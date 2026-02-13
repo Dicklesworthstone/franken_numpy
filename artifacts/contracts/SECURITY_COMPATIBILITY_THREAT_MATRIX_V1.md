@@ -36,3 +36,40 @@ Hardened mode is allowed to diverge only for explicitly allowlisted classes in
 
 Threat coverage must be declared per packet (`FNP-P2C-001`..`FNP-P2C-009`) and
 included in packet risk notes and parity gates before packet promotion.
+
+## Executable Control Mapping
+
+Executable mapping for each threat class is locked in:
+
+- `security_control_checks_v1.yaml`
+
+This map is machine-validated by the `security_contracts` suite and requires,
+per threat class:
+
+1. at least one executable check
+2. at least one fixture hook
+3. explicit compatibility drift gate
+4. explicit override-audit requirement
+5. required structured log evidence fields
+
+## Structured Log Evidence Contract
+
+All runtime-policy checks for this matrix must emit deterministic JSONL entries
+with:
+
+- `fixture_id`
+- `seed`
+- `mode`
+- `env_fingerprint`
+- `artifact_refs`
+- `reason_code`
+
+The end-to-end gate command is:
+
+```bash
+scripts/e2e/run_security_policy_gate.sh
+```
+
+The gate writes a timestamped log under `artifacts/logs/` and fails if any
+threat-control mapping, fail-closed requirement, or log field contract is
+violated.

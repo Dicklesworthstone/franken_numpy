@@ -8,6 +8,25 @@ pub enum RuntimeMode {
     Hardened,
 }
 
+impl RuntimeMode {
+    #[must_use]
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "strict" => Some(Self::Strict),
+            "hardened" => Some(Self::Hardened),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::Hardened => "hardened",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompatibilityClass {
     KnownCompatible,
@@ -15,11 +34,42 @@ pub enum CompatibilityClass {
     Unknown,
 }
 
+impl CompatibilityClass {
+    #[must_use]
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "known_compatible" => Self::KnownCompatible,
+            "known_incompatible" => Self::KnownIncompatible,
+            _ => Self::Unknown,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::KnownCompatible => "known_compatible",
+            Self::KnownIncompatible => "known_incompatible",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecisionAction {
     Allow,
     FullValidate,
     FailClosed,
+}
+
+impl DecisionAction {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::FullValidate => "full_validate",
+            Self::FailClosed => "fail_closed",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +101,27 @@ impl Default for DecisionLossModel {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionAuditContext {
+    pub fixture_id: String,
+    pub seed: u64,
+    pub env_fingerprint: String,
+    pub artifact_refs: Vec<String>,
+    pub reason_code: String,
+}
+
+impl Default for DecisionAuditContext {
+    fn default() -> Self {
+        Self {
+            fixture_id: "unknown_fixture".to_string(),
+            seed: 0,
+            env_fingerprint: "unknown_env".to_string(),
+            artifact_refs: Vec::new(),
+            reason_code: "unspecified".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecisionEvent {
     pub ts_millis: u128,
@@ -64,7 +135,26 @@ pub struct DecisionEvent {
     pub expected_loss_fail_closed: f64,
     pub selected_expected_loss: f64,
     pub evidence_terms: Vec<EvidenceTerm>,
+    pub fixture_id: String,
+    pub seed: u64,
+    pub env_fingerprint: String,
+    pub artifact_refs: Vec<String>,
+    pub reason_code: String,
     pub note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverrideAuditEvent {
+    pub ts_millis: u128,
+    pub mode: RuntimeMode,
+    pub class: CompatibilityClass,
+    pub requested_deviation_class: String,
+    pub packet_id: String,
+    pub requested_by: String,
+    pub reason_code: String,
+    pub approved: bool,
+    pub action: DecisionAction,
+    pub audit_ref: String,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -117,12 +207,46 @@ pub fn decide_compatibility(
     }
 }
 
+#[must_use]
+pub fn decide_compatibility_from_wire(
+    mode_raw: &str,
+    class_raw: &str,
+    risk_score: f64,
+    hardened_validation_threshold: f64,
+) -> DecisionAction {
+    let Some(mode) = RuntimeMode::from_wire(mode_raw) else {
+        return DecisionAction::FailClosed;
+    };
+    let class = CompatibilityClass::from_wire(class_raw);
+    decide_compatibility(mode, class, risk_score, hardened_validation_threshold)
+}
+
 pub fn decide_and_record(
     ledger: &mut EvidenceLedger,
     mode: RuntimeMode,
     class: CompatibilityClass,
     risk_score: f64,
     hardened_validation_threshold: f64,
+    note: impl Into<String>,
+) -> DecisionAction {
+    decide_and_record_with_context(
+        ledger,
+        mode,
+        class,
+        risk_score,
+        hardened_validation_threshold,
+        DecisionAuditContext::default(),
+        note,
+    )
+}
+
+pub fn decide_and_record_with_context(
+    ledger: &mut EvidenceLedger,
+    mode: RuntimeMode,
+    class: CompatibilityClass,
+    risk_score: f64,
+    hardened_validation_threshold: f64,
+    context: DecisionAuditContext,
     note: impl Into<String>,
 ) -> DecisionAction {
     let action = decide_compatibility(mode, class, risk_score, hardened_validation_threshold);
@@ -150,6 +274,7 @@ pub fn decide_and_record(
     let ts_millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis());
+    let normalized = normalize_audit_context(context);
     ledger.record(DecisionEvent {
         ts_millis,
         mode,
@@ -162,9 +287,91 @@ pub fn decide_and_record(
         expected_loss_fail_closed,
         selected_expected_loss,
         evidence_terms,
+        fixture_id: normalized.fixture_id,
+        seed: normalized.seed,
+        env_fingerprint: normalized.env_fingerprint,
+        artifact_refs: normalized.artifact_refs,
+        reason_code: normalized.reason_code,
         note: note.into(),
     });
     action
+}
+
+#[must_use]
+pub fn evaluate_policy_override(
+    mode: RuntimeMode,
+    class: CompatibilityClass,
+    requested_deviation_class: &str,
+    allowlisted_classes: &[&str],
+    packet_id: &str,
+    requested_by: &str,
+    reason_code: &str,
+) -> OverrideAuditEvent {
+    let ts_millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+
+    let requested = requested_deviation_class.trim();
+    let allowlisted = !requested.is_empty() && allowlisted_classes.contains(&requested);
+    let approved = matches!(mode, RuntimeMode::Hardened)
+        && matches!(class, CompatibilityClass::KnownCompatible)
+        && allowlisted;
+    let action = if approved {
+        // Any approved override still pays the safety tax by forcing full validation.
+        DecisionAction::FullValidate
+    } else {
+        DecisionAction::FailClosed
+    };
+
+    let packet = if packet_id.trim().is_empty() {
+        "unknown_packet"
+    } else {
+        packet_id.trim()
+    };
+    let requester = if requested_by.trim().is_empty() {
+        "unknown_requester"
+    } else {
+        requested_by.trim()
+    };
+    let normalized_reason = if reason_code.trim().is_empty() {
+        "unspecified"
+    } else {
+        reason_code.trim()
+    };
+
+    let audit_ref = format!(
+        "override:{}:{}:{}:{}",
+        packet,
+        requested,
+        mode.as_str(),
+        normalized_reason
+    );
+
+    OverrideAuditEvent {
+        ts_millis,
+        mode,
+        class,
+        requested_deviation_class: requested.to_string(),
+        packet_id: packet.to_string(),
+        requested_by: requester.to_string(),
+        reason_code: normalized_reason.to_string(),
+        approved,
+        action,
+        audit_ref,
+    }
+}
+
+fn normalize_audit_context(mut context: DecisionAuditContext) -> DecisionAuditContext {
+    if context.fixture_id.trim().is_empty() {
+        context.fixture_id = "unknown_fixture".to_string();
+    }
+    if context.env_fingerprint.trim().is_empty() {
+        context.env_fingerprint = "unknown_env".to_string();
+    }
+    if context.reason_code.trim().is_empty() {
+        context.reason_code = "unspecified".to_string();
+    }
+    context
 }
 
 fn clamp_probability(p: f64) -> f64 {
@@ -259,9 +466,10 @@ pub mod frankentui_integration {
 #[cfg(test)]
 mod tests {
     use super::{
-        CompatibilityClass, DecisionAction, DecisionLossModel, EvidenceLedger, RuntimeMode,
-        decide_and_record, decide_compatibility, expected_loss_for_action,
-        posterior_incompatibility,
+        CompatibilityClass, DecisionAction, DecisionAuditContext, DecisionLossModel,
+        EvidenceLedger, RuntimeMode, decide_and_record, decide_and_record_with_context,
+        decide_compatibility, decide_compatibility_from_wire, evaluate_policy_override,
+        expected_loss_for_action, posterior_incompatibility,
     };
 
     #[test]
@@ -312,6 +520,98 @@ mod tests {
         assert!((0.0..=1.0).contains(&event.posterior_incompatible));
         assert!(!event.evidence_terms.is_empty());
         assert!(event.selected_expected_loss.is_finite());
+        assert_eq!(event.fixture_id, "unknown_fixture");
+        assert_eq!(event.reason_code, "unspecified");
+    }
+
+    #[test]
+    fn decision_context_is_recorded_for_forensics() {
+        let mut ledger = EvidenceLedger::new();
+        let context = DecisionAuditContext {
+            fixture_id: "strict_unknown_fail_closed".to_string(),
+            seed: 1337,
+            env_fingerprint: "linux-x86_64-rust-2024".to_string(),
+            artifact_refs: vec![
+                "crates/fnp-conformance/fixtures/runtime_policy_cases.json".to_string(),
+                "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md".to_string(),
+            ],
+            reason_code: "unknown_metadata_version".to_string(),
+        };
+
+        let action = decide_and_record_with_context(
+            &mut ledger,
+            RuntimeMode::Strict,
+            CompatibilityClass::Unknown,
+            0.1,
+            0.7,
+            context,
+            "wire-class-decode",
+        );
+        assert_eq!(action, DecisionAction::FailClosed);
+
+        let event = ledger.last().expect("event should be present");
+        assert_eq!(event.fixture_id, "strict_unknown_fail_closed");
+        assert_eq!(event.seed, 1337);
+        assert_eq!(event.env_fingerprint, "linux-x86_64-rust-2024");
+        assert_eq!(event.reason_code, "unknown_metadata_version");
+        assert_eq!(event.artifact_refs.len(), 2);
+    }
+
+    #[test]
+    fn wire_decoding_fails_closed_for_unknown_inputs() {
+        assert_eq!(
+            decide_compatibility_from_wire("strict", "completely_unknown", 0.2, 0.7),
+            DecisionAction::FailClosed
+        );
+        assert_eq!(
+            decide_compatibility_from_wire("mystery_mode", "known_compatible", 0.2, 0.7),
+            DecisionAction::FailClosed
+        );
+    }
+
+    #[test]
+    fn policy_override_requires_hardened_allowlist_and_known_compatible() {
+        let allowlisted = [
+            "parser_diagnostic_enrichment",
+            "admission_guard_caps",
+            "recovery_with_integrity_proof",
+        ];
+
+        let approved = evaluate_policy_override(
+            RuntimeMode::Hardened,
+            CompatibilityClass::KnownCompatible,
+            "admission_guard_caps",
+            &allowlisted,
+            "FNP-P2C-006",
+            "ci-bot",
+            "defensive_cap",
+        );
+        assert!(approved.approved);
+        assert_eq!(approved.action, DecisionAction::FullValidate);
+
+        let denied = evaluate_policy_override(
+            RuntimeMode::Strict,
+            CompatibilityClass::KnownCompatible,
+            "admission_guard_caps",
+            &allowlisted,
+            "FNP-P2C-006",
+            "ci-bot",
+            "strict_override_attempt",
+        );
+        assert!(!denied.approved);
+        assert_eq!(denied.action, DecisionAction::FailClosed);
+
+        let denied_unknown = evaluate_policy_override(
+            RuntimeMode::Hardened,
+            CompatibilityClass::KnownCompatible,
+            "unknown_override",
+            &allowlisted,
+            "FNP-P2C-006",
+            "ci-bot",
+            "unknown_override_attempt",
+        );
+        assert!(!denied_unknown.approved);
+        assert_eq!(denied_unknown.action, DecisionAction::FailClosed);
     }
 
     #[test]

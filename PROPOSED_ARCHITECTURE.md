@@ -21,8 +21,8 @@
 - `fnp-linalg`: linear algebra adapters and scoped solver contracts.
 - `fnp-random`: deterministic RNG streams and state schemas.
 - `fnp-io`: npy/npz parser + writer with hardened boundary checks.
-- `fnp-conformance`: differential harness, oracle capture, benchmark + RaptorQ artifact tooling.
-- `fnp-runtime`: mode split, decision/evidence ledger, policy gate orchestration.
+- `fnp-conformance`: differential harness, adversarial policy harness, security-contract validator, oracle capture, benchmark + RaptorQ artifact tooling.
+- `fnp-runtime`: mode split, fail-closed wire decoding, explicit override-audit gate, decision/evidence ledger, policy gate orchestration.
 
 ## 4. Stride Calculus Engine (SCE) Contract
 
@@ -46,6 +46,7 @@ SCE is the non-negotiable compatibility kernel.
 | Known incompatible semantics | fail_closed | fail_closed |
 
 All decisions are recorded in an evidence ledger.
+Unknown wire mode/class inputs are fail-closed.
 
 ## 6. Implemented `FNP-P2C-005` Slice
 
@@ -114,11 +115,15 @@ cargo run -p fnp-conformance --bin run_ufunc_differential
 cargo run -p fnp-conformance --bin generate_benchmark_baseline
 cargo run -p fnp-conformance --bin generate_raptorq_sidecars
 cargo run -p fnp-conformance --bin validate_phase2c_packet -- --packet-id FNP-P2C-001
+cargo run -p fnp-conformance --bin run_security_gate
+scripts/e2e/run_security_policy_gate.sh
 ```
 
 Operational detail:
 - capture uses configurable interpreter `FNP_ORACLE_PYTHON` (fallback `python3`).
 - packet readiness uses `phase2c-contract-v1` mandatory-field validation and emits `not_ready` when required fields/files are missing.
+- security threat controls are machine-validated against `SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md`, `hardened_mode_allowlist_v1.yaml`, and `security_control_checks_v1.yaml`.
+- runtime/adversarial policy gates emit deterministic JSONL evidence with `fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code`.
 
 ## 10. Security and Compatibility Boundaries
 

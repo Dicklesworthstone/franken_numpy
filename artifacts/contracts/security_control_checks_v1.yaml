@@ -1,0 +1,130 @@
+schema_version: 1
+control_map_version: security-control-checks-v1
+threat_controls:
+  - threat_class: malformed_shape
+    executable_checks:
+      - run_shape_stride_suite
+      - run_runtime_policy_adversarial_suite
+    fixture_hooks:
+      - crates/fnp-conformance/fixtures/shape_stride_cases.json
+      - crates/fnp-conformance/fixtures/runtime_policy_adversarial_cases.json#wire_unknown_class_fail_closed
+    expected_log_fields:
+      - fixture_id
+      - seed
+      - mode
+      - env_fingerprint
+      - artifact_refs
+      - reason_code
+    compatibility_drift_gate: strict_zero_drift_gate
+    override_audit_requirement: not_applicable
+
+  - threat_class: unsafe_cast_path
+    executable_checks:
+      - run_dtype_promotion_suite
+    fixture_hooks:
+      - crates/fnp-conformance/fixtures/dtype_promotion_cases.json
+    expected_log_fields:
+      - fixture_id
+      - seed
+      - mode
+      - env_fingerprint
+      - artifact_refs
+      - reason_code
+    compatibility_drift_gate: dtype_promotion_drift_gate
+    override_audit_requirement: not_applicable
+
+  - threat_class: malicious_stride_alias
+    executable_checks:
+      - run_shape_stride_suite
+    fixture_hooks:
+      - crates/fnp-conformance/fixtures/shape_stride_cases.json
+    expected_log_fields:
+      - fixture_id
+      - seed
+      - mode
+      - env_fingerprint
+      - artifact_refs
+      - reason_code
+    compatibility_drift_gate: alias_drift_gate
+    override_audit_requirement: not_applicable
+
+  - threat_class: malformed_npy_npz
+    executable_checks:
+      - run_runtime_policy_adversarial_suite
+    fixture_hooks:
+      - crates/fnp-conformance/fixtures/runtime_policy_adversarial_cases.json#wire_unknown_mode_fail_closed
+    expected_log_fields:
+      - fixture_id
+      - seed
+      - mode
+      - env_fingerprint
+      - artifact_refs
+      - reason_code
+    compatibility_drift_gate: parser_fail_closed_gate
+    override_audit_requirement: strict_no_override
+
+  - threat_class: unknown_metadata_version
+    executable_checks:
+      - run_runtime_policy_suite
+      - run_runtime_policy_adversarial_suite
+    fixture_hooks:
+      - crates/fnp-conformance/fixtures/runtime_policy_cases.json#strict_unknown_fail_closed
+      - crates/fnp-conformance/fixtures/runtime_policy_adversarial_cases.json#wire_unknown_class_fail_closed
+    expected_log_fields:
+      - fixture_id
+      - seed
+      - mode
+      - env_fingerprint
+      - artifact_refs
+      - reason_code
+    compatibility_drift_gate: compatibility_drift_hash_required
+    override_audit_requirement: strict_no_override
+
+  - threat_class: adversarial_fixture
+    executable_checks:
+      - run_runtime_policy_adversarial_suite
+    fixture_hooks:
+      - crates/fnp-conformance/fixtures/runtime_policy_adversarial_cases.json
+    expected_log_fields:
+      - fixture_id
+      - seed
+      - mode
+      - env_fingerprint
+      - artifact_refs
+      - reason_code
+    compatibility_drift_gate: adversarial_reproducibility_gate
+    override_audit_requirement: audited_only
+
+  - threat_class: corrupt_durable_artifact
+    executable_checks:
+      - contract_schema::validate_phase2c_packet
+      - run_security_contract_suite
+    fixture_hooks:
+      - artifacts/raptorq/conformance_bundle_v1.decode_proof.json
+      - artifacts/raptorq/conformance_bundle_v1.scrub_report.json
+    expected_log_fields:
+      - fixture_id
+      - seed
+      - mode
+      - env_fingerprint
+      - artifact_refs
+      - reason_code
+    compatibility_drift_gate: decode_proof_hash_gate
+    override_audit_requirement: audited_recovery_only
+
+  - threat_class: policy_override_abuse
+    executable_checks:
+      - run_runtime_policy_adversarial_suite
+      - fnp_runtime::evaluate_policy_override
+    fixture_hooks:
+      - crates/fnp-conformance/fixtures/runtime_policy_adversarial_cases.json#wire_unknown_mode_fail_closed
+      - crates/fnp-conformance/fixtures/runtime_policy_cases.json#strict_unknown_fail_closed
+    expected_log_fields:
+      - fixture_id
+      - seed
+      - mode
+      - env_fingerprint
+      - artifact_refs
+      - reason_code
+    compatibility_drift_gate: override_audit_ref_gate
+    override_audit_requirement: explicit_audited_override_only

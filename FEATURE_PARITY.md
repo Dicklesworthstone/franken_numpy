@@ -15,7 +15,8 @@
 | Broadcasting legality | in_progress | deterministic broadcast cases green | broaden mixed-rank/multi-axis corpus |
 | Dtype promotion/casting | in_progress | scoped promotion table + fixture suite green | extract and verify broader cast table parity |
 | Contract schema + artifact topology lock | in_progress | `phase2c-contract-v1` locked in `artifacts/contracts/` + packet readiness validator in `fnp-conformance` | populate packet artifact directories and enforce validator in CI |
-| Strict/hardened policy split | in_progress | fail-closed runtime policy fixtures green | wire policy enforcement into io/ufunc execution paths |
+| Strict/hardened policy split | in_progress | strict+hardened and adversarial runtime policy suites green, wire-unknown inputs fail-closed, override gate audited, JSONL evidence logs emitted | wire policy enforcement into io/ufunc execution paths |
+| Security/compatibility threat matrix gating | in_progress | threat matrix + allowlist + executable control map machine-validated by `security_contracts` suite | enforce this suite as blocking CI gate and expand packet-specific threat controls |
 | Ufunc arithmetic/reduction | in_progress | broadcasted binary ops + reduction core implemented; differential suite green against captured oracle corpus | increase corpus breadth and run against full NumPy oracle environment |
 | RNG deterministic streams | not_started | none yet | implement `FNP-P2C-007` deterministic stream harness |
 | NPY/NPZ format parity | not_started | none yet | implement `FNP-P2C-009` parser/writer fixtures |

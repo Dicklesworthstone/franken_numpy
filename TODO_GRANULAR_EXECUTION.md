@@ -227,5 +227,25 @@ Status key:
 ### 10.2 Initial coding started
 - [x] Add versioned threat matrix artifact: `artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md`
 - [x] Add versioned hardened-mode allowlist artifact: `artifacts/contracts/hardened_mode_allowlist_v1.yaml`
-- [ ] Wire machine validation/gating for threat-matrix + allowlist artifacts
-- [ ] Add conformance/adversarial fixture hooks tied to the threat classes
+- [x] Wire machine validation/gating for threat-matrix + allowlist artifacts
+- [x] Add conformance/adversarial fixture hooks tied to the threat classes
+
+### 10.3 Follow-on implementation (current pass)
+- [x] Add executable security control map: `artifacts/contracts/security_control_checks_v1.yaml`
+- [x] Add machine-check suite: `crates/fnp-conformance/src/security_contracts.rs`
+- [x] Extend runtime policy fixtures with structured log context fields (`fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code`)
+- [x] Add adversarial runtime-policy fixture corpus: `runtime_policy_adversarial_cases.json`
+- [x] Add fail-closed wire-decoding path for unknown runtime mode/class in `fnp-runtime`
+- [x] Add explicit audited override gate evaluator in `fnp-runtime`
+- [x] Add runtime policy JSONL logging path support in `fnp-conformance`
+- [x] Add e2e security gate binary: `run_security_gate`
+- [x] Add e2e wrapper script: `scripts/e2e/run_security_policy_gate.sh`
+
+### 10.4 Validation outcomes (current pass)
+- [x] `cargo fmt --all`
+- [x] `cargo check --all-targets`
+- [x] `cargo clippy --all-targets -- -D warnings`
+- [x] `cargo test --workspace`
+- [x] `cargo test -p fnp-conformance -- --nocapture`
+- [x] `cargo bench`
+- [x] `scripts/e2e/run_security_policy_gate.sh`
