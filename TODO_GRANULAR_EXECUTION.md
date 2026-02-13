@@ -186,3 +186,46 @@ Status key:
 - [x] Re-run `run_ufunc_differential` (green: 7/7)
 - [x] Re-run `cargo test -p fnp-conformance` (green)
 - [x] Re-run `cargo fmt --check` (green)
+
+## 9. Bead `bd-23m.3` — Contract Schema + Artifact Topology Lock
+
+### 9.1 Triage and ownership
+- [x] Select top-impact bead via `bv --robot-next` (`bd-23m.3`)
+- [x] Mark bead `in_progress` via `br update`
+- [x] Reserve edit paths via Agent Mail reservations (`PlumCarp`)
+
+### 9.2 Implementation
+- [x] Add versioned contract schema lock artifacts under `artifacts/contracts/`
+- [x] Add machine-checkable packet validator module in `fnp-conformance`
+- [x] Add binary command for packet readiness validation (`validate_phase2c_packet`)
+- [x] Enforce missing-file and missing-field => `not_ready`
+- [x] Add unit tests for ready, missing-file, and missing-field paths
+
+### 9.3 Documentation and tracking
+- [x] Update `README.md` with packet-validator command
+- [x] Update `PROPOSED_ARCHITECTURE.md` with readiness-validator details
+- [x] Update `FEATURE_PARITY.md` foundation status for contract-schema lock
+- [x] Run formatter/check/tests for this bead and record outcomes
+- [x] Post completion update in Agent Mail thread `bd-23m.3`
+- [x] Close `bd-23m.3` if validation passes
+
+### 9.4 Validation outcomes
+- [x] `cargo fmt --check`
+- [x] `cargo check --all-targets`
+- [x] `cargo clippy --all-targets -- -D warnings`
+- [x] `cargo test --workspace`
+- [x] `cargo test -p fnp-conformance -- --nocapture`
+- [x] `cargo bench`
+
+## 10. Bead `bd-23m.2` — Security/Compatibility Threat Matrix (Started)
+
+### 10.1 Triage and state
+- [x] Re-run `bv --robot-next` after closing `bd-23m.3` and select next top-impact bead (`bd-23m.2`)
+- [x] Mark `bd-23m.2` as `in_progress`
+- [x] Send kickoff update in Agent Mail thread `bd-23m.2`
+
+### 10.2 Initial coding started
+- [x] Add versioned threat matrix artifact: `artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md`
+- [x] Add versioned hardened-mode allowlist artifact: `artifacts/contracts/hardened_mode_allowlist_v1.yaml`
+- [ ] Wire machine validation/gating for threat-matrix + allowlist artifacts
+- [ ] Add conformance/adversarial fixture hooks tied to the threat classes

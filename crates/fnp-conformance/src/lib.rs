@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod benchmark;
+pub mod contract_schema;
 pub mod raptorq_artifacts;
 pub mod ufunc_differential;
 

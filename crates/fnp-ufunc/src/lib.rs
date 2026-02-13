@@ -74,22 +74,41 @@ impl UFuncArray {
         let out_shape = broadcast_shape(&self.shape, &rhs.shape).map_err(UFuncError::Shape)?;
         let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
 
-        let out_strides = contiguous_strides_elems(&out_shape);
         let lhs_strides = contiguous_strides_elems(&self.shape);
         let rhs_strides = contiguous_strides_elems(&rhs.shape);
+        let lhs_axis_steps =
+            aligned_broadcast_axis_steps(out_shape.len(), &self.shape, &lhs_strides);
+        let rhs_axis_steps =
+            aligned_broadcast_axis_steps(out_shape.len(), &rhs.shape, &rhs_strides);
 
-        let mut multi_index = vec![0usize; out_shape.len()];
+        let mut out_multi = vec![0usize; out_shape.len()];
+        let mut lhs_flat = 0usize;
+        let mut rhs_flat = 0usize;
         let mut out_values = Vec::with_capacity(out_count);
 
         for flat in 0..out_count {
-            unravel_index(flat, &out_shape, &out_strides, &mut multi_index);
-
-            let lhs_flat =
-                broadcasted_source_index(&multi_index, &self.shape, &lhs_strides, out_shape.len());
-            let rhs_flat =
-                broadcasted_source_index(&multi_index, &rhs.shape, &rhs_strides, out_shape.len());
-
             out_values.push(op.apply(self.values[lhs_flat], rhs.values[rhs_flat]));
+
+            // Increment the output index as an odometer and adjust source flat
+            // indices incrementally. This avoids re-unraveling and re-mapping
+            // every output element.
+            if flat + 1 == out_count || out_shape.is_empty() {
+                continue;
+            }
+
+            for axis in (0..out_shape.len()).rev() {
+                out_multi[axis] += 1;
+                lhs_flat += lhs_axis_steps[axis];
+                rhs_flat += rhs_axis_steps[axis];
+
+                if out_multi[axis] < out_shape[axis] {
+                    break;
+                }
+
+                out_multi[axis] = 0;
+                lhs_flat -= lhs_axis_steps[axis] * out_shape[axis];
+                rhs_flat -= rhs_axis_steps[axis] * out_shape[axis];
+            }
         }
 
         Ok(Self {
@@ -199,6 +218,26 @@ fn contiguous_strides_elems(shape: &[usize]) -> Vec<usize> {
     strides
 }
 
+#[must_use]
+fn aligned_broadcast_axis_steps(
+    out_ndim: usize,
+    src_shape: &[usize],
+    src_strides: &[usize],
+) -> Vec<usize> {
+    if out_ndim == 0 {
+        return Vec::new();
+    }
+
+    let mut axis_steps = vec![0usize; out_ndim];
+    let offset = out_ndim - src_shape.len();
+
+    for (axis, (&dim, &stride)) in src_shape.iter().zip(src_strides).enumerate() {
+        axis_steps[axis + offset] = if dim == 1 { 0 } else { stride };
+    }
+
+    axis_steps
+}
+
 fn unravel_index(flat: usize, shape: &[usize], strides: &[usize], out_multi: &mut [usize]) {
     if shape.is_empty() {
         return;
@@ -221,29 +260,6 @@ fn ravel_index(multi: &[usize], _shape: &[usize], strides: &[usize]) -> usize {
         .iter()
         .zip(strides)
         .fold(0usize, |acc, (&idx, &stride)| acc + idx * stride)
-}
-
-#[must_use]
-fn broadcasted_source_index(
-    out_multi: &[usize],
-    src_shape: &[usize],
-    src_strides: &[usize],
-    out_ndim: usize,
-) -> usize {
-    if src_shape.is_empty() {
-        return 0;
-    }
-
-    let offset = out_ndim - src_shape.len();
-    let mut src_flat = 0usize;
-
-    for (axis, (&dim, &stride)) in src_shape.iter().zip(src_strides).enumerate() {
-        let out_axis = axis + offset;
-        let src_idx = if dim == 1 { 0 } else { out_multi[out_axis] };
-        src_flat += src_idx * stride;
-    }
-
-    src_flat
 }
 
 #[must_use]

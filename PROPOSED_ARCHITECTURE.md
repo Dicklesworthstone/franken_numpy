@@ -113,10 +113,12 @@ cargo run -p fnp-conformance --bin capture_numpy_oracle
 cargo run -p fnp-conformance --bin run_ufunc_differential
 cargo run -p fnp-conformance --bin generate_benchmark_baseline
 cargo run -p fnp-conformance --bin generate_raptorq_sidecars
+cargo run -p fnp-conformance --bin validate_phase2c_packet -- --packet-id FNP-P2C-001
 ```
 
 Operational detail:
 - capture uses configurable interpreter `FNP_ORACLE_PYTHON` (fallback `python3`).
+- packet readiness uses `phase2c-contract-v1` mandatory-field validation and emits `not_ready` when required fields/files are missing.
 
 ## 10. Security and Compatibility Boundaries
 

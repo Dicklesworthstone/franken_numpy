@@ -45,6 +45,7 @@ cargo run -p fnp-conformance --bin capture_numpy_oracle
 cargo run -p fnp-conformance --bin run_ufunc_differential
 cargo run -p fnp-conformance --bin generate_benchmark_baseline
 cargo run -p fnp-conformance --bin generate_raptorq_sidecars
+cargo run -p fnp-conformance --bin validate_phase2c_packet -- --packet-id FNP-P2C-001
 ```
 
 Example: use `uv` Python 3.14 + NumPy for capture:
@@ -59,6 +60,7 @@ Notes:
 - Oracle capture prefers legacy NumPy import, then system NumPy.
 - Oracle interpreter is configurable with `FNP_ORACLE_PYTHON` (defaults to `python3`).
 - If neither is importable in the environment, it uses `pure_python_fallback` and records this in the oracle artifact.
+- Packet contract schema lock is versioned as `phase2c-contract-v1` in `artifacts/contracts/`.
 
 ## Repository Layout
 

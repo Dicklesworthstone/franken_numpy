@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "contract_schema_version": "phase2c-contract-v1",
+  "required_files": [
+    "legacy_anchor_map.md",
+    "contract_table.md",
+    "fixture_manifest.json",
+    "parity_gate.yaml",
+    "risk_note.md",
+    "parity_report.json",
+    "parity_report.raptorq.json",
+    "parity_report.decode_proof.json"
+  ],
+  "required_markdown_tokens": {
+    "legacy_anchor_map.md": [
+      "packet_id",
+      "legacy_paths",
+      "legacy_symbols"
+    ],
+    "contract_table.md": [
+      "shape_stride_contract",
+      "dtype_cast_contract",
+      "error_contract",
+      "memory_alias_contract",
+      "strict_mode_policy",
+      "hardened_mode_policy",
+      "excluded_scope",
+      "performance_sentinels"
+    ],
+    "risk_note.md": [
+      "compatibility_risks",
+      "oracle_tests",
+      "raptorq_artifacts"
+    ]
+  },
+  "required_json_paths": {
+    "fixture_manifest.json": [
+      "schema_version",
+      "packet_id",
+      "oracle_tests",
+      "fixtures"
+    ],
+    "parity_report.json": [
+      "schema_version",
+      "packet_id",
+      "strict_parity",
+      "hardened_parity",
+      "divergence_classes",
+      "compatibility_drift_hash"
+    ],
+    "parity_report.raptorq.json": [
+      "schema_version",
+      "bundle_id",
+      "source_hash",
+      "source_size",
+      "symbol_size",
+      "symbols"
+    ],
+    "parity_report.decode_proof.json": [
+      "schema_version",
+      "bundle_id",
+      "recovery_success",
+      "expected_hash"
+    ]
+  },
+  "required_yaml_paths": {
+    "parity_gate.yaml": [
+      "schema_version",
+      "packet_id",
+      "strict_mode",
+      "hardened_mode",
+      "max_strict_drift",
+      "max_hardened_divergence"
+    ]
+  }
+}

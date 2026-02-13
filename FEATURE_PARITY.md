@@ -14,6 +14,7 @@
 | Shape/stride/view semantics | in_progress | fixture-driven shape/stride suites green in `fnp-conformance` | broaden corpus against extracted `shape.c` edge cases |
 | Broadcasting legality | in_progress | deterministic broadcast cases green | broaden mixed-rank/multi-axis corpus |
 | Dtype promotion/casting | in_progress | scoped promotion table + fixture suite green | extract and verify broader cast table parity |
+| Contract schema + artifact topology lock | in_progress | `phase2c-contract-v1` locked in `artifacts/contracts/` + packet readiness validator in `fnp-conformance` | populate packet artifact directories and enforce validator in CI |
 | Strict/hardened policy split | in_progress | fail-closed runtime policy fixtures green | wire policy enforcement into io/ufunc execution paths |
 | Ufunc arithmetic/reduction | in_progress | broadcasted binary ops + reduction core implemented; differential suite green against captured oracle corpus | increase corpus breadth and run against full NumPy oracle environment |
 | RNG deterministic streams | not_started | none yet | implement `FNP-P2C-007` deterministic stream harness |

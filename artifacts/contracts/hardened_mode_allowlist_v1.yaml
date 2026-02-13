@@ -1,0 +1,34 @@
+schema_version: 1
+allowlist_version: hardened-mode-allowlist-v1
+policy:
+  unknown_class_behavior: fail_closed
+  require_deterministic_audit_log: true
+  require_api_contract_preservation: true
+  require_bounded_recovery: true
+allowed_deviation_classes:
+  - class: parser_diagnostic_enrichment
+    description: >
+      Additional deterministic diagnostics for malformed parser inputs; no
+      behavior change in accepted inputs.
+    applies_to_packets: ["FNP-P2C-009"]
+  - class: admission_guard_caps
+    description: >
+      Defensive caps for hostile dimension/cardinality inputs with explicit
+      rejection outcome and audit record.
+    applies_to_packets: ["FNP-P2C-001", "FNP-P2C-006"]
+  - class: recovery_with_integrity_proof
+    description: >
+      Durable artifact recovery via RaptorQ with required hash verification and
+      decode proof artifact emission.
+    applies_to_packets:
+      [
+        "FNP-P2C-001",
+        "FNP-P2C-002",
+        "FNP-P2C-003",
+        "FNP-P2C-004",
+        "FNP-P2C-005",
+        "FNP-P2C-006",
+        "FNP-P2C-007",
+        "FNP-P2C-008",
+        "FNP-P2C-009"
+      ]
