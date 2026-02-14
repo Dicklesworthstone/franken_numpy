@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "contract_schema_version": "phase2c-contract-v1",
+  "packet_id": "FNP-P2C-001",
+  "packet_dir": "/data/projects/franken_numpy/crates/fnp-conformance/../../artifacts/phase2c/FNP-P2C-001",
+  "status": "not_ready",
+  "missing_artifacts": [
+    "fixture_manifest.json",
+    "parity_gate.yaml",
+    "parity_report.json",
+    "parity_report.raptorq.json",
+    "parity_report.decode_proof.json"
+  ],
+  "missing_fields": [],
+  "parse_errors": [],
+  "checked_at_unix_ms": 1771109836821
+}

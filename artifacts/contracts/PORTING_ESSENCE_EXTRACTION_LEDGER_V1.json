@@ -48,11 +48,16 @@
         "E2E-001-reshape-chain"
       ],
       "artifact_refs": [
+        "artifacts/phase2c/FNP-P2C-001/legacy_anchor_map.md",
+        "artifacts/phase2c/FNP-P2C-001/behavior_extraction_ledger.md",
+        "artifacts/phase2c/FNP-P2C-001/contract_table.md",
+        "artifacts/phase2c/FNP-P2C-001/risk_note.md",
+        "artifacts/phase2c/FNP-P2C-001/implementation_plan.md",
         "crates/fnp-ndarray/src/lib.rs",
         "crates/fnp-conformance/src/lib.rs"
       ],
       "owner_bead": "bd-23m.12.1",
-      "parity_debt_status": "open"
+      "parity_debt_status": "partial"
     },
     {
       "packet_id": "FNP-P2C-002",
@@ -80,11 +85,14 @@
         "E2E-002-mixed-dtype-pipeline"
       ],
       "artifact_refs": [
+        "artifacts/phase2c/FNP-P2C-002/legacy_anchor_map.md",
+        "artifacts/phase2c/FNP-P2C-002/behavior_extraction_ledger.md",
+        "artifacts/phase2c/FNP-P2C-002/contract_table.md",
         "crates/fnp-dtype/src/lib.rs",
         "crates/fnp-conformance/src/lib.rs"
       ],
       "owner_bead": "bd-23m.13.1",
-      "parity_debt_status": "open"
+      "parity_debt_status": "partial"
     },
     {
       "packet_id": "FNP-P2C-003",
