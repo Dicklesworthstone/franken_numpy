@@ -9,6 +9,7 @@ Status key:
 ## 0. Session Control
 
 - [x] Confirm `AGENTS.md` constraints and no-destructive policy
+- [x] Reconfirm absolute parity doctrine: complete drop-in legacy NumPy overlap is mandatory; reduced-scope completion is forbidden.
 - [x] Confirm requested workstreams:
   - `FNP-P2C-005` ufunc/reduction core
   - legacy oracle capture + differential pipeline
@@ -161,13 +162,14 @@ Status key:
 ### 7.1 Residual Risks (Captured)
 - [x] Oracle source now uses `system` NumPy (via local `uv` Python 3.14 venv), but parity is not yet anchored to the vendored legacy NumPy runtime path.
 - [x] `cargo bench` gate passes but workspace does not yet expose dedicated `[[bench]]` targets; benchmark evidence currently comes from `generate_benchmark_baseline` artifact pipeline.
-- [x] Ufunc coverage currently scoped to arithmetic binary ops + `sum` reductions; broader NumPy API surface remains open for subsequent parity waves.
+- [x] Ufunc coverage is currently limited to arithmetic binary ops + `sum` reductions; remaining NumPy API behavior is explicit parity debt that blocks any "drop-in complete" claim until closed.
 
 ### 7.2 Highest-Value Next Steps (Captured)
 - [x] Add dedicated criterion benchmark targets and wire regression thresholds.
 - [x] Expand oracle corpus to larger shape, dtype-promotion, NaN/Inf, and aliasing/view edge cases.
 - [x] Run capture pipeline against legacy NumPy runtime once local environment can import `legacy_numpy_code/numpy`.
 - [x] Continue port wave into planned crates (`fnp-fft`, `fnp-random` full API, `fnp-linalg` parity expansion) with the same differential + durability artifact pattern.
+- [x] Keep full legacy feature/functionality parity matrix current and require each session to reduce owned parity debt.
 
 ## 8. Post-Landing Follow-On (This Session)
 
@@ -284,3 +286,120 @@ Status key:
 - [x] Run `bv --robot-alerts` (no active critical alerts)
 - [x] Run `bv --robot-insights` for critical path and bottleneck update
 - [x] Run `bv --robot-suggest` and defer low-signal dependency suggestions pending manual validation
+
+## 12. Bead `bd-23m.5` — Unit/Property Test Conventions + Structured Log Contract (Current Pass)
+
+### 12.1 Triage and impact confirmation
+- [x] Re-run `bv --robot-next` and confirm `bd-23m.5` remains top-impact work item
+- [x] Verify `bd-23m.5` is still `in_progress`
+- [x] Re-check dependency fan-out and unblock counts before implementation
+
+### 12.2 Machine contract completion
+- [x] Add versioned machine contract artifact: `artifacts/contracts/test_logging_contract_v1.json`
+- [x] Define required structured log fields (`fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code`)
+- [x] Define mandatory invariant families for unit/property/adversarial suites
+- [x] Define shrink requirements (`deterministic_seed_replay`, bounded `max_shrink_steps`, shrink reason-code requirement)
+- [x] Define required test helper API anchors
+- [x] Define required gate script list for enforcement
+- [x] Define required fixture collection list for contract coverage
+
+### 12.3 Human-readable conventions companion
+- [x] Add conventions companion doc: `artifacts/contracts/TESTING_AND_LOGGING_CONVENTIONS_V1.md`
+- [x] Document invariant families and suite anchors
+- [x] Document shrink strategy and deterministic replay rules
+- [x] Document fixture ID policy and examples
+- [x] Document gate commands and fail criteria
+- [x] Map bead decisions to alien graveyard + FrankenSuite summary section IDs
+- [x] Document RaptorQ applicability boundary for durable vs ephemeral artifacts
+
+### 12.4 Conformance enforcement wiring
+- [x] Add contract validation module: `crates/fnp-conformance/src/test_contracts.rs`
+- [x] Validate schema version and contract version IDs
+- [x] Validate required structured log fields, invariant families, shrink settings, helper APIs, gate script declarations
+- [x] Validate gate script existence from repo root
+- [x] Validate fixture-level requirements (naming policy, seeds, reason codes, artifact refs)
+- [x] Add module tests (`fixture_id_policy_enforced`, `test_contract_suite_is_green`)
+- [x] Wire `run_test_contract_suite` into `run_all_core_suites`
+
+### 12.5 Gate tooling and e2e enforcement
+- [x] Add gate binary: `crates/fnp-conformance/src/bin/run_test_contract_gate.rs`
+- [x] Execute contract + runtime policy suites from one gate command
+- [x] Parse emitted JSONL runtime-policy logs and enforce required fields per entry
+- [x] Add wrapper script: `scripts/e2e/run_test_contract_gate.sh`
+- [x] Mark wrapper script executable
+
+### 12.6 Documentation updates
+- [x] Update `artifacts/contracts/README.md` with test/logging contract artifacts
+- [x] Update `README.md` conformance command list with test-contract gate commands
+- [x] Update broader spec docs (`COMPREHENSIVE_SPEC_FOR_FRANKENNUMPY_V1.md`, `PLAN_TO_PORT_NUMPY_TO_RUST.md`) with finalized test-contract references
+
+### 12.7 Validation and closure
+- [x] `cargo fmt --check`
+- [x] `cargo check --all-targets`
+- [x] `cargo clippy --all-targets -- -D warnings`
+- [x] `cargo test --workspace`
+- [x] `cargo test -p fnp-conformance -- --nocapture`
+- [x] `scripts/e2e/run_test_contract_gate.sh`
+- [x] `cargo bench`
+- [x] Add bead completion notes + evidence links via `br comments add`
+- [x] Close `bd-23m.5` with `br close` once all acceptance evidence is green
+
+## 13. Bead `bd-23m.24.1` — DOC-PASS-00 Baseline Gap Matrix + Quantitative Expansion Targets (Current Pass)
+
+### 13.1 Triage and claim
+- [x] Re-run `bv --robot-next` after closing `bd-23m.5`
+- [x] Confirm top actionable bead is `bd-23m.24.1`
+- [x] Mark `bd-23m.24.1` as `in_progress`
+
+### 13.2 Baseline measurement
+- [x] Measure baseline line counts for target docs (`EXHAUSTIVE_LEGACY_ANALYSIS.md`, `EXISTING_NUMPY_STRUCTURE.md`)
+- [x] Define explicit target line counts and expansion multipliers (12.0x and 16.0x)
+- [x] Add stable `DOC-PASS-00` section anchors in both target docs
+
+### 13.3 Pass-1 gap matrix integration
+- [x] Add per-domain gap matrix to `EXHAUSTIVE_LEGACY_ANALYSIS.md` with legacy anchors
+- [x] Add pass-1 gap matrix to `EXISTING_NUMPY_STRUCTURE.md` with traceability anchors
+- [x] Record explicit unit/property, differential, e2e, and structured logging implication status
+- [x] Link assertions to executable evidence artifacts where available (`fnp-conformance` fixtures/contracts/gates)
+
+### 13.4 Contradictions and unknowns
+- [x] Add contradiction register with owner, risk, and closure criteria in both target docs
+- [x] Flag reduced-scope V1 language as deprecated and closure-required (`DOC-C001`)
+- [ ] Reconcile remaining doc contradictions in downstream passes (`bd-23m.24.2`, `.24.3`, `.24.4`, `.24.10`)
+
+### 13.5 Bead closure steps
+- [x] Add `br comments add` completion note with matrix/evidence links
+- [x] Close `bd-23m.24.1` after acceptance criteria verification
+
+## 14. Packet `FNP-P2C-005` Kickoff (`bd-23m.16` / `bd-23m.16.1`) (Current Pass)
+
+### 14.1 Triage and claim
+- [x] Re-run `bv --robot-next` after closing `bd-23m.24.1`
+- [x] Mark packet feature `bd-23m.16` as `in_progress`
+- [x] Mark packet sub-bead `bd-23m.16.1` as `in_progress`
+
+### 14.2 Legacy anchor extraction
+- [x] Extract concrete symbol anchors from `ufunc_object.c` (`_parse_signature`, `_ufunc_setup_flags`, `convert_ufunc_arguments`, `ufunc_get_name_cstr`, signature normalization/resolution calls)
+- [x] Extract dispatch and override anchors from `dispatching.h`, `override.c`, `reduction.c`, `ufunc_type_resolution.c`
+- [x] Extract oracle test anchors from `test_ufunc.py`, `test_umath.py`, `test_overrides.py`
+
+### 14.3 Artifact authoring for `FNP-P2C-005-A`
+- [x] Create `artifacts/phase2c/FNP-P2C-005/legacy_anchor_map.md`
+- [x] Create `artifacts/phase2c/FNP-P2C-005/behavior_extraction_ledger.md`
+- [x] Map legacy anchors to planned Rust module boundaries
+- [x] Record strict/hardened observable contracts and compatibility invariants
+- [x] Record unknown/under-specified edges with owner, risk, and closure criteria
+- [x] Record planned unit/property, differential/metamorphic/adversarial, and e2e verification hooks
+- [x] Include structured logging contract linkage (`fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code`)
+
+### 14.4 Packet follow-on
+- [x] Add bead notes/evidence links via `br comments add` for `bd-23m.16.1`
+- [x] Close `bd-23m.16.1` if acceptance criteria are fully satisfied
+
+## 15. Packet `FNP-P2C-005-B` Contract Table (`bd-23m.16.2`) (Kickoff)
+
+### 15.1 Claim and handoff
+- [x] Confirm `bd-23m.16.2` is ready after closing `bd-23m.16.1`
+- [x] Mark `bd-23m.16.2` as `in_progress`
+- [ ] Draft strict/hardened contract table artifact for packet boundary
+- [ ] Attach unit/property + e2e scenario mapping and reason-code requirements

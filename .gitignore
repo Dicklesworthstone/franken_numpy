@@ -1,4 +1,5 @@
 /target
+target_*/
 **/*.rs.bk
 
 # bv (beads viewer) local config and caches

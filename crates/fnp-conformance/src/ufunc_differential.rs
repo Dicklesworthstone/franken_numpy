@@ -524,7 +524,9 @@ pub fn compare_against_oracle(
     Ok(UFuncDifferentialReport {
         schema_version: 1,
         oracle_source: oracle.oracle_source,
-        generated_at_unix_ms: now_unix_ms(),
+        // Keep differential artifacts deterministic across repeated local/CI runs
+        // when input/oracle fixtures are unchanged.
+        generated_at_unix_ms: oracle.generated_at_unix_ms,
         abs_tol,
         rel_tol,
         total_cases: inputs.len(),
@@ -534,7 +536,7 @@ pub fn compare_against_oracle(
     })
 }
 
-fn execute_input_case(case: &UFuncInputCase) -> Result<(Vec<usize>, Vec<f64>, String), String> {
+pub fn execute_input_case(case: &UFuncInputCase) -> Result<(Vec<usize>, Vec<f64>, String), String> {
     let lhs_dtype = parse_dtype(&case.lhs_dtype)?;
     let lhs = UFuncArray::new(case.lhs_shape.clone(), case.lhs_values.clone(), lhs_dtype)
         .map_err(|err| format!("lhs array error: {err}"))?;

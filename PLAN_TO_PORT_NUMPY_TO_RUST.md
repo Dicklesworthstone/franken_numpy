@@ -14,28 +14,24 @@ This project follows the spec-first `porting-to-rust` workflow:
 Primary oracle and spec set:
 
 - Legacy oracle: `/dp/franken_numpy/legacy_numpy_code/numpy`
-- FrankenNumPy spec: `COMPREHENSIVE_SPEC_FOR_FRANKENNUMPY_V1.md`
+- FrankenNumPy spec: `COMPREHENSIVE_SPEC_FOR_FRANKENNUMPY_V1.md` (filename retained for lineage; scope is full parity)
 - FrankenSQLite exemplar (copied): `COMPREHENSIVE_SPEC_FOR_FRANKENSQLITE_V1.md`
 - FrankenSQLite original path: `/dp/frankensqlite/COMPREHENSIVE_SPEC_FOR_FRANKENSQLITE_V1.md`
 
 The FrankenSQLite spec is a required style/quality baseline for evidence artifacts, mode split, durability contracts, and gate topology.
 
-## 3. V1 Included Scope
+## 3. Absolute Parity Doctrine (Program-Level, Non-Negotiable)
 
-- ndarray shape/stride/layout legality (SCE foundation)
-- reshape/broadcast legality and deterministic output shape
-- core dtype promotion/cast policy for scoped dtypes
-- strict/hardened runtime mode split with fail-closed behavior
-- fixture-driven conformance harness for shape/stride/promotion/policy
-- initial npy/npz IO and RNG contracts (first-wave extraction + implementation)
+- End-state target is ABSOLUTELY COMPLETE and TOTAL feature/functionality overlap with legacy NumPy as a true drop-in replacement.
+- Sequencing is allowed; scope reduction is not.
+- Any not-yet-implemented behavior must be tracked as explicit parity debt with owner, blocker, risk level, and closure gate.
+- No milestone can claim "done" via narrowed scope acceptance.
 
-## 4. Explicit V1 Exclusions
+## 4. Sequencing Rules (Not Exclusions)
 
-- full long-tail NumPy public API surface
-- packaging/doc/build ecosystems from legacy tree
-- f2py, C-extension ABI compatibility, Python runtime embedding
-- advanced linalg/fft breadth beyond scoped parity packets
-- non-critical modules until shape/stride/promotion/ufunc core is parity-green
+- Prioritize high-impact core behaviors first (shape/stride/promotion/dispatch/io), but maintain full-matrix parity trajectory.
+- Components such as packaging/doc/build ecosystems, f2py/C-extension ABI, runtime embedding, and long-tail APIs are phase-sequenced work, not permanent exclusions.
+- Each phase must reduce total parity debt and increase legacy-matrix coverage.
 
 ## 5. Phase Plan and Exit Gates
 
@@ -73,17 +69,17 @@ Deliverables:
 - strict/hardened policy enforcement in runtime
 
 Exit gate:
-- scoped conformance suites green for each implemented family
+- implemented-family conformance suites green plus parity-debt ledger updated with burn-down evidence toward full legacy closure
 
 ### Phase 5: Conformance + QA
 
 Deliverables:
-- differential parity report vs legacy oracle
+- differential parity report vs legacy oracle (full matrix coverage accounting)
 - benchmark deltas + isomorphism proofs
 - RaptorQ sidecar + scrub/decode proofs for durable artifacts
 
 Exit gate:
-- G1-G6 gates pass from comprehensive spec section 18
+- G1-G6 gates pass from comprehensive spec section 18 and remaining parity debt is explicitly owned, prioritized, and closure-gated
 
 ## 6. Method-Stack Artifact Requirements (Per Meaningful Change)
 
@@ -92,12 +88,20 @@ Exit gate:
 3. `RaptorQ-everywhere`: sidecar manifest + scrub/decode evidence (or explicit defer note).
 4. `frankenlibc/frankenfs doctrine`: strict/hardened behavior matrix + fail-closed checks.
 
+Test-conventions contract requirement:
+
+1. Keep machine contract current: `artifacts/contracts/test_logging_contract_v1.json`
+2. Keep human conventions current: `artifacts/contracts/TESTING_AND_LOGGING_CONVENTIONS_V1.md`
+3. Enforce via gate: `cargo run -p fnp-conformance --bin run_test_contract_gate`
+4. Enforce via e2e script: `scripts/e2e/run_test_contract_gate.sh`
+
 ## 7. Immediate Priorities (Post-This-Turn)
 
 1. Implement `FNP-P2C-001` and `FNP-P2C-002` beyond smoke-level coverage.
 2. Build differential fixture capture from legacy oracle tests.
 3. Add first benchmark baseline for broadcast/reduction sentinel workloads.
 4. Wire RaptorQ sidecar generation pipeline for conformance bundles.
+5. Maintain and publish full legacy feature/functionality parity matrix with no unowned gaps.
 
 ## 8. Mandatory Post-Change Commands
 

@@ -4,8 +4,10 @@ pub mod benchmark;
 pub mod contract_schema;
 pub mod raptorq_artifacts;
 pub mod security_contracts;
+pub mod test_contracts;
 pub mod ufunc_differential;
 
+use crate::ufunc_differential::{UFuncInputCase, UFuncOperation};
 use fnp_dtype::{DType, promote};
 use fnp_ndarray::{MemoryOrder, broadcast_shape, contiguous_strides};
 use fnp_runtime::{
@@ -124,6 +126,40 @@ struct PolicyAdversarialFixtureCase {
     reason_code: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct UFuncMetamorphicCase {
+    id: String,
+    relation: String,
+    lhs_shape: Vec<usize>,
+    lhs_values: Vec<f64>,
+    #[serde(default = "default_f64_dtype_name")]
+    lhs_dtype: String,
+    rhs_shape: Option<Vec<usize>>,
+    rhs_values: Option<Vec<f64>>,
+    rhs_dtype: Option<String>,
+    scalar: Option<f64>,
+    #[serde(default)]
+    seed: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct UFuncAdversarialCase {
+    id: String,
+    op: UFuncOperation,
+    lhs_shape: Vec<usize>,
+    lhs_values: Vec<f64>,
+    #[serde(default = "default_f64_dtype_name")]
+    lhs_dtype: String,
+    rhs_shape: Option<Vec<usize>>,
+    rhs_values: Option<Vec<f64>>,
+    rhs_dtype: Option<String>,
+    axis: Option<usize>,
+    keepdims: Option<bool>,
+    expected_error_contains: String,
+    #[serde(default)]
+    seed: u64,
+}
+
 #[derive(Debug, Serialize)]
 struct RuntimePolicyLogEntry {
     suite: &'static str,
@@ -139,6 +175,10 @@ struct RuntimePolicyLogEntry {
 }
 
 static RUNTIME_POLICY_LOG_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+
+fn default_f64_dtype_name() -> String {
+    "f64".to_string()
+}
 
 pub fn set_runtime_policy_log_path(path: Option<PathBuf>) {
     let cell = RUNTIME_POLICY_LOG_PATH.get_or_init(|| Mutex::new(None));
@@ -473,6 +513,265 @@ pub fn run_ufunc_differential_suite(config: &HarnessConfig) -> Result<SuiteRepor
     })
 }
 
+pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let path = config.fixture_root.join("ufunc_metamorphic_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    let cases: Vec<UFuncMetamorphicCase> =
+        serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))?;
+
+    let mut report = SuiteReport {
+        suite: "ufunc_metamorphic",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let pass = match case.relation.as_str() {
+            "add_commutative" => {
+                let Some(rhs_shape) = case.rhs_shape.clone() else {
+                    report.failures.push(format!(
+                        "{}: missing rhs_shape for add_commutative",
+                        case.id
+                    ));
+                    continue;
+                };
+                let Some(rhs_values) = case.rhs_values.clone() else {
+                    report.failures.push(format!(
+                        "{}: missing rhs_values for add_commutative",
+                        case.id
+                    ));
+                    continue;
+                };
+                let rhs_dtype = case
+                    .rhs_dtype
+                    .clone()
+                    .unwrap_or_else(default_f64_dtype_name);
+
+                let lhs_rhs = UFuncInputCase {
+                    id: format!("{}::lhs_rhs", case.id),
+                    op: UFuncOperation::Add,
+                    lhs_shape: case.lhs_shape.clone(),
+                    lhs_values: case.lhs_values.clone(),
+                    lhs_dtype: case.lhs_dtype.clone(),
+                    rhs_shape: Some(rhs_shape.clone()),
+                    rhs_values: Some(rhs_values.clone()),
+                    rhs_dtype: Some(rhs_dtype.clone()),
+                    axis: None,
+                    keepdims: None,
+                };
+                let rhs_lhs = UFuncInputCase {
+                    id: format!("{}::rhs_lhs", case.id),
+                    op: UFuncOperation::Add,
+                    lhs_shape: rhs_shape,
+                    lhs_values: rhs_values,
+                    lhs_dtype: rhs_dtype,
+                    rhs_shape: Some(case.lhs_shape.clone()),
+                    rhs_values: Some(case.lhs_values.clone()),
+                    rhs_dtype: Some(case.lhs_dtype.clone()),
+                    axis: None,
+                    keepdims: None,
+                };
+                evaluate_commutative_pair(&case.id, case.seed, lhs_rhs, rhs_lhs, &mut report)
+            }
+            "mul_commutative" => {
+                let Some(rhs_shape) = case.rhs_shape.clone() else {
+                    report.failures.push(format!(
+                        "{}: missing rhs_shape for mul_commutative",
+                        case.id
+                    ));
+                    continue;
+                };
+                let Some(rhs_values) = case.rhs_values.clone() else {
+                    report.failures.push(format!(
+                        "{}: missing rhs_values for mul_commutative",
+                        case.id
+                    ));
+                    continue;
+                };
+                let rhs_dtype = case
+                    .rhs_dtype
+                    .clone()
+                    .unwrap_or_else(default_f64_dtype_name);
+
+                let lhs_rhs = UFuncInputCase {
+                    id: format!("{}::lhs_rhs", case.id),
+                    op: UFuncOperation::Mul,
+                    lhs_shape: case.lhs_shape.clone(),
+                    lhs_values: case.lhs_values.clone(),
+                    lhs_dtype: case.lhs_dtype.clone(),
+                    rhs_shape: Some(rhs_shape.clone()),
+                    rhs_values: Some(rhs_values.clone()),
+                    rhs_dtype: Some(rhs_dtype.clone()),
+                    axis: None,
+                    keepdims: None,
+                };
+                let rhs_lhs = UFuncInputCase {
+                    id: format!("{}::rhs_lhs", case.id),
+                    op: UFuncOperation::Mul,
+                    lhs_shape: rhs_shape,
+                    lhs_values: rhs_values,
+                    lhs_dtype: rhs_dtype,
+                    rhs_shape: Some(case.lhs_shape.clone()),
+                    rhs_values: Some(case.lhs_values.clone()),
+                    rhs_dtype: Some(case.lhs_dtype.clone()),
+                    axis: None,
+                    keepdims: None,
+                };
+                evaluate_commutative_pair(&case.id, case.seed, lhs_rhs, rhs_lhs, &mut report)
+            }
+            "sum_linearity" => {
+                let scalar = case.scalar.unwrap_or(1.0);
+                let sum_case = UFuncInputCase {
+                    id: format!("{}::sum_base", case.id),
+                    op: UFuncOperation::Sum,
+                    lhs_shape: case.lhs_shape.clone(),
+                    lhs_values: case.lhs_values.clone(),
+                    lhs_dtype: case.lhs_dtype.clone(),
+                    rhs_shape: None,
+                    rhs_values: None,
+                    rhs_dtype: None,
+                    axis: None,
+                    keepdims: Some(false),
+                };
+                let scale_case = UFuncInputCase {
+                    id: format!("{}::scale", case.id),
+                    op: UFuncOperation::Mul,
+                    lhs_shape: case.lhs_shape.clone(),
+                    lhs_values: case.lhs_values.clone(),
+                    lhs_dtype: case.lhs_dtype.clone(),
+                    rhs_shape: Some(Vec::new()),
+                    rhs_values: Some(vec![scalar]),
+                    rhs_dtype: Some(default_f64_dtype_name()),
+                    axis: None,
+                    keepdims: None,
+                };
+
+                let Ok((_, base_values, _)) = ufunc_differential::execute_input_case(&sum_case)
+                else {
+                    report.failures.push(format!(
+                        "{}: seed={} failed evaluating base sum",
+                        case.id, case.seed
+                    ));
+                    continue;
+                };
+                let Ok((scaled_shape, scaled_values, _)) =
+                    ufunc_differential::execute_input_case(&scale_case)
+                else {
+                    report.failures.push(format!(
+                        "{}: seed={} failed evaluating scaled array",
+                        case.id, case.seed
+                    ));
+                    continue;
+                };
+
+                let scaled_sum_case = UFuncInputCase {
+                    id: format!("{}::sum_scaled", case.id),
+                    op: UFuncOperation::Sum,
+                    lhs_shape: scaled_shape,
+                    lhs_values: scaled_values,
+                    lhs_dtype: default_f64_dtype_name(),
+                    rhs_shape: None,
+                    rhs_values: None,
+                    rhs_dtype: None,
+                    axis: None,
+                    keepdims: Some(false),
+                };
+
+                let Ok((_, sum_scaled_values, _)) =
+                    ufunc_differential::execute_input_case(&scaled_sum_case)
+                else {
+                    report.failures.push(format!(
+                        "{}: seed={} failed evaluating scaled sum",
+                        case.id, case.seed
+                    ));
+                    continue;
+                };
+
+                let expected = base_values.first().copied().unwrap_or(0.0) * scalar;
+                let actual = sum_scaled_values.first().copied().unwrap_or(0.0);
+                let abs_err = (expected - actual).abs();
+                let threshold = 1e-9 + 1e-9 * expected.abs();
+                if abs_err > threshold {
+                    report.failures.push(format!(
+                        "{}: seed={} sum_linearity mismatch expected={} actual={} abs_err={} threshold={}",
+                        case.id, case.seed, expected, actual, abs_err, threshold
+                    ));
+                    false
+                } else {
+                    true
+                }
+            }
+            other => {
+                report
+                    .failures
+                    .push(format!("{}: unsupported relation {}", case.id, other));
+                false
+            }
+        };
+
+        if pass {
+            report.pass_count += 1;
+        }
+    }
+
+    Ok(report)
+}
+
+pub fn run_ufunc_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let path = config.fixture_root.join("ufunc_adversarial_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    let cases: Vec<UFuncAdversarialCase> =
+        serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))?;
+
+    let mut report = SuiteReport {
+        suite: "ufunc_adversarial",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let input = UFuncInputCase {
+            id: case.id.clone(),
+            op: case.op,
+            lhs_shape: case.lhs_shape.clone(),
+            lhs_values: case.lhs_values.clone(),
+            lhs_dtype: case.lhs_dtype.clone(),
+            rhs_shape: case.rhs_shape.clone(),
+            rhs_values: case.rhs_values.clone(),
+            rhs_dtype: case.rhs_dtype.clone(),
+            axis: case.axis,
+            keepdims: case.keepdims,
+        };
+
+        match ufunc_differential::execute_input_case(&input) {
+            Ok((shape, _, _)) => {
+                report.failures.push(format!(
+                    "{}: seed={} expected error containing '{}' but execution succeeded with shape={shape:?}",
+                    case.id, case.seed, case.expected_error_contains
+                ));
+            }
+            Err(err) => {
+                let expected = case.expected_error_contains.to_lowercase();
+                let actual = err.to_lowercase();
+                if actual.contains(&expected) {
+                    report.pass_count += 1;
+                } else {
+                    report.failures.push(format!(
+                        "{}: seed={} expected error containing '{}' but got '{}'",
+                        case.id, case.seed, case.expected_error_contains, err
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(report)
+}
+
 pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, String> {
     Ok(vec![
         run_shape_stride_suite(config)?,
@@ -480,8 +779,75 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
         run_runtime_policy_suite(config)?,
         run_runtime_policy_adversarial_suite(config)?,
         security_contracts::run_security_contract_suite(config)?,
+        test_contracts::run_test_contract_suite(config)?,
         run_ufunc_differential_suite(config)?,
+        run_ufunc_metamorphic_suite(config)?,
+        run_ufunc_adversarial_suite(config)?,
     ])
+}
+
+fn evaluate_commutative_pair(
+    case_id: &str,
+    seed: u64,
+    lhs_rhs: UFuncInputCase,
+    rhs_lhs: UFuncInputCase,
+    report: &mut SuiteReport,
+) -> bool {
+    let Ok((shape_a, values_a, dtype_a)) = ufunc_differential::execute_input_case(&lhs_rhs) else {
+        report.failures.push(format!(
+            "{}: seed={} failed lhs_rhs execution",
+            case_id, seed
+        ));
+        return false;
+    };
+    let Ok((shape_b, values_b, dtype_b)) = ufunc_differential::execute_input_case(&rhs_lhs) else {
+        report.failures.push(format!(
+            "{}: seed={} failed rhs_lhs execution",
+            case_id, seed
+        ));
+        return false;
+    };
+
+    if shape_a != shape_b {
+        report.failures.push(format!(
+            "{}: seed={} commutative shape mismatch lhs_rhs={shape_a:?} rhs_lhs={shape_b:?}",
+            case_id, seed
+        ));
+        return false;
+    }
+
+    if dtype_a != dtype_b {
+        report.failures.push(format!(
+            "{}: seed={} commutative dtype mismatch lhs_rhs={} rhs_lhs={}",
+            case_id, seed, dtype_a, dtype_b
+        ));
+        return false;
+    }
+
+    if !approx_equal_values(&values_a, &values_b, 1e-9, 1e-9) {
+        report.failures.push(format!(
+            "{}: seed={} commutative value mismatch",
+            case_id, seed
+        ));
+        return false;
+    }
+
+    true
+}
+
+fn approx_equal_values(expected: &[f64], actual: &[f64], abs_tol: f64, rel_tol: f64) -> bool {
+    if expected.len() != actual.len() {
+        return false;
+    }
+
+    for (&a, &b) in expected.iter().zip(actual.iter()) {
+        let abs_err = (a - b).abs();
+        let threshold = abs_tol + rel_tol * a.abs();
+        if abs_err > threshold {
+            return false;
+        }
+    }
+    true
 }
 
 fn parse_expected_action(case_id: &str, raw: &str) -> Result<DecisionAction, String> {
@@ -593,7 +959,7 @@ fn validate_runtime_policy_log_fields(
 mod tests {
     use super::{
         HarnessConfig, run_all_core_suites, run_runtime_policy_adversarial_suite, run_smoke,
-        run_ufunc_differential_suite,
+        run_ufunc_adversarial_suite, run_ufunc_differential_suite, run_ufunc_metamorphic_suite,
     };
     use std::path::PathBuf;
 
@@ -630,6 +996,27 @@ mod tests {
         let cfg = HarnessConfig::default_paths();
         let suite = super::security_contracts::run_security_contract_suite(&cfg)
             .expect("security contract suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn test_contract_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite = super::test_contracts::run_test_contract_suite(&cfg).expect("suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn ufunc_metamorphic_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite = run_ufunc_metamorphic_suite(&cfg).expect("metamorphic suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn ufunc_adversarial_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite = run_ufunc_adversarial_suite(&cfg).expect("adversarial suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 

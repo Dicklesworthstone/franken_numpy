@@ -1,10 +1,12 @@
 # COMPREHENSIVE_SPEC_FOR_FRANKENNUMPY_V1
 
+Historical filename note: the `_V1` suffix is retained for lineage only; this spec defines a full-parity, true drop-in replacement target.
+
 ## 0. Prime Directive
 
 Build a system that is simultaneously:
 
-1. Behaviorally trustworthy for scoped compatibility.
+1. Behaviorally trustworthy at full drop-in NumPy parity.
 2. Mathematically explicit in decision and risk handling.
 3. Operationally resilient via RaptorQ-backed durability.
 4. Performance-competitive via profile-and-proof discipline.
@@ -22,17 +24,15 @@ Legacy oracle:
 
 Most reimplementations fail by being partially compatible and operationally brittle. FrankenNumPy will instead combine compatibility realism with first-principles architecture and strict quality gates.
 
-## 2. V1 Scope Contract
+## 2. Absolute Parity Contract (Non-Negotiable)
 
-Included in V1:
+FrankenNumPy targets ABSOLUTELY COMPLETE and TOTAL feature/functionality overlap with legacy NumPy as a true drop-in replacement.
 
-- ndarray creation/reshape/view/slicing core; - broadcasting and elementwise ufuncs; - reduction basics; - npy/npz core IO.
+Delivery may be phased, but phase boundaries are sequencing only:
 
-Deferred from V1:
-
-- long-tail API surface outside highest-value use cases
-- broad ecosystem parity not required for core migration value
-- distributed/platform expansion not needed for V1 acceptance
+- uncovered behavior is parity debt, not accepted scope reduction
+- each parity-debt item must carry owner, risk, blocker, and closure gate
+- reduced-scope "V1 is good enough" acceptance is explicitly forbidden
 
 ## 3. Architecture Blueprint
 
@@ -54,14 +54,14 @@ Planned crate families:
 Two explicit operating modes:
 
 1. strict mode:
-   - maximize observable compatibility for scoped APIs
+   - maximize observable compatibility for the full legacy NumPy behavior surface
    - no behavior-altering repair heuristics
 2. hardened mode:
    - maintain outward contract while enabling defensive runtime checks and bounded repairs
 
 Compatibility focus for this project:
 
-Preserve NumPy-observable shape, broadcast, promotion, and view semantics for scoped operations.
+Preserve NumPy-observable shape, broadcast, promotion, and view semantics across the full legacy behavior matrix.
 
 Fail-closed policy:
 
@@ -135,6 +135,22 @@ Assurance ladder:
 - Tier C: property/fuzz/adversarial tests
 - Tier D: regression corpus for historical failures
 
+Test contract lock (release-blocking for scoped surfaces):
+
+1. Machine schema: `artifacts/contracts/test_logging_contract_v1.json`
+2. Human conventions: `artifacts/contracts/TESTING_AND_LOGGING_CONVENTIONS_V1.md`
+3. Gate runner: `cargo run -p fnp-conformance --bin run_test_contract_gate`
+4. E2E wrapper: `scripts/e2e/run_test_contract_gate.sh`
+
+Mandatory fields for fixture-level structured logs:
+
+1. `fixture_id`
+2. `seed`
+3. `mode`
+4. `env_fingerprint`
+5. `artifact_refs`
+6. `reason_code`
+
 ## 9. RaptorQ-Everywhere Durability Contract
 
 RaptorQ repair-symbol sidecars are required for long-lived project evidence:
@@ -172,15 +188,15 @@ Exit:
 
 ### M2 — First Vertical Slice
 
-- end-to-end scoped workflow implemented
+- end-to-end workflow implemented for first-wave capabilities with explicit parity-debt ledger updates
 
 Exit:
 - differential parity for first major API family
 - baseline benchmark report published
 
-### M3 — Scope Expansion
+### M3 — Parity Closure Expansion
 
-- additional V1 API families
+- additional API families closed toward full legacy matrix parity
 
 Exit:
 - expanded parity reports green
@@ -192,11 +208,11 @@ Exit:
 
 Exit:
 - regression gates stable
-- conformance drift zero for V1 scope
+- conformance drift zero for implemented surface plus parity-debt burn-down evidence toward full closure
 
 ## 11. Acceptance Gates
 
-Gate A: compatibility parity report passes for V1 scope.
+Gate A: compatibility parity report passes against the full legacy matrix for implemented surface, with explicit parity-debt ledger for remaining gaps.
 
 Gate B: security/fuzz/adversarial suite passes for high-risk paths.
 
@@ -204,7 +220,7 @@ Gate C: performance budgets pass with no semantic regressions.
 
 Gate D: RaptorQ durability artifacts validated and scrub-clean.
 
-All four gates must pass for V1 release readiness.
+All four gates must pass for release readiness; no release claim is valid without explicit full-parity trajectory and owned parity-debt closure plan.
 
 ## 12. Risk Register
 
@@ -223,12 +239,12 @@ Mitigations:
 ## 13. Immediate Execution Checklist
 
 1. Create workspace and crate skeleton.
-2. Implement smallest high-value end-to-end path in V1 scope.
+2. Implement highest-impact end-to-end path while preserving full-parity target and updating parity-debt governance artifacts.
 3. Stand up differential conformance harness against legacy oracle.
 4. Add benchmark baseline generation and regression gating.
 5. Add RaptorQ sidecar pipeline for conformance and benchmark artifacts.
 
-## 14. Detailed Crate Contracts (V1)
+## 14. Detailed Crate Contracts
 
 | Crate | Primary Responsibility | Explicit Non-Goal | Invariants | Mandatory Tests |
 |---|---|---|---|---|
@@ -236,13 +252,13 @@ Mitigations:
 | fnp-ndarray | shape/stride/storage model | ufunc dispatch | no invalid stride state, view metadata consistency | shape/stride property tests |
 | fnp-ufunc | elementwise dispatch + broadcast executor | IO | broadcast legality and result-shape determinism | broadcast edge corpus, scalar-vector-matrix parity |
 | fnp-linalg | dense algebra bridge and kernels | random/distribution APIs | solver input/output shape and tolerance contracts | decomposition fixtures, residual checks |
-| fnp-random | RNG streams and distributions | fft/linear algebra | deterministic seed replay for scoped generators | seed replay matrix, distribution sanity checks |
+| fnp-random | RNG streams and distributions | fft/linear algebra | deterministic seed replay for all shipped generators; unshipped generator parity tracked as explicit debt | seed replay matrix, distribution sanity checks |
 | fnp-fft | fft execution and plan policy | parsing/storage | transform shape and inverse consistency | fft round-trip fixtures |
 | fnp-io | npy/npz parsing and encoding | compute scheduling | metadata parsing deterministic and auditable | malformed header adversarial tests |
 | fnp-conformance | NumPy differential harness | production API | oracle compare policy explicit by dtype/op | differential comparator tests |
 | frankennumpy | integration + policy/runtime modes | kernel internals | strict/hardened mode and evidence output always wired | startup policy tests |
 
-## 15. Conformance Matrix (V1)
+## 15. Conformance Matrix
 
 | Family | Oracle Workload | Pass Criterion | Drift Severity |
 |---|---|---|---|
@@ -251,7 +267,7 @@ Mitigations:
 | Broadcasting | mixed rank elementwise suite | result-shape + value parity | critical |
 | Ufunc arithmetic | core ufunc corpus | value parity under dtype policy | high |
 | Reductions | axis and keepdims fixtures | shape and value parity | high |
-| Dtype promotion | pairwise mixed-dtype suite | exact promotion parity for scope | critical |
+| Dtype promotion | pairwise mixed-dtype suite | exact promotion parity against legacy matrix for shipped ops; explicit debt entries for remaining ops | critical |
 | NPY/NPZ IO | round-trip + malformed cases | data + metadata parity | high |
 | E2E pipeline | io -> broadcast -> reduction chain | reproducible parity report | critical |
 
@@ -350,7 +366,7 @@ This spec is paired with the following methodology artifacts:
 Rule of use:
 
 - Extraction and behavior understanding happens in EXISTING_NUMPY_STRUCTURE.md.
-- Scope, exclusions, and phase sequencing live in PLAN_TO_PORT_NUMPY_TO_RUST.md.
+- Phase sequencing and parity-debt governance live in PLAN_TO_PORT_NUMPY_TO_RUST.md.
 - Rust crate boundaries live in PROPOSED_ARCHITECTURE.md.
 - Delivery readiness is tracked in FEATURE_PARITY.md.
 

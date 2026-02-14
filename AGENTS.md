@@ -106,7 +106,7 @@ Planned workspace crates:
 ## Compatibility Doctrine (Mode-Split)
 
 - strict mode:
-  - maximize observable compatibility for V1 scoped APIs
+  - maximize observable compatibility for the full legacy NumPy behavior matrix
   - no behavior-altering repairs
 - hardened mode:
   - preserve API contract while adding safety guards
@@ -114,7 +114,7 @@ Planned workspace crates:
 
 Compatibility focus for this project:
 
-Preserve NumPy-observable shape, broadcast, promotion, and view semantics for scoped operations.
+Preserve NumPy-observable shape, broadcast, promotion, and view semantics across the full legacy operation surface.
 
 ---
 

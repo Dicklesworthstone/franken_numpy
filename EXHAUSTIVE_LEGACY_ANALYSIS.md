@@ -25,6 +25,37 @@ Project contracts:
 - `/data/projects/franken_numpy/PROPOSED_ARCHITECTURE.md`
 - `/data/projects/franken_numpy/FEATURE_PARITY.md`
 
+## DOC-PASS-00 Baseline Gap Matrix + Quantitative Expansion Targets
+
+Snapshot baseline (2026-02-14):
+
+| Document | Baseline lines | Target lines | Expansion multiplier | Anchor requirement |
+|---|---:|---:|---:|---|
+| `EXHAUSTIVE_LEGACY_ANALYSIS.md` | 275 | 3300 | 12.0x | Every new assertion links to legacy path and/or executable artifact |
+| `EXISTING_NUMPY_STRUCTURE.md` | 62 | 992 | 16.0x | Every new subsystem map row links to crate owner + conformance anchor |
+
+Pass-1 domain gap matrix (traceable to legacy anchors and executable evidence):
+
+| Domain | Legacy anchors | Current depth (0-5) | Target multiplier | Unit/Property implications | Differential implications | E2E implications | Structured logging implications | Evidence anchors |
+|---|---|---:|---:|---|---|---|---|---|
+| Shape/stride legality | `numpy/_core/src/multiarray/shape.c`, `shape.h` | 3 | 3.0x | partial (`shape_stride_cases.json`) | partial (`run_ufunc_differential`) | missing dedicated journey | partial (runtime policy only) | `crates/fnp-conformance/fixtures/shape_stride_cases.json`, `crates/fnp-conformance/src/lib.rs` |
+| Dtype promotion/casting | `dtypemeta.c`, `descriptor.c`, `can_cast_table.h` | 2 | 4.0x | partial (`dtype_promotion_cases.json`) | missing cast-matrix differential | missing dedicated journey | missing per-cast reason codes | `crates/fnp-conformance/fixtures/dtype_promotion_cases.json` |
+| Transfer/alias semantics | `dtype_transfer.c`, `lowlevel_strided_loops.c.src` | 1 | 6.0x | missing overlap property suite | missing overlap differential | missing overlap journey | missing overlap log taxonomy | legacy anchors only (no Rust artifact yet) |
+| Ufunc dispatch/override | `umath/ufunc_object.c`, dispatch loops | 3 | 3.0x | partial (metamorphic/adversarial corpus) | partial (`ufunc_differential`) | missing override journey | partial (`fixture_id`,`seed` in fixtures) | `crates/fnp-conformance/src/ufunc_differential.rs`, `crates/fnp-conformance/fixtures/ufunc_*` |
+| NDIter traversal | `multiarray/nditer*` | 1 | 6.0x | missing | missing | missing | missing | legacy anchors only (no Rust artifact yet) |
+| Random subsystem | `numpy/random/*.pyx`, `random/src/*` | 1 | 5.0x | missing deterministic stream properties | missing RNG differential | missing seed/state journey | missing RNG log taxonomy | `crates/fnp-random/src/lib.rs` (stub) |
+| Linalg subsystem | `numpy/linalg/lapack_lite/*` | 1 | 5.0x | missing solver invariants | missing solver differential | missing solver journey | missing linalg reason codes | `crates/fnp-linalg/src/lib.rs` (stub) |
+| IO subsystem | `numpy/lib/format.py`, npy/npz paths | 2 | 4.0x | missing malformed-header property coverage | missing io round-trip differential | missing io journey | missing parser reason-code families | `crates/fnp-io/src/lib.rs` (stub) |
+
+Contradictions/unknowns register (must be closed during doc-overhaul passes):
+
+| ID | Contradiction or unknown | Source/evidence anchor | Owner | Risk | Closure criteria |
+|---|---|---|---|---|---|
+| `DOC-C001` | `EXISTING_NUMPY_STRUCTURE.md` still states a reduced-scope “V1 extraction boundary” which conflicts with full drop-in parity doctrine. | `EXISTING_NUMPY_STRUCTURE.md` section 6 vs `COMPREHENSIVE_SPEC_FOR_FRANKENNUMPY_V1.md` sections 0 and 2 | `bd-23m.24.2` | critical | Replace scope-cut language with parity-debt sequencing language and explicit ownership table. |
+| `DOC-C002` | Existing structure doc does not map unit/property, differential, e2e, and structured logging implications per subsystem. | `EXISTING_NUMPY_STRUCTURE.md` sections 2-8 | `bd-23m.24.4` | high | Add per-subsystem verification matrix with covered/missing/deferred status and artifact links. |
+| `DOC-C003` | No explicit packet-to-artifact ownership crosswalk for unresolved domains (NDIter, RNG, linalg, IO). | `EXHAUSTIVE_LEGACY_ANALYSIS.md` sections 10-13 | `bd-23m.24.3` | high | Add packet index that binds each unresolved behavior class to packet bead IDs and closure gates. |
+| `DOC-C004` | Structured logging contract was added but not yet threaded into all subsystem extraction sections. | `artifacts/contracts/test_logging_contract_v1.json`, `artifacts/contracts/TESTING_AND_LOGGING_CONVENTIONS_V1.md` | `bd-23m.24.10` | medium | Each packet section names required log fields and reason-code taxonomy coverage status. |
+
 ## 2. Quantitative Legacy Inventory (Measured)
 
 - Total files: `2326`
