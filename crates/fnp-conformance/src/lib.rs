@@ -890,6 +890,7 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
         security_contracts::run_security_contract_suite(config)?,
         test_contracts::run_test_contract_suite(config)?,
         workflow_scenarios::run_user_workflow_scenario_suite(config)?,
+        raptorq_artifacts::run_raptorq_artifact_suite(config)?,
         run_ufunc_differential_suite(config)?,
         run_ufunc_metamorphic_suite(config)?,
         run_ufunc_adversarial_suite(config)?,
@@ -1347,6 +1348,14 @@ mod tests {
         let cfg = HarnessConfig::default_paths();
         let suite = super::workflow_scenarios::run_user_workflow_scenario_suite(&cfg)
             .expect("workflow scenario suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn raptorq_artifact_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite = super::raptorq_artifacts::run_raptorq_artifact_suite(&cfg)
+            .expect("raptorq artifact suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 

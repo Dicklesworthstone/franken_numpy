@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use crate::{HarnessConfig, SuiteReport};
 use asupersync::config::EncodingConfig;
 use asupersync::decoding::{DecodingConfig, DecodingPipeline};
 use asupersync::encoding::EncodingPipeline;
@@ -106,18 +107,21 @@ pub fn build_bundle_payload(
     repo_root: &Path,
     files: &[PathBuf],
 ) -> Result<Vec<u8>, String> {
+    let canonical_repo_root =
+        fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
     let mut sorted_files = files.to_vec();
     sorted_files.sort_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
 
     let mut payload_files = Vec::with_capacity(sorted_files.len());
 
     for file_path in sorted_files {
-        let bytes = fs::read(&file_path)
-            .map_err(|err| format!("failed reading {}: {err}", file_path.display()))?;
+        let canonical_file_path = fs::canonicalize(&file_path).unwrap_or(file_path);
+        let bytes = fs::read(&canonical_file_path)
+            .map_err(|err| format!("failed reading {}: {err}", canonical_file_path.display()))?;
 
-        let rel = file_path
-            .strip_prefix(repo_root)
-            .unwrap_or(file_path.as_path())
+        let rel = canonical_file_path
+            .strip_prefix(&canonical_repo_root)
+            .unwrap_or(canonical_file_path.as_path())
             .to_string_lossy()
             .to_string();
 
@@ -132,7 +136,8 @@ pub fn build_bundle_payload(
     let payload = BundlePayload {
         schema_version: 1,
         bundle_id: bundle_id.to_string(),
-        generated_at_unix_ms: now_unix_ms(),
+        // Keep bundle payload hashing deterministic across regeneration/verification.
+        generated_at_unix_ms: 0,
         files: payload_files,
     };
 
@@ -401,6 +406,400 @@ pub fn generate_bundle_sidecar_and_reports(
     let _sidecar = generate_sidecar_from_payload(bundle_id, &payload, sidecar_path, object_seed)?;
     let _ = scrub_and_write_reports(sidecar_path, scrub_report_path, decode_proof_path)?;
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct BundleArtifactSpec {
+    bundle_id: &'static str,
+    source_files: Vec<PathBuf>,
+    sidecar_path: PathBuf,
+    scrub_report_path: PathBuf,
+    decode_proof_path: PathBuf,
+}
+
+fn default_bundle_specs(repo_root: &Path) -> Vec<BundleArtifactSpec> {
+    let fixture_root =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fnp-conformance/fixtures");
+
+    vec![
+        BundleArtifactSpec {
+            bundle_id: "conformance_bundle_v1",
+            source_files: vec![
+                fixture_root.join("ufunc_input_cases.json"),
+                fixture_root.join("workflow_scenario_corpus.json"),
+                fixture_root.join("oracle_outputs/ufunc_oracle_output.json"),
+                fixture_root.join("oracle_outputs/ufunc_differential_report.json"),
+            ],
+            sidecar_path: repo_root.join("artifacts/raptorq/conformance_bundle_v1.sidecar.json"),
+            scrub_report_path: repo_root
+                .join("artifacts/raptorq/conformance_bundle_v1.scrub_report.json"),
+            decode_proof_path: repo_root
+                .join("artifacts/raptorq/conformance_bundle_v1.decode_proof.json"),
+        },
+        BundleArtifactSpec {
+            bundle_id: "benchmark_bundle_v1",
+            source_files: vec![repo_root.join("artifacts/baselines/ufunc_benchmark_baseline.json")],
+            sidecar_path: repo_root.join("artifacts/raptorq/benchmark_bundle_v1.sidecar.json"),
+            scrub_report_path: repo_root
+                .join("artifacts/raptorq/benchmark_bundle_v1.scrub_report.json"),
+            decode_proof_path: repo_root
+                .join("artifacts/raptorq/benchmark_bundle_v1.decode_proof.json"),
+        },
+    ]
+}
+
+fn modified_unix_ms(path: &Path) -> Result<u128, String> {
+    let metadata =
+        fs::metadata(path).map_err(|err| format!("failed stat {}: {err}", path.display()))?;
+    let modified = metadata
+        .modified()
+        .map_err(|err| format!("failed reading mtime {}: {err}", path.display()))?;
+    let millis = modified
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| format!("mtime before unix epoch {}: {err}", path.display()))?
+        .as_millis();
+    Ok(millis)
+}
+
+fn latest_mtime(paths: &[PathBuf]) -> Result<u128, String> {
+    let mut latest = 0u128;
+    for path in paths {
+        let ts = modified_unix_ms(path)?;
+        latest = latest.max(ts);
+    }
+    Ok(latest)
+}
+
+fn record_check(report: &mut SuiteReport, passed: bool, failure: String) {
+    report.case_count += 1;
+    if passed {
+        report.pass_count += 1;
+    } else {
+        report.failures.push(failure);
+    }
+}
+
+pub fn run_raptorq_artifact_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let repo_root = config
+        .contract_root
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            format!(
+                "unable to derive repo root from contract_root {}",
+                config.contract_root.display()
+            )
+        })?;
+    let specs = default_bundle_specs(&repo_root);
+
+    let mut report = SuiteReport {
+        suite: "raptorq_artifacts",
+        case_count: 0,
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for spec in &specs {
+        for source in &spec.source_files {
+            record_check(
+                &mut report,
+                source.is_file(),
+                format!(
+                    "{}: source file missing {}",
+                    spec.bundle_id,
+                    source.display()
+                ),
+            );
+        }
+
+        let sidecar_exists = spec.sidecar_path.is_file();
+        record_check(
+            &mut report,
+            sidecar_exists,
+            format!(
+                "{}: sidecar missing {}",
+                spec.bundle_id,
+                spec.sidecar_path.display()
+            ),
+        );
+
+        let scrub_exists = spec.scrub_report_path.is_file();
+        record_check(
+            &mut report,
+            scrub_exists,
+            format!(
+                "{}: scrub report missing {}",
+                spec.bundle_id,
+                spec.scrub_report_path.display()
+            ),
+        );
+
+        let proof_exists = spec.decode_proof_path.is_file();
+        record_check(
+            &mut report,
+            proof_exists,
+            format!(
+                "{}: decode proof missing {}",
+                spec.bundle_id,
+                spec.decode_proof_path.display()
+            ),
+        );
+
+        if !sidecar_exists || !scrub_exists || !proof_exists {
+            continue;
+        }
+
+        let sidecar_raw = match fs::read_to_string(&spec.sidecar_path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                record_check(
+                    &mut report,
+                    false,
+                    format!(
+                        "{}: failed reading sidecar {}: {err}",
+                        spec.bundle_id,
+                        spec.sidecar_path.display()
+                    ),
+                );
+                continue;
+            }
+        };
+        let sidecar: RaptorQSidecar = match serde_json::from_str(&sidecar_raw) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                record_check(
+                    &mut report,
+                    false,
+                    format!(
+                        "{}: invalid sidecar json {}: {err}",
+                        spec.bundle_id,
+                        spec.sidecar_path.display()
+                    ),
+                );
+                continue;
+            }
+        };
+
+        let scrub_raw = match fs::read_to_string(&spec.scrub_report_path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                record_check(
+                    &mut report,
+                    false,
+                    format!(
+                        "{}: failed reading scrub report {}: {err}",
+                        spec.bundle_id,
+                        spec.scrub_report_path.display()
+                    ),
+                );
+                continue;
+            }
+        };
+        let scrub: ScrubReport = match serde_json::from_str(&scrub_raw) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                record_check(
+                    &mut report,
+                    false,
+                    format!(
+                        "{}: invalid scrub json {}: {err}",
+                        spec.bundle_id,
+                        spec.scrub_report_path.display()
+                    ),
+                );
+                continue;
+            }
+        };
+
+        let proof_raw = match fs::read_to_string(&spec.decode_proof_path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                record_check(
+                    &mut report,
+                    false,
+                    format!(
+                        "{}: failed reading decode proof {}: {err}",
+                        spec.bundle_id,
+                        spec.decode_proof_path.display()
+                    ),
+                );
+                continue;
+            }
+        };
+        let proof: DecodeProofArtifact = match serde_json::from_str(&proof_raw) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                record_check(
+                    &mut report,
+                    false,
+                    format!(
+                        "{}: invalid decode proof json {}: {err}",
+                        spec.bundle_id,
+                        spec.decode_proof_path.display()
+                    ),
+                );
+                continue;
+            }
+        };
+
+        let payload = match build_bundle_payload(spec.bundle_id, &repo_root, &spec.source_files) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                record_check(
+                    &mut report,
+                    false,
+                    format!(
+                        "{}: failed rebuilding bundle payload: {err}",
+                        spec.bundle_id
+                    ),
+                );
+                continue;
+            }
+        };
+        let expected_hash = sha256_hex(&payload);
+
+        record_check(
+            &mut report,
+            sidecar.schema_version == 1,
+            format!("{}: sidecar schema_version must be 1", spec.bundle_id),
+        );
+        record_check(
+            &mut report,
+            scrub.schema_version == 1,
+            format!("{}: scrub schema_version must be 1", spec.bundle_id),
+        );
+        record_check(
+            &mut report,
+            proof.schema_version == 1,
+            format!("{}: decode proof schema_version must be 1", spec.bundle_id),
+        );
+        record_check(
+            &mut report,
+            sidecar.bundle_id == spec.bundle_id,
+            format!(
+                "{}: sidecar bundle_id mismatch actual={}",
+                spec.bundle_id, sidecar.bundle_id
+            ),
+        );
+        record_check(
+            &mut report,
+            scrub.bundle_id == spec.bundle_id,
+            format!(
+                "{}: scrub bundle_id mismatch actual={}",
+                spec.bundle_id, scrub.bundle_id
+            ),
+        );
+        record_check(
+            &mut report,
+            proof.bundle_id == spec.bundle_id,
+            format!(
+                "{}: decode proof bundle_id mismatch actual={}",
+                spec.bundle_id, proof.bundle_id
+            ),
+        );
+        record_check(
+            &mut report,
+            sidecar.total_symbols == sidecar.symbols.len(),
+            format!(
+                "{}: total_symbols mismatch declared={} actual={}",
+                spec.bundle_id,
+                sidecar.total_symbols,
+                sidecar.symbols.len()
+            ),
+        );
+        let source_hash_matches = sidecar.source_hash == expected_hash;
+        record_check(
+            &mut report,
+            source_hash_matches,
+            format!(
+                "{}: sidecar source_hash does not match source payload",
+                spec.bundle_id
+            ),
+        );
+        record_check(
+            &mut report,
+            sidecar.source_size == payload.len(),
+            format!(
+                "{}: sidecar source_size mismatch declared={} actual={}",
+                spec.bundle_id,
+                sidecar.source_size,
+                payload.len()
+            ),
+        );
+
+        let latest_source_mtime = latest_mtime(&spec.source_files).unwrap_or(0);
+        let sidecar_mtime = modified_unix_ms(&spec.sidecar_path).unwrap_or(0);
+        let scrub_mtime = modified_unix_ms(&spec.scrub_report_path).unwrap_or(0);
+        let proof_mtime = modified_unix_ms(&spec.decode_proof_path).unwrap_or(0);
+        let stale = latest_source_mtime > sidecar_mtime
+            || latest_source_mtime > scrub_mtime
+            || latest_source_mtime > proof_mtime;
+
+        record_check(
+            &mut report,
+            !stale || source_hash_matches,
+            format!(
+                "{}: stale durability artifacts latest_source_mtime={} sidecar_mtime={} scrub_mtime={} proof_mtime={}",
+                spec.bundle_id, latest_source_mtime, sidecar_mtime, scrub_mtime, proof_mtime
+            ),
+        );
+        record_check(
+            &mut report,
+            (sidecar.generated_at_unix_ms >= latest_source_mtime
+                && scrub.generated_at_unix_ms >= latest_source_mtime
+                && proof.generated_at_unix_ms >= latest_source_mtime)
+                || source_hash_matches,
+            format!(
+                "{}: generated_at_unix_ms indicates stale artifacts relative to source mtimes",
+                spec.bundle_id
+            ),
+        );
+
+        record_check(
+            &mut report,
+            scrub.status == "ok",
+            format!(
+                "{}: scrub status must be ok, got {}",
+                spec.bundle_id, scrub.status
+            ),
+        );
+        record_check(
+            &mut report,
+            scrub.full_decode_match && scrub.recovery_decode_match,
+            format!(
+                "{}: scrub decode match flags must both be true",
+                spec.bundle_id
+            ),
+        );
+        record_check(
+            &mut report,
+            scrub.expected_hash == expected_hash && scrub.decoded_hash == expected_hash,
+            format!(
+                "{}: scrub expected/decoded hashes must match bundle source hash",
+                spec.bundle_id
+            ),
+        );
+        record_check(
+            &mut report,
+            proof.recovery_success,
+            format!(
+                "{}: decode proof recovery_success must be true",
+                spec.bundle_id
+            ),
+        );
+        record_check(
+            &mut report,
+            proof.expected_hash == expected_hash
+                && proof.recovered_hash.as_deref() == Some(expected_hash.as_str()),
+            format!(
+                "{}: decode proof expected/recovered hashes must match source hash",
+                spec.bundle_id
+            ),
+        );
+    }
+
+    Ok(report)
 }
 
 #[cfg(test)]
