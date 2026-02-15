@@ -27,7 +27,7 @@ Pass-1 explicit coverage/traceability matrix (covered, missing, deferred):
 | Dtype promotion/cast | `numpy/_core/src/multiarray/dtypemeta.c`, `descriptor.c`, `can_cast_table.h` | `crates/fnp-conformance/fixtures/dtype_promotion_cases.json` | covered (partial) | missing (cast-matrix diff missing) | missing | missing |
 | Ufunc dispatch | `numpy/_core/src/umath/ufunc_object.c` | `crates/fnp-conformance/src/ufunc_differential.rs`, `crates/fnp-conformance/fixtures/ufunc_*` | covered (partial metamorphic/adversarial) | covered (partial) | missing | covered (fixture-level fields) |
 | Transfer/alias | `numpy/_core/src/multiarray/dtype_transfer.c`, `lowlevel_strided_loops.c.src` | none yet (legacy only) | missing | missing | missing | missing |
-| NDIter | `numpy/_core/src/multiarray/nditer*` | `artifacts/phase2c/FNP-P2C-006/legacy_anchor_map.md`, `artifacts/phase2c/FNP-P2C-006/behavior_extraction_ledger.md` | missing | missing | missing | missing |
+| NDIter | `numpy/_core/src/multiarray/nditer*` | `artifacts/phase2c/FNP-P2C-006/legacy_anchor_map.md`, `artifacts/phase2c/FNP-P2C-006/behavior_extraction_ledger.md`, `artifacts/phase2c/FNP-P2C-006/contract_table.md` | missing | missing | missing | missing |
 | Random | `numpy/random/*.pyx`, `numpy/random/src/*` | `crates/fnp-random/src/lib.rs` (stub) | missing | missing | missing | missing |
 | Linalg | `numpy/linalg/lapack_lite/*` | `crates/fnp-linalg/src/lib.rs` (stub) | missing | missing | missing | missing |
 | IO | `numpy/lib/format.py`, npy/npz handling paths | `crates/fnp-io/src/lib.rs` (stub) | missing | missing | missing | missing |
@@ -110,6 +110,8 @@ Exclude for V1:
 ## 9. Packet `FNP-P2C-006` Legacy Anchor + Behavior Ledger (A-stage)
 
 Packet focus: stride-tricks and broadcasting API.
+
+Packet-B output status: `artifacts/phase2c/FNP-P2C-006/contract_table.md` now defines strict/hardened invariant rows and failure reason-code vocabulary for this subsystem.
 
 ### 9.1 Legacy anchor -> Rust boundary map
 

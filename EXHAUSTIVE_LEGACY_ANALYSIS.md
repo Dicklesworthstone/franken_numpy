@@ -251,6 +251,9 @@ Artifact location (normative):
 Completed in this pass:
 - `artifacts/phase2c/FNP-P2C-006/legacy_anchor_map.md`
 - `artifacts/phase2c/FNP-P2C-006/behavior_extraction_ledger.md`
+- `artifacts/phase2c/FNP-P2C-006/contract_table.md`
+- `artifacts/phase2c/FNP-P2C-006/risk_note.md`
+- `artifacts/phase2c/FNP-P2C-006/implementation_plan.md`
 
 Anchor families locked for packet-A:
 - `numpy/lib/_stride_tricks_impl.py` (`as_strided`, `_broadcast_to`, `broadcast_to`, `_broadcast_shape`, `broadcast_shapes`, `broadcast_arrays`)
@@ -263,6 +266,16 @@ Verification hooks registered:
 - differential/metamorphic/adversarial expansion target: `bd-23m.17.6`
 - e2e replay/logging target: `bd-23m.17.7`
 - strict/hardened threat closure target: `bd-23m.17.3`
+
+Contract-table status:
+- strict/hardened invariants, pre/postconditions, failure semantics, and packet reason-code vocabulary are defined in `artifacts/phase2c/FNP-P2C-006/contract_table.md`
+- every contract row links planned unit/property IDs, differential IDs, and e2e IDs for packet follow-on stages
+
+Threat-model status:
+- hostile input classes, fail-closed envelope, hardened recovery constraints, adversarial fixture lanes, and residual-risk closures are documented in `artifacts/phase2c/FNP-P2C-006/risk_note.md`
+
+Implementation-plan status:
+- crate/module boundary skeleton, packet D->I implementation sequence, instrumentation insertion points, and compile-safe validation path are documented in `artifacts/phase2c/FNP-P2C-006/implementation_plan.md`
 
 ## 14. Strict/Hardened Compatibility Drift Budgets
 
