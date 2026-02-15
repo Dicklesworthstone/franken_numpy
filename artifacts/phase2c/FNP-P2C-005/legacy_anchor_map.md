@@ -3,6 +3,31 @@
 Packet: `FNP-P2C-005`  
 Subsystem: `Ufunc dispatch + gufunc signature`
 
+## Validator Token Fields
+
+packet_id: `FNP-P2C-005`
+
+legacy_paths:
+- `legacy_numpy_code/numpy/numpy/_core/src/umath/ufunc_object.c`
+- `legacy_numpy_code/numpy/numpy/_core/src/umath/override.c`
+- `legacy_numpy_code/numpy/numpy/_core/src/umath/reduction.c`
+- `legacy_numpy_code/numpy/numpy/_core/src/umath/dispatching.h`
+- `legacy_numpy_code/numpy/numpy/_core/tests/test_ufunc.py`
+- `legacy_numpy_code/numpy/numpy/_core/tests/test_umath.py`
+- `legacy_numpy_code/numpy/numpy/_core/tests/test_overrides.py`
+
+legacy_symbols:
+- `_parse_signature`
+- `convert_ufunc_arguments`
+- `_check_and_copy_sig_to_signature`
+- `_get_fixed_signature`
+- `promote_and_get_ufuncimpl`
+- `normalize_signature_keyword`
+- `PyUFunc_CheckOverride`
+- `PyUFunc_ReduceWrapper`
+- `PyUFunc_DefaultTypeResolver`
+- `PyUFunc_RegisterLoopForType`
+
 ## Scope
 
 This map captures concrete legacy NumPy anchors for ufunc/gufunc dispatch and signature handling, and binds each anchor to planned Rust module boundaries for clean-room implementation.

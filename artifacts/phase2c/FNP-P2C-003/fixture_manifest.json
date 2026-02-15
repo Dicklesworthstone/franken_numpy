@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "packet_id": "FNP-P2C-003",
+  "oracle_tests": [
+    "legacy_numpy_code/numpy/numpy/_core/tests/test_mem_overlap.py",
+    "legacy_numpy_code/numpy/numpy/_core/tests/test_nditer.py",
+    "legacy_numpy_code/numpy/numpy/_core/tests/test_casting_unittests.py",
+    "legacy_numpy_code/numpy/numpy/_core/tests/test_regression.py"
+  ],
+  "fixtures": [
+    {
+      "id": "p2c003_transfer_selector_nominal",
+      "input_path": "crates/fnp-conformance/fixtures/p2c003_transfer_selector_cases.json",
+      "oracle_case_id": "selector_contiguous_and_strided_matrix"
+    },
+    {
+      "id": "p2c003_overlap_alias_hazard",
+      "input_path": "crates/fnp-conformance/fixtures/p2c003_overlap_alias_cases.json",
+      "oracle_case_id": "overlap_copy_direction_required"
+    },
+    {
+      "id": "p2c003_where_mask_contract",
+      "input_path": "crates/fnp-conformance/fixtures/p2c003_where_mask_cases.json",
+      "oracle_case_id": "masked_write_preserves_masked_off_lanes"
+    },
+    {
+      "id": "p2c003_same_value_cast_guard",
+      "input_path": "crates/fnp-conformance/fixtures/p2c003_same_value_cast_cases.json",
+      "oracle_case_id": "lossy_same_value_cast_rejected"
+    },
+    {
+      "id": "p2c003_grouped_subarray_transfer",
+      "input_path": "crates/fnp-conformance/fixtures/p2c003_grouped_subarray_cases.json",
+      "oracle_case_id": "subarray_broadcast_contract_enforced"
+    },
+    {
+      "id": "p2c003_flatiter_transfer_paths",
+      "input_path": "crates/fnp-conformance/fixtures/p2c003_flatiter_transfer_cases.json",
+      "oracle_case_id": "flatiter_read_write_contracts"
+    }
+  ]
+}

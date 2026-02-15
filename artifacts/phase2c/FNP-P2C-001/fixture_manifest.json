@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "packet_id": "FNP-P2C-001",
+  "oracle_tests": [
+    "legacy_numpy_code/numpy/numpy/_core/tests/test_shape_base.py",
+    "legacy_numpy_code/numpy/numpy/lib/tests/test_shape_base.py"
+  ],
+  "fixtures": [
+    {
+      "id": "p2c001_shape_stride_core",
+      "input_path": "crates/fnp-conformance/fixtures/shape_stride_cases.json",
+      "oracle_case_id": "shape_stride_core_contract"
+    },
+    {
+      "id": "p2c001_runtime_policy_shape_boundary",
+      "input_path": "crates/fnp-conformance/fixtures/runtime_policy_cases.json",
+      "oracle_case_id": "shape_policy_boundary_contract"
+    }
+  ]
+}

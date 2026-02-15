@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "bundle_id": "FNP-P2C-001-parity-report",
+  "generated_at_unix_ms": 0,
+  "dropped_symbol": null,
+  "recovery_symbols_used": 0,
+  "recovery_success": true,
+  "expected_hash": "9337e4114619a661380ee30fcb3336617b5c6a54d756134bdbf9d2144d10bd01",
+  "recovered_hash": "9337e4114619a661380ee30fcb3336617b5c6a54d756134bdbf9d2144d10bd01",
+  "error": null
+}

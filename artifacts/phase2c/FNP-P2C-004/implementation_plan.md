@@ -78,7 +78,7 @@ All emissions must include:
 - Planning-stage validation rules:
   - no behavior-changing API migration is shipped in this bead;
   - packet boundaries and reason-code taxonomy remain internally consistent;
-  - packet validator continues to report complete artifact fields for `FNP-P2C-004`.
+  - packet validator continues to report complete artifact fields for `FNP-P2C-004` (packet status may remain `not_ready` until downstream E-I artifacts land).
 - Validation command (offloaded via `rch`):  
   `rch exec -- cargo run -p fnp-conformance --bin validate_phase2c_packet -- --packet-id FNP-P2C-004`
 

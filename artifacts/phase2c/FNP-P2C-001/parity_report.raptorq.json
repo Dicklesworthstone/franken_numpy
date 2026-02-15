@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "bundle_id": "FNP-P2C-001-parity-report",
+  "generated_at_unix_ms": 0,
+  "source_hash": "9337e4114619a661380ee30fcb3336617b5c6a54d756134bdbf9d2144d10bd01",
+  "source_size": 308,
+  "object_id_u128": 1001,
+  "symbol_size": 256,
+  "max_block_size": 256,
+  "repair_overhead": 1.25,
+  "source_blocks": 1,
+  "source_symbols": 1,
+  "repair_symbols": 1,
+  "total_symbols": 0,
+  "symbols": []
+}

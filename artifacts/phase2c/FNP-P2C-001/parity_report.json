@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "packet_id": "FNP-P2C-001",
+  "strict_parity": 0.0,
+  "hardened_parity": 0.0,
+  "divergence_classes": [
+    "pending_packet_e_unit_property",
+    "pending_packet_f_differential",
+    "pending_packet_g_e2e"
+  ],
+  "compatibility_drift_hash": "sha256:pending-fnp-p2c-001-evidence"
+}
