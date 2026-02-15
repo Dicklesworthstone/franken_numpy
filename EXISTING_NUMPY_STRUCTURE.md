@@ -27,7 +27,7 @@ Pass-1 explicit coverage/traceability matrix (covered, missing, deferred):
 | Dtype promotion/cast | `numpy/_core/src/multiarray/dtypemeta.c`, `descriptor.c`, `can_cast_table.h` | `crates/fnp-conformance/fixtures/dtype_promotion_cases.json` | covered (partial) | missing (cast-matrix diff missing) | missing | missing |
 | Ufunc dispatch | `numpy/_core/src/umath/ufunc_object.c` | `crates/fnp-conformance/src/ufunc_differential.rs`, `crates/fnp-conformance/fixtures/ufunc_*` | covered (partial metamorphic/adversarial) | covered (partial) | missing | covered (fixture-level fields) |
 | Transfer/alias | `numpy/_core/src/multiarray/dtype_transfer.c`, `lowlevel_strided_loops.c.src` | none yet (legacy only) | missing | missing | missing | missing |
-| NDIter | `numpy/_core/src/multiarray/nditer*` | none yet (legacy only) | missing | missing | missing | missing |
+| NDIter | `numpy/_core/src/multiarray/nditer*` | `artifacts/phase2c/FNP-P2C-006/legacy_anchor_map.md`, `artifacts/phase2c/FNP-P2C-006/behavior_extraction_ledger.md` | missing | missing | missing | missing |
 | Random | `numpy/random/*.pyx`, `numpy/random/src/*` | `crates/fnp-random/src/lib.rs` (stub) | missing | missing | missing | missing |
 | Linalg | `numpy/linalg/lapack_lite/*` | `crates/fnp-linalg/src/lib.rs` (stub) | missing | missing | missing | missing |
 | IO | `numpy/lib/format.py`, npy/npz handling paths | `crates/fnp-io/src/lib.rs` (stub) | missing | missing | missing | missing |
@@ -106,3 +106,25 @@ Exclude for V1:
 - Start with shape/stride/dtype model before any heavy optimization.
 - Keep promotion matrix and casting behavior explicit and versioned.
 - Use parity-by-op-family reports as release gates.
+
+## 9. Packet `FNP-P2C-006` Legacy Anchor + Behavior Ledger (A-stage)
+
+Packet focus: stride-tricks and broadcasting API.
+
+### 9.1 Legacy anchor -> Rust boundary map
+
+| Legacy anchors | Observable behavior family | Planned Rust boundary |
+|---|---|---|
+| `numpy/lib/_stride_tricks_impl.py` (`as_strided`, `_broadcast_to`, `broadcast_to`) | stride-view construction, read-only/writeable semantics, shape validation | `crates/fnp-ndarray` public API + layout core (`broadcast_shape`, `broadcast_shapes`, `NdLayout`) |
+| `numpy/lib/_stride_tricks_impl.py` (`_broadcast_shape`, `broadcast_arrays`) | N-ary broadcast merge, high-arity behavior, output view semantics | `crates/fnp-ndarray` + packet-specific conformance fixtures (`bd-23m.17.5`, `bd-23m.17.6`) |
+| `numpy/_core/src/multiarray/nditer_constr.c` (`npyiter_fill_axisdata`, `broadcast_error`, `operand_different_than_broadcast`) | zero-stride propagation, no-broadcast rejection, mismatch diagnostics | `crates/fnp-iter` iterator semantics layer (planned under `bd-23m.17.4`) |
+| `numpy/_core/src/multiarray/nditer_api.c` (`NpyIter_GetShape`, `NpyIter_CreateCompatibleStrides`) | iterator-shape exposure and compatible-stride derivation | `crates/fnp-iter` traversal/introspection contracts + `fnp-ndarray` layout integration |
+
+### 9.2 Verification hooks recorded by packet-A ledger
+
+| Verification lane | Current status | Next owner bead |
+|---|---|---|
+| Unit/property | Anchor ledger complete, executable packet-specific tests not yet implemented | `bd-23m.17.5` |
+| Differential/metamorphic/adversarial | Anchor ledger complete, packet-specific differential corpus not yet implemented | `bd-23m.17.6` |
+| E2E replay/forensics | Anchor ledger complete, packet-specific workflow scenario not yet implemented | `bd-23m.17.7` |
+| Structured logging | Contract fields known; packet-local enforcement hooks still pending implementation | `bd-23m.17.5`, `bd-23m.17.7` |

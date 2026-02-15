@@ -42,7 +42,7 @@ Pass-1 domain gap matrix (traceable to legacy anchors and executable evidence):
 | Dtype promotion/casting | `dtypemeta.c`, `descriptor.c`, `can_cast_table.h` | 2 | 4.0x | partial (`dtype_promotion_cases.json`) | missing cast-matrix differential | missing dedicated journey | missing per-cast reason codes | `crates/fnp-conformance/fixtures/dtype_promotion_cases.json` |
 | Transfer/alias semantics | `dtype_transfer.c`, `lowlevel_strided_loops.c.src` | 1 | 6.0x | missing overlap property suite | missing overlap differential | missing overlap journey | missing overlap log taxonomy | legacy anchors only (no Rust artifact yet) |
 | Ufunc dispatch/override | `umath/ufunc_object.c`, dispatch loops | 3 | 3.0x | partial (metamorphic/adversarial corpus) | partial (`ufunc_differential`) | missing override journey | partial (`fixture_id`,`seed` in fixtures) | `crates/fnp-conformance/src/ufunc_differential.rs`, `crates/fnp-conformance/fixtures/ufunc_*` |
-| NDIter traversal | `multiarray/nditer*` | 1 | 6.0x | missing | missing | missing | missing | legacy anchors only (no Rust artifact yet) |
+| NDIter traversal | `multiarray/nditer*` | 1 | 6.0x | missing | missing | missing | missing | `artifacts/phase2c/FNP-P2C-006/legacy_anchor_map.md`, `artifacts/phase2c/FNP-P2C-006/behavior_extraction_ledger.md` |
 | Random subsystem | `numpy/random/*.pyx`, `random/src/*` | 1 | 5.0x | missing deterministic stream properties | missing RNG differential | missing seed/state journey | missing RNG log taxonomy | `crates/fnp-random/src/lib.rs` (stub) |
 | Linalg subsystem | `numpy/linalg/lapack_lite/*` | 1 | 5.0x | missing solver invariants | missing solver differential | missing solver journey | missing linalg reason codes | `crates/fnp-linalg/src/lib.rs` (stub) |
 | IO subsystem | `numpy/lib/format.py`, npy/npz paths | 2 | 4.0x | missing malformed-header property coverage | missing io round-trip differential | missing io journey | missing parser reason-code families | `crates/fnp-io/src/lib.rs` (stub) |
@@ -245,6 +245,24 @@ Artifact location (normative):
 - `artifacts/phase2c/FNP-P2C-00X/fixture_manifest.json`
 - `artifacts/phase2c/FNP-P2C-00X/parity_gate.yaml`
 - `artifacts/phase2c/FNP-P2C-00X/risk_note.md`
+
+### 13.1 Packet `FNP-P2C-006` extraction status (`A` stage)
+
+Completed in this pass:
+- `artifacts/phase2c/FNP-P2C-006/legacy_anchor_map.md`
+- `artifacts/phase2c/FNP-P2C-006/behavior_extraction_ledger.md`
+
+Anchor families locked for packet-A:
+- `numpy/lib/_stride_tricks_impl.py` (`as_strided`, `_broadcast_to`, `broadcast_to`, `_broadcast_shape`, `broadcast_shapes`, `broadcast_arrays`)
+- `numpy/_core/src/multiarray/nditer_constr.c` (`npyiter_fill_axisdata`, `broadcast_error`, `operand_different_than_broadcast`)
+- `numpy/_core/src/multiarray/nditer_api.c` (`NpyIter_GetShape`, `NpyIter_CreateCompatibleStrides`)
+- oracle tests: `numpy/lib/tests/test_stride_tricks.py`, `numpy/_core/tests/test_nditer.py`
+
+Verification hooks registered:
+- unit/property expansion target: `bd-23m.17.5`
+- differential/metamorphic/adversarial expansion target: `bd-23m.17.6`
+- e2e replay/logging target: `bd-23m.17.7`
+- strict/hardened threat closure target: `bd-23m.17.3`
 
 ## 14. Strict/Hardened Compatibility Drift Budgets
 
