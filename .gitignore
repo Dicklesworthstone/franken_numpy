@@ -25,6 +25,14 @@ __pycache__/
 *.swp
 *.swo
 
+# Ephemeral agent/runtime artifacts
+storage.sqlite3
+storage.sqlite3-*
+rustc-ice-*.txt
+a.out
+--graph-format.svg
+target-codex*/
+
 # Local logs and profiling artifacts
 *.log
 *.profraw
