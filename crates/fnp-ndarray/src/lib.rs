@@ -245,4 +245,76 @@ mod tests {
         assert_eq!(layout.nbytes().expect("nbytes"), 120);
         assert_eq!(element_count(&layout.shape).expect("elements"), 30);
     }
+
+    #[test]
+    fn broadcast_shape_is_commutative_for_sample_shapes() {
+        let shapes: &[&[usize]] = &[
+            &[],
+            &[1],
+            &[3],
+            &[1, 4],
+            &[2, 1, 4],
+            &[2, 3, 4],
+            &[1, 1, 5, 1],
+        ];
+
+        for lhs in shapes {
+            for rhs in shapes {
+                let ab = broadcast_shape(lhs, rhs);
+                let ba = broadcast_shape(rhs, lhs);
+                match (ab, ba) {
+                    (Ok(left), Ok(right)) => assert_eq!(left, right),
+                    (Err(_), Err(_)) => {}
+                    (left, right) => assert_eq!(
+                        left.is_ok(),
+                        right.is_ok(),
+                        "broadcast commutativity mismatch: {left:?} vs {right:?}"
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn element_count_scalar_shape_is_one() {
+        assert_eq!(element_count(&[]).expect("scalar count"), 1);
+    }
+
+    #[test]
+    fn element_count_overflow_is_rejected() {
+        let err = element_count(&[usize::MAX, 2]).expect_err("overflow should fail");
+        assert!(matches!(err, ShapeError::Overflow));
+    }
+
+    #[test]
+    fn contiguous_strides_rejects_zero_item_size() {
+        let err = contiguous_strides(&[2, 3], 0, MemoryOrder::C).expect_err("must reject");
+        assert!(matches!(err, ShapeError::InvalidItemSize));
+    }
+
+    #[test]
+    fn invalid_negative_dimension_is_rejected() {
+        let err = fix_unknown_dimension(&[2, -2], 2).expect_err("negative dimension should fail");
+        assert!(matches!(err, ShapeError::InvalidDimension(-2)));
+    }
+
+    #[test]
+    fn zero_known_product_with_unknown_dimension_is_rejected() {
+        let err = fix_unknown_dimension(&[0, -1], 0).expect_err("zero known product is invalid");
+        assert!(matches!(
+            err,
+            ShapeError::IncompatibleElementCount { old: 0, new: 0 }
+        ));
+    }
+
+    #[test]
+    fn layout_nbytes_overflow_is_rejected() {
+        let layout = NdLayout {
+            shape: vec![usize::MAX],
+            strides: vec![1],
+            item_size: 2,
+        };
+        let err = layout.nbytes().expect_err("nbytes overflow should fail");
+        assert!(matches!(err, ShapeError::Overflow));
+    }
 }

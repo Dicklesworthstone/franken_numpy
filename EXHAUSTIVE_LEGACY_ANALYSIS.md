@@ -52,8 +52,8 @@ Contradictions/unknowns register (must be closed during doc-overhaul passes):
 | ID | Contradiction or unknown | Source/evidence anchor | Owner | Risk | Closure criteria |
 |---|---|---|---|---|---|
 | `DOC-C001` | `EXISTING_NUMPY_STRUCTURE.md` still states a reduced-scope “V1 extraction boundary” which conflicts with full drop-in parity doctrine. | `EXISTING_NUMPY_STRUCTURE.md` section 6 vs `COMPREHENSIVE_SPEC_FOR_FRANKENNUMPY_V1.md` sections 0 and 2 | `bd-23m.24.2` | critical | Replace scope-cut language with parity-debt sequencing language and explicit ownership table. |
-| `DOC-C002` | Existing structure doc does not map unit/property, differential, e2e, and structured logging implications per subsystem. | `EXISTING_NUMPY_STRUCTURE.md` sections 2-8 | `bd-23m.24.4` | high | Add per-subsystem verification matrix with covered/missing/deferred status and artifact links. |
-| `DOC-C003` | No explicit packet-to-artifact ownership crosswalk for unresolved domains (NDIter, RNG, linalg, IO). | `EXHAUSTIVE_LEGACY_ANALYSIS.md` sections 10-13 | `bd-23m.24.3` | high | Add packet index that binds each unresolved behavior class to packet bead IDs and closure gates. |
+| `DOC-C002` | Verification/logging implication mapping is now documented in DOC-PASS-03, but multiple packet domains remain missing/deferred. | `EXHAUSTIVE_LEGACY_ANALYSIS.md` DOC-PASS-03.4 + `EXISTING_NUMPY_STRUCTURE.md` DOC-PASS-03.4 | `bd-23m.24.4` | high | Keep pass-03 matrices synchronized with packet execution until unresolved domains are implementation-backed and evidence-complete. |
+| `DOC-C003` | Packet ownership crosswalk for unresolved domains is now documented in DOC-PASS-02.4, but executable crate boundaries remain unimplemented for those domains. | `EXHAUSTIVE_LEGACY_ANALYSIS.md` DOC-PASS-02.4 + crate stubs (`fnp-iter`, `fnp-random`, `fnp-linalg`, `fnp-io`) | `bd-23m.24.3` | high | Keep crosswalk synchronized with packet execution and close only when packet owners replace stubs with production surfaces and full E/F/G evidence. |
 | `DOC-C004` | Structured logging contract was added but not yet threaded into all subsystem extraction sections. | `artifacts/contracts/test_logging_contract_v1.json`, `artifacts/contracts/TESTING_AND_LOGGING_CONVENTIONS_V1.md` | `bd-23m.24.10` | medium | Each packet section names required log fields and reason-code taxonomy coverage status. |
 
 ## DOC-PASS-01 Full Module/Package Cartography with Ownership and Boundaries
@@ -128,6 +128,134 @@ Potentially invalid edges to reject:
 | `TOPO-C002` | Differential harness is currently concentrated in ufunc/policy surfaces; packet-specific differential lanes for transfer, RNG, linalg, and IO are not wired. | `crates/fnp-conformance/src/lib.rs`, fixture inventory under `crates/fnp-conformance/fixtures` | high | packet F-stage beads (`bd-23m.14.6`, `bd-23m.18.6`, `bd-23m.19.6`, `bd-23m.20.6`) | Add packet-local fixture manifests, oracle capture paths, and differential report outputs with reason codes. |
 | `TOPO-C003` | Layering constraints are documented but not machine-enforced as a workspace contract test. | Root `Cargo.toml` + crate manifests | medium | foundation gate `bd-23m.23` | Add automated dependency-direction check to reliability gate outputs and fail CI on forbidden edges. |
 | `TOPO-C004` | Runtime/workflow structured logs are optional via path configuration, allowing silent no-op when env/config is absent. | `set_runtime_policy_log_path`, `set_workflow_scenario_log_path`, `maybe_append_runtime_policy_log` | medium | foundation orchestration `bd-23m.6` | Gate runs must set explicit log paths and fail when required log artifacts are absent. |
+
+## DOC-PASS-02 Symbol/API Census and Surface Classification
+
+### DOC-PASS-02.1 Crate-level public symbol census
+
+| Crate | Public symbol families (Rust anchors) | Classification | Legacy correspondence |
+|---|---|---|---|
+| `fnp-dtype` | `DType` enum; `promote`; `can_cast_lossless` (`crates/fnp-dtype/src/lib.rs`) | Compatibility-kernel API (Tier A) | `dtypemeta.c`, `descriptor.c`, `can_cast_table.h` promotion/cast families |
+| `fnp-ndarray` | `MemoryOrder`, `ShapeError`, `broadcast_*`, `element_count`, `fix_unknown_dimension`, `contiguous_strides`, `NdLayout` (`crates/fnp-ndarray/src/lib.rs`) | Compatibility-kernel API (Tier A) | `shape.c`, `shape.h`, stride legality/broadcast shape semantics |
+| `fnp-ufunc` | `BinaryOp`, `UFuncArray` constructors/accessors/ops, `UFuncError` (`crates/fnp-ufunc/src/lib.rs`) | Execution API (Tier A) | `umath/ufunc_object.c` dispatch/reduction semantics |
+| `fnp-runtime` | mode/class/action enums; decision and ledger APIs; override gate; posterior/expected-loss helpers (`crates/fnp-runtime/src/lib.rs`) | Policy/audit API (Tier A) | Strict/hardened compatibility doctrine and fail-closed runtime matrix |
+| `fnp-conformance` | `HarnessConfig`, `SuiteReport`, all `run_*` suites + module exports in `benchmark`, `contract_schema`, `raptorq_artifacts`, `security_contracts`, `test_contracts`, `ufunc_differential`, `workflow_scenarios` | Verification/tooling API (Tier B) | Legacy oracle capture/comparison and packet artifact contract validation |
+| `fnp-iter` | `add(left, right)` placeholder (`crates/fnp-iter/src/lib.rs`) | Reserved ownership slot (Tier C) | Intended NDIter mapping not yet implemented |
+| `fnp-random` | `add(left, right)` placeholder (`crates/fnp-random/src/lib.rs`) | Reserved ownership slot (Tier C) | Intended RNG mapping not yet implemented |
+| `fnp-linalg` | `add(left, right)` placeholder (`crates/fnp-linalg/src/lib.rs`) | Reserved ownership slot (Tier C) | Intended linalg mapping not yet implemented |
+| `fnp-io` | `add(left, right)` placeholder (`crates/fnp-io/src/lib.rs`) | Reserved ownership slot (Tier C) | Intended NPY/NPZ mapping not yet implemented |
+
+### DOC-PASS-02.2 Call/usage context graph (operator paths -> API surfaces)
+
+| Entry path | Immediate API calls | Downstream semantic surfaces |
+|---|---|---|
+| `capture_numpy_oracle` bin | `ufunc_differential::capture_numpy_oracle` | Legacy/system NumPy capture into fixture oracle JSON |
+| `run_ufunc_differential` bin | `compare_against_oracle`, `write_differential_report` | `execute_input_case` -> `UFuncArray::{new,elementwise_binary,reduce_sum}` + dtype parsing |
+| `run_security_gate` bin | `run_runtime_policy_suite`, `run_runtime_policy_adversarial_suite`, `security_contracts::run_security_contract_suite` | `decide_and_record_with_context`, `decide_compatibility_from_wire`, runtime ledger/log contract checks |
+| `run_test_contract_gate` bin | `test_contracts::run_test_contract_suite` + runtime suites + log schema validation | fixture-shape/metadata contracts and structured logging field enforcement |
+| `run_workflow_scenario_gate` bin | `run_user_workflow_scenario_suite` | mixed pipeline: ufunc execution + runtime policy + scenario log emission (`fixture_id`,`seed`,`mode`,`env_fingerprint`,`artifact_refs`,`reason_code`) |
+| `generate_benchmark_baseline` bin | `benchmark::generate_benchmark_baseline` | controlled workload timing and baseline artifact emission |
+| `generate_raptorq_sidecars` bin | `raptorq_artifacts::generate_bundle_sidecar_and_reports` | sidecar generation, scrub report, decode-proof workflow |
+| `validate_phase2c_packet` bin | `contract_schema::validate_phase2c_packet`, `write_packet_readiness_report` | packet artifact completeness and schema/token checks |
+
+### DOC-PASS-02.3 Stability and user-visibility classification
+
+| Tier | Definition | Current symbol groups | Risk if treated as stable too early |
+|---|---|---|---|
+| Tier A | Implemented compatibility-kernel/public semantics used by harness execution | `fnp-dtype`, `fnp-ndarray`, `fnp-ufunc`, `fnp-runtime` public APIs | Medium: behavior is first-wave complete, not full-NumPy complete; parity drift remains possible outside scoped fixtures. |
+| Tier B | Operational tooling APIs for CI/gates/artifact lifecycle | `fnp-conformance` public modules and binaries | Medium: interfaces are workflow-stable but still evolving with packet schema/logging requirements. |
+| Tier C | Placeholder ownership surfaces only | `fnp-iter`, `fnp-random`, `fnp-linalg`, `fnp-io` `add()` stubs | Critical: presenting as production APIs would create false parity claims and hide major debt. |
+
+### DOC-PASS-02.4 Packet ownership index for unresolved behavior domains (`DOC-C003`)
+
+| Behavior domain | Placeholder surface now | Packet owner | Required closure gates (minimum) | Evidence anchors |
+|---|---|---|---|---|
+| NDIter traversal/index semantics | `fnp-iter::add` only | `bd-23m.17` / `FNP-P2C-006` | Replace stub with traversal API boundaries; close E/F/G lanes (`bd-23m.17.5`, `bd-23m.17.6`, `bd-23m.17.7`) + strict/hardened threat closure (`bd-23m.17.3`) | `artifacts/phase2c/FNP-P2C-006/*`, future packet readiness report |
+| RNG streams + state schema | `fnp-random::add` only | `bd-23m.18` / `FNP-P2C-007` | Implement deterministic RNG/state APIs and close packet E/F/G + logging coverage | `artifacts/phase2c/FNP-P2C-007/*` |
+| Linalg adapters/solver contracts | `fnp-linalg::add` only | `bd-23m.19` / `FNP-P2C-008` | Replace stub with scoped linalg API and close packet E/F/G + performance/isomorphism reports | `artifacts/phase2c/FNP-P2C-008/*` |
+| NPY/NPZ parser-writer contracts | `fnp-io::add` only | `bd-23m.20` / `FNP-P2C-009` | Replace stub with parser/writer boundary APIs; close packet E/F/G + security/logging + sidecar proof requirements | `artifacts/phase2c/FNP-P2C-009/*` |
+
+### DOC-PASS-02.5 Verification implications by symbol family
+
+| Symbol family | Unit/Property | Differential | E2E | Structured logging | Assessment |
+|---|---|---|---|---|---|
+| Shape/stride symbols (`fnp-ndarray`) | covered (crate tests + `shape_stride_cases.json`) | partial through ufunc differential shape validation | deferred packet-local scenarios | partial | parity debt remains for richer alias/transfer semantics |
+| Dtype symbols (`fnp-dtype`) | covered for promotion/cast primitives | partial (promotion diff exists, full cast matrix absent) | deferred | missing cast taxonomy | medium risk |
+| Ufunc symbols (`fnp-ufunc`) | covered for scoped ops | covered for scoped fixture corpus | partial via workflow suite | covered at fixture/scenario level | medium risk |
+| Runtime policy symbols (`fnp-runtime`) | covered (unit + policy fixtures) | adversarial wire-class differential equivalent covered | covered in workflow scenarios | covered with required fields | low-medium risk |
+| Verification/tooling symbols (`fnp-conformance`) | covered by module tests and gate execution | N/A | covered by gate binaries | covered by contract suites | medium operational risk (schema evolution) |
+| Placeholder symbols (`fnp-iter`/`fnp-random`/`fnp-linalg`/`fnp-io`) | missing | missing | missing | missing | critical parity debt |
+
+### DOC-PASS-02.6 Symbol-layer contradictions and unknowns
+
+| ID | Contradiction/unknown | Risk | Owner | Closure criteria |
+|---|---|---|---|---|
+| `SYM-C001` | Tier-C placeholder crates still export callable public functions (`add`) that could be misconstrued as parity surfaces. | high | `bd-23m.17`/`18`/`19`/`20` | Replace stubs with explicit packet-scoped APIs or mark crate surfaces as intentionally non-parity in crate docs/tests. |
+| `SYM-C002` | Runtime and workflow log appenders are path-config driven; absent config can silently skip log emission. | medium | `bd-23m.6` | Require explicit log path in orchestrator/gates and fail when expected logs are absent. |
+| `SYM-C003` | Differential harness is strongest for ufunc/runtime but weaker for cast matrix, transfer/alias, RNG, linalg, and IO. | high | packet F-stage beads (`bd-23m.14.6`, `bd-23m.18.6`, `bd-23m.19.6`, `bd-23m.20.6`) | Add packet-specific fixture and oracle diff lanes with failure taxonomy and reproducible artifacts. |
+
+## DOC-PASS-03 Data Model, State, and Invariant Mapping
+
+### DOC-PASS-03.1 Canonical data model map (state-bearing types)
+
+| Model family | Concrete types (anchors) | State schema | Ownership |
+|---|---|---|---|
+| Dtype identity/promotion | `DType` + `promote` + `can_cast_lossless` (`crates/fnp-dtype/src/lib.rs`) | finite scalar domain + deterministic promotion/cast relation | `fnp-dtype` |
+| Shape/stride legality | `MemoryOrder`, `ShapeError`, `NdLayout` + legality functions (`crates/fnp-ndarray/src/lib.rs`) | shape vectors, stride vectors, item-size arithmetic, legality error taxonomy | `fnp-ndarray` |
+| Numeric execution payload | `UFuncArray`, `BinaryOp`, `UFuncError` (`crates/fnp-ufunc/src/lib.rs`) | shape/value/dtype tuple with broadcasted binary and reduction transitions | `fnp-ufunc` |
+| Runtime policy/audit | `RuntimeMode`, `CompatibilityClass`, `DecisionAction`, `DecisionAuditContext`, `DecisionEvent`, `OverrideAuditEvent`, `EvidenceLedger` (`crates/fnp-runtime/src/lib.rs`) | mode/class/risk/threshold input state -> action + posterior/loss + audit metadata and append-only ledger | `fnp-runtime` |
+| Conformance fixtures/reports | `HarnessConfig`, `SuiteReport`, `UFuncInputCase`, `UFuncDifferentialReport`, workflow scenario structs (`crates/fnp-conformance/src/lib.rs`, `ufunc_differential.rs`, `workflow_scenarios.rs`) | corpus-driven execution state, case counters, failure diagnostics | `fnp-conformance` |
+| Artifact contract/durability | `PacketReadinessReport`, `MissingField` (`contract_schema.rs`), `RaptorQSidecar`, `ScrubReport`, `DecodeProofArtifact` (`raptorq_artifacts.rs`) | packet readiness state + integrity/durability metadata | `fnp-conformance` |
+| Reserved ownership placeholders | `add` stubs in `fnp-iter`, `fnp-random`, `fnp-linalg`, `fnp-io` | scalar arithmetic placeholder only; no domain state machine | packet owners `bd-23m.17`/`18`/`19`/`20` |
+
+### DOC-PASS-03.2 State transition ledger (input class -> transition -> terminal)
+
+| Transition class | Entry state | Transition function(s) | Success terminal | Failure terminal |
+|---|---|---|---|---|
+| Broadcast merge | `(lhs_shape, rhs_shape)` | `broadcast_shape`, `broadcast_shapes` | deterministic merged shape | `ShapeError::IncompatibleBroadcast` |
+| Reshape inference | `(new_shape spec, old_count)` | `fix_unknown_dimension` | resolved concrete shape | `MultipleUnknownDimensions` / `InvalidDimension` / `IncompatibleElementCount` / `Overflow` |
+| Layout derivation | `(shape, item_size, order)` | `contiguous_strides`, `NdLayout::contiguous` | legal contiguous layout | `InvalidItemSize` / `Overflow` |
+| Ufunc binary op | `(lhs UFuncArray, rhs UFuncArray, op)` | `elementwise_binary` | new output `UFuncArray` with promoted dtype | shape or input-length error via `UFuncError` |
+| Ufunc reduction | `(UFuncArray, axis, keepdims)` | `reduce_sum` | reduced output `UFuncArray` | `AxisOutOfBounds` / shape-derived errors |
+| Runtime policy decision | `(mode,class,risk,threshold)` | `decide_compatibility`, `decide_compatibility_from_wire` | `allow` or `full_validate` or `fail_closed` | unknown mode/class intentionally collapses to `fail_closed` |
+| Runtime event capture | `(ledger, decision context)` | `decide_and_record_with_context` | appended `DecisionEvent` | normalized default tokens when context fields are empty |
+| Workflow scenario execution | `(scenario fixture, mode)` | `run_user_workflow_scenario_suite`, `execute_mode` | pass/fail status with step-level evidence | deterministic failure records for missing fixtures/scripts or expectation mismatch |
+| Packet readiness gate | `(packet artifact dir)` | `validate_phase2c_packet` | ready report | non-ready report with missing artifact/field/parse diagnostics |
+| Durability pipeline | `(bundle files)` | `generate_bundle_sidecar_and_reports`, scrub/decode helpers | sidecar + scrub + decode proof | integrity mismatch/decode failure surfaces |
+
+### DOC-PASS-03.3 Mutability boundaries and trust zones
+
+| Zone | Mutable surface | Guard rail | Residual risk |
+|---|---|---|---|
+| Compatibility kernel data | derived vectors/buffers during computation | constructor + precondition checks (shape length, axis bounds, overflow guards) | public struct fields in some models can be mutated after construction if misused |
+| Runtime policy ledger | `EvidenceLedger.events` append path | append-only API (`record`) + context normalization | downstream consumers must treat missing logs as gate failure, not optional telemetry |
+| File-backed audit logs | runtime/workflow JSONL append | contract suites validate required fields | if log path not configured outside gates, append may no-op |
+| Artifact outputs | readiness reports + RaptorQ artifacts | schema/token/path validation + hash checks | stale artifacts can drift without periodic gate enforcement |
+| Placeholder crates | trivial function bodies | explicit documentation + packet ownership mapping | accidental reliance on placeholders as real APIs |
+
+### DOC-PASS-03.4 Invariant obligations with evidence status
+
+| Invariant | Expression | Evidence status | Logging/e2e implication |
+|---|---|---|---|
+| `INV-SHAPE-001` | element counts and stride arithmetic never overflow into unchecked state | covered by `fnp-ndarray` unit tests + shape fixtures | errors should map to stable reason taxonomy in packet logs (partial today) |
+| `INV-SHAPE-002` | broadcast legality is deterministic and fail-fast on incompatible dimensions | covered for current shape corpus | dedicated broadcast-focused e2e journey still deferred |
+| `INV-RESHAPE-001` | reshape `-1` inference is unique and count-preserving | covered by unit tests | packet-local reason-code coverage pending |
+| `INV-UFUNC-001` | ufunc construction enforces value length == shape element count | covered by unit tests + differential path | workflow logs capture case/step context for failures |
+| `INV-UFUNC-002` | reduction axis must be in bounds and output shape semantics respect `keepdims` | covered by unit tests + adversarial fixtures | scenario logs include pass/fail + detail per step |
+| `INV-POLICY-001` | unknown/incompatible wire semantics must fail closed | covered (runtime adversarial suite + workflow scenarios) | required structured log fields are enforced by test/security contract gates |
+| `INV-AUDIT-001` | decision events always carry non-empty audit identity fields | covered via context normalization + log validators | missing field is a contract/gate failure |
+| `INV-CONTRACT-001` | packet readiness requires mandatory files/tokens/paths | covered by `validate_phase2c_packet` | readiness reports are explicit triage artifacts |
+| `INV-DURABILITY-001` | sidecar/scrub/decode artifacts preserve payload integrity | covered for generated bundles | decode proof artifacts are mandatory for durable claim |
+| `INV-OWNERSHIP-001` | unresolved domains must expose real packet-scoped models before parity claims | missing (stubs remain) | packet owners must add unit/differential/e2e/logging trails before closure |
+
+### DOC-PASS-03.5 Data-model contradictions and closure backlog
+
+| ID | Contradiction/unknown | Risk | Owner | Closure criteria |
+|---|---|---|---|---|
+| `MODEL-C001` | `NdLayout` exposes public fields, so post-construction mutation can violate assumptions outside constructor checks. | medium | `bd-23m.12` | Decide encapsulation policy (public-by-contract vs encapsulated mutators) and enforce consistently. |
+| `MODEL-C002` | Runtime/workflow logging optionality can weaken forensic guarantees when not running gates. | medium | `bd-23m.6` | Require explicit log path and gate-level assertion of produced log artifacts in orchestrator flows. |
+| `MODEL-C003` | Placeholder crates do not implement their promised domain state machines/invariants. | critical | `bd-23m.17`/`18`/`19`/`20` | Replace stubs with packet-scoped state models + invariant tests + differential/e2e evidence. |
+| `MODEL-C004` | Cast-matrix and transfer/alias invariants are not yet represented as first-class state contracts in code. | high | `bd-23m.13`/`bd-23m.14` | Add explicit state/invariant tables and executable fixtures for cast matrix and overlap/alias transitions. |
 
 ## 2. Quantitative Legacy Inventory (Measured)
 

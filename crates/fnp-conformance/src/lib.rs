@@ -81,6 +81,14 @@ struct ShapeStrideFixtureCase {
     stride_item_size: usize,
     stride_order: String,
     expected_strides: Vec<isize>,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -175,7 +183,24 @@ struct RuntimePolicyLogEntry {
     passed: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct ShapeStrideLogEntry {
+    suite: &'static str,
+    fixture_id: String,
+    seed: u64,
+    mode: String,
+    env_fingerprint: String,
+    artifact_refs: Vec<String>,
+    reason_code: String,
+    expected_broadcast: Option<Vec<usize>>,
+    stride_shape: Vec<usize>,
+    stride_order: String,
+    expected_strides: Vec<isize>,
+    passed: bool,
+}
+
 static RUNTIME_POLICY_LOG_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+static SHAPE_STRIDE_LOG_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 fn default_f64_dtype_name() -> String {
     "f64".to_string()
@@ -183,6 +208,13 @@ fn default_f64_dtype_name() -> String {
 
 pub fn set_runtime_policy_log_path(path: Option<PathBuf>) {
     let cell = RUNTIME_POLICY_LOG_PATH.get_or_init(|| Mutex::new(None));
+    if let Ok(mut slot) = cell.lock() {
+        *slot = path;
+    }
+}
+
+pub fn set_shape_stride_log_path(path: Option<PathBuf>) {
+    let cell = SHAPE_STRIDE_LOG_PATH.get_or_init(|| Mutex::new(None));
     if let Ok(mut slot) = cell.lock() {
         *slot = path;
     }
@@ -220,6 +252,13 @@ pub fn run_shape_stride_suite(config: &HarnessConfig) -> Result<SuiteReport, Str
 
     for case in cases {
         let mut ok = true;
+        let reason_code = normalize_reason_code(&case.reason_code);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let mode = if config.strict_mode {
+            "strict"
+        } else {
+            "hardened"
+        };
 
         match (
             &case.expected_broadcast,
@@ -282,6 +321,22 @@ pub fn run_shape_stride_suite(config: &HarnessConfig) -> Result<SuiteReport, Str
         if ok {
             report.pass_count += 1;
         }
+
+        let log_entry = ShapeStrideLogEntry {
+            suite: "shape_stride",
+            fixture_id: case.id,
+            seed: case.seed,
+            mode: mode.to_string(),
+            env_fingerprint: normalize_env_fingerprint(&case.env_fingerprint),
+            artifact_refs,
+            reason_code,
+            expected_broadcast: case.expected_broadcast,
+            stride_shape: case.stride_shape,
+            stride_order: case.stride_order,
+            expected_strides: case.expected_strides,
+            passed: ok,
+        };
+        maybe_append_shape_stride_log(&log_entry)?;
     }
 
     Ok(report)
@@ -912,6 +967,38 @@ fn maybe_append_runtime_policy_log(entry: &RuntimePolicyLogEntry) -> Result<(), 
         .map_err(|err| {
             format!(
                 "failed appending runtime policy log {}: {err}",
+                path.display()
+            )
+        })
+}
+
+fn maybe_append_shape_stride_log(entry: &ShapeStrideLogEntry) -> Result<(), String> {
+    let configured = SHAPE_STRIDE_LOG_PATH
+        .get()
+        .and_then(|cell| cell.lock().ok())
+        .and_then(|slot| slot.clone());
+    let from_env = std::env::var_os("FNP_SHAPE_STRIDE_LOG_PATH").map(PathBuf::from);
+    let Some(path) = configured.or(from_env) else {
+        return Ok(());
+    };
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed creating {}: {err}", parent.display()))?;
+    }
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|err| format!("failed opening {}: {err}", path.display()))?;
+    let line = serde_json::to_string(entry)
+        .map_err(|err| format!("failed serializing shape-stride log entry: {err}"))?;
+    file.write_all(line.as_bytes())
+        .and_then(|_| file.write_all(b"\n"))
+        .map_err(|err| {
+            format!(
+                "failed appending shape-stride log {}: {err}",
                 path.display()
             )
         })
