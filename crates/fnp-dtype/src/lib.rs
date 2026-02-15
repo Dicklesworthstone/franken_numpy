@@ -80,9 +80,13 @@ pub const fn can_cast_lossless(src: DType, dst: DType) -> bool {
 mod tests {
     use super::{DType, can_cast_lossless, promote};
 
+    fn all_dtypes() -> [DType; 5] {
+        [DType::Bool, DType::I32, DType::I64, DType::F32, DType::F64]
+    }
+
     #[test]
     fn promotion_is_commutative() {
-        let dtypes = [DType::Bool, DType::I32, DType::I64, DType::F32, DType::F64];
+        let dtypes = all_dtypes();
 
         for &lhs in &dtypes {
             for &rhs in &dtypes {
@@ -105,5 +109,73 @@ mod tests {
         assert!(can_cast_lossless(DType::I32, DType::I64));
         assert!(!can_cast_lossless(DType::I64, DType::I32));
         assert!(!can_cast_lossless(DType::F64, DType::F32));
+    }
+
+    #[test]
+    fn parse_roundtrip_for_known_dtypes() {
+        for dtype in all_dtypes() {
+            let parsed = DType::parse(dtype.name()).expect("known dtype should parse");
+            assert_eq!(parsed, dtype);
+        }
+        assert!(DType::parse("complex128").is_none());
+    }
+
+    #[test]
+    fn item_size_matches_expectations() {
+        assert_eq!(DType::Bool.item_size(), 1);
+        assert_eq!(DType::I32.item_size(), 4);
+        assert_eq!(DType::F32.item_size(), 4);
+        assert_eq!(DType::I64.item_size(), 8);
+        assert_eq!(DType::F64.item_size(), 8);
+    }
+
+    #[test]
+    fn promotion_is_idempotent() {
+        for dtype in all_dtypes() {
+            assert_eq!(promote(dtype, dtype), dtype);
+        }
+    }
+
+    #[test]
+    fn lossless_cast_is_reflexive() {
+        for dtype in all_dtypes() {
+            assert!(
+                can_cast_lossless(dtype, dtype),
+                "{dtype:?} must cast to itself"
+            );
+        }
+    }
+
+    #[test]
+    fn lossless_cast_is_transitive_over_scoped_matrix() {
+        let dtypes = all_dtypes();
+        for &src in &dtypes {
+            for &mid in &dtypes {
+                for &dst in &dtypes {
+                    if can_cast_lossless(src, mid) && can_cast_lossless(mid, dst) {
+                        assert!(
+                            can_cast_lossless(src, dst),
+                            "non-transitive cast path: {src:?} -> {mid:?} -> {dst:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lossless_cast_implies_promotion_to_destination() {
+        let dtypes = all_dtypes();
+        for &src in &dtypes {
+            for &dst in &dtypes {
+                if can_cast_lossless(src, dst) {
+                    assert_eq!(
+                        promote(src, dst),
+                        dst,
+                        "promotion should pick cast-safe destination for {src:?}->{dst:?}"
+                    );
+                }
+            }
+        }
     }
 }

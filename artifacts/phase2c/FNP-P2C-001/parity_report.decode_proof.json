@@ -5,7 +5,7 @@
   "dropped_symbol": null,
   "recovery_symbols_used": 0,
   "recovery_success": true,
-  "expected_hash": "9337e4114619a661380ee30fcb3336617b5c6a54d756134bdbf9d2144d10bd01",
-  "recovered_hash": "9337e4114619a661380ee30fcb3336617b5c6a54d756134bdbf9d2144d10bd01",
+  "expected_hash": "04c7d7b616109cc2fddc126890cf5ad973a7356f893dee483979097f750c271a",
+  "recovered_hash": "04c7d7b616109cc2fddc126890cf5ad973a7356f893dee483979097f750c271a",
   "error": null
 }

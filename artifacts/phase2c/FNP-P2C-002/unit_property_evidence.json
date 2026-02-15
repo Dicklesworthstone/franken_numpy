@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "packet_id": "FNP-P2C-002",
+  "subtask_id": "FNP-P2C-002-E",
+  "status": "pass",
+  "coverage_floors": {
+    "dtype_unit_property_tests_min": 9,
+    "dtype_unit_property_tests_actual": 9,
+    "promotion_pair_property_checks_min": 25,
+    "promotion_pair_property_checks_actual": 25,
+    "dtype_promotion_fixture_cases_min": 4,
+    "dtype_promotion_fixture_cases_actual": 4,
+    "structured_log_required_fields_min": 6,
+    "structured_log_required_fields_actual": 6
+  },
+  "suites": [
+    {
+      "suite": "fnp-dtype::tests",
+      "command": "rch exec -- cargo test -p fnp-dtype",
+      "result": "pass",
+      "pass_count": 9,
+      "fail_count": 0
+    },
+    {
+      "suite": "fnp-conformance::tests",
+      "command": "rch exec -- cargo test -p fnp-conformance",
+      "result": "pass",
+      "pass_count": 24,
+      "fail_count": 0,
+      "required_log_contract_test": "dtype_promotion_suite_emits_structured_logs_with_required_fields"
+    }
+  ],
+  "quality_gates": [
+    {
+      "command": "cargo fmt --check",
+      "result": "pass"
+    },
+    {
+      "command": "rch exec -- cargo check --workspace --all-targets",
+      "result": "pass"
+    },
+    {
+      "command": "rch exec -- cargo clippy --workspace --all-targets -- -D warnings",
+      "result": "pass"
+    },
+    {
+      "command": "ubs --only=rust crates/fnp-dtype",
+      "result": "pass",
+      "critical_findings": 0
+    },
+    {
+      "command": "ubs --only=rust crates/fnp-conformance",
+      "result": "pass",
+      "critical_findings": 0
+    }
+  ],
+  "artifacts": [
+    "crates/fnp-dtype/src/lib.rs",
+    "crates/fnp-conformance/src/lib.rs",
+    "crates/fnp-conformance/fixtures/dtype_promotion_cases.json",
+    "artifacts/phase2c/FNP-P2C-002/parity_report.json"
+  ],
+  "notes": [
+    "Structured log fields enforced: fixture_id, seed, mode, env_fingerprint, artifact_refs, reason_code.",
+    "Beads closure remains blocked by bd-23m.23 despite packet-E implementation evidence."
+  ]
+}

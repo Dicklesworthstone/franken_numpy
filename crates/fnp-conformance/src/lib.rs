@@ -97,6 +97,14 @@ struct PromotionFixtureCase {
     lhs: String,
     rhs: String,
     expected: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -199,8 +207,25 @@ struct ShapeStrideLogEntry {
     passed: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct DTypePromotionLogEntry {
+    suite: &'static str,
+    fixture_id: String,
+    seed: u64,
+    mode: String,
+    env_fingerprint: String,
+    artifact_refs: Vec<String>,
+    reason_code: String,
+    lhs: String,
+    rhs: String,
+    expected: String,
+    actual: String,
+    passed: bool,
+}
+
 static RUNTIME_POLICY_LOG_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 static SHAPE_STRIDE_LOG_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+static DTYPE_PROMOTION_LOG_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 fn default_f64_dtype_name() -> String {
     "f64".to_string()
@@ -215,6 +240,13 @@ pub fn set_runtime_policy_log_path(path: Option<PathBuf>) {
 
 pub fn set_shape_stride_log_path(path: Option<PathBuf>) {
     let cell = SHAPE_STRIDE_LOG_PATH.get_or_init(|| Mutex::new(None));
+    if let Ok(mut slot) = cell.lock() {
+        *slot = path;
+    }
+}
+
+pub fn set_dtype_promotion_log_path(path: Option<PathBuf>) {
+    let cell = DTYPE_PROMOTION_LOG_PATH.get_or_init(|| Mutex::new(None));
     if let Ok(mut slot) = cell.lock() {
         *slot = path;
     }
@@ -365,7 +397,8 @@ pub fn run_dtype_promotion_suite(config: &HarnessConfig) -> Result<SuiteReport, 
             .ok_or_else(|| format!("{}: unknown expected dtype", case.id))?;
 
         let actual = promote(lhs, rhs);
-        if actual == expected {
+        let passed = actual == expected;
+        if passed {
             report.pass_count += 1;
         } else {
             report.failures.push(format!(
@@ -375,6 +408,26 @@ pub fn run_dtype_promotion_suite(config: &HarnessConfig) -> Result<SuiteReport, 
                 actual.name()
             ));
         }
+
+        let log_entry = DTypePromotionLogEntry {
+            suite: "dtype_promotion",
+            fixture_id: case.id,
+            seed: case.seed,
+            mode: if config.strict_mode {
+                "strict".to_string()
+            } else {
+                "hardened".to_string()
+            },
+            env_fingerprint: normalize_env_fingerprint(&case.env_fingerprint),
+            artifact_refs: normalize_artifact_refs(case.artifact_refs),
+            reason_code: normalize_reason_code(&case.reason_code),
+            lhs: lhs.name().to_string(),
+            rhs: rhs.name().to_string(),
+            expected: expected.name().to_string(),
+            actual: actual.name().to_string(),
+            passed,
+        };
+        maybe_append_dtype_promotion_log(&log_entry)?;
     }
 
     Ok(report)
@@ -1004,6 +1057,38 @@ fn maybe_append_shape_stride_log(entry: &ShapeStrideLogEntry) -> Result<(), Stri
         })
 }
 
+fn maybe_append_dtype_promotion_log(entry: &DTypePromotionLogEntry) -> Result<(), String> {
+    let configured = DTYPE_PROMOTION_LOG_PATH
+        .get()
+        .and_then(|cell| cell.lock().ok())
+        .and_then(|slot| slot.clone());
+    let from_env = std::env::var_os("FNP_DTYPE_PROMOTION_LOG_PATH").map(PathBuf::from);
+    let Some(path) = configured.or(from_env) else {
+        return Ok(());
+    };
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed creating {}: {err}", parent.display()))?;
+    }
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|err| format!("failed opening {}: {err}", path.display()))?;
+    let line = serde_json::to_string(entry)
+        .map_err(|err| format!("failed serializing dtype-promotion log entry: {err}"))?;
+    file.write_all(line.as_bytes())
+        .and_then(|_| file.write_all(b"\n"))
+        .map_err(|err| {
+            format!(
+                "failed appending dtype-promotion log {}: {err}",
+                path.display()
+            )
+        })
+}
+
 fn validate_runtime_policy_log_fields(
     report: &mut SuiteReport,
     events: &[fnp_runtime::DecisionEvent],
@@ -1047,9 +1132,10 @@ fn validate_runtime_policy_log_fields(
 #[cfg(test)]
 mod tests {
     use super::{
-        HarnessConfig, run_all_core_suites, run_runtime_policy_adversarial_suite,
-        run_shape_stride_suite, run_smoke, run_ufunc_adversarial_suite,
-        run_ufunc_differential_suite, run_ufunc_metamorphic_suite, set_shape_stride_log_path,
+        HarnessConfig, run_all_core_suites, run_dtype_promotion_suite,
+        run_runtime_policy_adversarial_suite, run_shape_stride_suite, run_smoke,
+        run_ufunc_adversarial_suite, run_ufunc_differential_suite, run_ufunc_metamorphic_suite,
+        set_dtype_promotion_log_path, set_shape_stride_log_path,
     };
     use serde_json::Value;
     use std::fs;
@@ -1097,6 +1183,89 @@ mod tests {
         let cfg = HarnessConfig::default_paths();
         let suite = super::test_contracts::run_test_contract_suite(&cfg).expect("suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn dtype_promotion_suite_emits_structured_logs_with_required_fields() {
+        let cfg = HarnessConfig::default_paths();
+        let ts_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let log_path = std::env::temp_dir().join(format!(
+            "fnp_dtype_promotion_suite_{}_{}.jsonl",
+            std::process::id(),
+            ts_nanos
+        ));
+        let _ = fs::remove_file(&log_path);
+        set_dtype_promotion_log_path(Some(log_path.clone()));
+
+        let suite = run_dtype_promotion_suite(&cfg).expect("dtype-promotion suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+
+        let raw = fs::read_to_string(&log_path).expect("dtype-promotion log should exist");
+        let mut entry_count = 0usize;
+        for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+            entry_count += 1;
+            let value: Value = serde_json::from_str(line).expect("log line must be valid json");
+            let obj = value.as_object().expect("log line must be json object");
+            assert!(
+                obj.get("fixture_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.trim().is_empty())
+            );
+            assert!(obj.get("seed").is_some_and(Value::is_u64));
+            assert!(
+                obj.get("mode")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| s == "strict" || s == "hardened")
+            );
+            assert!(
+                obj.get("env_fingerprint")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.trim().is_empty())
+            );
+            assert!(
+                obj.get("artifact_refs")
+                    .and_then(Value::as_array)
+                    .is_some_and(|arr| {
+                        !arr.is_empty()
+                            && arr
+                                .iter()
+                                .all(|item| item.as_str().is_some_and(|s| !s.trim().is_empty()))
+                    })
+            );
+            assert!(
+                obj.get("reason_code")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.trim().is_empty())
+            );
+            assert!(
+                obj.get("lhs")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.trim().is_empty())
+            );
+            assert!(
+                obj.get("rhs")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.trim().is_empty())
+            );
+            assert!(
+                obj.get("expected")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.trim().is_empty())
+            );
+            assert!(
+                obj.get("actual")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.trim().is_empty())
+            );
+        }
+        assert!(
+            entry_count > 0,
+            "dtype-promotion log should contain entries"
+        );
+        set_dtype_promotion_log_path(None);
+        let _ = fs::remove_file(log_path);
     }
 
     #[test]

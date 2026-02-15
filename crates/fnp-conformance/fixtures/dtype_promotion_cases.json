@@ -1,6 +1,54 @@
 [
-  {"id": "bool_i32", "lhs": "bool", "rhs": "i32", "expected": "i32"},
-  {"id": "i32_i64", "lhs": "i32", "rhs": "i64", "expected": "i64"},
-  {"id": "i32_f32", "lhs": "i32", "rhs": "f32", "expected": "f64"},
-  {"id": "f32_f64", "lhs": "f32", "rhs": "f64", "expected": "f64"}
+  {
+    "id": "bool_i32",
+    "lhs": "bool",
+    "rhs": "i32",
+    "expected": "i32",
+    "seed": 201,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
+    ],
+    "reason_code": "promotion_matrix_core"
+  },
+  {
+    "id": "i32_i64",
+    "lhs": "i32",
+    "rhs": "i64",
+    "expected": "i64",
+    "seed": 202,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
+    ],
+    "reason_code": "promotion_matrix_core"
+  },
+  {
+    "id": "i32_f32",
+    "lhs": "i32",
+    "rhs": "f32",
+    "expected": "f64",
+    "seed": 203,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
+    ],
+    "reason_code": "promotion_matrix_core"
+  },
+  {
+    "id": "f32_f64",
+    "lhs": "f32",
+    "rhs": "f64",
+    "expected": "f64",
+    "seed": 204,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
+    ],
+    "reason_code": "promotion_matrix_core"
+  }
 ]

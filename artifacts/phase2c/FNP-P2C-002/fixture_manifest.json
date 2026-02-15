@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "packet_id": "FNP-P2C-002",
+  "oracle_tests": [
+    "legacy_numpy_code/numpy/numpy/_core/tests/test_dtype.py",
+    "legacy_numpy_code/numpy/numpy/_core/tests/test_casting_floatingpoint_errors.py",
+    "legacy_numpy_code/numpy/numpy/_core/tests/test_ufunc.py"
+  ],
+  "fixtures": [
+    {
+      "id": "p2c002_dtype_promotion_core",
+      "input_path": "crates/fnp-conformance/fixtures/dtype_promotion_cases.json",
+      "oracle_case_id": "dtype_promotion_core_contract"
+    },
+    {
+      "id": "p2c002_runtime_policy_dtype_boundary",
+      "input_path": "crates/fnp-conformance/fixtures/runtime_policy_cases.json",
+      "oracle_case_id": "dtype_policy_boundary_contract"
+    }
+  ]
+}

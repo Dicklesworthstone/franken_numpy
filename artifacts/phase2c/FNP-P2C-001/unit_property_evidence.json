@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "packet_id": "FNP-P2C-001",
+  "subtask_id": "FNP-P2C-001-E",
+  "status": "pass",
+  "coverage_floors": {
+    "shape_invariant_unit_tests_min": 8,
+    "shape_invariant_unit_tests_actual": 8,
+    "broadcast_pair_property_checks_min": 49,
+    "broadcast_pair_property_checks_actual": 49,
+    "shape_stride_fixture_cases_min": 3,
+    "shape_stride_fixture_cases_actual": 3,
+    "structured_log_required_fields_min": 6,
+    "structured_log_required_fields_actual": 6
+  },
+  "suites": [
+    {
+      "suite": "fnp-ndarray::tests",
+      "command": "rch exec -- cargo test -p fnp-ndarray",
+      "result": "pass",
+      "pass_count": 14,
+      "fail_count": 0
+    },
+    {
+      "suite": "fnp-conformance::tests",
+      "command": "rch exec -- cargo test -p fnp-conformance",
+      "result": "pass",
+      "pass_count": 23,
+      "fail_count": 0,
+      "required_log_contract_test": "shape_stride_suite_emits_structured_logs_with_required_fields"
+    }
+  ],
+  "quality_gates": [
+    {
+      "command": "cargo fmt --check",
+      "result": "pass"
+    },
+    {
+      "command": "rch exec -- cargo check --workspace --all-targets",
+      "result": "pass"
+    },
+    {
+      "command": "rch exec -- cargo clippy --workspace --all-targets -- -D warnings",
+      "result": "pass"
+    },
+    {
+      "command": "ubs --only=rust crates/fnp-conformance",
+      "result": "pass",
+      "critical_findings": 0
+    },
+    {
+      "command": "ubs --only=rust crates/fnp-ndarray",
+      "result": "pass",
+      "critical_findings": 0
+    }
+  ],
+  "artifacts": [
+    "crates/fnp-conformance/fixtures/shape_stride_cases.json",
+    "crates/fnp-conformance/src/lib.rs",
+    "crates/fnp-ndarray/src/lib.rs",
+    "artifacts/phase2c/FNP-P2C-001/parity_report.json"
+  ],
+  "notes": [
+    "Structured log fields enforced: fixture_id, seed, mode, env_fingerprint, artifact_refs, reason_code.",
+    "One remote test retry was required due worker disk exhaustion; retry succeeded on a different worker."
+  ]
+}
