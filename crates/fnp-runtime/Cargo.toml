@@ -9,5 +9,5 @@ asupersync = ["dep:asupersync"]
 frankentui = ["dep:ftui"]
 
 [dependencies]
-asupersync = { version = "0.1.1", default-features = false, optional = true }
+asupersync = { version = "0.2.0", default-features = false, optional = true }
 ftui = { version = "0.1.1", default-features = false, optional = true }
