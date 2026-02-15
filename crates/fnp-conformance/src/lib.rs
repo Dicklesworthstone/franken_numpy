@@ -1054,6 +1054,7 @@ mod tests {
     use serde_json::Value;
     use std::fs;
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn smoke_harness_finds_oracle_and_fixtures() {
@@ -1101,8 +1102,15 @@ mod tests {
     #[test]
     fn shape_stride_suite_emits_structured_logs_with_required_fields() {
         let cfg = HarnessConfig::default_paths();
-        let temp = tempfile::tempdir().expect("tempdir should be created");
-        let log_path = temp.path().join("shape_stride_suite.jsonl");
+        let ts_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let log_path = std::env::temp_dir().join(format!(
+            "fnp_shape_stride_suite_{}_{}.jsonl",
+            std::process::id(),
+            ts_nanos
+        ));
+        let _ = fs::remove_file(&log_path);
         set_shape_stride_log_path(Some(log_path.clone()));
 
         let suite = run_shape_stride_suite(&cfg).expect("shape/stride suite should run");
@@ -1148,6 +1156,7 @@ mod tests {
         }
         assert!(entry_count > 0, "shape/stride log should contain entries");
         set_shape_stride_log_path(None);
+        let _ = fs::remove_file(log_path);
     }
 
     #[test]
