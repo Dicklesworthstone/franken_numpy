@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "packet_id": "FNP-P2C-004",
+  "subtask_id": "FNP-P2C-004-E",
+  "status": "pass",
+  "coverage_floors": {
+    "transfer_unit_property_tests_min": 10,
+    "transfer_unit_property_tests_actual": 12,
+    "selector_property_grid_checks_min": 800,
+    "selector_property_grid_checks_actual": 800,
+    "overlap_policy_grid_checks_min": 100,
+    "overlap_policy_grid_checks_actual": 100,
+    "reason_code_registry_entries_min": 10,
+    "reason_code_registry_entries_actual": 10,
+    "structured_log_required_fields_min": 6,
+    "structured_log_required_fields_actual": 6
+  },
+  "suites": [
+    {
+      "suite": "fnp-iter::tests",
+      "command": "rch exec -- cargo test -p fnp-iter",
+      "result": "pass",
+      "pass_count": 12,
+      "fail_count": 0
+    }
+  ],
+  "quality_gates": [
+    {
+      "command": "cargo fmt --check",
+      "result": "pass"
+    },
+    {
+      "command": "rch exec -- cargo check --workspace --all-targets",
+      "result": "pass"
+    },
+    {
+      "command": "rch exec -- cargo clippy --workspace --all-targets -- -D warnings",
+      "result": "pass"
+    },
+    {
+      "command": "ubs --only=rust crates/fnp-iter/src/lib.rs",
+      "result": "pass",
+      "critical_findings": 0
+    }
+  ],
+  "artifacts": [
+    "crates/fnp-iter/src/lib.rs",
+    "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+    "artifacts/phase2c/FNP-P2C-004/implementation_plan.md",
+    "artifacts/phase2c/FNP-P2C-004/unit_property_evidence.json"
+  ],
+  "notes": [
+    "Structured log fields enforced by TransferLogRecord: fixture_id, seed, mode, env_fingerprint, artifact_refs, reason_code.",
+    "Packet reason-code registry locked via TRANSFER_PACKET_REASON_CODES and round-trip replay-log assertions.",
+    "No additional source edits were required; existing fnp-iter unit/property coverage satisfied packet-E acceptance once evidence artifacting was completed."
+  ]
+}

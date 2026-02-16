@@ -562,12 +562,8 @@ mod tests {
 
     #[test]
     fn reduce_sum_keepdims_shape_contract_holds() {
-        let arr = UFuncArray::new(
-            vec![2, 3, 4],
-            (1..=24).map(f64::from).collect(),
-            DType::F64,
-        )
-        .expect("arr");
+        let arr = UFuncArray::new(vec![2, 3, 4], (1..=24).map(f64::from).collect(), DType::F64)
+            .expect("arr");
 
         for axis in 0..3 {
             let keep = arr
