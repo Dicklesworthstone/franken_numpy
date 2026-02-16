@@ -1379,6 +1379,9 @@ mod tests {
         run_ufunc_adversarial_suite, run_ufunc_differential_suite, run_ufunc_metamorphic_suite,
         set_dtype_promotion_log_path, set_shape_stride_log_path,
     };
+    use fnp_iter::{
+        RuntimeMode as IterRuntimeMode, TRANSFER_PACKET_REASON_CODES, TransferLogRecord,
+    };
     use serde_json::Value;
     use std::fs;
     use std::path::PathBuf;
@@ -1534,7 +1537,7 @@ mod tests {
         let mut saw_sliding_window_check = false;
         let mut saw_packet_006_artifact = false;
         let mut saw_stride_tricks_success = false;
-        let mut saw_stride_tricks_failure = false;
+        let mut saw_stride_tricks_expected_error = false;
         for line in raw.lines().filter(|line| !line.trim().is_empty()) {
             entry_count += 1;
             let value: Value = serde_json::from_str(line).expect("log line must be valid json");
@@ -1583,8 +1586,12 @@ mod tests {
             if reason_code.contains("stride_tricks") || reason_code.contains("as_strided") {
                 if passed {
                     saw_stride_tricks_success = true;
-                } else {
-                    saw_stride_tricks_failure = true;
+                }
+                if reason_code.contains("error")
+                    || reason_code.contains("negative_stride")
+                    || reason_code.contains("rank_mismatch")
+                {
+                    saw_stride_tricks_expected_error = true;
                 }
             }
 
@@ -1638,11 +1645,70 @@ mod tests {
             "shape/stride logs should include at least one successful stride-tricks case"
         );
         assert!(
-            saw_stride_tricks_failure,
-            "shape/stride logs should include at least one failing stride-tricks case"
+            saw_stride_tricks_expected_error,
+            "shape/stride logs should include at least one expected-error stride-tricks case"
         );
         set_shape_stride_log_path(None);
         let _ = fs::remove_file(log_path);
+    }
+
+    #[test]
+    fn packet003_transfer_reason_code_vocabulary_is_stable() {
+        assert_eq!(
+            TRANSFER_PACKET_REASON_CODES,
+            [
+                "transfer_selector_invalid_context",
+                "transfer_overlap_policy_triggered",
+                "transfer_where_mask_contract_violation",
+                "transfer_same_value_cast_rejected",
+                "transfer_string_width_mismatch",
+                "transfer_subarray_broadcast_contract_violation",
+                "flatiter_transfer_read_violation",
+                "flatiter_transfer_write_violation",
+                "transfer_nditer_overlap_policy",
+                "transfer_fpe_cast_error",
+            ]
+        );
+    }
+
+    #[test]
+    fn packet003_transfer_log_records_are_replay_complete() {
+        let artifact_refs = vec![
+            "artifacts/phase2c/FNP-P2C-003/fixture_manifest.json".to_string(),
+            "artifacts/phase2c/FNP-P2C-003/parity_gate.yaml".to_string(),
+        ];
+        for (index, reason_code) in TRANSFER_PACKET_REASON_CODES.iter().enumerate() {
+            let log_record = TransferLogRecord {
+                fixture_id: format!("UP-003-{index:02}"),
+                seed: 3_000 + u64::try_from(index).expect("small test index"),
+                mode: IterRuntimeMode::Strict,
+                env_fingerprint: "fnp-conformance-tests".to_string(),
+                artifact_refs: artifact_refs.clone(),
+                reason_code: (*reason_code).to_string(),
+                passed: true,
+            };
+            assert!(
+                log_record.is_replay_complete(),
+                "packet003 log should be replay complete for reason_code={reason_code}"
+            );
+        }
+    }
+
+    #[test]
+    fn packet003_transfer_log_records_reject_missing_required_fields() {
+        let log_record = TransferLogRecord {
+            fixture_id: String::new(),
+            seed: 3_100,
+            mode: IterRuntimeMode::Hardened,
+            env_fingerprint: String::new(),
+            artifact_refs: Vec::new(),
+            reason_code: String::new(),
+            passed: false,
+        };
+        assert!(
+            !log_record.is_replay_complete(),
+            "packet003 log should reject missing required fields"
+        );
     }
 
     #[test]
