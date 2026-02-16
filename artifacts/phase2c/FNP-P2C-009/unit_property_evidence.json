@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "packet_id": "FNP-P2C-009",
+  "subtask_id": "FNP-P2C-009-E",
+  "status": "pass",
+  "coverage_floors": {
+    "io_unit_property_tests_min": 12,
+    "io_unit_property_tests_actual": 18,
+    "magic_header_property_seed_checks_min": 128,
+    "magic_header_property_seed_checks_actual": 128,
+    "reason_code_registry_entries_min": 10,
+    "reason_code_registry_entries_actual": 10,
+    "structured_log_required_fields_min": 14,
+    "structured_log_required_fields_actual": 14
+  },
+  "suites": [
+    {
+      "suite": "fnp-io::tests",
+      "command": "rch exec -- cargo test -p fnp-io",
+      "result": "pass",
+      "pass_count": 18,
+      "fail_count": 0
+    }
+  ],
+  "quality_gates": [
+    {
+      "command": "cargo fmt --check",
+      "result": "pass"
+    },
+    {
+      "command": "rch exec -- cargo check --workspace --all-targets",
+      "result": "pass"
+    },
+    {
+      "command": "rch exec -- cargo clippy --workspace --all-targets -- -D warnings",
+      "result": "pass"
+    },
+    {
+      "command": "ubs --only=rust crates/fnp-io/src/lib.rs",
+      "result": "pass",
+      "critical_findings": 0
+    }
+  ],
+  "artifacts": [
+    "crates/fnp-io/src/lib.rs",
+    "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+    "artifacts/phase2c/FNP-P2C-009/implementation_plan.md",
+    "artifacts/phase2c/FNP-P2C-009/unit_property_evidence.json"
+  ],
+  "notes": [
+    "Structured log fields enforced by IOLogRecord: ts_utc, suite_id, test_id, packet_id, fixture_id, mode, seed, input_digest, output_digest, env_fingerprint, artifact_refs, duration_ms, outcome, reason_code.",
+    "Property coverage includes deterministic write-contract grid checks with explicit seed-traceability in looped assertions.",
+    "Policy/budget boundaries are validated for header-size cap, dispatch-retry cap, archive-member/size caps, and memmap validation retries."
+  ]
+}
