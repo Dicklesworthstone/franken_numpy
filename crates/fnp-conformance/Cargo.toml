@@ -7,6 +7,7 @@ edition = "2024"
 fnp-dtype = { path = "../fnp-dtype", version = "0.1.0" }
 fnp-io = { path = "../fnp-io", version = "0.1.0" }
 fnp-iter = { path = "../fnp-iter", version = "0.1.0" }
+fnp-linalg = { path = "../fnp-linalg", version = "0.1.0" }
 fnp-ndarray = { path = "../fnp-ndarray", version = "0.1.0" }
 fnp-runtime = { path = "../fnp-runtime", version = "0.1.0" }
 fnp-ufunc = { path = "../fnp-ufunc", version = "0.1.0" }

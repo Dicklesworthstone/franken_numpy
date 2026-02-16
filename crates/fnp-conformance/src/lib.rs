@@ -15,6 +15,11 @@ use fnp_io::{
     validate_io_policy_metadata, validate_magic_version, validate_memmap_contract,
     validate_npz_archive_budget, validate_read_payload,
 };
+use fnp_linalg::{
+    LinAlgError, QrMode, lstsq_output_shapes, qr_output_shapes, solve_2x2, svd_output_shapes,
+    validate_backend_bridge, validate_policy_metadata as validate_linalg_policy_metadata,
+    validate_spectral_branch, validate_tolerance_policy,
+};
 use fnp_ndarray::{MemoryOrder, NdLayout, broadcast_shape, contiguous_strides};
 use fnp_runtime::{
     CompatibilityClass, DecisionAction, DecisionAuditContext, EvidenceLedger, RuntimeMode,
@@ -273,6 +278,150 @@ struct IoAdversarialCase {
 }
 
 #[derive(Debug, Deserialize)]
+struct LinalgDifferentialCase {
+    id: String,
+    operation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    matrix: Vec<Vec<f64>>,
+    #[serde(default)]
+    rhs: Vec<f64>,
+    #[serde(default)]
+    shape: Vec<usize>,
+    #[serde(default)]
+    rhs_shape: Vec<usize>,
+    #[serde(default)]
+    qr_mode: String,
+    #[serde(default)]
+    full_matrices: bool,
+    #[serde(default = "default_true")]
+    converged: bool,
+    #[serde(default)]
+    uplo: String,
+    #[serde(default)]
+    rcond: f64,
+    #[serde(default)]
+    search_depth: usize,
+    #[serde(default)]
+    backend_supported: bool,
+    #[serde(default)]
+    validation_retries: usize,
+    #[serde(default)]
+    mode_raw: String,
+    #[serde(default)]
+    class_raw: String,
+    #[serde(default)]
+    expected_solution: Vec<f64>,
+    #[serde(default)]
+    expected_q_shape: Option<Vec<usize>>,
+    #[serde(default)]
+    expected_r_shape: Vec<usize>,
+    #[serde(default)]
+    expected_u_shape: Vec<usize>,
+    #[serde(default)]
+    expected_s_shape: Vec<usize>,
+    #[serde(default)]
+    expected_vh_shape: Vec<usize>,
+    #[serde(default)]
+    expected_x_shape: Vec<usize>,
+    #[serde(default)]
+    expected_residuals_shape: Vec<usize>,
+    #[serde(default)]
+    expected_rank_upper_bound: usize,
+    #[serde(default)]
+    expected_singular_values_shape: Vec<usize>,
+    #[serde(default)]
+    expected_error_contains: String,
+    #[serde(default)]
+    expected_reason_code: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinalgMetamorphicCase {
+    id: String,
+    relation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    matrix: Vec<Vec<f64>>,
+    #[serde(default)]
+    rhs: Vec<f64>,
+    #[serde(default)]
+    scalar: f64,
+    #[serde(default)]
+    shape: Vec<usize>,
+    #[serde(default)]
+    qr_mode: String,
+    #[serde(default)]
+    lhs_shape: Vec<usize>,
+    #[serde(default)]
+    rhs_shape: Vec<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinalgAdversarialCase {
+    id: String,
+    operation: String,
+    expected_error_contains: String,
+    expected_reason_code: String,
+    #[serde(default)]
+    severity: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    matrix: Vec<Vec<f64>>,
+    #[serde(default)]
+    rhs: Vec<f64>,
+    #[serde(default)]
+    shape: Vec<usize>,
+    #[serde(default)]
+    rhs_shape: Vec<usize>,
+    #[serde(default)]
+    qr_mode: String,
+    #[serde(default)]
+    full_matrices: bool,
+    #[serde(default = "default_true")]
+    converged: bool,
+    #[serde(default)]
+    uplo: String,
+    #[serde(default)]
+    rcond: f64,
+    #[serde(default)]
+    search_depth: usize,
+    #[serde(default)]
+    backend_supported: bool,
+    #[serde(default)]
+    validation_retries: usize,
+    #[serde(default)]
+    mode_raw: String,
+    #[serde(default)]
+    class_raw: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct CrashSignatureRegistry {
     schema_version: u8,
     registry_version: String,
@@ -341,12 +490,36 @@ struct DTypePromotionLogEntry {
     passed: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct LinalgDifferentialMismatch {
+    fixture_id: String,
+    seed: u64,
+    mode: String,
+    expected_reason_code: String,
+    actual_reason_code: String,
+    message: String,
+    artifact_refs: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct LinalgDifferentialReportArtifact {
+    suite: &'static str,
+    total_cases: usize,
+    passed_cases: usize,
+    failed_cases: usize,
+    mismatches: Vec<LinalgDifferentialMismatch>,
+}
+
 static RUNTIME_POLICY_LOG_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 static SHAPE_STRIDE_LOG_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 static DTYPE_PROMOTION_LOG_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 fn default_f64_dtype_name() -> String {
     "f64".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 pub fn set_runtime_policy_log_path(path: Option<PathBuf>) {
@@ -1197,6 +1370,545 @@ pub fn run_ufunc_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport
     Ok(report)
 }
 
+#[derive(Debug)]
+enum LinalgOperationOutcome {
+    Unit,
+    SolveVector(Vec<f64>),
+    QrShapes {
+        q_shape: Option<Vec<usize>>,
+        r_shape: Vec<usize>,
+    },
+    SvdShapes {
+        u_shape: Vec<usize>,
+        s_shape: Vec<usize>,
+        vh_shape: Vec<usize>,
+    },
+    LstsqShapes {
+        x_shape: Vec<usize>,
+        residuals_shape: Vec<usize>,
+        rank_upper_bound: usize,
+        singular_values_shape: Vec<usize>,
+    },
+}
+
+struct LinalgOperationInput<'a> {
+    operation: &'a str,
+    matrix: &'a [Vec<f64>],
+    rhs: &'a [f64],
+    shape: &'a [usize],
+    rhs_shape: &'a [usize],
+    qr_mode: &'a str,
+    full_matrices: bool,
+    converged: bool,
+    uplo: &'a str,
+    rcond: f64,
+    search_depth: usize,
+    backend_supported: bool,
+    validation_retries: usize,
+    mode_raw: &'a str,
+    class_raw: &'a str,
+}
+
+pub fn run_linalg_differential_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let path = config.fixture_root.join("linalg_differential_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    let cases: Vec<LinalgDifferentialCase> =
+        serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))?;
+
+    let mut report = SuiteReport {
+        suite: "linalg_differential",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+    let mut mismatches = Vec::new();
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+        let expected_reason_code = if case.expected_reason_code.trim().is_empty() {
+            reason_code.clone()
+        } else {
+            case.expected_reason_code.trim().to_string()
+        };
+
+        let outcome = execute_linalg_differential_operation(&case);
+        if case.expected_error_contains.trim().is_empty() {
+            match outcome {
+                Ok(actual) => match validate_linalg_differential_expectation(&case, &actual) {
+                    Ok(()) => {
+                        report.pass_count += 1;
+                    }
+                    Err(message) => {
+                        let rendered = format!(
+                            "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} {}",
+                            case.id,
+                            case.seed,
+                            mode,
+                            reason_code,
+                            env_fingerprint,
+                            artifact_refs.join(","),
+                            message
+                        );
+                        report.failures.push(rendered.clone());
+                        mismatches.push(LinalgDifferentialMismatch {
+                            fixture_id: case.id,
+                            seed: case.seed,
+                            mode,
+                            expected_reason_code,
+                            actual_reason_code: reason_code,
+                            message: rendered,
+                            artifact_refs,
+                        });
+                    }
+                },
+                Err(err) => {
+                    let actual_reason_code = err.reason_code().to_string();
+                    let rendered = format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} expected success but got error '{}'",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(","),
+                        err
+                    );
+                    report.failures.push(rendered.clone());
+                    mismatches.push(LinalgDifferentialMismatch {
+                        fixture_id: case.id,
+                        seed: case.seed,
+                        mode,
+                        expected_reason_code,
+                        actual_reason_code,
+                        message: rendered,
+                        artifact_refs,
+                    });
+                }
+            }
+        } else {
+            let expected_error = case.expected_error_contains.to_lowercase();
+            match outcome {
+                Ok(_) => {
+                    let rendered = format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} expected error containing '{}' but operation '{}' succeeded",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(","),
+                        case.expected_error_contains,
+                        case.operation
+                    );
+                    report.failures.push(rendered.clone());
+                    mismatches.push(LinalgDifferentialMismatch {
+                        fixture_id: case.id,
+                        seed: case.seed,
+                        mode,
+                        expected_reason_code,
+                        actual_reason_code: "none".to_string(),
+                        message: rendered,
+                        artifact_refs,
+                    });
+                }
+                Err(err) => {
+                    let actual_reason_code = err.reason_code().to_string();
+                    let contains_expected = err.to_string().to_lowercase().contains(&expected_error);
+                    let reason_match = actual_reason_code == expected_reason_code;
+                    if contains_expected && reason_match {
+                        report.pass_count += 1;
+                    } else {
+                        let rendered = format!(
+                            "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} expected error containing '{}' with reason_code='{}' but got '{}' (reason_code='{}')",
+                            case.id,
+                            case.seed,
+                            mode,
+                            reason_code,
+                            env_fingerprint,
+                            artifact_refs.join(","),
+                            case.expected_error_contains,
+                            expected_reason_code,
+                            err,
+                            actual_reason_code
+                        );
+                        report.failures.push(rendered.clone());
+                        mismatches.push(LinalgDifferentialMismatch {
+                            fixture_id: case.id,
+                            seed: case.seed,
+                            mode,
+                            expected_reason_code,
+                            actual_reason_code,
+                            message: rendered,
+                            artifact_refs,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let artifact = LinalgDifferentialReportArtifact {
+        suite: "linalg_differential",
+        total_cases: report.case_count,
+        passed_cases: report.pass_count,
+        failed_cases: report.case_count.saturating_sub(report.pass_count),
+        mismatches,
+    };
+    let report_path = config
+        .fixture_root
+        .join("oracle_outputs/linalg_differential_report.json");
+    if let Some(parent) = report_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed creating {}: {err}", parent.display()))?;
+    }
+    let payload = serde_json::to_string_pretty(&artifact)
+        .map_err(|err| format!("failed serializing linalg differential report: {err}"))?;
+    fs::write(&report_path, payload.as_bytes())
+        .map_err(|err| format!("failed writing {}: {err}", report_path.display()))?;
+
+    Ok(report)
+}
+
+pub fn run_linalg_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let path = config.fixture_root.join("linalg_metamorphic_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    let cases: Vec<LinalgMetamorphicCase> =
+        serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))?;
+
+    let mut report = SuiteReport {
+        suite: "linalg_metamorphic",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+        let pass = match case.relation.as_str() {
+            "solve_homogeneous_scaling" => {
+                let matrix = match decode_matrix_2x2(&case.matrix) {
+                    Ok(matrix) => matrix,
+                    Err(err) => {
+                        report.failures.push(format!(
+                            "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} invalid matrix fixture: {}",
+                            case.id,
+                            case.seed,
+                            reason_code,
+                            env_fingerprint,
+                            artifact_refs.join(","),
+                            err
+                        ));
+                        continue;
+                    }
+                };
+                let rhs = match decode_rhs_2(&case.rhs) {
+                    Ok(rhs) => rhs,
+                    Err(err) => {
+                        report.failures.push(format!(
+                            "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} invalid rhs fixture: {}",
+                            case.id,
+                            case.seed,
+                            reason_code,
+                            env_fingerprint,
+                            artifact_refs.join(","),
+                            err
+                        ));
+                        continue;
+                    }
+                };
+                let scalar = case.scalar;
+
+                let base = match solve_2x2(matrix, rhs) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        report.failures.push(format!(
+                            "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} base solve failed: {}",
+                            case.id,
+                            case.seed,
+                            reason_code,
+                            env_fingerprint,
+                            artifact_refs.join(","),
+                            err
+                        ));
+                        continue;
+                    }
+                };
+                let scaled_rhs = [rhs[0] * scalar, rhs[1] * scalar];
+                let scaled = match solve_2x2(matrix, scaled_rhs) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        report.failures.push(format!(
+                            "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} scaled solve failed: {}",
+                            case.id,
+                            case.seed,
+                            reason_code,
+                            env_fingerprint,
+                            artifact_refs.join(","),
+                            err
+                        ));
+                        continue;
+                    }
+                };
+                let expected = [base[0] * scalar, base[1] * scalar];
+                if !approx_equal_values(&expected, &scaled, 1e-9, 1e-9) {
+                    report.failures.push(format!(
+                        "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} solve_homogeneous_scaling mismatch expected={expected:?} actual={scaled:?}",
+                        case.id,
+                        case.seed,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(",")
+                    ));
+                    false
+                } else {
+                    true
+                }
+            }
+            "qr_repeat_deterministic" => {
+                let mode = match QrMode::from_mode_token(&case.qr_mode) {
+                    Ok(mode) => mode,
+                    Err(err) => {
+                        report.failures.push(format!(
+                            "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} invalid qr_mode '{}': {}",
+                            case.id,
+                            case.seed,
+                            reason_code,
+                            env_fingerprint,
+                            artifact_refs.join(","),
+                            case.qr_mode,
+                            err
+                        ));
+                        continue;
+                    }
+                };
+
+                let first = match qr_output_shapes(&case.shape, mode) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        report.failures.push(format!(
+                            "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} first qr evaluation failed: {}",
+                            case.id,
+                            case.seed,
+                            reason_code,
+                            env_fingerprint,
+                            artifact_refs.join(","),
+                            err
+                        ));
+                        continue;
+                    }
+                };
+                let second = match qr_output_shapes(&case.shape, mode) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        report.failures.push(format!(
+                            "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} second qr evaluation failed: {}",
+                            case.id,
+                            case.seed,
+                            reason_code,
+                            env_fingerprint,
+                            artifact_refs.join(","),
+                            err
+                        ));
+                        continue;
+                    }
+                };
+
+                if first != second {
+                    report.failures.push(format!(
+                        "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} qr_repeat_deterministic mismatch first={first:?} second={second:?}",
+                        case.id,
+                        case.seed,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(",")
+                    ));
+                    false
+                } else {
+                    true
+                }
+            }
+            "lstsq_rhs_column_growth" => {
+                if case.rhs_shape.len() != 1 {
+                    report.failures.push(format!(
+                        "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} rhs_shape must be a vector shape for lstsq_rhs_column_growth",
+                        case.id,
+                        case.seed,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(",")
+                    ));
+                    continue;
+                }
+                let vector = match lstsq_output_shapes(&case.lhs_shape, &case.rhs_shape) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        report.failures.push(format!(
+                            "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} vector rhs lstsq failed: {}",
+                            case.id,
+                            case.seed,
+                            reason_code,
+                            env_fingerprint,
+                            artifact_refs.join(","),
+                            err
+                        ));
+                        continue;
+                    }
+                };
+                let matrix_rhs_shape = vec![case.rhs_shape[0], 2];
+                let matrix = match lstsq_output_shapes(&case.lhs_shape, &matrix_rhs_shape) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        report.failures.push(format!(
+                            "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} matrix rhs lstsq failed: {}",
+                            case.id,
+                            case.seed,
+                            reason_code,
+                            env_fingerprint,
+                            artifact_refs.join(","),
+                            err
+                        ));
+                        continue;
+                    }
+                };
+
+                if vector.rank_upper_bound != matrix.rank_upper_bound
+                    || vector.singular_values_shape != matrix.singular_values_shape
+                    || vector.x_shape.first() != matrix.x_shape.first()
+                {
+                    report.failures.push(format!(
+                        "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} lstsq_rhs_column_growth mismatch vector={vector:?} matrix={matrix:?}",
+                        case.id,
+                        case.seed,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(",")
+                    ));
+                    false
+                } else {
+                    true
+                }
+            }
+            other => {
+                report.failures.push(format!(
+                    "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} unsupported relation {}",
+                    case.id,
+                    case.seed,
+                    reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    other
+                ));
+                false
+            }
+        };
+
+        if pass {
+            report.pass_count += 1;
+        }
+    }
+
+    Ok(report)
+}
+
+pub fn run_linalg_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let path = config.fixture_root.join("linalg_adversarial_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    let cases: Vec<LinalgAdversarialCase> =
+        serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))?;
+
+    let mut report = SuiteReport {
+        suite: "linalg_adversarial",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+        let severity = case.severity.trim().to_lowercase();
+        if !matches!(severity.as_str(), "low" | "medium" | "high" | "critical") {
+            report.failures.push(format!(
+                "{}: invalid severity '{}' (must be low|medium|high|critical), reason_code={}, mode={}, env_fingerprint={}, artifact_refs={}",
+                case.id,
+                case.severity,
+                reason_code,
+                mode,
+                env_fingerprint,
+                artifact_refs.join(",")
+            ));
+            continue;
+        }
+        if case.expected_error_contains.trim().is_empty() {
+            report.failures.push(format!(
+                "{}: expected_error_contains must be non-empty, reason_code={}, mode={}, env_fingerprint={}, artifact_refs={}",
+                case.id,
+                reason_code,
+                mode,
+                env_fingerprint,
+                artifact_refs.join(",")
+            ));
+            continue;
+        }
+        let expected_reason_code = if case.expected_reason_code.trim().is_empty() {
+            reason_code.clone()
+        } else {
+            case.expected_reason_code.trim().to_string()
+        };
+
+        let expected_error = case.expected_error_contains.to_lowercase();
+        match execute_linalg_adversarial_operation(&case) {
+            Ok(_) => {
+                report.failures.push(format!(
+                    "{}: severity={severity} seed={} reason_code={} mode={} env_fingerprint={} artifact_refs={} expected error containing '{}' but operation '{}' succeeded",
+                    case.id,
+                    case.seed,
+                    reason_code,
+                    mode,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    case.expected_error_contains,
+                    case.operation
+                ));
+            }
+            Err(err) => {
+                let actual_reason_code = err.reason_code().to_string();
+                let contains_expected = err.to_string().to_lowercase().contains(&expected_error);
+                let reason_match = actual_reason_code == expected_reason_code;
+                if contains_expected && reason_match {
+                    report.pass_count += 1;
+                } else {
+                    report.failures.push(format!(
+                        "{}: severity={severity} seed={} reason_code={} mode={} env_fingerprint={} artifact_refs={} expected error containing '{}' with reason_code='{}' but got '{}' (reason_code='{}')",
+                        case.id,
+                        case.seed,
+                        reason_code,
+                        mode,
+                        env_fingerprint,
+                        artifact_refs.join(","),
+                        case.expected_error_contains,
+                        expected_reason_code,
+                        err,
+                        actual_reason_code
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(report)
+}
+
 pub fn run_io_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
     let path = config.fixture_root.join("io_adversarial_cases.json");
     let raw = fs::read_to_string(&path)
@@ -1318,6 +2030,7 @@ pub fn run_crash_signature_regression_suite(config: &HarnessConfig) -> Result<Su
             "runtime_policy_adversarial" => run_runtime_policy_adversarial_suite(config)?,
             "ufunc_adversarial" => run_ufunc_adversarial_suite(config)?,
             "io_adversarial" => run_io_adversarial_suite(config)?,
+            "linalg_adversarial" => run_linalg_adversarial_suite(config)?,
             other => {
                 record_suite_check(
                     &mut report,
@@ -1429,6 +2142,9 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
         run_dtype_promotion_suite(config)?,
         run_runtime_policy_suite(config)?,
         run_runtime_policy_adversarial_suite(config)?,
+        run_linalg_differential_suite(config)?,
+        run_linalg_metamorphic_suite(config)?,
+        run_linalg_adversarial_suite(config)?,
         run_io_adversarial_suite(config)?,
         run_crash_signature_regression_suite(config)?,
         security_contracts::run_security_contract_suite(config)?,
@@ -1503,6 +2219,223 @@ fn approx_equal_values(expected: &[f64], actual: &[f64], abs_tol: f64, rel_tol: 
         }
     }
     true
+}
+
+fn resolve_case_mode(raw: &str, strict_mode: bool) -> String {
+    if raw.trim().is_empty() {
+        if strict_mode {
+            "strict".to_string()
+        } else {
+            "hardened".to_string()
+        }
+    } else {
+        raw.trim().to_string()
+    }
+}
+
+fn decode_matrix_2x2(matrix: &[Vec<f64>]) -> Result<[[f64; 2]; 2], LinAlgError> {
+    if matrix.len() != 2 || matrix.iter().any(|row| row.len() != 2) {
+        return Err(LinAlgError::ShapeContractViolation(
+            "solve_2x2 requires a 2x2 matrix fixture",
+        ));
+    }
+    Ok([[matrix[0][0], matrix[0][1]], [matrix[1][0], matrix[1][1]]])
+}
+
+fn decode_rhs_2(rhs: &[f64]) -> Result<[f64; 2], LinAlgError> {
+    if rhs.len() != 2 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "solve_2x2 requires a length-2 rhs fixture",
+        ));
+    }
+    Ok([rhs[0], rhs[1]])
+}
+
+fn execute_linalg_differential_operation(
+    case: &LinalgDifferentialCase,
+) -> Result<LinalgOperationOutcome, LinAlgError> {
+    execute_linalg_operation(LinalgOperationInput {
+        operation: &case.operation,
+        matrix: &case.matrix,
+        rhs: &case.rhs,
+        shape: &case.shape,
+        rhs_shape: &case.rhs_shape,
+        qr_mode: &case.qr_mode,
+        full_matrices: case.full_matrices,
+        converged: case.converged,
+        uplo: &case.uplo,
+        rcond: case.rcond,
+        search_depth: case.search_depth,
+        backend_supported: case.backend_supported,
+        validation_retries: case.validation_retries,
+        mode_raw: &case.mode_raw,
+        class_raw: &case.class_raw,
+    })
+}
+
+fn execute_linalg_adversarial_operation(
+    case: &LinalgAdversarialCase,
+) -> Result<LinalgOperationOutcome, LinAlgError> {
+    execute_linalg_operation(LinalgOperationInput {
+        operation: &case.operation,
+        matrix: &case.matrix,
+        rhs: &case.rhs,
+        shape: &case.shape,
+        rhs_shape: &case.rhs_shape,
+        qr_mode: &case.qr_mode,
+        full_matrices: case.full_matrices,
+        converged: case.converged,
+        uplo: &case.uplo,
+        rcond: case.rcond,
+        search_depth: case.search_depth,
+        backend_supported: case.backend_supported,
+        validation_retries: case.validation_retries,
+        mode_raw: &case.mode_raw,
+        class_raw: &case.class_raw,
+    })
+}
+
+fn execute_linalg_operation(
+    input: LinalgOperationInput<'_>,
+) -> Result<LinalgOperationOutcome, LinAlgError> {
+    match input.operation {
+        "solve_2x2" => {
+            let matrix = decode_matrix_2x2(input.matrix)?;
+            let rhs = decode_rhs_2(input.rhs)?;
+            let solved = solve_2x2(matrix, rhs)?;
+            Ok(LinalgOperationOutcome::SolveVector(solved.to_vec()))
+        }
+        "qr_shapes" => {
+            let mode = QrMode::from_mode_token(input.qr_mode)?;
+            let output = qr_output_shapes(input.shape, mode)?;
+            Ok(LinalgOperationOutcome::QrShapes {
+                q_shape: output.q_shape,
+                r_shape: output.r_shape,
+            })
+        }
+        "svd_shapes" => {
+            let output = svd_output_shapes(input.shape, input.full_matrices, input.converged)?;
+            Ok(LinalgOperationOutcome::SvdShapes {
+                u_shape: output.u_shape,
+                s_shape: output.s_shape,
+                vh_shape: output.vh_shape,
+            })
+        }
+        "lstsq_shapes" => {
+            let output = lstsq_output_shapes(input.shape, input.rhs_shape)?;
+            Ok(LinalgOperationOutcome::LstsqShapes {
+                x_shape: output.x_shape,
+                residuals_shape: output.residuals_shape,
+                rank_upper_bound: output.rank_upper_bound,
+                singular_values_shape: output.singular_values_shape,
+            })
+        }
+        "spectral_branch" => {
+            validate_spectral_branch(input.uplo, input.converged)?;
+            Ok(LinalgOperationOutcome::Unit)
+        }
+        "tolerance_policy" => {
+            validate_tolerance_policy(input.rcond, input.search_depth)?;
+            Ok(LinalgOperationOutcome::Unit)
+        }
+        "backend_bridge" => {
+            validate_backend_bridge(input.backend_supported, input.validation_retries)?;
+            Ok(LinalgOperationOutcome::Unit)
+        }
+        "policy_metadata" => {
+            validate_linalg_policy_metadata(input.mode_raw, input.class_raw)?;
+            Ok(LinalgOperationOutcome::Unit)
+        }
+        _ => Err(LinAlgError::PolicyUnknownMetadata(
+            "unsupported linalg operation",
+        )),
+    }
+}
+
+fn validate_linalg_differential_expectation(
+    case: &LinalgDifferentialCase,
+    outcome: &LinalgOperationOutcome,
+) -> Result<(), String> {
+    match (case.operation.as_str(), outcome) {
+        ("solve_2x2", LinalgOperationOutcome::SolveVector(actual)) => {
+            if case.expected_solution.len() != actual.len() {
+                return Err(format!(
+                    "solve_2x2 expected solution length {} but got {}",
+                    case.expected_solution.len(),
+                    actual.len()
+                ));
+            }
+            if !approx_equal_values(&case.expected_solution, actual, 1e-9, 1e-9) {
+                return Err(format!(
+                    "solve_2x2 mismatch expected={:?} actual={actual:?}",
+                    case.expected_solution
+                ));
+            }
+            Ok(())
+        }
+        ("qr_shapes", LinalgOperationOutcome::QrShapes { q_shape, r_shape }) => {
+            if case.expected_q_shape.as_ref() != Some(q_shape)
+                || case.expected_r_shape != *r_shape
+            {
+                return Err(format!(
+                    "qr_shapes mismatch expected_q_shape={:?} expected_r_shape={:?} actual_q_shape={q_shape:?} actual_r_shape={r_shape:?}",
+                    case.expected_q_shape, case.expected_r_shape
+                ));
+            }
+            Ok(())
+        }
+        (
+            "svd_shapes",
+            LinalgOperationOutcome::SvdShapes {
+                u_shape,
+                s_shape,
+                vh_shape,
+            },
+        ) => {
+            if case.expected_u_shape != *u_shape
+                || case.expected_s_shape != *s_shape
+                || case.expected_vh_shape != *vh_shape
+            {
+                return Err(format!(
+                    "svd_shapes mismatch expected_u={:?} expected_s={:?} expected_vh={:?} actual_u={u_shape:?} actual_s={s_shape:?} actual_vh={vh_shape:?}",
+                    case.expected_u_shape, case.expected_s_shape, case.expected_vh_shape
+                ));
+            }
+            Ok(())
+        }
+        (
+            "lstsq_shapes",
+            LinalgOperationOutcome::LstsqShapes {
+                x_shape,
+                residuals_shape,
+                rank_upper_bound,
+                singular_values_shape,
+            },
+        ) => {
+            if case.expected_x_shape != *x_shape
+                || case.expected_residuals_shape != *residuals_shape
+                || case.expected_rank_upper_bound != *rank_upper_bound
+                || case.expected_singular_values_shape != *singular_values_shape
+            {
+                return Err(format!(
+                    "lstsq_shapes mismatch expected_x={:?} expected_residuals={:?} expected_rank_upper_bound={} expected_singular_values={:?} actual_x={x_shape:?} actual_residuals={residuals_shape:?} actual_rank_upper_bound={} actual_singular_values={singular_values_shape:?}",
+                    case.expected_x_shape,
+                    case.expected_residuals_shape,
+                    case.expected_rank_upper_bound,
+                    case.expected_singular_values_shape,
+                    rank_upper_bound
+                ));
+            }
+            Ok(())
+        }
+        (
+            "spectral_branch" | "tolerance_policy" | "backend_bridge" | "policy_metadata",
+            LinalgOperationOutcome::Unit,
+        ) => Ok(()),
+        (operation, actual) => Err(format!(
+            "operation {operation} produced unexpected outcome {actual:?}"
+        )),
+    }
 }
 
 fn execute_io_adversarial_operation(case: &IoAdversarialCase) -> Result<(), String> {
