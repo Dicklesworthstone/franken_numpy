@@ -1,0 +1,136 @@
+[
+  {
+    "id": "linalg_solve_2x2_golden",
+    "operation": "solve_2x2",
+    "seed": 8201,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "matrix": [
+      [3.0, 1.0],
+      [1.0, 2.0]
+    ],
+    "rhs": [9.0, 8.0],
+    "expected_solution": [2.0, 3.0]
+  },
+  {
+    "id": "linalg_qr_shapes_reduced_5x3",
+    "operation": "qr_shapes",
+    "seed": 8202,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [5, 3],
+    "qr_mode": "reduced",
+    "expected_q_shape": [5, 3],
+    "expected_r_shape": [3, 3]
+  },
+  {
+    "id": "linalg_svd_shapes_full_4x3",
+    "operation": "svd_shapes",
+    "seed": 8203,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [4, 3],
+    "full_matrices": true,
+    "converged": true,
+    "expected_u_shape": [4, 4],
+    "expected_s_shape": [3],
+    "expected_vh_shape": [3, 3]
+  },
+  {
+    "id": "linalg_lstsq_shapes_matrix_rhs",
+    "operation": "lstsq_shapes",
+    "seed": 8204,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [5, 3],
+    "rhs_shape": [5, 2],
+    "expected_x_shape": [3, 2],
+    "expected_residuals_shape": [2],
+    "expected_rank_upper_bound": 3,
+    "expected_singular_values_shape": [3]
+  },
+  {
+    "id": "linalg_spectral_upper_converged",
+    "operation": "spectral_branch",
+    "seed": 8205,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "uplo": "U",
+    "converged": true
+  },
+  {
+    "id": "linalg_tolerance_policy_budget",
+    "operation": "tolerance_policy",
+    "seed": 8206,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "rcond": 0.000001,
+    "search_depth": 16
+  },
+  {
+    "id": "linalg_backend_bridge_budget_edge",
+    "operation": "backend_bridge",
+    "seed": 8207,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "backend_supported": true,
+    "validation_retries": 64
+  },
+  {
+    "id": "linalg_policy_metadata_hardened_incompatible",
+    "operation": "policy_metadata",
+    "seed": 8208,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "mode_raw": "hardened",
+    "class_raw": "known_incompatible_semantics"
+  }
+]

@@ -32,7 +32,7 @@ subsystem: `linalg bridge first wave`
 | lane | fixture family | objective | owner bead |
 |---|---|---|---|
 | Fuzz/property | packet-E linalg invariant corpus (planned) | detect solver/decomposition/spectral/tolerance contract violations with shrinkable counterexamples | `bd-23m.19.5` |
-| Differential/metamorphic | packet-F linalg oracle/adversarial corpus (planned) | enforce strict parity for linalg output/failure-class behavior across golden and hostile cases | `bd-23m.19.6` |
+| Differential/metamorphic | packet-F linalg oracle/adversarial corpus (implemented) | enforce strict parity for linalg output/failure-class behavior across golden and hostile cases | `bd-23m.19.6` |
 | E2E/replay | packet-G linalg workflow scenarios (planned) | verify strict/hardened replay traceability and policy-forensics linkage | `bd-23m.19.7` |
 
 ## Residual Risks and Compensating Controls
@@ -41,7 +41,7 @@ subsystem: `linalg bridge first wave`
 |---|---|---|---|
 | `P2C008-RES-01` | `fnp-linalg` is still skeletal for the full packet boundary surface. | keep unsupported semantics fail-closed and block parity promotion until packet-D boundary work lands | `bd-23m.19.4` + packet-E baseline tests |
 | `P2C008-RES-02` | packet-scoped unit/property linalg corpus is incomplete. | require packet-E suite with deterministic shrink/replay logging before parity claims | `bd-23m.19.5` |
-| `P2C008-RES-03` | differential/adversarial coverage for singular/non-convergence/tolerance-edge classes is incomplete. | enforce packet-F fixture lanes and differential gate coverage | `bd-23m.19.6` |
+| `P2C008-RES-03` | closed: differential/adversarial coverage for singular/non-convergence/tolerance-edge classes is now wired into packet-F suites and gates. | maintain packet-F fixture lanes and differential gate coverage (`linalg_differential`, `linalg_metamorphic`, `linalg_adversarial`). | `bd-23m.19.6` |
 | `P2C008-RES-04` | packet-scoped e2e replay for linalg journeys is incomplete. | add packet-G scenario logs with required structured fields and reason-code linkage | `bd-23m.19.7` |
 | `P2C008-RES-05` | hardened budget/calibration thresholds are defined but not tuned for full linalg corpus scale. | trigger conservative fallback on drift and recalibrate from packet-H evidence before packet-I sign-off | `bd-23m.19.8` + packet-I closure |
 

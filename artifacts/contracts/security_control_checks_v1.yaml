@@ -87,9 +87,11 @@ threat_controls:
     executable_checks:
       - run_runtime_policy_adversarial_suite
       - run_io_adversarial_suite
+      - run_linalg_adversarial_suite
     fixture_hooks:
       - crates/fnp-conformance/fixtures/runtime_policy_adversarial_cases.json
       - crates/fnp-conformance/fixtures/io_adversarial_cases.json
+      - crates/fnp-conformance/fixtures/linalg_adversarial_cases.json
     expected_log_fields:
       - fixture_id
       - seed
@@ -99,6 +101,60 @@ threat_controls:
       - reason_code
     compatibility_drift_gate: adversarial_reproducibility_gate
     override_audit_requirement: audited_only
+
+  - threat_class: linalg_shape_tolerance_abuse
+    executable_checks:
+      - run_linalg_differential_suite
+      - run_linalg_metamorphic_suite
+      - run_linalg_adversarial_suite
+    fixture_hooks:
+      - crates/fnp-conformance/fixtures/linalg_differential_cases.json#linalg_solve_2x2_golden
+      - crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json#linalg_solve_homogeneous_scaling
+      - crates/fnp-conformance/fixtures/linalg_adversarial_cases.json#linalg_shape_rank1_invalid
+      - crates/fnp-conformance/fixtures/linalg_adversarial_cases.json#linalg_tolerance_negative_rcond
+    expected_log_fields:
+      - fixture_id
+      - seed
+      - mode
+      - env_fingerprint
+      - artifact_refs
+      - reason_code
+    compatibility_drift_gate: strict_zero_drift_gate
+    override_audit_requirement: not_applicable
+
+  - threat_class: linalg_backend_bridge_tampering
+    executable_checks:
+      - run_linalg_adversarial_suite
+      - run_crash_signature_regression_suite
+    fixture_hooks:
+      - crates/fnp-conformance/fixtures/linalg_adversarial_cases.json#linalg_backend_unsupported
+      - artifacts/contracts/CRASH_SIGNATURE_REGISTRY_V1.json#crash-linalg-backend-unsupported
+    expected_log_fields:
+      - fixture_id
+      - seed
+      - mode
+      - env_fingerprint
+      - artifact_refs
+      - reason_code
+    compatibility_drift_gate: adversarial_reproducibility_gate
+    override_audit_requirement: strict_no_override
+
+  - threat_class: linalg_policy_unknown_metadata
+    executable_checks:
+      - run_linalg_adversarial_suite
+      - run_runtime_policy_adversarial_suite
+    fixture_hooks:
+      - crates/fnp-conformance/fixtures/linalg_adversarial_cases.json#linalg_policy_unknown_mode
+      - crates/fnp-conformance/fixtures/runtime_policy_adversarial_cases.json#wire_unknown_mode_fail_closed
+    expected_log_fields:
+      - fixture_id
+      - seed
+      - mode
+      - env_fingerprint
+      - artifact_refs
+      - reason_code
+    compatibility_drift_gate: compatibility_drift_hash_required
+    override_audit_requirement: strict_no_override
 
   - threat_class: corrupt_durable_artifact
     executable_checks:

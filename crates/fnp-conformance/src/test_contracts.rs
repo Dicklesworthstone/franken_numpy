@@ -21,6 +21,9 @@ const REQUIRED_INVARIANT_FAMILIES: &[&str] = &[
     "dtype_promotion_table",
     "runtime_policy_fail_closed",
     "io_parser_adversarial_surface",
+    "linalg_differential_parity",
+    "linalg_metamorphic_relations",
+    "linalg_adversarial_error_surface",
     "ufunc_metamorphic_relations",
     "ufunc_adversarial_error_surface",
     "user_workflow_golden_journeys",
@@ -28,6 +31,9 @@ const REQUIRED_INVARIANT_FAMILIES: &[&str] = &[
 
 const REQUIRED_TEST_HELPER_APIS: &[&str] = &[
     "fnp_conformance::run_all_core_suites",
+    "fnp_conformance::run_linalg_differential_suite",
+    "fnp_conformance::run_linalg_metamorphic_suite",
+    "fnp_conformance::run_linalg_adversarial_suite",
     "fnp_conformance::run_io_adversarial_suite",
     "fnp_conformance::run_crash_signature_regression_suite",
     "fnp_conformance::test_contracts::run_test_contract_suite",
@@ -48,6 +54,9 @@ const REQUIRED_FIXTURE_FILES: &[&str] = &[
     "runtime_policy_cases.json",
     "runtime_policy_adversarial_cases.json",
     "io_adversarial_cases.json",
+    "linalg_differential_cases.json",
+    "linalg_metamorphic_cases.json",
+    "linalg_adversarial_cases.json",
     "ufunc_input_cases.json",
     "ufunc_metamorphic_cases.json",
     "ufunc_adversarial_cases.json",
@@ -248,6 +257,9 @@ pub fn run_test_contract_suite(config: &HarnessConfig) -> Result<SuiteReport, St
     validate_runtime_policy_fixtures(config, &contract, &mut report)?;
     validate_runtime_policy_adversarial_fixtures(config, &contract, &mut report)?;
     validate_io_adversarial_fixtures(config, &contract, &mut report)?;
+    validate_linalg_differential_fixtures(config, &contract, &mut report)?;
+    validate_linalg_metamorphic_fixtures(config, &contract, &mut report)?;
+    validate_linalg_adversarial_fixtures(config, &contract, &mut report)?;
     validate_ufunc_input_fixtures(config, &contract, &mut report)?;
     validate_ufunc_metamorphic_fixtures(config, &contract, &mut report)?;
     validate_ufunc_adversarial_fixtures(config, &contract, &mut report)?;
@@ -554,6 +566,283 @@ fn validate_io_adversarial_fixtures(
                 report,
                 false,
                 "io_adversarial_cases missing severity".to_string(),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_linalg_differential_fixtures(
+    config: &HarnessConfig,
+    contract: &TestLoggingContract,
+    report: &mut SuiteReport,
+) -> Result<(), String> {
+    let path = config.fixture_root.join("linalg_differential_cases.json");
+    let values = load_fixture_array(&path)?;
+    let mut ids = BTreeSet::new();
+
+    for value in values {
+        let Some(obj) = value.as_object() else {
+            record_check(
+                report,
+                false,
+                "linalg_differential_cases must be an array of objects".to_string(),
+            );
+            continue;
+        };
+
+        let id = required_string(obj, "id");
+        if let Some(id) = id {
+            record_check(
+                report,
+                validate_fixture_id(id, &contract.fixture_id_policy),
+                format!("linalg_differential_cases invalid fixture id {id}"),
+            );
+            record_check(
+                report,
+                ids.insert(id.to_string()),
+                format!("linalg_differential_cases duplicate fixture id {id}"),
+            );
+        } else {
+            record_check(
+                report,
+                false,
+                "linalg_differential_cases missing id".to_string(),
+            );
+        }
+
+        if contract
+            .replay_semantics
+            .deterministic_seed_required_for_property_and_adversarial
+        {
+            record_check(
+                report,
+                has_u64(obj, "seed"),
+                "linalg_differential_cases missing deterministic seed".to_string(),
+            );
+        }
+        if contract
+            .replay_semantics
+            .require_reason_code_for_policy_and_adversarial
+        {
+            record_check(
+                report,
+                has_non_empty_string(obj, "reason_code"),
+                "linalg_differential_cases missing reason_code".to_string(),
+            );
+        }
+        if contract
+            .replay_semantics
+            .require_artifact_refs_for_policy_and_adversarial
+        {
+            record_check(
+                report,
+                has_non_empty_string_array(obj, "artifact_refs"),
+                "linalg_differential_cases missing artifact_refs".to_string(),
+            );
+        }
+        record_check(
+            report,
+            has_non_empty_string(obj, "env_fingerprint"),
+            "linalg_differential_cases missing env_fingerprint".to_string(),
+        );
+        record_check(
+            report,
+            has_non_empty_string(obj, "operation"),
+            "linalg_differential_cases missing operation".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_linalg_metamorphic_fixtures(
+    config: &HarnessConfig,
+    contract: &TestLoggingContract,
+    report: &mut SuiteReport,
+) -> Result<(), String> {
+    let path = config.fixture_root.join("linalg_metamorphic_cases.json");
+    let values = load_fixture_array(&path)?;
+    let mut ids = BTreeSet::new();
+
+    for value in values {
+        let Some(obj) = value.as_object() else {
+            record_check(
+                report,
+                false,
+                "linalg_metamorphic_cases must be an array of objects".to_string(),
+            );
+            continue;
+        };
+
+        let id = required_string(obj, "id");
+        if let Some(id) = id {
+            record_check(
+                report,
+                validate_fixture_id(id, &contract.fixture_id_policy),
+                format!("linalg_metamorphic_cases invalid fixture id {id}"),
+            );
+            record_check(
+                report,
+                ids.insert(id.to_string()),
+                format!("linalg_metamorphic_cases duplicate fixture id {id}"),
+            );
+        } else {
+            record_check(
+                report,
+                false,
+                "linalg_metamorphic_cases missing id".to_string(),
+            );
+        }
+
+        if contract
+            .replay_semantics
+            .deterministic_seed_required_for_property_and_adversarial
+        {
+            record_check(
+                report,
+                has_u64(obj, "seed"),
+                "linalg_metamorphic_cases missing deterministic seed".to_string(),
+            );
+        }
+        if contract
+            .replay_semantics
+            .require_reason_code_for_policy_and_adversarial
+        {
+            record_check(
+                report,
+                has_non_empty_string(obj, "reason_code"),
+                "linalg_metamorphic_cases missing reason_code".to_string(),
+            );
+        }
+        if contract
+            .replay_semantics
+            .require_artifact_refs_for_policy_and_adversarial
+        {
+            record_check(
+                report,
+                has_non_empty_string_array(obj, "artifact_refs"),
+                "linalg_metamorphic_cases missing artifact_refs".to_string(),
+            );
+        }
+        record_check(
+            report,
+            has_non_empty_string(obj, "env_fingerprint"),
+            "linalg_metamorphic_cases missing env_fingerprint".to_string(),
+        );
+        record_check(
+            report,
+            has_non_empty_string(obj, "relation"),
+            "linalg_metamorphic_cases missing relation".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_linalg_adversarial_fixtures(
+    config: &HarnessConfig,
+    contract: &TestLoggingContract,
+    report: &mut SuiteReport,
+) -> Result<(), String> {
+    let path = config.fixture_root.join("linalg_adversarial_cases.json");
+    let values = load_fixture_array(&path)?;
+    let mut ids = BTreeSet::new();
+
+    for value in values {
+        let Some(obj) = value.as_object() else {
+            record_check(
+                report,
+                false,
+                "linalg_adversarial_cases must be an array of objects".to_string(),
+            );
+            continue;
+        };
+
+        let id = required_string(obj, "id");
+        if let Some(id) = id {
+            record_check(
+                report,
+                validate_fixture_id(id, &contract.fixture_id_policy),
+                format!("linalg_adversarial_cases invalid fixture id {id}"),
+            );
+            record_check(
+                report,
+                ids.insert(id.to_string()),
+                format!("linalg_adversarial_cases duplicate fixture id {id}"),
+            );
+        } else {
+            record_check(
+                report,
+                false,
+                "linalg_adversarial_cases missing id".to_string(),
+            );
+        }
+
+        if contract
+            .replay_semantics
+            .deterministic_seed_required_for_property_and_adversarial
+        {
+            record_check(
+                report,
+                has_u64(obj, "seed"),
+                "linalg_adversarial_cases missing deterministic seed".to_string(),
+            );
+        }
+        if contract
+            .replay_semantics
+            .require_reason_code_for_policy_and_adversarial
+        {
+            record_check(
+                report,
+                has_non_empty_string(obj, "reason_code"),
+                "linalg_adversarial_cases missing reason_code".to_string(),
+            );
+            record_check(
+                report,
+                has_non_empty_string(obj, "expected_reason_code"),
+                "linalg_adversarial_cases missing expected_reason_code".to_string(),
+            );
+        }
+        if contract
+            .replay_semantics
+            .require_artifact_refs_for_policy_and_adversarial
+        {
+            record_check(
+                report,
+                has_non_empty_string_array(obj, "artifact_refs"),
+                "linalg_adversarial_cases missing artifact_refs".to_string(),
+            );
+        }
+        record_check(
+            report,
+            has_non_empty_string(obj, "env_fingerprint"),
+            "linalg_adversarial_cases missing env_fingerprint".to_string(),
+        );
+        record_check(
+            report,
+            has_non_empty_string(obj, "operation"),
+            "linalg_adversarial_cases missing operation".to_string(),
+        );
+        record_check(
+            report,
+            has_non_empty_string(obj, "expected_error_contains"),
+            "linalg_adversarial_cases missing expected_error_contains".to_string(),
+        );
+
+        let severity = required_string(obj, "severity");
+        if let Some(severity) = severity {
+            record_check(
+                report,
+                matches!(severity, "low" | "medium" | "high" | "critical"),
+                format!("linalg_adversarial_cases invalid severity {severity}"),
+            );
+        } else {
+            record_check(
+                report,
+                false,
+                "linalg_adversarial_cases missing severity".to_string(),
             );
         }
     }

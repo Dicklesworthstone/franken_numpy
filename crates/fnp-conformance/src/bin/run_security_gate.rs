@@ -2,6 +2,7 @@
 
 use fnp_conformance::{
     HarnessConfig, SuiteReport, run_crash_signature_regression_suite, run_io_adversarial_suite,
+    run_linalg_adversarial_suite, run_linalg_differential_suite, run_linalg_metamorphic_suite,
     run_runtime_policy_adversarial_suite, run_runtime_policy_suite, security_contracts,
     set_runtime_policy_log_path,
 };
@@ -281,6 +282,9 @@ fn run_gate_suites(cfg: &HarnessConfig) -> Result<Vec<SuiteReport>, String> {
     Ok(vec![
         run_runtime_policy_suite(cfg)?,
         run_runtime_policy_adversarial_suite(cfg)?,
+        run_linalg_differential_suite(cfg)?,
+        run_linalg_metamorphic_suite(cfg)?,
+        run_linalg_adversarial_suite(cfg)?,
         run_io_adversarial_suite(cfg)?,
         run_crash_signature_regression_suite(cfg)?,
         security_contracts::run_security_contract_suite(cfg)?,

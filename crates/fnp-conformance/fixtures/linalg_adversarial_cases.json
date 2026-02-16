@@ -1,0 +1,159 @@
+[
+  {
+    "id": "linalg_shape_rank1_invalid",
+    "operation": "qr_shapes",
+    "expected_error_contains": "at least 2D",
+    "expected_reason_code": "linalg_shape_contract_violation",
+    "severity": "high",
+    "seed": 8401,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/risk_note.md",
+      "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json"
+    ],
+    "reason_code": "linalg_shape_contract_violation",
+    "shape": [5],
+    "qr_mode": "reduced"
+  },
+  {
+    "id": "linalg_solve_singular_system",
+    "operation": "solve_2x2",
+    "expected_error_contains": "singular matrix",
+    "expected_reason_code": "linalg_solver_singularity",
+    "severity": "critical",
+    "seed": 8402,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/risk_note.md",
+      "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json"
+    ],
+    "reason_code": "linalg_solver_singularity",
+    "matrix": [
+      [1.0, 2.0],
+      [2.0, 4.0]
+    ],
+    "rhs": [3.0, 6.0]
+  },
+  {
+    "id": "linalg_qr_mode_invalid_token",
+    "operation": "qr_shapes",
+    "expected_error_contains": "qr mode is not one of",
+    "expected_reason_code": "linalg_qr_mode_invalid",
+    "severity": "high",
+    "seed": 8403,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/risk_note.md",
+      "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json"
+    ],
+    "reason_code": "linalg_qr_mode_invalid",
+    "shape": [4, 3],
+    "qr_mode": "bad_mode"
+  },
+  {
+    "id": "linalg_svd_nonconverged",
+    "operation": "svd_shapes",
+    "expected_error_contains": "did not converge",
+    "expected_reason_code": "linalg_svd_nonconvergence",
+    "severity": "high",
+    "seed": 8404,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/risk_note.md",
+      "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json"
+    ],
+    "reason_code": "linalg_svd_nonconvergence",
+    "shape": [4, 4],
+    "full_matrices": false,
+    "converged": false
+  },
+  {
+    "id": "linalg_spectral_invalid_uplo",
+    "operation": "spectral_branch",
+    "expected_error_contains": "did not converge",
+    "expected_reason_code": "linalg_spectral_convergence_failed",
+    "severity": "high",
+    "seed": 8405,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/risk_note.md",
+      "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json"
+    ],
+    "reason_code": "linalg_spectral_convergence_failed",
+    "uplo": "X",
+    "converged": true
+  },
+  {
+    "id": "linalg_lstsq_rhs_mismatch",
+    "operation": "lstsq_shapes",
+    "expected_error_contains": "rhs rows must equal lhs rows",
+    "expected_reason_code": "linalg_lstsq_tuple_contract_violation",
+    "severity": "high",
+    "seed": 8406,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/risk_note.md",
+      "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json"
+    ],
+    "reason_code": "linalg_lstsq_tuple_contract_violation",
+    "shape": [5, 3],
+    "rhs_shape": [4]
+  },
+  {
+    "id": "linalg_tolerance_negative_rcond",
+    "operation": "tolerance_policy",
+    "expected_error_contains": "rcond must be finite and >= 0",
+    "expected_reason_code": "linalg_norm_det_rank_policy_violation",
+    "severity": "high",
+    "seed": 8407,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/risk_note.md",
+      "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json"
+    ],
+    "reason_code": "linalg_norm_det_rank_policy_violation",
+    "rcond": -1.0,
+    "search_depth": 1
+  },
+  {
+    "id": "linalg_backend_unsupported",
+    "operation": "backend_bridge",
+    "expected_error_contains": "backend bridge is unsupported",
+    "expected_reason_code": "linalg_backend_bridge_invalid",
+    "severity": "critical",
+    "seed": 8408,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/risk_note.md",
+      "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json"
+    ],
+    "reason_code": "linalg_backend_bridge_invalid",
+    "backend_supported": false,
+    "validation_retries": 0
+  },
+  {
+    "id": "linalg_policy_unknown_mode",
+    "operation": "policy_metadata",
+    "expected_error_contains": "unknown mode/class metadata rejected fail-closed",
+    "expected_reason_code": "linalg_policy_unknown_metadata",
+    "severity": "high",
+    "seed": 8409,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/risk_note.md",
+      "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json"
+    ],
+    "reason_code": "linalg_policy_unknown_metadata",
+    "mode_raw": "legacy_mode",
+    "class_raw": "known_compatible_low_risk"
+  }
+]

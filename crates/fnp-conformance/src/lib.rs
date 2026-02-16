@@ -1517,7 +1517,8 @@ pub fn run_linalg_differential_suite(config: &HarnessConfig) -> Result<SuiteRepo
                 }
                 Err(err) => {
                     let actual_reason_code = err.reason_code().to_string();
-                    let contains_expected = err.to_string().to_lowercase().contains(&expected_error);
+                    let contains_expected =
+                        err.to_string().to_lowercase().contains(&expected_error);
                     let reason_match = actual_reason_code == expected_reason_code;
                     if contains_expected && reason_match {
                         report.pass_count += 1;
@@ -2374,9 +2375,7 @@ fn validate_linalg_differential_expectation(
             Ok(())
         }
         ("qr_shapes", LinalgOperationOutcome::QrShapes { q_shape, r_shape }) => {
-            if case.expected_q_shape.as_ref() != Some(q_shape)
-                || case.expected_r_shape != *r_shape
-            {
+            if case.expected_q_shape != *q_shape || case.expected_r_shape != *r_shape {
                 return Err(format!(
                     "qr_shapes mismatch expected_q_shape={:?} expected_r_shape={:?} actual_q_shape={q_shape:?} actual_r_shape={r_shape:?}",
                     case.expected_q_shape, case.expected_r_shape
@@ -2671,10 +2670,11 @@ fn validate_runtime_policy_log_fields(
 mod tests {
     use super::{
         HarnessConfig, run_all_core_suites, run_crash_signature_regression_suite,
-        run_dtype_promotion_suite, run_io_adversarial_suite, run_runtime_policy_adversarial_suite,
-        run_shape_stride_suite, run_smoke, run_ufunc_adversarial_suite,
-        run_ufunc_differential_suite, run_ufunc_metamorphic_suite, set_dtype_promotion_log_path,
-        set_shape_stride_log_path,
+        run_dtype_promotion_suite, run_io_adversarial_suite, run_linalg_adversarial_suite,
+        run_linalg_differential_suite, run_linalg_metamorphic_suite,
+        run_runtime_policy_adversarial_suite, run_shape_stride_suite, run_smoke,
+        run_ufunc_adversarial_suite, run_ufunc_differential_suite, run_ufunc_metamorphic_suite,
+        set_dtype_promotion_log_path, set_shape_stride_log_path,
     };
     use fnp_iter::{
         RuntimeMode as IterRuntimeMode, TRANSFER_PACKET_REASON_CODES, TransferLogRecord,
@@ -3019,6 +3019,27 @@ mod tests {
     fn ufunc_adversarial_suite_is_green() {
         let cfg = HarnessConfig::default_paths();
         let suite = run_ufunc_adversarial_suite(&cfg).expect("adversarial suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn linalg_differential_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite = run_linalg_differential_suite(&cfg).expect("differential suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn linalg_metamorphic_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite = run_linalg_metamorphic_suite(&cfg).expect("metamorphic suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn linalg_adversarial_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite = run_linalg_adversarial_suite(&cfg).expect("adversarial suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 

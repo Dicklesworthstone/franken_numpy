@@ -52,6 +52,23 @@
         "crates/fnp-io/src/lib.rs:245",
         "crates/fnp-conformance/src/lib.rs:1125"
       ]
+    },
+    {
+      "signature_id": "crash-linalg-backend-unsupported",
+      "suite": "linalg_adversarial",
+      "fixture_id": "linalg_backend_unsupported",
+      "seed": 8305,
+      "severity": "high",
+      "reason_code": "linalg_backend_bridge_invalid",
+      "status": "closed",
+      "minimized_repro_artifacts": [
+        "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json",
+        "artifacts/phase2c/FNP-P2C-008/contract_table.md"
+      ],
+      "blame_refs": [
+        "crates/fnp-linalg/src/lib.rs:389",
+        "crates/fnp-conformance/src/lib.rs:1833"
+      ]
     }
   ]
 }

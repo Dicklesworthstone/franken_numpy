@@ -30,7 +30,7 @@ Subsystem: `linalg bridge first wave`
 |---|---|---|---|---|
 | `P2C008-U01` | Exact tolerance/conditioning boundaries for near-singular cases may differ across backend realizations. | high | `bd-23m.19.2` | contract table pins tolerance-class rules and differential fixtures enforce class stability. |
 | `P2C008-U02` | Full backend abstraction for lapack-lite vs future Rust/native backend needs explicit compatibility policy. | high | `bd-23m.19.4` | implementation plan defines backend seam and fail-closed fallback behavior for unsupported backend classes. |
-| `P2C008-U03` | Differential corpus for non-convergence and mixed-dtype linalg edge cases is incomplete. | high | `bd-23m.19.6` | packet-F adversarial/metamorphic fixtures cover non-convergence and mixed-dtype regimes with replay metadata. |
+| `P2C008-U03` | Differential corpus for non-convergence and mixed-dtype linalg edge cases is now implemented through packet-F fixtures and gate wiring. | closed | `bd-23m.19.6` | closed by packet-F fixture lanes in `crates/fnp-conformance/fixtures/linalg_*_cases.json` and conformance suite integration in `crates/fnp-conformance/src/lib.rs`. |
 | `P2C008-U04` | E2E replay and forensic linkage for linalg-first workflows is not yet packet-specific. | medium | `bd-23m.19.7` | packet-G scenarios encode step-level replay logs and artifact cross-links. |
 
 ## 4. Planned Verification Hooks
@@ -38,7 +38,7 @@ Subsystem: `linalg bridge first wave`
 | Verification lane | Planned hook | Artifact target |
 |---|---|---|
 | Unit/property | solver/decomposition/spectral/tolerance law suites with shrinkable counterexamples | `crates/fnp-conformance/fixtures/linalg_property_cases.json` (planned), structured JSONL logs |
-| Differential/metamorphic/adversarial | extend harness for singular/non-convergence/tolerance-edge differential checks | `crates/fnp-conformance/src/linalg_differential.rs` (planned), `crates/fnp-conformance/fixtures/linalg_adversarial_cases.json` (planned) |
+| Differential/metamorphic/adversarial | packet-F harness checks singular/non-convergence/tolerance-edge/backend-policy classes | `crates/fnp-conformance/src/lib.rs` (`run_linalg_differential_suite`, `run_linalg_metamorphic_suite`, `run_linalg_adversarial_suite`), `crates/fnp-conformance/fixtures/linalg_differential_cases.json`, `crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json`, `crates/fnp-conformance/fixtures/linalg_adversarial_cases.json` |
 | E2E | linalg workflow scenarios chained with upstream/downstream packet behaviors | `scripts/e2e/run_linalg_bridge_journey.sh` (planned) |
 | Structured logging | enforce mandatory packet logging schema for all linalg suites and gates | `artifacts/contracts/test_logging_contract_v1.json`, `scripts/e2e/run_test_contract_gate.sh` |
 
