@@ -207,6 +207,7 @@ dependencies = [
  "asupersync",
  "base64",
  "fnp-dtype",
+ "fnp-iter",
  "fnp-ndarray",
  "fnp-runtime",
  "fnp-ufunc",

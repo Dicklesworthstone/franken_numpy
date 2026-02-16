@@ -4,6 +4,34 @@ use fnp_dtype::{DType, promote};
 use fnp_ndarray::{ShapeError, broadcast_shape, element_count};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UFuncRuntimeMode {
+    Strict,
+    Hardened,
+}
+
+impl UFuncRuntimeMode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::Hardened => "hardened",
+        }
+    }
+}
+
+pub const UFUNC_PACKET_REASON_CODES: [&str; 9] = [
+    "ufunc_shape_contract_violation",
+    "ufunc_invalid_input_length",
+    "ufunc_axis_out_of_bounds",
+    "ufunc_division_by_zero_observed",
+    "ufunc_broadcast_selector_determinism",
+    "ufunc_reduce_keepdims_contract",
+    "ufunc_reduce_axis_contract",
+    "ufunc_scalar_broadcast_contract",
+    "ufunc_dtype_promotion_contract",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -180,6 +208,43 @@ impl std::fmt::Display for UFuncError {
 
 impl std::error::Error for UFuncError {}
 
+impl UFuncError {
+    #[must_use]
+    pub fn reason_code(&self) -> &'static str {
+        match self {
+            Self::Shape(_) => "ufunc_shape_contract_violation",
+            Self::InvalidInputLength { .. } => "ufunc_invalid_input_length",
+            Self::AxisOutOfBounds { .. } => "ufunc_axis_out_of_bounds",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UFuncLogRecord {
+    pub fixture_id: String,
+    pub seed: u64,
+    pub mode: UFuncRuntimeMode,
+    pub env_fingerprint: String,
+    pub artifact_refs: Vec<String>,
+    pub reason_code: String,
+    pub passed: bool,
+}
+
+impl UFuncLogRecord {
+    #[must_use]
+    pub fn is_replay_complete(&self) -> bool {
+        !self.fixture_id.trim().is_empty()
+            && !self.mode.as_str().is_empty()
+            && !self.env_fingerprint.trim().is_empty()
+            && !self.reason_code.trim().is_empty()
+            && !self.artifact_refs.is_empty()
+            && self
+                .artifact_refs
+                .iter()
+                .all(|artifact| !artifact.trim().is_empty())
+    }
+}
+
 #[must_use]
 fn contiguous_strides_elems(shape: &[usize]) -> Vec<usize> {
     if shape.is_empty() {
@@ -269,8 +334,19 @@ fn reduced_shape(shape: &[usize], axis: usize, keepdims: bool) -> Vec<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BinaryOp, UFuncArray, UFuncError};
-    use fnp_dtype::DType;
+    use super::{
+        BinaryOp, UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncError, UFuncLogRecord,
+        UFuncRuntimeMode,
+    };
+    use fnp_dtype::{DType, promote};
+    use fnp_ndarray::broadcast_shape;
+
+    fn packet005_artifacts() -> Vec<String> {
+        vec![
+            "artifacts/phase2c/FNP-P2C-005/fixture_manifest.json".to_string(),
+            "artifacts/phase2c/FNP-P2C-005/parity_gate.yaml".to_string(),
+        ]
+    }
 
     #[test]
     fn broadcasted_add_matches_expected_values() {
@@ -392,5 +468,162 @@ mod tests {
             err,
             UFuncError::AxisOutOfBounds { axis: 2, ndim: 2 }
         ));
+        assert_eq!(err.reason_code(), "ufunc_axis_out_of_bounds");
+    }
+
+    #[test]
+    fn reason_code_registry_matches_packet_contract() {
+        assert_eq!(
+            UFUNC_PACKET_REASON_CODES,
+            [
+                "ufunc_shape_contract_violation",
+                "ufunc_invalid_input_length",
+                "ufunc_axis_out_of_bounds",
+                "ufunc_division_by_zero_observed",
+                "ufunc_broadcast_selector_determinism",
+                "ufunc_reduce_keepdims_contract",
+                "ufunc_reduce_axis_contract",
+                "ufunc_scalar_broadcast_contract",
+                "ufunc_dtype_promotion_contract",
+            ]
+        );
+    }
+
+    #[test]
+    fn ufunc_error_reason_codes_cover_adversarial_paths() {
+        let len_err = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0], DType::F64)
+            .expect_err("invalid length should fail");
+        assert_eq!(len_err.reason_code(), "ufunc_invalid_input_length");
+
+        let lhs = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
+            .expect("lhs");
+        let rhs = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).expect("rhs");
+        let shape_err = lhs
+            .elementwise_binary(&rhs, BinaryOp::Add)
+            .expect_err("incompatible broadcast should fail");
+        assert_eq!(shape_err.reason_code(), "ufunc_shape_contract_violation");
+    }
+
+    #[test]
+    fn elementwise_binary_property_grid_is_deterministic() {
+        let cases = [
+            (
+                vec![2, 3],
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                DType::F64,
+                vec![3],
+                vec![10.0, 20.0, 30.0],
+                DType::F64,
+            ),
+            (
+                vec![1, 3],
+                vec![2.0, 4.0, 8.0],
+                DType::I32,
+                vec![2, 1, 3],
+                vec![1.0, 3.0, 5.0, 7.0, 9.0, 11.0],
+                DType::F32,
+            ),
+            (
+                vec![],
+                vec![4.0],
+                DType::I64,
+                vec![2, 2],
+                vec![1.0, 2.0, 3.0, 4.0],
+                DType::I32,
+            ),
+        ];
+
+        let ops = [BinaryOp::Add, BinaryOp::Sub, BinaryOp::Mul, BinaryOp::Div];
+
+        for (lhs_shape, lhs_values, lhs_dtype, rhs_shape, rhs_values, rhs_dtype) in cases {
+            let lhs =
+                UFuncArray::new(lhs_shape.clone(), lhs_values.clone(), lhs_dtype).expect("lhs");
+            let rhs =
+                UFuncArray::new(rhs_shape.clone(), rhs_values.clone(), rhs_dtype).expect("rhs");
+            let expected_dtype = promote(lhs_dtype, rhs_dtype);
+            let expected_shape =
+                broadcast_shape(&lhs_shape, &rhs_shape).expect("broadcast should work");
+
+            for op in ops {
+                let first = lhs
+                    .elementwise_binary(&rhs, op)
+                    .expect("operation should succeed");
+                let second = lhs
+                    .elementwise_binary(&rhs, op)
+                    .expect("operation should be deterministic");
+                assert_eq!(first.shape(), second.shape());
+                assert_eq!(first.values(), second.values());
+                assert_eq!(first.dtype(), second.dtype());
+                assert_eq!(first.dtype(), expected_dtype);
+                assert_eq!(first.shape(), expected_shape.as_slice());
+            }
+        }
+    }
+
+    #[test]
+    fn reduce_sum_keepdims_shape_contract_holds() {
+        let arr = UFuncArray::new(
+            vec![2, 3, 4],
+            (1..=24).map(f64::from).collect(),
+            DType::F64,
+        )
+        .expect("arr");
+
+        for axis in 0..3 {
+            let keep = arr
+                .reduce_sum(Some(axis), true)
+                .expect("keepdims reduction should succeed");
+            let drop = arr
+                .reduce_sum(Some(axis), false)
+                .expect("dropdims reduction should succeed");
+            assert_eq!(keep.shape().len(), arr.shape().len());
+            assert_eq!(drop.shape().len(), arr.shape().len() - 1);
+            assert_eq!(keep.values(), drop.values());
+        }
+    }
+
+    #[test]
+    fn packet005_log_record_is_replay_complete() {
+        let record = UFuncLogRecord {
+            fixture_id: "UP-005-elementwise-deterministic".to_string(),
+            seed: 5001,
+            mode: UFuncRuntimeMode::Strict,
+            env_fingerprint: "fnp-ufunc-tests".to_string(),
+            artifact_refs: packet005_artifacts(),
+            reason_code: "ufunc_broadcast_selector_determinism".to_string(),
+            passed: true,
+        };
+        assert!(record.is_replay_complete());
+    }
+
+    #[test]
+    fn packet005_log_record_rejects_missing_required_fields() {
+        let missing = UFuncLogRecord {
+            fixture_id: String::new(),
+            seed: 5002,
+            mode: UFuncRuntimeMode::Hardened,
+            env_fingerprint: String::new(),
+            artifact_refs: Vec::new(),
+            reason_code: String::new(),
+            passed: false,
+        };
+        assert!(!missing.is_replay_complete());
+    }
+
+    #[test]
+    fn packet005_reason_codes_round_trip_into_replay_logs() {
+        for (idx, reason_code) in UFUNC_PACKET_REASON_CODES.iter().enumerate() {
+            let record = UFuncLogRecord {
+                fixture_id: format!("UP-005-{idx}"),
+                seed: 5100 + u64::try_from(idx).expect("small index"),
+                mode: UFuncRuntimeMode::Strict,
+                env_fingerprint: "fnp-ufunc-tests".to_string(),
+                artifact_refs: packet005_artifacts(),
+                reason_code: (*reason_code).to_string(),
+                passed: true,
+            };
+            assert!(record.is_replay_complete());
+            assert_eq!(record.reason_code, *reason_code);
+        }
     }
 }
