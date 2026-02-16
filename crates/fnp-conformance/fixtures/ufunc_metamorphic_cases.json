@@ -3,6 +3,13 @@
     "id": "add_commutative_dense_2x2",
     "relation": "add_commutative",
     "seed": 301,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
     "lhs_shape": [2, 2],
     "lhs_values": [1.0, -2.0, 3.5, 4.0],
     "lhs_dtype": "f64",
@@ -14,6 +21,13 @@
     "id": "mul_commutative_broadcast_2x3_by_3",
     "relation": "mul_commutative",
     "seed": 302,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
     "lhs_shape": [2, 3],
     "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
     "lhs_dtype": "f64",
@@ -25,6 +39,13 @@
     "id": "sum_linearity_scalar_neg_2_5",
     "relation": "sum_linearity",
     "seed": 303,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_reduction_contract_violation",
     "lhs_shape": [2, 3],
     "lhs_values": [1.5, -2.0, 3.0, 0.25, 4.0, -5.0],
     "lhs_dtype": "f64",

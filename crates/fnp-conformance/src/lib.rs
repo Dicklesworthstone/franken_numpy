@@ -21,6 +21,7 @@ use fnp_linalg::{
     validate_spectral_branch, validate_tolerance_policy,
 };
 use fnp_ndarray::{MemoryOrder, NdLayout, broadcast_shape, contiguous_strides};
+use fnp_random::{DeterministicRng, RandomError};
 use fnp_runtime::{
     CompatibilityClass, DecisionAction, DecisionAuditContext, EvidenceLedger, RuntimeMode,
     decide_and_record_with_context, decide_compatibility_from_wire,
@@ -208,6 +209,14 @@ struct UFuncMetamorphicCase {
     scalar: Option<f64>,
     #[serde(default)]
     seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -225,7 +234,19 @@ struct UFuncAdversarialCase {
     keepdims: Option<bool>,
     expected_error_contains: String,
     #[serde(default)]
+    expected_reason_code: String,
+    #[serde(default)]
+    severity: String,
+    #[serde(default)]
     seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -422,6 +443,92 @@ struct LinalgAdversarialCase {
 }
 
 #[derive(Debug, Deserialize)]
+struct RngDifferentialCase {
+    id: String,
+    operation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    expected_reason_code: String,
+    #[serde(default)]
+    alt_seed: u64,
+    #[serde(default)]
+    draws: usize,
+    #[serde(default)]
+    upper_bound: u64,
+    #[serde(default)]
+    steps: u64,
+    #[serde(default)]
+    prefix_draws: usize,
+    #[serde(default)]
+    replay_draws: usize,
+    #[serde(default)]
+    fill_len: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct RngMetamorphicCase {
+    id: String,
+    relation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    alt_seed: u64,
+    #[serde(default)]
+    draws: usize,
+    #[serde(default)]
+    upper_bound: u64,
+    #[serde(default)]
+    steps: u64,
+    #[serde(default)]
+    extra_steps: u64,
+    #[serde(default)]
+    fill_len: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct RngAdversarialCase {
+    id: String,
+    operation: String,
+    expected_error_contains: String,
+    expected_reason_code: String,
+    #[serde(default)]
+    severity: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    alt_seed: u64,
+    #[serde(default)]
+    draws: usize,
+    #[serde(default)]
+    steps: u64,
+}
+
+#[derive(Debug, Deserialize)]
 struct CrashSignatureRegistry {
     schema_version: u8,
     registry_version: String,
@@ -508,6 +615,46 @@ struct LinalgDifferentialReportArtifact {
     passed_cases: usize,
     failed_cases: usize,
     mismatches: Vec<LinalgDifferentialMismatch>,
+}
+
+#[derive(Debug, Serialize)]
+struct UFuncDifferentialMismatch {
+    fixture_id: String,
+    seed: u64,
+    mode: String,
+    expected_reason_code: String,
+    actual_reason_code: String,
+    message: String,
+    artifact_refs: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct UFuncDifferentialReportArtifact {
+    suite: &'static str,
+    total_cases: usize,
+    passed_cases: usize,
+    failed_cases: usize,
+    mismatches: Vec<UFuncDifferentialMismatch>,
+}
+
+#[derive(Debug, Serialize)]
+struct RngDifferentialMismatch {
+    fixture_id: String,
+    seed: u64,
+    mode: String,
+    expected_reason_code: String,
+    actual_reason_code: String,
+    message: String,
+    artifact_refs: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RngDifferentialReportArtifact {
+    suite: &'static str,
+    total_cases: usize,
+    passed_cases: usize,
+    failed_cases: usize,
+    mismatches: Vec<RngDifferentialMismatch>,
 }
 
 static RUNTIME_POLICY_LOG_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
@@ -1091,13 +1238,50 @@ pub fn run_ufunc_differential_suite(config: &HarnessConfig) -> Result<SuiteRepor
     let report = ufunc_differential::compare_against_oracle(&input_path, &oracle_path, 1e-9, 1e-9)?;
     ufunc_differential::write_differential_report(&report_path, &report)?;
 
+    let mismatches = report
+        .failures
+        .iter()
+        .map(|failure| UFuncDifferentialMismatch {
+            fixture_id: failure.id.clone(),
+            seed: failure.seed,
+            mode: failure.mode.clone(),
+            expected_reason_code: failure.expected_reason_code.clone(),
+            actual_reason_code: failure.actual_reason_code.clone(),
+            message: failure
+                .reason
+                .clone()
+                .unwrap_or_else(|| "no reason provided".to_string()),
+            artifact_refs: failure.artifact_refs.clone(),
+        })
+        .collect::<Vec<_>>();
+    let artifact = UFuncDifferentialReportArtifact {
+        suite: "ufunc_differential",
+        total_cases: report.total_cases,
+        passed_cases: report.passed_cases,
+        failed_cases: report.failed_cases,
+        mismatches,
+    };
+    let artifact_path = config
+        .fixture_root
+        .join("oracle_outputs/ufunc_differential_mismatch_report.json");
+    let payload = serde_json::to_string_pretty(&artifact)
+        .map_err(|err| format!("failed serializing ufunc differential report: {err}"))?;
+    fs::write(&artifact_path, payload.as_bytes())
+        .map_err(|err| format!("failed writing {}: {err}", artifact_path.display()))?;
+
     let failures = report
         .failures
         .iter()
         .map(|failure| {
             format!(
-                "{}: {}",
+                "{}: seed={} mode={} reason_code={} expected_reason_code={} env_fingerprint={} artifact_refs={} {}",
                 failure.id,
+                failure.seed,
+                failure.mode,
+                failure.actual_reason_code,
+                failure.expected_reason_code,
+                failure.env_fingerprint,
+                failure.artifact_refs.join(","),
                 failure.reason.as_deref().unwrap_or("no reason provided")
             )
         })
@@ -1126,19 +1310,34 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
     };
 
     for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+
         let pass = match case.relation.as_str() {
             "add_commutative" => {
                 let Some(rhs_shape) = case.rhs_shape.clone() else {
                     report.failures.push(format!(
-                        "{}: missing rhs_shape for add_commutative",
-                        case.id
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} missing rhs_shape for add_commutative",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(",")
                     ));
                     continue;
                 };
                 let Some(rhs_values) = case.rhs_values.clone() else {
                     report.failures.push(format!(
-                        "{}: missing rhs_values for add_commutative",
-                        case.id
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} missing rhs_values for add_commutative",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(",")
                     ));
                     continue;
                 };
@@ -1158,6 +1357,13 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     rhs_dtype: Some(rhs_dtype.clone()),
                     axis: None,
                     keepdims: None,
+                    seed: case.seed,
+                    mode: mode.clone(),
+                    env_fingerprint: env_fingerprint.clone(),
+                    artifact_refs: artifact_refs.clone(),
+                    reason_code: reason_code.clone(),
+                    expected_reason_code: reason_code.clone(),
+                    expected_error_contains: String::new(),
                 };
                 let rhs_lhs = UFuncInputCase {
                     id: format!("{}::rhs_lhs", case.id),
@@ -1170,21 +1376,48 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     rhs_dtype: Some(case.lhs_dtype.clone()),
                     axis: None,
                     keepdims: None,
+                    seed: case.seed,
+                    mode: mode.clone(),
+                    env_fingerprint: env_fingerprint.clone(),
+                    artifact_refs: artifact_refs.clone(),
+                    reason_code: reason_code.clone(),
+                    expected_reason_code: reason_code.clone(),
+                    expected_error_contains: String::new(),
                 };
-                evaluate_commutative_pair(&case.id, case.seed, lhs_rhs, rhs_lhs, &mut report)
+                evaluate_commutative_pair(
+                    &case.id,
+                    case.seed,
+                    &mode,
+                    &reason_code,
+                    &env_fingerprint,
+                    &artifact_refs,
+                    lhs_rhs,
+                    rhs_lhs,
+                    &mut report,
+                )
             }
             "mul_commutative" => {
                 let Some(rhs_shape) = case.rhs_shape.clone() else {
                     report.failures.push(format!(
-                        "{}: missing rhs_shape for mul_commutative",
-                        case.id
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} missing rhs_shape for mul_commutative",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(",")
                     ));
                     continue;
                 };
                 let Some(rhs_values) = case.rhs_values.clone() else {
                     report.failures.push(format!(
-                        "{}: missing rhs_values for mul_commutative",
-                        case.id
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} missing rhs_values for mul_commutative",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(",")
                     ));
                     continue;
                 };
@@ -1204,6 +1437,13 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     rhs_dtype: Some(rhs_dtype.clone()),
                     axis: None,
                     keepdims: None,
+                    seed: case.seed,
+                    mode: mode.clone(),
+                    env_fingerprint: env_fingerprint.clone(),
+                    artifact_refs: artifact_refs.clone(),
+                    reason_code: reason_code.clone(),
+                    expected_reason_code: reason_code.clone(),
+                    expected_error_contains: String::new(),
                 };
                 let rhs_lhs = UFuncInputCase {
                     id: format!("{}::rhs_lhs", case.id),
@@ -1216,8 +1456,25 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     rhs_dtype: Some(case.lhs_dtype.clone()),
                     axis: None,
                     keepdims: None,
+                    seed: case.seed,
+                    mode: mode.clone(),
+                    env_fingerprint: env_fingerprint.clone(),
+                    artifact_refs: artifact_refs.clone(),
+                    reason_code: reason_code.clone(),
+                    expected_reason_code: reason_code.clone(),
+                    expected_error_contains: String::new(),
                 };
-                evaluate_commutative_pair(&case.id, case.seed, lhs_rhs, rhs_lhs, &mut report)
+                evaluate_commutative_pair(
+                    &case.id,
+                    case.seed,
+                    &mode,
+                    &reason_code,
+                    &env_fingerprint,
+                    &artifact_refs,
+                    lhs_rhs,
+                    rhs_lhs,
+                    &mut report,
+                )
             }
             "sum_linearity" => {
                 let scalar = case.scalar.unwrap_or(1.0);
@@ -1232,6 +1489,13 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     rhs_dtype: None,
                     axis: None,
                     keepdims: Some(false),
+                    seed: case.seed,
+                    mode: mode.clone(),
+                    env_fingerprint: env_fingerprint.clone(),
+                    artifact_refs: artifact_refs.clone(),
+                    reason_code: reason_code.clone(),
+                    expected_reason_code: reason_code.clone(),
+                    expected_error_contains: String::new(),
                 };
                 let scale_case = UFuncInputCase {
                     id: format!("{}::scale", case.id),
@@ -1244,13 +1508,25 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     rhs_dtype: Some(default_f64_dtype_name()),
                     axis: None,
                     keepdims: None,
+                    seed: case.seed,
+                    mode: mode.clone(),
+                    env_fingerprint: env_fingerprint.clone(),
+                    artifact_refs: artifact_refs.clone(),
+                    reason_code: reason_code.clone(),
+                    expected_reason_code: reason_code.clone(),
+                    expected_error_contains: String::new(),
                 };
 
                 let Ok((_, base_values, _)) = ufunc_differential::execute_input_case(&sum_case)
                 else {
                     report.failures.push(format!(
-                        "{}: seed={} failed evaluating base sum",
-                        case.id, case.seed
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} failed evaluating base sum",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(",")
                     ));
                     continue;
                 };
@@ -1258,8 +1534,13 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     ufunc_differential::execute_input_case(&scale_case)
                 else {
                     report.failures.push(format!(
-                        "{}: seed={} failed evaluating scaled array",
-                        case.id, case.seed
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} failed evaluating scaled array",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(",")
                     ));
                     continue;
                 };
@@ -1275,14 +1556,26 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     rhs_dtype: None,
                     axis: None,
                     keepdims: Some(false),
+                    seed: case.seed,
+                    mode: mode.clone(),
+                    env_fingerprint: env_fingerprint.clone(),
+                    artifact_refs: artifact_refs.clone(),
+                    reason_code: reason_code.clone(),
+                    expected_reason_code: reason_code.clone(),
+                    expected_error_contains: String::new(),
                 };
 
                 let Ok((_, sum_scaled_values, _)) =
                     ufunc_differential::execute_input_case(&scaled_sum_case)
                 else {
                     report.failures.push(format!(
-                        "{}: seed={} failed evaluating scaled sum",
-                        case.id, case.seed
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} failed evaluating scaled sum",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(",")
                     ));
                     continue;
                 };
@@ -1293,8 +1586,17 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                 let threshold = 1e-9 + 1e-9 * expected.abs();
                 if abs_err > threshold {
                     report.failures.push(format!(
-                        "{}: seed={} sum_linearity mismatch expected={} actual={} abs_err={} threshold={}",
-                        case.id, case.seed, expected, actual, abs_err, threshold
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} sum_linearity mismatch expected={} actual={} abs_err={} threshold={}",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(","),
+                        expected,
+                        actual,
+                        abs_err,
+                        threshold
                     ));
                     false
                 } else {
@@ -1302,9 +1604,16 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                 }
             }
             other => {
-                report
-                    .failures
-                    .push(format!("{}: unsupported relation {}", case.id, other));
+                report.failures.push(format!(
+                    "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} unsupported relation {}",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    other
+                ));
                 false
             }
         };
@@ -1332,6 +1641,39 @@ pub fn run_ufunc_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport
     };
 
     for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+        let severity = case.severity.trim().to_lowercase();
+        if !matches!(severity.as_str(), "low" | "medium" | "high" | "critical") {
+            report.failures.push(format!(
+                "{}: invalid severity '{}' (must be low|medium|high|critical), reason_code={}, mode={}, env_fingerprint={}, artifact_refs={}",
+                case.id,
+                case.severity,
+                reason_code,
+                mode,
+                env_fingerprint,
+                artifact_refs.join(",")
+            ));
+            continue;
+        }
+        if case.expected_error_contains.trim().is_empty() {
+            report.failures.push(format!(
+                "{}: expected_error_contains must be non-empty, reason_code={}, mode={}, env_fingerprint={}, artifact_refs={}",
+                case.id,
+                reason_code,
+                mode,
+                env_fingerprint,
+                artifact_refs.join(",")
+            ));
+            continue;
+        }
+        let expected_reason_code = if case.expected_reason_code.trim().is_empty() {
+            reason_code.clone()
+        } else {
+            case.expected_reason_code.trim().to_string()
+        };
         let input = UFuncInputCase {
             id: case.id.clone(),
             op: case.op,
@@ -1343,24 +1685,48 @@ pub fn run_ufunc_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport
             rhs_dtype: case.rhs_dtype.clone(),
             axis: case.axis,
             keepdims: case.keepdims,
+            seed: case.seed,
+            mode: mode.clone(),
+            env_fingerprint: env_fingerprint.clone(),
+            artifact_refs: artifact_refs.clone(),
+            reason_code: reason_code.clone(),
+            expected_reason_code: expected_reason_code.clone(),
+            expected_error_contains: case.expected_error_contains.clone(),
         };
 
         match ufunc_differential::execute_input_case(&input) {
             Ok((shape, _, _)) => {
                 report.failures.push(format!(
-                    "{}: seed={} expected error containing '{}' but execution succeeded with shape={shape:?}",
-                    case.id, case.seed, case.expected_error_contains
+                    "{}: severity={severity} seed={} reason_code={} mode={} env_fingerprint={} artifact_refs={} expected error containing '{}' with reason_code='{}' but execution succeeded with shape={shape:?}",
+                    case.id,
+                    case.seed,
+                    reason_code,
+                    mode,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    case.expected_error_contains,
+                    expected_reason_code
                 ));
             }
             Err(err) => {
                 let expected = case.expected_error_contains.to_lowercase();
                 let actual = err.to_lowercase();
-                if actual.contains(&expected) {
+                let actual_reason_code = classify_ufunc_reason_code(case.op, &err);
+                if actual.contains(&expected) && actual_reason_code == expected_reason_code {
                     report.pass_count += 1;
                 } else {
                     report.failures.push(format!(
-                        "{}: seed={} expected error containing '{}' but got '{}'",
-                        case.id, case.seed, case.expected_error_contains, err
+                        "{}: severity={severity} seed={} reason_code={} mode={} env_fingerprint={} artifact_refs={} expected error containing '{}' with reason_code='{}' but got '{}' (reason_code='{}')",
+                        case.id,
+                        case.seed,
+                        reason_code,
+                        mode,
+                        env_fingerprint,
+                        artifact_refs.join(","),
+                        case.expected_error_contains,
+                        expected_reason_code,
+                        err,
+                        actual_reason_code
                     ));
                 }
             }
@@ -1910,6 +2276,241 @@ pub fn run_linalg_adversarial_suite(config: &HarnessConfig) -> Result<SuiteRepor
     Ok(report)
 }
 
+#[derive(Debug, Clone)]
+struct RngSuiteError {
+    reason_code: String,
+    message: String,
+}
+
+impl RngSuiteError {
+    fn new(reason_code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            reason_code: reason_code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for RngSuiteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for RngSuiteError {}
+
+pub fn run_rng_differential_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let path = config.fixture_root.join("rng_differential_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    let cases: Vec<RngDifferentialCase> =
+        serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))?;
+
+    let mut report = SuiteReport {
+        suite: "rng_differential",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+    let mut mismatches = Vec::new();
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+        let expected_reason_code = if case.expected_reason_code.trim().is_empty() {
+            reason_code.clone()
+        } else {
+            case.expected_reason_code.trim().to_string()
+        };
+
+        match execute_rng_differential_operation(&case) {
+            Ok(()) => {
+                report.pass_count += 1;
+            }
+            Err(err) => {
+                let rendered = format!(
+                    "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} {} (actual_reason_code={})",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    err.message,
+                    err.reason_code
+                );
+                report.failures.push(rendered.clone());
+                mismatches.push(RngDifferentialMismatch {
+                    fixture_id: case.id,
+                    seed: case.seed,
+                    mode,
+                    expected_reason_code,
+                    actual_reason_code: err.reason_code,
+                    message: rendered,
+                    artifact_refs,
+                });
+            }
+        }
+    }
+
+    let artifact = RngDifferentialReportArtifact {
+        suite: "rng_differential",
+        total_cases: report.case_count,
+        passed_cases: report.pass_count,
+        failed_cases: report.case_count.saturating_sub(report.pass_count),
+        mismatches,
+    };
+    let report_path = config
+        .fixture_root
+        .join("oracle_outputs/rng_differential_report.json");
+    if let Some(parent) = report_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed creating {}: {err}", parent.display()))?;
+    }
+    let payload = serde_json::to_string_pretty(&artifact)
+        .map_err(|err| format!("failed serializing rng differential report: {err}"))?;
+    fs::write(&report_path, payload.as_bytes())
+        .map_err(|err| format!("failed writing {}: {err}", report_path.display()))?;
+
+    Ok(report)
+}
+
+pub fn run_rng_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let path = config.fixture_root.join("rng_metamorphic_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    let cases: Vec<RngMetamorphicCase> =
+        serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))?;
+
+    let mut report = SuiteReport {
+        suite: "rng_metamorphic",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+
+        match evaluate_rng_metamorphic_relation(&case) {
+            Ok(()) => {
+                report.pass_count += 1;
+            }
+            Err(err) => {
+                report.failures.push(format!(
+                    "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} {} (actual_reason_code={})",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    err.message,
+                    err.reason_code
+                ));
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+pub fn run_rng_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let path = config.fixture_root.join("rng_adversarial_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    let cases: Vec<RngAdversarialCase> =
+        serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))?;
+
+    let mut report = SuiteReport {
+        suite: "rng_adversarial",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+        let severity = case.severity.trim().to_lowercase();
+        if !matches!(severity.as_str(), "low" | "medium" | "high" | "critical") {
+            report.failures.push(format!(
+                "{}: invalid severity '{}' (must be low|medium|high|critical), reason_code={}, mode={}, env_fingerprint={}, artifact_refs={}",
+                case.id,
+                case.severity,
+                reason_code,
+                mode,
+                env_fingerprint,
+                artifact_refs.join(",")
+            ));
+            continue;
+        }
+        if case.expected_error_contains.trim().is_empty() {
+            report.failures.push(format!(
+                "{}: expected_error_contains must be non-empty, reason_code={}, mode={}, env_fingerprint={}, artifact_refs={}",
+                case.id,
+                reason_code,
+                mode,
+                env_fingerprint,
+                artifact_refs.join(",")
+            ));
+            continue;
+        }
+
+        let expected_reason_code = if case.expected_reason_code.trim().is_empty() {
+            reason_code.clone()
+        } else {
+            case.expected_reason_code.trim().to_string()
+        };
+        let expected_error = case.expected_error_contains.to_lowercase();
+        match execute_rng_adversarial_operation(&case) {
+            Ok(()) => {
+                report.failures.push(format!(
+                    "{}: severity={severity} seed={} reason_code={} mode={} env_fingerprint={} artifact_refs={} expected error containing '{}' but operation '{}' succeeded",
+                    case.id,
+                    case.seed,
+                    reason_code,
+                    mode,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    case.expected_error_contains,
+                    case.operation
+                ));
+            }
+            Err(err) => {
+                let contains_expected = err.message.to_lowercase().contains(&expected_error);
+                let reason_match = err.reason_code == expected_reason_code;
+                if contains_expected && reason_match {
+                    report.pass_count += 1;
+                } else {
+                    report.failures.push(format!(
+                        "{}: severity={severity} seed={} reason_code={} mode={} env_fingerprint={} artifact_refs={} expected error containing '{}' with reason_code='{}' but got '{}' (reason_code='{}')",
+                        case.id,
+                        case.seed,
+                        reason_code,
+                        mode,
+                        env_fingerprint,
+                        artifact_refs.join(","),
+                        case.expected_error_contains,
+                        expected_reason_code,
+                        err.message,
+                        err.reason_code
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(report)
+}
+
 pub fn run_io_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
     let path = config.fixture_root.join("io_adversarial_cases.json");
     let raw = fs::read_to_string(&path)
@@ -2032,6 +2633,7 @@ pub fn run_crash_signature_regression_suite(config: &HarnessConfig) -> Result<Su
             "ufunc_adversarial" => run_ufunc_adversarial_suite(config)?,
             "io_adversarial" => run_io_adversarial_suite(config)?,
             "linalg_adversarial" => run_linalg_adversarial_suite(config)?,
+            "rng_adversarial" => run_rng_adversarial_suite(config)?,
             other => {
                 record_suite_check(
                     &mut report,
@@ -2143,6 +2745,9 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
         run_dtype_promotion_suite(config)?,
         run_runtime_policy_suite(config)?,
         run_runtime_policy_adversarial_suite(config)?,
+        run_rng_differential_suite(config)?,
+        run_rng_metamorphic_suite(config)?,
+        run_rng_adversarial_suite(config)?,
         run_linalg_differential_suite(config)?,
         run_linalg_metamorphic_suite(config)?,
         run_linalg_adversarial_suite(config)?,
@@ -2158,48 +2763,80 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
     ])
 }
 
+#[allow(clippy::too_many_arguments)]
 fn evaluate_commutative_pair(
     case_id: &str,
     seed: u64,
+    mode: &str,
+    reason_code: &str,
+    env_fingerprint: &str,
+    artifact_refs: &[String],
     lhs_rhs: UFuncInputCase,
     rhs_lhs: UFuncInputCase,
     report: &mut SuiteReport,
 ) -> bool {
     let Ok((shape_a, values_a, dtype_a)) = ufunc_differential::execute_input_case(&lhs_rhs) else {
         report.failures.push(format!(
-            "{}: seed={} failed lhs_rhs execution",
-            case_id, seed
+            "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} failed lhs_rhs execution",
+            case_id,
+            seed,
+            mode,
+            reason_code,
+            env_fingerprint,
+            artifact_refs.join(",")
         ));
         return false;
     };
     let Ok((shape_b, values_b, dtype_b)) = ufunc_differential::execute_input_case(&rhs_lhs) else {
         report.failures.push(format!(
-            "{}: seed={} failed rhs_lhs execution",
-            case_id, seed
+            "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} failed rhs_lhs execution",
+            case_id,
+            seed,
+            mode,
+            reason_code,
+            env_fingerprint,
+            artifact_refs.join(",")
         ));
         return false;
     };
 
     if shape_a != shape_b {
         report.failures.push(format!(
-            "{}: seed={} commutative shape mismatch lhs_rhs={shape_a:?} rhs_lhs={shape_b:?}",
-            case_id, seed
+            "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} commutative shape mismatch lhs_rhs={shape_a:?} rhs_lhs={shape_b:?}",
+            case_id,
+            seed,
+            mode,
+            reason_code,
+            env_fingerprint,
+            artifact_refs.join(",")
         ));
         return false;
     }
 
     if dtype_a != dtype_b {
         report.failures.push(format!(
-            "{}: seed={} commutative dtype mismatch lhs_rhs={} rhs_lhs={}",
-            case_id, seed, dtype_a, dtype_b
+            "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} commutative dtype mismatch lhs_rhs={} rhs_lhs={}",
+            case_id,
+            seed,
+            mode,
+            reason_code,
+            env_fingerprint,
+            artifact_refs.join(","),
+            dtype_a,
+            dtype_b
         ));
         return false;
     }
 
     if !approx_equal_values(&values_a, &values_b, 1e-9, 1e-9) {
         report.failures.push(format!(
-            "{}: seed={} commutative value mismatch",
-            case_id, seed
+            "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} commutative value mismatch",
+            case_id,
+            seed,
+            mode,
+            reason_code,
+            env_fingerprint,
+            artifact_refs.join(",")
         ));
         return false;
     }
@@ -2231,6 +2868,34 @@ fn resolve_case_mode(raw: &str, strict_mode: bool) -> String {
         }
     } else {
         raw.trim().to_string()
+    }
+}
+
+fn classify_ufunc_reason_code(op: UFuncOperation, detail: &str) -> String {
+    let lowered = detail.to_lowercase();
+    if lowered.contains("rhs_shape")
+        || lowered.contains("rhs_values")
+        || lowered.contains("signature")
+    {
+        "ufunc_signature_parse_failed".to_string()
+    } else if lowered.contains("unsupported dtype")
+        || lowered.contains("dtype")
+        || lowered.contains("promotion")
+    {
+        "ufunc_type_resolution_invalid".to_string()
+    } else if matches!(op, UFuncOperation::Sum)
+        && (lowered.contains("axis") || lowered.contains("keepdims") || lowered.contains("reduce"))
+    {
+        "ufunc_reduction_contract_violation".to_string()
+    } else if lowered.contains("override") {
+        "ufunc_override_precedence_violation".to_string()
+    } else if lowered.contains("policy")
+        || lowered.contains("metadata")
+        || lowered.contains("oracle")
+    {
+        "ufunc_policy_unknown_metadata".to_string()
+    } else {
+        "ufunc_dispatch_resolution_failed".to_string()
     }
 }
 
@@ -2435,6 +3100,263 @@ fn validate_linalg_differential_expectation(
             "operation {operation} produced unexpected outcome {actual:?}"
         )),
     }
+}
+
+const DEFAULT_RNG_DRAWS: usize = 128;
+const DEFAULT_RNG_REPLAY_DRAWS: usize = 32;
+const DEFAULT_RNG_PREFIX_DRAWS: usize = 8;
+const DEFAULT_RNG_JUMP_STEPS: u64 = 32;
+const RNG_MAX_JUMP_OPS: u64 = 1024;
+const RNG_MAX_STATE_SCHEMA_FIELDS: u64 = 4096;
+
+fn execute_rng_differential_operation(case: &RngDifferentialCase) -> Result<(), RngSuiteError> {
+    match case.operation.as_str() {
+        "same_seed_stream" => {
+            let draws = case.draws.max(DEFAULT_RNG_DRAWS);
+            let mut lhs = DeterministicRng::new(case.seed);
+            let mut rhs = DeterministicRng::new(case.seed);
+            for index in 0..draws {
+                if lhs.next_u64() != rhs.next_u64() {
+                    return Err(RngSuiteError::new(
+                        "rng_reproducibility_witness_failed",
+                        format!("same-seed stream mismatch at draw {index}"),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        "different_seed_diverges" => {
+            let draws = case.draws.max(DEFAULT_RNG_DRAWS);
+            let alt_seed = if case.alt_seed == 0 {
+                case.seed.wrapping_add(1)
+            } else {
+                case.alt_seed
+            };
+            let mut lhs = DeterministicRng::new(case.seed);
+            let mut rhs = DeterministicRng::new(alt_seed);
+            let diverged = (0..draws).any(|_| lhs.next_u64() != rhs.next_u64());
+            if diverged {
+                Ok(())
+            } else {
+                Err(RngSuiteError::new(
+                    "rng_reproducibility_witness_failed",
+                    "distinct seeds did not diverge within draw budget",
+                ))
+            }
+        }
+        "jump_ahead_equivalence" => {
+            let steps = case.steps.max(DEFAULT_RNG_JUMP_STEPS);
+            let mut jumped = DeterministicRng::new(case.seed);
+            let mut stepped = DeterministicRng::new(case.seed);
+            jumped.jump_ahead(steps);
+            for _ in 0..steps {
+                let _ = stepped.next_u64();
+            }
+            if jumped.next_u64() == stepped.next_u64() {
+                Ok(())
+            } else {
+                Err(RngSuiteError::new(
+                    "rng_jump_contract_violation",
+                    "jump-ahead witness diverged from stepped advancement",
+                ))
+            }
+        }
+        "state_restore_replay" => {
+            let prefix_draws = case.prefix_draws.max(DEFAULT_RNG_PREFIX_DRAWS);
+            let replay_draws = case.replay_draws.max(DEFAULT_RNG_REPLAY_DRAWS);
+            let mut source = DeterministicRng::new(case.seed);
+            for _ in 0..prefix_draws {
+                let _ = source.next_u64();
+            }
+            let (seed, counter) = source.state();
+            let mut restored = DeterministicRng::from_state(seed, counter);
+            for index in 0..replay_draws {
+                if source.next_u64() != restored.next_u64() {
+                    return Err(RngSuiteError::new(
+                        "rng_state_restore_contract",
+                        format!("restored sequence diverged at replay draw {index}"),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        "bounded_u64_grid" => {
+            let draws = case.draws.max(DEFAULT_RNG_DRAWS);
+            let mut rng = DeterministicRng::new(case.seed);
+            for index in 0..draws {
+                let value = rng
+                    .bounded_u64(case.upper_bound)
+                    .map_err(map_random_error_to_rng_suite)?;
+                if value >= case.upper_bound {
+                    return Err(RngSuiteError::new(
+                        "rng_bounded_output_contract",
+                        format!("bounded sample exceeded upper bound at draw {index}"),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        "next_f64_unit_interval" => {
+            let draws = case.draws.max(DEFAULT_RNG_DRAWS);
+            let mut rng = DeterministicRng::new(case.seed);
+            for index in 0..draws {
+                let sample = rng.next_f64();
+                if !(0.0..1.0).contains(&sample) {
+                    return Err(RngSuiteError::new(
+                        "rng_float_range_contract",
+                        format!("next_f64 sample outside [0,1) at draw {index}: {sample}"),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        "fill_len_contract" => {
+            let mut rng = DeterministicRng::new(case.seed);
+            let values = rng.fill_u64(case.fill_len);
+            if values.len() == case.fill_len {
+                Ok(())
+            } else {
+                Err(RngSuiteError::new(
+                    "rng_fill_length_contract",
+                    format!(
+                        "fill_u64 length mismatch expected={} actual={}",
+                        case.fill_len,
+                        values.len()
+                    ),
+                ))
+            }
+        }
+        other => Err(RngSuiteError::new(
+            "rng_policy_unknown_metadata",
+            format!("unsupported rng differential operation {other}"),
+        )),
+    }
+}
+
+fn evaluate_rng_metamorphic_relation(case: &RngMetamorphicCase) -> Result<(), RngSuiteError> {
+    match case.relation.as_str() {
+        "jump_partition_additivity" => {
+            let steps = case.steps.max(DEFAULT_RNG_JUMP_STEPS);
+            let extra_steps = case.extra_steps.max(17);
+            let mut lhs = DeterministicRng::new(case.seed);
+            lhs.jump_ahead(steps);
+            lhs.jump_ahead(extra_steps);
+            let mut rhs = DeterministicRng::new(case.seed);
+            rhs.jump_ahead(steps.saturating_add(extra_steps));
+
+            if lhs.next_u64() == rhs.next_u64() {
+                Ok(())
+            } else {
+                Err(RngSuiteError::new(
+                    "rng_jump_contract_violation",
+                    "jump partition additivity invariant failed",
+                ))
+            }
+        }
+        "fill_matches_iterative_draw" => {
+            let len = case.fill_len.max(DEFAULT_RNG_REPLAY_DRAWS);
+            let mut lhs = DeterministicRng::new(case.seed);
+            let filled = lhs.fill_u64(len);
+            let mut rhs = DeterministicRng::new(case.seed);
+            let iter = (0..len).map(|_| rhs.next_u64()).collect::<Vec<_>>();
+            if filled == iter {
+                Ok(())
+            } else {
+                Err(RngSuiteError::new(
+                    "rng_fill_length_contract",
+                    "fill_u64 output does not match iterative draws",
+                ))
+            }
+        }
+        "bounded_repeatability" => {
+            let draws = case.draws.max(DEFAULT_RNG_DRAWS);
+            let upper_bound = case.upper_bound.max(2);
+            let second_seed = if case.alt_seed == 0 {
+                case.seed
+            } else {
+                case.alt_seed
+            };
+            let mut lhs = DeterministicRng::new(case.seed);
+            let mut rhs = DeterministicRng::new(second_seed);
+            for index in 0..draws {
+                let lhs_value = lhs
+                    .bounded_u64(upper_bound)
+                    .map_err(map_random_error_to_rng_suite)?;
+                let rhs_value = rhs
+                    .bounded_u64(upper_bound)
+                    .map_err(map_random_error_to_rng_suite)?;
+                if lhs_value != rhs_value {
+                    return Err(RngSuiteError::new(
+                        "rng_bounded_output_contract",
+                        format!("bounded repeatability diverged at draw {index}"),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        other => Err(RngSuiteError::new(
+            "rng_policy_unknown_metadata",
+            format!("unsupported rng metamorphic relation {other}"),
+        )),
+    }
+}
+
+fn execute_rng_adversarial_operation(case: &RngAdversarialCase) -> Result<(), RngSuiteError> {
+    match case.operation.as_str() {
+        "bounded_zero_rejected" => {
+            let mut rng = DeterministicRng::new(case.seed);
+            rng.bounded_u64(0)
+                .map(|_| ())
+                .map_err(map_random_error_to_rng_suite)
+        }
+        "forced_repro_witness_mismatch" => {
+            let draws = case.draws.max(DEFAULT_RNG_REPLAY_DRAWS);
+            let alt_seed = if case.alt_seed == 0 {
+                case.seed.wrapping_add(1)
+            } else {
+                case.alt_seed
+            };
+            let mut lhs = DeterministicRng::new(case.seed);
+            let mut rhs = DeterministicRng::new(alt_seed);
+            for _ in 0..draws {
+                if lhs.next_u64() != rhs.next_u64() {
+                    return Err(RngSuiteError::new(
+                        "rng_reproducibility_witness_failed",
+                        "reproducibility witness mismatch between paired streams",
+                    ));
+                }
+            }
+            Ok(())
+        }
+        "jump_budget_exceeded" => {
+            if case.steps > RNG_MAX_JUMP_OPS {
+                Err(RngSuiteError::new(
+                    "rng_jump_contract_violation",
+                    "jump operations exceeded bounded budget",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        "state_schema_budget_exceeded" => {
+            if case.steps > RNG_MAX_STATE_SCHEMA_FIELDS {
+                Err(RngSuiteError::new(
+                    "rng_state_schema_invalid",
+                    "state schema entries exceeded bounded budget",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        other => Err(RngSuiteError::new(
+            "rng_policy_unknown_metadata",
+            format!("unsupported rng adversarial operation {other}"),
+        )),
+    }
+}
+
+fn map_random_error_to_rng_suite(error: RandomError) -> RngSuiteError {
+    RngSuiteError::new(error.reason_code(), error.to_string())
 }
 
 fn execute_io_adversarial_operation(case: &IoAdversarialCase) -> Result<(), String> {
@@ -2671,7 +3593,8 @@ mod tests {
     use super::{
         HarnessConfig, run_all_core_suites, run_crash_signature_regression_suite,
         run_dtype_promotion_suite, run_io_adversarial_suite, run_linalg_adversarial_suite,
-        run_linalg_differential_suite, run_linalg_metamorphic_suite,
+        run_linalg_differential_suite, run_linalg_metamorphic_suite, run_rng_adversarial_suite,
+        run_rng_differential_suite, run_rng_metamorphic_suite,
         run_runtime_policy_adversarial_suite, run_shape_stride_suite, run_smoke,
         run_ufunc_adversarial_suite, run_ufunc_differential_suite, run_ufunc_metamorphic_suite,
         set_dtype_promotion_log_path, set_shape_stride_log_path,
@@ -3040,6 +3963,27 @@ mod tests {
     fn linalg_adversarial_suite_is_green() {
         let cfg = HarnessConfig::default_paths();
         let suite = run_linalg_adversarial_suite(&cfg).expect("adversarial suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn rng_differential_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite = run_rng_differential_suite(&cfg).expect("differential suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn rng_metamorphic_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite = run_rng_metamorphic_suite(&cfg).expect("metamorphic suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn rng_adversarial_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite = run_rng_adversarial_suite(&cfg).expect("adversarial suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 

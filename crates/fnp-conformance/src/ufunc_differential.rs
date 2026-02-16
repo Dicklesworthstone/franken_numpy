@@ -280,6 +280,20 @@ pub struct UFuncInputCase {
     pub rhs_dtype: Option<String>,
     pub axis: Option<usize>,
     pub keepdims: Option<bool>,
+    #[serde(default)]
+    pub seed: u64,
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default)]
+    pub env_fingerprint: String,
+    #[serde(default)]
+    pub artifact_refs: Vec<String>,
+    #[serde(default)]
+    pub reason_code: String,
+    #[serde(default)]
+    pub expected_reason_code: String,
+    #[serde(default)]
+    pub expected_error_contains: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -303,12 +317,18 @@ pub struct UFuncOracleCapture {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UFuncDifferentialCaseResult {
     pub id: String,
+    pub seed: u64,
+    pub mode: String,
+    pub env_fingerprint: String,
+    pub artifact_refs: Vec<String>,
     pub pass: bool,
     pub max_abs_error: f64,
     pub expected_shape: Vec<usize>,
     pub actual_shape: Vec<usize>,
     pub expected_dtype: String,
     pub actual_dtype: String,
+    pub expected_reason_code: String,
+    pub actual_reason_code: String,
     pub reason: Option<String>,
 }
 
@@ -327,6 +347,71 @@ pub struct UFuncDifferentialReport {
 
 fn default_f64_dtype() -> String {
     "f64".to_string()
+}
+
+fn normalize_mode(raw: &str) -> String {
+    if raw.trim().is_empty() {
+        "strict".to_string()
+    } else {
+        raw.trim().to_string()
+    }
+}
+
+fn normalize_env_fingerprint(raw: &str) -> String {
+    if raw.trim().is_empty() {
+        "unknown_env".to_string()
+    } else {
+        raw.trim().to_string()
+    }
+}
+
+fn normalize_artifact_refs(mut refs: Vec<String>) -> Vec<String> {
+    refs.retain(|entry| !entry.trim().is_empty());
+    if refs.is_empty() {
+        refs.push("crates/fnp-conformance/fixtures/ufunc_input_cases.json".to_string());
+    }
+    refs
+}
+
+fn classify_reason_code(op: UFuncOperation, detail: &str) -> String {
+    let lowered = detail.to_lowercase();
+
+    if lowered.contains("oracle case missing")
+        || lowered.contains("unsupported oracle status")
+        || lowered.contains("unknown metadata")
+    {
+        "ufunc_policy_unknown_metadata".to_string()
+    } else if lowered.contains("signature")
+        || lowered.contains("rhs_shape")
+        || lowered.contains("rhs_values")
+    {
+        "ufunc_signature_parse_failed".to_string()
+    } else if lowered.contains("dtype mismatch")
+        || lowered.contains("unsupported dtype")
+        || lowered.contains("type resolution")
+    {
+        "ufunc_type_resolution_invalid".to_string()
+    } else if matches!(op, UFuncOperation::Sum)
+        && (lowered.contains("axis")
+            || lowered.contains("keepdims")
+            || lowered.contains("reduce sum"))
+    {
+        "ufunc_reduction_contract_violation".to_string()
+    } else if lowered.contains("override") {
+        "ufunc_override_precedence_violation".to_string()
+    } else {
+        "ufunc_dispatch_resolution_failed".to_string()
+    }
+}
+
+fn resolve_expected_reason_code(input: &UFuncInputCase, fallback: &str) -> String {
+    if !input.expected_reason_code.trim().is_empty() {
+        input.expected_reason_code.trim().to_string()
+    } else if !input.reason_code.trim().is_empty() {
+        input.reason_code.trim().to_string()
+    } else {
+        fallback.to_string()
+    }
 }
 
 fn now_unix_ms() -> u128 {
@@ -438,17 +523,29 @@ pub fn compare_against_oracle(
     let mut passed = 0usize;
 
     for input in &inputs {
+        let mode = normalize_mode(&input.mode);
+        let env_fingerprint = normalize_env_fingerprint(&input.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(input.artifact_refs.clone());
+
         let oracle_case = match oracle_map.get(input.id.as_str()) {
             Some(case) => *case,
             None => {
+                let actual_reason_code = classify_reason_code(input.op, "oracle case missing");
+                let expected_reason_code = resolve_expected_reason_code(input, &actual_reason_code);
                 failures.push(UFuncDifferentialCaseResult {
                     id: input.id.clone(),
+                    seed: input.seed,
+                    mode: mode.clone(),
+                    env_fingerprint: env_fingerprint.clone(),
+                    artifact_refs: artifact_refs.clone(),
                     pass: false,
                     max_abs_error: f64::INFINITY,
                     expected_shape: Vec::new(),
                     actual_shape: Vec::new(),
                     expected_dtype: "missing".to_string(),
                     actual_dtype: "unknown".to_string(),
+                    expected_reason_code,
+                    actual_reason_code,
                     reason: Some("oracle case missing".to_string()),
                 });
                 continue;
@@ -458,6 +555,35 @@ pub fn compare_against_oracle(
         let outcome = execute_input_case(input);
         match (oracle_case.status.as_str(), outcome) {
             ("ok", Ok((actual_shape, actual_values, actual_dtype))) => {
+                let expected_dtype_canonical = canonical_dtype_name(&oracle_case.dtype);
+                let actual_dtype_canonical = canonical_dtype_name(&actual_dtype);
+                if expected_dtype_canonical != actual_dtype_canonical {
+                    let reason = format!(
+                        "dtype mismatch expected={} actual={}",
+                        oracle_case.dtype, actual_dtype
+                    );
+                    let actual_reason_code = classify_reason_code(input.op, &reason);
+                    let expected_reason_code =
+                        resolve_expected_reason_code(input, "ufunc_type_resolution_invalid");
+                    failures.push(UFuncDifferentialCaseResult {
+                        id: input.id.clone(),
+                        seed: input.seed,
+                        mode: mode.clone(),
+                        env_fingerprint: env_fingerprint.clone(),
+                        artifact_refs: artifact_refs.clone(),
+                        pass: false,
+                        max_abs_error: f64::INFINITY,
+                        expected_shape: oracle_case.shape.clone(),
+                        actual_shape,
+                        expected_dtype: oracle_case.dtype.clone(),
+                        actual_dtype,
+                        expected_reason_code,
+                        actual_reason_code,
+                        reason: Some(reason),
+                    });
+                    continue;
+                }
+
                 let (pass, max_abs_error, reason) = compare_arrays(
                     &oracle_case.shape,
                     &oracle_case.values,
@@ -470,54 +596,157 @@ pub fn compare_against_oracle(
                 if pass {
                     passed += 1;
                 } else {
+                    let reason_text = reason
+                        .clone()
+                        .unwrap_or_else(|| "unknown differential mismatch".to_string());
+                    let actual_reason_code = classify_reason_code(input.op, &reason_text);
+                    let expected_reason_code =
+                        resolve_expected_reason_code(input, &actual_reason_code);
                     failures.push(UFuncDifferentialCaseResult {
                         id: input.id.clone(),
+                        seed: input.seed,
+                        mode: mode.clone(),
+                        env_fingerprint: env_fingerprint.clone(),
+                        artifact_refs: artifact_refs.clone(),
                         pass,
                         max_abs_error,
                         expected_shape: oracle_case.shape.clone(),
                         actual_shape,
                         expected_dtype: oracle_case.dtype.clone(),
                         actual_dtype,
+                        expected_reason_code,
+                        actual_reason_code,
                         reason,
                     });
                 }
             }
-            ("ok", Err(err)) => failures.push(UFuncDifferentialCaseResult {
-                id: input.id.clone(),
-                pass: false,
-                max_abs_error: f64::INFINITY,
-                expected_shape: oracle_case.shape.clone(),
-                actual_shape: Vec::new(),
-                expected_dtype: oracle_case.dtype.clone(),
-                actual_dtype: "error".to_string(),
-                reason: Some(format!("execution failed: {err}")),
-            }),
-            ("error", _) => failures.push(UFuncDifferentialCaseResult {
-                id: input.id.clone(),
-                pass: false,
-                max_abs_error: f64::INFINITY,
-                expected_shape: oracle_case.shape.clone(),
-                actual_shape: Vec::new(),
-                expected_dtype: oracle_case.dtype.clone(),
-                actual_dtype: "unknown".to_string(),
-                reason: Some(format!(
-                    "oracle errored: {}",
-                    oracle_case
-                        .error
-                        .clone()
-                        .unwrap_or_else(|| "unknown error".to_string())
-                )),
-            }),
-            (status, _) => failures.push(UFuncDifferentialCaseResult {
-                id: input.id.clone(),
-                pass: false,
-                max_abs_error: f64::INFINITY,
-                expected_shape: oracle_case.shape.clone(),
-                actual_shape: Vec::new(),
-                expected_dtype: oracle_case.dtype.clone(),
-                actual_dtype: "unknown".to_string(),
-                reason: Some(format!("unsupported oracle status: {status}")),
-            }),
+            ("ok", Err(err)) => {
+                let detail = format!("execution failed: {err}");
+                let actual_reason_code = classify_reason_code(input.op, &detail);
+                let expected_reason_code = resolve_expected_reason_code(input, &actual_reason_code);
+                failures.push(UFuncDifferentialCaseResult {
+                    id: input.id.clone(),
+                    seed: input.seed,
+                    mode: mode.clone(),
+                    env_fingerprint: env_fingerprint.clone(),
+                    artifact_refs: artifact_refs.clone(),
+                    pass: false,
+                    max_abs_error: f64::INFINITY,
+                    expected_shape: oracle_case.shape.clone(),
+                    actual_shape: Vec::new(),
+                    expected_dtype: oracle_case.dtype.clone(),
+                    actual_dtype: "error".to_string(),
+                    expected_reason_code,
+                    actual_reason_code,
+                    reason: Some(detail),
+                });
+            }
+            ("error", Ok((actual_shape, _, actual_dtype))) => {
+                let oracle_error = oracle_case
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "unknown error".to_string());
+                let expected_reason_code = resolve_expected_reason_code(
+                    input,
+                    &classify_reason_code(input.op, &oracle_error),
+                );
+                failures.push(UFuncDifferentialCaseResult {
+                    id: input.id.clone(),
+                    seed: input.seed,
+                    mode: mode.clone(),
+                    env_fingerprint: env_fingerprint.clone(),
+                    artifact_refs: artifact_refs.clone(),
+                    pass: false,
+                    max_abs_error: f64::INFINITY,
+                    expected_shape: oracle_case.shape.clone(),
+                    actual_shape,
+                    expected_dtype: oracle_case.dtype.clone(),
+                    actual_dtype,
+                    expected_reason_code,
+                    actual_reason_code: "ufunc_dispatch_resolution_failed".to_string(),
+                    reason: Some(format!(
+                        "oracle expected error '{}' but execution succeeded",
+                        oracle_error
+                    )),
+                });
+            }
+            ("error", Err(err)) => {
+                let oracle_error = oracle_case
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "unknown error".to_string());
+                let actual_reason_code = classify_reason_code(input.op, &err);
+                let expected_reason_code = resolve_expected_reason_code(
+                    input,
+                    &classify_reason_code(input.op, &oracle_error),
+                );
+
+                let expected_error_contains = input.expected_error_contains.trim().to_lowercase();
+                let actual_lower = err.to_lowercase();
+                let error_match = if expected_error_contains.is_empty() {
+                    true
+                } else {
+                    actual_lower.contains(&expected_error_contains)
+                };
+                let reason_match = expected_reason_code == actual_reason_code;
+
+                if error_match && reason_match {
+                    passed += 1;
+                } else {
+                    let detail = if expected_error_contains.is_empty() {
+                        format!(
+                            "oracle/local error disagreement: oracle='{}' actual='{}' expected_reason_code='{}' actual_reason_code='{}'",
+                            oracle_error, err, expected_reason_code, actual_reason_code
+                        )
+                    } else {
+                        format!(
+                            "oracle/local error mismatch expected_error_contains='{}' oracle='{}' actual='{}' expected_reason_code='{}' actual_reason_code='{}'",
+                            expected_error_contains,
+                            oracle_error,
+                            err,
+                            expected_reason_code,
+                            actual_reason_code
+                        )
+                    };
+                    failures.push(UFuncDifferentialCaseResult {
+                        id: input.id.clone(),
+                        seed: input.seed,
+                        mode: mode.clone(),
+                        env_fingerprint: env_fingerprint.clone(),
+                        artifact_refs: artifact_refs.clone(),
+                        pass: false,
+                        max_abs_error: f64::INFINITY,
+                        expected_shape: oracle_case.shape.clone(),
+                        actual_shape: Vec::new(),
+                        expected_dtype: oracle_case.dtype.clone(),
+                        actual_dtype: "error".to_string(),
+                        expected_reason_code,
+                        actual_reason_code,
+                        reason: Some(detail),
+                    });
+                }
+            }
+            (status, _) => {
+                let detail = format!("unsupported oracle status: {status}");
+                let actual_reason_code = classify_reason_code(input.op, &detail);
+                let expected_reason_code = resolve_expected_reason_code(input, &actual_reason_code);
+                failures.push(UFuncDifferentialCaseResult {
+                    id: input.id.clone(),
+                    seed: input.seed,
+                    mode,
+                    env_fingerprint,
+                    artifact_refs,
+                    pass: false,
+                    max_abs_error: f64::INFINITY,
+                    expected_shape: oracle_case.shape.clone(),
+                    actual_shape: Vec::new(),
+                    expected_dtype: oracle_case.dtype.clone(),
+                    actual_dtype: "unknown".to_string(),
+                    expected_reason_code,
+                    actual_reason_code,
+                    reason: Some(detail),
+                });
+            }
         }
     }
 
@@ -583,6 +812,19 @@ pub fn execute_input_case(case: &UFuncInputCase) -> Result<(Vec<usize>, Vec<f64>
 
 fn parse_dtype(name: &str) -> Result<DType, String> {
     DType::parse(name).ok_or_else(|| format!("unsupported dtype: {name}"))
+}
+
+fn canonical_dtype_name(name: &str) -> String {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "f64" | "float64" => "float64".to_string(),
+        "f32" | "float32" => "float32".to_string(),
+        "i64" | "int64" => "int64".to_string(),
+        "i32" | "int32" => "int32".to_string(),
+        "u64" | "uint64" => "uint64".to_string(),
+        "u32" | "uint32" => "uint32".to_string(),
+        "bool" | "bool_" => "bool_".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn compare_arrays(

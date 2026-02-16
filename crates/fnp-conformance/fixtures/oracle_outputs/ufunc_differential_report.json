@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "oracle_source": "system",
-  "generated_at_unix_ms": 1771013154371,
+  "oracle_source": "pure_python_fallback",
+  "generated_at_unix_ms": 1771280701984,
   "abs_tol": 1e-9,
   "rel_tol": 1e-9,
-  "total_cases": 7,
-  "passed_cases": 7,
+  "total_cases": 10,
+  "passed_cases": 10,
   "failed_cases": 0,
   "failures": []
 }

@@ -3,7 +3,9 @@
 use fnp_conformance::{
     HarnessConfig, SuiteReport, run_crash_signature_regression_suite, run_io_adversarial_suite,
     run_linalg_adversarial_suite, run_linalg_differential_suite, run_linalg_metamorphic_suite,
-    run_runtime_policy_adversarial_suite, run_runtime_policy_suite, set_runtime_policy_log_path,
+    run_rng_adversarial_suite, run_rng_differential_suite, run_rng_metamorphic_suite,
+    run_runtime_policy_adversarial_suite, run_runtime_policy_suite, run_ufunc_adversarial_suite,
+    run_ufunc_differential_suite, run_ufunc_metamorphic_suite, set_runtime_policy_log_path,
     test_contracts,
 };
 use serde::Serialize;
@@ -293,6 +295,12 @@ fn run_gate_suites(cfg: &HarnessConfig, log_path: &Path) -> Result<Vec<SuiteRepo
         test_contracts::run_test_contract_suite(cfg)?,
         run_runtime_policy_suite(cfg)?,
         run_runtime_policy_adversarial_suite(cfg)?,
+        run_ufunc_differential_suite(cfg)?,
+        run_ufunc_metamorphic_suite(cfg)?,
+        run_ufunc_adversarial_suite(cfg)?,
+        run_rng_differential_suite(cfg)?,
+        run_rng_metamorphic_suite(cfg)?,
+        run_rng_adversarial_suite(cfg)?,
         run_linalg_differential_suite(cfg)?,
         run_linalg_metamorphic_suite(cfg)?,
         run_linalg_adversarial_suite(cfg)?,

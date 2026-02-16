@@ -87,10 +87,12 @@ threat_controls:
     executable_checks:
       - run_runtime_policy_adversarial_suite
       - run_io_adversarial_suite
+      - run_rng_adversarial_suite
       - run_linalg_adversarial_suite
     fixture_hooks:
       - crates/fnp-conformance/fixtures/runtime_policy_adversarial_cases.json
       - crates/fnp-conformance/fixtures/io_adversarial_cases.json
+      - crates/fnp-conformance/fixtures/rng_adversarial_cases.json
       - crates/fnp-conformance/fixtures/linalg_adversarial_cases.json
     expected_log_fields:
       - fixture_id
@@ -100,6 +102,25 @@ threat_controls:
       - artifact_refs
       - reason_code
     compatibility_drift_gate: adversarial_reproducibility_gate
+    override_audit_requirement: audited_only
+
+  - threat_class: rng_reproducibility_drift
+    executable_checks:
+      - run_rng_differential_suite
+      - run_rng_metamorphic_suite
+      - run_rng_adversarial_suite
+    fixture_hooks:
+      - crates/fnp-conformance/fixtures/rng_differential_cases.json#rng_same_seed_stream_witness
+      - crates/fnp-conformance/fixtures/rng_metamorphic_cases.json#rng_jump_partition_additivity
+      - crates/fnp-conformance/fixtures/rng_adversarial_cases.json#rng_forced_witness_mismatch
+    expected_log_fields:
+      - fixture_id
+      - seed
+      - mode
+      - env_fingerprint
+      - artifact_refs
+      - reason_code
+    compatibility_drift_gate: strict_zero_drift_gate
     override_audit_requirement: audited_only
 
   - threat_class: linalg_shape_tolerance_abuse

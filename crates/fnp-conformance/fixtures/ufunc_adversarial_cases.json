@@ -2,6 +2,15 @@
   {
     "id": "add_shape_mismatch_2x2_vs_3x1",
     "seed": 401,
+    "severity": "high",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed",
     "op": "add",
     "lhs_shape": [2, 2],
     "lhs_values": [1.0, 2.0, 3.0, 4.0],
@@ -14,6 +23,15 @@
   {
     "id": "sum_axis_out_of_bounds",
     "seed": 402,
+    "severity": "critical",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_reduction_contract_violation",
+    "expected_reason_code": "ufunc_reduction_contract_violation",
     "op": "sum",
     "lhs_shape": [2, 2],
     "lhs_values": [1.0, 2.0, 3.0, 4.0],
@@ -25,6 +43,15 @@
   {
     "id": "mul_missing_rhs_shape",
     "seed": 403,
+    "severity": "medium",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_signature_parse_failed",
+    "expected_reason_code": "ufunc_signature_parse_failed",
     "op": "mul",
     "lhs_shape": [2],
     "lhs_values": [1.0, 2.0],

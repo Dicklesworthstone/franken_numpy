@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "packet_id": "FNP-P2C-005",
+  "subtask_id": "FNP-P2C-005-F",
+  "status": "pass",
+  "summary": {
+    "differential_total_cases": 10,
+    "differential_passed_cases": 10,
+    "differential_failed_cases": 0,
+    "ufunc_targeted_test_cases": 5,
+    "ufunc_targeted_test_passed": 5,
+    "ufunc_targeted_test_failed": 0
+  },
+  "suites": [
+    {
+      "suite": "ufunc_differential_bin",
+      "command": "rch exec -- cargo run -p fnp-conformance --bin run_ufunc_differential",
+      "result": "pass",
+      "notes": [
+        "Report indicates total=10, passed=10, failed=0.",
+        "Oracle fixture source is pure_python_fallback in this environment."
+      ]
+    },
+    {
+      "suite": "fnp_conformance_ufunc_tests",
+      "command": "rch exec -- cargo test -p fnp-conformance ufunc_",
+      "result": "pass",
+      "pass_count": 5,
+      "fail_count": 0
+    }
+  ],
+  "quality_gates": [
+    {
+      "command": "rch exec -- cargo fmt --check",
+      "result": "pass"
+    },
+    {
+      "command": "rch exec -- cargo check --workspace --all-targets",
+      "result": "pass"
+    },
+    {
+      "command": "rch exec -- cargo clippy --workspace --all-targets -- -D warnings",
+      "result": "pass"
+    }
+  ],
+  "artifacts": [
+    "crates/fnp-conformance/fixtures/ufunc_input_cases.json",
+    "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json",
+    "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json",
+    "crates/fnp-conformance/fixtures/oracle_outputs/ufunc_oracle_output.json",
+    "crates/fnp-conformance/fixtures/oracle_outputs/ufunc_differential_report.json",
+    "crates/fnp-conformance/src/ufunc_differential.rs",
+    "crates/fnp-conformance/src/lib.rs",
+    "crates/fnp-conformance/src/test_contracts.rs",
+    "crates/fnp-conformance/src/bin/run_test_contract_gate.rs",
+    "crates/fnp-conformance/src/bin/run_security_gate.rs",
+    "artifacts/phase2c/FNP-P2C-005/differential_metamorphic_adversarial_evidence.json"
+  ],
+  "notes": [
+    "Ufunc differential now supports machine-readable reason-code mismatch artifacts and replay metadata (seed, mode, env_fingerprint, artifact_refs).",
+    "Gate binaries now include ufunc differential/metamorphic/adversarial suites in run_gate_suites.",
+    "Fixture contract validation now enforces ufunc reason_code, expected_reason_code, severity, env_fingerprint, and artifact_refs fields."
+  ]
+}
