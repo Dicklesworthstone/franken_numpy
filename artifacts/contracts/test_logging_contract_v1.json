@@ -13,6 +13,7 @@
     "shape_stride_legality",
     "dtype_promotion_table",
     "runtime_policy_fail_closed",
+    "io_parser_adversarial_surface",
     "ufunc_metamorphic_relations",
     "ufunc_adversarial_error_surface",
     "user_workflow_golden_journeys"
@@ -25,6 +26,8 @@
   },
   "required_test_helper_apis": [
     "fnp_conformance::run_all_core_suites",
+    "fnp_conformance::run_io_adversarial_suite",
+    "fnp_conformance::run_crash_signature_regression_suite",
     "fnp_conformance::test_contracts::run_test_contract_suite",
     "fnp_conformance::set_runtime_policy_log_path",
     "fnp_conformance::workflow_scenarios::run_user_workflow_scenario_suite"
@@ -50,6 +53,7 @@
   "required_fixture_collections": [
     "crates/fnp-conformance/fixtures/runtime_policy_cases.json",
     "crates/fnp-conformance/fixtures/runtime_policy_adversarial_cases.json",
+    "crates/fnp-conformance/fixtures/io_adversarial_cases.json",
     "crates/fnp-conformance/fixtures/ufunc_input_cases.json",
     "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json",
     "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json",

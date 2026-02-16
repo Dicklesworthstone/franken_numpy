@@ -1,0 +1,127 @@
+[
+  {
+    "id": "io_magic_invalid_short_prefix",
+    "operation": "magic_version",
+    "expected_error_contains": "invalid or unsupported npy/npz magic/version",
+    "severity": "high",
+    "seed": 901,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_magic_invalid",
+    "payload_prefix": [147, 78, 85]
+  },
+  {
+    "id": "io_header_rank_budget_exceeded",
+    "operation": "header_schema",
+    "expected_error_contains": "shape rank exceeds packet validation budget",
+    "severity": "high",
+    "seed": 902,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_header_schema_invalid",
+    "shape": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    "fortran_order": false,
+    "dtype_descr": "<f8",
+    "header_len": 128
+  },
+  {
+    "id": "io_dtype_descriptor_big_endian_rejected",
+    "operation": "dtype_decode",
+    "expected_error_contains": "dtype descriptor is invalid or unsupported",
+    "severity": "medium",
+    "seed": 903,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/test_logging_contract_v1.json",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_dtype_descriptor_invalid",
+    "dtype_descr": ">i4"
+  },
+  {
+    "id": "io_payload_len_mismatch",
+    "operation": "read_payload",
+    "expected_error_contains": "payload bytes must exactly match expected shape/dtype footprint",
+    "severity": "high",
+    "seed": 904,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/unit_property_evidence.json"
+    ],
+    "reason_code": "io_read_payload_incomplete",
+    "shape": [2, 3],
+    "dtype_descr": "<f8",
+    "payload_len_bytes": 40
+  },
+  {
+    "id": "io_memmap_object_dtype_rejected",
+    "operation": "memmap_contract",
+    "expected_error_contains": "object dtype is invalid for memmap path",
+    "severity": "high",
+    "seed": 905,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_memmap_contract_violation",
+    "memmap_mode": "r",
+    "dtype_descr": "|O",
+    "file_len_bytes": 4096,
+    "expected_bytes": 1024,
+    "validation_retries": 0
+  },
+  {
+    "id": "io_load_dispatch_pickle_rejected_without_allow",
+    "operation": "load_dispatch",
+    "expected_error_contains": "payload prefix does not map to allowed npy/npz/pickle branch",
+    "severity": "medium",
+    "seed": 906,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_load_dispatch_invalid",
+    "payload_prefix": [128, 5, 149],
+    "allow_pickle": false
+  },
+  {
+    "id": "io_npz_budget_overflow",
+    "operation": "npz_archive_budget",
+    "expected_error_contains": "archive decoded size exceeded bounded budget",
+    "severity": "critical",
+    "seed": 907,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_npz_archive_contract_violation",
+    "member_count": 8,
+    "uncompressed_bytes": 3000000000,
+    "dispatch_retries": 0
+  },
+  {
+    "id": "io_policy_unknown_mode_fail_closed",
+    "operation": "policy_metadata",
+    "expected_error_contains": "unknown mode/class metadata rejected fail-closed",
+    "severity": "critical",
+    "seed": 908,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/contracts/hardened_mode_allowlist_v1.yaml"
+    ],
+    "reason_code": "io_policy_unknown_metadata",
+    "mode_raw": "mystery_mode",
+    "class_raw": "known_compatible_low_risk"
+  }
+]

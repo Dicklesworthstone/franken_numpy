@@ -10,12 +10,18 @@ pub mod workflow_scenarios;
 
 use crate::ufunc_differential::{UFuncInputCase, UFuncOperation};
 use fnp_dtype::{DType, promote};
+use fnp_io::{
+    IOSupportedDType, MemmapMode, classify_load_dispatch, validate_header_schema,
+    validate_io_policy_metadata, validate_magic_version, validate_memmap_contract,
+    validate_npz_archive_budget, validate_read_payload,
+};
 use fnp_ndarray::{MemoryOrder, NdLayout, broadcast_shape, contiguous_strides};
 use fnp_runtime::{
     CompatibilityClass, DecisionAction, DecisionAuditContext, EvidenceLedger, RuntimeMode,
     decide_and_record_with_context, decide_compatibility_from_wire,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -215,6 +221,75 @@ struct UFuncAdversarialCase {
     expected_error_contains: String,
     #[serde(default)]
     seed: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct IoAdversarialCase {
+    id: String,
+    operation: String,
+    expected_error_contains: String,
+    #[serde(default)]
+    severity: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    payload_prefix: Vec<u8>,
+    #[serde(default)]
+    shape: Vec<usize>,
+    #[serde(default)]
+    fortran_order: bool,
+    #[serde(default)]
+    dtype_descr: String,
+    #[serde(default)]
+    header_len: usize,
+    #[serde(default)]
+    payload_len_bytes: usize,
+    #[serde(default)]
+    allow_pickle: bool,
+    #[serde(default)]
+    memmap_mode: String,
+    #[serde(default)]
+    file_len_bytes: usize,
+    #[serde(default)]
+    expected_bytes: usize,
+    #[serde(default)]
+    validation_retries: usize,
+    #[serde(default)]
+    member_count: usize,
+    #[serde(default)]
+    uncompressed_bytes: usize,
+    #[serde(default)]
+    dispatch_retries: usize,
+    #[serde(default)]
+    mode_raw: String,
+    #[serde(default)]
+    class_raw: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CrashSignatureRegistry {
+    schema_version: u8,
+    registry_version: String,
+    signatures: Vec<CrashSignatureEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CrashSignatureEntry {
+    signature_id: String,
+    suite: String,
+    fixture_id: String,
+    seed: u64,
+    severity: String,
+    reason_code: String,
+    status: String,
+    minimized_repro_artifacts: Vec<String>,
+    blame_refs: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1122,12 +1197,240 @@ pub fn run_ufunc_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport
     Ok(report)
 }
 
+pub fn run_io_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let path = config.fixture_root.join("io_adversarial_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    let cases: Vec<IoAdversarialCase> =
+        serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))?;
+
+    let mut report = SuiteReport {
+        suite: "io_adversarial",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+        let severity = case.severity.trim().to_lowercase();
+        if !matches!(severity.as_str(), "low" | "medium" | "high" | "critical") {
+            report.failures.push(format!(
+                "{}: invalid severity '{}' (must be low|medium|high|critical), reason_code={}, env_fingerprint={}, artifact_refs={}",
+                case.id,
+                case.severity,
+                reason_code,
+                env_fingerprint,
+                artifact_refs.join(",")
+            ));
+            continue;
+        }
+        if case.expected_error_contains.trim().is_empty() {
+            report.failures.push(format!(
+                "{}: expected_error_contains must be non-empty, reason_code={}, env_fingerprint={}, artifact_refs={}",
+                case.id,
+                reason_code,
+                env_fingerprint,
+                artifact_refs.join(",")
+            ));
+            continue;
+        }
+
+        let expected = case.expected_error_contains.to_lowercase();
+        match execute_io_adversarial_operation(&case) {
+            Ok(()) => {
+                report.failures.push(format!(
+                    "{}: severity={severity} seed={} reason_code={} env_fingerprint={} artifact_refs={} expected error containing '{}' but operation '{}' succeeded",
+                    case.id,
+                    case.seed,
+                    reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    case.expected_error_contains,
+                    case.operation
+                ));
+            }
+            Err(actual_error) => {
+                if actual_error.to_lowercase().contains(&expected) {
+                    report.pass_count += 1;
+                } else {
+                    report.failures.push(format!(
+                        "{}: severity={severity} seed={} reason_code={} env_fingerprint={} artifact_refs={} expected error containing '{}' but got '{}'",
+                        case.id,
+                        case.seed,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(","),
+                        case.expected_error_contains,
+                        actual_error
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+pub fn run_crash_signature_regression_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let registry_path = config
+        .contract_root
+        .join("CRASH_SIGNATURE_REGISTRY_V1.json");
+    let raw = fs::read_to_string(&registry_path)
+        .map_err(|err| format!("failed reading {}: {err}", registry_path.display()))?;
+    let registry: CrashSignatureRegistry =
+        serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))?;
+
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut report = SuiteReport {
+        suite: "crash_signature_regression",
+        case_count: 0,
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    record_suite_check(
+        &mut report,
+        registry.schema_version == 1,
+        "crash signature registry schema_version must be 1".to_string(),
+    );
+    record_suite_check(
+        &mut report,
+        registry.registry_version == "crash-signature-registry-v1",
+        "crash signature registry version mismatch".to_string(),
+    );
+    record_suite_check(
+        &mut report,
+        !registry.signatures.is_empty(),
+        "crash signature registry must contain at least one signature".to_string(),
+    );
+
+    let mut failure_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut unique_suites = BTreeSet::new();
+    for signature in &registry.signatures {
+        unique_suites.insert(signature.suite.trim().to_string());
+    }
+
+    for suite_name in unique_suites {
+        let suite_report = match suite_name.as_str() {
+            "runtime_policy_adversarial" => run_runtime_policy_adversarial_suite(config)?,
+            "ufunc_adversarial" => run_ufunc_adversarial_suite(config)?,
+            "io_adversarial" => run_io_adversarial_suite(config)?,
+            other => {
+                record_suite_check(
+                    &mut report,
+                    false,
+                    format!("crash signature registry references unsupported suite '{other}'"),
+                );
+                continue;
+            }
+        };
+        failure_map.insert(suite_name, suite_report.failures);
+    }
+
+    let mut seen_signature_ids = BTreeSet::new();
+    for signature in registry.signatures {
+        let mut failures = Vec::new();
+
+        if signature.signature_id.trim().is_empty() {
+            failures.push("signature_id must not be empty".to_string());
+        }
+        if !seen_signature_ids.insert(signature.signature_id.clone()) {
+            failures.push(format!(
+                "duplicate signature_id {} in crash registry (seed={})",
+                signature.signature_id, signature.seed
+            ));
+        }
+        if signature.fixture_id.trim().is_empty() {
+            failures.push(format!(
+                "{}: fixture_id must not be empty",
+                signature.signature_id
+            ));
+        }
+        if signature.reason_code.trim().is_empty() {
+            failures.push(format!(
+                "{}: reason_code must not be empty",
+                signature.signature_id
+            ));
+        }
+        if !matches!(
+            signature.severity.trim(),
+            "low" | "medium" | "high" | "critical"
+        ) {
+            failures.push(format!(
+                "{}: severity '{}' is invalid",
+                signature.signature_id, signature.severity
+            ));
+        }
+        if signature.status != "closed" {
+            failures.push(format!(
+                "{}: status must remain 'closed' to satisfy regression guard (actual={})",
+                signature.signature_id, signature.status
+            ));
+        }
+        if signature.minimized_repro_artifacts.is_empty() {
+            failures.push(format!(
+                "{}: minimized_repro_artifacts must not be empty",
+                signature.signature_id
+            ));
+        }
+        for artifact in &signature.minimized_repro_artifacts {
+            if artifact.trim().is_empty() {
+                failures.push(format!(
+                    "{}: minimized_repro_artifacts contains empty entry",
+                    signature.signature_id
+                ));
+                continue;
+            }
+            let artifact_path = repo_root.join(artifact);
+            if !artifact_path.exists() {
+                failures.push(format!(
+                    "{}: minimized repro artifact missing {}",
+                    signature.signature_id,
+                    artifact_path.display()
+                ));
+            }
+        }
+        if signature.blame_refs.is_empty() {
+            failures.push(format!(
+                "{}: blame_refs must not be empty",
+                signature.signature_id
+            ));
+        }
+        if let Some(suite_failures) = failure_map.get(signature.suite.trim()) {
+            let marker = format!("{}:", signature.fixture_id);
+            if suite_failures
+                .iter()
+                .any(|failure| failure.contains(&marker))
+            {
+                failures.push(format!(
+                    "{}: regression detected in suite '{}' for fixture_id '{}'",
+                    signature.signature_id, signature.suite, signature.fixture_id
+                ));
+            }
+        }
+
+        if failures.is_empty() {
+            report.pass_count += 1;
+        } else {
+            report.failures.extend(failures);
+        }
+        report.case_count += 1;
+    }
+
+    Ok(report)
+}
+
 pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, String> {
     Ok(vec![
         run_shape_stride_suite(config)?,
         run_dtype_promotion_suite(config)?,
         run_runtime_policy_suite(config)?,
         run_runtime_policy_adversarial_suite(config)?,
+        run_io_adversarial_suite(config)?,
+        run_crash_signature_regression_suite(config)?,
         security_contracts::run_security_contract_suite(config)?,
         test_contracts::run_test_contract_suite(config)?,
         workflow_scenarios::run_user_workflow_scenario_suite(config)?,
@@ -1200,6 +1503,66 @@ fn approx_equal_values(expected: &[f64], actual: &[f64], abs_tol: f64, rel_tol: 
         }
     }
     true
+}
+
+fn execute_io_adversarial_operation(case: &IoAdversarialCase) -> Result<(), String> {
+    match case.operation.as_str() {
+        "magic_version" => validate_magic_version(&case.payload_prefix)
+            .map(|_| ())
+            .map_err(|err| err.to_string()),
+        "header_schema" => validate_header_schema(
+            &case.shape,
+            case.fortran_order,
+            &case.dtype_descr,
+            case.header_len,
+        )
+        .map(|_| ())
+        .map_err(|err| err.to_string()),
+        "dtype_decode" => IOSupportedDType::decode(&case.dtype_descr)
+            .map(|_| ())
+            .map_err(|err| err.to_string()),
+        "read_payload" => {
+            let dtype = IOSupportedDType::decode(&case.dtype_descr)
+                .map_err(|err| format!("{}: dtype decode failed: {err}", case.id))?;
+            validate_read_payload(&case.shape, case.payload_len_bytes, dtype)
+                .map(|_| ())
+                .map_err(|err| err.to_string())
+        }
+        "memmap_contract" => {
+            let mode = MemmapMode::parse(&case.memmap_mode).map_err(|err| err.to_string())?;
+            let dtype = IOSupportedDType::decode(&case.dtype_descr)
+                .map_err(|err| format!("{}: dtype decode failed: {err}", case.id))?;
+            validate_memmap_contract(
+                mode,
+                dtype,
+                case.file_len_bytes,
+                case.expected_bytes,
+                case.validation_retries,
+            )
+            .map_err(|err| err.to_string())
+        }
+        "load_dispatch" => classify_load_dispatch(&case.payload_prefix, case.allow_pickle)
+            .map(|_| ())
+            .map_err(|err| err.to_string()),
+        "npz_archive_budget" => validate_npz_archive_budget(
+            case.member_count,
+            case.uncompressed_bytes,
+            case.dispatch_retries,
+        )
+        .map_err(|err| err.to_string()),
+        "policy_metadata" => validate_io_policy_metadata(&case.mode_raw, &case.class_raw)
+            .map_err(|err| err.to_string()),
+        other => Err(format!("unsupported io_adversarial operation {other}")),
+    }
+}
+
+fn record_suite_check(report: &mut SuiteReport, passed: bool, failure: String) {
+    report.case_count += 1;
+    if passed {
+        report.pass_count += 1;
+    } else {
+        report.failures.push(failure);
+    }
 }
 
 fn parse_expected_action(case_id: &str, raw: &str) -> Result<DecisionAction, String> {
@@ -1374,10 +1737,11 @@ fn validate_runtime_policy_log_fields(
 #[cfg(test)]
 mod tests {
     use super::{
-        HarnessConfig, run_all_core_suites, run_dtype_promotion_suite,
-        run_runtime_policy_adversarial_suite, run_shape_stride_suite, run_smoke,
-        run_ufunc_adversarial_suite, run_ufunc_differential_suite, run_ufunc_metamorphic_suite,
-        set_dtype_promotion_log_path, set_shape_stride_log_path,
+        HarnessConfig, run_all_core_suites, run_crash_signature_regression_suite,
+        run_dtype_promotion_suite, run_io_adversarial_suite, run_runtime_policy_adversarial_suite,
+        run_shape_stride_suite, run_smoke, run_ufunc_adversarial_suite,
+        run_ufunc_differential_suite, run_ufunc_metamorphic_suite, set_dtype_promotion_log_path,
+        set_shape_stride_log_path,
     };
     use fnp_iter::{
         RuntimeMode as IterRuntimeMode, TRANSFER_PACKET_REASON_CODES, TransferLogRecord,
@@ -1722,6 +2086,21 @@ mod tests {
     fn ufunc_adversarial_suite_is_green() {
         let cfg = HarnessConfig::default_paths();
         let suite = run_ufunc_adversarial_suite(&cfg).expect("adversarial suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn io_adversarial_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite = run_io_adversarial_suite(&cfg).expect("io adversarial suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn crash_signature_regression_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite = run_crash_signature_regression_suite(&cfg)
+            .expect("crash signature regression suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 

@@ -7,6 +7,7 @@ This folder stores normalized oracle-vs-target fixtures for `fnp-conformance`.
 - `dtype_promotion_cases.json`: deterministic promotion-table checks.
 - `runtime_policy_cases.json`: strict/hardened fail-closed policy checks with structured log context.
 - `runtime_policy_adversarial_cases.json`: malformed/unknown wire-class inputs proving fail-closed behavior.
+- `io_adversarial_cases.json`: parser-boundary adversarial IO corpus with severity-classified failure expectations.
 - `ufunc_input_cases.json`: differential ufunc/reduction input corpus.
 - `ufunc_metamorphic_cases.json`: deterministic metamorphic checks (commutativity, linearity).
 - `ufunc_adversarial_cases.json`: adversarial ufunc inputs expecting controlled errors.

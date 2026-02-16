@@ -1,8 +1,9 @@
 #![forbid(unsafe_code)]
 
 use fnp_conformance::{
-    HarnessConfig, SuiteReport, run_runtime_policy_adversarial_suite, run_runtime_policy_suite,
-    set_runtime_policy_log_path, test_contracts,
+    HarnessConfig, SuiteReport, run_crash_signature_regression_suite, run_io_adversarial_suite,
+    run_runtime_policy_adversarial_suite, run_runtime_policy_suite, set_runtime_policy_log_path,
+    test_contracts,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -291,6 +292,8 @@ fn run_gate_suites(cfg: &HarnessConfig, log_path: &Path) -> Result<Vec<SuiteRepo
         test_contracts::run_test_contract_suite(cfg)?,
         run_runtime_policy_suite(cfg)?,
         run_runtime_policy_adversarial_suite(cfg)?,
+        run_io_adversarial_suite(cfg)?,
+        run_crash_signature_regression_suite(cfg)?,
         validate_runtime_policy_log(log_path)?,
     ])
 }

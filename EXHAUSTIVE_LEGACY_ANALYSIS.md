@@ -40,12 +40,12 @@ Pass-1 domain gap matrix (traceable to legacy anchors and executable evidence):
 |---|---|---:|---:|---|---|---|---|---|
 | Shape/stride legality | `numpy/_core/src/multiarray/shape.c`, `shape.h` | 3 | 3.0x | partial (`shape_stride_cases.json`) | partial (`run_ufunc_differential`) | missing dedicated journey | partial (runtime policy only) | `crates/fnp-conformance/fixtures/shape_stride_cases.json`, `crates/fnp-conformance/src/lib.rs` |
 | Dtype promotion/casting | `dtypemeta.c`, `descriptor.c`, `can_cast_table.h` | 2 | 4.0x | partial (`dtype_promotion_cases.json`) | missing cast-matrix differential | missing dedicated journey | missing per-cast reason codes | `crates/fnp-conformance/fixtures/dtype_promotion_cases.json` |
-| Transfer/alias semantics | `dtype_transfer.c`, `lowlevel_strided_loops.c.src` | 1 | 6.0x | missing overlap property suite | missing overlap differential | missing overlap journey | missing overlap log taxonomy | legacy anchors only (no Rust artifact yet) |
+| Transfer/alias semantics | `dtype_transfer.c`, `lowlevel_strided_loops.c.src` | 2 | 4.0x | partial (packet-local unit/property coverage exists) | missing overlap differential | missing overlap journey | partial (`TransferLogRecord` schema/reason codes) | `crates/fnp-iter/src/lib.rs`, `artifacts/phase2c/FNP-P2C-003/*` |
 | Ufunc dispatch/override | `umath/ufunc_object.c`, dispatch loops | 3 | 3.0x | partial (metamorphic/adversarial corpus) | partial (`ufunc_differential`) | missing override journey | partial (`fixture_id`,`seed` in fixtures) | `crates/fnp-conformance/src/ufunc_differential.rs`, `crates/fnp-conformance/fixtures/ufunc_*` |
-| NDIter traversal | `multiarray/nditer*` | 1 | 6.0x | missing | missing | missing | missing | `artifacts/phase2c/FNP-P2C-006/legacy_anchor_map.md`, `artifacts/phase2c/FNP-P2C-006/behavior_extraction_ledger.md` |
-| Random subsystem | `numpy/random/*.pyx`, `random/src/*` | 1 | 5.0x | missing deterministic stream properties | missing RNG differential | missing seed/state journey | missing RNG log taxonomy | `crates/fnp-random/src/lib.rs` (stub) |
-| Linalg subsystem | `numpy/linalg/lapack_lite/*` | 1 | 5.0x | missing solver invariants | missing solver differential | missing solver journey | missing linalg reason codes | `crates/fnp-linalg/src/lib.rs` (stub) |
-| IO subsystem | `numpy/lib/format.py`, npy/npz paths | 2 | 4.0x | missing malformed-header property coverage | missing io round-trip differential | missing io journey | missing parser reason-code families | `crates/fnp-io/src/lib.rs` (stub) |
+| NDIter traversal | `multiarray/nditer*` | 2 | 4.0x | partial (transfer/flatiter contract tests exist) | missing | missing | partial (transfer reason-code/log schema checks) | `crates/fnp-iter/src/lib.rs`, `artifacts/phase2c/FNP-P2C-006/*` |
+| Random subsystem | `numpy/random/*.pyx`, `random/src/*` | 2 | 3.0x | covered deterministic stream/state/bounded contracts | missing RNG differential | missing seed/state journey | partial (`RandomLogRecord` schema/reason codes) | `crates/fnp-random/src/lib.rs`, `artifacts/phase2c/FNP-P2C-007/*` |
+| Linalg subsystem | `numpy/linalg/lapack_lite/*` | 2 | 3.0x | covered solver/shape/policy contracts | missing solver differential | missing solver journey | partial (`LinAlgLogRecord` schema/reason codes) | `crates/fnp-linalg/src/lib.rs`, `artifacts/phase2c/FNP-P2C-008/*` |
+| IO subsystem | `numpy/lib/format.py`, npy/npz paths | 2 | 3.0x | covered parser/budget/policy contract tests | missing io round-trip differential | missing io journey | partial (`IOLogRecord` schema/reason codes) | `crates/fnp-io/src/lib.rs`, `artifacts/phase2c/FNP-P2C-009/*` |
 
 Contradictions/unknowns register (must be closed during doc-overhaul passes):
 
@@ -53,7 +53,7 @@ Contradictions/unknowns register (must be closed during doc-overhaul passes):
 |---|---|---|---|---|---|
 | `DOC-C001` | `EXISTING_NUMPY_STRUCTURE.md` still states a reduced-scope “V1 extraction boundary” which conflicts with full drop-in parity doctrine. | `EXISTING_NUMPY_STRUCTURE.md` section 6 vs `COMPREHENSIVE_SPEC_FOR_FRANKENNUMPY_V1.md` sections 0 and 2 | `bd-23m.24.2` | critical | Replace scope-cut language with parity-debt sequencing language and explicit ownership table. |
 | `DOC-C002` | Verification/logging implication mapping is now documented in DOC-PASS-03, but multiple packet domains remain missing/deferred. | `EXHAUSTIVE_LEGACY_ANALYSIS.md` DOC-PASS-03.4 + `EXISTING_NUMPY_STRUCTURE.md` DOC-PASS-03.4 | `bd-23m.24.4` | high | Keep pass-03 matrices synchronized with packet execution until unresolved domains are implementation-backed and evidence-complete. |
-| `DOC-C003` | Packet ownership crosswalk for unresolved domains is now documented in DOC-PASS-02.4, but executable crate boundaries remain unimplemented for those domains. | `EXHAUSTIVE_LEGACY_ANALYSIS.md` DOC-PASS-02.4 + crate stubs (`fnp-iter`, `fnp-random`, `fnp-linalg`, `fnp-io`) | `bd-23m.24.3` | high | Keep crosswalk synchronized with packet execution and close only when packet owners replace stubs with production surfaces and full E/F/G evidence. |
+| `DOC-C003` | Packet ownership crosswalk is documented and packet-local crates are implemented, but those domains remain under-integrated in conformance differential/e2e gate lanes. | `EXHAUSTIVE_LEGACY_ANALYSIS.md` DOC-PASS-02.4 + packet-local crates (`fnp-iter`, `fnp-random`, `fnp-linalg`, `fnp-io`) + `run_all_core_suites` | `bd-23m.24.3` | high | Keep crosswalk synchronized with packet execution and close only when packet-local F/G lanes are gate-integrated with complete evidence artifacts. |
 | `DOC-C004` | Structured logging contract was added but not yet threaded into all subsystem extraction sections. | `artifacts/contracts/test_logging_contract_v1.json`, `artifacts/contracts/TESTING_AND_LOGGING_CONVENTIONS_V1.md` | `bd-23m.24.10` | medium | Each packet section names required log fields and reason-code taxonomy coverage status. |
 
 ## DOC-PASS-01 Full Module/Package Cartography with Ownership and Boundaries
@@ -236,7 +236,7 @@ Potentially invalid edges to reject:
 | Runtime policy ledger | `EvidenceLedger.events` append path | append-only API (`record`) + context normalization | downstream consumers must treat missing logs as gate failure, not optional telemetry |
 | File-backed audit logs | runtime/workflow JSONL append | contract suites validate required fields | if log path not configured outside gates, append may no-op |
 | Artifact outputs | readiness reports + RaptorQ artifacts | schema/token/path validation + hash checks | stale artifacts can drift without periodic gate enforcement |
-| Placeholder crates | trivial function bodies | explicit documentation + packet ownership mapping | accidental reliance on placeholders as real APIs |
+| Packet-local first-wave crates | contract-scoped APIs with partial gate integration | explicit packet ownership + contradiction/gap ledgers | overestimating readiness before differential/e2e lanes are integrated |
 
 ### DOC-PASS-03.4 Invariant obligations with evidence status
 
@@ -251,7 +251,7 @@ Potentially invalid edges to reject:
 | `INV-AUDIT-001` | decision events always carry non-empty audit identity fields | covered via context normalization + log validators | missing field is a contract/gate failure |
 | `INV-CONTRACT-001` | packet readiness requires mandatory files/tokens/paths | covered by `validate_phase2c_packet` | readiness reports are explicit triage artifacts |
 | `INV-DURABILITY-001` | sidecar/scrub/decode artifacts preserve payload integrity | covered for generated bundles | decode proof artifacts are mandatory for durable claim |
-| `INV-OWNERSHIP-001` | unresolved domains must expose real packet-scoped models before parity claims | missing (stubs remain) | packet owners must add unit/differential/e2e/logging trails before closure |
+| `INV-OWNERSHIP-001` | unresolved domains must have lane-complete packet evidence (unit/property + differential + e2e + logging) before parity claims | partial (models exist; packet-local differential/e2e lanes remain open) | packet owners must close F/G lanes and include evidence in readiness closure artifacts |
 
 ### DOC-PASS-03.5 Data-model contradictions and closure backlog
 
@@ -364,6 +364,516 @@ Potentially invalid edges to reject:
 | `PERF-C002` | `bounded_u64` uses rejection sampling with no explicit retry cap; expected `O(1)` but worst-case retries are unbounded. | medium | `bd-23m.18` | Document/implement bounded retry policy (or explicit rationale) and add adversarial witness tests. |
 | `PERF-C003` | Gate/logging costs are observable per run but not tracked as longitudinal metrics, making regressions hard to detect early. | medium | foundation `bd-23m.8` | Emit periodic gate-cost trend artifacts with environment fingerprints and threshold alerts. |
 | `PERF-C004` | Packet-local memory budgets are encoded in crate constants, but cross-packet aggregate memory envelope is undocumented. | medium | `bd-23m.24.6` follow-on + packet owners | Define and publish cross-packet memory budget matrix with enforcement hooks in gate scripts. |
+
+## DOC-PASS-06 Concurrency/Lifecycle Semantics and Ordering Guarantees
+
+### DOC-PASS-06.1 Shared-state ownership map (who can mutate what)
+
+| Shared state surface | Owner module | Mutation API | Synchronization model | Ordering guarantee |
+|---|---|---|---|---|
+| Runtime decision ledger (`EvidenceLedger.events`) | `crates/fnp-runtime/src/lib.rs` | `EvidenceLedger::record` via `&mut self` | Rust exclusive-borrow discipline (`&mut`) | insertion order equals call order within a single ledger instance. |
+| Runtime policy log path config | `crates/fnp-conformance/src/lib.rs` | `set_runtime_policy_log_path` | `OnceLock<Mutex<Option<PathBuf>>>` | last successful setter call wins for subsequent append attempts. |
+| Shape/stride log path config | `crates/fnp-conformance/src/lib.rs` | `set_shape_stride_log_path` | `OnceLock<Mutex<Option<PathBuf>>>` | last successful setter call wins for subsequent append attempts. |
+| Dtype-promotion log path config | `crates/fnp-conformance/src/lib.rs` | `set_dtype_promotion_log_path` | `OnceLock<Mutex<Option<PathBuf>>>` | last successful setter call wins for subsequent append attempts. |
+| Workflow scenario log path config | `crates/fnp-conformance/src/workflow_scenarios.rs` | `set_workflow_scenario_log_path` | `OnceLock<Mutex<Option<PathBuf>>>` | last successful setter call wins for subsequent append attempts. |
+| Workflow log required-flag | `crates/fnp-conformance/src/workflow_scenarios.rs` | `set_workflow_scenario_log_required` | `OnceLock<Mutex<bool>>` | gate sets true before attempts; guard resets to false on drop. |
+
+### DOC-PASS-06.2 Lifecycle traces (init -> execute -> finalize)
+
+| Lifecycle ID | Initialization | Active phase | Finalization | Failure terminal |
+|---|---|---|---|---|
+| `LC-001` runtime decision event lifecycle | construct `EvidenceLedger::new` | `decide_and_record_with_context` computes action/posterior/loss and appends event | caller inspects `events()` / `last()` | fail-closed decisions still produce events; malformed context normalized with default tokens. |
+| `LC-002` security/test gate attempt lifecycle | parse options, build default harness config, set attempt log path | run suites, summarize attempt, evaluate pass/fail + diagnostics, possibly retry | emit final summary/artifact index; stop on pass or budget exhaustion | deterministic failure/flake-budget/coverage-floor diagnostics in summary artifacts. |
+| `LC-003` workflow scenario gate lifecycle | set `workflow_log_required=true`, install drop guard, set attempt log path | run scenario suite; each step emits workflow log entry via append helper; optional retries | drop guard forces `workflow_log_required=false`; summary and diagnostics emitted | if required log path is unset, append helper fails immediately and gate attempt fails deterministically. |
+| `LC-004` log append lifecycle (runtime/shape/dtype/workflow) | resolve configured path or env fallback | ensure parent directory exists, open file in append mode, serialize entry, append newline payload | return `Ok(())` after append | path open/create/write errors are surfaced as gate/suite failures. |
+
+### DOC-PASS-06.3 Ordering guarantees (explicitly documented)
+
+| Ordering domain | Guarantee | Anchor |
+|---|---|---|
+| Decision events | `events` vector preserves append order; `last()` is the most recent recorded decision in that ledger instance. | `EvidenceLedger::record`, `events`, `last` in `crates/fnp-runtime/src/lib.rs` |
+| Workflow scenario evaluation | Scenario list is processed in corpus order; each scenario executes `steps` in declared order (`for step in &scenario.steps`). | `run_user_workflow_scenario_suite` and `execute_mode` in `crates/fnp-conformance/src/workflow_scenarios.rs` |
+| Gate attempts | Attempt indices are monotonic from `0..=retries` and first successful attempt breaks the loop. | `run_security_gate.rs`, `run_test_contract_gate.rs`, `run_workflow_scenario_gate.rs` |
+| Log entries per step | Within one process, log emission follows step execution order and append call sequence for that attempt. | `maybe_append_*log` helpers and per-step calls in conformance/workflow modules |
+| Required-log lifecycle | `set_workflow_scenario_log_required(true)` is active during gate run and is reset by drop guard after run exits. | `WorkflowLogRequirementGuard` in `run_workflow_scenario_gate.rs` |
+
+### DOC-PASS-06.4 Race-sensitive and lifecycle-sensitive zones
+
+| Zone | Sensitivity | Current mitigation | Residual risk |
+|---|---|---|---|
+| Global log-path setters (`OnceLock<Mutex<...>>`) | process-global mutable config can be overwritten by later setter calls | mutex-protected writes/reads avoid data races | semantic interference if multiple gate flows run concurrently in one process and reconfigure shared path slots. |
+| Optional runtime/shape/dtype log path behavior | append helper returns `Ok(())` when no path is set | explicit path setting in security/test gate binaries | non-gate or custom invocations may silently skip logs unless enforced externally. |
+| Workflow required-log policy | required-flag guards against silent skip in workflow gate | guard + explicit error on missing path | if other callers invoke suite without required flag, missing path can still be treated as non-fatal. |
+| File append semantics | append mode preserves payload-at-end writes per call | each append writes serialized line + newline in one `write_all` call | no explicit cross-process file lock; interleaving across separate processes is possible at OS scheduling granularity. |
+| Ledger ownership | per-instance mutable ledger avoids shared mutable globals | `&mut` API enforces single mutable accessor in safe Rust | callers needing cross-thread shared ledgers must introduce their own synchronization policy. |
+
+### DOC-PASS-06.5 Verification and logging implications
+
+| Lifecycle area | Unit/Property | Differential | E2E | Structured logging | Assessment |
+|---|---|---|---|---|---|
+| Runtime decision ordering | covered by runtime unit tests (event recording + context normalization) | N/A numerical diff; policy-wire behavior covered | covered indirectly via security/workflow gates | covered via runtime policy log entries | strong for single-process sequencing semantics |
+| Workflow step ordering and required logs | covered by workflow scenario tests and gate checks | N/A | covered via workflow gate retries and coverage checks | covered with required fields per step | medium risk due shared global path config |
+| Gate retry lifecycle | covered in gate binaries through deterministic attempt summary logic | N/A | covered by gate scripts and summaries | attempts include log-path evidence refs | strong for deterministic retry accounting |
+| Cross-process append behavior | missing explicit stress/property tests | missing | missing | partial (log lines exist, but interleaving behavior not asserted) | open lifecycle reliability gap |
+
+### DOC-PASS-06.6 Concurrency/lifecycle contradictions and closure register
+
+| ID | Contradiction / unknown | Risk | Owner | Closure criteria |
+|---|---|---|---|---|
+| `CONC-C001` | Conformance log path config is global and mutable (`OnceLock<Mutex<Option<PathBuf>>>`), so concurrent in-process gate runs can override each other's destinations. | high | foundation `bd-23m.6`/`bd-23m.23` | move to scoped/log-handle passing or isolate config per run context; add regression test for concurrent invocations. |
+| `CONC-C002` | Runtime/shape/dtype append helpers allow silent success when log path is unset, unlike workflow gate required-path mode. | medium | foundation `bd-23m.6` | add mandatory-log mode for all gate-critical appenders or fail gate when expected logs are missing. |
+| `CONC-C003` | No explicit end-to-end tests exercise cross-process append contention and ordering stability for JSONL logs. | medium | `bd-23m.7` + docs pass-10 | add stress harness and retention/ordering validation artifacts for log append concurrency. |
+| `CONC-C004` | Ordering guarantees are strong inside one process/ledger but not codified as formal contract tests across all packet-local log pipelines. | medium | packet G/I beads | add ordering contract tests and include results in packet readiness evidence packs. |
+
+## DOC-PASS-07 Error Taxonomy, Failure Modes, and Recovery Semantics
+
+### DOC-PASS-07.1 Canonical error taxonomy (code-level anchors)
+
+| Error family | Primary type/registry | Failure class | Typical trigger | Recovery semantics |
+|---|---|---|---|---|
+| Shape/stride legality | `ShapeError` (`fnp-ndarray`) | input validation / contract violation | invalid dimension, overflow, incompatible broadcast, out-of-bounds view | fail-fast `Result::Err`; caller must adjust shape/stride inputs. |
+| Ufunc execution | `UFuncError` + `UFUNC_PACKET_REASON_CODES` (`fnp-ufunc`) | shape/input/axis contract violation | invalid input length, axis out of bounds, shape merge failures | fail-fast; reason code mapped via `UFuncError::reason_code`. |
+| Runtime policy | `DecisionAction::FailClosed` (`fnp-runtime`) | compatibility rejection / fail-closed guard | unknown wire mode/class, known incompatible class, high-risk hardened path | deterministic fail-closed decision and evidence event emission. |
+| Transfer/index semantics | `TransferError` + `TRANSFER_PACKET_REASON_CODES` (`fnp-iter`) | selector/overlap/index contract violation | invalid context, lossy same-value cast, overlap policy violations, index mismatch | fail-fast rejection with stable transfer reason code. |
+| RNG contract | `RandomError` + `RANDOM_PACKET_REASON_CODES` (`fnp-random`) | bounded-generation contract violation | invalid upper bound (`0`) | deterministic error return; caller must provide valid bound. |
+| Linalg contract | `LinAlgError` + `LINALG_PACKET_REASON_CODES` (`fnp-linalg`) | shape/mode/convergence/policy failure | singular solves, invalid qr mode, non-convergence, unknown metadata | fail-fast with packet-specific reason codes; unknown metadata fails closed. |
+| IO contract | `IOError` + `IO_PACKET_REASON_CODES` (`fnp-io`) | parser/dispatch/budget/policy failure | bad magic/version, invalid schema/descriptor, memmap/pickle policy violations | fail-fast; unknown metadata and invalid dispatch are rejected fail-closed. |
+| Gate reliability diagnostics | `deterministic_failure` / `flake_budget_exceeded` / `coverage_floor_breach` (gate binaries) | orchestration reliability failure | retries exhausted, flake budget exceeded, coverage ratio below floor | gate exits non-zero and emits diagnostics with evidence references. |
+
+### DOC-PASS-07.2 Failure mode matrix (detect -> classify -> act)
+
+| Failure mode | Detection point | Classification channel | Action | Escalation path |
+|---|---|---|---|---|
+| Semantic contract mismatch (shape/ufunc/transfer) | crate-level validators and constructors | typed error enum + packet reason code | immediate `Err`, no fallback mutation | fixture/gate failure with case-id context. |
+| Unknown compatibility metadata | runtime/linalg/io policy metadata checks | fail-closed action or policy error reason | reject operation (`fail_closed`) | scenario/gate diagnostics + audit/event trails. |
+| Log path unset in workflow gate | `maybe_append_workflow_log` with required flag | explicit string error | fail scenario step and gate attempt | retry (if configured), then deterministic_failure diagnostic. |
+| Gate suite mismatch | attempt summarization in gate binaries | suite failures + reliability diagnostics | continue until retry budget exhausted or pass | report JSON and exit code `2` on failure. |
+| Flaky behavior beyond budget | gate reliability checks (`flake_budget`) | diagnostic reason code `flake_budget_exceeded` | mark gate failed | operator triage with per-attempt log evidence. |
+| Coverage below floor | gate reliability checks (`coverage_floor`) | diagnostic reason code `coverage_floor_breach` | mark gate failed | rerun/expand fixture coverage before promotion. |
+
+### DOC-PASS-07.3 Recovery semantics by layer
+
+| Layer | Recovery strategy implemented today | Strategy not implemented (explicit debt) |
+|---|---|---|
+| Core semantic crates (`fnp-ndarray`, `fnp-ufunc`, `fnp-iter`, `fnp-random`, `fnp-linalg`, `fnp-io`) | deterministic fail-fast errors with typed enums and stable reason codes | no automatic semantic repair/rewrite; intentional to preserve parity observability |
+| Runtime policy layer (`fnp-runtime`) | fail-closed defaults on unknown/incompatible semantics; hardened path can escalate to `full_validate` | no probabilistic auto-override without allowlist; intentional safety constraint |
+| Conformance suites | per-case failure accumulation with explicit failure messages | packet-local differential/replay lanes still incomplete for some domains |
+| Gate binaries | bounded retry loops + flake/coverage diagnostics + evidence refs | adaptive retry policies beyond fixed budgets not implemented |
+| Logging/forensics | structured JSONL append with required fields and contract validation | cross-process append contention hardening and strict global log-path isolation pending |
+
+### DOC-PASS-07.4 User-visible vs internal error channels
+
+| Channel | Intended audience | Current format |
+|---|---|---|
+| `Display` implementations on error enums | developers/operators reading test output and logs | human-readable explanatory strings with key context (axis, expected/actual, policy text) |
+| `reason_code` fields and packet reason-code registries | machine gates, analytics, replay tooling | stable tokenized identifiers (`*_contract_violation`, `*_invalid`, `*_fail_closed` families) |
+| Gate diagnostics objects | CI/operator pipelines | structured JSON with subsystem, reason_code, message, evidence_refs |
+| Workflow/runtime log entries | replay/forensics tooling | structured JSONL rows with fixture/test/mode/env/artifact/reason fields |
+
+### DOC-PASS-07.5 Verification implications for error/recovery semantics
+
+| Domain | Unit/Property | Differential | E2E | Logging-contract coverage | Status |
+|---|---|---|---|---|---|
+| Shape + ufunc + runtime errors | covered | covered for scoped ufunc/runtime lanes | covered in workflow/security/test gates | covered | strong in currently scoped domains |
+| Transfer/random/linalg/io errors | covered at crate level | missing packet-local differential lanes | missing packet-local replay lanes | schema-level coverage exists | partial/open integration debt |
+| Gate reliability diagnostics | covered by gate logic/tests and execution paths | N/A | covered (gates emit diagnostics) | covered by report JSON + attempt logs | strong |
+
+### DOC-PASS-07.6 Error/recovery contradictions and closure register
+
+| ID | Contradiction / unknown | Risk | Owner | Closure criteria |
+|---|---|---|---|---|
+| `ERR-C001` | Error taxonomies exist across packet-local crates, but conformance gate orchestration still emphasizes ufunc/runtime lanes. | high | packet F/G owners (`bd-23m.14.6`, `bd-23m.18.6`, `bd-23m.19.6`, `bd-23m.20.6`) | integrate packet-local differential/replay suites and include their reason-code outcomes in gate summaries. |
+| `ERR-C002` | Runtime/shape/dtype log appenders can no-op when path unset, weakening recovery forensics despite errors being generated. | medium | foundation `bd-23m.6` | require mandatory logging mode or explicit gate failure on missing expected logs. |
+| `ERR-C003` | Gate retries are fixed-budget and non-adaptive; there is no dynamic policy for repeated transient failures. | medium | foundation `bd-23m.8` | add decision-theoretic retry/escalation strategy with explicit expected-loss justification. |
+| `ERR-C004` | Packet readiness reports validate artifact presence but do not yet require exhaustive reason-code coverage proofs for packet-local failure families. | medium | packet I beads + docs pass-10 | add reason-code coverage attestations to packet readiness contracts. |
+
+## DOC-PASS-08 Security/Compatibility Edge Cases and Undefined Zones
+
+### DOC-PASS-08.1 Edge-case boundary matrix (legacy anchor -> Rust boundary -> mode behavior)
+
+| Edge zone | Legacy anchor(s) | Rust anchor(s) | Strict mode expectation | Hardened mode expectation | Evidence status |
+|---|---|---|---|---|---|
+| Unknown runtime wire metadata (`mode`/`class`) | no canonical NumPy wire token schema for strict-vs-hardened routing (FrankenNumPy-added contract surface) | `decide_compatibility_from_wire`, `decide_compatibility`, `evaluate_policy_override` (`crates/fnp-runtime/src/lib.rs`) | fail-closed on unknown `mode`/class | fail-closed on unknown `mode`/class; allow override only for known-compatible + allowlisted + hardened path | covered by runtime unit tests + security/test-contract/workflow suites |
+| NPY magic/version and header schema ambiguity | `numpy/lib/format.py` and npy/npz readers in `numpy/lib/npyio.py` | `validate_magic_version`, `validate_header_schema`, `validate_read_payload`, `validate_npz_archive_budget` (`crates/fnp-io/src/lib.rs`) | reject invalid magic/version/header and overflowed budgets | same semantic rejection with bounded retry/size controls | covered in `fnp-io` unit tests; gate integration partial |
+| Object dtype/pickle dispatch ambiguity | `numpy.load(... allow_pickle=...)` behavior families | `enforce_pickle_policy`, `classify_load_dispatch`, `validate_memmap_contract` (`crates/fnp-io/src/lib.rs`) | reject object payload when pickle policy disallows it | same rejection unless explicit allow path is provided | unit coverage present; packet-local differential/replay still open |
+| Reshape `-1`, overflow, and incompatible element-count edge cases | `numpy/_core/src/multiarray/shape.c` contracts | `fix_unknown_dimension`, `element_count`, `contiguous_strides` (`crates/fnp-ndarray/src/lib.rs`) | deterministic error for multiple `-1`, invalid negatives, overflow, or incompatible counts | same | strong unit/property coverage; broad legacy differential expansion still pending |
+| Stride-tricks out-of-bounds / negative-stride edge behavior | `numpy/lib/_stride_tricks_impl.py` (`as_strided`, `broadcast_to`) | `NdLayout::as_strided`, `required_view_nbytes`, `NdLayout::broadcast_to` (`crates/fnp-ndarray/src/lib.rs`) | reject out-of-bounds views and negative strides | same | unit coverage present; parity gap remains for negative-stride-compatible legacy cases |
+| Iterator overlap/broadcast/write edge behavior | `numpy/_core/src/multiarray/nditer_constr.c`, `nditer_api.c` | `overlap_copy_policy`, `validate_nditer_flags`, `validate_flatiter_*` (`crates/fnp-iter/src/lib.rs`) | reject policy-violating overlap/broadcast/index requests | same | strong unit/property coverage; packet-local differential lane pending |
+| Linalg policy metadata/backend bridge boundary | `numpy/linalg/*` operational behavior families | `validate_policy_metadata`, `validate_backend_bridge`, `validate_tolerance_policy` (`crates/fnp-linalg/src/lib.rs`) | fail on unknown metadata/backend unsupported/budget overflow | same; bounded revalidation/tolerance budgets | unit coverage present; packet-local differential/replay lane pending |
+
+### DOC-PASS-08.2 Undefined or ambiguous zones and deterministic FrankenNumPy stance
+
+| Undefined/ambiguous zone | Why this is ambiguous at parity boundary | Current deterministic stance | Risk |
+|---|---|---|---|
+| Tokenized `unknown_semantics` values in packet-local metadata validators | token is syntactically accepted in IO/linalg metadata validators, but semantic meaning is not a legacy-stable allow signal | runtime decision layer remains authoritative and fail-closes unknown/incompatible semantic classes | high |
+| Negative-stride `as_strided` behavior breadth | legacy permits nuanced negative-stride view behavior in some pathways | `required_view_nbytes` rejects negative strides (`ShapeError::NegativeStride`) pending explicit parity expansion | high |
+| Object-dtype load/memmap policy interaction | legacy behavior depends on payload kind, policy flags, and path | object dtype requires explicit pickle path; object memmap is rejected; unknown dispatch prefixes reject | high |
+| NDIter overlap/broadcast interactions under complex flags | legacy C machinery contains many branch-specific diagnostics and transitions | current validator focuses on explicit flag contracts (`no_broadcast`, `copy_if_overlap`) and rejects violations | medium |
+| Workflow/gate failure-class taxonomy for novel reason codes | new reason codes may emerge before classifier updates | unknown reason codes currently collapse to generic `scenario_assertion` in workflow gate classification | medium |
+| Logging-path optionality outside required workflow mode | some appenders can no-op when path is unset | workflow gate can force required logging; runtime/shape/dtype appenders still have optional-path behavior | medium |
+
+### DOC-PASS-08.3 Security/fault scenario matrix (detect -> contain -> audit)
+
+| Scenario | Primary detection guard | Deterministic containment action | Audit / replay artifact path |
+|---|---|---|---|
+| Header bomb / malformed NPY payload | `validate_magic_version`, `validate_header_schema`, `validate_read_payload` | fail-fast parse rejection | IO reason codes + packet logs (`io_magic_invalid`, `io_header_schema_invalid`, `io_read_payload_incomplete`) |
+| Archive amplification attempt | `validate_npz_archive_budget` member/decoded-size/retry caps | fail-fast budget rejection | IO logs + gate diagnostics |
+| Pickle smuggling via ambiguous payload prefix | `classify_load_dispatch` + `enforce_pickle_policy` | reject dispatch unless explicit pickle policy allows | IO reason codes (`io_pickle_policy_violation`, `io_load_dispatch_invalid`) |
+| Metadata spoofing / unknown control tokens | `decide_compatibility_from_wire`, `validate_policy_metadata`, `validate_io_policy_metadata` | fail-closed action/rejection | runtime evidence ledger + packet-local policy reason codes |
+| Stride alias abuse / view overflow | `required_view_nbytes`, `NdLayout::as_strided`, `broadcast_strides` | reject out-of-bounds or incompatible layouts | ndarray reason-path logs and fixture failures |
+| Retry-budget gaming / flaky masking | gate retry loops + `flake_budget` + `coverage_floor` checks | non-zero gate exit with explicit diagnostic reason code | gate report JSON + per-attempt logs + replay command guidance |
+
+### DOC-PASS-08.4 Verification/logging implications for security/compatibility edge zones
+
+| Edge family | Unit/Property | Differential | E2E | Logging/forensics | Status |
+|---|---|---|---|---|---|
+| Runtime fail-closed metadata handling | covered | covered for runtime suites | covered in security/test/workflow gates | covered via evidence ledger + runtime policy logs | strong |
+| IO parser/policy boundedness | covered | partial packet-local differential integration | partial | covered via IO log schemas/reason codes | medium/open integration debt |
+| Stride-tricks and reshape undefined zones | covered | partial | partial | covered at test/log level | medium with parity debt |
+| Iterator/linalg/random packet-local policy edges | covered | missing packet-local differential lanes | missing packet-local replay lanes | schema-level coverage present | partial/open |
+| Gate failure taxonomy and replay guidance | covered | N/A | covered | covered, but unknown reasons currently coarsened | medium |
+
+### DOC-PASS-08.5 Security/compatibility contradictions and closure register
+
+| ID | Contradiction / unknown | Risk | Owner | Closure criteria |
+|---|---|---|---|---|
+| `SEC-C001` | Packet-local metadata validators accept tokenized `unknown_semantics`, while runtime doctrine requires semantic fail-closed handling for unknowns. | high | packet F/G owners + foundation `bd-23m.8` | document/encode a single cross-crate rule: unknown semantic class must deterministically map to fail-closed behavior end-to-end. |
+| `SEC-C002` | Negative-stride view behavior is currently rejected in ndarray, leaving parity debt against legacy stride-tricks breadth. | high | packet `bd-23m.17` | add explicit legacy parity matrix for negative strides and implement/test contract-compliant branches. |
+| `SEC-C003` | Object/pickle load policy is bounded but packet-local differential/replay evidence for hostile payload classes is incomplete. | high | packet `bd-23m.20.6`, `bd-23m.20.7` | add adversarial corpus + workflow replay artifacts proving deterministic policy handling. |
+| `SEC-C004` | Optional-path logging for runtime/shape/dtype appenders can weaken forensic completeness in edge failures. | medium | foundation `bd-23m.6` | enforce mandatory logging mode or gate-level missing-log failure checks across all critical appenders. |
+| `SEC-C005` | Workflow gate collapses unknown reason-code classes into a generic bucket, reducing triage precision for new failure families. | medium | foundation `bd-23m.23` | expand failure-class taxonomy and require explicit mapping tests for newly introduced reason codes. |
+| `SEC-C006` | Iterator/linalg/random packet-local edges are unit/property-covered but not yet gate-backed by full differential/replay suites. | medium | packets `bd-23m.14.6`, `bd-23m.18.6`, `bd-23m.19.6` | complete packet-local differential + replay gates and include outputs in readiness summaries. |
+
+## DOC-PASS-09 Unit/E2E Test Corpus and Logging Evidence Crosswalk
+
+### DOC-PASS-09.1 Crosswalk schema (machine-parseable row contract)
+
+Each row in the matrices below is intended to be parseable with stable keys:
+- `row_id` (stable identifier)
+- `behavior_family`
+- `unit_property_lane`
+- `differential_lane`
+- `e2e_gate_lane`
+- `logging_contract_lane`
+- `status`
+- `risk`
+- `owner_beads`
+
+### DOC-PASS-09.2 Behavior-to-evidence matrix
+
+| row_id | behavior_family | unit_property_lane | differential_lane | e2e_gate_lane | logging_contract_lane | status | risk | owner_beads |
+|---|---|---|---|---|---|---|---|---|
+| `XW-001` | shape/stride legality + view transforms (`fnp-ndarray` + conformance shape suite) | `fnp-ndarray` unit/property tests (`fix_unknown_dimension`, `broadcast_*`, `as_strided`, `sliding_window`) + `run_shape_stride_suite` | no dedicated legacy oracle differential lane yet | workflow/scenario gates indirectly exercise shape/runtime paths, not a dedicated shape gate | `ShapeStrideLogEntry` append path + normalized `fixture_id/seed/mode/env_fingerprint/artifact_refs/reason_code` in conformance (`run_shape_stride_suite`) | partial | medium | `bd-23m.12.6`, `bd-23m.17.6`, docs `bd-23m.24.10` |
+| `XW-002` | dtype promotion determinism (`fnp-dtype`) | `fnp-dtype` unit tests + `run_dtype_promotion_suite` fixture corpus | no standalone legacy-oracle diff lane yet | covered only through aggregate gates; no dedicated dtype e2e runner | `DTypePromotionLogEntry` with normalized replay fields (`run_dtype_promotion_suite`) | partial | medium | `bd-23m.13.6`, docs `bd-23m.24.10` |
+| `XW-003` | runtime compatibility policy (strict/hardened/fail-closed) | runtime unit tests + `run_runtime_policy_suite` + `run_runtime_policy_adversarial_suite` | adversarial lane present for wire/metadata hostile cases (fixture-driven, not NumPy oracle) | `run_security_gate`, `run_test_contract_gate`, `run_workflow_scenario_gate` (+ `scripts/e2e/run_*`) | `RuntimePolicyLogEntry`, runtime ledger validation (`validate_runtime_policy_log_fields`), required log fields in test-contract gate | strong | low | foundation `bd-23m.5`, `bd-23m.23` |
+| `XW-004` | ufunc execution parity (broadcast, reductions, dispatch) | `fnp-ufunc` unit tests + conformance metamorphic/adversarial suites | dedicated oracle differential lane: `run_ufunc_differential_suite` + `run_ufunc_metamorphic_suite` + `run_ufunc_adversarial_suite` | workflow gate artifact linkage includes `ufunc_input_cases`; no dedicated standalone ufunc e2e gate binary | `UFuncLogRecord` replay-complete validation fields and reason-code registry checks | strong (core lane) | medium | `bd-23m.16.6`, `bd-23m.16.7` |
+| `XW-005` | transfer/iterator overlap + flatiter contracts (`fnp-iter`) | strong unit/property coverage in `fnp-iter` + conformance packet-003 log-contract tests | packet-local differential lane not yet integrated | packet-local workflow replay lane missing | `TransferLogRecord` validation + reason-code vocabulary checks in conformance | partial/open | high | `bd-23m.14.6`, `bd-23m.14.7` |
+| `XW-006` | RNG deterministic streams/state (`fnp-random`) | strong crate-level unit/property coverage (`same_seed`, state round-trip, bounds) | packet-local differential lane not yet integrated | packet-local workflow replay lane missing | `RandomLogRecord` replay-complete validation + reason-code roundtrip tests | partial/open | high | `bd-23m.18.6`, `bd-23m.18.7` |
+| `XW-007` | linalg policy/shape/solver contracts (`fnp-linalg`) | strong crate-level unit/property coverage | packet-local differential lane not yet integrated | packet-local workflow replay lane missing | `LinAlgLogRecord` replay-complete validation + reason-code roundtrip tests | partial/open | high | `bd-23m.19.6`, `bd-23m.19.7` |
+| `XW-008` | IO parser/dispatch/policy contracts (`fnp-io`) | strong crate-level unit/property coverage | packet-local differential lane not yet integrated | packet-local workflow replay lane missing | `IOLogRecord` replay-complete validation + reason-code roundtrip tests | partial/open | high | `bd-23m.20.6`, `bd-23m.20.7` |
+| `XW-009` | reliability/durability gates (retry/flake/coverage, artifact envelopes) | gate-bin unit coverage + conformance core-suite checks | N/A (governance lane) | dedicated gate binaries + e2e scripts (`run_security_policy_gate.sh`, `run_test_contract_gate.sh`, `run_workflow_scenario_gate.sh`, `run_raptorq_gate.sh`) | reliability diagnostics + workflow forensics artifact index + failure envelopes | strong | medium | foundation `bd-23m.23`, `bd-23m.7` |
+
+### DOC-PASS-09.3 Mandatory replay/logging field contract crosswalk
+
+| Field | Contract meaning | Validation anchors |
+|---|---|---|
+| `fixture_id` | unique fixture identity for replay/triage lineage | packet log-record validators (`UFuncLogRecord`, `TransferLogRecord`, `RandomLogRecord`, `LinAlgLogRecord`, `IOLogRecord`) and `REQUIRED_LOG_FIELDS` in `run_test_contract_gate` |
+| `seed` | deterministic replay handle | required in conformance log-contract gate (`seed` must be u64) and packet log structs |
+| `mode` | strict/hardened execution mode channel | required by log-contract gate + packet runtime-mode enums |
+| `env_fingerprint` | environment identity for reproducibility | normalized by conformance helpers (`normalize_env_fingerprint`) and required by log validators |
+| `artifact_refs` | evidence pointers to fixtures/reports/contracts | normalized (`normalize_artifact_refs`) and required non-empty by log validators + contract gate |
+| `reason_code` | stable machine-level failure/success taxonomy token | normalized (`normalize_reason_code`) and validated against packet reason-code registries |
+
+### DOC-PASS-09.4 Gap backlog derived from crosswalk
+
+| gap_id | Missing lane | Impact | Risk | Owner | Closure criteria |
+|---|---|---|---|---|---|
+| `GAP-XW-001` | No packet-local differential lane for iter/random/linalg/io packets | cannot prove end-to-end parity drift on these lanes | high | `bd-23m.14.6`, `bd-23m.18.6`, `bd-23m.19.6`, `bd-23m.20.6` | add fixture-driven differential harnesses + reports per packet |
+| `GAP-XW-002` | No packet-local e2e workflow replay scripts for iter/random/linalg/io packets | weakens reproducible incident forensics outside runtime/ufunc path | high | `bd-23m.14.7`, `bd-23m.18.7`, `bd-23m.19.7`, `bd-23m.20.7` | add workflow corpus + gate integration + replay commands |
+| `GAP-XW-003` | Shape/dtype lanes lack dedicated gate binaries despite suite-level coverage | harder to isolate regressions in CI by subsystem | medium | foundation `bd-23m.23` + packet owners | add subsystem-focused gate wrappers or explicit gate-suite partitioning |
+| `GAP-XW-004` | Runtime/shape/dtype appenders can no-op if log path unset | potential forensic blind spots | medium | `bd-23m.6` | enforce required-log policy or fail gate on missing expected logs |
+
+### DOC-PASS-09.5 Crosswalk contradictions and closure register
+
+| ID | Contradiction / unknown | Risk | Owner | Closure criteria |
+|---|---|---|---|---|
+| `XW-C001` | Packet-local crates expose replay-complete log contracts, but corresponding differential/e2e conformance lanes are unevenly integrated. | high | packet F/G owners | require each packet readiness report to include all four lanes: unit/property, differential, e2e, log contract validation. |
+| `XW-C002` | Gate reliability tooling is mature for runtime/workflow lanes, but equivalent reliability envelopes are not yet emitted for packet-local lanes. | medium | foundation `bd-23m.23` + packet owners | extend reliability-report pattern to packet-local gates as they are added. |
+| `XW-C003` | Crosswalk evidence is currently embedded in docs only; there is no generated machine artifact that CI can diff directly for drift. | medium | docs `bd-23m.24.10` + foundation automation bead | emit crosswalk snapshot JSON as CI artifact and gate schema/version drift. |
+
+## DOC-PASS-10 Expansion Draft (Pass A): Topology and Boundary Narratives
+
+### DOC-PASS-10.1 Layered topology contract (project-level)
+
+| layer_id | Layer | Owned responsibilities | Primary anchors | Allowed dependency direction |
+|---|---|---|---|---|
+| `L1` | API semantics kernel | dtype/shape/stride/broadcast legality and deterministic view contracts | `crates/fnp-dtype/src/lib.rs`, `crates/fnp-ndarray/src/lib.rs` | inward to pure semantic primitives only |
+| `L2` | Execution kernels | transfer/iterator execution classes, ufunc kernels/reductions, packet-local numeric contracts | `crates/fnp-iter/src/lib.rs`, `crates/fnp-ufunc/src/lib.rs`, `crates/fnp-random/src/lib.rs`, `crates/fnp-linalg/src/lib.rs`, `crates/fnp-io/src/lib.rs` | may depend on `L1`; must not mutate conformance/gate state directly |
+| `L3` | Runtime policy/audit | strict/hardened decision law, fail-closed semantics, override audit, expected-loss event capture | `crates/fnp-runtime/src/lib.rs` | consumes outputs from `L1/L2`; exposes decision events |
+| `L4` | Conformance orchestration | fixture ingestion, suite execution, parity comparison, log normalization/append | `crates/fnp-conformance/src/lib.rs`, `crates/fnp-conformance/src/ufunc_differential.rs`, `crates/fnp-conformance/src/workflow_scenarios.rs` | orchestrates `L1/L2/L3`; owns suite reports |
+| `L5` | Gate/reliability + durability artifacts | retry/flake/coverage governance, forensics index, RaptorQ sidecars/scrub/decode proofs | `crates/fnp-conformance/src/bin/run_*_gate.rs`, `crates/fnp-conformance/src/raptorq_artifacts.rs`, `scripts/e2e/run_*_gate.sh` | wraps `L4`; must remain policy-only (no semantic mutation) |
+
+### DOC-PASS-10.2 Boundary narratives (who may call whom, and why)
+
+| Boundary | Narrative | Contract |
+|---|---|---|
+| `L1 -> L2` | semantic legality feeds execution but execution does not redefine legality | execution kernels must treat shape/dtype legality as preconditions and surface typed errors, not reinterpret rules ad hoc |
+| `L2/L1 -> L3` | runtime policy evaluates compatibility/risk metadata before action | unknown/incompatible semantics map to fail-closed decisions and auditable events |
+| `L3/L2/L1 -> L4` | conformance runs fixtures against semantic + execution + policy layers and emits structured reports | suites normalize `fixture_id/seed/mode/env_fingerprint/artifact_refs/reason_code` for replay |
+| `L4 -> L5` | gates consume suite summaries and reliability budgets, then publish deterministic status + diagnostics | retry/flake/coverage controls may classify outcomes but cannot alter semantic verdicts |
+
+### DOC-PASS-10.3 Verification/logging implications by topology layer
+
+| layer_id | Unit/Property | Differential | E2E | Logging contract | Status |
+|---|---|---|---|---|---|
+| `L1` | strong for ndarray/dtype legality invariants | partial (shape/dtype differential expansion pending) | partial (indirect via workflow gates) | shape/dtype suite logs exist; required-path enforcement not universal | medium |
+| `L2` | strong crate-level for ufunc/iter/random/linalg/io | strong for ufunc only; packet-local differential debt in iter/random/linalg/io | partial (runtime/workflow-centric) | packet log-record schemas enforce replay fields | mixed/open |
+| `L3` | strong runtime unit + adversarial suites | N/A numeric diff; strong policy fixture differential | strong gate integration | runtime ledger + log-field checks enforced | strong |
+| `L4` | strong suite-level validation | strong on integrated suites | strong via workflow scenarios | normalized fields + append helpers | strong with optional-path caveat |
+| `L5` | strong gate-bin coverage | N/A | strong scripted replay wrappers (`rch exec -- cargo run ...`) | reliability reports/diagnostics/artifact indices | strong |
+
+### DOC-PASS-10.4 Topology contradictions and closure register
+
+| ID | Contradiction / unknown | Risk | Owner | Closure criteria |
+|---|---|---|---|---|
+| `ARCH-C001` | Layer topology is now explicit, but import/build-time guardrails do not yet automatically enforce forbidden cross-layer coupling. | medium | foundation automation follow-up | add static dependency checks (crate-level policy) and gate violations in CI. |
+| `ARCH-C002` | `L2` packet-local domains expose log schemas but remain unevenly integrated into `L4/L5` differential and e2e governance lanes. | high | packet F/G owners | promote packet-local lanes into gate suite roster and readiness reports. |
+| `ARCH-C003` | Optional-path logging in parts of `L4` can reduce observability guarantees expected by `L5` reliability governance. | medium | `bd-23m.6` + `bd-23m.23` | enforce required-log policy for all gate-critical appenders or fail gate when logs are missing. |
+
+## DOC-PASS-11 Expansion Draft (Pass B): Behavioral and Risk Synthesis
+
+### DOC-PASS-11.1 Behavioral risk concentration map
+
+| domain_id | Behavioral contract core | Dominant failure modes | Blast radius if regressed | Current controls | Residual debt |
+|---|---|---|---|---|---|
+| `BR-001` | shape/stride/broadcast legality | overflow, incompatible broadcast, invalid reshape/view transitions | corrupts nearly all array operations upstream of kernel execution | `ShapeError`-backed checks, shape-stride suite, unit/property invariants | dedicated differential/e2e breadth for full legacy matrix still incomplete |
+| `BR-002` | dtype promotion/cast determinism | wrong promotion table resolution, cast policy drift | silent numeric/type drift across all ufunc/linalg/IO paths | dtype promotion suite + registry checks | dedicated dtype-focused differential/e2e gate lane pending |
+| `BR-003` | runtime strict/hardened compatibility doctrine | unknown/incompatible metadata not failing closed, override misuse | policy bypass can invalidate security and compatibility guarantees globally | fail-closed decision law + adversarial/runtime suites + gate diagnostics | optional-path logging caveat remains in some appenders |
+| `BR-004` | ufunc dispatch/reduction parity | shape/dtype mismatch, reduction axis drift, broadcast dispatch divergence | high user-visible parity break on core numerical path | oracle differential + metamorphic + adversarial suites | standalone ufunc e2e gate wrapper not yet isolated |
+| `BR-005` | iterator/transfer/flatiter overlap semantics | overlap policy misclassification, index/write contract breaks | aliasing/assignment corruption in non-contiguous and iterator-heavy paths | packet-local unit/property + reason-code/log schema checks | packet-local differential and replay lanes still open |
+| `BR-006` | RNG deterministic stream/state schema | seed/state drift, bounded generation policy violation | reproducibility and scientific repeatability failures | deterministic/state tests + log schema checks | packet-local differential/replay gate integration pending |
+| `BR-007` | linalg policy/shape/convergence contracts | mode-policy mismatch, solver/shape contract violations | high-severity numerical correctness and stability risk | packet-local unit/property + reason-code/log schema checks | packet-local differential/replay gate integration pending |
+| `BR-008` | IO parser/dispatch/policy boundaries | malformed payload acceptance, pickle/memmap policy drift, budget bypass | security and data-integrity risk at ingestion boundary | bounded validators + reason-code/log schema checks | packet-local differential/replay gate integration pending |
+
+### DOC-PASS-11.2 Compatibility drift sentinel matrix
+
+| sentinel_id | Drift signal | Detection lane | Trigger threshold | Escalation action |
+|---|---|---|---|---|
+| `SEN-001` | fail-closed violations on unknown/incompatible semantics | runtime ledger checks (`validate_runtime_policy_log_fields`) + gate diagnostics | any non-zero occurrence | immediate gate fail; block promotion and open high-priority incident bead |
+| `SEN-002` | ufunc parity mismatches vs oracle | `run_ufunc_differential_suite` report failures | any mismatch in required family | fail build lane; require minimized repro and reason-code mapping update |
+| `SEN-003` | flake/coverage reliability drift | gate reliability diagnostics (`flake_budget_exceeded`, `coverage_floor_breach`) | over configured budget/floor | block merge; replay via emitted command and update corpus/fixtures |
+| `SEN-004` | missing replay-complete log fields | `run_test_contract_gate` log validator + packet log-record validators | any required-field miss | fail test-contract gate and require logging contract remediation |
+| `SEN-005` | packet-local lane incompleteness at readiness | packet readiness reports vs crosswalk `GAP-XW-*` | any missing required lane at closure | disallow packet closure until lane-evidence checklist is complete |
+
+### DOC-PASS-11.3 Budgeted-control and expected-loss integration status
+
+| control_surface | Budgeted behavior implemented | Expected-loss / decision-theoretic status | Gap owner |
+|---|---|---|---|
+| runtime policy decisions | yes (`hardened_validation_threshold`, fail-closed routing, expected-loss fields in events) | implemented in runtime decision events | foundation maintained |
+| gate retry/flake/coverage governance | yes (explicit retries, flake budget, coverage floor) | heuristic thresholds currently dominate; expected-loss escalation policy not unified | `bd-23m.8`, `bd-23m.23` |
+| packet-local parser/solver budgets | partial (IO/linalg bounded retries/search depth/cap checks) | mostly threshold-based guards; unified loss-based escalation not yet encoded | packet owners + foundation policy |
+
+### DOC-PASS-11.4 Verification/logging implications for pass-B synthesis
+
+| synthesis_area | Unit/Property | Differential | E2E | Logging/forensics | Status |
+|---|---|---|---|---|---|
+| Core semantic/kernel concentration (`BR-001..BR-004`) | strong | strong for ufunc/runtime, partial for shape/dtype | strong for runtime/workflow lanes | strong with known optional-path caveat | medium-strong |
+| Packet-local risk concentration (`BR-005..BR-008`) | strong crate-level | missing packet-local differential lanes | missing packet-local replay lanes | strong schema-level, weaker gate integration | partial/open |
+| Reliability sentinel framework (`SEN-*`) | strong gate-bin/test coverage | N/A | strong for security/test/workflow/raptorq gate runners | strong diagnostics + replay-command linkage | strong |
+
+### DOC-PASS-11.5 Behavioral/risk synthesis contradictions and closure register
+
+| ID | Contradiction / unknown | Risk | Owner | Closure criteria |
+|---|---|---|---|---|
+| `SYN-C001` | Risk concentration is known for packet-local domains, but lane completeness remains inconsistent at readiness time. | high | packet F/G owners | require lane-complete checklist enforcement in packet readiness gate. |
+| `SYN-C002` | Runtime uses expected-loss annotations, but gate escalation strategy is still primarily threshold-driven. | medium | `bd-23m.8` + `bd-23m.23` | add explicit expected-loss-based escalation policy for reliability gates. |
+| `SYN-C003` | Cross-cut sentinel set is documented, but no single generated artifact currently tracks sentinel status over time. | medium | docs automation follow-up | emit sentinel snapshot artifact per gate run and trend it in CI. |
+
+## DOC-PASS-12 Independent Red-Team Contradiction and Completeness Review
+
+### DOC-PASS-12.1 Adversarial findings ledger (severity + evidence anchors)
+
+| finding_id | Severity | Finding | Evidence anchors | Disposition |
+|---|---|---|---|---|
+| `RT12-F001` | high | Earlier doc framing treated packet-local crates as placeholders/stubs despite implemented packet-local contract APIs. | `DOC-PASS-02.1`, `DOC-PASS-02.4`, `DOC-PASS-02.5`; `crates/fnp-iter/src/lib.rs`, `crates/fnp-random/src/lib.rs`, `crates/fnp-linalg/src/lib.rs`, `crates/fnp-io/src/lib.rs` | corrected language in pass-12 precursor edits; contradiction now reframed as lane-integration debt, not implementation absence |
+| `RT12-F002` | high | Packet-local domains remain under-integrated into differential + replay/e2e governance despite strong crate-level unit/property coverage. | `DOC-PASS-09.2`, `DOC-PASS-09.4`, `DOC-PASS-11.4`; `crates/fnp-conformance/src/lib.rs`, `crates/fnp-conformance/src/workflow_scenarios.rs` | open; must be closed by packet F/G/H/I lane completion beads before readiness sign-off |
+| `RT12-F003` | medium | Optional-path log appenders can weaken replay-complete evidence guarantees on gate-critical paths. | `DOC-PASS-10.4` (`ARCH-C003`), `DOC-PASS-11.4`; `crates/fnp-conformance/src/lib.rs` (`maybe_append_*`), `crates/fnp-conformance/src/workflow_scenarios.rs` (`maybe_append_workflow_log`) | open; require fail-closed required-log policy for gate-critical appenders |
+| `RT12-F004` | medium | Runtime uses expected-loss calculus, but reliability gate escalation remains mostly threshold-based. | `DOC-PASS-11.3`, `DOC-PASS-11.5` (`SYN-C002`); `crates/fnp-runtime/src/lib.rs` (`expected_loss_*` fields), `crates/fnp-conformance/src/bin/run_*_gate.rs` | open; unify expected-loss escalation policy across gate binaries |
+| `RT12-F005` | medium | Contradiction tracking is distributed across many pass sections without a single machine snapshot artifact. | `DOC-PASS-02.6`, `03.5`, `04.4`, `05.5`, `06.6`, `07.6`, `08.5`, `09.5`, `10.4`, `11.5` | open; add generated contradiction/sentinel snapshot artifact per gate cycle |
+
+### DOC-PASS-12.2 Assertion traceability map (legacy anchors and executable evidence)
+
+| assertion_id | Assertion under review | Legacy anchor(s) | Executable evidence anchor(s) | Traceability status |
+|---|---|---|---|---|
+| `RT12-A001` | SCE shape/stride/broadcast legality is deterministic and fail-fast on invalid contracts. | `legacy_numpy_code/numpy/_core/src/multiarray/shape.c`, `legacy_numpy_code/numpy/_core/src/multiarray/shape.h` | `crates/fnp-ndarray/src/lib.rs`, `crates/fnp-conformance/fixtures/shape_stride_cases.json`, `crates/fnp-conformance/src/lib.rs` | traceable; differential breadth remains partial |
+| `RT12-A002` | Dtype promotion behavior is deterministic under declared cast policy. | `legacy_numpy_code/numpy/_core/src/multiarray/dtypemeta.c`, `legacy_numpy_code/numpy/_core/src/multiarray/descriptor.c`, `legacy_numpy_code/numpy/_core/src/multiarray/can_cast_table.h` | `crates/fnp-dtype/src/lib.rs`, `crates/fnp-conformance/fixtures/dtype_promotion_cases.json`, `crates/fnp-conformance/src/lib.rs` | traceable; dedicated dtype gate lane still pending |
+| `RT12-A003` | Strict/hardened policy decisions are fail-closed for unknown/incompatible semantics with auditable reasoning. | clean-room policy extension (no single legacy equivalent) | `crates/fnp-runtime/src/lib.rs`, `crates/fnp-conformance/fixtures/runtime_policy_cases.json`, `crates/fnp-conformance/fixtures/runtime_policy_adversarial_cases.json`, `crates/fnp-conformance/src/test_contracts.rs` | traceable via executable policy fixtures and schema checks |
+| `RT12-A004` | Ufunc dispatch/reduction behavior is oracle-checked and mismatch-reporting is deterministic. | `legacy_numpy_code/numpy/_core/src/umath/ufunc_object.c` | `crates/fnp-ufunc/src/lib.rs`, `crates/fnp-conformance/src/ufunc_differential.rs`, `crates/fnp-conformance/src/bin/run_ufunc_differential.rs` | traceable; standalone ufunc e2e wrapper still open |
+| `RT12-A005` | Durable artifact obligations include sidecar/scrub/decode-proof linkage. | contract-level requirement (durability doctrine) | `crates/fnp-conformance/src/raptorq_artifacts.rs`, `crates/fnp-conformance/src/bin/run_raptorq_gate.rs`, `artifacts/raptorq/conformance_bundle_v1.sidecar.json`, `artifacts/raptorq/conformance_bundle_v1.scrub_report.json`, `artifacts/raptorq/conformance_bundle_v1.decode_proof.json` | traceable; gating breadth is strong |
+
+### DOC-PASS-12.3 Unit/property, differential, e2e, logging implication matrix
+
+| implication_id | Area | Unit/Property | Differential | E2E/replay | Logging/forensics | Status |
+|---|---|---|---|---|---|---|
+| `RT12-I001` | packet-local iter/random/linalg/io parity proof chain | covered at crate level | missing/partial packet-local differential lanes | missing/partial packet-local replay scenarios | schema-level checks covered; gate-level propagation partial | open/high |
+| `RT12-I002` | required-log enforcement on gate-critical appenders | partial (`#[cfg(test)]` validation exists) | N/A | partial (gates run even when some appenders are optional-path) | missing fail-closed enforcement for missing gate-critical logs | open/medium |
+| `RT12-I003` | expected-loss-informed escalation in reliability envelope | covered in runtime decision unit tests | N/A | partial (gate binaries use threshold controls) | partial (diagnostics emitted, but expected-loss policy not unified) | open/medium |
+| `RT12-I004` | contradiction/sentinel drift observability over time | N/A | N/A | deferred pending snapshot emission | missing single machine artifact for contradiction trend tracking | open/medium |
+
+### DOC-PASS-12.4 Contradiction/unknown closure register
+
+| ID | Contradiction / unknown | Risk | Owner bead(s) | Closure criteria |
+|---|---|---|---|---|
+| `RT12-C001` | Packet-local contract APIs are implemented, but readiness still lacks lane-complete differential + replay evidence for all packet-local domains. | high | `bd-23m.14.6/.7`, `bd-23m.18.6/.7`, `bd-23m.19.6/.7`, `bd-23m.20.6/.7` | each packet ships closed differential + workflow/e2e evidence and appears as green in readiness reports |
+| `RT12-C002` | Gate-critical logging remains partially optional-path and can silently weaken replay completeness guarantees. | medium | `bd-23m.6`, `bd-23m.23` | enforce required logging policy (or explicit fail) in all gate-critical appenders and validate in test-contract gate |
+| `RT12-C003` | Expected-loss model is runtime-local; reliability governance does not yet consume it as primary escalation policy. | medium | `bd-23m.8`, `bd-23m.23` | gate retries/flake/coverage escalation includes expected-loss policy artifact and deterministic fallback trigger |
+| `RT12-C004` | Contradiction registers are comprehensive but fragmented, preventing single-artifact trend/diff auditing. | medium | docs automation follow-up + `bd-23m.23` | emit versioned contradiction/sentinel snapshot artifact and wire it into CI/gate reports |
+
+## DOC-PASS-14 Full-Agent Deep Dive Pass A (Structure Specialist)
+
+### DOC-PASS-14.1 Canonical topology alias map (cross-doc coherence)
+
+| Canonical layer | Local alias (this doc) | Alias in `EXISTING_NUMPY_STRUCTURE.md` | Ownership anchor(s) | Structural contract |
+|---|---|---|---|---|
+| semantic kernel | `L1` | `A1` | `crates/fnp-dtype/src/lib.rs`, `crates/fnp-ndarray/src/lib.rs` | single source of truth for legality/promotion; execution may not redefine semantics |
+| execution kernel set | `L2` | `A2` | `crates/fnp-ufunc/src/lib.rs`, `crates/fnp-iter/src/lib.rs`, `crates/fnp-random/src/lib.rs`, `crates/fnp-linalg/src/lib.rs`, `crates/fnp-io/src/lib.rs` | consumes semantic outputs and emits typed errors/reason codes |
+| runtime policy kernel | `L3` | `A3` | `crates/fnp-runtime/src/lib.rs` | mode/class/risk arbitration (`allow`/`full_validate`/`fail_closed`) with audit evidence |
+| conformance orchestrator | `L4` | `A4` | `crates/fnp-conformance/src/lib.rs`, `crates/fnp-conformance/src/ufunc_differential.rs`, `crates/fnp-conformance/src/workflow_scenarios.rs` | fixture-driven execution/reporting; no semantic mutation |
+| reliability/durability envelope | `L5` | `A5` | `crates/fnp-conformance/src/bin/run_*_gate.rs`, `crates/fnp-conformance/src/raptorq_artifacts.rs`, `scripts/e2e/run_*_gate.sh` | governance and durability checks only; cannot rewrite suite outcomes |
+
+### DOC-PASS-14.2 Structure-specialist findings ledger (adversarial)
+
+| finding_id | Severity | Structural finding | Evidence anchors | Disposition |
+|---|---|---|---|---|
+| `ST14-F001` | medium | Two equivalent layer ID vocabularies (`L*` vs `A*`) were undocumented as aliases, creating avoidable drift risk in future pass references. | `DOC-PASS-10.1` in both target docs | resolved in this pass via explicit alias map |
+| `ST14-F002` | high | Layering/dependency law is documented but still lacks machine enforcement, so cross-layer violations can regress silently. | `DOC-PASS-10.4` (`ARCH-C001`), `DOC-PASS-01.5` (`TOPO-C003`), root `Cargo.toml` workspace graph | open; requires CI-level dependency-direction contract check |
+| `ST14-F003` | high | Packet-local `L2/A2` domains remain structurally under-wired into `L4/L5` gate lanes despite clear ownership boundaries. | `DOC-PASS-09.2`, `DOC-PASS-11.4`, `DOC-PASS-12.3` | open; packet-local F/G/H/I lane closure required |
+| `ST14-F004` | medium | Gate/replay command conventions are documented, but there is no single structure-level checklist proving each gate path is `rch`-offloaded and replay-deterministic. | `DOC-PASS-10.3`, `scripts/e2e/run_*_gate.sh`, `crates/fnp-conformance/src/bin/run_*_gate.rs` | open; add gate invocation topology checklist artifact |
+
+### DOC-PASS-14.3 Boundary-law coherence audit
+
+| boundary_id | Canonical boundary law | Evidence of enforcement today | Gap | Owner |
+|---|---|---|---|---|
+| `ST14-B001` | semantic kernel -> execution kernel only (`L1 -> L2`) | crate-level API boundaries and typed error vocabularies | no automated forbidden-edge CI check | foundation automation follow-up |
+| `ST14-B002` | execution/semantic -> runtime policy (`L2/L1 -> L3`) | runtime decision API and policy fixture suites | packet-local paths are not uniformly represented in gate-level scenarios | packet F/G owners |
+| `ST14-B003` | runtime/execution/semantic -> conformance (`L3/L2/L1 -> L4`) | conformance orchestrator suite wiring and fixture contracts | lane completeness varies by packet domain | packet + conformance owners |
+| `ST14-B004` | conformance -> reliability envelope (`L4 -> L5`) | gate binaries consume suite summaries + diagnostics | no single generated topology checklist proving every gate path and replay contract | `bd-23m.10`, `bd-23m.23` |
+
+### DOC-PASS-14.4 Unit/property, differential, e2e, logging implications (structure lens)
+
+| implication_id | Structure concern | Unit/Property | Differential | E2E/replay | Logging/forensics | Status |
+|---|---|---|---|---|---|---|
+| `ST14-I001` | alias-map drift prevention (`L*`/`A*`) | covered by doc-level canonical map | N/A | N/A | N/A | resolved |
+| `ST14-I002` | dependency-direction enforcement | missing automated structural test | N/A | partial (detected indirectly through failures) | partial (failure diagnostics exist, no direct edge-policy artifact) | open/high |
+| `ST14-I003` | packet-local topology integration (`L2/A2 -> L4/L5`) | covered at crate level | missing/partial packet-local lanes | missing/partial packet-local workflow replay | partial schema coverage, incomplete gate-level propagation | open/high |
+| `ST14-I004` | gate invocation topology determinism (`rch` + replay completeness) | partial via gate-bin tests | N/A | partial scripted wrappers, no single checklist artifact | partial diagnostics without unified topology checklist | open/medium |
+
+### DOC-PASS-14.5 Structure contradiction register with closure criteria
+
+| ID | Contradiction / unknown | Risk | Owner bead(s) | Closure criteria |
+|---|---|---|---|---|
+| `ST14-C001` | Equivalent layer IDs across docs were not explicitly mapped, risking reference drift and false contradictions. | medium | `bd-23m.24.15` | maintained canonical alias table present in both docs and used by subsequent passes |
+| `ST14-C002` | Dependency-direction contract remains prose-only and can drift from actual workspace edges. | high | `bd-23m.23` + docs automation follow-up | CI emits explicit dependency-edge policy check and fails forbidden edges |
+| `ST14-C003` | Packet-local layer ownership is declared but not lane-complete in conformance/gate topology. | high | `bd-23m.14.6/.7`, `bd-23m.18.6/.7`, `bd-23m.19.6/.7`, `bd-23m.20.6/.7` | packet-local differential + replay lanes are required and green in readiness outputs |
+| `ST14-C004` | No unified gate topology artifact ties `rch` command path, replay contract, and diagnostics references together. | medium | `bd-23m.10`, `bd-23m.23` | publish gate topology checklist artifact linking invocation, replay fields, and diagnostics paths |
+
+## DOC-PASS-15 Full-Agent Deep Dive Pass B (Behavior Specialist)
+
+### DOC-PASS-15.1 Behavior findings ledger (adversarial)
+
+| finding_id | Severity | Behavioral finding | Evidence anchors | Disposition |
+|---|---|---|---|---|
+| `BH15-F001` | high | Runtime decision semantics include risk-threshold action routing, but packet-local policy validators (`fnp-io`, `fnp-linalg`) currently validate token legality only, not action selection; docs must keep these layers distinct. | `crates/fnp-runtime/src/lib.rs` (`decide_compatibility`), `crates/fnp-io/src/lib.rs` (`validate_io_policy_metadata`), `crates/fnp-linalg/src/lib.rs` (`validate_policy_metadata`) | resolved in docs by explicit layer separation; implementation integration remains open |
+| `BH15-F002` | medium | Deterministic invariants are strong at crate level (SCE/ufunc/iter/random), but cross-packet differential/replay evidence remains uneven, so behavior confidence is non-uniform by domain. | `crates/fnp-ndarray/src/lib.rs`, `crates/fnp-ufunc/src/lib.rs`, `crates/fnp-iter/src/lib.rs`, `crates/fnp-random/src/lib.rs`; `DOC-PASS-12.3` | open; packet-local F/G lane completion required |
+| `BH15-F003` | medium | Reason-code stability is tested packet-by-packet, but no global reason-code ontology artifact yet enforces cross-packet semantic normalization. | packet reason-code registries in `fnp-iter`/`fnp-ufunc`/`fnp-random`/`fnp-linalg`/`fnp-io`; `crates/fnp-conformance/src/test_contracts.rs` | open; needs cross-packet taxonomy artifact/policy gate |
+| `BH15-F004` | low | Fail-closed handling for unknown metadata is consistently encoded across runtime and packet-local validators, reducing ambiguity for unknown/incompatible behavior classes. | `crates/fnp-runtime/src/lib.rs`, `crates/fnp-linalg/src/lib.rs`, `crates/fnp-io/src/lib.rs` | confirmed/retained |
+
+### DOC-PASS-15.2 Behavior invariant traceability map
+
+| assertion_id | Behavioral assertion | Legacy anchor(s) | Executable evidence anchor(s) | Status |
+|---|---|---|---|---|
+| `BH15-A001` | Broadcast legality and reshape `-1` inference are deterministic and overflow-checked. | `legacy_numpy_code/numpy/_core/src/multiarray/shape.c`, `legacy_numpy_code/numpy/_core/src/multiarray/shape.h` | `crates/fnp-ndarray/src/lib.rs` (`broadcast_shape`, `fix_unknown_dimension`, overflow tests) | traceable; broad parity matrix still expanding |
+| `BH15-A002` | Ufunc broadcasted elementwise/reduction behavior is deterministic with stable error semantics. | `legacy_numpy_code/numpy/_core/src/umath/ufunc_object.c` | `crates/fnp-ufunc/src/lib.rs` (property grids + reason-code tests), `crates/fnp-conformance/src/ufunc_differential.rs` | traceable; standalone ufunc e2e gate artifact pending |
+| `BH15-A003` | Transfer/flatiter/overlap behavior follows deterministic policy with explicit rejection reasons. | `legacy_numpy_code/numpy/_core/src/multiarray/dtype_transfer.c`, `legacy_numpy_code/numpy/_core/src/multiarray/nditer*` | `crates/fnp-iter/src/lib.rs` (selector/overlap/flags property grids + log checks) | traceable; packet-local differential/replay integration pending |
+| `BH15-A004` | RNG streams are deterministic under seed/state/jump contracts and bounded output rules. | `legacy_numpy_code/numpy/random/src/*`, `legacy_numpy_code/numpy/random/*.pyx` | `crates/fnp-random/src/lib.rs` (seed/state/jump/fill tests + log checks) | traceable; packet-local differential/replay integration pending |
+| `BH15-A005` | Strict/hardened compatibility routing is fail-closed for unknown/incompatible semantics with auditable loss annotations. | policy extension (clean-room) | `crates/fnp-runtime/src/lib.rs` (`decide_compatibility`, `expected_loss_for_action`, ledger events), `runtime_policy_*` fixtures | traceable; gate-level expected-loss escalation policy remains open |
+
+### DOC-PASS-15.3 Strict vs hardened edge-case coherence matrix
+
+| behavior_surface | Strict mode expectation | Hardened mode expectation | Evidence anchors | Coherence status |
+|---|---|---|---|---|
+| known-compatible low-risk class | `allow` | `allow` | `crates/fnp-runtime/src/lib.rs` (`decide_compatibility`) | coherent |
+| known-compatible high-risk class | `allow` (compatibility-first) | `full_validate` when `risk_score >= threshold` | `crates/fnp-runtime/src/lib.rs` (`hardened_validation_threshold`) | coherent at runtime; packet-local docs must not over-claim this logic locally |
+| known-incompatible / unknown class | `fail_closed` | `fail_closed` | runtime + packet-local metadata validators | coherent |
+| packet-local metadata token validation | accepts known mode/class tokens, rejects unknown tokens | same | `validate_policy_metadata` in `fnp-linalg`/`fnp-io` | coherent but intentionally narrower than runtime action routing |
+
+### DOC-PASS-15.4 Unit/property, differential, e2e, logging implications (behavior lens)
+
+| implication_id | Behavior concern | Unit/Property | Differential | E2E/replay | Logging/forensics | Status |
+|---|---|---|---|---|---|---|
+| `BH15-I001` | runtime-vs-packet policy layer separation | covered by runtime and packet-local unit tests | partial (policy differential strong; packet-local action-routing differential absent) | partial (workflow covers runtime routes more than packet-local policy branches) | strong reason-code/log-field checks | open/medium |
+| `BH15-I002` | packet-local deterministic behavior parity (iter/random/linalg/io) | strong crate-level invariants | missing/partial packet-local differential lanes | missing/partial packet-local replay lanes | schema-level log completeness checks exist | open/high |
+| `BH15-I003` | cross-packet reason-code semantic normalization | covered packet-local registry tests | N/A | N/A | partial (test-contract gate checks presence, not ontology-level semantics) | open/medium |
+| `BH15-I004` | fail-closed unknown/incompatible handling | strong runtime + packet-local validator tests | strong on runtime policy fixtures | strong in security/workflow gate paths | strong with known optional-path caveat in appenders | medium-strong |
+
+### DOC-PASS-15.5 Behavior contradiction register with closure criteria
+
+| ID | Contradiction / unknown | Risk | Owner bead(s) | Closure criteria |
+|---|---|---|---|---|
+| `BH15-C001` | Docs can blur runtime action-routing logic with packet-local token validators unless explicitly separated. | high | `bd-23m.24.16` + docs automation follow-up | maintain explicit runtime-vs-packet policy boundary language in final integration pass |
+| `BH15-C002` | Behavior invariants are strong in unit/property lanes but not uniformly proven in packet-local differential/replay lanes. | high | `bd-23m.14.6/.7`, `bd-23m.18.6/.7`, `bd-23m.19.6/.7`, `bd-23m.20.6/.7` | packet-local differential and replay lanes are green and referenced in readiness artifacts |
+| `BH15-C003` | No global reason-code ontology artifact ensures consistent semantics across packet registries. | medium | `bd-23m.23` + test-contract policy follow-up | publish cross-packet reason-code taxonomy artifact and enforce mapping checks in gate path |
+| `BH15-C004` | Expected-loss is computed at runtime, but reliability escalation remains mostly threshold-based. | medium | `bd-23m.8`, `bd-23m.23` | gate policy consumes expected-loss artifact with deterministic fallback trigger and audit trace |
+
+## DOC-PASS-16 Full-Agent Deep Dive Pass C (Risk/Perf/Test Specialist)
+
+### DOC-PASS-16.1 Risk/perf/test findings ledger (adversarial)
+
+| finding_id | Severity | Finding | Evidence anchors | Disposition |
+|---|---|---|---|---|
+| `RPT16-F001` | high | Reliability gate controls are explicit (`retries`, `flake_budget`, `coverage_floor`, diagnostics reason codes), but packet-local differential/replay incompleteness still dominates residual risk. | `crates/fnp-conformance/src/bin/run_security_gate.rs`, `run_test_contract_gate.rs`, `run_workflow_scenario_gate.rs`; `DOC-PASS-12.3`, `DOC-PASS-15.4` | open; packet-local F/G/H/I lane closure required |
+| `RPT16-F002` | medium | Runtime emits expected-loss evidence, but gate escalation logic remains threshold-driven and does not yet consume expected-loss as first-class policy input. | `crates/fnp-runtime/src/lib.rs` (`expected_loss_*`), gate bins in `crates/fnp-conformance/src/bin/run_*_gate.rs` | open; expected-loss integration policy required |
+| `RPT16-F003` | medium | Performance evidence chain is strong (p50/p95/p99 baselines, hyperfine/strace artifacts, isomorphism proof, rollback trigger), but EV-gate automation remains documentation-level. | `crates/fnp-conformance/src/benchmark.rs`, `artifacts/optimization/ROUND3_OPPORTUNITY_MATRIX.md`, `artifacts/proofs/ISOMORPHISM_PROOF_ROUND3.md` | open; automate EV gate calculation/reporting |
+| `RPT16-F004` | medium | Logging field contracts are strongly enforced (`fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code`), yet optional-path appenders still leave a known observability caveat. | `crates/fnp-conformance/src/lib.rs` (`normalize_*`, log appenders), `crates/fnp-conformance/src/test_contracts.rs` | open; required-log enforcement remains pending |
+| `RPT16-F005` | low | Durability controls are robust: sidecar/scrub/decode-proof existence, schema checks, hash match, and stale-artifact detection are all executable. | `crates/fnp-conformance/src/raptorq_artifacts.rs`, `crates/fnp-conformance/src/bin/run_raptorq_gate.rs` | confirmed/retained |
+
+### DOC-PASS-16.2 Coverage and gate topology matrix
+
+| lane_id | Risk/test lane | Primary executors | Current strength | Dominant gap | Owner bead(s) |
+|---|---|---|---|---|---|
+| `RPT16-L001` | Unit/property invariants | packet crates + `#[cfg(test)]` suites | strong | cross-packet ontology and CI policy synthesis | `bd-23m.23` |
+| `RPT16-L002` | Differential/metamorphic/adversarial | `run_ufunc_differential`, conformance suites | strong for ufunc/runtime, partial for packet-local iter/random/linalg/io | packet-local differential lane incompleteness | `bd-23m.14.6`, `bd-23m.18.6`, `bd-23m.19.6`, `bd-23m.20.6` |
+| `RPT16-L003` | E2E workflow/replay | `run_workflow_scenario_gate` + `scripts/e2e/run_*_gate.sh` | medium-strong for integrated scenarios | packet-local replay lane incompleteness | `bd-23m.14.7`, `bd-23m.18.7`, `bd-23m.19.7`, `bd-23m.20.7` |
+| `RPT16-L004` | Reliability governance | security/test/workflow gate binaries | strong retries/flake/coverage + diagnostics | expected-loss not yet policy input | `bd-23m.8`, `bd-23m.23` |
+| `RPT16-L005` | Durability integrity | `run_raptorq_gate`, `raptorq_artifacts` suite | strong | none critical; maintain freshness discipline | `bd-23m.21`, `bd-23m.22` |
+
+### DOC-PASS-16.3 Performance governance evidence chain
+
+| stage_id | Governance stage | Evidence anchor(s) | Enforced invariant | Residual risk |
+|---|---|---|---|---|
+| `RPT16-P001` | baseline telemetry generation | `crates/fnp-conformance/src/benchmark.rs`, `artifacts/baselines/ufunc_benchmark_baseline*.json` | p50/p95/p99 + throughput/bandwidth metrics are reproducibly emitted | benchmark scope breadth still limited to selected workloads |
+| `RPT16-P002` | hotspot profiling fallback chain | `artifacts/optimization/ROUND3_OPPORTUNITY_MATRIX.md` | profile evidence exists even when `perf` unavailable (`strace -c` fallback) | lower-fidelity hotspot attribution under fallback |
+| `RPT16-P003` | behavior-isomorphism proof | `artifacts/proofs/ISOMORPHISM_PROOF_ROUND3.md`, `artifacts/proofs/golden_checksums_round3.txt` | optimization lever changes must preserve behavior identity | proof automation not yet embedded as one-shot gate |
+| `RPT16-P004` | rollback trigger governance | `artifacts/proofs/ISOMORPHISM_PROOF_ROUND3.md` (p99 regression trigger) | sustained tail regression trigger documented with rollback condition | trigger enforcement is policy/manual, not machine gate |
+
+### DOC-PASS-16.4 Logging and durability contract checklist
+
+| checklist_id | Contract requirement | Evidence anchor(s) | Status |
+|---|---|---|---|
+| `RPT16-K001` | replay-critical fields (`fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code`) are mandatory for policy/adversarial/workflow fixtures | `crates/fnp-conformance/src/test_contracts.rs`, `crates/fnp-conformance/src/lib.rs` (`normalize_*`) | strong |
+| `RPT16-K002` | workflow log coverage must include all scenario IDs and required metadata links | `crates/fnp-conformance/src/bin/run_workflow_scenario_gate.rs` (`validate_workflow_log_coverage`) | strong |
+| `RPT16-K003` | durability bundles require sidecar + scrub report + decode proof, schema-valid and hash-consistent | `crates/fnp-conformance/src/raptorq_artifacts.rs`, `run_raptorq_gate.rs` | strong |
+| `RPT16-K004` | stale artifact detection blocks outdated durability bundles | `crates/fnp-conformance/src/raptorq_artifacts.rs` (mtime + generated_at checks) | strong |
+| `RPT16-K005` | gate-critical appenders must not silently skip log emission | `DOC-PASS-12/14/15` contradiction registers (`ARCH-C003`, `RT12-C002`) | open |
+
+### DOC-PASS-16.5 Risk/perf/test contradiction register with closure criteria
+
+| ID | Contradiction / unknown | Risk | Owner bead(s) | Closure criteria |
+|---|---|---|---|---|
+| `RPT16-C001` | Reliability gates are mature, but packet-local differential/replay lanes remain incomplete and dominate residual release risk. | high | `bd-23m.14.6/.7`, `bd-23m.18.6/.7`, `bd-23m.19.6/.7`, `bd-23m.20.6/.7` | packet-local F/G lanes are green and referenced in readiness reports |
+| `RPT16-C002` | Expected-loss remains runtime-local; gate escalation is still threshold-led. | medium | `bd-23m.8`, `bd-23m.23` | gate diagnostics include expected-loss policy artifact and deterministic fallback trigger |
+| `RPT16-C003` | Performance governance has strong artifacts but lacks machine-enforced EV gate + rollback automation. | medium | `bd-23m.8`, `bd-23m.10` | CI emits EV score and auto-fails when EV/rollback conditions are violated |
+| `RPT16-C004` | Logging schema is strict, yet optional-path gate appenders still leave observability holes. | medium | `bd-23m.6`, `bd-23m.23` | required-log policy enforced fail-closed for all gate-critical appenders |
 
 ## 2. Quantitative Legacy Inventory (Measured)
 

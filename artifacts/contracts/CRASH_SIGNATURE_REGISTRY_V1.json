@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "registry_version": "crash-signature-registry-v1",
+  "signatures": [
+    {
+      "signature_id": "crash-runtime-wire-unknown-mode",
+      "suite": "runtime_policy_adversarial",
+      "fixture_id": "wire_unknown_mode_fail_closed",
+      "seed": 201,
+      "severity": "high",
+      "reason_code": "unknown_runtime_mode",
+      "status": "closed",
+      "minimized_repro_artifacts": [
+        "crates/fnp-conformance/fixtures/runtime_policy_adversarial_cases.json",
+        "artifacts/contracts/security_control_checks_v1.yaml"
+      ],
+      "blame_refs": [
+        "crates/fnp-runtime/src/lib.rs:211",
+        "crates/fnp-conformance/src/lib.rs:757"
+      ]
+    },
+    {
+      "signature_id": "crash-ufunc-shape-mismatch",
+      "suite": "ufunc_adversarial",
+      "fixture_id": "add_shape_mismatch_2x2_vs_3x1",
+      "seed": 401,
+      "severity": "high",
+      "reason_code": "ufunc_shape_contract_violation",
+      "status": "closed",
+      "minimized_repro_artifacts": [
+        "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json",
+        "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+      ],
+      "blame_refs": [
+        "crates/fnp-ufunc/src/lib.rs:213",
+        "crates/fnp-conformance/src/lib.rs:1072"
+      ]
+    },
+    {
+      "signature_id": "crash-io-magic-short-prefix",
+      "suite": "io_adversarial",
+      "fixture_id": "io_magic_invalid_short_prefix",
+      "seed": 901,
+      "severity": "critical",
+      "reason_code": "io_magic_invalid",
+      "status": "closed",
+      "minimized_repro_artifacts": [
+        "crates/fnp-conformance/fixtures/io_adversarial_cases.json",
+        "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+      ],
+      "blame_refs": [
+        "crates/fnp-io/src/lib.rs:245",
+        "crates/fnp-conformance/src/lib.rs:1125"
+      ]
+    }
+  ]
+}

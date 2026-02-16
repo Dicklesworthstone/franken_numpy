@@ -51,8 +51,11 @@ threat_controls:
   - threat_class: malformed_npy_npz
     executable_checks:
       - run_runtime_policy_adversarial_suite
+      - run_io_adversarial_suite
     fixture_hooks:
       - crates/fnp-conformance/fixtures/runtime_policy_adversarial_cases.json#wire_unknown_mode_fail_closed
+      - crates/fnp-conformance/fixtures/io_adversarial_cases.json#io_magic_invalid_short_prefix
+      - crates/fnp-conformance/fixtures/io_adversarial_cases.json#io_npz_budget_overflow
     expected_log_fields:
       - fixture_id
       - seed
@@ -83,8 +86,10 @@ threat_controls:
   - threat_class: adversarial_fixture
     executable_checks:
       - run_runtime_policy_adversarial_suite
+      - run_io_adversarial_suite
     fixture_hooks:
       - crates/fnp-conformance/fixtures/runtime_policy_adversarial_cases.json
+      - crates/fnp-conformance/fixtures/io_adversarial_cases.json
     expected_log_fields:
       - fixture_id
       - seed
