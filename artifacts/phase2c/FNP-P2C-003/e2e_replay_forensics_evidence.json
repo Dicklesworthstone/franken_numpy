@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "packet_id": "FNP-P2C-003",
+  "subtask_id": "FNP-P2C-003-G",
+  "status": "pass",
+  "summary": {
+    "workflow_suite_total_checks": 565,
+    "workflow_suite_passed_checks": 565,
+    "workflow_suite_failed_checks": 0,
+    "attempts_run": 1,
+    "flake_budget": 0,
+    "coverage_floor": 1.0,
+    "coverage_ratio": 1.0
+  },
+  "scenario_coverage": {
+    "packet_golden": "transfer_packet_replay",
+    "packet_hostile": "transfer_packet_hostile_guardrails",
+    "strict_expected_status": "pass/fail_closed (scenario-dependent)",
+    "hardened_expected_status": "pass/fail_closed (scenario-dependent)"
+  },
+  "workflow_gate_runs": [
+    {
+      "command": "scripts/e2e/run_transfer_contract_journey.sh artifacts/logs/workflow_scenario_packet003_e2e_latest.jsonl artifacts/logs/workflow_scenario_packet003_reliability_latest.json artifacts/logs/workflow_scenario_packet003_artifact_index_latest.json",
+      "result": "pass",
+      "replay_command": "cargo run -p fnp-conformance --bin run_workflow_scenario_gate -- --log-path 'artifacts/logs/workflow_scenario_packet003_e2e_latest.jsonl' --retries 0 --flake-budget 0 --coverage-floor 1",
+      "notes": [
+        "Packet-003 wrapper script completed with workflow_scenarios case_count=565 pass_count=565.",
+        "Forensics artifact index includes transfer_iter_differential_cases, transfer_iter_adversarial_cases, and transfer_packet_workflow_script entries."
+      ]
+    },
+    {
+      "command": "rch exec -- cargo run -p fnp-conformance --bin run_workflow_scenario_gate -- --log-path artifacts/phase2c/FNP-P2C-003/workflow_scenario_packet003_e2e.jsonl --artifact-index-path artifacts/phase2c/FNP-P2C-003/workflow_scenario_packet003_artifact_index.json --report-path artifacts/phase2c/FNP-P2C-003/workflow_scenario_packet003_reliability.json --retries 1 --flake-budget 0 --coverage-floor 1.0",
+      "result": "pass",
+      "replay_command": "cargo run -p fnp-conformance --bin run_workflow_scenario_gate -- --log-path 'artifacts/phase2c/FNP-P2C-003/workflow_scenario_packet003_e2e.jsonl' --retries 0 --flake-budget 0 --coverage-floor 1",
+      "notes": [
+        "Direct gate invocation confirmed deterministic replay command emission for packet-003 logs.",
+        "Strict and hardened scenario expectations remained green for transfer_packet_replay and transfer_packet_hostile_guardrails."
+      ]
+    }
+  ],
+  "quality_gates": [
+    {
+      "command": "rch exec -- cargo fmt --check",
+      "result": "pass"
+    },
+    {
+      "command": "rch exec -- cargo check --workspace --all-targets",
+      "result": "pass"
+    },
+    {
+      "command": "rch exec -- cargo clippy --workspace --all-targets -- -D warnings",
+      "result": "pass"
+    },
+    {
+      "command": "rch exec -- cargo test -p fnp-conformance workflow_scenario_suite_is_green -- --nocapture",
+      "result": "pass"
+    },
+    {
+      "command": "scripts/e2e/run_transfer_contract_journey.sh artifacts/logs/workflow_scenario_packet003_e2e_latest.jsonl artifacts/logs/workflow_scenario_packet003_reliability_latest.json artifacts/logs/workflow_scenario_packet003_artifact_index_latest.json",
+      "result": "pass"
+    }
+  ],
+  "forensics_artifact_index": {
+    "path": "artifacts/phase2c/FNP-P2C-003/workflow_scenario_packet003_artifact_index.json",
+    "generated_at_unix_ms": 1771368196515,
+    "status": "pass",
+    "required_entries": [
+      "transfer_iter_differential_cases",
+      "transfer_iter_adversarial_cases",
+      "transfer_packet_workflow_script"
+    ]
+  },
+  "artifacts": [
+    "crates/fnp-conformance/src/workflow_scenarios.rs",
+    "crates/fnp-conformance/src/bin/run_workflow_scenario_gate.rs",
+    "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json",
+    "scripts/e2e/run_transfer_contract_journey.sh",
+    "artifacts/phase2c/FNP-P2C-003/differential_metamorphic_adversarial_evidence.json",
+    "artifacts/phase2c/FNP-P2C-003/e2e_replay_forensics_evidence.json"
+  ],
+  "notes": [
+    "Workflow step logs continue to include fixture_id, seed, mode, env_fingerprint, artifact_refs, and reason_code via WorkflowScenarioLogEntry.",
+    "Packet-003 scenarios execute real iter_fixture_case differential/adversarial transfer operations instead of metadata-only references.",
+    "The packet-specific wrapper script provides deterministic paths for replay logs, reliability reports, and artifact index outputs."
+  ]
+}
