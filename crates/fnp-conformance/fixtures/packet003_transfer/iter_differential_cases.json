@@ -1,0 +1,220 @@
+[
+  {
+    "id": "transfer_selector_contiguous_golden",
+    "operation": "select_transfer_class",
+    "seed": 5101,
+    "mode": "strict",
+    "env_fingerprint": "fnp-transfer-packet003-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-003/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-003/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "transfer_selector_invalid_context",
+    "expected_reason_code": "transfer_selector_invalid_context",
+    "selector": {
+      "src_stride": 8,
+      "dst_stride": 8,
+      "item_size": 8,
+      "element_count": 16,
+      "aligned": true,
+      "cast_is_lossless": true,
+      "same_value_cast": false
+    },
+    "expected_transfer_class": "contiguous"
+  },
+  {
+    "id": "transfer_selector_strided_cast_golden",
+    "operation": "select_transfer_class",
+    "seed": 5102,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-transfer-packet003-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-003/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-003/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "transfer_selector_invalid_context",
+    "expected_reason_code": "transfer_selector_invalid_context",
+    "selector": {
+      "src_stride": 16,
+      "dst_stride": 8,
+      "item_size": 8,
+      "element_count": 12,
+      "aligned": false,
+      "cast_is_lossless": false,
+      "same_value_cast": false
+    },
+    "expected_transfer_class": "strided_cast"
+  },
+  {
+    "id": "transfer_selector_strided_lossless_golden",
+    "operation": "select_transfer_class",
+    "seed": 5103,
+    "mode": "strict",
+    "env_fingerprint": "fnp-transfer-packet003-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-003/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-003/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "transfer_selector_invalid_context",
+    "expected_reason_code": "transfer_selector_invalid_context",
+    "selector": {
+      "src_stride": 16,
+      "dst_stride": 8,
+      "item_size": 8,
+      "element_count": 12,
+      "aligned": false,
+      "cast_is_lossless": true,
+      "same_value_cast": false
+    },
+    "expected_transfer_class": "strided"
+  },
+  {
+    "id": "transfer_overlap_backward_copy_golden",
+    "operation": "overlap_copy_policy",
+    "seed": 5104,
+    "mode": "strict",
+    "env_fingerprint": "fnp-transfer-packet003-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-003/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-003/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "transfer_overlap_policy_triggered",
+    "expected_reason_code": "transfer_overlap_policy_triggered",
+    "overlap": {
+      "src_offset": 0,
+      "dst_offset": 4,
+      "byte_len": 8
+    },
+    "expected_overlap_action": "backward_copy"
+  },
+  {
+    "id": "transfer_overlap_disjoint_no_copy_golden",
+    "operation": "overlap_copy_policy",
+    "seed": 5105,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-transfer-packet003-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-003/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-003/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "transfer_overlap_policy_triggered",
+    "expected_reason_code": "transfer_overlap_policy_triggered",
+    "overlap": {
+      "src_offset": 0,
+      "dst_offset": 64,
+      "byte_len": 8
+    },
+    "expected_overlap_action": "no_copy"
+  },
+  {
+    "id": "transfer_flags_no_broadcast_violation",
+    "operation": "validate_nditer_flags",
+    "seed": 5106,
+    "mode": "strict",
+    "env_fingerprint": "fnp-transfer-packet003-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-003/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-003/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "transfer_nditer_overlap_policy",
+    "expected_reason_code": "nditer_no_broadcast_violation",
+    "expected_error_contains": "no_broadcast",
+    "flags": {
+      "copy_if_overlap": true,
+      "no_broadcast": true,
+      "observed_overlap": false,
+      "observed_broadcast": true
+    }
+  },
+  {
+    "id": "transfer_flags_overlap_violation",
+    "operation": "validate_nditer_flags",
+    "seed": 5107,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-transfer-packet003-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-003/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-003/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "transfer_nditer_overlap_policy",
+    "expected_reason_code": "nditer_overlap_policy_triggered",
+    "expected_error_contains": "copy_if_overlap",
+    "flags": {
+      "copy_if_overlap": false,
+      "no_broadcast": false,
+      "observed_overlap": true,
+      "observed_broadcast": false
+    }
+  },
+  {
+    "id": "transfer_flatiter_fancy_read_golden",
+    "operation": "validate_flatiter_read",
+    "seed": 5108,
+    "mode": "strict",
+    "env_fingerprint": "fnp-transfer-packet003-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-003/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-003/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "flatiter_transfer_read_violation",
+    "expected_reason_code": "flatiter_transfer_read_violation",
+    "len": 8,
+    "flat_index": {
+      "kind": "fancy",
+      "indices": [0, 2, 4, 6]
+    },
+    "expected_selected": 4
+  },
+  {
+    "id": "transfer_flatiter_slice_write_golden",
+    "operation": "validate_flatiter_write",
+    "seed": 5109,
+    "mode": "strict",
+    "env_fingerprint": "fnp-transfer-packet003-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-003/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-003/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "flatiter_transfer_write_violation",
+    "expected_reason_code": "flatiter_transfer_write_violation",
+    "len": 10,
+    "values_len": 4,
+    "flat_index": {
+      "kind": "slice",
+      "start": 1,
+      "stop": 9,
+      "step": 2
+    },
+    "expected_selected": 4
+  },
+  {
+    "id": "transfer_flatiter_write_values_len_mismatch",
+    "operation": "validate_flatiter_write",
+    "seed": 5110,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-transfer-packet003-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-003/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-003/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "flatiter_transfer_write_violation",
+    "expected_reason_code": "flatiter_indexing_contract_violation",
+    "expected_error_contains": "values_len",
+    "len": 8,
+    "values_len": 2,
+    "flat_index": {
+      "kind": "single",
+      "index": 3
+    }
+  }
+]

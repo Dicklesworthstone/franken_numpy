@@ -5928,6 +5928,37 @@ mod tests {
     }
 
     #[test]
+    fn transfer_packet003_f_suites_are_green() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.fixture_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/packet003_transfer");
+
+        let differential = run_iter_differential_suite(&cfg)
+            .expect("packet003 transfer differential suite should run");
+        assert!(
+            differential.all_passed(),
+            "failures={:?}",
+            differential.failures
+        );
+
+        let metamorphic = run_iter_metamorphic_suite(&cfg)
+            .expect("packet003 transfer metamorphic suite should run");
+        assert!(
+            metamorphic.all_passed(),
+            "failures={:?}",
+            metamorphic.failures
+        );
+
+        let adversarial = run_iter_adversarial_suite(&cfg)
+            .expect("packet003 transfer adversarial suite should run");
+        assert!(
+            adversarial.all_passed(),
+            "failures={:?}",
+            adversarial.failures
+        );
+    }
+
+    #[test]
     fn security_contract_suite_is_green() {
         let cfg = HarnessConfig::default_paths();
         let suite = super::security_contracts::run_security_contract_suite(&cfg)
