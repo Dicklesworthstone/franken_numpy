@@ -51,6 +51,7 @@ struct ReliabilitySummary {
 struct GateSummary {
     status: &'static str,
     workflow_log: String,
+    replay_command: String,
     attempts: Vec<AttemptSummary>,
     suites: Vec<SuiteSummary>,
     reliability: ReliabilitySummary,
@@ -256,6 +257,8 @@ fn run() -> Result<(), String> {
         .report_path
         .as_ref()
         .map(|path| path.display().to_string());
+    let replay_command =
+        replay_command(&workflow_log, options.flake_budget, options.coverage_floor);
 
     let forensics_artifact_index = build_forensics_artifact_index(ForensicsBuildContext {
         status,
@@ -270,7 +273,8 @@ fn run() -> Result<(), String> {
 
     let summary = GateSummary {
         status,
-        workflow_log,
+        workflow_log: workflow_log.clone(),
+        replay_command,
         attempts,
         suites: vec![final_suite],
         reliability: ReliabilitySummary {
@@ -640,10 +644,68 @@ fn build_forensics_artifact_index(
             description: "Differential fixture cases linked from workflow scenarios".to_string(),
         },
         ArtifactIndexEntry {
+            id: "shape_stride_cases".to_string(),
+            kind: "fixture_collection".to_string(),
+            path: "crates/fnp-conformance/fixtures/shape_stride_cases.json".to_string(),
+            description: "Shape/stride fixture cases linked from workflow scenarios".to_string(),
+        },
+        ArtifactIndexEntry {
+            id: "iter_differential_cases".to_string(),
+            kind: "fixture_collection".to_string(),
+            path: "crates/fnp-conformance/fixtures/iter_differential_cases.json".to_string(),
+            description: "Iterator differential fixture cases linked from workflow scenarios"
+                .to_string(),
+        },
+        ArtifactIndexEntry {
+            id: "iter_adversarial_cases".to_string(),
+            kind: "fixture_collection".to_string(),
+            path: "crates/fnp-conformance/fixtures/iter_adversarial_cases.json".to_string(),
+            description: "Iterator adversarial fixture cases linked from workflow scenarios"
+                .to_string(),
+        },
+        ArtifactIndexEntry {
+            id: "io_differential_cases".to_string(),
+            kind: "fixture_collection".to_string(),
+            path: "crates/fnp-conformance/fixtures/io_differential_cases.json".to_string(),
+            description: "IO differential fixture cases linked from workflow scenarios".to_string(),
+        },
+        ArtifactIndexEntry {
+            id: "io_adversarial_cases".to_string(),
+            kind: "fixture_collection".to_string(),
+            path: "crates/fnp-conformance/fixtures/io_adversarial_cases.json".to_string(),
+            description: "IO adversarial fixture cases linked from workflow scenarios".to_string(),
+        },
+        ArtifactIndexEntry {
+            id: "linalg_differential_cases".to_string(),
+            kind: "fixture_collection".to_string(),
+            path: "crates/fnp-conformance/fixtures/linalg_differential_cases.json".to_string(),
+            description: "Linalg differential fixture cases linked from workflow scenarios"
+                .to_string(),
+        },
+        ArtifactIndexEntry {
+            id: "linalg_adversarial_cases".to_string(),
+            kind: "fixture_collection".to_string(),
+            path: "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json".to_string(),
+            description: "Linalg adversarial fixture cases linked from workflow scenarios"
+                .to_string(),
+        },
+        ArtifactIndexEntry {
             id: "workflow_runner_script".to_string(),
             kind: "replay_script".to_string(),
             path: "scripts/e2e/run_workflow_scenario_gate.sh".to_string(),
             description: "Canonical script for local/CI replay".to_string(),
+        },
+        ArtifactIndexEntry {
+            id: "linalg_packet_workflow_script".to_string(),
+            kind: "replay_script".to_string(),
+            path: "scripts/e2e/run_linalg_contract_journey.sh".to_string(),
+            description: "Packet-008 workflow replay wrapper script".to_string(),
+        },
+        ArtifactIndexEntry {
+            id: "io_packet_workflow_script".to_string(),
+            kind: "replay_script".to_string(),
+            path: "scripts/e2e/run_io_contract_journey.sh".to_string(),
+            description: "Packet-009 workflow replay wrapper script".to_string(),
         },
     ];
     if let Some(path) = context.report_path {

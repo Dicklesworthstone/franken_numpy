@@ -1,0 +1,7 @@
+{
+  "suite": "rng_differential",
+  "total_cases": 7,
+  "passed_cases": 7,
+  "failed_cases": 0,
+  "mismatches": []
+}

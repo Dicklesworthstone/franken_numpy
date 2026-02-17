@@ -60,6 +60,10 @@ enum WorkflowStep {
         #[serde(default)]
         expect_error_contains: Option<String>,
     },
+    ShapeStrideCase {
+        id: String,
+        case_id: String,
+    },
     RuntimePolicy {
         id: String,
         case_id: String,
@@ -71,6 +75,21 @@ enum WorkflowStep {
         case_id: String,
         expected_action_strict: String,
         expected_action_hardened: String,
+    },
+    IterFixtureCase {
+        id: String,
+        case_id: String,
+        fixture_set: String,
+    },
+    IoFixtureCase {
+        id: String,
+        case_id: String,
+        fixture_set: String,
+    },
+    LinalgFixtureCase {
+        id: String,
+        case_id: String,
+        fixture_set: String,
     },
 }
 
@@ -115,6 +134,14 @@ struct ModeExecution {
     failures: Vec<String>,
 }
 
+#[derive(Debug)]
+struct IterStepResult {
+    expected: String,
+    actual: String,
+    passed: bool,
+    detail: String,
+}
+
 static WORKFLOW_SCENARIO_LOG_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 static WORKFLOW_SCENARIO_LOG_REQUIRED: OnceLock<Mutex<bool>> = OnceLock::new();
 
@@ -147,6 +174,7 @@ pub fn run_user_workflow_scenario_suite(config: &HarnessConfig) -> Result<SuiteR
         serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))?;
 
     let ufunc_cases = load_ufunc_case_map(&config.fixture_root.join("ufunc_input_cases.json"))?;
+    let shape_stride_cases = load_shape_stride_case_map(&config.fixture_root)?;
     let policy_cases =
         load_runtime_policy_case_map(&config.fixture_root.join("runtime_policy_cases.json"))?;
     let wire_cases = load_runtime_policy_wire_case_map(
@@ -154,6 +182,12 @@ pub fn run_user_workflow_scenario_suite(config: &HarnessConfig) -> Result<SuiteR
             .fixture_root
             .join("runtime_policy_adversarial_cases.json"),
     )?;
+    let iter_differential_cases = load_iter_differential_case_map(&config.fixture_root)?;
+    let iter_adversarial_cases = load_iter_adversarial_case_map(&config.fixture_root)?;
+    let io_differential_cases = load_io_differential_case_map(&config.fixture_root)?;
+    let io_adversarial_cases = load_io_adversarial_case_map(&config.fixture_root)?;
+    let linalg_differential_cases = load_linalg_differential_case_map(&config.fixture_root)?;
+    let linalg_adversarial_cases = load_linalg_adversarial_case_map(&config.fixture_root)?;
 
     let repo_root = derive_repo_root(&config.fixture_root)?;
 
@@ -222,9 +256,16 @@ pub fn run_user_workflow_scenario_suite(config: &HarnessConfig) -> Result<SuiteR
         for fixture_id in &scenario.links.differential_fixture_ids {
             record_check(
                 &mut report,
-                ufunc_cases.contains_key(fixture_id.as_str()),
+                ufunc_cases.contains_key(fixture_id.as_str())
+                    || shape_stride_cases.contains_key(fixture_id.as_str())
+                    || iter_differential_cases.contains_key(fixture_id.as_str())
+                    || iter_adversarial_cases.contains_key(fixture_id.as_str())
+                    || io_differential_cases.contains_key(fixture_id.as_str())
+                    || io_adversarial_cases.contains_key(fixture_id.as_str())
+                    || linalg_differential_cases.contains_key(fixture_id.as_str())
+                    || linalg_adversarial_cases.contains_key(fixture_id.as_str()),
                 format!(
-                    "{}: differential fixture id not found in ufunc_input_cases.json: {}",
+                    "{}: differential fixture id not found in ufunc_input_cases.json, shape_stride_cases.json, iter_differential_cases.json, iter_adversarial_cases.json, io_differential_cases.json, io_adversarial_cases.json, linalg_differential_cases.json, or linalg_adversarial_cases.json: {}",
                     scenario.id, fixture_id
                 ),
             );
@@ -283,15 +324,29 @@ pub fn run_user_workflow_scenario_suite(config: &HarnessConfig) -> Result<SuiteR
             scenario,
             RuntimeMode::Strict,
             &ufunc_cases,
+            &shape_stride_cases,
             &policy_cases,
             &wire_cases,
+            &iter_differential_cases,
+            &iter_adversarial_cases,
+            &io_differential_cases,
+            &io_adversarial_cases,
+            &linalg_differential_cases,
+            &linalg_adversarial_cases,
         )?;
         let hardened = execute_mode(
             scenario,
             RuntimeMode::Hardened,
             &ufunc_cases,
+            &shape_stride_cases,
             &policy_cases,
             &wire_cases,
+            &iter_differential_cases,
+            &iter_adversarial_cases,
+            &io_differential_cases,
+            &io_adversarial_cases,
+            &linalg_differential_cases,
+            &linalg_adversarial_cases,
         )?;
 
         let strict_expected = scenario.strict.expected_status.trim().to_lowercase();
@@ -399,6 +454,134 @@ fn load_runtime_policy_wire_case_map(
     Ok(map)
 }
 
+fn load_iter_differential_case_map(
+    fixture_root: &Path,
+) -> Result<BTreeMap<String, crate::IterDifferentialCase>, String> {
+    let cases = crate::load_iter_differential_cases(fixture_root)?;
+    let mut map = BTreeMap::new();
+    for case in cases {
+        if map.insert(case.id.clone(), case).is_some() {
+            return Err(format!(
+                "duplicate iter differential fixture id in {}",
+                fixture_root.join("iter_differential_cases.json").display()
+            ));
+        }
+    }
+    Ok(map)
+}
+
+fn load_iter_adversarial_case_map(
+    fixture_root: &Path,
+) -> Result<BTreeMap<String, crate::IterAdversarialCase>, String> {
+    let cases = crate::load_iter_adversarial_cases(fixture_root)?;
+    let mut map = BTreeMap::new();
+    for case in cases {
+        if map.insert(case.id.clone(), case).is_some() {
+            return Err(format!(
+                "duplicate iter adversarial fixture id in {}",
+                fixture_root.join("iter_adversarial_cases.json").display()
+            ));
+        }
+    }
+    Ok(map)
+}
+
+fn load_io_differential_case_map(
+    fixture_root: &Path,
+) -> Result<BTreeMap<String, crate::IoDifferentialCase>, String> {
+    let path = fixture_root.join("io_differential_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    let cases: Vec<crate::IoDifferentialCase> = serde_json::from_str(&raw)
+        .map_err(|err| format!("invalid json {}: {err}", path.display()))?;
+    let mut map = BTreeMap::new();
+    for case in cases {
+        if map.insert(case.id.clone(), case).is_some() {
+            return Err(format!(
+                "duplicate io differential fixture id in {}",
+                path.display()
+            ));
+        }
+    }
+    Ok(map)
+}
+
+fn load_io_adversarial_case_map(
+    fixture_root: &Path,
+) -> Result<BTreeMap<String, crate::IoAdversarialCase>, String> {
+    let path = fixture_root.join("io_adversarial_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    let cases: Vec<crate::IoAdversarialCase> = serde_json::from_str(&raw)
+        .map_err(|err| format!("invalid json {}: {err}", path.display()))?;
+    let mut map = BTreeMap::new();
+    for case in cases {
+        if map.insert(case.id.clone(), case).is_some() {
+            return Err(format!(
+                "duplicate io adversarial fixture id in {}",
+                path.display()
+            ));
+        }
+    }
+    Ok(map)
+}
+
+fn load_linalg_differential_case_map(
+    fixture_root: &Path,
+) -> Result<BTreeMap<String, crate::LinalgDifferentialCase>, String> {
+    let path = fixture_root.join("linalg_differential_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    let cases: Vec<crate::LinalgDifferentialCase> = serde_json::from_str(&raw)
+        .map_err(|err| format!("invalid json {}: {err}", path.display()))?;
+    let mut map = BTreeMap::new();
+    for case in cases {
+        if map.insert(case.id.clone(), case).is_some() {
+            return Err(format!(
+                "duplicate linalg differential fixture id in {}",
+                path.display()
+            ));
+        }
+    }
+    Ok(map)
+}
+
+fn load_linalg_adversarial_case_map(
+    fixture_root: &Path,
+) -> Result<BTreeMap<String, crate::LinalgAdversarialCase>, String> {
+    let path = fixture_root.join("linalg_adversarial_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    let cases: Vec<crate::LinalgAdversarialCase> = serde_json::from_str(&raw)
+        .map_err(|err| format!("invalid json {}: {err}", path.display()))?;
+    let mut map = BTreeMap::new();
+    for case in cases {
+        if map.insert(case.id.clone(), case).is_some() {
+            return Err(format!(
+                "duplicate linalg adversarial fixture id in {}",
+                path.display()
+            ));
+        }
+    }
+    Ok(map)
+}
+
+fn load_shape_stride_case_map(
+    fixture_root: &Path,
+) -> Result<BTreeMap<String, crate::ShapeStrideFixtureCase>, String> {
+    let cases = crate::load_shape_stride_cases(fixture_root)?;
+    let mut map = BTreeMap::new();
+    for case in cases {
+        if map.insert(case.id.clone(), case).is_some() {
+            return Err(format!(
+                "duplicate shape_stride fixture id in {}",
+                fixture_root.join("shape_stride_cases.json").display()
+            ));
+        }
+    }
+    Ok(map)
+}
+
 fn derive_repo_root(fixture_root: &Path) -> Result<PathBuf, String> {
     fixture_root
         .parent()
@@ -413,12 +596,20 @@ fn derive_repo_root(fixture_root: &Path) -> Result<PathBuf, String> {
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_mode(
     scenario: &WorkflowScenarioCase,
     mode: RuntimeMode,
     ufunc_cases: &BTreeMap<String, UFuncInputCase>,
+    shape_stride_cases: &BTreeMap<String, crate::ShapeStrideFixtureCase>,
     policy_cases: &BTreeMap<String, PolicyFixtureCase>,
     wire_cases: &BTreeMap<String, PolicyWireFixtureCase>,
+    iter_differential_cases: &BTreeMap<String, crate::IterDifferentialCase>,
+    iter_adversarial_cases: &BTreeMap<String, crate::IterAdversarialCase>,
+    io_differential_cases: &BTreeMap<String, crate::IoDifferentialCase>,
+    io_adversarial_cases: &BTreeMap<String, crate::IoAdversarialCase>,
+    linalg_differential_cases: &BTreeMap<String, crate::LinalgDifferentialCase>,
+    linalg_adversarial_cases: &BTreeMap<String, crate::LinalgAdversarialCase>,
 ) -> Result<ModeExecution, String> {
     let mut failures = Vec::new();
     let mut saw_fail_closed = false;
@@ -493,6 +684,57 @@ fn execute_mode(
 
                 if !passed {
                     failures.push(format!("{fixture_id}: {detail}"));
+                }
+            }
+            WorkflowStep::ShapeStrideCase { id, case_id } => {
+                let mut passed = false;
+                let expected = "pass".to_string();
+                let actual: String;
+                let mut detail = String::new();
+
+                if let Some(case) = shape_stride_cases.get(case_id.as_str()) {
+                    let (case_passed, case_failures) = crate::evaluate_shape_stride_case(case);
+                    passed = case_passed;
+                    if passed {
+                        actual = "pass".to_string();
+                    } else if !case_failures.is_empty() {
+                        detail = case_failures.join("; ");
+                        actual = detail.clone();
+                    } else {
+                        detail = "shape_stride validation failed".to_string();
+                        actual = detail.clone();
+                    }
+                } else {
+                    detail = format!("shape/stride case id '{}' not found", case_id);
+                    actual = detail.clone();
+                }
+
+                let fixture_id = format!("{}::{}", scenario.id, id);
+                let entry = WorkflowScenarioLogEntry {
+                    suite: "workflow_scenarios",
+                    fixture_id: fixture_id.clone(),
+                    seed: scenario.seed,
+                    mode: mode_name.clone(),
+                    env_fingerprint: scenario.env_fingerprint.clone(),
+                    artifact_refs: scenario.artifact_refs.clone(),
+                    reason_code: scenario.reason_code.clone(),
+                    scenario_id: scenario.id.clone(),
+                    step_id: id.clone(),
+                    step_kind: "shape_stride_case".to_string(),
+                    expected,
+                    actual,
+                    passed,
+                    detail: detail.clone(),
+                };
+                maybe_append_workflow_log(&entry)?;
+
+                if !passed {
+                    let failure_detail = if detail.is_empty() {
+                        "shape_stride validation failed".to_string()
+                    } else {
+                        detail.clone()
+                    };
+                    failures.push(format!("{fixture_id}: {failure_detail}"));
                 }
             }
             WorkflowStep::RuntimePolicy {
@@ -613,6 +855,219 @@ fn execute_mode(
                     failures.push(format!("{fixture_id}: {detail}"));
                 }
             }
+            WorkflowStep::IterFixtureCase {
+                id,
+                case_id,
+                fixture_set,
+            } => {
+                let fixture_id = format!("{}::{}", scenario.id, id);
+                let (expected, actual, passed, detail) = match fixture_set.as_str() {
+                    "differential" => {
+                        if let Some(case) = iter_differential_cases.get(case_id.as_str()) {
+                            let result = execute_iter_differential_step(case);
+                            (result.expected, result.actual, result.passed, result.detail)
+                        } else {
+                            (
+                                String::new(),
+                                "missing_case".to_string(),
+                                false,
+                                format!("iter differential case id '{}' not found", case_id),
+                            )
+                        }
+                    }
+                    "adversarial" => {
+                        if let Some(case) = iter_adversarial_cases.get(case_id.as_str()) {
+                            let result = execute_iter_adversarial_step(case);
+                            (result.expected, result.actual, result.passed, result.detail)
+                        } else {
+                            (
+                                String::new(),
+                                "missing_case".to_string(),
+                                false,
+                                format!("iter adversarial case id '{}' not found", case_id),
+                            )
+                        }
+                    }
+                    other => (
+                        String::new(),
+                        "unsupported_fixture_set".to_string(),
+                        false,
+                        format!(
+                            "unsupported iter fixture_set '{}' (expected differential|adversarial)",
+                            other
+                        ),
+                    ),
+                };
+
+                let entry = WorkflowScenarioLogEntry {
+                    suite: "workflow_scenarios",
+                    fixture_id: fixture_id.clone(),
+                    seed: scenario.seed,
+                    mode: mode_name.clone(),
+                    env_fingerprint: scenario.env_fingerprint.clone(),
+                    artifact_refs: scenario.artifact_refs.clone(),
+                    reason_code: scenario.reason_code.clone(),
+                    scenario_id: scenario.id.clone(),
+                    step_id: id.clone(),
+                    step_kind: "iter_fixture_case".to_string(),
+                    expected,
+                    actual,
+                    passed,
+                    detail: detail.clone(),
+                };
+                maybe_append_workflow_log(&entry)?;
+
+                if !passed {
+                    let failure_detail = if detail.is_empty() {
+                        "iterator fixture step failed".to_string()
+                    } else {
+                        detail
+                    };
+                    failures.push(format!("{fixture_id}: {failure_detail}"));
+                }
+            }
+            WorkflowStep::IoFixtureCase {
+                id,
+                case_id,
+                fixture_set,
+            } => {
+                let fixture_id = format!("{}::{}", scenario.id, id);
+                let (expected, actual, passed, detail) = match fixture_set.as_str() {
+                    "differential" => {
+                        if let Some(case) = io_differential_cases.get(case_id.as_str()) {
+                            let result = execute_io_differential_step(case);
+                            (result.expected, result.actual, result.passed, result.detail)
+                        } else {
+                            (
+                                String::new(),
+                                "missing_case".to_string(),
+                                false,
+                                format!("io differential case id '{}' not found", case_id),
+                            )
+                        }
+                    }
+                    "adversarial" => {
+                        if let Some(case) = io_adversarial_cases.get(case_id.as_str()) {
+                            let result = execute_io_adversarial_step(case);
+                            (result.expected, result.actual, result.passed, result.detail)
+                        } else {
+                            (
+                                String::new(),
+                                "missing_case".to_string(),
+                                false,
+                                format!("io adversarial case id '{}' not found", case_id),
+                            )
+                        }
+                    }
+                    other => (
+                        String::new(),
+                        "unsupported_fixture_set".to_string(),
+                        false,
+                        format!(
+                            "unsupported io fixture_set '{}' (expected differential|adversarial)",
+                            other
+                        ),
+                    ),
+                };
+
+                let entry = WorkflowScenarioLogEntry {
+                    suite: "workflow_scenarios",
+                    fixture_id: fixture_id.clone(),
+                    seed: scenario.seed,
+                    mode: mode_name.clone(),
+                    env_fingerprint: scenario.env_fingerprint.clone(),
+                    artifact_refs: scenario.artifact_refs.clone(),
+                    reason_code: scenario.reason_code.clone(),
+                    scenario_id: scenario.id.clone(),
+                    step_id: id.clone(),
+                    step_kind: "io_fixture_case".to_string(),
+                    expected,
+                    actual,
+                    passed,
+                    detail: detail.clone(),
+                };
+                maybe_append_workflow_log(&entry)?;
+
+                if !passed {
+                    let failure_detail = if detail.is_empty() {
+                        "io fixture step failed".to_string()
+                    } else {
+                        detail
+                    };
+                    failures.push(format!("{fixture_id}: {failure_detail}"));
+                }
+            }
+            WorkflowStep::LinalgFixtureCase {
+                id,
+                case_id,
+                fixture_set,
+            } => {
+                let fixture_id = format!("{}::{}", scenario.id, id);
+                let (expected, actual, passed, detail) = match fixture_set.as_str() {
+                    "differential" => {
+                        if let Some(case) = linalg_differential_cases.get(case_id.as_str()) {
+                            let result = execute_linalg_differential_step(case);
+                            (result.expected, result.actual, result.passed, result.detail)
+                        } else {
+                            (
+                                String::new(),
+                                "missing_case".to_string(),
+                                false,
+                                format!("linalg differential case id '{}' not found", case_id),
+                            )
+                        }
+                    }
+                    "adversarial" => {
+                        if let Some(case) = linalg_adversarial_cases.get(case_id.as_str()) {
+                            let result = execute_linalg_adversarial_step(case);
+                            (result.expected, result.actual, result.passed, result.detail)
+                        } else {
+                            (
+                                String::new(),
+                                "missing_case".to_string(),
+                                false,
+                                format!("linalg adversarial case id '{}' not found", case_id),
+                            )
+                        }
+                    }
+                    other => (
+                        String::new(),
+                        "unsupported_fixture_set".to_string(),
+                        false,
+                        format!(
+                            "unsupported linalg fixture_set '{}' (expected differential|adversarial)",
+                            other
+                        ),
+                    ),
+                };
+
+                let entry = WorkflowScenarioLogEntry {
+                    suite: "workflow_scenarios",
+                    fixture_id: fixture_id.clone(),
+                    seed: scenario.seed,
+                    mode: mode_name.clone(),
+                    env_fingerprint: scenario.env_fingerprint.clone(),
+                    artifact_refs: scenario.artifact_refs.clone(),
+                    reason_code: scenario.reason_code.clone(),
+                    scenario_id: scenario.id.clone(),
+                    step_id: id.clone(),
+                    step_kind: "linalg_fixture_case".to_string(),
+                    expected,
+                    actual,
+                    passed,
+                    detail: detail.clone(),
+                };
+                maybe_append_workflow_log(&entry)?;
+
+                if !passed {
+                    let failure_detail = if detail.is_empty() {
+                        "linalg fixture step failed".to_string()
+                    } else {
+                        detail
+                    };
+                    failures.push(format!("{fixture_id}: {failure_detail}"));
+                }
+            }
         }
     }
 
@@ -630,6 +1085,449 @@ fn execute_mode(
         actual_status,
         failures,
     })
+}
+
+fn flat_index_len_hint(index: &crate::IterFlatIndexFixtureInput) -> usize {
+    index
+        .stop
+        .max(index.mask.len())
+        .max(index.index.saturating_add(1))
+}
+
+fn execute_iter_differential_step(case: &crate::IterDifferentialCase) -> IterStepResult {
+    let reason_code = crate::normalize_reason_code(&case.reason_code);
+    let expected_reason_code = if case.expected_reason_code.trim().is_empty() {
+        reason_code.clone()
+    } else {
+        case.expected_reason_code.trim().to_string()
+    };
+    let expected_error = case.expected_error_contains.to_lowercase();
+    let flat_len = case
+        .len
+        .unwrap_or_else(|| case.flat_index.as_ref().map_or(0, flat_index_len_hint));
+
+    if expected_error.is_empty() {
+        match crate::execute_iter_operation_with_len(
+            &case.id,
+            &case.operation,
+            case.selector.as_ref(),
+            case.overlap.as_ref(),
+            case.flat_index.as_ref(),
+            case.flags.as_ref(),
+            flat_len,
+            case.values_len,
+        ) {
+            Ok(outcome) => match crate::validate_iter_success_expectations(case, &outcome) {
+                Ok(()) => IterStepResult {
+                    expected: format!("ok reason_code={expected_reason_code}"),
+                    actual: format!("ok reason_code={reason_code}"),
+                    passed: reason_code == expected_reason_code,
+                    detail: if reason_code == expected_reason_code {
+                        String::new()
+                    } else {
+                        format!(
+                            "success reason-code mismatch expected={} actual={}",
+                            expected_reason_code, reason_code
+                        )
+                    },
+                },
+                Err(err) => IterStepResult {
+                    expected: format!("ok reason_code={expected_reason_code}"),
+                    actual: format!("error:{err}"),
+                    passed: false,
+                    detail: err,
+                },
+            },
+            Err(err) => IterStepResult {
+                expected: format!("ok reason_code={expected_reason_code}"),
+                actual: format!("error:{} reason_code={}", err.message, err.reason_code),
+                passed: false,
+                detail: format!(
+                    "expected successful execution but operation '{}' failed",
+                    case.operation
+                ),
+            },
+        }
+    } else {
+        match crate::execute_iter_operation_with_len(
+            &case.id,
+            &case.operation,
+            case.selector.as_ref(),
+            case.overlap.as_ref(),
+            case.flat_index.as_ref(),
+            case.flags.as_ref(),
+            flat_len,
+            case.values_len,
+        ) {
+            Ok(_) => IterStepResult {
+                expected: format!(
+                    "error_contains:{} reason_code={}",
+                    case.expected_error_contains, expected_reason_code
+                ),
+                actual: format!("ok reason_code={reason_code}"),
+                passed: false,
+                detail: format!(
+                    "expected error containing '{}' but operation '{}' succeeded",
+                    case.expected_error_contains, case.operation
+                ),
+            },
+            Err(err) => {
+                let contains_expected = err.message.to_lowercase().contains(&expected_error);
+                let reason_match = err.reason_code == expected_reason_code;
+                let passed = contains_expected && reason_match;
+                let detail = if passed {
+                    String::new()
+                } else {
+                    format!(
+                        "expected error containing '{}' with reason_code='{}' but got '{}' (actual_reason_code='{}')",
+                        case.expected_error_contains,
+                        expected_reason_code,
+                        err.message,
+                        err.reason_code
+                    )
+                };
+                IterStepResult {
+                    expected: format!(
+                        "error_contains:{} reason_code={}",
+                        case.expected_error_contains, expected_reason_code
+                    ),
+                    actual: format!("error:{} reason_code={}", err.message, err.reason_code),
+                    passed,
+                    detail,
+                }
+            }
+        }
+    }
+}
+
+fn execute_iter_adversarial_step(case: &crate::IterAdversarialCase) -> IterStepResult {
+    let reason_code = crate::normalize_reason_code(&case.reason_code);
+    let expected_reason_code = if case.expected_reason_code.trim().is_empty() {
+        reason_code
+    } else {
+        case.expected_reason_code.trim().to_string()
+    };
+    let expected_error = case.expected_error_contains.to_lowercase();
+    let flat_len = case
+        .len
+        .unwrap_or_else(|| case.flat_index.as_ref().map_or(0, flat_index_len_hint));
+
+    match crate::execute_iter_operation_with_len(
+        &case.id,
+        &case.operation,
+        case.selector.as_ref(),
+        case.overlap.as_ref(),
+        case.flat_index.as_ref(),
+        case.flags.as_ref(),
+        flat_len,
+        case.values_len,
+    ) {
+        Ok(_) => IterStepResult {
+            expected: format!(
+                "error_contains:{} reason_code={}",
+                case.expected_error_contains, expected_reason_code
+            ),
+            actual: "ok".to_string(),
+            passed: false,
+            detail: format!(
+                "expected error containing '{}' but operation '{}' succeeded",
+                case.expected_error_contains, case.operation
+            ),
+        },
+        Err(err) => {
+            let contains_expected = err.message.to_lowercase().contains(&expected_error);
+            let reason_match = err.reason_code == expected_reason_code;
+            let passed = contains_expected && reason_match;
+            let detail = if passed {
+                String::new()
+            } else {
+                format!(
+                    "expected error containing '{}' with reason_code='{}' but got '{}' (actual_reason_code='{}')",
+                    case.expected_error_contains,
+                    expected_reason_code,
+                    err.message,
+                    err.reason_code
+                )
+            };
+            IterStepResult {
+                expected: format!(
+                    "error_contains:{} reason_code={}",
+                    case.expected_error_contains, expected_reason_code
+                ),
+                actual: format!("error:{} reason_code={}", err.message, err.reason_code),
+                passed,
+                detail,
+            }
+        }
+    }
+}
+
+fn execute_io_differential_step(case: &crate::IoDifferentialCase) -> IterStepResult {
+    let reason_code = crate::normalize_reason_code(&case.reason_code);
+    let expected_reason_code = if case.expected_reason_code.trim().is_empty() {
+        reason_code.clone()
+    } else {
+        case.expected_reason_code.trim().to_string()
+    };
+    let expected_error = case.expected_error_contains.to_lowercase();
+
+    if expected_error.is_empty() {
+        match crate::execute_io_differential_operation(case) {
+            Ok(outcome) => {
+                match crate::validate_io_differential_success_expectations(case, &outcome) {
+                    Ok(()) => IterStepResult {
+                        expected: format!("ok reason_code={expected_reason_code}"),
+                        actual: format!("ok reason_code={reason_code}"),
+                        passed: reason_code == expected_reason_code,
+                        detail: if reason_code == expected_reason_code {
+                            String::new()
+                        } else {
+                            format!(
+                                "success reason-code mismatch expected={} actual={}",
+                                expected_reason_code, reason_code
+                            )
+                        },
+                    },
+                    Err(err) => IterStepResult {
+                        expected: format!("ok reason_code={expected_reason_code}"),
+                        actual: format!("error:{err}"),
+                        passed: false,
+                        detail: err,
+                    },
+                }
+            }
+            Err(err) => IterStepResult {
+                expected: format!("ok reason_code={expected_reason_code}"),
+                actual: format!("error:{} reason_code={}", err.message, err.reason_code),
+                passed: false,
+                detail: format!(
+                    "expected successful execution but operation '{}' failed",
+                    case.operation
+                ),
+            },
+        }
+    } else {
+        match crate::execute_io_differential_operation(case) {
+            Ok(_) => IterStepResult {
+                expected: format!(
+                    "error_contains:{} reason_code={}",
+                    case.expected_error_contains, expected_reason_code
+                ),
+                actual: format!("ok reason_code={reason_code}"),
+                passed: false,
+                detail: format!(
+                    "expected error containing '{}' but operation '{}' succeeded",
+                    case.expected_error_contains, case.operation
+                ),
+            },
+            Err(err) => {
+                let contains_expected = err.message.to_lowercase().contains(&expected_error);
+                let reason_match = err.reason_code == expected_reason_code;
+                let passed = contains_expected && reason_match;
+                let detail = if passed {
+                    String::new()
+                } else {
+                    format!(
+                        "expected error containing '{}' with reason_code='{}' but got '{}' (actual_reason_code='{}')",
+                        case.expected_error_contains,
+                        expected_reason_code,
+                        err.message,
+                        err.reason_code
+                    )
+                };
+                IterStepResult {
+                    expected: format!(
+                        "error_contains:{} reason_code={}",
+                        case.expected_error_contains, expected_reason_code
+                    ),
+                    actual: format!("error:{} reason_code={}", err.message, err.reason_code),
+                    passed,
+                    detail,
+                }
+            }
+        }
+    }
+}
+
+fn execute_io_adversarial_step(case: &crate::IoAdversarialCase) -> IterStepResult {
+    let reason_code = crate::normalize_reason_code(&case.reason_code);
+    let expected_reason_code = if case.expected_reason_code.trim().is_empty() {
+        reason_code
+    } else {
+        case.expected_reason_code.trim().to_string()
+    };
+    let expected_error = case.expected_error_contains.to_lowercase();
+
+    match crate::execute_io_adversarial_operation(case) {
+        Ok(()) => IterStepResult {
+            expected: format!(
+                "error_contains:{} reason_code={}",
+                case.expected_error_contains, expected_reason_code
+            ),
+            actual: "ok".to_string(),
+            passed: false,
+            detail: format!(
+                "expected error containing '{}' but operation '{}' succeeded",
+                case.expected_error_contains, case.operation
+            ),
+        },
+        Err(err) => {
+            let contains_expected = err.message.to_lowercase().contains(&expected_error);
+            let reason_match = err.reason_code == expected_reason_code;
+            let passed = contains_expected && reason_match;
+            let detail = if passed {
+                String::new()
+            } else {
+                format!(
+                    "expected error containing '{}' with reason_code='{}' but got '{}' (actual_reason_code='{}')",
+                    case.expected_error_contains,
+                    expected_reason_code,
+                    err.message,
+                    err.reason_code
+                )
+            };
+            IterStepResult {
+                expected: format!(
+                    "error_contains:{} reason_code={}",
+                    case.expected_error_contains, expected_reason_code
+                ),
+                actual: format!("error:{} reason_code={}", err.message, err.reason_code),
+                passed,
+                detail,
+            }
+        }
+    }
+}
+
+fn execute_linalg_differential_step(case: &crate::LinalgDifferentialCase) -> IterStepResult {
+    let reason_code = crate::normalize_reason_code(&case.reason_code);
+    let expected_reason_code = if case.expected_reason_code.trim().is_empty() {
+        reason_code.clone()
+    } else {
+        case.expected_reason_code.trim().to_string()
+    };
+    let expected_error = case.expected_error_contains.to_lowercase();
+
+    if expected_error.is_empty() {
+        match crate::execute_linalg_differential_operation(case) {
+            Ok(outcome) => match crate::validate_linalg_differential_expectation(case, &outcome) {
+                Ok(()) => IterStepResult {
+                    expected: format!("ok reason_code={expected_reason_code}"),
+                    actual: format!("ok reason_code={reason_code}"),
+                    passed: reason_code == expected_reason_code,
+                    detail: if reason_code == expected_reason_code {
+                        String::new()
+                    } else {
+                        format!(
+                            "success reason-code mismatch expected={} actual={}",
+                            expected_reason_code, reason_code
+                        )
+                    },
+                },
+                Err(err) => IterStepResult {
+                    expected: format!("ok reason_code={expected_reason_code}"),
+                    actual: format!("error:{err}"),
+                    passed: false,
+                    detail: err,
+                },
+            },
+            Err(err) => IterStepResult {
+                expected: format!("ok reason_code={expected_reason_code}"),
+                actual: format!("error:{err} reason_code={}", err.reason_code()),
+                passed: false,
+                detail: format!(
+                    "expected successful execution but operation '{}' failed",
+                    case.operation
+                ),
+            },
+        }
+    } else {
+        match crate::execute_linalg_differential_operation(case) {
+            Ok(_) => IterStepResult {
+                expected: format!(
+                    "error_contains:{} reason_code={}",
+                    case.expected_error_contains, expected_reason_code
+                ),
+                actual: format!("ok reason_code={reason_code}"),
+                passed: false,
+                detail: format!(
+                    "expected error containing '{}' but operation '{}' succeeded",
+                    case.expected_error_contains, case.operation
+                ),
+            },
+            Err(err) => {
+                let actual_reason_code = err.reason_code().to_string();
+                let contains_expected = err.to_string().to_lowercase().contains(&expected_error);
+                let reason_match = actual_reason_code == expected_reason_code;
+                let passed = contains_expected && reason_match;
+                let detail = if passed {
+                    String::new()
+                } else {
+                    format!(
+                        "expected error containing '{}' with reason_code='{}' but got '{}' (actual_reason_code='{}')",
+                        case.expected_error_contains, expected_reason_code, err, actual_reason_code
+                    )
+                };
+                IterStepResult {
+                    expected: format!(
+                        "error_contains:{} reason_code={}",
+                        case.expected_error_contains, expected_reason_code
+                    ),
+                    actual: format!("error:{err} reason_code={actual_reason_code}"),
+                    passed,
+                    detail,
+                }
+            }
+        }
+    }
+}
+
+fn execute_linalg_adversarial_step(case: &crate::LinalgAdversarialCase) -> IterStepResult {
+    let reason_code = crate::normalize_reason_code(&case.reason_code);
+    let expected_reason_code = if case.expected_reason_code.trim().is_empty() {
+        reason_code
+    } else {
+        case.expected_reason_code.trim().to_string()
+    };
+    let expected_error = case.expected_error_contains.to_lowercase();
+
+    match crate::execute_linalg_adversarial_operation(case) {
+        Ok(_) => IterStepResult {
+            expected: format!(
+                "error_contains:{} reason_code={}",
+                case.expected_error_contains, expected_reason_code
+            ),
+            actual: "ok".to_string(),
+            passed: false,
+            detail: format!(
+                "expected error containing '{}' but operation '{}' succeeded",
+                case.expected_error_contains, case.operation
+            ),
+        },
+        Err(err) => {
+            let actual_reason_code = err.reason_code().to_string();
+            let contains_expected = err.to_string().to_lowercase().contains(&expected_error);
+            let reason_match = actual_reason_code == expected_reason_code;
+            let passed = contains_expected && reason_match;
+            let detail = if passed {
+                String::new()
+            } else {
+                format!(
+                    "expected error containing '{}' with reason_code='{}' but got '{}' (actual_reason_code='{}')",
+                    case.expected_error_contains, expected_reason_code, err, actual_reason_code
+                )
+            };
+            IterStepResult {
+                expected: format!(
+                    "error_contains:{} reason_code={}",
+                    case.expected_error_contains, expected_reason_code
+                ),
+                actual: format!("error:{err} reason_code={actual_reason_code}"),
+                passed,
+                detail,
+            }
+        }
+    }
 }
 
 fn parse_action(raw: &str) -> Result<DecisionAction, String> {

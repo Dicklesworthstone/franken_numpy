@@ -11,9 +11,15 @@ pub mod workflow_scenarios;
 use crate::ufunc_differential::{UFuncInputCase, UFuncOperation};
 use fnp_dtype::{DType, promote};
 use fnp_io::{
-    IOSupportedDType, MemmapMode, classify_load_dispatch, validate_header_schema,
-    validate_io_policy_metadata, validate_magic_version, validate_memmap_contract,
-    validate_npz_archive_budget, validate_read_payload,
+    IOError, IOSupportedDType, LoadDispatch, MemmapMode, classify_load_dispatch,
+    validate_descriptor_roundtrip, validate_header_schema, validate_io_policy_metadata,
+    validate_magic_version, validate_memmap_contract, validate_npz_archive_budget,
+    validate_read_payload,
+};
+use fnp_iter::{
+    FlatIterIndex, NditerTransferFlags, OverlapAction, TransferClass, TransferError,
+    TransferSelectorInput, overlap_copy_policy, select_transfer_class, validate_flatiter_read,
+    validate_flatiter_write, validate_nditer_flags,
 };
 use fnp_linalg::{
     LinAlgError, QrMode, lstsq_output_shapes, qr_output_shapes, solve_2x2, svd_output_shapes,
@@ -255,9 +261,13 @@ struct IoAdversarialCase {
     operation: String,
     expected_error_contains: String,
     #[serde(default)]
+    expected_reason_code: String,
+    #[serde(default)]
     severity: String,
     #[serde(default)]
     seed: u64,
+    #[serde(default)]
+    mode: String,
     #[serde(default)]
     env_fingerprint: String,
     #[serde(default)]
@@ -286,6 +296,104 @@ struct IoAdversarialCase {
     expected_bytes: usize,
     #[serde(default)]
     validation_retries: usize,
+    #[serde(default)]
+    member_count: usize,
+    #[serde(default)]
+    uncompressed_bytes: usize,
+    #[serde(default)]
+    dispatch_retries: usize,
+    #[serde(default)]
+    mode_raw: String,
+    #[serde(default)]
+    class_raw: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct IoDifferentialCase {
+    id: String,
+    operation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    expected_reason_code: String,
+    #[serde(default)]
+    expected_error_contains: String,
+    #[serde(default)]
+    payload_prefix: Vec<u8>,
+    #[serde(default)]
+    shape: Vec<usize>,
+    #[serde(default)]
+    fortran_order: bool,
+    #[serde(default)]
+    dtype_descr: String,
+    #[serde(default)]
+    header_len: usize,
+    #[serde(default)]
+    payload_len_bytes: usize,
+    #[serde(default)]
+    allow_pickle: bool,
+    #[serde(default)]
+    memmap_mode: String,
+    #[serde(default)]
+    file_len_bytes: usize,
+    #[serde(default)]
+    expected_bytes: usize,
+    #[serde(default)]
+    validation_retries: usize,
+    #[serde(default)]
+    member_count: usize,
+    #[serde(default)]
+    uncompressed_bytes: usize,
+    #[serde(default)]
+    dispatch_retries: usize,
+    #[serde(default)]
+    mode_raw: String,
+    #[serde(default)]
+    class_raw: String,
+    #[serde(default)]
+    expected_dispatch: String,
+    #[serde(default)]
+    expected_magic_version: String,
+    #[serde(default)]
+    expected_count: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IoMetamorphicCase {
+    id: String,
+    relation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    payload_prefix: Vec<u8>,
+    #[serde(default)]
+    shape: Vec<usize>,
+    #[serde(default)]
+    fortran_order: bool,
+    #[serde(default)]
+    dtype_descr: String,
+    #[serde(default)]
+    header_len: usize,
+    #[serde(default)]
+    payload_len_bytes: usize,
+    #[serde(default)]
+    allow_pickle: bool,
     #[serde(default)]
     member_count: usize,
     #[serde(default)]
@@ -528,6 +636,143 @@ struct RngAdversarialCase {
     steps: u64,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct IterSelectorFixtureInput {
+    src_stride: isize,
+    dst_stride: isize,
+    item_size: usize,
+    element_count: usize,
+    aligned: bool,
+    cast_is_lossless: bool,
+    same_value_cast: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct IterOverlapFixtureInput {
+    src_offset: usize,
+    dst_offset: usize,
+    byte_len: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct IterFlatIndexFixtureInput {
+    kind: String,
+    #[serde(default)]
+    index: usize,
+    #[serde(default)]
+    start: usize,
+    #[serde(default)]
+    stop: usize,
+    #[serde(default = "default_one_usize")]
+    step: usize,
+    #[serde(default)]
+    indices: Vec<usize>,
+    #[serde(default)]
+    mask: Vec<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct IterFlagsFixtureInput {
+    copy_if_overlap: bool,
+    no_broadcast: bool,
+    observed_overlap: bool,
+    observed_broadcast: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct IterDifferentialCase {
+    id: String,
+    operation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    expected_reason_code: String,
+    #[serde(default)]
+    expected_error_contains: String,
+    #[serde(default)]
+    selector: Option<IterSelectorFixtureInput>,
+    #[serde(default)]
+    overlap: Option<IterOverlapFixtureInput>,
+    #[serde(default)]
+    flat_index: Option<IterFlatIndexFixtureInput>,
+    #[serde(default)]
+    flags: Option<IterFlagsFixtureInput>,
+    #[serde(default)]
+    len: Option<usize>,
+    #[serde(default)]
+    values_len: Option<usize>,
+    #[serde(default)]
+    expected_transfer_class: Option<String>,
+    #[serde(default)]
+    expected_overlap_action: Option<String>,
+    #[serde(default)]
+    expected_selected: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct IterMetamorphicCase {
+    id: String,
+    relation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    selector: Option<IterSelectorFixtureInput>,
+    #[serde(default)]
+    overlap: Option<IterOverlapFixtureInput>,
+    #[serde(default)]
+    flat_index: Option<IterFlatIndexFixtureInput>,
+    #[serde(default)]
+    flags: Option<IterFlagsFixtureInput>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct IterAdversarialCase {
+    id: String,
+    operation: String,
+    expected_error_contains: String,
+    expected_reason_code: String,
+    #[serde(default)]
+    severity: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    selector: Option<IterSelectorFixtureInput>,
+    #[serde(default)]
+    overlap: Option<IterOverlapFixtureInput>,
+    #[serde(default)]
+    flat_index: Option<IterFlatIndexFixtureInput>,
+    #[serde(default)]
+    flags: Option<IterFlagsFixtureInput>,
+    #[serde(default)]
+    len: Option<usize>,
+    #[serde(default)]
+    values_len: Option<usize>,
+}
+
 #[derive(Debug, Deserialize)]
 struct CrashSignatureRegistry {
     schema_version: u8,
@@ -676,12 +921,60 @@ struct RngDifferentialReportArtifact {
     mismatches: Vec<RngDifferentialMismatch>,
 }
 
+#[derive(Debug, Serialize)]
+struct IoDifferentialMismatch {
+    fixture_id: String,
+    seed: u64,
+    mode: String,
+    operation: String,
+    expected_reason_code: String,
+    actual_reason_code: String,
+    message: String,
+    minimal_repro_artifacts: Vec<String>,
+    artifact_refs: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct IoDifferentialReportArtifact {
+    suite: &'static str,
+    total_cases: usize,
+    passed_cases: usize,
+    failed_cases: usize,
+    mismatches: Vec<IoDifferentialMismatch>,
+}
+
+#[derive(Debug, Serialize)]
+struct IterDifferentialMismatch {
+    fixture_id: String,
+    seed: u64,
+    mode: String,
+    operation: String,
+    expected_reason_code: String,
+    actual_reason_code: String,
+    message: String,
+    minimal_repro_artifacts: Vec<String>,
+    artifact_refs: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct IterDifferentialReportArtifact {
+    suite: &'static str,
+    total_cases: usize,
+    passed_cases: usize,
+    failed_cases: usize,
+    mismatches: Vec<IterDifferentialMismatch>,
+}
+
 static RUNTIME_POLICY_LOG_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 static SHAPE_STRIDE_LOG_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 static DTYPE_PROMOTION_LOG_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 fn default_f64_dtype_name() -> String {
     "f64".to_string()
+}
+
+fn default_one_usize() -> usize {
+    1
 }
 
 fn default_true() -> bool {
@@ -732,12 +1025,285 @@ fn load_shape_stride_cases(fixture_root: &Path) -> Result<Vec<ShapeStrideFixture
     serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
 }
 
+fn load_iter_differential_cases(fixture_root: &Path) -> Result<Vec<IterDifferentialCase>, String> {
+    let path = fixture_root.join("iter_differential_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
+}
+
+fn load_iter_metamorphic_cases(fixture_root: &Path) -> Result<Vec<IterMetamorphicCase>, String> {
+    let path = fixture_root.join("iter_metamorphic_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
+}
+
+fn load_iter_adversarial_cases(fixture_root: &Path) -> Result<Vec<IterAdversarialCase>, String> {
+    let path = fixture_root.join("iter_adversarial_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
+}
+
 fn parse_shape_stride_order(case_id: &str, stride_order: &str) -> Result<MemoryOrder, String> {
     match stride_order {
         "C" => Ok(MemoryOrder::C),
         "F" => Ok(MemoryOrder::F),
         bad => Err(format!("{case_id}: invalid stride_order={bad}")),
     }
+}
+
+fn evaluate_shape_stride_case(case: &ShapeStrideFixtureCase) -> (bool, Vec<String>) {
+    let mut ok = true;
+    let mut failures = Vec::new();
+
+    match (
+        &case.expected_broadcast,
+        broadcast_shape(&case.lhs, &case.rhs),
+    ) {
+        (Some(expected), Ok(actual)) if expected == &actual => {}
+        (None, Err(_)) => {}
+        (Some(expected), Ok(actual)) => {
+            ok = false;
+            failures.push(format!(
+                "{}: broadcast mismatch expected={expected:?} actual={actual:?}",
+                case.id
+            ));
+        }
+        (Some(expected), Err(err)) => {
+            ok = false;
+            failures.push(format!(
+                "{}: broadcast expected={expected:?} but failed: {err}",
+                case.id
+            ));
+        }
+        (None, Ok(actual)) => {
+            ok = false;
+            failures.push(format!(
+                "{}: broadcast expected failure but got {actual:?}",
+                case.id
+            ));
+        }
+    }
+
+    let order = match parse_shape_stride_order(&case.id, &case.stride_order) {
+        Ok(order) => order,
+        Err(err) => {
+            ok = false;
+            failures.push(err);
+            MemoryOrder::C
+        }
+    };
+
+    let computed_strides =
+        match contiguous_strides(&case.stride_shape, case.stride_item_size, order) {
+            Ok(strides) if strides == case.expected_strides => Some(strides),
+            Ok(strides) => {
+                ok = false;
+                failures.push(format!(
+                    "{}: stride mismatch expected={:?} actual={strides:?}",
+                    case.id, case.expected_strides
+                ));
+                Some(strides)
+            }
+            Err(err) => {
+                ok = false;
+                failures.push(format!("{}: stride computation failed: {err}", case.id));
+                None
+            }
+        };
+
+    let base_layout = computed_strides.map(|strides| NdLayout {
+        shape: case.stride_shape.clone(),
+        strides,
+        item_size: case.stride_item_size,
+    });
+
+    if let Some(as_strided_case) = &case.as_strided {
+        if let Some(base) = &base_layout {
+            match base.as_strided(
+                as_strided_case.shape.clone(),
+                as_strided_case.strides.clone(),
+            ) {
+                Ok(view) => {
+                    if let Some(needle) = &as_strided_case.expected_error_contains {
+                        ok = false;
+                        failures.push(format!(
+                            "{}: as_strided expected error containing '{}' but succeeded",
+                            case.id, needle
+                        ));
+                    } else {
+                        if let Some(expected_shape) = &as_strided_case.expected_shape
+                            && view.shape != *expected_shape
+                        {
+                            ok = false;
+                            failures.push(format!(
+                                "{}: as_strided shape mismatch expected={expected_shape:?} actual={:?}",
+                                case.id, view.shape
+                            ));
+                        }
+
+                        if let Some(expected_strides) = &as_strided_case.expected_strides
+                            && view.strides != *expected_strides
+                        {
+                            ok = false;
+                            failures.push(format!(
+                                "{}: as_strided strides mismatch expected={expected_strides:?} actual={:?}",
+                                case.id, view.strides
+                            ));
+                        }
+                    }
+                }
+                Err(err) => {
+                    if let Some(needle) = &as_strided_case.expected_error_contains {
+                        let actual = err.to_string().to_lowercase();
+                        if !actual.contains(&needle.to_lowercase()) {
+                            ok = false;
+                            failures.push(format!(
+                                "{}: as_strided expected error containing '{}' but got '{}'",
+                                case.id, needle, err
+                            ));
+                        }
+                    } else {
+                        ok = false;
+                        failures.push(format!(
+                            "{}: as_strided unexpectedly failed: {}",
+                            case.id, err
+                        ));
+                    }
+                }
+            }
+        } else {
+            ok = false;
+            failures.push(format!(
+                "{}: cannot validate as_strided without valid base layout",
+                case.id
+            ));
+        }
+    }
+
+    if let Some(broadcast_to_case) = &case.broadcast_to {
+        if let Some(base) = &base_layout {
+            match base.broadcast_to(broadcast_to_case.shape.clone()) {
+                Ok(view) => {
+                    if let Some(needle) = &broadcast_to_case.expected_error_contains {
+                        ok = false;
+                        failures.push(format!(
+                            "{}: broadcast_to expected error containing '{}' but succeeded",
+                            case.id, needle
+                        ));
+                    } else {
+                        if let Some(expected_shape) = &broadcast_to_case.expected_shape
+                            && view.shape != *expected_shape
+                        {
+                            ok = false;
+                            failures.push(format!(
+                                "{}: broadcast_to shape mismatch expected={expected_shape:?} actual={:?}",
+                                case.id, view.shape
+                            ));
+                        }
+
+                        if let Some(expected_strides) = &broadcast_to_case.expected_strides
+                            && view.strides != *expected_strides
+                        {
+                            ok = false;
+                            failures.push(format!(
+                                "{}: broadcast_to strides mismatch expected={expected_strides:?} actual={:?}",
+                                case.id, view.strides
+                            ));
+                        }
+                    }
+                }
+                Err(err) => {
+                    if let Some(needle) = &broadcast_to_case.expected_error_contains {
+                        let actual = err.to_string().to_lowercase();
+                        if !actual.contains(&needle.to_lowercase()) {
+                            ok = false;
+                            failures.push(format!(
+                                "{}: broadcast_to expected error containing '{}' but got '{}'",
+                                case.id, needle, err
+                            ));
+                        }
+                    } else {
+                        ok = false;
+                        failures.push(format!(
+                            "{}: broadcast_to unexpectedly failed: {}",
+                            case.id, err
+                        ));
+                    }
+                }
+            }
+        } else {
+            ok = false;
+            failures.push(format!(
+                "{}: cannot validate broadcast_to without valid base layout",
+                case.id
+            ));
+        }
+    }
+
+    if let Some(sliding_window_case) = &case.sliding_window {
+        if let Some(base) = &base_layout {
+            match base.sliding_window_view(sliding_window_case.window_shape.clone()) {
+                Ok(view) => {
+                    if let Some(needle) = &sliding_window_case.expected_error_contains {
+                        ok = false;
+                        failures.push(format!(
+                            "{}: sliding_window_view expected error containing '{}' but succeeded",
+                            case.id, needle
+                        ));
+                    } else {
+                        if let Some(expected_shape) = &sliding_window_case.expected_shape
+                            && view.shape != *expected_shape
+                        {
+                            ok = false;
+                            failures.push(format!(
+                                "{}: sliding_window_view shape mismatch expected={expected_shape:?} actual={:?}",
+                                case.id, view.shape
+                            ));
+                        }
+
+                        if let Some(expected_strides) = &sliding_window_case.expected_strides
+                            && view.strides != *expected_strides
+                        {
+                            ok = false;
+                            failures.push(format!(
+                                "{}: sliding_window_view strides mismatch expected={expected_strides:?} actual={:?}",
+                                case.id, view.strides
+                            ));
+                        }
+                    }
+                }
+                Err(err) => {
+                    if let Some(needle) = &sliding_window_case.expected_error_contains {
+                        let actual = err.to_string().to_lowercase();
+                        if !actual.contains(&needle.to_lowercase()) {
+                            ok = false;
+                            failures.push(format!(
+                                "{}: sliding_window_view expected error containing '{}' but got '{}'",
+                                case.id, needle, err
+                            ));
+                        }
+                    } else {
+                        ok = false;
+                        failures.push(format!(
+                            "{}: sliding_window_view unexpectedly failed: {}",
+                            case.id, err
+                        ));
+                    }
+                }
+            }
+        } else {
+            ok = false;
+            failures.push(format!(
+                "{}: cannot validate sliding_window_view without valid base layout",
+                case.id
+            ));
+        }
+    }
+
+    (ok, failures)
 }
 
 pub fn run_shape_stride_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
@@ -751,7 +1317,6 @@ pub fn run_shape_stride_suite(config: &HarnessConfig) -> Result<SuiteReport, Str
     };
 
     for case in cases {
-        let mut ok = true;
         let reason_code = normalize_reason_code(&case.reason_code);
         let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
         let as_strided_checked = case.as_strided.is_some();
@@ -763,253 +1328,8 @@ pub fn run_shape_stride_suite(config: &HarnessConfig) -> Result<SuiteReport, Str
             "hardened"
         };
 
-        match (
-            &case.expected_broadcast,
-            broadcast_shape(&case.lhs, &case.rhs),
-        ) {
-            (Some(expected), Ok(actual)) if expected == &actual => {}
-            (None, Err(_)) => {}
-            (Some(expected), Ok(actual)) => {
-                ok = false;
-                report.failures.push(format!(
-                    "{}: broadcast mismatch expected={expected:?} actual={actual:?}",
-                    case.id
-                ));
-            }
-            (Some(expected), Err(err)) => {
-                ok = false;
-                report.failures.push(format!(
-                    "{}: broadcast expected={expected:?} but failed: {err}",
-                    case.id
-                ));
-            }
-            (None, Ok(actual)) => {
-                ok = false;
-                report.failures.push(format!(
-                    "{}: broadcast expected failure but got {actual:?}",
-                    case.id
-                ));
-            }
-        }
-
-        let order = match parse_shape_stride_order(&case.id, &case.stride_order) {
-            Ok(order) => order,
-            Err(err) => {
-                ok = false;
-                report.failures.push(err);
-                MemoryOrder::C
-            }
-        };
-
-        let computed_strides =
-            match contiguous_strides(&case.stride_shape, case.stride_item_size, order) {
-                Ok(strides) if strides == case.expected_strides => Some(strides),
-                Ok(strides) => {
-                    ok = false;
-                    report.failures.push(format!(
-                        "{}: stride mismatch expected={:?} actual={strides:?}",
-                        case.id, case.expected_strides
-                    ));
-                    Some(strides)
-                }
-                Err(err) => {
-                    ok = false;
-                    report
-                        .failures
-                        .push(format!("{}: stride computation failed: {err}", case.id));
-                    None
-                }
-            };
-
-        let base_layout = computed_strides.map(|strides| NdLayout {
-            shape: case.stride_shape.clone(),
-            strides,
-            item_size: case.stride_item_size,
-        });
-
-        if let Some(as_strided_case) = &case.as_strided {
-            if let Some(base) = &base_layout {
-                match base.as_strided(
-                    as_strided_case.shape.clone(),
-                    as_strided_case.strides.clone(),
-                ) {
-                    Ok(view) => {
-                        if let Some(needle) = &as_strided_case.expected_error_contains {
-                            ok = false;
-                            report.failures.push(format!(
-                                "{}: as_strided expected error containing '{}' but succeeded",
-                                case.id, needle
-                            ));
-                        } else {
-                            if let Some(expected_shape) = &as_strided_case.expected_shape
-                                && view.shape != *expected_shape
-                            {
-                                ok = false;
-                                report.failures.push(format!(
-                                    "{}: as_strided shape mismatch expected={expected_shape:?} actual={:?}",
-                                    case.id, view.shape
-                                ));
-                            }
-
-                            if let Some(expected_strides) = &as_strided_case.expected_strides
-                                && view.strides != *expected_strides
-                            {
-                                ok = false;
-                                report.failures.push(format!(
-                                    "{}: as_strided strides mismatch expected={expected_strides:?} actual={:?}",
-                                    case.id, view.strides
-                                ));
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        if let Some(needle) = &as_strided_case.expected_error_contains {
-                            let actual = err.to_string().to_lowercase();
-                            if !actual.contains(&needle.to_lowercase()) {
-                                ok = false;
-                                report.failures.push(format!(
-                                    "{}: as_strided expected error containing '{}' but got '{}'",
-                                    case.id, needle, err
-                                ));
-                            }
-                        } else {
-                            ok = false;
-                            report.failures.push(format!(
-                                "{}: as_strided unexpectedly failed: {}",
-                                case.id, err
-                            ));
-                        }
-                    }
-                }
-            } else {
-                ok = false;
-                report.failures.push(format!(
-                    "{}: cannot validate as_strided without valid base layout",
-                    case.id
-                ));
-            }
-        }
-
-        if let Some(broadcast_to_case) = &case.broadcast_to {
-            if let Some(base) = &base_layout {
-                match base.broadcast_to(broadcast_to_case.shape.clone()) {
-                    Ok(view) => {
-                        if let Some(needle) = &broadcast_to_case.expected_error_contains {
-                            ok = false;
-                            report.failures.push(format!(
-                                "{}: broadcast_to expected error containing '{}' but succeeded",
-                                case.id, needle
-                            ));
-                        } else {
-                            if let Some(expected_shape) = &broadcast_to_case.expected_shape
-                                && view.shape != *expected_shape
-                            {
-                                ok = false;
-                                report.failures.push(format!(
-                                    "{}: broadcast_to shape mismatch expected={expected_shape:?} actual={:?}",
-                                    case.id, view.shape
-                                ));
-                            }
-
-                            if let Some(expected_strides) = &broadcast_to_case.expected_strides
-                                && view.strides != *expected_strides
-                            {
-                                ok = false;
-                                report.failures.push(format!(
-                                    "{}: broadcast_to strides mismatch expected={expected_strides:?} actual={:?}",
-                                    case.id, view.strides
-                                ));
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        if let Some(needle) = &broadcast_to_case.expected_error_contains {
-                            let actual = err.to_string().to_lowercase();
-                            if !actual.contains(&needle.to_lowercase()) {
-                                ok = false;
-                                report.failures.push(format!(
-                                    "{}: broadcast_to expected error containing '{}' but got '{}'",
-                                    case.id, needle, err
-                                ));
-                            }
-                        } else {
-                            ok = false;
-                            report.failures.push(format!(
-                                "{}: broadcast_to unexpectedly failed: {}",
-                                case.id, err
-                            ));
-                        }
-                    }
-                }
-            } else {
-                ok = false;
-                report.failures.push(format!(
-                    "{}: cannot validate broadcast_to without valid base layout",
-                    case.id
-                ));
-            }
-        }
-
-        if let Some(sliding_window_case) = &case.sliding_window {
-            if let Some(base) = &base_layout {
-                match base.sliding_window_view(sliding_window_case.window_shape.clone()) {
-                    Ok(view) => {
-                        if let Some(needle) = &sliding_window_case.expected_error_contains {
-                            ok = false;
-                            report.failures.push(format!(
-                                "{}: sliding_window_view expected error containing '{}' but succeeded",
-                                case.id, needle
-                            ));
-                        } else {
-                            if let Some(expected_shape) = &sliding_window_case.expected_shape
-                                && view.shape != *expected_shape
-                            {
-                                ok = false;
-                                report.failures.push(format!(
-                                    "{}: sliding_window_view shape mismatch expected={expected_shape:?} actual={:?}",
-                                    case.id, view.shape
-                                ));
-                            }
-
-                            if let Some(expected_strides) = &sliding_window_case.expected_strides
-                                && view.strides != *expected_strides
-                            {
-                                ok = false;
-                                report.failures.push(format!(
-                                    "{}: sliding_window_view strides mismatch expected={expected_strides:?} actual={:?}",
-                                    case.id, view.strides
-                                ));
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        if let Some(needle) = &sliding_window_case.expected_error_contains {
-                            let actual = err.to_string().to_lowercase();
-                            if !actual.contains(&needle.to_lowercase()) {
-                                ok = false;
-                                report.failures.push(format!(
-                                    "{}: sliding_window_view expected error containing '{}' but got '{}'",
-                                    case.id, needle, err
-                                ));
-                            }
-                        } else {
-                            ok = false;
-                            report.failures.push(format!(
-                                "{}: sliding_window_view unexpectedly failed: {}",
-                                case.id, err
-                            ));
-                        }
-                    }
-                }
-            } else {
-                ok = false;
-                report.failures.push(format!(
-                    "{}: cannot validate sliding_window_view without valid base layout",
-                    case.id
-                ));
-            }
-        }
-
+        let (ok, failures_for_case) = evaluate_shape_stride_case(&case);
+        report.failures.extend(failures_for_case);
         if ok {
             report.pass_count += 1;
         }
@@ -1545,6 +1865,862 @@ pub fn run_shape_stride_adversarial_suite(config: &HarnessConfig) -> Result<Suit
 
     if report.case_count == 0 {
         return Err("shape_stride_adversarial produced zero checks".to_string());
+    }
+
+    Ok(report)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IterOperationOutcome {
+    TransferClass(TransferClass),
+    OverlapAction(OverlapAction),
+    SelectedCount(usize),
+    Unit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IterSuiteError {
+    reason_code: String,
+    message: String,
+}
+
+impl IterSuiteError {
+    fn new(reason_code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            reason_code: reason_code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for IterSuiteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for IterSuiteError {}
+
+fn classify_iter_transfer_error(operation: &str, error: &TransferError) -> String {
+    match operation {
+        "select_transfer_class" => "nditer_constructor_invalid_configuration".to_string(),
+        "overlap_copy_policy" => "nditer_overlap_policy_triggered".to_string(),
+        "validate_nditer_flags" => {
+            let lowered = error.to_string().to_lowercase();
+            if lowered.contains("no_broadcast") {
+                "nditer_no_broadcast_violation".to_string()
+            } else {
+                "nditer_overlap_policy_triggered".to_string()
+            }
+        }
+        "validate_flatiter_read" | "validate_flatiter_write" => {
+            "flatiter_indexing_contract_violation".to_string()
+        }
+        _ => "nditer_transition_precondition_failed".to_string(),
+    }
+}
+
+fn parse_expected_transfer_class(raw: &str) -> Result<TransferClass, String> {
+    match raw {
+        "contiguous" => Ok(TransferClass::Contiguous),
+        "strided" => Ok(TransferClass::Strided),
+        "strided_cast" => Ok(TransferClass::StridedCast),
+        other => Err(format!(
+            "invalid expected_transfer_class '{other}' (must be contiguous|strided|strided_cast)"
+        )),
+    }
+}
+
+fn parse_expected_overlap_action(raw: &str) -> Result<OverlapAction, String> {
+    match raw {
+        "no_copy" => Ok(OverlapAction::NoCopy),
+        "forward_copy" => Ok(OverlapAction::ForwardCopy),
+        "backward_copy" => Ok(OverlapAction::BackwardCopy),
+        other => Err(format!(
+            "invalid expected_overlap_action '{other}' (must be no_copy|forward_copy|backward_copy)"
+        )),
+    }
+}
+
+fn build_flatiter_index(
+    case_id: &str,
+    input: &IterFlatIndexFixtureInput,
+) -> Result<FlatIterIndex, IterSuiteError> {
+    match input.kind.as_str() {
+        "single" => Ok(FlatIterIndex::Single(input.index)),
+        "slice" => Ok(FlatIterIndex::Slice {
+            start: input.start,
+            stop: input.stop,
+            step: input.step,
+        }),
+        "fancy" => Ok(FlatIterIndex::Fancy(input.indices.clone())),
+        "bool_mask" => Ok(FlatIterIndex::BoolMask(input.mask.clone())),
+        other => Err(IterSuiteError::new(
+            "nditer_constructor_invalid_configuration",
+            format!("{case_id}: unsupported flat_index.kind '{other}'"),
+        )),
+    }
+}
+
+fn execute_iter_operation(
+    case_id: &str,
+    operation: &str,
+    selector: Option<&IterSelectorFixtureInput>,
+    overlap: Option<&IterOverlapFixtureInput>,
+    flags: Option<&IterFlagsFixtureInput>,
+    _values_len: Option<usize>,
+) -> Result<IterOperationOutcome, IterSuiteError> {
+    match operation {
+        "select_transfer_class" => {
+            let Some(selector) = selector else {
+                return Err(IterSuiteError::new(
+                    "nditer_constructor_invalid_configuration",
+                    format!("{case_id}: missing selector payload"),
+                ));
+            };
+            let input = TransferSelectorInput {
+                src_stride: selector.src_stride,
+                dst_stride: selector.dst_stride,
+                item_size: selector.item_size,
+                element_count: selector.element_count,
+                aligned: selector.aligned,
+                cast_is_lossless: selector.cast_is_lossless,
+                same_value_cast: selector.same_value_cast,
+            };
+            select_transfer_class(input)
+                .map(IterOperationOutcome::TransferClass)
+                .map_err(|error| {
+                    IterSuiteError::new(
+                        classify_iter_transfer_error(operation, &error),
+                        error.to_string(),
+                    )
+                })
+        }
+        "overlap_copy_policy" => {
+            let Some(overlap) = overlap else {
+                return Err(IterSuiteError::new(
+                    "nditer_overlap_policy_triggered",
+                    format!("{case_id}: missing overlap payload"),
+                ));
+            };
+            overlap_copy_policy(overlap.src_offset, overlap.dst_offset, overlap.byte_len)
+                .map(IterOperationOutcome::OverlapAction)
+                .map_err(|error| {
+                    IterSuiteError::new(
+                        classify_iter_transfer_error(operation, &error),
+                        error.to_string(),
+                    )
+                })
+        }
+        "validate_nditer_flags" => {
+            let Some(flags) = flags else {
+                return Err(IterSuiteError::new(
+                    "nditer_constructor_invalid_configuration",
+                    format!("{case_id}: missing flags payload"),
+                ));
+            };
+            validate_nditer_flags(NditerTransferFlags {
+                copy_if_overlap: flags.copy_if_overlap,
+                no_broadcast: flags.no_broadcast,
+                observed_overlap: flags.observed_overlap,
+                observed_broadcast: flags.observed_broadcast,
+            })
+            .map(|_| IterOperationOutcome::Unit)
+            .map_err(|error| {
+                IterSuiteError::new(
+                    classify_iter_transfer_error(operation, &error),
+                    error.to_string(),
+                )
+            })
+        }
+        "validate_flatiter_read" | "validate_flatiter_write" => Err(IterSuiteError::new(
+            "flatiter_indexing_contract_violation",
+            format!("{case_id}: operation '{operation}' requires explicit len/value parameters"),
+        )),
+        other => Err(IterSuiteError::new(
+            "nditer_constructor_invalid_configuration",
+            format!("{case_id}: unsupported iter operation '{other}'"),
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_iter_operation_with_len(
+    case_id: &str,
+    operation: &str,
+    selector: Option<&IterSelectorFixtureInput>,
+    overlap: Option<&IterOverlapFixtureInput>,
+    flat_index: Option<&IterFlatIndexFixtureInput>,
+    flags: Option<&IterFlagsFixtureInput>,
+    len: usize,
+    values_len: Option<usize>,
+) -> Result<IterOperationOutcome, IterSuiteError> {
+    match operation {
+        "validate_flatiter_read" => {
+            let Some(flat_index) = flat_index else {
+                return Err(IterSuiteError::new(
+                    "flatiter_indexing_contract_violation",
+                    format!("{case_id}: missing flat_index payload"),
+                ));
+            };
+            let index = build_flatiter_index(case_id, flat_index)?;
+            validate_flatiter_read(len, &index)
+                .map(IterOperationOutcome::SelectedCount)
+                .map_err(|error| {
+                    IterSuiteError::new(
+                        classify_iter_transfer_error(operation, &error),
+                        error.to_string(),
+                    )
+                })
+        }
+        "validate_flatiter_write" => {
+            let Some(flat_index) = flat_index else {
+                return Err(IterSuiteError::new(
+                    "flatiter_indexing_contract_violation",
+                    format!("{case_id}: missing flat_index payload"),
+                ));
+            };
+            let index = build_flatiter_index(case_id, flat_index)?;
+            let values_len = values_len.unwrap_or(0);
+            validate_flatiter_write(len, &index, values_len)
+                .map(IterOperationOutcome::SelectedCount)
+                .map_err(|error| {
+                    IterSuiteError::new(
+                        classify_iter_transfer_error(operation, &error),
+                        error.to_string(),
+                    )
+                })
+        }
+        _ => execute_iter_operation(case_id, operation, selector, overlap, flags, values_len),
+    }
+}
+
+fn iter_minimal_repro_artifacts(case_id: &str, refs: &[String], fixture_path: &str) -> Vec<String> {
+    let mut entries = refs
+        .iter()
+        .filter(|entry| !entry.trim().is_empty())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    entries.insert(format!("{fixture_path}#{case_id}"));
+    entries.into_iter().collect()
+}
+
+fn validate_iter_success_expectations(
+    case: &IterDifferentialCase,
+    outcome: &IterOperationOutcome,
+) -> Result<(), String> {
+    if let Some(expected_transfer_class) = &case.expected_transfer_class {
+        let expected = parse_expected_transfer_class(expected_transfer_class)?;
+        match outcome {
+            IterOperationOutcome::TransferClass(actual) if *actual == expected => {}
+            IterOperationOutcome::TransferClass(actual) => {
+                return Err(format!(
+                    "transfer class mismatch expected={expected:?} actual={actual:?}"
+                ));
+            }
+            _ => {
+                return Err(
+                    "expected transfer class outcome but operation returned different outcome type"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    if let Some(expected_overlap_action) = &case.expected_overlap_action {
+        let expected = parse_expected_overlap_action(expected_overlap_action)?;
+        match outcome {
+            IterOperationOutcome::OverlapAction(actual) if *actual == expected => {}
+            IterOperationOutcome::OverlapAction(actual) => {
+                return Err(format!(
+                    "overlap action mismatch expected={expected:?} actual={actual:?}"
+                ));
+            }
+            _ => {
+                return Err(
+                    "expected overlap action outcome but operation returned different outcome type"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    if let Some(expected_selected) = case.expected_selected {
+        match outcome {
+            IterOperationOutcome::SelectedCount(actual) if *actual == expected_selected => {}
+            IterOperationOutcome::SelectedCount(actual) => {
+                return Err(format!(
+                    "selected-count mismatch expected={expected_selected} actual={actual}"
+                ));
+            }
+            _ => {
+                return Err(
+                    "expected selected-count outcome but operation returned different outcome type"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub fn run_iter_differential_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let cases = load_iter_differential_cases(&config.fixture_root)?;
+    let mut report = SuiteReport {
+        suite: "iter_differential",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+    let mut mismatches = Vec::new();
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+        let expected_reason_code = if case.expected_reason_code.trim().is_empty() {
+            reason_code.clone()
+        } else {
+            case.expected_reason_code.trim().to_string()
+        };
+        let expected_error = case.expected_error_contains.to_lowercase();
+        let flat_len = case.len.unwrap_or_else(|| {
+            case.flat_index.as_ref().map_or(0, |index| {
+                index
+                    .stop
+                    .max(index.mask.len())
+                    .max(index.index.saturating_add(1))
+            })
+        });
+
+        match execute_iter_operation_with_len(
+            &case.id,
+            &case.operation,
+            case.selector.as_ref(),
+            case.overlap.as_ref(),
+            case.flat_index.as_ref(),
+            case.flags.as_ref(),
+            flat_len,
+            case.values_len,
+        ) {
+            Ok(outcome) if expected_error.is_empty() => {
+                let actual_reason_code = reason_code.clone();
+                match validate_iter_success_expectations(&case, &outcome) {
+                    Ok(()) if actual_reason_code == expected_reason_code => {
+                        report.pass_count += 1;
+                    }
+                    Ok(()) => {
+                        let rendered = format!(
+                            "{}: seed={} mode={} reason_code={} expected_reason_code={} env_fingerprint={} artifact_refs={} success reason-code mismatch",
+                            case.id,
+                            case.seed,
+                            mode,
+                            actual_reason_code,
+                            expected_reason_code,
+                            env_fingerprint,
+                            artifact_refs.join(",")
+                        );
+                        report.failures.push(rendered.clone());
+                        mismatches.push(IterDifferentialMismatch {
+                            fixture_id: case.id.clone(),
+                            seed: case.seed,
+                            mode: mode.clone(),
+                            operation: case.operation.clone(),
+                            expected_reason_code,
+                            actual_reason_code,
+                            message: rendered,
+                            minimal_repro_artifacts: iter_minimal_repro_artifacts(
+                                &case.id,
+                                &artifact_refs,
+                                "crates/fnp-conformance/fixtures/iter_differential_cases.json",
+                            ),
+                            artifact_refs: artifact_refs.clone(),
+                        });
+                    }
+                    Err(detail) => {
+                        let rendered = format!(
+                            "{}: seed={} mode={} reason_code={} expected_reason_code={} env_fingerprint={} artifact_refs={} {}",
+                            case.id,
+                            case.seed,
+                            mode,
+                            actual_reason_code,
+                            expected_reason_code,
+                            env_fingerprint,
+                            artifact_refs.join(","),
+                            detail
+                        );
+                        report.failures.push(rendered.clone());
+                        mismatches.push(IterDifferentialMismatch {
+                            fixture_id: case.id.clone(),
+                            seed: case.seed,
+                            mode: mode.clone(),
+                            operation: case.operation.clone(),
+                            expected_reason_code,
+                            actual_reason_code,
+                            message: rendered,
+                            minimal_repro_artifacts: iter_minimal_repro_artifacts(
+                                &case.id,
+                                &artifact_refs,
+                                "crates/fnp-conformance/fixtures/iter_differential_cases.json",
+                            ),
+                            artifact_refs: artifact_refs.clone(),
+                        });
+                    }
+                }
+            }
+            Ok(_) => {
+                let rendered = format!(
+                    "{}: seed={} mode={} reason_code={} expected_reason_code={} env_fingerprint={} artifact_refs={} expected error containing '{}' but operation '{}' succeeded",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    expected_reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    case.expected_error_contains,
+                    case.operation
+                );
+                report.failures.push(rendered.clone());
+                mismatches.push(IterDifferentialMismatch {
+                    fixture_id: case.id.clone(),
+                    seed: case.seed,
+                    mode: mode.clone(),
+                    operation: case.operation.clone(),
+                    expected_reason_code,
+                    actual_reason_code: "none".to_string(),
+                    message: rendered,
+                    minimal_repro_artifacts: iter_minimal_repro_artifacts(
+                        &case.id,
+                        &artifact_refs,
+                        "crates/fnp-conformance/fixtures/iter_differential_cases.json",
+                    ),
+                    artifact_refs: artifact_refs.clone(),
+                });
+            }
+            Err(err) if expected_error.is_empty() => {
+                let rendered = format!(
+                    "{}: seed={} mode={} reason_code={} expected_reason_code={} env_fingerprint={} artifact_refs={} expected success but got '{}' (actual_reason_code='{}')",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    expected_reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    err.message,
+                    err.reason_code
+                );
+                report.failures.push(rendered.clone());
+                mismatches.push(IterDifferentialMismatch {
+                    fixture_id: case.id.clone(),
+                    seed: case.seed,
+                    mode: mode.clone(),
+                    operation: case.operation.clone(),
+                    expected_reason_code,
+                    actual_reason_code: err.reason_code,
+                    message: rendered,
+                    minimal_repro_artifacts: iter_minimal_repro_artifacts(
+                        &case.id,
+                        &artifact_refs,
+                        "crates/fnp-conformance/fixtures/iter_differential_cases.json",
+                    ),
+                    artifact_refs: artifact_refs.clone(),
+                });
+            }
+            Err(err) => {
+                let contains_expected = err.message.to_lowercase().contains(&expected_error);
+                let reason_match = err.reason_code == expected_reason_code;
+                if contains_expected && reason_match {
+                    report.pass_count += 1;
+                } else {
+                    let rendered = format!(
+                        "{}: seed={} mode={} reason_code={} expected_reason_code={} env_fingerprint={} artifact_refs={} expected error containing '{}' with reason_code='{}' but got '{}' (actual_reason_code='{}')",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        expected_reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(","),
+                        case.expected_error_contains,
+                        expected_reason_code,
+                        err.message,
+                        err.reason_code
+                    );
+                    report.failures.push(rendered.clone());
+                    mismatches.push(IterDifferentialMismatch {
+                        fixture_id: case.id.clone(),
+                        seed: case.seed,
+                        mode: mode.clone(),
+                        operation: case.operation.clone(),
+                        expected_reason_code,
+                        actual_reason_code: err.reason_code,
+                        message: rendered,
+                        minimal_repro_artifacts: iter_minimal_repro_artifacts(
+                            &case.id,
+                            &artifact_refs,
+                            "crates/fnp-conformance/fixtures/iter_differential_cases.json",
+                        ),
+                        artifact_refs: artifact_refs.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    let artifact = IterDifferentialReportArtifact {
+        suite: "iter_differential",
+        total_cases: report.case_count,
+        passed_cases: report.pass_count,
+        failed_cases: report.case_count.saturating_sub(report.pass_count),
+        mismatches,
+    };
+    let report_path = config
+        .fixture_root
+        .join("oracle_outputs/iter_differential_report.json");
+    if let Some(parent) = report_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed creating {}: {err}", parent.display()))?;
+    }
+    let payload = serde_json::to_string_pretty(&artifact)
+        .map_err(|err| format!("failed serializing iter differential report: {err}"))?;
+    fs::write(&report_path, payload.as_bytes())
+        .map_err(|err| format!("failed writing {}: {err}", report_path.display()))?;
+
+    Ok(report)
+}
+
+pub fn run_iter_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let cases = load_iter_metamorphic_cases(&config.fixture_root)?;
+    let mut report = SuiteReport {
+        suite: "iter_metamorphic",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+        let pass = match case.relation.as_str() {
+            "selector_deterministic" => {
+                let first = execute_iter_operation(
+                    &case.id,
+                    "select_transfer_class",
+                    case.selector.as_ref(),
+                    None,
+                    None,
+                    None,
+                );
+                let second = execute_iter_operation(
+                    &case.id,
+                    "select_transfer_class",
+                    case.selector.as_ref(),
+                    None,
+                    None,
+                    None,
+                );
+                first == second
+            }
+            "overlap_repeatable" => {
+                let first = execute_iter_operation(
+                    &case.id,
+                    "overlap_copy_policy",
+                    None,
+                    case.overlap.as_ref(),
+                    None,
+                    None,
+                );
+                let second = execute_iter_operation(
+                    &case.id,
+                    "overlap_copy_policy",
+                    None,
+                    case.overlap.as_ref(),
+                    None,
+                    None,
+                );
+                first == second
+            }
+            "flatiter_read_write_count_equivalence" => {
+                let Some(flat_index) = case.flat_index.as_ref() else {
+                    report.failures.push(format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} missing flat_index payload for relation {}",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(","),
+                        case.relation
+                    ));
+                    continue;
+                };
+                let len = flat_index
+                    .mask
+                    .len()
+                    .max(flat_index.stop)
+                    .max(flat_index.index.saturating_add(1));
+                let Ok(IterOperationOutcome::SelectedCount(selected)) =
+                    execute_iter_operation_with_len(
+                        &case.id,
+                        "validate_flatiter_read",
+                        None,
+                        None,
+                        Some(flat_index),
+                        None,
+                        len,
+                        None,
+                    )
+                else {
+                    report.failures.push(format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} failed flatiter read relation check",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(",")
+                    ));
+                    continue;
+                };
+                let Ok(IterOperationOutcome::SelectedCount(selected_write)) =
+                    execute_iter_operation_with_len(
+                        &case.id,
+                        "validate_flatiter_write",
+                        None,
+                        None,
+                        Some(flat_index),
+                        None,
+                        len,
+                        Some(selected),
+                    )
+                else {
+                    report.failures.push(format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} failed flatiter write relation check",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(",")
+                    ));
+                    continue;
+                };
+                selected == selected_write
+            }
+            "bool_mask_population_matches_selected" => {
+                let Some(flat_index) = case.flat_index.as_ref() else {
+                    report.failures.push(format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} missing flat_index payload for relation {}",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(","),
+                        case.relation
+                    ));
+                    continue;
+                };
+                if flat_index.kind != "bool_mask" {
+                    report.failures.push(format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} relation {} requires bool_mask kind",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(","),
+                        case.relation
+                    ));
+                    continue;
+                }
+                let len = flat_index.mask.len();
+                let Ok(IterOperationOutcome::SelectedCount(selected)) =
+                    execute_iter_operation_with_len(
+                        &case.id,
+                        "validate_flatiter_read",
+                        None,
+                        None,
+                        Some(flat_index),
+                        None,
+                        len,
+                        None,
+                    )
+                else {
+                    report.failures.push(format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} failed bool-mask read relation check",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(",")
+                    ));
+                    continue;
+                };
+                selected == flat_index.mask.iter().filter(|flag| **flag).count()
+            }
+            "nditer_flags_idempotent" => {
+                let first = execute_iter_operation(
+                    &case.id,
+                    "validate_nditer_flags",
+                    None,
+                    None,
+                    case.flags.as_ref(),
+                    None,
+                );
+                let second = execute_iter_operation(
+                    &case.id,
+                    "validate_nditer_flags",
+                    None,
+                    None,
+                    case.flags.as_ref(),
+                    None,
+                );
+                first == second
+            }
+            other => {
+                report.failures.push(format!(
+                    "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} unsupported relation {}",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    other
+                ));
+                false
+            }
+        };
+
+        if pass {
+            report.pass_count += 1;
+        } else if !report
+            .failures
+            .iter()
+            .any(|failure| failure.starts_with(&format!("{}:", case.id)))
+        {
+            report.failures.push(format!(
+                "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} relation {} failed",
+                case.id,
+                case.seed,
+                mode,
+                reason_code,
+                env_fingerprint,
+                artifact_refs.join(","),
+                case.relation
+            ));
+        }
+    }
+
+    Ok(report)
+}
+
+pub fn run_iter_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let cases = load_iter_adversarial_cases(&config.fixture_root)?;
+    let mut report = SuiteReport {
+        suite: "iter_adversarial",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+        let severity = case.severity.trim().to_lowercase();
+        if !matches!(severity.as_str(), "low" | "medium" | "high" | "critical") {
+            report.failures.push(format!(
+                "{}: invalid severity '{}' (must be low|medium|high|critical), reason_code={}, mode={}, env_fingerprint={}, artifact_refs={}",
+                case.id,
+                case.severity,
+                reason_code,
+                mode,
+                env_fingerprint,
+                artifact_refs.join(",")
+            ));
+            continue;
+        }
+        if case.expected_error_contains.trim().is_empty() {
+            report.failures.push(format!(
+                "{}: expected_error_contains must be non-empty, reason_code={}, mode={}, env_fingerprint={}, artifact_refs={}",
+                case.id,
+                reason_code,
+                mode,
+                env_fingerprint,
+                artifact_refs.join(",")
+            ));
+            continue;
+        }
+
+        let expected_reason_code = if case.expected_reason_code.trim().is_empty() {
+            reason_code.clone()
+        } else {
+            case.expected_reason_code.trim().to_string()
+        };
+        let flat_len = case.len.unwrap_or_else(|| {
+            case.flat_index.as_ref().map_or(0, |index| {
+                index
+                    .stop
+                    .max(index.mask.len())
+                    .max(index.index.saturating_add(1))
+            })
+        });
+        let expected_error = case.expected_error_contains.to_lowercase();
+        match execute_iter_operation_with_len(
+            &case.id,
+            &case.operation,
+            case.selector.as_ref(),
+            case.overlap.as_ref(),
+            case.flat_index.as_ref(),
+            case.flags.as_ref(),
+            flat_len,
+            case.values_len,
+        ) {
+            Ok(_) => {
+                report.failures.push(format!(
+                    "{}: severity={severity} seed={} reason_code={} mode={} env_fingerprint={} artifact_refs={} expected error containing '{}' but operation '{}' succeeded",
+                    case.id,
+                    case.seed,
+                    reason_code,
+                    mode,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    case.expected_error_contains,
+                    case.operation
+                ));
+            }
+            Err(err) => {
+                let contains_expected = err.message.to_lowercase().contains(&expected_error);
+                let reason_match = err.reason_code == expected_reason_code;
+                if contains_expected && reason_match {
+                    report.pass_count += 1;
+                } else {
+                    report.failures.push(format!(
+                        "{}: severity={severity} seed={} reason_code={} mode={} env_fingerprint={} artifact_refs={} expected error containing '{}' with reason_code='{}' but got '{}' (actual_reason_code='{}')",
+                        case.id,
+                        case.seed,
+                        reason_code,
+                        mode,
+                        env_fingerprint,
+                        artifact_refs.join(","),
+                        case.expected_error_contains,
+                        expected_reason_code,
+                        err.message,
+                        err.reason_code
+                    ));
+                }
+            }
+        }
     }
 
     Ok(report)
@@ -2839,6 +4015,37 @@ impl std::fmt::Display for RngSuiteError {
 
 impl std::error::Error for RngSuiteError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IoOperationOutcome {
+    Unit,
+    Count(usize),
+    Dispatch(String),
+    MagicVersion(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IoSuiteError {
+    reason_code: String,
+    message: String,
+}
+
+impl IoSuiteError {
+    fn new(reason_code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            reason_code: reason_code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for IoSuiteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for IoSuiteError {}
+
 pub fn run_rng_differential_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
     let path = config.fixture_root.join("rng_differential_cases.json");
     let raw = fs::read_to_string(&path)
@@ -3051,6 +4258,266 @@ pub fn run_rng_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport, 
     Ok(report)
 }
 
+pub fn run_io_differential_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let path = config.fixture_root.join("io_differential_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    let cases: Vec<IoDifferentialCase> =
+        serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))?;
+
+    let mut report = SuiteReport {
+        suite: "io_differential",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+    let mut mismatches = Vec::new();
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+        let expected_reason_code = if case.expected_reason_code.trim().is_empty() {
+            reason_code.clone()
+        } else {
+            case.expected_reason_code.trim().to_string()
+        };
+        let expected_error = case.expected_error_contains.to_lowercase();
+
+        match execute_io_differential_operation(&case) {
+            Ok(outcome) if expected_error.is_empty() => {
+                let actual_reason_code = reason_code.clone();
+                match validate_io_differential_success_expectations(&case, &outcome) {
+                    Ok(()) if actual_reason_code == expected_reason_code => {
+                        report.pass_count += 1;
+                    }
+                    Ok(()) => {
+                        let rendered = format!(
+                            "{}: seed={} mode={} reason_code={} expected_reason_code={} env_fingerprint={} artifact_refs={} success reason-code mismatch",
+                            case.id,
+                            case.seed,
+                            mode,
+                            actual_reason_code,
+                            expected_reason_code,
+                            env_fingerprint,
+                            artifact_refs.join(",")
+                        );
+                        report.failures.push(rendered.clone());
+                        mismatches.push(IoDifferentialMismatch {
+                            fixture_id: case.id.clone(),
+                            seed: case.seed,
+                            mode: mode.clone(),
+                            operation: case.operation.clone(),
+                            expected_reason_code,
+                            actual_reason_code,
+                            message: rendered,
+                            minimal_repro_artifacts: iter_minimal_repro_artifacts(
+                                &case.id,
+                                &artifact_refs,
+                                "crates/fnp-conformance/fixtures/io_differential_cases.json",
+                            ),
+                            artifact_refs: artifact_refs.clone(),
+                        });
+                    }
+                    Err(detail) => {
+                        let rendered = format!(
+                            "{}: seed={} mode={} reason_code={} expected_reason_code={} env_fingerprint={} artifact_refs={} {}",
+                            case.id,
+                            case.seed,
+                            mode,
+                            actual_reason_code,
+                            expected_reason_code,
+                            env_fingerprint,
+                            artifact_refs.join(","),
+                            detail
+                        );
+                        report.failures.push(rendered.clone());
+                        mismatches.push(IoDifferentialMismatch {
+                            fixture_id: case.id.clone(),
+                            seed: case.seed,
+                            mode: mode.clone(),
+                            operation: case.operation.clone(),
+                            expected_reason_code,
+                            actual_reason_code,
+                            message: rendered,
+                            minimal_repro_artifacts: iter_minimal_repro_artifacts(
+                                &case.id,
+                                &artifact_refs,
+                                "crates/fnp-conformance/fixtures/io_differential_cases.json",
+                            ),
+                            artifact_refs: artifact_refs.clone(),
+                        });
+                    }
+                }
+            }
+            Ok(_) => {
+                let rendered = format!(
+                    "{}: seed={} mode={} reason_code={} expected_reason_code={} env_fingerprint={} artifact_refs={} expected error containing '{}' but operation '{}' succeeded",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    expected_reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    case.expected_error_contains,
+                    case.operation
+                );
+                report.failures.push(rendered.clone());
+                mismatches.push(IoDifferentialMismatch {
+                    fixture_id: case.id.clone(),
+                    seed: case.seed,
+                    mode: mode.clone(),
+                    operation: case.operation.clone(),
+                    expected_reason_code,
+                    actual_reason_code: reason_code,
+                    message: rendered,
+                    minimal_repro_artifacts: iter_minimal_repro_artifacts(
+                        &case.id,
+                        &artifact_refs,
+                        "crates/fnp-conformance/fixtures/io_differential_cases.json",
+                    ),
+                    artifact_refs,
+                });
+            }
+            Err(err) if expected_error.is_empty() => {
+                let rendered = format!(
+                    "{}: seed={} mode={} reason_code={} expected_reason_code={} env_fingerprint={} artifact_refs={} unexpected error '{}' (actual_reason_code='{}')",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    expected_reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    err.message,
+                    err.reason_code
+                );
+                report.failures.push(rendered.clone());
+                mismatches.push(IoDifferentialMismatch {
+                    fixture_id: case.id.clone(),
+                    seed: case.seed,
+                    mode: mode.clone(),
+                    operation: case.operation.clone(),
+                    expected_reason_code,
+                    actual_reason_code: err.reason_code.clone(),
+                    message: rendered,
+                    minimal_repro_artifacts: iter_minimal_repro_artifacts(
+                        &case.id,
+                        &artifact_refs,
+                        "crates/fnp-conformance/fixtures/io_differential_cases.json",
+                    ),
+                    artifact_refs,
+                });
+            }
+            Err(err) => {
+                let contains_expected = err.message.to_lowercase().contains(&expected_error);
+                let reason_match = err.reason_code == expected_reason_code;
+                if contains_expected && reason_match {
+                    report.pass_count += 1;
+                } else {
+                    let rendered = format!(
+                        "{}: seed={} mode={} reason_code={} expected_reason_code={} env_fingerprint={} artifact_refs={} expected error containing '{}' with reason_code='{}' but got '{}' (actual_reason_code='{}')",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        expected_reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(","),
+                        case.expected_error_contains,
+                        expected_reason_code,
+                        err.message,
+                        err.reason_code
+                    );
+                    report.failures.push(rendered.clone());
+                    mismatches.push(IoDifferentialMismatch {
+                        fixture_id: case.id.clone(),
+                        seed: case.seed,
+                        mode: mode.clone(),
+                        operation: case.operation.clone(),
+                        expected_reason_code,
+                        actual_reason_code: err.reason_code.clone(),
+                        message: rendered,
+                        minimal_repro_artifacts: iter_minimal_repro_artifacts(
+                            &case.id,
+                            &artifact_refs,
+                            "crates/fnp-conformance/fixtures/io_differential_cases.json",
+                        ),
+                        artifact_refs,
+                    });
+                }
+            }
+        }
+    }
+
+    let report_path = config
+        .fixture_root
+        .join("oracle_outputs")
+        .join("io_differential_report.json");
+    let artifact = IoDifferentialReportArtifact {
+        suite: "io_differential",
+        total_cases: report.case_count,
+        passed_cases: report.pass_count,
+        failed_cases: report.case_count.saturating_sub(report.pass_count),
+        mismatches,
+    };
+    if let Some(parent) = report_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed creating {}: {err}", parent.display()))?;
+    }
+    let payload = serde_json::to_string_pretty(&artifact)
+        .map_err(|err| format!("failed serializing io differential report: {err}"))?;
+    fs::write(&report_path, payload.as_bytes())
+        .map_err(|err| format!("failed writing {}: {err}", report_path.display()))?;
+
+    Ok(report)
+}
+
+pub fn run_io_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let path = config.fixture_root.join("io_metamorphic_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    let cases: Vec<IoMetamorphicCase> =
+        serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))?;
+
+    let mut report = SuiteReport {
+        suite: "io_metamorphic",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+
+        match evaluate_io_metamorphic_relation(&case) {
+            Ok(()) => {
+                report.pass_count += 1;
+            }
+            Err(err) => {
+                report.failures.push(format!(
+                    "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} {} (actual_reason_code={})",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    err.message,
+                    err.reason_code
+                ));
+            }
+        }
+    }
+
+    Ok(report)
+}
+
 pub fn run_io_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
     let path = config.fixture_root.join("io_adversarial_cases.json");
     let raw = fs::read_to_string(&path)
@@ -3066,16 +4533,23 @@ pub fn run_io_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport, S
     };
 
     for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
         let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
         let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
         let reason_code = normalize_reason_code(&case.reason_code);
+        let expected_reason_code = if case.expected_reason_code.trim().is_empty() {
+            reason_code.clone()
+        } else {
+            case.expected_reason_code.trim().to_string()
+        };
         let severity = case.severity.trim().to_lowercase();
         if !matches!(severity.as_str(), "low" | "medium" | "high" | "critical") {
             report.failures.push(format!(
-                "{}: invalid severity '{}' (must be low|medium|high|critical), reason_code={}, env_fingerprint={}, artifact_refs={}",
+                "{}: invalid severity '{}' (must be low|medium|high|critical), reason_code={}, mode={}, env_fingerprint={}, artifact_refs={}",
                 case.id,
                 case.severity,
                 reason_code,
+                mode,
                 env_fingerprint,
                 artifact_refs.join(",")
             ));
@@ -3083,9 +4557,10 @@ pub fn run_io_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport, S
         }
         if case.expected_error_contains.trim().is_empty() {
             report.failures.push(format!(
-                "{}: expected_error_contains must be non-empty, reason_code={}, env_fingerprint={}, artifact_refs={}",
+                "{}: expected_error_contains must be non-empty, reason_code={}, mode={}, env_fingerprint={}, artifact_refs={}",
                 case.id,
                 reason_code,
+                mode,
                 env_fingerprint,
                 artifact_refs.join(",")
             ));
@@ -3096,29 +4571,35 @@ pub fn run_io_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport, S
         match execute_io_adversarial_operation(&case) {
             Ok(()) => {
                 report.failures.push(format!(
-                    "{}: severity={severity} seed={} reason_code={} env_fingerprint={} artifact_refs={} expected error containing '{}' but operation '{}' succeeded",
+                    "{}: severity={severity} seed={} reason_code={} mode={} env_fingerprint={} artifact_refs={} expected error containing '{}' but operation '{}' succeeded",
                     case.id,
                     case.seed,
                     reason_code,
+                    mode,
                     env_fingerprint,
                     artifact_refs.join(","),
                     case.expected_error_contains,
                     case.operation
                 ));
             }
-            Err(actual_error) => {
-                if actual_error.to_lowercase().contains(&expected) {
+            Err(err) => {
+                let contains_expected = err.message.to_lowercase().contains(&expected);
+                let reason_match = err.reason_code == expected_reason_code;
+                if contains_expected && reason_match {
                     report.pass_count += 1;
                 } else {
                     report.failures.push(format!(
-                        "{}: severity={severity} seed={} reason_code={} env_fingerprint={} artifact_refs={} expected error containing '{}' but got '{}'",
+                        "{}: severity={severity} seed={} reason_code={} mode={} env_fingerprint={} artifact_refs={} expected error containing '{}' with reason_code='{}' but got '{}' (actual_reason_code='{}')",
                         case.id,
                         case.seed,
                         reason_code,
+                        mode,
                         env_fingerprint,
                         artifact_refs.join(","),
                         case.expected_error_contains,
-                        actual_error
+                        expected_reason_code,
+                        err.message,
+                        err.reason_code
                     ));
                 }
             }
@@ -3285,6 +4766,9 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
         run_shape_stride_differential_suite(config)?,
         run_shape_stride_metamorphic_suite(config)?,
         run_shape_stride_adversarial_suite(config)?,
+        run_iter_differential_suite(config)?,
+        run_iter_metamorphic_suite(config)?,
+        run_iter_adversarial_suite(config)?,
         run_dtype_promotion_suite(config)?,
         run_runtime_policy_suite(config)?,
         run_runtime_policy_adversarial_suite(config)?,
@@ -3294,6 +4778,8 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
         run_linalg_differential_suite(config)?,
         run_linalg_metamorphic_suite(config)?,
         run_linalg_adversarial_suite(config)?,
+        run_io_differential_suite(config)?,
+        run_io_metamorphic_suite(config)?,
         run_io_adversarial_suite(config)?,
         run_crash_signature_regression_suite(config)?,
         security_contracts::run_security_contract_suite(config)?,
@@ -3902,33 +5388,44 @@ fn map_random_error_to_rng_suite(error: RandomError) -> RngSuiteError {
     RngSuiteError::new(error.reason_code(), error.to_string())
 }
 
-fn execute_io_adversarial_operation(case: &IoAdversarialCase) -> Result<(), String> {
+fn load_dispatch_label(dispatch: LoadDispatch) -> String {
+    match dispatch {
+        LoadDispatch::Npy => "npy",
+        LoadDispatch::Npz => "npz",
+        LoadDispatch::Pickle => "pickle",
+    }
+    .to_string()
+}
+
+fn execute_io_differential_operation(
+    case: &IoDifferentialCase,
+) -> Result<IoOperationOutcome, IoSuiteError> {
     match case.operation.as_str() {
         "magic_version" => validate_magic_version(&case.payload_prefix)
-            .map(|_| ())
-            .map_err(|err| err.to_string()),
+            .map(|(major, minor)| IoOperationOutcome::MagicVersion(format!("{major}.{minor}")))
+            .map_err(map_io_error_to_suite),
         "header_schema" => validate_header_schema(
             &case.shape,
             case.fortran_order,
             &case.dtype_descr,
             case.header_len,
         )
-        .map(|_| ())
-        .map_err(|err| err.to_string()),
+        .map(|_| IoOperationOutcome::Unit)
+        .map_err(map_io_error_to_suite),
         "dtype_decode" => IOSupportedDType::decode(&case.dtype_descr)
-            .map(|_| ())
-            .map_err(|err| err.to_string()),
+            .map(|_| IoOperationOutcome::Unit)
+            .map_err(map_io_error_to_suite),
         "read_payload" => {
-            let dtype = IOSupportedDType::decode(&case.dtype_descr)
-                .map_err(|err| format!("{}: dtype decode failed: {err}", case.id))?;
+            let dtype =
+                IOSupportedDType::decode(&case.dtype_descr).map_err(map_io_error_to_suite)?;
             validate_read_payload(&case.shape, case.payload_len_bytes, dtype)
-                .map(|_| ())
-                .map_err(|err| err.to_string())
+                .map(IoOperationOutcome::Count)
+                .map_err(map_io_error_to_suite)
         }
         "memmap_contract" => {
-            let mode = MemmapMode::parse(&case.memmap_mode).map_err(|err| err.to_string())?;
-            let dtype = IOSupportedDType::decode(&case.dtype_descr)
-                .map_err(|err| format!("{}: dtype decode failed: {err}", case.id))?;
+            let mode = MemmapMode::parse(&case.memmap_mode).map_err(map_io_error_to_suite)?;
+            let dtype =
+                IOSupportedDType::decode(&case.dtype_descr).map_err(map_io_error_to_suite)?;
             validate_memmap_contract(
                 mode,
                 dtype,
@@ -3936,21 +5433,212 @@ fn execute_io_adversarial_operation(case: &IoAdversarialCase) -> Result<(), Stri
                 case.expected_bytes,
                 case.validation_retries,
             )
-            .map_err(|err| err.to_string())
+            .map(|_| IoOperationOutcome::Unit)
+            .map_err(map_io_error_to_suite)
         }
         "load_dispatch" => classify_load_dispatch(&case.payload_prefix, case.allow_pickle)
-            .map(|_| ())
-            .map_err(|err| err.to_string()),
+            .map(|dispatch| IoOperationOutcome::Dispatch(load_dispatch_label(dispatch)))
+            .map_err(map_io_error_to_suite),
         "npz_archive_budget" => validate_npz_archive_budget(
             case.member_count,
             case.uncompressed_bytes,
             case.dispatch_retries,
         )
-        .map_err(|err| err.to_string()),
+        .map(|_| IoOperationOutcome::Unit)
+        .map_err(map_io_error_to_suite),
         "policy_metadata" => validate_io_policy_metadata(&case.mode_raw, &case.class_raw)
-            .map_err(|err| err.to_string()),
-        other => Err(format!("unsupported io_adversarial operation {other}")),
+            .map(|_| IoOperationOutcome::Unit)
+            .map_err(map_io_error_to_suite),
+        other => Err(IoSuiteError::new(
+            "io_policy_unknown_metadata",
+            format!("unsupported io differential operation {other}"),
+        )),
     }
+}
+
+fn validate_io_differential_success_expectations(
+    case: &IoDifferentialCase,
+    outcome: &IoOperationOutcome,
+) -> Result<(), String> {
+    if !case.expected_dispatch.trim().is_empty() {
+        let expected = case.expected_dispatch.trim().to_lowercase();
+        match outcome {
+            IoOperationOutcome::Dispatch(actual) if actual.to_lowercase() == expected => {}
+            IoOperationOutcome::Dispatch(actual) => {
+                return Err(format!(
+                    "dispatch mismatch expected={expected} actual={actual}"
+                ));
+            }
+            _ => {
+                return Err(
+                    "expected dispatch outcome but operation returned a different outcome type"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    if !case.expected_magic_version.trim().is_empty() {
+        let expected = case.expected_magic_version.trim();
+        match outcome {
+            IoOperationOutcome::MagicVersion(actual) if actual == expected => {}
+            IoOperationOutcome::MagicVersion(actual) => {
+                return Err(format!(
+                    "magic version mismatch expected={expected} actual={actual}"
+                ));
+            }
+            _ => {
+                return Err(
+                    "expected magic-version outcome but operation returned a different outcome type"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    if let Some(expected_count) = case.expected_count {
+        match outcome {
+            IoOperationOutcome::Count(actual) if *actual == expected_count => {}
+            IoOperationOutcome::Count(actual) => {
+                return Err(format!(
+                    "count mismatch expected={expected_count} actual={actual}"
+                ));
+            }
+            _ => {
+                return Err(
+                    "expected count outcome but operation returned a different outcome type"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn evaluate_io_metamorphic_relation(case: &IoMetamorphicCase) -> Result<(), IoSuiteError> {
+    match case.relation.as_str() {
+        "magic_version_idempotent" => {
+            let first =
+                validate_magic_version(&case.payload_prefix).map_err(map_io_error_to_suite)?;
+            let second =
+                validate_magic_version(&case.payload_prefix).map_err(map_io_error_to_suite)?;
+            if first == second {
+                Ok(())
+            } else {
+                Err(IoSuiteError::new(
+                    "io_magic_invalid",
+                    format!("magic version idempotence diverged first={first:?} second={second:?}"),
+                ))
+            }
+        }
+        "header_schema_descriptor_roundtrip" => {
+            let header = validate_header_schema(
+                &case.shape,
+                case.fortran_order,
+                &case.dtype_descr,
+                case.header_len,
+            )
+            .map_err(map_io_error_to_suite)?;
+            validate_descriptor_roundtrip(header.descr).map_err(map_io_error_to_suite)
+        }
+        "read_payload_repeatable" => {
+            let dtype =
+                IOSupportedDType::decode(&case.dtype_descr).map_err(map_io_error_to_suite)?;
+            let first = validate_read_payload(&case.shape, case.payload_len_bytes, dtype)
+                .map_err(map_io_error_to_suite)?;
+            let dtype =
+                IOSupportedDType::decode(&case.dtype_descr).map_err(map_io_error_to_suite)?;
+            let second = validate_read_payload(&case.shape, case.payload_len_bytes, dtype)
+                .map_err(map_io_error_to_suite)?;
+            if first == second {
+                Ok(())
+            } else {
+                Err(IoSuiteError::new(
+                    "io_read_payload_incomplete",
+                    format!("read payload repeatability diverged first={first} second={second}"),
+                ))
+            }
+        }
+        "dispatch_stability" => {
+            let first = classify_load_dispatch(&case.payload_prefix, case.allow_pickle)
+                .map(load_dispatch_label)
+                .map_err(map_io_error_to_suite)?;
+            let second = classify_load_dispatch(&case.payload_prefix, case.allow_pickle)
+                .map(load_dispatch_label)
+                .map_err(map_io_error_to_suite)?;
+            if first == second {
+                Ok(())
+            } else {
+                Err(IoSuiteError::new(
+                    "io_load_dispatch_invalid",
+                    format!("dispatch stability diverged first={first} second={second}"),
+                ))
+            }
+        }
+        "npz_budget_idempotent" => {
+            validate_npz_archive_budget(
+                case.member_count,
+                case.uncompressed_bytes,
+                case.dispatch_retries,
+            )
+            .map_err(map_io_error_to_suite)?;
+            validate_npz_archive_budget(
+                case.member_count,
+                case.uncompressed_bytes,
+                case.dispatch_retries,
+            )
+            .map_err(map_io_error_to_suite)
+        }
+        "policy_metadata_idempotent" => {
+            validate_io_policy_metadata(&case.mode_raw, &case.class_raw)
+                .map_err(map_io_error_to_suite)?;
+            validate_io_policy_metadata(&case.mode_raw, &case.class_raw)
+                .map_err(map_io_error_to_suite)
+        }
+        other => Err(IoSuiteError::new(
+            "io_policy_unknown_metadata",
+            format!("unsupported io metamorphic relation {other}"),
+        )),
+    }
+}
+
+fn execute_io_adversarial_operation(case: &IoAdversarialCase) -> Result<(), IoSuiteError> {
+    let differential_case = IoDifferentialCase {
+        id: case.id.clone(),
+        operation: case.operation.clone(),
+        seed: case.seed,
+        mode: case.mode.clone(),
+        env_fingerprint: case.env_fingerprint.clone(),
+        artifact_refs: case.artifact_refs.clone(),
+        reason_code: case.reason_code.clone(),
+        expected_reason_code: case.expected_reason_code.clone(),
+        expected_error_contains: case.expected_error_contains.clone(),
+        payload_prefix: case.payload_prefix.clone(),
+        shape: case.shape.clone(),
+        fortran_order: case.fortran_order,
+        dtype_descr: case.dtype_descr.clone(),
+        header_len: case.header_len,
+        payload_len_bytes: case.payload_len_bytes,
+        allow_pickle: case.allow_pickle,
+        memmap_mode: case.memmap_mode.clone(),
+        file_len_bytes: case.file_len_bytes,
+        expected_bytes: case.expected_bytes,
+        validation_retries: case.validation_retries,
+        member_count: case.member_count,
+        uncompressed_bytes: case.uncompressed_bytes,
+        dispatch_retries: case.dispatch_retries,
+        mode_raw: case.mode_raw.clone(),
+        class_raw: case.class_raw.clone(),
+        expected_dispatch: String::new(),
+        expected_magic_version: String::new(),
+        expected_count: None,
+    };
+    execute_io_differential_operation(&differential_case).map(|_| ())
+}
+
+fn map_io_error_to_suite(error: IOError) -> IoSuiteError {
+    IoSuiteError::new(error.reason_code(), error.to_string())
 }
 
 fn record_suite_check(report: &mut SuiteReport, passed: bool, failure: String) {
@@ -4135,14 +5823,15 @@ fn validate_runtime_policy_log_fields(
 mod tests {
     use super::{
         HarnessConfig, run_all_core_suites, run_crash_signature_regression_suite,
-        run_dtype_promotion_suite, run_io_adversarial_suite, run_linalg_adversarial_suite,
-        run_linalg_differential_suite, run_linalg_metamorphic_suite, run_rng_adversarial_suite,
-        run_rng_differential_suite, run_rng_metamorphic_suite,
-        run_runtime_policy_adversarial_suite, run_shape_stride_adversarial_suite,
-        run_shape_stride_differential_suite, run_shape_stride_metamorphic_suite,
-        run_shape_stride_suite, run_smoke, run_ufunc_adversarial_suite,
-        run_ufunc_differential_suite, run_ufunc_metamorphic_suite, set_dtype_promotion_log_path,
-        set_shape_stride_log_path,
+        run_dtype_promotion_suite, run_io_adversarial_suite, run_io_differential_suite,
+        run_io_metamorphic_suite, run_iter_adversarial_suite, run_iter_differential_suite,
+        run_iter_metamorphic_suite, run_linalg_adversarial_suite, run_linalg_differential_suite,
+        run_linalg_metamorphic_suite, run_rng_adversarial_suite, run_rng_differential_suite,
+        run_rng_metamorphic_suite, run_runtime_policy_adversarial_suite,
+        run_shape_stride_adversarial_suite, run_shape_stride_differential_suite,
+        run_shape_stride_metamorphic_suite, run_shape_stride_suite, run_smoke,
+        run_ufunc_adversarial_suite, run_ufunc_differential_suite, run_ufunc_metamorphic_suite,
+        set_dtype_promotion_log_path, set_shape_stride_log_path,
     };
     use fnp_iter::{
         RuntimeMode as IterRuntimeMode, TRANSFER_PACKET_REASON_CODES, TransferLogRecord,
@@ -4202,6 +5891,35 @@ mod tests {
 
         let adversarial =
             run_shape_stride_adversarial_suite(&cfg).expect("shape-stride adversarial suite");
+        assert!(
+            adversarial.all_passed(),
+            "failures={:?}",
+            adversarial.failures
+        );
+    }
+
+    #[test]
+    fn iter_packet004_f_suites_are_green() {
+        let cfg = HarnessConfig::default_paths();
+
+        let differential =
+            run_iter_differential_suite(&cfg).expect("iter differential suite should run");
+        assert!(
+            differential.all_passed(),
+            "failures={:?}",
+            differential.failures
+        );
+
+        let metamorphic =
+            run_iter_metamorphic_suite(&cfg).expect("iter metamorphic suite should run");
+        assert!(
+            metamorphic.all_passed(),
+            "failures={:?}",
+            metamorphic.failures
+        );
+
+        let adversarial =
+            run_iter_adversarial_suite(&cfg).expect("iter adversarial suite should run");
         assert!(
             adversarial.all_passed(),
             "failures={:?}",
@@ -4565,6 +6283,20 @@ mod tests {
     fn io_adversarial_suite_is_green() {
         let cfg = HarnessConfig::default_paths();
         let suite = run_io_adversarial_suite(&cfg).expect("io adversarial suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn io_differential_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite = run_io_differential_suite(&cfg).expect("io differential suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn io_metamorphic_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite = run_io_metamorphic_suite(&cfg).expect("io metamorphic suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 

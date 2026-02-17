@@ -2,12 +2,14 @@
 
 use fnp_conformance::{
     HarnessConfig, SuiteReport, run_crash_signature_regression_suite, run_io_adversarial_suite,
-    run_linalg_adversarial_suite, run_linalg_differential_suite, run_linalg_metamorphic_suite,
-    run_rng_adversarial_suite, run_rng_differential_suite, run_rng_metamorphic_suite,
-    run_runtime_policy_adversarial_suite, run_runtime_policy_suite,
-    run_shape_stride_adversarial_suite, run_shape_stride_differential_suite,
-    run_shape_stride_metamorphic_suite, run_ufunc_adversarial_suite, run_ufunc_differential_suite,
-    run_ufunc_metamorphic_suite, security_contracts, set_runtime_policy_log_path,
+    run_io_differential_suite, run_io_metamorphic_suite, run_iter_adversarial_suite,
+    run_iter_differential_suite, run_iter_metamorphic_suite, run_linalg_adversarial_suite,
+    run_linalg_differential_suite, run_linalg_metamorphic_suite, run_rng_adversarial_suite,
+    run_rng_differential_suite, run_rng_metamorphic_suite, run_runtime_policy_adversarial_suite,
+    run_runtime_policy_suite, run_shape_stride_adversarial_suite,
+    run_shape_stride_differential_suite, run_shape_stride_metamorphic_suite,
+    run_ufunc_adversarial_suite, run_ufunc_differential_suite, run_ufunc_metamorphic_suite,
+    security_contracts, set_runtime_policy_log_path,
 };
 use serde::Serialize;
 use std::fs;
@@ -288,6 +290,9 @@ fn run_gate_suites(cfg: &HarnessConfig) -> Result<Vec<SuiteReport>, String> {
         run_shape_stride_differential_suite(cfg)?,
         run_shape_stride_metamorphic_suite(cfg)?,
         run_shape_stride_adversarial_suite(cfg)?,
+        run_iter_differential_suite(cfg)?,
+        run_iter_metamorphic_suite(cfg)?,
+        run_iter_adversarial_suite(cfg)?,
         run_ufunc_differential_suite(cfg)?,
         run_ufunc_metamorphic_suite(cfg)?,
         run_ufunc_adversarial_suite(cfg)?,
@@ -297,6 +302,8 @@ fn run_gate_suites(cfg: &HarnessConfig) -> Result<Vec<SuiteReport>, String> {
         run_linalg_differential_suite(cfg)?,
         run_linalg_metamorphic_suite(cfg)?,
         run_linalg_adversarial_suite(cfg)?,
+        run_io_differential_suite(cfg)?,
+        run_io_metamorphic_suite(cfg)?,
         run_io_adversarial_suite(cfg)?,
         run_crash_signature_regression_suite(cfg)?,
         security_contracts::run_security_contract_suite(cfg)?,

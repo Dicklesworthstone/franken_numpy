@@ -1,0 +1,66 @@
+[
+  {
+    "id": "rng_bounded_zero_rejected",
+    "operation": "bounded_zero_rejected",
+    "expected_error_contains": "upper_bound must be > 0",
+    "expected_reason_code": "random_upper_bound_rejected",
+    "severity": "high",
+    "seed": 7201,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "random_upper_bound_rejected"
+  },
+  {
+    "id": "rng_forced_witness_mismatch",
+    "operation": "forced_repro_witness_mismatch",
+    "expected_error_contains": "reproducibility witness mismatch",
+    "expected_reason_code": "rng_reproducibility_witness_failed",
+    "severity": "medium",
+    "seed": 7202,
+    "alt_seed": 7203,
+    "draws": 64,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_reproducibility_witness_failed"
+  },
+  {
+    "id": "rng_jump_budget_exceeded_guardrail",
+    "operation": "jump_budget_exceeded",
+    "expected_error_contains": "jump operations exceeded bounded budget",
+    "expected_reason_code": "rng_jump_contract_violation",
+    "severity": "high",
+    "seed": 7204,
+    "steps": 2048,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_jump_contract_violation"
+  },
+  {
+    "id": "rng_state_schema_budget_exceeded_guardrail",
+    "operation": "state_schema_budget_exceeded",
+    "expected_error_contains": "state schema entries exceeded bounded budget",
+    "expected_reason_code": "rng_state_schema_invalid",
+    "severity": "critical",
+    "seed": 7205,
+    "steps": 5000,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_state_schema_invalid"
+  }
+]

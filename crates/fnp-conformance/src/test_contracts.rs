@@ -1354,6 +1354,34 @@ fn validate_workflow_scenario_fixtures(
         &config.fixture_root.join("ufunc_input_cases.json"),
         "ufunc_input_cases",
     )?;
+    let shape_stride_ids = collect_fixture_ids(
+        &config.fixture_root.join("shape_stride_cases.json"),
+        "shape_stride_cases",
+    )?;
+    let iter_differential_ids = collect_fixture_ids(
+        &config.fixture_root.join("iter_differential_cases.json"),
+        "iter_differential_cases",
+    )?;
+    let iter_adversarial_ids = collect_fixture_ids(
+        &config.fixture_root.join("iter_adversarial_cases.json"),
+        "iter_adversarial_cases",
+    )?;
+    let io_differential_ids = collect_fixture_ids(
+        &config.fixture_root.join("io_differential_cases.json"),
+        "io_differential_cases",
+    )?;
+    let io_adversarial_ids = collect_fixture_ids(
+        &config.fixture_root.join("io_adversarial_cases.json"),
+        "io_adversarial_cases",
+    )?;
+    let linalg_differential_ids = collect_fixture_ids(
+        &config.fixture_root.join("linalg_differential_cases.json"),
+        "linalg_differential_cases",
+    )?;
+    let linalg_adversarial_ids = collect_fixture_ids(
+        &config.fixture_root.join("linalg_adversarial_cases.json"),
+        "linalg_adversarial_cases",
+    )?;
     let runtime_policy_ids = collect_fixture_ids(
         &config.fixture_root.join("runtime_policy_cases.json"),
         "runtime_policy_cases",
@@ -1364,6 +1392,15 @@ fn validate_workflow_scenario_fixtures(
             .join("runtime_policy_adversarial_cases.json"),
         "runtime_policy_adversarial_cases",
     )?;
+    let mut workflow_fixture_ids = BTreeSet::new();
+    workflow_fixture_ids.extend(ufunc_ids.iter().cloned());
+    workflow_fixture_ids.extend(shape_stride_ids.iter().cloned());
+    workflow_fixture_ids.extend(iter_differential_ids.iter().cloned());
+    workflow_fixture_ids.extend(iter_adversarial_ids.iter().cloned());
+    workflow_fixture_ids.extend(io_differential_ids.iter().cloned());
+    workflow_fixture_ids.extend(io_adversarial_ids.iter().cloned());
+    workflow_fixture_ids.extend(linalg_differential_ids.iter().cloned());
+    workflow_fixture_ids.extend(linalg_adversarial_ids.iter().cloned());
 
     let repo_root = config
         .fixture_root
@@ -1571,6 +1608,131 @@ fn validate_workflow_scenario_fixtures(
                         }
                     }
                 }
+                (Some("shape_stride_case"), Some(case_id)) => {
+                    record_check(
+                        report,
+                        shape_stride_ids.contains(case_id),
+                        format!(
+                            "workflow step references unknown shape_stride_case case_id {case_id}"
+                        ),
+                    );
+                }
+                (Some("iter_fixture_case"), Some(case_id)) => {
+                    match required_string(step_obj, "fixture_set") {
+                        Some("differential") => {
+                            record_check(
+                                report,
+                                iter_differential_ids.contains(case_id),
+                                format!(
+                                    "workflow step references unknown iter_differential_cases case_id {case_id}"
+                                ),
+                            );
+                        }
+                        Some("adversarial") => {
+                            record_check(
+                                report,
+                                iter_adversarial_ids.contains(case_id),
+                                format!(
+                                    "workflow step references unknown iter_adversarial_cases case_id {case_id}"
+                                ),
+                            );
+                        }
+                        Some(other) => {
+                            record_check(
+                                report,
+                                false,
+                                format!(
+                                    "workflow step has invalid fixture_set {other} (expected differential|adversarial)"
+                                ),
+                            );
+                        }
+                        None => {
+                            record_check(
+                                report,
+                                false,
+                                "workflow step missing fixture_set for iter_fixture_case"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+                (Some("io_fixture_case"), Some(case_id)) => {
+                    match required_string(step_obj, "fixture_set") {
+                        Some("differential") => {
+                            record_check(
+                                report,
+                                io_differential_ids.contains(case_id),
+                                format!(
+                                    "workflow step references unknown io_differential_cases case_id {case_id}"
+                                ),
+                            );
+                        }
+                        Some("adversarial") => {
+                            record_check(
+                                report,
+                                io_adversarial_ids.contains(case_id),
+                                format!(
+                                    "workflow step references unknown io_adversarial_cases case_id {case_id}"
+                                ),
+                            );
+                        }
+                        Some(other) => {
+                            record_check(
+                                report,
+                                false,
+                                format!(
+                                    "workflow step has invalid fixture_set {other} (expected differential|adversarial)"
+                                ),
+                            );
+                        }
+                        None => {
+                            record_check(
+                                report,
+                                false,
+                                "workflow step missing fixture_set for io_fixture_case".to_string(),
+                            );
+                        }
+                    }
+                }
+                (Some("linalg_fixture_case"), Some(case_id)) => {
+                    match required_string(step_obj, "fixture_set") {
+                        Some("differential") => {
+                            record_check(
+                                report,
+                                linalg_differential_ids.contains(case_id),
+                                format!(
+                                    "workflow step references unknown linalg_differential_cases case_id {case_id}"
+                                ),
+                            );
+                        }
+                        Some("adversarial") => {
+                            record_check(
+                                report,
+                                linalg_adversarial_ids.contains(case_id),
+                                format!(
+                                    "workflow step references unknown linalg_adversarial_cases case_id {case_id}"
+                                ),
+                            );
+                        }
+                        Some(other) => {
+                            record_check(
+                                report,
+                                false,
+                                format!(
+                                    "workflow step has invalid fixture_set {other} (expected differential|adversarial)"
+                                ),
+                            );
+                        }
+                        None => {
+                            record_check(
+                                report,
+                                false,
+                                "workflow step missing fixture_set for linalg_fixture_case"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
                 (Some(other), _) => {
                     record_check(
                         report,
@@ -1614,7 +1776,7 @@ fn validate_workflow_scenario_fixtures(
                     };
                     record_check(
                         report,
-                        ufunc_ids.contains(entry),
+                        workflow_fixture_ids.contains(entry),
                         format!(
                             "workflow links.differential_fixture_ids references unknown case id {entry}"
                         ),

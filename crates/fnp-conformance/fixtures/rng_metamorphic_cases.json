@@ -1,0 +1,44 @@
+[
+  {
+    "id": "rng_jump_partition_additivity",
+    "relation": "jump_partition_additivity",
+    "seed": 7101,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_metamorphic_cases.json"
+    ],
+    "reason_code": "random_jump_ahead_contract",
+    "steps": 512,
+    "extra_steps": 87
+  },
+  {
+    "id": "rng_fill_matches_iterative_draw",
+    "relation": "fill_matches_iterative_draw",
+    "seed": 7102,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_metamorphic_cases.json"
+    ],
+    "reason_code": "random_fill_length_contract",
+    "fill_len": 256
+  },
+  {
+    "id": "rng_bounded_repeatability_witness",
+    "relation": "bounded_repeatability",
+    "seed": 7103,
+    "alt_seed": 7103,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_metamorphic_cases.json"
+    ],
+    "reason_code": "random_bounded_output_contract",
+    "draws": 256,
+    "upper_bound": 97
+  }
+]

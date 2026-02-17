@@ -7,6 +7,14 @@ This folder stores normalized oracle-vs-target fixtures for `fnp-conformance`.
 - `dtype_promotion_cases.json`: deterministic promotion-table checks.
 - `runtime_policy_cases.json`: strict/hardened fail-closed policy checks with structured log context.
 - `runtime_policy_adversarial_cases.json`: malformed/unknown wire-class inputs proving fail-closed behavior.
+- `iter_differential_cases.json`: packet `FNP-P2C-004` iterator differential corpus for selector/overlap/flag/flatiter behavior parity.
+- `iter_metamorphic_cases.json`: deterministic iterator metamorphic invariants (repeatability/idempotence/count laws).
+- `iter_adversarial_cases.json`: hostile iterator payloads expecting stable reason-code failures.
+- `rng_differential_cases.json`: packet `FNP-P2C-007` deterministic RNG differential witness corpus.
+- `rng_metamorphic_cases.json`: deterministic RNG metamorphic invariants (jump additivity, fill/iter equivalence, bounded repeatability).
+- `rng_adversarial_cases.json`: hostile RNG payloads expecting bounded fail-closed reason-code outcomes.
+- `io_differential_cases.json`: packet `FNP-P2C-009` differential corpus for NPY/NPZ parser/dispatch contract checks.
+- `io_metamorphic_cases.json`: deterministic IO metamorphic invariants (idempotent header/dispatch/policy/budget validations).
 - `io_adversarial_cases.json`: parser-boundary adversarial IO corpus with severity-classified failure expectations.
 - `linalg_differential_cases.json`: packet `FNP-P2C-008` differential oracle corpus for solver/factorization/spectral/tolerance/backend/policy seams.
 - `linalg_metamorphic_cases.json`: deterministic linalg metamorphic invariants (solve scaling, qr determinism, lstsq tuple consistency).
@@ -14,7 +22,9 @@ This folder stores normalized oracle-vs-target fixtures for `fnp-conformance`.
 - `ufunc_input_cases.json`: differential ufunc/reduction input corpus.
 - `ufunc_metamorphic_cases.json`: deterministic metamorphic checks (commutativity, linearity).
 - `ufunc_adversarial_cases.json`: adversarial ufunc inputs expecting controlled errors.
-- `workflow_scenario_corpus.json`: user workflow golden journeys linking differential fixtures, e2e scripts, and prioritized gap beads.
+- `workflow_scenario_corpus.json`: user workflow golden journeys linking differential fixtures, e2e scripts, and prioritized gap beads (including packet `FNP-P2C-004` iterator replay scenarios).
 - `oracle_outputs/ufunc_oracle_output.json`: captured NumPy oracle outputs.
 - `oracle_outputs/ufunc_differential_report.json`: comparator report against current Rust implementation.
+- `oracle_outputs/iter_differential_report.json`: machine-readable mismatch report for packet `FNP-P2C-004` iterator differential checks.
+- `oracle_outputs/io_differential_report.json`: machine-readable mismatch report for packet `FNP-P2C-009` IO differential checks.
 - `oracle_outputs/linalg_differential_report.json`: machine-readable mismatch report for packet `FNP-P2C-008` differential checks.

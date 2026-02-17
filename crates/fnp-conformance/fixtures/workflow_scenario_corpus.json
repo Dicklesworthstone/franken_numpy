@@ -118,6 +118,727 @@
     ]
   },
   {
+    "id": "ufunc_packet_dispatch_replay",
+    "category": "high_frequency",
+    "description": "Packet FNP-P2C-005 golden workflow covering broadcast dispatch and reduction replay in strict/hardened modes.",
+    "seed": 5601,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-005/differential_metamorphic_adversarial_evidence.json",
+      "scripts/e2e/run_workflow_scenario_gate.sh"
+    ],
+    "reason_code": "ufunc_dispatch_replay_golden_path",
+    "strict": {
+      "expected_status": "pass"
+    },
+    "hardened": {
+      "expected_status": "pass"
+    },
+    "steps": [
+      {
+        "id": "step_dispatch_add",
+        "kind": "ufunc_input",
+        "case_id": "add_broadcast_2x3_plus_3"
+      },
+      {
+        "id": "step_dispatch_mul_scalar",
+        "kind": "ufunc_input",
+        "case_id": "mul_scalar_broadcast"
+      },
+      {
+        "id": "step_reduce_keepdims",
+        "kind": "ufunc_input",
+        "case_id": "sum_axis1_keepdims"
+      },
+      {
+        "id": "step_policy_allow_known_good",
+        "kind": "runtime_policy",
+        "case_id": "strict_known_good",
+        "expected_action_strict": "allow",
+        "expected_action_hardened": "allow"
+      }
+    ],
+    "links": {
+      "differential_fixture_ids": [
+        "add_broadcast_2x3_plus_3",
+        "mul_scalar_broadcast",
+        "sum_axis1_keepdims"
+      ],
+      "e2e_script_paths": [
+        "scripts/e2e/run_workflow_scenario_gate.sh",
+        "scripts/e2e/run_test_contract_gate.sh"
+      ]
+    },
+    "gaps": [
+      {
+        "bead_id": "bd-23m.16.8",
+        "owner": "bd-23m.16.8",
+        "priority": "p1",
+        "description": "Profile and optimize this replay path with explicit isomorphism evidence before final packet sign-off."
+      },
+      {
+        "bead_id": "bd-23m.16.9",
+        "owner": "bd-23m.16.9",
+        "priority": "p1",
+        "description": "Aggregate this workflow replay with final packet parity and durability evidence bundle artifacts."
+      }
+    ]
+  },
+  {
+    "id": "ufunc_packet_dispatch_hostile_guardrails",
+    "category": "adversarial",
+    "description": "Packet FNP-P2C-005 hostile workflow proving dispatch, axis, and signature errors remain replayable while unknown wire metadata stays fail-closed.",
+    "seed": 5602,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json",
+      "scripts/e2e/run_workflow_scenario_gate.sh"
+    ],
+    "reason_code": "ufunc_dispatch_hostile_guardrails",
+    "strict": {
+      "expected_status": "fail_closed"
+    },
+    "hardened": {
+      "expected_status": "fail_closed"
+    },
+    "steps": [
+      {
+        "id": "step_shape_mismatch_rejected",
+        "kind": "ufunc_input",
+        "case_id": "add_shape_mismatch_2x2_vs_3x1",
+        "expect_error_contains": "broadcast"
+      },
+      {
+        "id": "step_axis_guard_rejected",
+        "kind": "ufunc_input",
+        "case_id": "sum_axis_out_of_bounds",
+        "expect_error_contains": "axis"
+      },
+      {
+        "id": "step_signature_guard_rejected",
+        "kind": "ufunc_input",
+        "case_id": "mul_missing_rhs_shape",
+        "expect_error_contains": "rhs_shape"
+      },
+      {
+        "id": "step_wire_unknown_class_fail_closed",
+        "kind": "runtime_policy_wire",
+        "case_id": "wire_hardened_unknown_class_fail_closed",
+        "expected_action_strict": "fail_closed",
+        "expected_action_hardened": "fail_closed"
+      }
+    ],
+    "links": {
+      "differential_fixture_ids": [
+        "add_shape_mismatch_2x2_vs_3x1",
+        "sum_axis_out_of_bounds",
+        "mul_missing_rhs_shape"
+      ],
+      "e2e_script_paths": [
+        "scripts/e2e/run_workflow_scenario_gate.sh",
+        "scripts/e2e/run_security_policy_gate.sh"
+      ]
+    },
+    "gaps": [
+      {
+        "bead_id": "bd-23m.16.8",
+        "owner": "bd-23m.16.8",
+        "priority": "p1",
+        "description": "Add hotspot/latency profiling to this hostile workflow replay with deterministic fallback annotations."
+      },
+      {
+        "bead_id": "bd-23m.16.9",
+        "owner": "bd-23m.16.9",
+        "priority": "p1",
+        "description": "Link hostile replay logs and diagnostics into the packet final evidence index for independent audit."
+      }
+    ]
+  },
+  {
+    "id": "stride_tricks_packet_replay",
+    "category": "high_frequency",
+    "description": "Packet FNP-P2C-006 golden workflow covering deterministic stride-tricks replay with strict/hardened policy parity.",
+    "seed": 5701,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-006/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-006/differential_metamorphic_adversarial_evidence.json",
+      "scripts/e2e/run_workflow_scenario_gate.sh"
+    ],
+    "reason_code": "stride_tricks_replay_golden_path",
+    "strict": {
+      "expected_status": "pass"
+    },
+    "hardened": {
+      "expected_status": "pass"
+    },
+    "steps": [
+      {
+        "id": "step_stride_views_success",
+        "kind": "shape_stride_case",
+        "case_id": "stride_tricks_views_success"
+      },
+      {
+        "id": "step_stride_broadcast_expand",
+        "kind": "shape_stride_case",
+        "case_id": "stride_tricks_broadcast_expand"
+      },
+      {
+        "id": "step_stride_high_rank_broadcast",
+        "kind": "shape_stride_case",
+        "case_id": "stride_tricks_high_rank_broadcast"
+      },
+      {
+        "id": "step_policy_allow_known_good",
+        "kind": "runtime_policy",
+        "case_id": "strict_known_good",
+        "expected_action_strict": "allow",
+        "expected_action_hardened": "allow"
+      }
+    ],
+    "links": {
+      "differential_fixture_ids": [
+        "stride_tricks_views_success",
+        "stride_tricks_broadcast_expand",
+        "stride_tricks_high_rank_broadcast"
+      ],
+      "e2e_script_paths": [
+        "scripts/e2e/run_workflow_scenario_gate.sh",
+        "scripts/e2e/run_test_contract_gate.sh"
+      ]
+    },
+    "gaps": [
+      {
+        "bead_id": "bd-23m.17.8",
+        "owner": "bd-23m.17.8",
+        "priority": "p1",
+        "description": "Profile and optimize packet-006 stride-tricks replay with explicit isomorphism evidence before final sign-off."
+      },
+      {
+        "bead_id": "bd-23m.17.9",
+        "owner": "bd-23m.17.9",
+        "priority": "p1",
+        "description": "Attach packet-006 workflow replay outputs into the final parity and durability evidence bundle."
+      }
+    ]
+  },
+  {
+    "id": "stride_tricks_packet_hostile_guardrails",
+    "category": "adversarial",
+    "description": "Packet FNP-P2C-006 hostile workflow proving stride-trick error surfaces remain replayable while unknown wire metadata stays fail-closed.",
+    "seed": 5702,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-006/contract_table.md",
+      "crates/fnp-conformance/fixtures/shape_stride_cases.json",
+      "scripts/e2e/run_workflow_scenario_gate.sh"
+    ],
+    "reason_code": "stride_tricks_hostile_guardrails",
+    "strict": {
+      "expected_status": "fail_closed"
+    },
+    "hardened": {
+      "expected_status": "fail_closed"
+    },
+    "steps": [
+      {
+        "id": "step_stride_error_surface",
+        "kind": "shape_stride_case",
+        "case_id": "stride_tricks_error_surface"
+      },
+      {
+        "id": "step_stride_negative_stride_rejected",
+        "kind": "shape_stride_case",
+        "case_id": "stride_tricks_negative_stride_error"
+      },
+      {
+        "id": "step_stride_rank_mismatch_rejected",
+        "kind": "shape_stride_case",
+        "case_id": "stride_tricks_rank_mismatch_error"
+      },
+      {
+        "id": "step_wire_unknown_class_fail_closed",
+        "kind": "runtime_policy_wire",
+        "case_id": "wire_unknown_class_fail_closed",
+        "expected_action_strict": "fail_closed",
+        "expected_action_hardened": "fail_closed"
+      }
+    ],
+    "links": {
+      "differential_fixture_ids": [
+        "stride_tricks_error_surface",
+        "stride_tricks_negative_stride_error",
+        "stride_tricks_rank_mismatch_error"
+      ],
+      "e2e_script_paths": [
+        "scripts/e2e/run_workflow_scenario_gate.sh",
+        "scripts/e2e/run_security_policy_gate.sh"
+      ]
+    },
+    "gaps": [
+      {
+        "bead_id": "bd-23m.17.8",
+        "owner": "bd-23m.17.8",
+        "priority": "p1",
+        "description": "Measure hostile stride-tricks replay hotspots and document deterministic fallback behavior."
+      },
+      {
+        "bead_id": "bd-23m.17.9",
+        "owner": "bd-23m.17.9",
+        "priority": "p1",
+        "description": "Link hostile packet-006 workflow diagnostics into the final packet evidence index for auditability."
+      }
+    ]
+  },
+  {
+    "id": "nditer_packet_replay",
+    "category": "high_frequency",
+    "description": "Packet FNP-P2C-004 golden workflow covering iterator transfer selection, overlap policy, and flatiter assignment replay in strict/hardened modes.",
+    "seed": 5801,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-004/differential_metamorphic_adversarial_evidence.json",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json",
+      "scripts/e2e/run_workflow_scenario_gate.sh"
+    ],
+    "reason_code": "nditer_packet_replay_golden_path",
+    "strict": {
+      "expected_status": "pass"
+    },
+    "hardened": {
+      "expected_status": "pass"
+    },
+    "steps": [
+      {
+        "id": "step_iter_selector_contiguous",
+        "kind": "iter_fixture_case",
+        "case_id": "iter_selector_contiguous_golden",
+        "fixture_set": "differential"
+      },
+      {
+        "id": "step_iter_overlap_backward_copy",
+        "kind": "iter_fixture_case",
+        "case_id": "iter_overlap_backward_copy_golden",
+        "fixture_set": "differential"
+      },
+      {
+        "id": "step_iter_flatiter_slice_write",
+        "kind": "iter_fixture_case",
+        "case_id": "iter_flatiter_slice_write_golden",
+        "fixture_set": "differential"
+      },
+      {
+        "id": "step_policy_allow_known_good",
+        "kind": "runtime_policy",
+        "case_id": "strict_known_good",
+        "expected_action_strict": "allow",
+        "expected_action_hardened": "allow"
+      }
+    ],
+    "links": {
+      "differential_fixture_ids": [
+        "iter_selector_contiguous_golden",
+        "iter_overlap_backward_copy_golden",
+        "iter_flatiter_slice_write_golden"
+      ],
+      "e2e_script_paths": [
+        "scripts/e2e/run_workflow_scenario_gate.sh",
+        "scripts/e2e/run_test_contract_gate.sh"
+      ]
+    },
+    "gaps": [
+      {
+        "bead_id": "bd-23m.15.8",
+        "owner": "bd-23m.15.8",
+        "priority": "p1",
+        "description": "Profile and optimize packet-004 iterator workflow replay with explicit isomorphism evidence."
+      },
+      {
+        "bead_id": "bd-23m.15.9",
+        "owner": "bd-23m.15.9",
+        "priority": "p1",
+        "description": "Aggregate packet-004 workflow replay outputs into the final parity and durability evidence bundle."
+      }
+    ]
+  },
+  {
+    "id": "nditer_packet_hostile_guardrails",
+    "category": "adversarial",
+    "description": "Packet FNP-P2C-004 hostile workflow proving iterator malformed payloads remain replayable while unknown wire metadata stays fail-closed.",
+    "seed": 5802,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_adversarial_cases.json",
+      "scripts/e2e/run_workflow_scenario_gate.sh"
+    ],
+    "reason_code": "nditer_packet_hostile_guardrails",
+    "strict": {
+      "expected_status": "fail_closed"
+    },
+    "hardened": {
+      "expected_status": "fail_closed"
+    },
+    "steps": [
+      {
+        "id": "step_iter_selector_zero_item_size_rejected",
+        "kind": "iter_fixture_case",
+        "case_id": "iter_selector_zero_item_size_rejected",
+        "fixture_set": "adversarial"
+      },
+      {
+        "id": "step_iter_flatiter_write_mask_mismatch_rejected",
+        "kind": "iter_fixture_case",
+        "case_id": "iter_flatiter_write_bool_mask_mismatch_rejected",
+        "fixture_set": "adversarial"
+      },
+      {
+        "id": "step_iter_no_broadcast_rejected",
+        "kind": "iter_fixture_case",
+        "case_id": "iter_nditer_flags_no_broadcast_rejected",
+        "fixture_set": "adversarial"
+      },
+      {
+        "id": "step_wire_unknown_mode_fail_closed",
+        "kind": "runtime_policy_wire",
+        "case_id": "wire_unknown_mode_fail_closed",
+        "expected_action_strict": "fail_closed",
+        "expected_action_hardened": "fail_closed"
+      }
+    ],
+    "links": {
+      "differential_fixture_ids": [
+        "iter_selector_zero_item_size_rejected",
+        "iter_flatiter_write_bool_mask_mismatch_rejected",
+        "iter_nditer_flags_no_broadcast_rejected"
+      ],
+      "e2e_script_paths": [
+        "scripts/e2e/run_workflow_scenario_gate.sh",
+        "scripts/e2e/run_security_policy_gate.sh"
+      ]
+    },
+    "gaps": [
+      {
+        "bead_id": "bd-23m.15.8",
+        "owner": "bd-23m.15.8",
+        "priority": "p1",
+        "description": "Add hotspot and latency profiling for hostile packet-004 iterator workflow replay."
+      },
+      {
+        "bead_id": "bd-23m.15.9",
+        "owner": "bd-23m.15.9",
+        "priority": "p1",
+        "description": "Link hostile packet-004 iterator workflow diagnostics into the final evidence index."
+      }
+    ]
+  },
+  {
+    "id": "io_packet_replay",
+    "category": "high_frequency",
+    "description": "Packet FNP-P2C-009 golden workflow covering deterministic IO parse/dispatch/policy replay in strict and hardened modes.",
+    "seed": 5901,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-009/e2e_replay_forensics_evidence.json",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json",
+      "scripts/e2e/run_io_contract_journey.sh"
+    ],
+    "reason_code": "io_packet_replay_golden_path",
+    "strict": {
+      "expected_status": "pass"
+    },
+    "hardened": {
+      "expected_status": "pass"
+    },
+    "steps": [
+      {
+        "id": "step_io_magic_version",
+        "kind": "io_fixture_case",
+        "case_id": "io_magic_version_v2_golden",
+        "fixture_set": "differential"
+      },
+      {
+        "id": "step_io_read_payload_exact",
+        "kind": "io_fixture_case",
+        "case_id": "io_read_payload_exact_bytes_golden",
+        "fixture_set": "differential"
+      },
+      {
+        "id": "step_io_dispatch_npz",
+        "kind": "io_fixture_case",
+        "case_id": "io_load_dispatch_npz_golden",
+        "fixture_set": "differential"
+      },
+      {
+        "id": "step_io_policy_metadata",
+        "kind": "io_fixture_case",
+        "case_id": "io_policy_metadata_known_golden",
+        "fixture_set": "differential"
+      },
+      {
+        "id": "step_policy_allow_known_good",
+        "kind": "runtime_policy",
+        "case_id": "strict_known_good",
+        "expected_action_strict": "allow",
+        "expected_action_hardened": "allow"
+      }
+    ],
+    "links": {
+      "differential_fixture_ids": [
+        "io_magic_version_v2_golden",
+        "io_read_payload_exact_bytes_golden",
+        "io_load_dispatch_npz_golden",
+        "io_policy_metadata_known_golden"
+      ],
+      "e2e_script_paths": [
+        "scripts/e2e/run_io_contract_journey.sh",
+        "scripts/e2e/run_workflow_scenario_gate.sh",
+        "scripts/e2e/run_test_contract_gate.sh"
+      ]
+    },
+    "gaps": [
+      {
+        "bead_id": "bd-23m.20.8",
+        "owner": "bd-23m.20.8",
+        "priority": "p1",
+        "description": "Profile packet-009 workflow replay hotspots and produce behavior-isomorphism deltas."
+      },
+      {
+        "bead_id": "bd-23m.20.9",
+        "owner": "bd-23m.20.9",
+        "priority": "p1",
+        "description": "Attach packet-009 workflow replay logs/forensics into final parity and durability evidence bundle."
+      }
+    ]
+  },
+  {
+    "id": "io_packet_hostile_guardrails",
+    "category": "adversarial",
+    "description": "Packet FNP-P2C-009 hostile workflow proving malformed IO payloads remain replayable while unknown wire metadata stays fail-closed.",
+    "seed": 5902,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_adversarial_cases.json",
+      "scripts/e2e/run_io_contract_journey.sh"
+    ],
+    "reason_code": "io_packet_hostile_guardrails",
+    "strict": {
+      "expected_status": "fail_closed"
+    },
+    "hardened": {
+      "expected_status": "fail_closed"
+    },
+    "steps": [
+      {
+        "id": "step_io_magic_invalid",
+        "kind": "io_fixture_case",
+        "case_id": "io_magic_invalid_short_prefix",
+        "fixture_set": "adversarial"
+      },
+      {
+        "id": "step_io_archive_budget_overflow",
+        "kind": "io_fixture_case",
+        "case_id": "io_npz_budget_overflow",
+        "fixture_set": "adversarial"
+      },
+      {
+        "id": "step_io_policy_unknown_mode",
+        "kind": "io_fixture_case",
+        "case_id": "io_policy_unknown_mode_fail_closed",
+        "fixture_set": "adversarial"
+      },
+      {
+        "id": "step_wire_unknown_mode_fail_closed",
+        "kind": "runtime_policy_wire",
+        "case_id": "wire_unknown_mode_fail_closed",
+        "expected_action_strict": "fail_closed",
+        "expected_action_hardened": "fail_closed"
+      }
+    ],
+    "links": {
+      "differential_fixture_ids": [
+        "io_magic_invalid_short_prefix",
+        "io_npz_budget_overflow",
+        "io_policy_unknown_mode_fail_closed"
+      ],
+      "e2e_script_paths": [
+        "scripts/e2e/run_io_contract_journey.sh",
+        "scripts/e2e/run_workflow_scenario_gate.sh",
+        "scripts/e2e/run_security_policy_gate.sh"
+      ]
+    },
+    "gaps": [
+      {
+        "bead_id": "bd-23m.20.8",
+        "owner": "bd-23m.20.8",
+        "priority": "p1",
+        "description": "Quantify hostile IO workflow replay overhead and define deterministic fallback thresholds."
+      },
+      {
+        "bead_id": "bd-23m.20.9",
+        "owner": "bd-23m.20.9",
+        "priority": "p1",
+        "description": "Link hostile packet-009 workflow diagnostics into final parity and durability evidence artifacts."
+      }
+    ]
+  },
+  {
+    "id": "linalg_packet_replay",
+    "category": "high_frequency",
+    "description": "Packet FNP-P2C-008 golden workflow covering deterministic linalg contract replay in strict and hardened modes.",
+    "seed": 6001,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json",
+      "scripts/e2e/run_linalg_contract_journey.sh"
+    ],
+    "reason_code": "linalg_packet_replay_golden_path",
+    "strict": {
+      "expected_status": "pass"
+    },
+    "hardened": {
+      "expected_status": "pass"
+    },
+    "steps": [
+      {
+        "id": "step_linalg_solve",
+        "kind": "linalg_fixture_case",
+        "case_id": "linalg_solve_2x2_golden",
+        "fixture_set": "differential"
+      },
+      {
+        "id": "step_linalg_qr",
+        "kind": "linalg_fixture_case",
+        "case_id": "linalg_qr_shapes_reduced_5x3",
+        "fixture_set": "differential"
+      },
+      {
+        "id": "step_linalg_lstsq",
+        "kind": "linalg_fixture_case",
+        "case_id": "linalg_lstsq_shapes_matrix_rhs",
+        "fixture_set": "differential"
+      },
+      {
+        "id": "step_linalg_policy_metadata",
+        "kind": "linalg_fixture_case",
+        "case_id": "linalg_policy_metadata_hardened_incompatible",
+        "fixture_set": "differential"
+      },
+      {
+        "id": "step_policy_allow_known_good",
+        "kind": "runtime_policy",
+        "case_id": "strict_known_good",
+        "expected_action_strict": "allow",
+        "expected_action_hardened": "allow"
+      }
+    ],
+    "links": {
+      "differential_fixture_ids": [
+        "linalg_solve_2x2_golden",
+        "linalg_qr_shapes_reduced_5x3",
+        "linalg_lstsq_shapes_matrix_rhs",
+        "linalg_policy_metadata_hardened_incompatible"
+      ],
+      "e2e_script_paths": [
+        "scripts/e2e/run_linalg_contract_journey.sh",
+        "scripts/e2e/run_workflow_scenario_gate.sh",
+        "scripts/e2e/run_test_contract_gate.sh"
+      ]
+    },
+    "gaps": [
+      {
+        "bead_id": "bd-23m.19.8",
+        "owner": "bd-23m.19.8",
+        "priority": "p1",
+        "description": "Profile packet-008 workflow replay hotspots and produce behavior-isomorphism deltas."
+      },
+      {
+        "bead_id": "bd-23m.19.9",
+        "owner": "bd-23m.19.9",
+        "priority": "p1",
+        "description": "Attach packet-008 workflow replay logs/forensics into final parity and durability evidence bundle."
+      }
+    ]
+  },
+  {
+    "id": "linalg_packet_hostile_guardrails",
+    "category": "adversarial",
+    "description": "Packet FNP-P2C-008 hostile workflow proving linalg malformed payloads remain replayable while unknown wire metadata stays fail-closed.",
+    "seed": 6002,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/risk_note.md",
+      "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json",
+      "scripts/e2e/run_linalg_contract_journey.sh"
+    ],
+    "reason_code": "linalg_packet_hostile_guardrails",
+    "strict": {
+      "expected_status": "fail_closed"
+    },
+    "hardened": {
+      "expected_status": "fail_closed"
+    },
+    "steps": [
+      {
+        "id": "step_linalg_solve_singular",
+        "kind": "linalg_fixture_case",
+        "case_id": "linalg_solve_singular_system",
+        "fixture_set": "adversarial"
+      },
+      {
+        "id": "step_linalg_qr_mode_invalid",
+        "kind": "linalg_fixture_case",
+        "case_id": "linalg_qr_mode_invalid_token",
+        "fixture_set": "adversarial"
+      },
+      {
+        "id": "step_linalg_policy_unknown_mode",
+        "kind": "linalg_fixture_case",
+        "case_id": "linalg_policy_unknown_mode",
+        "fixture_set": "adversarial"
+      },
+      {
+        "id": "step_wire_unknown_class_fail_closed",
+        "kind": "runtime_policy_wire",
+        "case_id": "wire_unknown_class_fail_closed",
+        "expected_action_strict": "fail_closed",
+        "expected_action_hardened": "fail_closed"
+      }
+    ],
+    "links": {
+      "differential_fixture_ids": [
+        "linalg_solve_singular_system",
+        "linalg_qr_mode_invalid_token",
+        "linalg_policy_unknown_mode"
+      ],
+      "e2e_script_paths": [
+        "scripts/e2e/run_linalg_contract_journey.sh",
+        "scripts/e2e/run_workflow_scenario_gate.sh",
+        "scripts/e2e/run_security_policy_gate.sh"
+      ]
+    },
+    "gaps": [
+      {
+        "bead_id": "bd-23m.19.8",
+        "owner": "bd-23m.19.8",
+        "priority": "p1",
+        "description": "Quantify hostile linalg workflow replay overhead and define deterministic fallback thresholds."
+      },
+      {
+        "bead_id": "bd-23m.19.9",
+        "owner": "bd-23m.19.9",
+        "priority": "p1",
+        "description": "Link hostile packet-008 workflow diagnostics into final parity and durability evidence artifacts."
+      }
+    ]
+  },
+  {
     "id": "unknown_metadata_fail_closed_guard",
     "category": "adversarial",
     "description": "Hostile metadata and wire-mode inputs must fail closed in both strict and hardened operation modes.",
@@ -171,7 +892,7 @@
         "bead_id": "bd-23m.17.7",
         "owner": "bd-23m.17.7",
         "priority": "p1",
-        "description": "Add hostile stride-trick workflow replays once packet FNP-P2C-006 G-stage scenarios land."
+        "description": "Expand hostile stride-trick workflow coverage to include zero-extent replay and high-rank corruption injections."
       }
     ]
   }

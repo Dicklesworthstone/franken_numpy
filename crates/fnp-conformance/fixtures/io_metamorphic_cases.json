@@ -1,0 +1,95 @@
+[
+  {
+    "id": "io_magic_version_idempotent",
+    "relation": "magic_version_idempotent",
+    "seed": 9911,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-009/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "io_magic_contract",
+    "payload_prefix": [147, 78, 85, 77, 80, 89, 3, 0]
+  },
+  {
+    "id": "io_header_schema_descriptor_roundtrip",
+    "relation": "header_schema_descriptor_roundtrip",
+    "seed": 9912,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-009/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "io_header_schema_contract",
+    "shape": [3, 2],
+    "fortran_order": false,
+    "dtype_descr": "<f8",
+    "header_len": 128
+  },
+  {
+    "id": "io_read_payload_repeatable_count",
+    "relation": "read_payload_repeatable",
+    "seed": 9913,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-009/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "io_read_payload_contract",
+    "shape": [4],
+    "dtype_descr": "<f8",
+    "payload_len_bytes": 32
+  },
+  {
+    "id": "io_dispatch_stability_npz_prefix",
+    "relation": "dispatch_stability",
+    "seed": 9914,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-009/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "io_load_dispatch_contract",
+    "payload_prefix": [80, 75, 3, 4],
+    "allow_pickle": true
+  },
+  {
+    "id": "io_npz_budget_idempotent",
+    "relation": "npz_budget_idempotent",
+    "seed": 9915,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-009/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "io_npz_archive_contract",
+    "member_count": 2,
+    "uncompressed_bytes": 1024,
+    "dispatch_retries": 0
+  },
+  {
+    "id": "io_policy_metadata_idempotent",
+    "relation": "policy_metadata_idempotent",
+    "seed": 9916,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-009/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "io_policy_metadata_contract",
+    "mode_raw": "strict",
+    "class_raw": "known_compatible_low_risk"
+  }
+]

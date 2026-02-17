@@ -1,0 +1,138 @@
+[
+  {
+    "id": "iter_selector_zero_item_size_rejected",
+    "operation": "select_transfer_class",
+    "seed": 4301,
+    "severity": "critical",
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-004/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "nditer_constructor_invalid_configuration",
+    "expected_reason_code": "nditer_constructor_invalid_configuration",
+    "expected_error_contains": "item_size",
+    "selector": {
+      "src_stride": 8,
+      "dst_stride": 8,
+      "item_size": 0,
+      "element_count": 1,
+      "aligned": true,
+      "cast_is_lossless": true,
+      "same_value_cast": false
+    }
+  },
+  {
+    "id": "iter_selector_lossy_same_value_rejected",
+    "operation": "select_transfer_class",
+    "seed": 4302,
+    "severity": "high",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-004/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "nditer_constructor_invalid_configuration",
+    "expected_reason_code": "nditer_constructor_invalid_configuration",
+    "expected_error_contains": "cast",
+    "selector": {
+      "src_stride": 8,
+      "dst_stride": 8,
+      "item_size": 8,
+      "element_count": 4,
+      "aligned": true,
+      "cast_is_lossless": false,
+      "same_value_cast": true
+    }
+  },
+  {
+    "id": "iter_overlap_zero_length_rejected",
+    "operation": "overlap_copy_policy",
+    "seed": 4303,
+    "severity": "high",
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-004/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "nditer_overlap_policy_triggered",
+    "expected_reason_code": "nditer_overlap_policy_triggered",
+    "expected_error_contains": "byte_len",
+    "overlap": {
+      "src_offset": 0,
+      "dst_offset": 8,
+      "byte_len": 0
+    }
+  },
+  {
+    "id": "iter_flatiter_read_out_of_bounds_rejected",
+    "operation": "validate_flatiter_read",
+    "seed": 4304,
+    "severity": "high",
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-004/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "flatiter_indexing_contract_violation",
+    "expected_reason_code": "flatiter_indexing_contract_violation",
+    "expected_error_contains": "out of bounds",
+    "len": 4,
+    "flat_index": {
+      "kind": "single",
+      "index": 6
+    }
+  },
+  {
+    "id": "iter_flatiter_write_bool_mask_mismatch_rejected",
+    "operation": "validate_flatiter_write",
+    "seed": 4305,
+    "severity": "critical",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-004/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "flatiter_indexing_contract_violation",
+    "expected_reason_code": "flatiter_indexing_contract_violation",
+    "expected_error_contains": "length",
+    "len": 4,
+    "values_len": 1,
+    "flat_index": {
+      "kind": "bool_mask",
+      "mask": [true, false, true]
+    }
+  },
+  {
+    "id": "iter_nditer_flags_no_broadcast_rejected",
+    "operation": "validate_nditer_flags",
+    "seed": 4306,
+    "severity": "high",
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-004/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "nditer_no_broadcast_violation",
+    "expected_reason_code": "nditer_no_broadcast_violation",
+    "expected_error_contains": "no_broadcast",
+    "flags": {
+      "copy_if_overlap": true,
+      "no_broadcast": true,
+      "observed_overlap": false,
+      "observed_broadcast": true
+    }
+  }
+]
