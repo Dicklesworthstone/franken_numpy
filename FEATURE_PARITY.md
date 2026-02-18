@@ -18,9 +18,9 @@
 | Strict/hardened policy split | in_progress | strict+hardened and adversarial runtime policy suites green, wire-unknown inputs fail-closed, override gate audited, JSONL evidence logs emitted | wire policy enforcement into io/ufunc execution paths |
 | Security/compatibility threat matrix gating | in_progress | threat matrix + allowlist + executable control map machine-validated by `security_contracts` suite | enforce this suite as blocking CI gate and expand packet-specific threat controls |
 | Ufunc arithmetic/reduction | in_progress | broadcasted binary ops + reduction core implemented; differential suite green against captured oracle corpus | increase corpus breadth and run against full NumPy oracle environment |
-| RNG deterministic streams | not_started | none yet | implement `FNP-P2C-007` deterministic stream harness |
-| NPY/NPZ format parity | not_started | none yet | implement `FNP-P2C-009` parser/writer fixtures |
-| Linalg first-wave | not_started | none yet | implement `FNP-P2C-008` scoped linalg bridge |
+| RNG deterministic streams | in_progress | packet `FNP-P2C-007` differential/metamorphic/adversarial fixtures wired; `rng_differential_report.json` green (7/7); packet readiness `status=ready` | broaden generator/distribution matrix and enforce real NumPy oracle path in CI |
+| NPY/NPZ format parity | in_progress | packet `FNP-P2C-009` differential/metamorphic/adversarial fixtures wired; `io_differential_report.json` green (8/8); packet readiness `status=ready` | expand parser/writer edge corpus and broaden hostile archive coverage |
+| Linalg first-wave | in_progress | packet `FNP-P2C-008` differential/metamorphic/adversarial fixtures wired; `linalg_differential_report.json` green (8/8); packet readiness `status=ready` | expand backend/solver tolerance matrix and increase oracle-comparison breadth |
 | RaptorQ artifact durability | in_progress | sidecar + scrub + decode proof artifacts generated for conformance and benchmark bundles | integrate generation/verification into CI and expand recovery matrix |
 
 ## Required Evidence Per Family
@@ -34,11 +34,12 @@
 ## Current Gaps
 
 1. Oracle capture is now running against `system` NumPy (local `uv` Python 3.14 venv), but legacy-vendored NumPy parity runs are not yet established as a regular gate.
-2. Differential corpus is still small and does not yet represent the full extraction packet surface.
+2. Differential corpora for packet families (including 007/008/009) are still scoped and do not yet represent full legacy NumPy surface area.
 3. Bench baseline exists but regression gate enforcement is not yet wired in CI.
 
 ## Near-Term Milestones
 
 1. Expand `FNP-P2C-005` differential corpus to adversarial broadcast/reduction edges.
 2. Add full NumPy oracle environment path in CI/container.
-3. Promote sidecar/scrub/decode checks to blocking gate.
+3. Expand `FNP-P2C-007`, `FNP-P2C-008`, and `FNP-P2C-009` toward full legacy-matrix parity breadth (differential + metamorphic + adversarial).
+4. Promote sidecar/scrub/decode checks to blocking gate.

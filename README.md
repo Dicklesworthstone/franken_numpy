@@ -40,6 +40,9 @@ Implemented first major vertical slices:
 - `fnp-ndarray`: broadcast legality, reshape `-1` inference, contiguous stride calculus (C/F)
 - `fnp-runtime`: strict/hardened decision policy + fail-closed wire decoding + audited override gate + evidence ledger
 - `fnp-ufunc`: broadcasted binary ops + reduction sum (axis/keepdims)
+- `fnp-random`: deterministic RNG stream contracts + bounded guardrail checks
+- `fnp-linalg`: first-wave solver/factorization/spectral contract surfaces with fixture-driven conformance checks
+- `fnp-io`: first-wave NPY/NPZ parser/writer contract surfaces with hardened adversarial boundary checks
 - `fnp-conformance`: fixture suites + adversarial security suites + oracle capture + differential report + benchmark baseline + RaptorQ sidecars/scrub/decode proofs
   + workflow scenario corpus + golden journey gate with strict/hardened replay logs
 
@@ -153,6 +156,6 @@ cargo bench
 
 1. Expand `FNP-P2C-005` corpus to adversarial and high-dimensional edge cases.
 2. Move oracle capture to true legacy/system NumPy path in CI images.
-3. Implement `FNP-P2C-007` (RNG), `FNP-P2C-008` (linalg), and `FNP-P2C-009` (npy/npz) to full legacy-matrix parity.
+3. Expand `FNP-P2C-007` (RNG), `FNP-P2C-008` (linalg), and `FNP-P2C-009` (npy/npz) from first-wave coverage to full legacy-matrix parity breadth.
 4. Promote benchmark + sidecar checks to mandatory CI gates.
 5. Publish and continuously burn down full legacy NumPy parity debt until zero.
