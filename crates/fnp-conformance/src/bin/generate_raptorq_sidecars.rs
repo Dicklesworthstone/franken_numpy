@@ -14,9 +14,11 @@ fn main() {
 fn run() -> Result<(), String> {
     let emit_artifact_markers = parse_args()?;
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fnp-conformance/fixtures");
+    let fixture_root =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fnp-conformance/fixtures");
 
-    let conformance_sidecar_path = repo_root.join("artifacts/raptorq/conformance_bundle_v1.sidecar.json");
+    let conformance_sidecar_path =
+        repo_root.join("artifacts/raptorq/conformance_bundle_v1.sidecar.json");
     let conformance_scrub_path =
         repo_root.join("artifacts/raptorq/conformance_bundle_v1.scrub_report.json");
     let conformance_decode_proof_path =
@@ -41,7 +43,8 @@ fn run() -> Result<(), String> {
 
     let benchmark_files = vec![repo_root.join("artifacts/baselines/ufunc_benchmark_baseline.json")];
 
-    let benchmark_sidecar_path = repo_root.join("artifacts/raptorq/benchmark_bundle_v1.sidecar.json");
+    let benchmark_sidecar_path =
+        repo_root.join("artifacts/raptorq/benchmark_bundle_v1.sidecar.json");
     let benchmark_scrub_path =
         repo_root.join("artifacts/raptorq/benchmark_bundle_v1.scrub_report.json");
     let benchmark_decode_proof_path =
@@ -88,8 +91,12 @@ fn parse_args() -> Result<bool, String> {
 
 fn emit_artifact_with_markers(repo_root: &Path, path: &Path) -> Result<(), String> {
     let marker_path = path.strip_prefix(repo_root).unwrap_or(path);
-    let raw = fs::read_to_string(path)
-        .map_err(|err| format!("failed reading {} for marker emission: {err}", path.display()))?;
+    let raw = fs::read_to_string(path).map_err(|err| {
+        format!(
+            "failed reading {} for marker emission: {err}",
+            path.display()
+        )
+    })?;
     println!("BEGIN_FILE:{}", marker_path.display());
     print!("{raw}");
     if !raw.ends_with('\n') {

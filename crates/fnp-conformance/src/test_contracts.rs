@@ -1362,9 +1362,21 @@ fn validate_workflow_scenario_fixtures(
         &config.fixture_root.join("iter_differential_cases.json"),
         "iter_differential_cases",
     )?;
+    let iter_transfer_differential_ids = collect_fixture_ids(
+        &config
+            .fixture_root
+            .join("packet003_transfer/iter_differential_cases.json"),
+        "packet003_transfer.iter_differential_cases",
+    )?;
     let iter_adversarial_ids = collect_fixture_ids(
         &config.fixture_root.join("iter_adversarial_cases.json"),
         "iter_adversarial_cases",
+    )?;
+    let iter_transfer_adversarial_ids = collect_fixture_ids(
+        &config
+            .fixture_root
+            .join("packet003_transfer/iter_adversarial_cases.json"),
+        "packet003_transfer.iter_adversarial_cases",
     )?;
     let io_differential_ids = collect_fixture_ids(
         &config.fixture_root.join("io_differential_cases.json"),
@@ -1382,6 +1394,36 @@ fn validate_workflow_scenario_fixtures(
         &config.fixture_root.join("linalg_adversarial_cases.json"),
         "linalg_adversarial_cases",
     )?;
+    let dtype_differential_ids = collect_fixture_ids(
+        &config
+            .fixture_root
+            .join("packet002_dtype/dtype_differential_cases.json"),
+        "packet002_dtype.dtype_differential_cases",
+    )?;
+    let dtype_metamorphic_ids = collect_fixture_ids(
+        &config
+            .fixture_root
+            .join("packet002_dtype/dtype_metamorphic_cases.json"),
+        "packet002_dtype.dtype_metamorphic_cases",
+    )?;
+    let dtype_adversarial_ids = collect_fixture_ids(
+        &config
+            .fixture_root
+            .join("packet002_dtype/dtype_adversarial_cases.json"),
+        "packet002_dtype.dtype_adversarial_cases",
+    )?;
+    let rng_differential_ids = collect_fixture_ids(
+        &config.fixture_root.join("rng_differential_cases.json"),
+        "rng_differential_cases",
+    )?;
+    let rng_metamorphic_ids = collect_fixture_ids(
+        &config.fixture_root.join("rng_metamorphic_cases.json"),
+        "rng_metamorphic_cases",
+    )?;
+    let rng_adversarial_ids = collect_fixture_ids(
+        &config.fixture_root.join("rng_adversarial_cases.json"),
+        "rng_adversarial_cases",
+    )?;
     let runtime_policy_ids = collect_fixture_ids(
         &config.fixture_root.join("runtime_policy_cases.json"),
         "runtime_policy_cases",
@@ -1396,11 +1438,24 @@ fn validate_workflow_scenario_fixtures(
     workflow_fixture_ids.extend(ufunc_ids.iter().cloned());
     workflow_fixture_ids.extend(shape_stride_ids.iter().cloned());
     workflow_fixture_ids.extend(iter_differential_ids.iter().cloned());
+    workflow_fixture_ids.extend(iter_transfer_differential_ids.iter().cloned());
     workflow_fixture_ids.extend(iter_adversarial_ids.iter().cloned());
+    workflow_fixture_ids.extend(iter_transfer_adversarial_ids.iter().cloned());
     workflow_fixture_ids.extend(io_differential_ids.iter().cloned());
     workflow_fixture_ids.extend(io_adversarial_ids.iter().cloned());
     workflow_fixture_ids.extend(linalg_differential_ids.iter().cloned());
     workflow_fixture_ids.extend(linalg_adversarial_ids.iter().cloned());
+    workflow_fixture_ids.extend(dtype_differential_ids.iter().cloned());
+    workflow_fixture_ids.extend(dtype_metamorphic_ids.iter().cloned());
+    workflow_fixture_ids.extend(dtype_adversarial_ids.iter().cloned());
+    workflow_fixture_ids.extend(rng_differential_ids.iter().cloned());
+    workflow_fixture_ids.extend(rng_metamorphic_ids.iter().cloned());
+    workflow_fixture_ids.extend(rng_adversarial_ids.iter().cloned());
+
+    let mut iter_all_differential_ids = iter_differential_ids.clone();
+    iter_all_differential_ids.extend(iter_transfer_differential_ids.iter().cloned());
+    let mut iter_all_adversarial_ids = iter_adversarial_ids.clone();
+    iter_all_adversarial_ids.extend(iter_transfer_adversarial_ids.iter().cloned());
 
     let repo_root = config
         .fixture_root
@@ -1622,7 +1677,7 @@ fn validate_workflow_scenario_fixtures(
                         Some("differential") => {
                             record_check(
                                 report,
-                                iter_differential_ids.contains(case_id),
+                                iter_all_differential_ids.contains(case_id),
                                 format!(
                                     "workflow step references unknown iter_differential_cases case_id {case_id}"
                                 ),
@@ -1631,7 +1686,7 @@ fn validate_workflow_scenario_fixtures(
                         Some("adversarial") => {
                             record_check(
                                 report,
-                                iter_adversarial_ids.contains(case_id),
+                                iter_all_adversarial_ids.contains(case_id),
                                 format!(
                                     "workflow step references unknown iter_adversarial_cases case_id {case_id}"
                                 ),
@@ -1651,6 +1706,102 @@ fn validate_workflow_scenario_fixtures(
                                 report,
                                 false,
                                 "workflow step missing fixture_set for iter_fixture_case"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+                (Some("dtype_fixture_case"), Some(case_id)) => {
+                    match required_string(step_obj, "fixture_set") {
+                        Some("differential") => {
+                            record_check(
+                                report,
+                                dtype_differential_ids.contains(case_id),
+                                format!(
+                                    "workflow step references unknown packet002_dtype.differential case_id {case_id}"
+                                ),
+                            );
+                        }
+                        Some("metamorphic") => {
+                            record_check(
+                                report,
+                                dtype_metamorphic_ids.contains(case_id),
+                                format!(
+                                    "workflow step references unknown packet002_dtype.metamorphic case_id {case_id}"
+                                ),
+                            );
+                        }
+                        Some("adversarial") => {
+                            record_check(
+                                report,
+                                dtype_adversarial_ids.contains(case_id),
+                                format!(
+                                    "workflow step references unknown packet002_dtype.adversarial case_id {case_id}"
+                                ),
+                            );
+                        }
+                        Some(other) => {
+                            record_check(
+                                report,
+                                false,
+                                format!(
+                                    "workflow step has invalid fixture_set {other} (expected differential|metamorphic|adversarial)"
+                                ),
+                            );
+                        }
+                        None => {
+                            record_check(
+                                report,
+                                false,
+                                "workflow step missing fixture_set for dtype_fixture_case"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+                (Some("rng_fixture_case"), Some(case_id)) => {
+                    match required_string(step_obj, "fixture_set") {
+                        Some("differential") => {
+                            record_check(
+                                report,
+                                rng_differential_ids.contains(case_id),
+                                format!(
+                                    "workflow step references unknown rng_differential_cases case_id {case_id}"
+                                ),
+                            );
+                        }
+                        Some("metamorphic") => {
+                            record_check(
+                                report,
+                                rng_metamorphic_ids.contains(case_id),
+                                format!(
+                                    "workflow step references unknown rng_metamorphic_cases case_id {case_id}"
+                                ),
+                            );
+                        }
+                        Some("adversarial") => {
+                            record_check(
+                                report,
+                                rng_adversarial_ids.contains(case_id),
+                                format!(
+                                    "workflow step references unknown rng_adversarial_cases case_id {case_id}"
+                                ),
+                            );
+                        }
+                        Some(other) => {
+                            record_check(
+                                report,
+                                false,
+                                format!(
+                                    "workflow step has invalid fixture_set {other} (expected differential|metamorphic|adversarial)"
+                                ),
+                            );
+                        }
+                        None => {
+                            record_check(
+                                report,
+                                false,
+                                "workflow step missing fixture_set for rng_fixture_case"
                                     .to_string(),
                             );
                         }
