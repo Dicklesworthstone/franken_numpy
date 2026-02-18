@@ -467,6 +467,89 @@ mod tests {
     }
 
     #[test]
+    fn mixed_dtype_high_rank_add_promotes_and_broadcasts() {
+        let lhs =
+            UFuncArray::new(vec![2, 1, 2], vec![1.0, 2.0, 3.0, 4.0], DType::I32).expect("lhs");
+        let rhs = UFuncArray::new(vec![1, 3, 1], vec![0.5, -1.0, 2.0], DType::F32).expect("rhs");
+
+        let out = lhs
+            .elementwise_binary(&rhs, BinaryOp::Add)
+            .expect("broadcasted mixed-dtype add");
+
+        assert_eq!(out.shape(), &[2, 3, 2]);
+        assert_eq!(out.dtype(), DType::F64);
+        assert_eq!(
+            out.values(),
+            &[1.5, 2.5, 0.0, 1.0, 3.0, 4.0, 3.5, 4.5, 2.0, 3.0, 5.0, 6.0]
+        );
+    }
+
+    #[test]
+    fn mixed_dtype_bool_i64_mul_promotes_to_i64() {
+        let lhs =
+            UFuncArray::new(vec![2, 1, 2], vec![1.0, 0.0, 0.0, 1.0], DType::Bool).expect("lhs");
+        let rhs = UFuncArray::new(vec![1, 3, 1], vec![10.0, -2.0, 7.0], DType::I64).expect("rhs");
+
+        let out = lhs
+            .elementwise_binary(&rhs, BinaryOp::Mul)
+            .expect("broadcasted mixed-dtype mul");
+
+        assert_eq!(out.shape(), &[2, 3, 2]);
+        assert_eq!(out.dtype(), DType::I64);
+        assert_eq!(
+            out.values(),
+            &[
+                10.0, 0.0, -2.0, 0.0, 7.0, 0.0, 0.0, 10.0, 0.0, -2.0, 0.0, 7.0
+            ]
+        );
+    }
+
+    #[test]
+    fn reduce_sum_axis_one_keepdims_preserves_integer_dtype() {
+        let arr = UFuncArray::new(
+            vec![2, 2, 2],
+            vec![-3.0, 1.0, 5.0, -7.0, 9.0, 11.0, -13.0, 15.0],
+            DType::I32,
+        )
+        .expect("arr");
+
+        let out = arr.reduce_sum(Some(1), true).expect("sum axis=1 keepdims");
+        assert_eq!(out.shape(), &[2, 1, 2]);
+        assert_eq!(out.values(), &[2.0, -6.0, -4.0, 26.0]);
+        assert_eq!(out.dtype(), DType::I32);
+    }
+
+    #[test]
+    fn reduce_sum_propagates_non_finite_values() {
+        let arr = UFuncArray::new(
+            vec![2, 2, 2],
+            vec![
+                1.0,
+                f64::INFINITY,
+                -1.0,
+                2.0,
+                3.0,
+                f64::NEG_INFINITY,
+                f64::NAN,
+                4.0,
+            ],
+            DType::F64,
+        )
+        .expect("arr");
+
+        let axis_one = arr.reduce_sum(Some(1), true).expect("sum axis=1 keepdims");
+        assert_eq!(axis_one.shape(), &[2, 1, 2]);
+        assert_eq!(axis_one.values()[0], 0.0);
+        assert!(axis_one.values()[1].is_infinite() && axis_one.values()[1].is_sign_positive());
+        assert!(axis_one.values()[2].is_nan());
+        assert!(axis_one.values()[3].is_infinite() && axis_one.values()[3].is_sign_negative());
+
+        let full = arr.reduce_sum(None, false).expect("sum all");
+        assert_eq!(full.shape(), &[]);
+        assert!(full.values()[0].is_nan());
+    }
+
+    #[test]
     fn invalid_input_length_is_rejected() {
         let err = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0], DType::F64)
             .expect_err("should reject length mismatch");

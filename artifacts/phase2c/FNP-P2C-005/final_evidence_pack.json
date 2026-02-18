@@ -2,13 +2,13 @@
   "schema_version": 1,
   "packet_id": "FNP-P2C-005",
   "subtask_id": "FNP-P2C-005-I",
-  "generated_at_unix_ms": 1771321753158,
+  "generated_at_unix_ms": 1771448455805,
   "status": "pass",
   "reproducibility_command": "cargo run -p fnp-conformance --bin generate_packet005_final_evidence_pack",
   "parity_signals": {
     "strict_parity": 1.0,
     "hardened_parity": 1.0,
-    "compatibility_drift_hash": "sha256:23ebcbf627f7015bdd11161fb22fc06946b7e4a73af4ef7f227bcd119f2cf4f0",
+    "compatibility_drift_hash": "sha256:c4ef29d5e71a83f09393f52fc926a8d7a121868dc8ceb8ce2b1d06918784995c",
     "divergence_classes": [
       "no_observed_strict_drift_in_packet005_gates",
       "no_observed_hardened_drift_in_packet005_gates"
@@ -49,10 +49,11 @@
     "crates/fnp-conformance/fixtures/ufunc_input_cases.json",
     "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json",
     "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json",
+    "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json",
     "crates/fnp-conformance/fixtures/oracle_outputs/ufunc_differential_report.json"
   ],
   "artifact_digests": {
-    "artifacts/phase2c/FNP-P2C-005/behavior_extraction_ledger.md": "dbd27b96e313096d64c158f286cd9487c0ccc3db8e3d2b058380a2a6aab04589",
+    "artifacts/phase2c/FNP-P2C-005/behavior_extraction_ledger.md": "853c6fb3ca9c1d532a822e42ff8a4307a0a47f676c8bc475db32af3220da2f4c",
     "artifacts/phase2c/FNP-P2C-005/contract_table.md": "33af8c96b39ddf57622c96abaa5a99a9ad23bd25de3a1d895ec264546f53db67",
     "artifacts/phase2c/FNP-P2C-005/differential_metamorphic_adversarial_evidence.json": "8ba10f3fc12f4a32e0d7ddc967239d4251a16d1c363e360427c891869efa2e20",
     "artifacts/phase2c/FNP-P2C-005/fixture_manifest.json": "f5ddfc2f8a304b8ac6f9fed313e3648e3eb88cf91c61032bf3d7c09828e0906b",
@@ -60,16 +61,17 @@
     "artifacts/phase2c/FNP-P2C-005/optimization_profile_isomorphism_evidence.json": "0a526aa88777dd215c388704bb3acb15b6e2bdccb3081dbb1c4448886c613609",
     "artifacts/phase2c/FNP-P2C-005/optimization_profile_report.json": "4cdb44825eb80ec8c7938dea04c84b2b0361099fc2c88efbbc4fbee37b97322f",
     "artifacts/phase2c/FNP-P2C-005/parity_gate.yaml": "99460882b9f2fe25e58368d39ef63fbae9353200952db87ad2039435b1f72599",
-    "artifacts/phase2c/FNP-P2C-005/parity_report.json": "3c61f8325c28ecc391f360124e4d91dbab7f8528bd2e02ee0921e24067ea3d7f",
-    "artifacts/phase2c/FNP-P2C-005/risk_note.md": "b6c12ae63df60f3096bb3f43b656f9557ee55ad4370545c65a0fc5c04dc05f7a",
+    "artifacts/phase2c/FNP-P2C-005/parity_report.json": "71cb75ae56b82855a93dc77f2c8b78507fc32826e2b491978c23304ccd1e4604",
+    "artifacts/phase2c/FNP-P2C-005/risk_note.md": "c77f9fd17fabf11476685bf6f4560f0b1fd3f3e2145d8db0ca3ca8ef502a6c8b",
     "artifacts/phase2c/FNP-P2C-005/unit_property_evidence.json": "7a3f75cb103130be6f04c913687bc1bfb573b42c794ee6ad4a40da3c57e62c46",
     "artifacts/phase2c/FNP-P2C-005/workflow_scenario_packet005_opt_artifact_index.json": "e7ee0dc5dcee55e345b2ecb69326c895c39a74498d0a906a33635db62b4cb7e0",
     "artifacts/phase2c/FNP-P2C-005/workflow_scenario_packet005_opt_e2e.jsonl": "be08a2a007257cce585209a96cee8408420eb7cbaa94cc909b22209a59a026c3",
     "artifacts/phase2c/FNP-P2C-005/workflow_scenario_packet005_opt_reliability.json": "0c7ed4e44a294b12c9901d8c7ad7229f56e74981fbbcd58ddddf214f767cb448",
-    "crates/fnp-conformance/fixtures/oracle_outputs/ufunc_differential_report.json": "794810eea3efcc8e60080e4b237d66c5cd14975a2ee63770c08db06b4bb8919b",
-    "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json": "b050a31780d5cc44f216c81e5a76ad49f4760e140a36199e7a56e9712353fd8b",
-    "crates/fnp-conformance/fixtures/ufunc_input_cases.json": "8421ca979357d58d96c0d2f5fa27673e20c683da0962c63a0cadf8e3665ada6f",
-    "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json": "f2afdf7c68d0564a9131bf9b5de0d8f8d5cf2409cde9db4b9e552db9864ebb78"
+    "crates/fnp-conformance/fixtures/oracle_outputs/ufunc_differential_report.json": "46772c695931a559ab669eed8f804e13b74320e7289f4521de0fc0686f6f12bb",
+    "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json": "be54f6dcb33bb07cfc6ca2d85b194f07abc1d4e66cb75e63d3cab27f7abfb008",
+    "crates/fnp-conformance/fixtures/ufunc_input_cases.json": "776a3e83cf336fb1f49d2728fc3484fa6fb4b364a0c5cdfbeb324cd0166fb2ae",
+    "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json": "8e76c24bd396b9745242056f6a0cd409f01ddbb9477c6fa5ca33ef1105ce22d9",
+    "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json": "39232000405b32fdb8502becfc3946ad9a6b7d6039c23049538e313210ddce63"
   },
   "raptorq": {
     "sidecar_path": "artifacts/phase2c/FNP-P2C-005/parity_report.raptorq.json",

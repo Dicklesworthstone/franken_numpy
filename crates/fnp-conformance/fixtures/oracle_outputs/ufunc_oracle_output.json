@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "oracle_source": "pure_python_fallback",
-  "generated_at_unix_ms": 1771403832525,
+  "generated_at_unix_ms": 1771448439420,
   "cases": [
     {
       "id": "add_broadcast_2x3_plus_3",
@@ -347,6 +347,86 @@
       "shape": [],
       "values": [],
       "dtype": "unknown"
+    },
+    {
+      "id": "add_mixed_dtype_i32_plus_f32_2x1x2_plus_1x3x1",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3,
+        2
+      ],
+      "values": [
+        1.5,
+        2.5,
+        0.0,
+        1.0,
+        3.0,
+        4.0,
+        3.5,
+        4.5,
+        2.0,
+        3.0,
+        5.0,
+        6.0
+      ],
+      "dtype": "f64"
+    },
+    {
+      "id": "mul_mixed_dtype_i64_by_f32_2x1x2_by_1x3x1",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3,
+        2
+      ],
+      "values": [
+        0.5,
+        1.0,
+        -1.0,
+        -2.0,
+        2.0,
+        4.0,
+        1.5,
+        2.0,
+        -3.0,
+        -4.0,
+        6.0,
+        8.0
+      ],
+      "dtype": "f64"
+    },
+    {
+      "id": "sum_axis1_keepdims_f64_2x2x2",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        1,
+        2
+      ],
+      "values": [
+        2.0,
+        -6.0,
+        -4.0,
+        26.0
+      ],
+      "dtype": "f64"
+    },
+    {
+      "id": "add_zero_extent_mixed_dtype_2x0x3x1_plus_1x0x1x1",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        0,
+        3,
+        1
+      ],
+      "values": [],
+      "dtype": "f64"
     }
   ]
 }
