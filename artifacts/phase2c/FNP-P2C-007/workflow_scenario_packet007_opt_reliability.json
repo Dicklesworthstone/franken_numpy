@@ -9,8 +9,8 @@
       "workflow_log": "artifacts/phase2c/FNP-P2C-007/workflow_scenario_packet007_opt_e2e.jsonl",
       "suite": {
         "suite": "workflow_scenarios",
-        "case_count": 455,
-        "pass_count": 455,
+        "case_count": 592,
+        "pass_count": 592,
         "failures": []
       }
     }
@@ -18,8 +18,8 @@
   "suites": [
     {
       "suite": "workflow_scenarios",
-      "case_count": 455,
-      "pass_count": 455,
+      "case_count": 592,
+      "pass_count": 592,
       "failures": []
     }
   ],
@@ -37,7 +37,7 @@
   "forensics_artifact_index": {
     "schema_version": 1,
     "gate": "run_workflow_scenario_gate",
-    "generated_at_unix_ms": 1771345269598,
+    "generated_at_unix_ms": 1771461323545,
     "status": "pass",
     "execution_context": "local",
     "triage": null,
@@ -78,6 +78,18 @@
         "kind": "fixture_collection",
         "path": "crates/fnp-conformance/fixtures/iter_adversarial_cases.json",
         "description": "Iterator adversarial fixture cases linked from workflow scenarios"
+      },
+      {
+        "id": "transfer_iter_differential_cases",
+        "kind": "fixture_collection",
+        "path": "crates/fnp-conformance/fixtures/packet003_transfer/iter_differential_cases.json",
+        "description": "Packet-003 transfer differential fixture cases linked from workflow scenarios"
+      },
+      {
+        "id": "transfer_iter_adversarial_cases",
+        "kind": "fixture_collection",
+        "path": "crates/fnp-conformance/fixtures/packet003_transfer/iter_adversarial_cases.json",
+        "description": "Packet-003 transfer adversarial fixture cases linked from workflow scenarios"
       },
       {
         "id": "io_differential_cases",
@@ -122,6 +134,18 @@
         "description": "RNG adversarial fixture cases linked from workflow scenarios"
       },
       {
+        "id": "dtype_differential_cases",
+        "kind": "fixture_collection",
+        "path": "crates/fnp-conformance/fixtures/packet002_dtype/dtype_differential_cases.json",
+        "description": "Packet-002 dtype differential fixture cases linked from workflow scenarios"
+      },
+      {
+        "id": "dtype_adversarial_cases",
+        "kind": "fixture_collection",
+        "path": "crates/fnp-conformance/fixtures/packet002_dtype/dtype_adversarial_cases.json",
+        "description": "Packet-002 dtype adversarial fixture cases linked from workflow scenarios"
+      },
+      {
         "id": "workflow_runner_script",
         "kind": "replay_script",
         "path": "scripts/e2e/run_workflow_scenario_gate.sh",
@@ -150,6 +174,18 @@
         "kind": "replay_script",
         "path": "scripts/e2e/run_rng_contract_journey.sh",
         "description": "Packet-007 workflow replay wrapper script"
+      },
+      {
+        "id": "dtype_packet_workflow_script",
+        "kind": "replay_script",
+        "path": "scripts/e2e/run_dtype_contract_journey.sh",
+        "description": "Packet-002 workflow replay wrapper script"
+      },
+      {
+        "id": "transfer_packet_workflow_script",
+        "kind": "replay_script",
+        "path": "scripts/e2e/run_transfer_contract_journey.sh",
+        "description": "Packet-003 workflow replay wrapper script"
       },
       {
         "id": "reliability_report",

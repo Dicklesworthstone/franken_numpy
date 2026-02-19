@@ -99,5 +99,48 @@
     "reason_code": "random_fill_length_contract",
     "expected_reason_code": "random_fill_length_contract",
     "fill_len": 64
+  },
+  {
+    "id": "rng_same_seed_stream_long_budget_witness",
+    "operation": "same_seed_stream",
+    "seed": 7008,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_differential_cases.json"
+    ],
+    "reason_code": "random_seed_determinism_contract",
+    "expected_reason_code": "random_seed_determinism_contract",
+    "draws": 4096
+  },
+  {
+    "id": "rng_jump_ahead_equivalence_large_step_witness",
+    "operation": "jump_ahead_equivalence",
+    "seed": 7009,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_differential_cases.json"
+    ],
+    "reason_code": "random_jump_ahead_contract",
+    "expected_reason_code": "random_jump_ahead_contract",
+    "steps": 4096
+  },
+  {
+    "id": "rng_state_restore_long_prefix_replay_witness",
+    "operation": "state_restore_replay",
+    "seed": 7010,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_differential_cases.json"
+    ],
+    "reason_code": "random_state_restore_contract",
+    "expected_reason_code": "random_state_restore_contract",
+    "prefix_draws": 512,
+    "replay_draws": 512
   }
 ]
