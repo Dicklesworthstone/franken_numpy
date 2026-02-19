@@ -111,5 +111,21 @@
       "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
     ],
     "reason_code": "rng_reproducibility_witness_failed"
+  },
+  {
+    "id": "rng_forced_witness_mismatch_default_alt_seed",
+    "operation": "forced_repro_witness_mismatch",
+    "expected_error_contains": "reproducibility witness mismatch",
+    "expected_reason_code": "rng_reproducibility_witness_failed",
+    "severity": "medium",
+    "seed": 7209,
+    "draws": 129,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_reproducibility_witness_failed"
   }
 ]

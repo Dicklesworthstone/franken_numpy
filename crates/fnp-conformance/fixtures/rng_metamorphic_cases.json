@@ -82,5 +82,46 @@
     "reason_code": "random_bounded_output_contract",
     "draws": 512,
     "upper_bound": 1048573
+  },
+  {
+    "id": "rng_jump_partition_additivity_small_step",
+    "relation": "jump_partition_additivity",
+    "seed": 7107,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_metamorphic_cases.json"
+    ],
+    "reason_code": "random_jump_ahead_contract",
+    "steps": 33,
+    "extra_steps": 1
+  },
+  {
+    "id": "rng_fill_matches_iterative_draw_minimal_nondefault",
+    "relation": "fill_matches_iterative_draw",
+    "seed": 7108,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_metamorphic_cases.json"
+    ],
+    "reason_code": "random_fill_length_contract",
+    "fill_len": 33
+  },
+  {
+    "id": "rng_bounded_repeatability_default_alt_seed",
+    "relation": "bounded_repeatability",
+    "seed": 7109,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_metamorphic_cases.json"
+    ],
+    "reason_code": "random_bounded_output_contract",
+    "draws": 384,
+    "upper_bound": 2
   }
 ]
