@@ -24,9 +24,19 @@
         "case_id": "add_broadcast_2x3_plus_3"
       },
       {
+        "id": "step_sub_mixed_dtype",
+        "kind": "ufunc_input",
+        "case_id": "sub_mixed_dtype_f32_minus_i32_2x1x2_by_1x3x1"
+      },
+      {
         "id": "step_sum_axis1",
         "kind": "ufunc_input",
         "case_id": "sum_axis1_keepdims"
+      },
+      {
+        "id": "step_sum_all_keepdims_bool",
+        "kind": "ufunc_input",
+        "case_id": "sum_all_keepdims_bool_2x1x3x1"
       },
       {
         "id": "step_policy_known_good",
@@ -39,7 +49,9 @@
     "links": {
       "differential_fixture_ids": [
         "add_broadcast_2x3_plus_3",
-        "sum_axis1_keepdims"
+        "sub_mixed_dtype_f32_minus_i32_2x1x2_by_1x3x1",
+        "sum_axis1_keepdims",
+        "sum_all_keepdims_bool_2x1x3x1"
       ],
       "e2e_script_paths": [
         "scripts/e2e/run_workflow_scenario_gate.sh",
@@ -408,9 +420,19 @@
         "case_id": "mul_scalar_broadcast"
       },
       {
+        "id": "step_dispatch_div_high_rank",
+        "kind": "ufunc_input",
+        "case_id": "div_broadcast_f64_by_f32_1x2x1x3x1_by_2x1x3x1x1"
+      },
+      {
         "id": "step_reduce_keepdims",
         "kind": "ufunc_input",
         "case_id": "sum_axis1_keepdims"
+      },
+      {
+        "id": "step_reduce_axis0_keepdims_f32",
+        "kind": "ufunc_input",
+        "case_id": "sum_axis0_keepdims_f32_2x1x2x1x2"
       },
       {
         "id": "step_policy_allow_known_good",
@@ -424,7 +446,9 @@
       "differential_fixture_ids": [
         "add_broadcast_2x3_plus_3",
         "mul_scalar_broadcast",
-        "sum_axis1_keepdims"
+        "div_broadcast_f64_by_f32_1x2x1x3x1_by_2x1x3x1x1",
+        "sum_axis1_keepdims",
+        "sum_axis0_keepdims_f32_2x1x2x1x2"
       ],
       "e2e_script_paths": [
         "scripts/e2e/run_workflow_scenario_gate.sh",
@@ -472,9 +496,21 @@
         "expect_error_contains": "broadcast"
       },
       {
+        "id": "step_shape_mismatch_sub_rejected",
+        "kind": "ufunc_input",
+        "case_id": "sub_shape_mismatch_2x1x2x1_vs_1x3x2",
+        "expect_error_contains": "broadcast"
+      },
+      {
         "id": "step_axis_guard_rejected",
         "kind": "ufunc_input",
         "case_id": "sum_axis_out_of_bounds",
+        "expect_error_contains": "axis"
+      },
+      {
+        "id": "step_axis_guard_bool_rejected",
+        "kind": "ufunc_input",
+        "case_id": "sum_axis_out_of_bounds_bool_4d",
         "expect_error_contains": "axis"
       },
       {
@@ -482,6 +518,12 @@
         "kind": "ufunc_input",
         "case_id": "mul_missing_rhs_shape",
         "expect_error_contains": "rhs_shape"
+      },
+      {
+        "id": "step_signature_rhs_values_guard_rejected",
+        "kind": "ufunc_input",
+        "case_id": "div_missing_rhs_values_2x1x2_by_1x2x1",
+        "expect_error_contains": "rhs_values"
       },
       {
         "id": "step_wire_unknown_class_fail_closed",
@@ -494,8 +536,11 @@
     "links": {
       "differential_fixture_ids": [
         "add_shape_mismatch_2x2_vs_3x1",
+        "sub_shape_mismatch_2x1x2x1_vs_1x3x2",
         "sum_axis_out_of_bounds",
-        "mul_missing_rhs_shape"
+        "sum_axis_out_of_bounds_bool_4d",
+        "mul_missing_rhs_shape",
+        "div_missing_rhs_values_2x1x2_by_1x2x1"
       ],
       "e2e_script_paths": [
         "scripts/e2e/run_workflow_scenario_gate.sh",
