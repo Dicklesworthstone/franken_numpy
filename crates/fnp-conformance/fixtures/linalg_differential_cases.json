@@ -132,5 +132,77 @@
     "expected_reason_code": "linalg_differential_expected_success",
     "mode_raw": "hardened",
     "class_raw": "known_incompatible_semantics"
+  },
+  {
+    "id": "linalg_qr_shapes_r_mode_3x5",
+    "operation": "qr_shapes",
+    "seed": 8209,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [3, 5],
+    "qr_mode": "r",
+    "expected_q_shape": null,
+    "expected_r_shape": [3, 5]
+  },
+  {
+    "id": "linalg_qr_shapes_raw_mode_4x2",
+    "operation": "qr_shapes",
+    "seed": 8210,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [4, 2],
+    "qr_mode": "raw",
+    "expected_q_shape": [2, 4],
+    "expected_r_shape": [2]
+  },
+  {
+    "id": "linalg_svd_shapes_reduced_3x5",
+    "operation": "svd_shapes",
+    "seed": 8211,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [3, 5],
+    "full_matrices": false,
+    "converged": true,
+    "expected_u_shape": [3, 3],
+    "expected_s_shape": [3],
+    "expected_vh_shape": [3, 5]
+  },
+  {
+    "id": "linalg_lstsq_shapes_vector_rhs",
+    "operation": "lstsq_shapes",
+    "seed": 8212,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [7, 3],
+    "rhs_shape": [7],
+    "expected_x_shape": [3],
+    "expected_residuals_shape": [1],
+    "expected_rank_upper_bound": 3,
+    "expected_singular_values_shape": [3]
   }
 ]

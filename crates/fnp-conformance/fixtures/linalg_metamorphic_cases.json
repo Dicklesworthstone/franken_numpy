@@ -41,5 +41,48 @@
     "reason_code": "linalg_metamorphic_expected_relation",
     "lhs_shape": [7, 3],
     "rhs_shape": [7]
+  },
+  {
+    "id": "linalg_solve_homogeneous_scaling_negative_scalar",
+    "relation": "solve_homogeneous_scaling",
+    "seed": 8304,
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/behavior_extraction_ledger.md",
+      "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
+    ],
+    "reason_code": "linalg_metamorphic_expected_relation",
+    "matrix": [
+      [5.0, 2.0],
+      [1.0, 3.0]
+    ],
+    "rhs": [7.0, 8.0],
+    "scalar": -2.0
+  },
+  {
+    "id": "linalg_qr_repeat_deterministic_raw",
+    "relation": "qr_repeat_deterministic",
+    "seed": 8305,
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/behavior_extraction_ledger.md",
+      "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
+    ],
+    "reason_code": "linalg_metamorphic_expected_relation",
+    "shape": [5, 3],
+    "qr_mode": "raw"
+  },
+  {
+    "id": "linalg_lstsq_rhs_column_growth_square",
+    "relation": "lstsq_rhs_column_growth",
+    "seed": 8306,
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/behavior_extraction_ledger.md",
+      "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
+    ],
+    "reason_code": "linalg_metamorphic_expected_relation",
+    "lhs_shape": [4, 4],
+    "rhs_shape": [4]
   }
 ]

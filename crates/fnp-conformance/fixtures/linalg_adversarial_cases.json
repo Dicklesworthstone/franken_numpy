@@ -155,5 +155,56 @@
     "reason_code": "linalg_policy_unknown_metadata",
     "mode_raw": "legacy_mode",
     "class_raw": "known_compatible_low_risk"
+  },
+  {
+    "id": "linalg_tolerance_search_depth_exceeded",
+    "operation": "tolerance_policy",
+    "expected_error_contains": "search depth exceeded tolerance budget",
+    "expected_reason_code": "linalg_norm_det_rank_policy_violation",
+    "severity": "high",
+    "seed": 8410,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/risk_note.md",
+      "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json"
+    ],
+    "reason_code": "linalg_norm_det_rank_policy_violation",
+    "rcond": 0.001,
+    "search_depth": 129
+  },
+  {
+    "id": "linalg_backend_revalidation_budget_exceeded",
+    "operation": "backend_bridge",
+    "expected_error_contains": "revalidation budget exceeded",
+    "expected_reason_code": "linalg_backend_bridge_invalid",
+    "severity": "critical",
+    "seed": 8411,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/risk_note.md",
+      "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json"
+    ],
+    "reason_code": "linalg_backend_bridge_invalid",
+    "backend_supported": true,
+    "validation_retries": 65
+  },
+  {
+    "id": "linalg_policy_unknown_class",
+    "operation": "policy_metadata",
+    "expected_error_contains": "unknown mode/class metadata rejected fail-closed",
+    "expected_reason_code": "linalg_policy_unknown_metadata",
+    "severity": "high",
+    "seed": 8412,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/risk_note.md",
+      "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json"
+    ],
+    "reason_code": "linalg_policy_unknown_metadata",
+    "mode_raw": "strict",
+    "class_raw": "legacy_semantics"
   }
 ]
