@@ -161,7 +161,7 @@ impl UFuncArray {
         })
     }
 
-    pub fn reduce_sum(&self, axis: Option<usize>, keepdims: bool) -> Result<Self, UFuncError> {
+    pub fn reduce_sum(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
         match axis {
             None => {
                 let sum: f64 = self.values.iter().copied().sum();
@@ -177,10 +177,7 @@ impl UFuncArray {
                 })
             }
             Some(axis) => {
-                let ndim = self.shape.len();
-                if axis >= ndim {
-                    return Err(UFuncError::AxisOutOfBounds { axis, ndim });
-                }
+                let axis = normalize_axis(axis, self.shape.len())?;
 
                 let out_shape = reduced_shape(&self.shape, axis, keepdims);
                 let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
@@ -201,7 +198,7 @@ impl UFuncArray {
 pub enum UFuncError {
     Shape(ShapeError),
     InvalidInputLength { expected: usize, actual: usize },
-    AxisOutOfBounds { axis: usize, ndim: usize },
+    AxisOutOfBounds { axis: isize, ndim: usize },
 }
 
 impl std::fmt::Display for UFuncError {
@@ -345,6 +342,20 @@ fn reduced_shape(shape: &[usize], axis: usize, keepdims: bool) -> Vec<usize> {
             .filter_map(|(idx, &dim)| (idx != axis).then_some(dim))
             .collect()
     }
+}
+
+fn normalize_axis(axis: isize, ndim: usize) -> Result<usize, UFuncError> {
+    let ndim_i128 = i128::try_from(ndim).expect("ndim should always fit into i128");
+    let axis_i128 = i128::try_from(axis).expect("isize should always fit into i128");
+    let normalized = if axis_i128 < 0 {
+        ndim_i128 + axis_i128
+    } else {
+        axis_i128
+    };
+    if normalized < 0 || normalized >= ndim_i128 {
+        return Err(UFuncError::AxisOutOfBounds { axis, ndim });
+    }
+    usize::try_from(normalized).map_err(|_| UFuncError::AxisOutOfBounds { axis, ndim })
 }
 
 #[cfg(test)]
@@ -570,6 +581,30 @@ mod tests {
     }
 
     #[test]
+    fn negative_axis_wraps_from_end() {
+        let arr = UFuncArray::new(vec![2, 2, 2], (1..=8).map(f64::from).collect(), DType::F64)
+            .expect("arr");
+        let out = arr
+            .reduce_sum(Some(-1), false)
+            .expect("axis=-1 should be valid");
+        assert_eq!(out.shape(), &[2, 2]);
+        assert_eq!(out.values(), &[3.0, 7.0, 11.0, 15.0]);
+    }
+
+    #[test]
+    fn negative_axis_out_of_bounds_is_rejected() {
+        let arr = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).expect("arr");
+        let err = arr
+            .reduce_sum(Some(-3), false)
+            .expect_err("axis should be invalid");
+        assert!(matches!(
+            err,
+            UFuncError::AxisOutOfBounds { axis: -3, ndim: 2 }
+        ));
+        assert_eq!(err.reason_code(), "ufunc_axis_out_of_bounds");
+    }
+
+    #[test]
     fn reason_code_registry_matches_packet_contract() {
         assert_eq!(
             UFUNC_PACKET_REASON_CODES,
@@ -663,7 +698,7 @@ mod tests {
         let arr = UFuncArray::new(vec![2, 3, 4], (1..=24).map(f64::from).collect(), DType::F64)
             .expect("arr");
 
-        for axis in 0..3 {
+        for axis in 0_isize..3_isize {
             let keep = arr
                 .reduce_sum(Some(axis), true)
                 .expect("keepdims reduction should succeed");

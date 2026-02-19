@@ -330,5 +330,25 @@
     "axis": 2,
     "keepdims": false,
     "expected_error_contains": "axis"
+  },
+  {
+    "id": "sum_axis_negative_out_of_bounds_rank_two_2x1_axis_neg3",
+    "seed": 415,
+    "severity": "critical",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_reduction_contract_violation",
+    "expected_reason_code": "ufunc_reduction_contract_violation",
+    "op": "sum",
+    "lhs_shape": [2, 1],
+    "lhs_values": [1.0, 2.0],
+    "lhs_dtype": "f64",
+    "axis": -3,
+    "keepdims": false,
+    "expected_error_contains": "axis"
   }
 ]

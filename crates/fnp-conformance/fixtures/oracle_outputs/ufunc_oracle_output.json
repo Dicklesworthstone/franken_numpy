@@ -807,6 +807,47 @@
       "shape": [],
       "values": [],
       "dtype": "unknown"
+    },
+    {
+      "id": "sum_axis_neg1_no_keepdims_2x2x2",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        2
+      ],
+      "values": [
+        3.0,
+        7.0,
+        11.0,
+        15.0
+      ],
+      "dtype": "f64"
+    },
+    {
+      "id": "sum_axis_neg2_keepdims_2x2x2",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        1,
+        2
+      ],
+      "values": [
+        4.0,
+        6.0,
+        12.0,
+        14.0
+      ],
+      "dtype": "f64"
+    },
+    {
+      "id": "sum_axis_negative_out_of_bounds_2x2x2",
+      "status": "error",
+      "error": "axis -4 out of bounds for shape [2, 2, 2]",
+      "shape": [],
+      "values": [],
+      "dtype": "unknown"
     }
   ]
 }

@@ -298,7 +298,7 @@ struct UFuncAdversarialCase {
     rhs_shape: Option<Vec<usize>>,
     rhs_values: Option<Vec<f64>>,
     rhs_dtype: Option<String>,
-    axis: Option<usize>,
+    axis: Option<isize>,
     keepdims: Option<bool>,
     expected_error_contains: String,
     #[serde(default)]

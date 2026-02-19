@@ -143,8 +143,11 @@ def py_sum(vals, shape, axis, keepdims):
         out_shape = [1] * len(shape) if keepdims else []
         return out_shape, [float(sum(vals))]
 
+    raw_axis = axis
+    if axis < 0:
+        axis += len(shape)
     if axis < 0 or axis >= len(shape):
-        raise ValueError(f'axis {axis} out of bounds for shape {shape}')
+        raise ValueError(f'axis {raw_axis} out of bounds for shape {shape}')
 
     in_strides = py_strides(shape)
     out_shape = py_reduced_shape(shape, axis, keepdims)
@@ -320,7 +323,7 @@ pub struct UFuncInputCase {
     pub rhs_shape: Option<Vec<usize>>,
     pub rhs_values: Option<Vec<f64>>,
     pub rhs_dtype: Option<String>,
-    pub axis: Option<usize>,
+    pub axis: Option<isize>,
     pub keepdims: Option<bool>,
     #[serde(default)]
     pub seed: u64,
@@ -925,8 +928,8 @@ fn compare_arrays(
 #[cfg(test)]
 mod tests {
     use super::{
-        UFuncOracleCapture, UFuncOracleCase, compare_against_oracle, load_oracle_capture,
-        write_differential_report,
+        UFuncInputCase, UFuncOperation, UFuncOracleCapture, UFuncOracleCase,
+        compare_against_oracle, execute_input_case, load_oracle_capture, write_differential_report,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -988,5 +991,62 @@ mod tests {
         let _ = fs::remove_file(input_path);
         let _ = fs::remove_file(oracle_path);
         let _ = fs::remove_file(report_path);
+    }
+
+    #[test]
+    fn execute_input_case_supports_negative_axis_sum() {
+        let case = UFuncInputCase {
+            id: "sum_axis_neg1".to_string(),
+            op: UFuncOperation::Sum,
+            lhs_shape: vec![2, 2, 2],
+            lhs_values: (1..=8).map(f64::from).collect(),
+            lhs_dtype: "f64".to_string(),
+            rhs_shape: None,
+            rhs_values: None,
+            rhs_dtype: None,
+            axis: Some(-1),
+            keepdims: Some(false),
+            seed: 0,
+            mode: "strict".to_string(),
+            env_fingerprint: "tests".to_string(),
+            artifact_refs: Vec::new(),
+            reason_code: "ufunc_reduction_contract_violation".to_string(),
+            expected_reason_code: "ufunc_reduction_contract_violation".to_string(),
+            expected_error_contains: String::new(),
+        };
+
+        let (shape, values, dtype) = execute_input_case(&case).expect("negative axis sum");
+        assert_eq!(shape, vec![2, 2]);
+        assert_eq!(values, vec![3.0, 7.0, 11.0, 15.0]);
+        assert_eq!(dtype, "f64");
+    }
+
+    #[test]
+    fn execute_input_case_rejects_negative_axis_out_of_bounds() {
+        let case = UFuncInputCase {
+            id: "sum_axis_neg3_oob".to_string(),
+            op: UFuncOperation::Sum,
+            lhs_shape: vec![2, 2],
+            lhs_values: vec![1.0, 2.0, 3.0, 4.0],
+            lhs_dtype: "f64".to_string(),
+            rhs_shape: None,
+            rhs_values: None,
+            rhs_dtype: None,
+            axis: Some(-3),
+            keepdims: Some(false),
+            seed: 0,
+            mode: "strict".to_string(),
+            env_fingerprint: "tests".to_string(),
+            artifact_refs: Vec::new(),
+            reason_code: "ufunc_reduction_contract_violation".to_string(),
+            expected_reason_code: "ufunc_reduction_contract_violation".to_string(),
+            expected_error_contains: String::new(),
+        };
+
+        let err = execute_input_case(&case).expect_err("axis should be rejected");
+        assert!(
+            err.contains("axis"),
+            "expected axis error substring, got: {err}"
+        );
     }
 }

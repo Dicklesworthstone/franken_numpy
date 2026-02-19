@@ -1010,5 +1010,69 @@
     "reason_code": "ufunc_signature_parse_failed",
     "expected_reason_code": "ufunc_signature_parse_failed",
     "expected_error_contains": "rhs_values"
+  },
+  {
+    "id": "sum_axis_neg1_no_keepdims_2x2x2",
+    "op": "sum",
+    "lhs_shape": [2, 2, 2],
+    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": -1,
+    "keepdims": false,
+    "seed": 5514,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_reduction_contract_violation",
+    "expected_reason_code": "ufunc_reduction_contract_violation"
+  },
+  {
+    "id": "sum_axis_neg2_keepdims_2x2x2",
+    "op": "sum",
+    "lhs_shape": [2, 2, 2],
+    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": -2,
+    "keepdims": true,
+    "seed": 5515,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_reduction_contract_violation",
+    "expected_reason_code": "ufunc_reduction_contract_violation"
+  },
+  {
+    "id": "sum_axis_negative_out_of_bounds_2x2x2",
+    "op": "sum",
+    "lhs_shape": [2, 2, 2],
+    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": -4,
+    "keepdims": false,
+    "seed": 5516,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_reduction_contract_violation",
+    "expected_reason_code": "ufunc_reduction_contract_violation",
+    "expected_error_contains": "axis"
   }
 ]
