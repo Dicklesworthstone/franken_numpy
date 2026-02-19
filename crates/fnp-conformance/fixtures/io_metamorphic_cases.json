@@ -91,5 +91,65 @@
     "reason_code": "io_policy_metadata_contract",
     "mode_raw": "strict",
     "class_raw": "known_compatible_low_risk"
+  },
+  {
+    "id": "io_magic_version_idempotent_v1",
+    "relation": "magic_version_idempotent",
+    "seed": 9917,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-009/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/io_metamorphic_cases.json"
+    ],
+    "reason_code": "io_magic_contract",
+    "payload_prefix": [147, 78, 85, 77, 80, 89, 1, 0]
+  },
+  {
+    "id": "io_read_payload_repeatable_bool_cube",
+    "relation": "read_payload_repeatable",
+    "seed": 9918,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-009/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/io_metamorphic_cases.json"
+    ],
+    "reason_code": "io_read_payload_contract",
+    "shape": [2, 2, 2],
+    "dtype_descr": "|b1",
+    "payload_len_bytes": 8
+  },
+  {
+    "id": "io_dispatch_stability_pickle_allowed",
+    "relation": "dispatch_stability",
+    "seed": 9919,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-009/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/io_metamorphic_cases.json"
+    ],
+    "reason_code": "io_load_dispatch_contract",
+    "payload_prefix": [128, 5, 149],
+    "allow_pickle": true
+  },
+  {
+    "id": "io_policy_metadata_idempotent_unknown_semantics",
+    "relation": "policy_metadata_idempotent",
+    "seed": 9920,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-009/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/io_metamorphic_cases.json"
+    ],
+    "reason_code": "io_policy_metadata_contract",
+    "mode_raw": "hardened",
+    "class_raw": "unknown_semantics"
   }
 ]

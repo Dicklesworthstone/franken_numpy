@@ -123,5 +123,75 @@
     "reason_code": "io_policy_unknown_metadata",
     "mode_raw": "mystery_mode",
     "class_raw": "known_compatible_low_risk"
+  },
+  {
+    "id": "io_header_schema_zero_bytes",
+    "operation": "header_schema",
+    "expected_error_contains": "header bytes must be within bounded budget",
+    "expected_reason_code": "io_header_schema_invalid",
+    "severity": "high",
+    "seed": 909,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_header_schema_invalid",
+    "shape": [2, 2],
+    "fortran_order": false,
+    "dtype_descr": "<f8",
+    "header_len": 0
+  },
+  {
+    "id": "io_memmap_retry_budget_exceeded",
+    "operation": "memmap_contract",
+    "expected_error_contains": "memmap validation retries exceeded bounded budget",
+    "expected_reason_code": "io_memmap_contract_violation",
+    "severity": "high",
+    "seed": 910,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_memmap_contract_violation",
+    "memmap_mode": "r",
+    "dtype_descr": "<f8",
+    "file_len_bytes": 4096,
+    "expected_bytes": 1024,
+    "validation_retries": 65
+  },
+  {
+    "id": "io_npz_archive_member_count_zero",
+    "operation": "npz_archive_budget",
+    "expected_error_contains": "archive member count is outside bounded limits",
+    "expected_reason_code": "io_npz_archive_contract_violation",
+    "severity": "critical",
+    "seed": 911,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_npz_archive_contract_violation",
+    "member_count": 0,
+    "uncompressed_bytes": 1024,
+    "dispatch_retries": 0
+  },
+  {
+    "id": "io_policy_unknown_class_fail_closed",
+    "operation": "policy_metadata",
+    "expected_error_contains": "unknown mode/class metadata rejected fail-closed",
+    "expected_reason_code": "io_policy_unknown_metadata",
+    "severity": "critical",
+    "seed": 912,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/contracts/hardened_mode_allowlist_v1.yaml"
+    ],
+    "reason_code": "io_policy_unknown_metadata",
+    "mode_raw": "strict",
+    "class_raw": "legacy_semantics"
   }
 ]
