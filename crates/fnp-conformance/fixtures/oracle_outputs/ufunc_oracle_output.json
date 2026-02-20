@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "oracle_source": "system",
-  "generated_at_unix_ms": 1771592484373,
+  "generated_at_unix_ms": 1771593362126,
   "cases": [
     {
       "id": "add_broadcast_2x3_plus_3",
@@ -1898,6 +1898,206 @@
         0.0,
         0.7853981633974483,
         -0.7853981633974483
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "cbrt_mixed_values",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        4
+      ],
+      "values": [
+        2.0,
+        -3.0000000000000004,
+        0.0,
+        1.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "cbrt_large_values",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        3
+      ],
+      "values": [
+        10.0,
+        -5.0,
+        0.1
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "expm1_near_zero",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        4
+      ],
+      "values": [
+        0.0,
+        1.718281828459045,
+        -0.6321205588285577,
+        1.0000000000000009e-15
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "log1p_near_zero",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        4
+      ],
+      "values": [
+        0.0,
+        0.6931471805599453,
+        -0.6931471805599453,
+        9.999999999999997e-16
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "degrees_standard_angles",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        4
+      ],
+      "values": [
+        0.0,
+        180.0,
+        90.0,
+        45.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "radians_standard_angles",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        4
+      ],
+      "values": [
+        0.0,
+        3.141592653589793,
+        1.5707963267948966,
+        0.7853981633974483
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "rint_bankers_rounding",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        8
+      ],
+      "values": [
+        0.0,
+        2.0,
+        2.0,
+        4.0,
+        4.0,
+        -0.0,
+        2.0,
+        -2.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "trunc_mixed_values",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        5
+      ],
+      "values": [
+        1.0,
+        -1.0,
+        2.0,
+        -2.0,
+        0.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "fmod_sign_follows_dividend",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        4
+      ],
+      "values": [
+        1.0,
+        -1.0,
+        1.0,
+        -1.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "fmod_broadcast_2x3_by_1",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        2.0,
+        3.0,
+        0.0,
+        1.0,
+        2.0,
+        3.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "copysign_mixed",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        4
+      ],
+      "values": [
+        -1.0,
+        1.0,
+        -3.0,
+        3.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "fmax_elementwise",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        3
+      ],
+      "values": [
+        4.0,
+        5.0,
+        6.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "fmin_elementwise",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        3
+      ],
+      "values": [
+        1.0,
+        2.0,
+        3.0
       ],
       "dtype": "float64"
     }
