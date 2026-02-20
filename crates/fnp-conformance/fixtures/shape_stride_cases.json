@@ -310,5 +310,116 @@
       "artifacts/phase2c/FNP-P2C-001/parity_gate.yaml"
     ],
     "reason_code": "broadcast_rank_mismatch_trailing_axis"
+  },
+  {
+    "id": "broadcast_incompatible_same_rank_interior",
+    "lhs": [2, 5, 3],
+    "rhs": [2, 4, 3],
+    "expected_broadcast": null,
+    "stride_shape": [2, 4, 3],
+    "stride_item_size": 8,
+    "stride_order": "C",
+    "expected_strides": [96, 24, 8],
+    "seed": 115,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-001/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-001/parity_gate.yaml"
+    ],
+    "reason_code": "broadcast_incompatible_interior_axis"
+  },
+  {
+    "id": "broadcast_incompatible_high_rank_5d",
+    "lhs": [2, 3, 4, 5, 6],
+    "rhs": [2, 3, 4, 7, 6],
+    "expected_broadcast": null,
+    "stride_shape": [2, 3, 4, 5, 6],
+    "stride_item_size": 4,
+    "stride_order": "C",
+    "expected_strides": [1440, 480, 120, 24, 4],
+    "seed": 116,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-001/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-001/parity_gate.yaml"
+    ],
+    "reason_code": "broadcast_incompatible_high_rank"
+  },
+  {
+    "id": "broadcast_incompatible_leading_axis",
+    "lhs": [3, 1],
+    "rhs": [4, 1],
+    "expected_broadcast": null,
+    "stride_shape": [4, 1],
+    "stride_item_size": 8,
+    "stride_order": "C",
+    "expected_strides": [8, 8],
+    "seed": 117,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-001/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-001/parity_gate.yaml"
+    ],
+    "reason_code": "broadcast_incompatible_leading_axis"
+  },
+  {
+    "id": "broadcast_incompatible_rank_mismatch_two_axes",
+    "lhs": [2, 3, 4],
+    "rhs": [5, 6],
+    "expected_broadcast": null,
+    "stride_shape": [2, 5, 6],
+    "stride_item_size": 8,
+    "stride_order": "C",
+    "expected_strides": [240, 48, 8],
+    "seed": 118,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-001/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-001/parity_gate.yaml"
+    ],
+    "reason_code": "broadcast_incompatible_rank_extension_multi_axis"
+  },
+  {
+    "id": "stride_tricks_sliding_window_exceeds_extent",
+    "lhs": [1],
+    "rhs": [1],
+    "expected_broadcast": [1],
+    "stride_shape": [4, 4],
+    "stride_item_size": 8,
+    "stride_order": "C",
+    "expected_strides": [32, 8],
+    "sliding_window": {
+      "window_shape": [5, 5],
+      "expected_error_contains": "invalid sliding window"
+    },
+    "seed": 119,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-006/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-006/parity_gate.yaml"
+    ],
+    "reason_code": "sliding_window_exceeds_extent"
+  },
+  {
+    "id": "stride_tricks_as_strided_negative_stride",
+    "lhs": [4],
+    "rhs": [4],
+    "expected_broadcast": [4],
+    "stride_shape": [4],
+    "stride_item_size": 8,
+    "stride_order": "C",
+    "expected_strides": [8],
+    "seed": 120,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-006/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-006/parity_gate.yaml"
+    ],
+    "reason_code": "as_strided_negative_stride",
+    "as_strided": {
+      "shape": [4],
+      "strides": [-8],
+      "expected_error_contains": "negative"
+    }
   }
 ]

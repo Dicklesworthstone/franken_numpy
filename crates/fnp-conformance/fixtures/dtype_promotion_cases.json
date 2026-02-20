@@ -50,5 +50,148 @@
       "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
     ],
     "reason_code": "promotion_matrix_core"
+  },
+  {
+    "id": "bool_bool",
+    "lhs": "bool",
+    "rhs": "bool",
+    "expected": "bool",
+    "seed": 205,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
+    ],
+    "reason_code": "promotion_matrix_core"
+  },
+  {
+    "id": "bool_i64",
+    "lhs": "bool",
+    "rhs": "i64",
+    "expected": "i64",
+    "seed": 206,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
+    ],
+    "reason_code": "promotion_matrix_core"
+  },
+  {
+    "id": "bool_f32",
+    "lhs": "bool",
+    "rhs": "f32",
+    "expected": "f32",
+    "seed": 207,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
+    ],
+    "reason_code": "promotion_matrix_core"
+  },
+  {
+    "id": "bool_f64",
+    "lhs": "bool",
+    "rhs": "f64",
+    "expected": "f64",
+    "seed": 208,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
+    ],
+    "reason_code": "promotion_matrix_core"
+  },
+  {
+    "id": "i32_i32",
+    "lhs": "i32",
+    "rhs": "i32",
+    "expected": "i32",
+    "seed": 209,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
+    ],
+    "reason_code": "promotion_matrix_core"
+  },
+  {
+    "id": "i32_f64",
+    "lhs": "i32",
+    "rhs": "f64",
+    "expected": "f64",
+    "seed": 210,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
+    ],
+    "reason_code": "promotion_matrix_core"
+  },
+  {
+    "id": "i64_i64",
+    "lhs": "i64",
+    "rhs": "i64",
+    "expected": "i64",
+    "seed": 211,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
+    ],
+    "reason_code": "promotion_matrix_core"
+  },
+  {
+    "id": "i64_f32",
+    "lhs": "i64",
+    "rhs": "f32",
+    "expected": "f64",
+    "seed": 212,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
+    ],
+    "reason_code": "promotion_matrix_core"
+  },
+  {
+    "id": "i64_f64",
+    "lhs": "i64",
+    "rhs": "f64",
+    "expected": "f64",
+    "seed": 213,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
+    ],
+    "reason_code": "promotion_matrix_core"
+  },
+  {
+    "id": "f32_f32",
+    "lhs": "f32",
+    "rhs": "f32",
+    "expected": "f32",
+    "seed": 214,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
+    ],
+    "reason_code": "promotion_matrix_core"
+  },
+  {
+    "id": "f64_f64",
+    "lhs": "f64",
+    "rhs": "f64",
+    "expected": "f64",
+    "seed": 215,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
+    ],
+    "reason_code": "promotion_matrix_core"
   }
 ]

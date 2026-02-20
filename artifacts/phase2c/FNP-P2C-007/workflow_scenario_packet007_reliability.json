@@ -37,7 +37,7 @@
   "forensics_artifact_index": {
     "schema_version": 1,
     "gate": "run_workflow_scenario_gate",
-    "generated_at_unix_ms": 1771573043601,
+    "generated_at_unix_ms": 1771584803594,
     "status": "pass",
     "execution_context": "local",
     "triage": null,

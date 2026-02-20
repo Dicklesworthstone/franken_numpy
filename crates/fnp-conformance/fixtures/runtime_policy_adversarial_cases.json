@@ -43,5 +43,80 @@
       "artifacts/contracts/security_control_checks_v1.yaml"
     ],
     "reason_code": "parser_unknown_variant"
+  },
+  {
+    "id": "wire_null_mode_fail_closed",
+    "mode_raw": "null_sentinel",
+    "class_raw": "known_compatible",
+    "risk_score": 0.1,
+    "threshold": 0.7,
+    "expected_action": "fail_closed",
+    "seed": 204,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md",
+      "artifacts/contracts/security_control_checks_v1.yaml"
+    ],
+    "reason_code": "null_sentinel_runtime_mode"
+  },
+  {
+    "id": "wire_both_unknown_fail_closed",
+    "mode_raw": "alpha_v99",
+    "class_raw": "beta_unresolved",
+    "risk_score": 0.5,
+    "threshold": 0.7,
+    "expected_action": "fail_closed",
+    "seed": 205,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md",
+      "artifacts/contracts/hardened_mode_allowlist_v1.yaml"
+    ],
+    "reason_code": "unknown_runtime_mode_and_class"
+  },
+  {
+    "id": "wire_whitespace_mode_fail_closed",
+    "mode_raw": "  strict  ",
+    "class_raw": "known_compatible",
+    "risk_score": 0.2,
+    "threshold": 0.7,
+    "expected_action": "fail_closed",
+    "seed": 206,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md",
+      "artifacts/contracts/security_control_checks_v1.yaml"
+    ],
+    "reason_code": "whitespace_padded_mode"
+  },
+  {
+    "id": "wire_uppercase_mode_fail_closed",
+    "mode_raw": "STRICT",
+    "class_raw": "known_compatible",
+    "risk_score": 0.4,
+    "threshold": 0.7,
+    "expected_action": "fail_closed",
+    "seed": 207,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md",
+      "artifacts/contracts/security_control_checks_v1.yaml"
+    ],
+    "reason_code": "case_sensitive_mode_rejection"
+  },
+  {
+    "id": "wire_empty_class_fail_closed",
+    "mode_raw": "hardened",
+    "class_raw": "",
+    "risk_score": 0.6,
+    "threshold": 0.7,
+    "expected_action": "fail_closed",
+    "seed": 208,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md",
+      "artifacts/contracts/hardened_mode_allowlist_v1.yaml"
+    ],
+    "reason_code": "empty_compatibility_class"
   }
 ]

@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "bundle_id": "fnp_p2c006_parity_bundle_v1",
-  "generated_at_unix_ms": 1771441927911,
+  "generated_at_unix_ms": 1771592834581,
   "dropped_symbol": "sbn=0 esi=0 kind=source",
-  "recovery_symbols_used": 734,
+  "recovery_symbols_used": 773,
   "recovery_success": true,
-  "expected_hash": "dc8656e7dc36dbf5fbbe82a9f9cc5543004946e51959c733e55d259b63c475c9",
-  "recovered_hash": "dc8656e7dc36dbf5fbbe82a9f9cc5543004946e51959c733e55d259b63c475c9",
+  "expected_hash": "ce1221446e4217908fcdf0f8ef67dba231d1b24508e1356fa5fc56dceb0d57fe",
+  "recovered_hash": "ce1221446e4217908fcdf0f8ef67dba231d1b24508e1356fa5fc56dceb0d57fe",
   "error": null
 }

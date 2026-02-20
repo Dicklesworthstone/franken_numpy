@@ -585,5 +585,710 @@
     "expect_success": true,
     "expected_shape": [1, 2, 1, 2],
     "expect_non_finite": true
+  },
+  {
+    "id": "add_shape_mismatch_rank8_2x1x2x1x2x1x2x3_vs_1x3x1x3x1x3x1",
+    "seed": 425,
+    "severity": "high",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed",
+    "op": "add",
+    "lhs_shape": [2, 1, 2, 1, 2, 1, 2, 3],
+    "lhs_values": [
+      1.0, 2.0, 3.0, 4.0, 5.0, 6.0,
+      7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+      13.0, 14.0, 15.0, 16.0, 17.0, 18.0,
+      19.0, 20.0, 21.0, 22.0, 23.0, 24.0,
+      25.0, 26.0, 27.0, 28.0, 29.0, 30.0,
+      31.0, 32.0, 33.0, 34.0, 35.0, 36.0,
+      37.0, 38.0, 39.0, 40.0, 41.0, 42.0,
+      43.0, 44.0, 45.0, 46.0, 47.0, 48.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [1, 3, 1, 3, 1, 3, 1],
+    "rhs_values": [
+      1.0, 2.0, 3.0, 4.0, 5.0, 6.0,
+      7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+      13.0, 14.0, 15.0, 16.0, 17.0, 18.0,
+      19.0, 20.0, 21.0, 22.0, 23.0, 24.0,
+      25.0, 26.0, 27.0
+    ],
+    "rhs_dtype": "f64",
+    "expected_error_contains": "cannot broadcast"
+  },
+  {
+    "id": "sum_axis_out_of_bounds_rank8_axis_9",
+    "seed": 426,
+    "severity": "critical",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_reduction_contract_violation",
+    "expected_reason_code": "ufunc_reduction_contract_violation",
+    "op": "sum",
+    "lhs_shape": [1, 2, 1, 2, 1, 2, 1, 2],
+    "lhs_values": [
+      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+      9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0
+    ],
+    "lhs_dtype": "f64",
+    "axis": 9,
+    "keepdims": false,
+    "expected_error_contains": "axis"
+  },
+  {
+    "id": "sub_shape_mismatch_rank7_mixed_dims",
+    "seed": 427,
+    "severity": "high",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed",
+    "op": "sub",
+    "lhs_shape": [2, 3, 1, 2, 1, 3, 2],
+    "lhs_values": [
+      1.0, 2.0, 3.0, 4.0, 5.0, 6.0,
+      7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+      13.0, 14.0, 15.0, 16.0, 17.0, 18.0,
+      19.0, 20.0, 21.0, 22.0, 23.0, 24.0,
+      25.0, 26.0, 27.0, 28.0, 29.0, 30.0,
+      31.0, 32.0, 33.0, 34.0, 35.0, 36.0,
+      37.0, 38.0, 39.0, 40.0, 41.0, 42.0,
+      43.0, 44.0, 45.0, 46.0, 47.0, 48.0,
+      49.0, 50.0, 51.0, 52.0, 53.0, 54.0,
+      55.0, 56.0, 57.0, 58.0, 59.0, 60.0,
+      61.0, 62.0, 63.0, 64.0, 65.0, 66.0,
+      67.0, 68.0, 69.0, 70.0, 71.0, 72.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [1, 5, 2, 1, 3, 1, 2],
+    "rhs_values": [
+      1.0, 2.0, 3.0, 4.0, 5.0, 6.0,
+      7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+      13.0, 14.0, 15.0, 16.0, 17.0, 18.0,
+      19.0, 20.0, 21.0, 22.0, 23.0, 24.0,
+      25.0, 26.0, 27.0, 28.0, 29.0, 30.0,
+      31.0, 32.0, 33.0, 34.0, 35.0, 36.0,
+      37.0, 38.0, 39.0, 40.0, 41.0, 42.0,
+      43.0, 44.0, 45.0, 46.0, 47.0, 48.0,
+      49.0, 50.0, 51.0, 52.0, 53.0, 54.0,
+      55.0, 56.0, 57.0, 58.0, 59.0, 60.0
+    ],
+    "rhs_dtype": "f64",
+    "expected_error_contains": "cannot broadcast"
+  },
+  {
+    "id": "mul_bool_lhs_missing_rhs_values",
+    "seed": 428,
+    "severity": "medium",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_signature_parse_failed",
+    "expected_reason_code": "ufunc_signature_parse_failed",
+    "op": "mul",
+    "lhs_shape": [3, 2],
+    "lhs_values": [1.0, 0.0, 1.0, 1.0, 0.0, 0.0],
+    "lhs_dtype": "bool",
+    "rhs_shape": [2],
+    "rhs_values": null,
+    "rhs_dtype": "i32",
+    "expected_error_contains": "rhs_values"
+  },
+  {
+    "id": "div_i32_by_zero_strict_broadcast_2x3_by_3",
+    "seed": 429,
+    "severity": "critical",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_division_by_zero_observed",
+    "expected_reason_code": "ufunc_division_by_zero_observed",
+    "op": "div",
+    "lhs_shape": [2, 3],
+    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_dtype": "i32",
+    "rhs_shape": [3],
+    "rhs_values": [0.0, 1.0, 0.0],
+    "rhs_dtype": "i32",
+    "expect_success": true,
+    "expected_shape": [2, 3],
+    "expect_non_finite": true
+  },
+  {
+    "id": "sum_negative_axis_out_of_bounds_rank8_axis_neg9",
+    "seed": 430,
+    "severity": "critical",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_reduction_contract_violation",
+    "expected_reason_code": "ufunc_reduction_contract_violation",
+    "op": "sum",
+    "lhs_shape": [1, 2, 1, 2, 1, 2, 1, 2],
+    "lhs_values": [
+      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+      9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0
+    ],
+    "lhs_dtype": "f64",
+    "axis": -9,
+    "keepdims": true,
+    "expected_error_contains": "axis"
+  },
+  {
+    "id": "add_rank_mismatch_scalar_vs_rank8",
+    "seed": 431,
+    "severity": "high",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_broadcast_selector_determinism",
+    "expected_reason_code": "ufunc_broadcast_selector_determinism",
+    "op": "add",
+    "lhs_shape": [],
+    "lhs_values": [42.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [1, 1, 1, 1, 1, 1, 1, 2],
+    "rhs_values": [1.0, 2.0],
+    "rhs_dtype": "f64",
+    "expect_success": true,
+    "expected_shape": [1, 1, 1, 1, 1, 1, 1, 2]
+  },
+  {
+    "id": "mul_shape_mismatch_all_nonone_dims_3x4_vs_5x6",
+    "seed": 432,
+    "severity": "high",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed",
+    "op": "mul",
+    "lhs_shape": [3, 4],
+    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [5, 6],
+    "rhs_values": [
+      1.0, 2.0, 3.0, 4.0, 5.0, 6.0,
+      7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+      13.0, 14.0, 15.0, 16.0, 17.0, 18.0,
+      19.0, 20.0, 21.0, 22.0, 23.0, 24.0,
+      25.0, 26.0, 27.0, 28.0, 29.0, 30.0
+    ],
+    "rhs_dtype": "f64",
+    "expected_error_contains": "cannot broadcast"
+  },
+  {
+    "id": "sum_axis_out_of_bounds_scalar_axis_0",
+    "seed": 433,
+    "severity": "critical",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_reduction_contract_violation",
+    "expected_reason_code": "ufunc_reduction_contract_violation",
+    "op": "sum",
+    "lhs_shape": [],
+    "lhs_values": [42.0],
+    "lhs_dtype": "f64",
+    "axis": 0,
+    "keepdims": false,
+    "expected_error_contains": "axis"
+  },
+  {
+    "id": "div_mixed_dtype_f32_by_bool_broadcast_3x1_by_1x3",
+    "seed": 434,
+    "severity": "high",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_division_by_zero_observed",
+    "expected_reason_code": "ufunc_division_by_zero_observed",
+    "op": "div",
+    "lhs_shape": [3, 1],
+    "lhs_values": [1.0, 2.0, 3.0],
+    "lhs_dtype": "f32",
+    "rhs_shape": [1, 3],
+    "rhs_values": [0.0, 1.0, 0.0],
+    "rhs_dtype": "bool",
+    "expect_success": true,
+    "expected_shape": [3, 3],
+    "expect_non_finite": true
+  },
+  {
+    "id": "add_lhs_values_count_exceeds_shape_product",
+    "seed": 435,
+    "severity": "high",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed",
+    "op": "add",
+    "lhs_shape": [2, 2],
+    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [2, 2],
+    "rhs_values": [1.0, 2.0, 3.0, 4.0],
+    "rhs_dtype": "f64",
+    "expected_error_contains": "invalid input length"
+  },
+  {
+    "id": "sum_rank1_keepdims_true_axis_out_of_bounds_axis_1",
+    "seed": 436,
+    "severity": "critical",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_reduction_contract_violation",
+    "expected_reason_code": "ufunc_reduction_contract_violation",
+    "op": "sum",
+    "lhs_shape": [5],
+    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0],
+    "lhs_dtype": "f64",
+    "axis": 1,
+    "keepdims": true,
+    "expected_error_contains": "axis"
+  },
+  {
+    "id": "sub_shape_mismatch_trailing_dim_conflict_2x3x4_vs_2x3x5",
+    "seed": 437,
+    "severity": "high",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed",
+    "op": "sub",
+    "lhs_shape": [2, 3, 4],
+    "lhs_values": [
+      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+      9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+      17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [2, 3, 5],
+    "rhs_values": [
+      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0,
+      11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0,
+      21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0
+    ],
+    "rhs_dtype": "f64",
+    "expected_error_contains": "cannot broadcast"
+  },
+  {
+    "id": "mul_zero_extent_broadcast_mismatch_2x0x3_vs_2x0x5",
+    "seed": 438,
+    "severity": "high",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed",
+    "op": "mul",
+    "lhs_shape": [2, 0, 3],
+    "lhs_values": [],
+    "lhs_dtype": "f64",
+    "rhs_shape": [2, 0, 5],
+    "rhs_values": [],
+    "rhs_dtype": "f64",
+    "expected_error_contains": "cannot broadcast"
+  },
+  {
+    "id": "sum_overflow_f64_rank6_keepdims_true_axis_5",
+    "seed": 439,
+    "severity": "critical",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_reduce_axis_contract",
+    "expected_reason_code": "ufunc_reduce_axis_contract",
+    "op": "sum",
+    "lhs_shape": [1, 1, 1, 1, 1, 4],
+    "lhs_values": [1e308, 1e308, 1e308, 1e308],
+    "lhs_dtype": "f64",
+    "axis": 5,
+    "keepdims": true,
+    "expect_success": true,
+    "expected_shape": [1, 1, 1, 1, 1, 1],
+    "expect_non_finite": true
+  },
+  {
+    "id": "add_multi_zero_extent_cascade_success_3x0x0x2_plus_1x0x0x1",
+    "seed": 440,
+    "severity": "medium",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_broadcast_selector_determinism",
+    "expected_reason_code": "ufunc_broadcast_selector_determinism",
+    "op": "add",
+    "lhs_shape": [3, 0, 0, 2],
+    "lhs_values": [],
+    "lhs_dtype": "f64",
+    "rhs_shape": [1, 0, 0, 1],
+    "rhs_values": [],
+    "rhs_dtype": "f64",
+    "expect_success": true,
+    "expected_shape": [3, 0, 0, 2]
+  },
+  {
+    "id": "mul_multi_zero_extent_cascade_mismatch_3x0x0x2_vs_3x0x0x5",
+    "seed": 441,
+    "severity": "high",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed",
+    "op": "mul",
+    "lhs_shape": [3, 0, 0, 2],
+    "lhs_values": [],
+    "lhs_dtype": "f64",
+    "rhs_shape": [3, 0, 0, 5],
+    "rhs_values": [],
+    "rhs_dtype": "f64",
+    "expected_error_contains": "cannot broadcast"
+  },
+  {
+    "id": "sum_empty_rank1_axis0_success",
+    "seed": 442,
+    "severity": "high",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_reduce_axis_contract",
+    "expected_reason_code": "ufunc_reduce_axis_contract",
+    "op": "sum",
+    "lhs_shape": [0],
+    "lhs_values": [],
+    "lhs_dtype": "f64",
+    "axis": 0,
+    "keepdims": false,
+    "expect_success": true,
+    "expected_shape": []
+  },
+  {
+    "id": "div_all_zeros_rhs_broadcast_2x3_by_3",
+    "seed": 443,
+    "severity": "critical",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_division_by_zero_observed",
+    "expected_reason_code": "ufunc_division_by_zero_observed",
+    "op": "div",
+    "lhs_shape": [2, 3],
+    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [3],
+    "rhs_values": [0.0, 0.0, 0.0],
+    "rhs_dtype": "f64",
+    "expect_success": true,
+    "expected_shape": [2, 3],
+    "expect_non_finite": true
+  },
+  {
+    "id": "add_rank8_multi_zero_extent_success_1x0x1x0x1x2x1x1_plus_1x0x1x0x1x1x1x1",
+    "seed": 444,
+    "severity": "high",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_broadcast_selector_determinism",
+    "expected_reason_code": "ufunc_broadcast_selector_determinism",
+    "op": "add",
+    "lhs_shape": [1, 0, 1, 0, 1, 2, 1, 1],
+    "lhs_values": [],
+    "lhs_dtype": "f64",
+    "rhs_shape": [1, 0, 1, 0, 1, 1, 1, 1],
+    "rhs_values": [],
+    "rhs_dtype": "f64",
+    "expect_success": true,
+    "expected_shape": [1, 0, 1, 0, 1, 2, 1, 1]
+  },
+  {
+    "id": "sum_multi_zero_extent_axis0_keepdims_3x0x0x2",
+    "seed": 445,
+    "severity": "high",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_reduce_axis_contract",
+    "expected_reason_code": "ufunc_reduce_axis_contract",
+    "op": "sum",
+    "lhs_shape": [3, 0, 0, 2],
+    "lhs_values": [],
+    "lhs_dtype": "f64",
+    "axis": 0,
+    "keepdims": true,
+    "expect_success": true,
+    "expected_shape": [1, 0, 0, 2]
+  },
+  {
+    "id": "sub_lhs_values_count_deficit_2x3",
+    "seed": 446,
+    "severity": "high",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed",
+    "op": "sub",
+    "lhs_shape": [2, 3],
+    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [2, 3],
+    "rhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "rhs_dtype": "f64",
+    "expected_error_contains": "invalid input length"
+  },
+  {
+    "id": "div_negative_zero_rhs_2x2_by_1x2",
+    "seed": 447,
+    "severity": "critical",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_division_by_zero_observed",
+    "expected_reason_code": "ufunc_division_by_zero_observed",
+    "op": "div",
+    "lhs_shape": [2, 2],
+    "lhs_values": [1.0, -1.0, 2.0, -2.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [1, 2],
+    "rhs_values": [-0.0, 0.0],
+    "rhs_dtype": "f64",
+    "expect_success": true,
+    "expected_shape": [2, 2],
+    "expect_non_finite": true
+  },
+  {
+    "id": "sum_rank8_valid_axis7_keepdims_success",
+    "seed": 448,
+    "severity": "high",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_reduce_axis_contract",
+    "expected_reason_code": "ufunc_reduce_axis_contract",
+    "op": "sum",
+    "lhs_shape": [2, 1, 2, 1, 2, 1, 2, 2],
+    "lhs_values": [
+      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+      9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+      17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0,
+      25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0
+    ],
+    "lhs_dtype": "f64",
+    "axis": 7,
+    "keepdims": true,
+    "expect_success": true,
+    "expected_shape": [2, 1, 2, 1, 2, 1, 2, 1]
+  },
+  {
+    "id": "add_rank0_plus_rank0_success",
+    "seed": 449,
+    "severity": "medium",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_broadcast_selector_determinism",
+    "expected_reason_code": "ufunc_broadcast_selector_determinism",
+    "op": "add",
+    "lhs_shape": [],
+    "lhs_values": [42.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [17.0],
+    "rhs_dtype": "f64",
+    "expect_success": true,
+    "expected_shape": []
+  },
+  {
+    "id": "sum_rank0_axis_neg1_oob",
+    "seed": 450,
+    "severity": "critical",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_reduction_contract_violation",
+    "expected_reason_code": "ufunc_reduction_contract_violation",
+    "op": "sum",
+    "lhs_shape": [],
+    "lhs_values": [42.0],
+    "lhs_dtype": "f64",
+    "axis": -1,
+    "keepdims": false,
+    "expected_error_contains": "axis"
+  },
+  {
+    "id": "mul_mixed_dtype_rank6_broadcast_mismatch_i32_f64",
+    "seed": 451,
+    "severity": "high",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed",
+    "op": "mul",
+    "lhs_shape": [2, 1, 3, 1, 2, 1],
+    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+    "lhs_dtype": "i32",
+    "rhs_shape": [1, 2, 5, 1, 1, 1],
+    "rhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+    "rhs_dtype": "f64",
+    "expected_error_contains": "cannot broadcast"
+  },
+  {
+    "id": "div_zero_by_zero_scalar",
+    "seed": 452,
+    "severity": "critical",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_division_by_zero_observed",
+    "expected_reason_code": "ufunc_division_by_zero_observed",
+    "op": "div",
+    "lhs_shape": [],
+    "lhs_values": [0.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [0.0],
+    "rhs_dtype": "f64",
+    "expect_success": true,
+    "expected_shape": [],
+    "expect_non_finite": true
+  },
+  {
+    "id": "sum_multi_zero_extent_axis2_rank5_2x0x0x3x2",
+    "seed": 453,
+    "severity": "high",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_reduce_axis_contract",
+    "expected_reason_code": "ufunc_reduce_axis_contract",
+    "op": "sum",
+    "lhs_shape": [2, 0, 0, 3, 2],
+    "lhs_values": [],
+    "lhs_dtype": "f64",
+    "axis": 2,
+    "keepdims": false,
+    "expect_success": true,
+    "expected_shape": [2, 0, 3, 2]
+  },
+  {
+    "id": "add_rank8_all_ones_success",
+    "seed": 454,
+    "severity": "medium",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json"
+    ],
+    "reason_code": "ufunc_broadcast_selector_determinism",
+    "expected_reason_code": "ufunc_broadcast_selector_determinism",
+    "op": "add",
+    "lhs_shape": [1, 1, 1, 1, 1, 1, 1, 1],
+    "lhs_values": [42.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [1, 1, 1, 1, 1, 1, 1, 1],
+    "rhs_values": [17.0],
+    "rhs_dtype": "f64",
+    "expect_success": true,
+    "expected_shape": [1, 1, 1, 1, 1, 1, 1, 1]
   }
 ]

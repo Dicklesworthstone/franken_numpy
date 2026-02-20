@@ -192,5 +192,222 @@
       "kind": "single",
       "index": 3
     }
+  },
+  {
+    "id": "iter_selector_strided_golden",
+    "operation": "select_transfer_class",
+    "seed": 4110,
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "nditer_constructor_contract",
+    "expected_reason_code": "nditer_constructor_contract",
+    "selector": {
+      "src_stride": 16,
+      "dst_stride": 16,
+      "item_size": 8,
+      "element_count": 8,
+      "aligned": true,
+      "cast_is_lossless": true,
+      "same_value_cast": false
+    },
+    "expected_transfer_class": "strided"
+  },
+  {
+    "id": "iter_overlap_forward_copy_golden",
+    "operation": "overlap_copy_policy",
+    "seed": 4111,
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "nditer_overlap_policy_contract",
+    "expected_reason_code": "nditer_overlap_policy_contract",
+    "overlap": {
+      "src_offset": 8,
+      "dst_offset": 4,
+      "byte_len": 8
+    },
+    "expected_overlap_action": "forward_copy"
+  },
+  {
+    "id": "iter_overlap_adjacent_no_copy_golden",
+    "operation": "overlap_copy_policy",
+    "seed": 4112,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "nditer_overlap_policy_contract",
+    "expected_reason_code": "nditer_overlap_policy_contract",
+    "overlap": {
+      "src_offset": 0,
+      "dst_offset": 8,
+      "byte_len": 8
+    },
+    "expected_overlap_action": "no_copy"
+  },
+  {
+    "id": "iter_flatiter_single_boundary_read",
+    "operation": "validate_flatiter_read",
+    "seed": 4113,
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "flatiter_indexing_contract",
+    "expected_reason_code": "flatiter_indexing_contract",
+    "len": 16,
+    "flat_index": {
+      "kind": "single",
+      "index": 15
+    },
+    "expected_selected": 1
+  },
+  {
+    "id": "iter_flatiter_full_slice_read",
+    "operation": "validate_flatiter_read",
+    "seed": 4114,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "flatiter_indexing_contract",
+    "expected_reason_code": "flatiter_indexing_contract",
+    "len": 10,
+    "flat_index": {
+      "kind": "slice",
+      "start": 0,
+      "stop": 10,
+      "step": 1
+    },
+    "expected_selected": 10
+  },
+  {
+    "id": "iter_flatiter_strided_slice_read",
+    "operation": "validate_flatiter_read",
+    "seed": 4115,
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "flatiter_indexing_contract",
+    "expected_reason_code": "flatiter_indexing_contract",
+    "len": 20,
+    "flat_index": {
+      "kind": "slice",
+      "start": 0,
+      "stop": 20,
+      "step": 3
+    },
+    "expected_selected": 7
+  },
+  {
+    "id": "iter_flatiter_empty_fancy_read",
+    "operation": "validate_flatiter_read",
+    "seed": 4116,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "flatiter_indexing_contract",
+    "expected_reason_code": "flatiter_indexing_contract",
+    "len": 8,
+    "flat_index": {
+      "kind": "fancy",
+      "indices": []
+    },
+    "expected_selected": 0
+  },
+  {
+    "id": "iter_flatiter_all_true_mask_read",
+    "operation": "validate_flatiter_read",
+    "seed": 4117,
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "flatiter_indexing_contract",
+    "expected_reason_code": "flatiter_indexing_contract",
+    "len": 8,
+    "flat_index": {
+      "kind": "bool_mask",
+      "mask": [true, true, true, true, true, true, true, true]
+    },
+    "expected_selected": 8
+  },
+  {
+    "id": "iter_flatiter_all_false_mask_read",
+    "operation": "validate_flatiter_read",
+    "seed": 4118,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "flatiter_indexing_contract",
+    "expected_reason_code": "flatiter_indexing_contract",
+    "len": 8,
+    "flat_index": {
+      "kind": "bool_mask",
+      "mask": [false, false, false, false, false, false, false, false]
+    },
+    "expected_selected": 0
+  },
+  {
+    "id": "iter_flags_both_valid_golden",
+    "operation": "validate_nditer_flags",
+    "seed": 4119,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "nditer_overlap_policy_contract",
+    "expected_reason_code": "nditer_overlap_policy_contract",
+    "flags": {
+      "copy_if_overlap": true,
+      "no_broadcast": false,
+      "observed_overlap": true,
+      "observed_broadcast": true
+    }
+  },
+  {
+    "id": "iter_flatiter_reverse_fancy_read",
+    "operation": "validate_flatiter_read",
+    "seed": 4120,
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "flatiter_indexing_contract",
+    "expected_reason_code": "flatiter_indexing_contract",
+    "len": 8,
+    "flat_index": {
+      "kind": "fancy",
+      "indices": [7, 6, 5, 4, 3, 2, 1, 0]
+    },
+    "expected_selected": 8
   }
 ]

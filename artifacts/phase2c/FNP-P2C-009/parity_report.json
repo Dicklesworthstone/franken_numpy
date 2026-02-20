@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "packet_id": "FNP-P2C-009",
-  "strict_parity": 0.0,
-  "hardened_parity": 0.0,
+  "strict_parity": 1.0,
+  "hardened_parity": 1.0,
   "divergence_classes": [
     "no_observed_strict_drift_in_packet009_gates",
     "no_observed_hardened_drift_in_packet009_gates"
   ],
-  "compatibility_drift_hash": "sha256:6a1cab56360e6389388e3230bb195bd18ea13e766ceeb961aa4aed8fe4f7ca75"
+  "compatibility_drift_hash": "sha256:0555af5ec2508e173e94f6253a67b019b9a418cdefa1125353737ce965bf2b5e"
 }

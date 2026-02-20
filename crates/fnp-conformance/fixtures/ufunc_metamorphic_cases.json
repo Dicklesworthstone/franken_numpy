@@ -166,5 +166,294 @@
     "rhs_shape": [1, 0, 1],
     "rhs_values": [],
     "rhs_dtype": "f64"
+  },
+  {
+    "id": "add_commutative_rank6_2x1x1x1x2x3_plus_1x3x1x2x1x1",
+    "relation": "add_commutative",
+    "seed": 310,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "lhs_shape": [2, 1, 1, 1, 2, 3],
+    "lhs_values": [1.0, -2.0, 3.0, 4.0, -5.0, 6.0, 7.0, -8.0, 9.0, 10.0, -11.0, 12.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [1, 3, 1, 2, 1, 1],
+    "rhs_values": [0.5, -1.5, 2.0, 3.5, -0.25, 4.0],
+    "rhs_dtype": "f64"
+  },
+  {
+    "id": "mul_commutative_rank6_1x2x1x2x1x2_by_2x1x2x1x2x1",
+    "relation": "mul_commutative",
+    "seed": 311,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "lhs_shape": [1, 2, 1, 2, 1, 2],
+    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [2, 1, 2, 1, 2, 1],
+    "rhs_values": [0.5, -1.0, 2.0, -0.5, 1.5, -3.0, 0.25, -2.5],
+    "rhs_dtype": "f64"
+  },
+  {
+    "id": "sum_linearity_rank6_1x2x1x2x1x3_scalar_3_14",
+    "relation": "sum_linearity",
+    "seed": 312,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_reduction_contract_violation",
+    "lhs_shape": [1, 2, 1, 2, 1, 3],
+    "lhs_values": [
+      1.0, -2.0, 3.0, 4.0, -5.0, 6.0,
+      7.0, -8.0, 9.0, 10.0, -11.0, 12.0
+    ],
+    "lhs_dtype": "f64",
+    "scalar": 3.14
+  },
+  {
+    "id": "add_commutative_scalar_plus_rank3",
+    "relation": "add_commutative",
+    "seed": 313,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "lhs_shape": [],
+    "lhs_values": [42.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [2, 3, 4],
+    "rhs_values": [
+      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+      9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+      17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0
+    ],
+    "rhs_dtype": "f64"
+  },
+  {
+    "id": "mul_commutative_i32_3x2_by_2",
+    "relation": "mul_commutative",
+    "seed": 314,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "lhs_shape": [3, 2],
+    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_dtype": "i32",
+    "rhs_shape": [2],
+    "rhs_values": [10.0, -5.0],
+    "rhs_dtype": "i32"
+  },
+  {
+    "id": "add_commutative_rank7_1x1x2x1x2x1x3_plus_2x1x1x2x1x3x1",
+    "relation": "add_commutative",
+    "seed": 315,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "lhs_shape": [1, 1, 2, 1, 2, 1, 3],
+    "lhs_values": [1.0, -2.0, 3.0, 4.0, -5.0, 6.0, 7.0, -8.0, 9.0, 10.0, -11.0, 12.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [2, 1, 1, 2, 1, 3, 1],
+    "rhs_values": [0.5, -1.0, 2.0, -0.5, 1.5, -3.0, 0.25, -2.5, 3.5, -4.5, 5.5, -6.5],
+    "rhs_dtype": "f64"
+  },
+  {
+    "id": "sum_linearity_scalar_zero",
+    "relation": "sum_linearity",
+    "seed": 316,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_reduction_contract_violation",
+    "lhs_shape": [3, 4],
+    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+    "lhs_dtype": "f64",
+    "scalar": 0.0
+  },
+  {
+    "id": "sum_linearity_scalar_one",
+    "relation": "sum_linearity",
+    "seed": 317,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_reduction_contract_violation",
+    "lhs_shape": [2, 2, 2],
+    "lhs_values": [1.0, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0],
+    "lhs_dtype": "f64",
+    "scalar": 1.0
+  },
+  {
+    "id": "mul_commutative_mixed_dtype_i64_f64_2x3_by_3",
+    "relation": "mul_commutative",
+    "seed": 318,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "lhs_shape": [2, 3],
+    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_dtype": "i64",
+    "rhs_shape": [3],
+    "rhs_values": [0.5, -1.5, 2.5],
+    "rhs_dtype": "f64"
+  },
+  {
+    "id": "add_commutative_single_element_vs_rank4",
+    "relation": "add_commutative",
+    "seed": 319,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "lhs_shape": [1],
+    "lhs_values": [99.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [2, 3, 1, 4],
+    "rhs_values": [
+      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+      9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+      17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0
+    ],
+    "rhs_dtype": "f64"
+  },
+  {
+    "id": "add_commutative_rank8_interleaved_ones",
+    "relation": "add_commutative",
+    "seed": 320,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "lhs_shape": [2, 1, 2, 1, 2, 1, 2, 1],
+    "lhs_values": [1.0, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0, 9.0, -10.0, 11.0, -12.0, 13.0, -14.0, 15.0, -16.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [1, 2, 1, 2, 1, 2, 1, 2],
+    "rhs_values": [0.5, -1.0, 2.0, -0.5, 1.5, -3.0, 0.25, -2.5, 3.5, -4.5, 5.5, -6.5, 7.5, -8.5, 9.5, -10.5],
+    "rhs_dtype": "f64"
+  },
+  {
+    "id": "mul_commutative_mixed_dtype_i32_f64_rank4",
+    "relation": "mul_commutative",
+    "seed": 321,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "lhs_shape": [2, 1, 3, 1],
+    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_dtype": "i32",
+    "rhs_shape": [1, 2, 1, 2],
+    "rhs_values": [0.5, -1.5, 2.5, -0.75],
+    "rhs_dtype": "f64"
+  },
+  {
+    "id": "sum_linearity_rank7_scalar_neg1",
+    "relation": "sum_linearity",
+    "seed": 322,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_reduction_contract_violation",
+    "lhs_shape": [1, 2, 1, 2, 1, 2, 1],
+    "lhs_values": [1.0, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0],
+    "lhs_dtype": "f64",
+    "scalar": -1.0
+  },
+  {
+    "id": "add_commutative_zero_extent_rank4_2x0x3x1_plus_1x0x1x4",
+    "relation": "add_commutative",
+    "seed": 323,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "lhs_shape": [2, 0, 3, 1],
+    "lhs_values": [],
+    "lhs_dtype": "f64",
+    "rhs_shape": [1, 0, 1, 4],
+    "rhs_values": [],
+    "rhs_dtype": "f64"
+  },
+  {
+    "id": "mul_commutative_f32_rank5_broadcast",
+    "relation": "mul_commutative",
+    "seed": 324,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "lhs_shape": [2, 1, 2, 1, 3],
+    "lhs_values": [1.0, -2.0, 3.0, 4.0, -5.0, 6.0, 7.0, -8.0, 9.0, 10.0, -11.0, 12.0],
+    "lhs_dtype": "f32",
+    "rhs_shape": [1, 3, 1, 2, 1],
+    "rhs_values": [0.5, -1.5, 2.0, 3.5, -0.25, 4.0],
+    "rhs_dtype": "f32"
+  },
+  {
+    "id": "sum_linearity_rank5_f32_scalar_2",
+    "relation": "sum_linearity",
+    "seed": 325,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_reduction_contract_violation",
+    "lhs_shape": [2, 1, 3, 1, 2],
+    "lhs_values": [1.5, -2.5, 3.0, -4.0, 5.5, 6.5, -7.5, 8.5, 9.0, -10.0, 11.5, 12.5],
+    "lhs_dtype": "f32",
+    "scalar": 2.0
   }
 ]

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "oracle_source": "pure_python_fallback",
-  "generated_at_unix_ms": 1771462211204,
+  "oracle_source": "system",
+  "generated_at_unix_ms": 1771592484373,
   "cases": [
     {
       "id": "add_broadcast_2x3_plus_3",
@@ -19,7 +19,7 @@
         25.0,
         36.0
       ],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "sub_same_shape_2x2",
@@ -35,7 +35,7 @@
         6.0,
         6.0
       ],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "mul_scalar_broadcast",
@@ -51,7 +51,7 @@
         1.5,
         2.0
       ],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "div_vector_by_scalar",
@@ -65,7 +65,7 @@
         5.0,
         6.0
       ],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "sum_all_no_keepdims",
@@ -75,7 +75,7 @@
       "values": [
         21.0
       ],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "sum_axis1_keepdims",
@@ -89,7 +89,7 @@
         6.0,
         15.0
       ],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "sum_axis0_no_keepdims",
@@ -103,7 +103,7 @@
         7.0,
         9.0
       ],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "add_broadcast_2x1x3x1_plus_1x4x1x1",
@@ -141,7 +141,7 @@
         45.0,
         46.0
       ],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "mul_broadcast_2x2x2_by_1x2x1",
@@ -162,7 +162,7 @@
         -7.0,
         -8.0
       ],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "sum_axis2_keepdims_2x2x3x2",
@@ -184,7 +184,7 @@
         63.0,
         66.0
       ],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "sum_axis0_no_keepdims_2x2x2x2",
@@ -205,12 +205,12 @@
         22.0,
         24.0
       ],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "add_shape_mismatch_2x2_vs_3x1",
       "status": "error",
-      "error": "cannot broadcast [2, 2] with [3, 1]",
+      "error": "operands could not be broadcast together with shapes (2,2) (3,1) ",
       "shape": [],
       "values": [],
       "dtype": "unknown"
@@ -218,7 +218,7 @@
     {
       "id": "sum_axis_out_of_bounds",
       "status": "error",
-      "error": "axis 3 out of bounds for shape [2, 2]",
+      "error": "axis 3 is out of bounds for array of dimension 2",
       "shape": [],
       "values": [],
       "dtype": "unknown"
@@ -226,7 +226,7 @@
     {
       "id": "add_shape_mismatch_2x1x3x1_vs_2x4x2",
       "status": "error",
-      "error": "cannot broadcast [2, 1, 3, 1] with [2, 4, 2]",
+      "error": "operands could not be broadcast together with shapes (2,1,3,1) (2,4,2) ",
       "shape": [],
       "values": [],
       "dtype": "unknown"
@@ -234,7 +234,7 @@
     {
       "id": "sum_axis_out_of_bounds_4d",
       "status": "error",
-      "error": "axis 5 out of bounds for shape [2, 2, 2, 2]",
+      "error": "axis 5 is out of bounds for array of dimension 4",
       "shape": [],
       "values": [],
       "dtype": "unknown"
@@ -284,7 +284,7 @@
         8.0,
         9.0
       ],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "sum_axis3_no_keepdims_1x2x3x2x2",
@@ -310,7 +310,7 @@
         44.0,
         46.0
       ],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "add_zero_extent_broadcast_2x0x3_plus_1x0x1",
@@ -322,12 +322,12 @@
         3
       ],
       "values": [],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "add_shape_mismatch_1x2x1x3x1_vs_2x1x4x2",
       "status": "error",
-      "error": "cannot broadcast [1, 2, 1, 3, 1] with [2, 1, 4, 2]",
+      "error": "operands could not be broadcast together with shapes (1,2,1,3,1) (2,1,4,2) ",
       "shape": [],
       "values": [],
       "dtype": "unknown"
@@ -335,7 +335,7 @@
     {
       "id": "sum_axis_out_of_bounds_5d",
       "status": "error",
-      "error": "axis 6 out of bounds for shape [1, 2, 3, 2, 2]",
+      "error": "axis 6 is out of bounds for array of dimension 5",
       "shape": [],
       "values": [],
       "dtype": "unknown"
@@ -343,7 +343,7 @@
     {
       "id": "mul_missing_rhs_values_2x1x3_by_1x3x1",
       "status": "error",
-      "error": "'NoneType' object is not iterable",
+      "error": "cannot reshape array of size 1 into shape (1,3,1)",
       "shape": [],
       "values": [],
       "dtype": "unknown"
@@ -371,7 +371,7 @@
         5.0,
         6.0
       ],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "mul_mixed_dtype_i64_by_f32_2x1x2_by_1x3x1",
@@ -396,7 +396,7 @@
         6.0,
         8.0
       ],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "sum_axis1_keepdims_f64_2x2x2",
@@ -413,7 +413,7 @@
         -4.0,
         26.0
       ],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "mul_mixed_dtype_bool_by_i64_2x1x2_by_1x3x1",
@@ -428,17 +428,17 @@
         10.0,
         0.0,
         -2.0,
-        -0.0,
+        0.0,
         7.0,
         0.0,
         0.0,
         10.0,
-        -0.0,
+        0.0,
         -2.0,
         0.0,
         7.0
       ],
-      "dtype": "i64"
+      "dtype": "int64"
     },
     {
       "id": "sum_axis1_keepdims_i32_2x2x2",
@@ -455,7 +455,7 @@
         -4.0,
         26.0
       ],
-      "dtype": "i32"
+      "dtype": "int64"
     },
     {
       "id": "add_zero_extent_mixed_dtype_2x0x3x1_plus_1x0x1x1",
@@ -468,7 +468,7 @@
         1
       ],
       "values": [],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "add_broadcast_3x1x2x1x2_plus_1x4x1x2x1",
@@ -579,7 +579,7 @@
         9.0,
         10.0
       ],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "div_mixed_dtype_i32_by_f64_2x1x3x1_by_1x4x1x1",
@@ -617,7 +617,7 @@
         -0.75,
         3.75
       ],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "sum_axis4_keepdims_f32_2x1x3x1x2",
@@ -638,7 +638,7 @@
         -1.0,
         24.0
       ],
-      "dtype": "f32"
+      "dtype": "float32"
     },
     {
       "id": "sum_axis2_no_keepdims_i64_2x1x3x1x2",
@@ -656,12 +656,12 @@
         -9.0,
         -12.0
       ],
-      "dtype": "i64"
+      "dtype": "int64"
     },
     {
       "id": "add_shape_mismatch_3x1x2x1x2_vs_2x4x1x2x1",
       "status": "error",
-      "error": "cannot broadcast [3, 1, 2, 1, 2] with [2, 4, 1, 2, 1]",
+      "error": "operands could not be broadcast together with shapes (3,1,2,1,2) (2,4,1,2,1) ",
       "shape": [],
       "values": [],
       "dtype": "unknown"
@@ -669,7 +669,7 @@
     {
       "id": "sum_axis_out_of_bounds_6d",
       "status": "error",
-      "error": "axis 6 out of bounds for shape [1, 2, 1, 2, 1, 2]",
+      "error": "axis 6 is out of bounds for array of dimension 6",
       "shape": [],
       "values": [],
       "dtype": "unknown"
@@ -697,7 +697,7 @@
         1.5,
         -6.5
       ],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "div_broadcast_f64_by_f32_1x2x1x3x1_by_2x1x3x1x1",
@@ -748,7 +748,7 @@
         -0.9,
         3.0
       ],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "sum_all_keepdims_bool_2x1x3x1",
@@ -763,7 +763,7 @@
       "values": [
         4.0
       ],
-      "dtype": "bool"
+      "dtype": "int64"
     },
     {
       "id": "sum_axis0_keepdims_f32_2x1x2x1x2",
@@ -782,12 +782,12 @@
         8.5,
         -2.0
       ],
-      "dtype": "f32"
+      "dtype": "float32"
     },
     {
       "id": "sub_shape_mismatch_2x1x2x1_vs_1x3x2",
       "status": "error",
-      "error": "cannot broadcast [2, 1, 2, 1] with [1, 3, 2]",
+      "error": "operands could not be broadcast together with shapes (2,1,2,1) (1,3,2) ",
       "shape": [],
       "values": [],
       "dtype": "unknown"
@@ -795,7 +795,7 @@
     {
       "id": "sum_axis_out_of_bounds_bool_4d",
       "status": "error",
-      "error": "axis 4 out of bounds for shape [1, 2, 1, 2]",
+      "error": "axis 4 is out of bounds for array of dimension 4",
       "shape": [],
       "values": [],
       "dtype": "unknown"
@@ -803,7 +803,7 @@
     {
       "id": "div_missing_rhs_values_2x1x2_by_1x2x1",
       "status": "error",
-      "error": "'NoneType' object is not iterable",
+      "error": "cannot reshape array of size 1 into shape (1,2,1)",
       "shape": [],
       "values": [],
       "dtype": "unknown"
@@ -822,7 +822,7 @@
         11.0,
         15.0
       ],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "sum_axis_neg2_keepdims_2x2x2",
@@ -839,15 +839,1067 @@
         12.0,
         14.0
       ],
-      "dtype": "f64"
+      "dtype": "float64"
     },
     {
       "id": "sum_axis_negative_out_of_bounds_2x2x2",
       "status": "error",
-      "error": "axis -4 out of bounds for shape [2, 2, 2]",
+      "error": "axis -4 is out of bounds for array of dimension 3",
       "shape": [],
       "values": [],
       "dtype": "unknown"
+    },
+    {
+      "id": "add_rank4_broadcast_2x1x3x1_plus_1x4x1x2",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        4,
+        3,
+        2
+      ],
+      "values": [
+        11.0,
+        21.0,
+        12.0,
+        22.0,
+        13.0,
+        23.0,
+        31.0,
+        41.0,
+        32.0,
+        42.0,
+        33.0,
+        43.0,
+        51.0,
+        61.0,
+        52.0,
+        62.0,
+        53.0,
+        63.0,
+        71.0,
+        81.0,
+        72.0,
+        82.0,
+        73.0,
+        83.0,
+        14.0,
+        24.0,
+        15.0,
+        25.0,
+        16.0,
+        26.0,
+        34.0,
+        44.0,
+        35.0,
+        45.0,
+        36.0,
+        46.0,
+        54.0,
+        64.0,
+        55.0,
+        65.0,
+        56.0,
+        66.0,
+        74.0,
+        84.0,
+        75.0,
+        85.0,
+        76.0,
+        86.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "mul_i32_2x3",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        7.0,
+        16.0,
+        27.0,
+        40.0,
+        55.0,
+        72.0
+      ],
+      "dtype": "int32"
+    },
+    {
+      "id": "sum_rank3_axis1_keepdims",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        1,
+        4
+      ],
+      "values": [
+        15.0,
+        18.0,
+        21.0,
+        24.0,
+        51.0,
+        54.0,
+        57.0,
+        60.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "div_f32_broadcast_3_by_1x3",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1,
+        3
+      ],
+      "values": [
+        5.0,
+        5.0,
+        6.0
+      ],
+      "dtype": "float32"
+    },
+    {
+      "id": "sub_mixed_dtype_i32_f64_2x2",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        2
+      ],
+      "values": [
+        8.5,
+        17.5,
+        26.5,
+        35.5
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "sum_rank4_axis_minus1",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        2,
+        2
+      ],
+      "values": [
+        6.0,
+        15.0,
+        24.0,
+        33.0,
+        42.0,
+        51.0,
+        60.0,
+        69.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "add_rank5_broadcast_1x2x1x2x1_plus_2x1x3x1x4",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        2,
+        3,
+        2,
+        4
+      ],
+      "values": [
+        11.0,
+        21.0,
+        31.0,
+        41.0,
+        12.0,
+        22.0,
+        32.0,
+        42.0,
+        51.0,
+        61.0,
+        71.0,
+        81.0,
+        52.0,
+        62.0,
+        72.0,
+        82.0,
+        91.0,
+        101.0,
+        111.0,
+        121.0,
+        92.0,
+        102.0,
+        112.0,
+        122.0,
+        13.0,
+        23.0,
+        33.0,
+        43.0,
+        14.0,
+        24.0,
+        34.0,
+        44.0,
+        53.0,
+        63.0,
+        73.0,
+        83.0,
+        54.0,
+        64.0,
+        74.0,
+        84.0,
+        93.0,
+        103.0,
+        113.0,
+        123.0,
+        94.0,
+        104.0,
+        114.0,
+        124.0,
+        131.0,
+        141.0,
+        151.0,
+        161.0,
+        132.0,
+        142.0,
+        152.0,
+        162.0,
+        171.0,
+        181.0,
+        191.0,
+        201.0,
+        172.0,
+        182.0,
+        192.0,
+        202.0,
+        211.0,
+        221.0,
+        231.0,
+        241.0,
+        212.0,
+        222.0,
+        232.0,
+        242.0,
+        133.0,
+        143.0,
+        153.0,
+        163.0,
+        134.0,
+        144.0,
+        154.0,
+        164.0,
+        173.0,
+        183.0,
+        193.0,
+        203.0,
+        174.0,
+        184.0,
+        194.0,
+        204.0,
+        213.0,
+        223.0,
+        233.0,
+        243.0,
+        214.0,
+        224.0,
+        234.0,
+        244.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "sum_f32_rank2_axis0_keepdims",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1,
+        4
+      ],
+      "values": [
+        15.0,
+        18.0,
+        21.0,
+        24.0
+      ],
+      "dtype": "float32"
+    },
+    {
+      "id": "prod_all_no_keepdims",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        720.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "prod_axis1_keepdims",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        1
+      ],
+      "values": [
+        6.0,
+        120.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "prod_i32_promotes_to_i64",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        120.0
+      ],
+      "dtype": "int64"
+    },
+    {
+      "id": "min_all_no_keepdims",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "min_axis0_no_keepdims",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        3
+      ],
+      "values": [
+        1.5,
+        1.0,
+        2.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "min_i32_preserves_dtype",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "int32"
+    },
+    {
+      "id": "max_all_no_keepdims",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        5.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "max_axis1_keepdims",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        1
+      ],
+      "values": [
+        4.0,
+        5.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "max_bool_preserves_dtype",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "bool"
+    },
+    {
+      "id": "mean_all_no_keepdims",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        3.5
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "mean_axis1_no_keepdims",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2
+      ],
+      "values": [
+        2.0,
+        5.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "mean_i32_promotes_to_f64",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        2.5
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "mean_axis0_keepdims_3d",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1,
+        3,
+        2
+      ],
+      "values": [
+        4.0,
+        5.0,
+        6.0,
+        7.0,
+        8.0,
+        9.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "abs_mixed_signs",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        3.0,
+        1.0,
+        4.0,
+        1.5,
+        5.0,
+        0.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "abs_i32_preserves_dtype",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        4
+      ],
+      "values": [
+        2.0,
+        0.0,
+        3.0,
+        7.0
+      ],
+      "dtype": "int32"
+    },
+    {
+      "id": "negative_mixed_values",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        -1.0,
+        2.0,
+        -0.0,
+        -3.5,
+        4.5,
+        -100.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "sign_mixed_values",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        -1.0,
+        0.0,
+        1.0,
+        -1.0,
+        0.0,
+        1.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "sqrt_positive_values",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        0.0,
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+        5.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "square_mixed_values",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        4.0,
+        0.0,
+        9.0,
+        2.25,
+        16.0,
+        25.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "square_f32_preserves_dtype",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        4
+      ],
+      "values": [
+        1.0,
+        4.0,
+        9.0,
+        16.0
+      ],
+      "dtype": "float32"
+    },
+    {
+      "id": "exp_positive_values",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        1.0,
+        2.718281828459045,
+        7.38905609893065,
+        0.36787944117144233,
+        1.6487212707001282,
+        0.6065306597126334
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "log_positive_values",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        0.0,
+        1.0,
+        0.0,
+        2.302585092994046,
+        4.605170185988092,
+        -0.6931471805599453
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "log2_powers_of_two",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        4
+      ],
+      "values": [
+        0.0,
+        1.0,
+        2.0,
+        3.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "log10_powers_of_ten",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        4
+      ],
+      "values": [
+        0.0,
+        1.0,
+        2.0,
+        3.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "sin_key_angles",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        4
+      ],
+      "values": [
+        0.0,
+        1.0,
+        1.2246467991473532e-16,
+        -2.4492935982947064e-16
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "cos_key_angles",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        4
+      ],
+      "values": [
+        1.0,
+        6.123233995736766e-17,
+        -1.0,
+        1.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "tan_small_angles",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        4
+      ],
+      "values": [
+        0.0,
+        0.25534192122103627,
+        0.5463024898437905,
+        0.9315964599440724
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "power_float_exponents",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        8.0,
+        9.0,
+        2.0,
+        1.0,
+        10.0,
+        0.25
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "power_broadcast_2x3_by_1",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        1.0,
+        4.0,
+        9.0,
+        16.0,
+        25.0,
+        36.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "remainder_sign_follows_divisor",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        4
+      ],
+      "values": [
+        1.0,
+        2.0,
+        -2.0,
+        -1.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "remainder_broadcast_2x3_by_3",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        1.0,
+        3.0,
+        2.0,
+        1.0,
+        2.0,
+        0.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "minimum_elementwise",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        1.0,
+        2.0,
+        3.0,
+        1.0,
+        2.0,
+        3.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "minimum_broadcast_2x3_by_scalar",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        1.0,
+        4.0,
+        3.0,
+        4.0,
+        2.0,
+        4.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "maximum_elementwise",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        4.0,
+        5.0,
+        6.0,
+        7.0,
+        9.0,
+        8.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "maximum_broadcast_2x3_by_scalar",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        4.0,
+        5.0,
+        4.0,
+        7.0,
+        4.0,
+        8.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "floor_mixed_values",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        1.0,
+        -2.0,
+        2.0,
+        -3.0,
+        0.0,
+        3.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "ceil_mixed_values",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        2.0,
+        -1.0,
+        3.0,
+        -2.0,
+        0.0,
+        4.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "round_bankers_rounding",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        0.0,
+        2.0,
+        2.0,
+        4.0,
+        4.0,
+        -0.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "round_general_values",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        2.0,
+        -2.0,
+        2.0,
+        -2.0,
+        0.0,
+        100.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "reciprocal_positive_values",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        1.0,
+        0.5,
+        0.25,
+        2.0,
+        4.0,
+        0.1
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "reciprocal_mixed_signs",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        4
+      ],
+      "values": [
+        -0.5,
+        2.0,
+        -4.0,
+        0.125
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "sinh_mixed_values",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        0.0,
+        1.1752011936438014,
+        -1.1752011936438014,
+        3.626860407847019,
+        -3.626860407847019,
+        0.5210953054937474
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "cosh_mixed_values",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        1.0,
+        1.5430806348152435,
+        1.5430806348152435,
+        3.7621956910836314,
+        3.7621956910836314,
+        1.1276259652063807
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "tanh_mixed_values",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        0.0,
+        0.7615941559557649,
+        -0.7615941559557649,
+        0.9640275800758168,
+        -0.9640275800758168,
+        0.46211715726000974
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "arcsin_valid_range",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        0.0,
+        0.5235987755982989,
+        1.5707963267948966,
+        -0.5235987755982989,
+        -1.5707963267948966,
+        0.25268025514207865
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "arccos_valid_range",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        1.5707963267948966,
+        1.047197551196598,
+        0.0,
+        2.0943951023931957,
+        3.141592653589793,
+        1.318116071652818
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "arctan_mixed_values",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        0.0,
+        0.7853981633974483,
+        -0.7853981633974483,
+        1.4711276743037347,
+        -1.4711276743037347,
+        0.4636476090008061
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "arctan2_quadrants",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        4
+      ],
+      "values": [
+        0.7853981633974483,
+        -0.7853981633974483,
+        -2.356194490192345,
+        2.356194490192345
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "arctan2_broadcast_2x3_by_1",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        0.7853981633974483,
+        0.0,
+        -0.7853981633974483,
+        0.0,
+        0.7853981633974483,
+        -0.7853981633974483
+      ],
+      "dtype": "float64"
     }
   ]
 }

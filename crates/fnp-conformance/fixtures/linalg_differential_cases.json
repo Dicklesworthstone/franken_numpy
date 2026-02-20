@@ -369,5 +369,175 @@
     "qr_mode": "r",
     "expected_q_present": false,
     "expected_tolerance": 1e-9
+  },
+  {
+    "id": "linalg_solve_2x2_identity",
+    "operation": "solve_2x2",
+    "seed": 8222,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "matrix": [
+      [1.0, 0.0],
+      [0.0, 1.0]
+    ],
+    "rhs": [7.0, 11.0],
+    "expected_solution": [7.0, 11.0]
+  },
+  {
+    "id": "linalg_solve_2x2_upper_triangular",
+    "operation": "solve_2x2",
+    "seed": 8223,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "matrix": [
+      [4.0, 2.0],
+      [0.0, 3.0]
+    ],
+    "rhs": [14.0, 9.0],
+    "expected_solution": [2.0, 3.0]
+  },
+  {
+    "id": "linalg_qr_shapes_reduced_square_4x4",
+    "operation": "qr_shapes",
+    "seed": 8224,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [4, 4],
+    "qr_mode": "reduced",
+    "expected_q_shape": [4, 4],
+    "expected_r_shape": [4, 4]
+  },
+  {
+    "id": "linalg_qr_shapes_complete_tall_8x3",
+    "operation": "qr_shapes",
+    "seed": 8225,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [8, 3],
+    "qr_mode": "complete",
+    "expected_q_shape": [8, 8],
+    "expected_r_shape": [8, 3]
+  },
+  {
+    "id": "linalg_svd_shapes_reduced_square_5x5",
+    "operation": "svd_shapes",
+    "seed": 8226,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [5, 5],
+    "full_matrices": false,
+    "converged": true,
+    "expected_u_shape": [5, 5],
+    "expected_s_shape": [5],
+    "expected_vh_shape": [5, 5]
+  },
+  {
+    "id": "linalg_svd_shapes_full_2x7",
+    "operation": "svd_shapes",
+    "seed": 8227,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [2, 7],
+    "full_matrices": true,
+    "converged": true,
+    "expected_u_shape": [2, 2],
+    "expected_s_shape": [2],
+    "expected_vh_shape": [7, 7]
+  },
+  {
+    "id": "linalg_spectral_lower_converged",
+    "operation": "spectral_branch",
+    "seed": 8228,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "uplo": "L",
+    "converged": true
+  },
+  {
+    "id": "linalg_tolerance_policy_zero_rcond_low_depth",
+    "operation": "tolerance_policy",
+    "seed": 8229,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "rcond": 0.0,
+    "search_depth": 1
+  },
+  {
+    "id": "linalg_backend_bridge_zero_retries",
+    "operation": "backend_bridge",
+    "seed": 8230,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "backend_supported": true,
+    "validation_retries": 0
+  },
+  {
+    "id": "linalg_policy_metadata_strict_low_risk",
+    "operation": "policy_metadata",
+    "seed": 8231,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "mode_raw": "strict",
+    "class_raw": "known_compatible_low_risk"
   }
 ]

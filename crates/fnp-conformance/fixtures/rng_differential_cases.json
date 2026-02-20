@@ -200,5 +200,121 @@
     ],
     "reason_code": "rng_policy_unknown_metadata",
     "expected_reason_code": "rng_policy_unknown_metadata"
+  },
+  {
+    "id": "rng_same_seed_stream_minimal_witness",
+    "operation": "same_seed_stream",
+    "seed": 7015,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_differential_cases.json"
+    ],
+    "reason_code": "random_seed_determinism_contract",
+    "expected_reason_code": "random_seed_determinism_contract",
+    "draws": 1
+  },
+  {
+    "id": "rng_different_seed_diverges_large_gap_witness",
+    "operation": "different_seed_diverges",
+    "seed": 7016,
+    "alt_seed": 999999999,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_differential_cases.json"
+    ],
+    "reason_code": "random_stream_divergence_contract",
+    "expected_reason_code": "random_stream_divergence_contract",
+    "draws": 64
+  },
+  {
+    "id": "rng_jump_ahead_equivalence_single_step_witness",
+    "operation": "jump_ahead_equivalence",
+    "seed": 7017,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_differential_cases.json"
+    ],
+    "reason_code": "random_jump_ahead_contract",
+    "expected_reason_code": "random_jump_ahead_contract",
+    "steps": 1
+  },
+  {
+    "id": "rng_state_restore_replay_large_prefix_witness",
+    "operation": "state_restore_replay",
+    "seed": 7018,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_differential_cases.json"
+    ],
+    "reason_code": "random_state_restore_contract",
+    "expected_reason_code": "random_state_restore_contract",
+    "prefix_draws": 2048,
+    "replay_draws": 128
+  },
+  {
+    "id": "rng_bounded_u64_grid_large_upper_bound_witness",
+    "operation": "bounded_u64_grid",
+    "seed": 7020,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_differential_cases.json"
+    ],
+    "reason_code": "random_bounded_output_contract",
+    "expected_reason_code": "random_bounded_output_contract",
+    "upper_bound": 1000000,
+    "draws": 256
+  },
+  {
+    "id": "rng_next_f64_unit_interval_hardened_witness",
+    "operation": "next_f64_unit_interval",
+    "seed": 7021,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_differential_cases.json"
+    ],
+    "reason_code": "random_float_range_contract",
+    "expected_reason_code": "random_float_range_contract",
+    "draws": 512
+  },
+  {
+    "id": "rng_fill_len_large_contract_witness",
+    "operation": "fill_len_contract",
+    "seed": 7022,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_differential_cases.json"
+    ],
+    "reason_code": "random_fill_length_contract",
+    "expected_reason_code": "random_fill_length_contract",
+    "fill_len": 4096
+  },
+  {
+    "id": "rng_policy_metadata_hardened_high_risk_contract",
+    "operation": "policy_metadata",
+    "seed": 7023,
+    "mode": "hardened",
+    "mode_raw": "hardened",
+    "class_raw": "known_compatible_high_risk",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_differential_cases.json"
+    ],
+    "reason_code": "rng_policy_unknown_metadata",
+    "expected_reason_code": "rng_policy_unknown_metadata"
   }
 ]

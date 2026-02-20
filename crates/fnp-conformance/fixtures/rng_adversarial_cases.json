@@ -144,5 +144,533 @@
       "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
     ],
     "reason_code": "rng_policy_unknown_metadata"
+  },
+  {
+    "id": "rng_jump_budget_exactly_at_limit_guardrail",
+    "operation": "jump_budget_exceeded",
+    "expected_error_contains": "jump operations exceeded bounded budget",
+    "expected_reason_code": "rng_jump_contract_violation",
+    "severity": "high",
+    "seed": 7212,
+    "steps": 4096,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_jump_contract_violation"
+  },
+  {
+    "id": "rng_state_schema_massive_budget_exceeded",
+    "operation": "state_schema_budget_exceeded",
+    "expected_error_contains": "state schema entries exceeded bounded budget",
+    "expected_reason_code": "rng_state_schema_invalid",
+    "severity": "critical",
+    "seed": 7213,
+    "steps": 100000,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_state_schema_invalid"
+  },
+  {
+    "id": "rng_forced_witness_mismatch_minimal_draws",
+    "operation": "forced_repro_witness_mismatch",
+    "expected_error_contains": "reproducibility witness mismatch",
+    "expected_reason_code": "rng_reproducibility_witness_failed",
+    "severity": "medium",
+    "seed": 7214,
+    "alt_seed": 7215,
+    "draws": 1,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_reproducibility_witness_failed"
+  },
+  {
+    "id": "rng_policy_metadata_unknown_strict",
+    "operation": "policy_metadata_unknown",
+    "expected_error_contains": "unknown mode/class metadata rejected fail-closed",
+    "expected_reason_code": "rng_policy_unknown_metadata",
+    "severity": "high",
+    "seed": 7216,
+    "mode": "strict",
+    "mode_raw": "strict",
+    "class_raw": "fictional_class_xyz",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_policy_unknown_metadata"
+  },
+  {
+    "id": "rng_policy_metadata_unknown_mode",
+    "operation": "policy_metadata_unknown",
+    "expected_error_contains": "unknown mode/class metadata rejected fail-closed",
+    "expected_reason_code": "rng_policy_unknown_metadata",
+    "severity": "high",
+    "seed": 7217,
+    "mode": "hardened",
+    "mode_raw": "turbo_mode",
+    "class_raw": "known_compatible",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_policy_unknown_metadata"
+  },
+  {
+    "id": "rng_forced_witness_mismatch_large_seed_gap",
+    "operation": "forced_repro_witness_mismatch",
+    "expected_error_contains": "reproducibility witness mismatch",
+    "expected_reason_code": "rng_reproducibility_witness_failed",
+    "severity": "medium",
+    "seed": 0,
+    "alt_seed": 18446744073709551615,
+    "draws": 32,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_reproducibility_witness_failed"
+  },
+  {
+    "id": "rng_jump_massive_budget_exceeded",
+    "operation": "jump_budget_exceeded",
+    "expected_error_contains": "jump operations exceeded bounded budget",
+    "expected_reason_code": "rng_jump_contract_violation",
+    "severity": "high",
+    "seed": 7218,
+    "steps": 999999,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_jump_contract_violation"
+  },
+  {
+    "id": "rng_bounded_zero_rejected_hardened",
+    "operation": "bounded_zero_rejected",
+    "expected_error_contains": "upper_bound must be > 0",
+    "expected_reason_code": "random_upper_bound_rejected",
+    "severity": "high",
+    "seed": 7219,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "random_upper_bound_rejected"
+  },
+  {
+    "id": "rng_policy_metadata_both_unknown",
+    "operation": "policy_metadata_unknown",
+    "expected_error_contains": "unknown mode/class metadata rejected fail-closed",
+    "expected_reason_code": "rng_policy_unknown_metadata",
+    "severity": "critical",
+    "seed": 7220,
+    "mode": "strict",
+    "mode_raw": "experimental",
+    "class_raw": "experimental_class",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_policy_unknown_metadata"
+  },
+  {
+    "id": "rng_forced_witness_mismatch_adjacent_seeds",
+    "operation": "forced_repro_witness_mismatch",
+    "expected_error_contains": "reproducibility witness mismatch",
+    "expected_reason_code": "rng_reproducibility_witness_failed",
+    "severity": "medium",
+    "seed": 7221,
+    "alt_seed": 7222,
+    "draws": 256,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_reproducibility_witness_failed"
+  },
+  {
+    "id": "rng_seedsequence_empty_entropy",
+    "operation": "seedsequence_empty_entropy",
+    "expected_error_contains": "seed sequence state generation contract violated",
+    "expected_reason_code": "rng_seedsequence_generate_state_failed",
+    "severity": "critical",
+    "seed": 7223,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_seedsequence_generate_state_failed"
+  },
+  {
+    "id": "rng_seedsequence_pool_size_zero",
+    "operation": "seedsequence_pool_size_invalid",
+    "expected_error_contains": "seed sequence state generation contract violated",
+    "expected_reason_code": "rng_seedsequence_generate_state_failed",
+    "severity": "critical",
+    "seed": 7224,
+    "pool_size": 0,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_seedsequence_generate_state_failed"
+  },
+  {
+    "id": "rng_seedsequence_pool_size_exceeded",
+    "operation": "seedsequence_pool_size_invalid",
+    "expected_error_contains": "seed sequence state generation contract violated",
+    "expected_reason_code": "rng_seedsequence_generate_state_failed",
+    "severity": "critical",
+    "seed": 7225,
+    "pool_size": 257,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_seedsequence_generate_state_failed"
+  },
+  {
+    "id": "rng_seedsequence_generate_state_word_limit",
+    "operation": "seedsequence_generate_state_exceeded",
+    "expected_error_contains": "seed sequence state generation contract violated",
+    "expected_reason_code": "rng_seedsequence_generate_state_failed",
+    "severity": "high",
+    "seed": 7226,
+    "words": 1048577,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_seedsequence_generate_state_failed"
+  },
+  {
+    "id": "rng_seedsequence_spawn_zero_children",
+    "operation": "seedsequence_spawn_invalid",
+    "expected_error_contains": "seed sequence spawn contract violated",
+    "expected_reason_code": "rng_seedsequence_spawn_contract_violation",
+    "severity": "critical",
+    "seed": 7227,
+    "spawn_count": 0,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_seedsequence_spawn_contract_violation"
+  },
+  {
+    "id": "rng_seedsequence_spawn_exceeded",
+    "operation": "seedsequence_spawn_invalid",
+    "expected_error_contains": "seed sequence spawn contract violated",
+    "expected_reason_code": "rng_seedsequence_spawn_contract_violation",
+    "severity": "critical",
+    "seed": 7228,
+    "spawn_count": 4097,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_seedsequence_spawn_contract_violation"
+  },
+  {
+    "id": "rng_bitgenerator_jump_zero",
+    "operation": "bitgenerator_jump_invalid",
+    "expected_error_contains": "jump count exceeded bounded packet-007 policy limits",
+    "expected_reason_code": "rng_jump_contract_violation",
+    "severity": "high",
+    "seed": 7229,
+    "steps": 0,
+    "kind": "pcg64",
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_jump_contract_violation"
+  },
+  {
+    "id": "rng_bitgenerator_jump_exceeded",
+    "operation": "bitgenerator_jump_invalid",
+    "expected_error_contains": "jump count exceeded bounded packet-007 policy limits",
+    "expected_reason_code": "rng_jump_contract_violation",
+    "severity": "high",
+    "seed": 7230,
+    "steps": 1025,
+    "kind": "mt19937",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_jump_contract_violation"
+  },
+  {
+    "id": "rng_bitgenerator_spawn_zero",
+    "operation": "bitgenerator_spawn_invalid",
+    "expected_error_contains": "bit-generator spawn request violated packet-007 child bounds",
+    "expected_reason_code": "rng_seedsequence_spawn_contract_violation",
+    "severity": "high",
+    "seed": 7231,
+    "spawn_count": 0,
+    "kind": "philox",
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_seedsequence_spawn_contract_violation"
+  },
+  {
+    "id": "rng_bitgenerator_spawn_exceeded",
+    "operation": "bitgenerator_spawn_invalid",
+    "expected_error_contains": "bit-generator spawn request violated packet-007 child bounds",
+    "expected_reason_code": "rng_seedsequence_spawn_contract_violation",
+    "severity": "high",
+    "seed": 7232,
+    "spawn_count": 4097,
+    "kind": "sfc64",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_seedsequence_spawn_contract_violation"
+  },
+  {
+    "id": "rng_bitgenerator_state_kind_mismatch",
+    "operation": "bitgenerator_state_kind_mismatch",
+    "expected_error_contains": "bit-generator state kind does not match target algorithm",
+    "expected_reason_code": "rng_state_schema_invalid",
+    "severity": "critical",
+    "seed": 7233,
+    "kind": "pcg64",
+    "mode_raw": "mt19937",
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_state_schema_invalid"
+  },
+  {
+    "id": "rng_bitgenerator_state_schema_version_bad",
+    "operation": "bitgenerator_state_schema_version_invalid",
+    "expected_error_contains": "bit-generator state schema version is unsupported",
+    "expected_reason_code": "rng_state_schema_invalid",
+    "severity": "critical",
+    "seed": 7234,
+    "steps": 99,
+    "kind": "pcg64",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_state_schema_invalid"
+  },
+  {
+    "id": "rng_seedsequence_generate_state_exceeded_hardened",
+    "operation": "seedsequence_generate_state_exceeded",
+    "expected_error_contains": "seed sequence state generation contract violated",
+    "expected_reason_code": "rng_seedsequence_generate_state_failed",
+    "severity": "high",
+    "seed": 7235,
+    "words": 1048577,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_seedsequence_generate_state_failed"
+  },
+  {
+    "id": "rng_seedsequence_spawn_exceeded_strict",
+    "operation": "seedsequence_spawn_invalid",
+    "expected_error_contains": "seed sequence spawn contract violated",
+    "expected_reason_code": "rng_seedsequence_spawn_contract_violation",
+    "severity": "critical",
+    "seed": 7236,
+    "spawn_count": 4097,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_seedsequence_spawn_contract_violation"
+  },
+  {
+    "id": "rng_bitgenerator_jump_exceeded_philox",
+    "operation": "bitgenerator_jump_invalid",
+    "expected_error_contains": "jump count exceeded bounded packet-007 policy limits",
+    "expected_reason_code": "rng_jump_contract_violation",
+    "severity": "high",
+    "seed": 7237,
+    "steps": 1025,
+    "kind": "philox",
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_jump_contract_violation"
+  },
+  {
+    "id": "rng_bitgenerator_jump_exceeded_sfc64",
+    "operation": "bitgenerator_jump_invalid",
+    "expected_error_contains": "jump count exceeded bounded packet-007 policy limits",
+    "expected_reason_code": "rng_jump_contract_violation",
+    "severity": "high",
+    "seed": 7238,
+    "steps": 2048,
+    "kind": "sfc64",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_jump_contract_violation"
+  },
+  {
+    "id": "rng_bitgenerator_state_kind_mismatch_mt_philox",
+    "operation": "bitgenerator_state_kind_mismatch",
+    "expected_error_contains": "bit-generator state kind does not match target algorithm",
+    "expected_reason_code": "rng_state_schema_invalid",
+    "severity": "critical",
+    "seed": 7239,
+    "kind": "mt19937",
+    "mode_raw": "philox",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_state_schema_invalid"
+  },
+  {
+    "id": "rng_bitgenerator_state_kind_mismatch_sfc_pcg",
+    "operation": "bitgenerator_state_kind_mismatch",
+    "expected_error_contains": "bit-generator state kind does not match target algorithm",
+    "expected_reason_code": "rng_state_schema_invalid",
+    "severity": "critical",
+    "seed": 7240,
+    "kind": "sfc64",
+    "mode_raw": "pcg64",
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_state_schema_invalid"
+  },
+  {
+    "id": "rng_bitgenerator_state_schema_version_bad_strict",
+    "operation": "bitgenerator_state_schema_version_invalid",
+    "expected_error_contains": "bit-generator state schema version is unsupported",
+    "expected_reason_code": "rng_state_schema_invalid",
+    "severity": "critical",
+    "seed": 7241,
+    "steps": 99,
+    "kind": "mt19937",
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_state_schema_invalid"
+  },
+  {
+    "id": "rng_seedsequence_pool_size_boundary_strict",
+    "operation": "seedsequence_pool_size_invalid",
+    "expected_error_contains": "seed sequence state generation contract violated",
+    "expected_reason_code": "rng_seedsequence_generate_state_failed",
+    "severity": "critical",
+    "seed": 7242,
+    "pool_size": 257,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_seedsequence_generate_state_failed"
+  },
+  {
+    "id": "rng_seedsequence_spawn_massive",
+    "operation": "seedsequence_spawn_invalid",
+    "expected_error_contains": "seed sequence spawn contract violated",
+    "expected_reason_code": "rng_seedsequence_spawn_contract_violation",
+    "severity": "critical",
+    "seed": 7243,
+    "spawn_count": 100000,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_seedsequence_spawn_contract_violation"
+  },
+  {
+    "id": "rng_policy_metadata_empty_class",
+    "operation": "policy_metadata_unknown",
+    "expected_error_contains": "unknown mode/class metadata rejected fail-closed",
+    "expected_reason_code": "rng_policy_unknown_metadata",
+    "severity": "high",
+    "seed": 7244,
+    "mode": "strict",
+    "mode_raw": "strict",
+    "class_raw": "",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_policy_unknown_metadata"
   }
 ]

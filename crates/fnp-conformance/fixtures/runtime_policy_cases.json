@@ -58,5 +58,125 @@
       "artifacts/contracts/hardened_mode_allowlist_v1.yaml"
     ],
     "reason_code": "known_incompatible"
+  },
+  {
+    "id": "hardened_compatible_low_risk_allow",
+    "mode": "hardened",
+    "class": "known_compatible",
+    "risk_score": 0.3,
+    "threshold": 0.7,
+    "expected_action": "allow",
+    "seed": 105,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md",
+      "artifacts/contracts/security_control_checks_v1.yaml"
+    ],
+    "reason_code": "hardened_below_threshold"
+  },
+  {
+    "id": "hardened_unknown_fail_closed",
+    "mode": "hardened",
+    "class": "unknown",
+    "risk_score": 0.5,
+    "threshold": 0.7,
+    "expected_action": "fail_closed",
+    "seed": 106,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md",
+      "artifacts/contracts/hardened_mode_allowlist_v1.yaml"
+    ],
+    "reason_code": "unknown_metadata_version"
+  },
+  {
+    "id": "strict_incompatible_fail_closed",
+    "mode": "strict",
+    "class": "known_incompatible",
+    "risk_score": 0.8,
+    "threshold": 0.7,
+    "expected_action": "fail_closed",
+    "seed": 107,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md",
+      "artifacts/contracts/hardened_mode_allowlist_v1.yaml"
+    ],
+    "reason_code": "known_incompatible"
+  },
+  {
+    "id": "hardened_compatible_boundary_validate",
+    "mode": "hardened",
+    "class": "known_compatible",
+    "risk_score": 0.7,
+    "threshold": 0.7,
+    "expected_action": "full_validate",
+    "seed": 108,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md",
+      "artifacts/contracts/security_control_checks_v1.yaml"
+    ],
+    "reason_code": "hardened_risk_escalation"
+  },
+  {
+    "id": "hardened_compatible_just_below_threshold",
+    "mode": "hardened",
+    "class": "known_compatible",
+    "risk_score": 0.69,
+    "threshold": 0.7,
+    "expected_action": "allow",
+    "seed": 109,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md",
+      "artifacts/contracts/security_control_checks_v1.yaml"
+    ],
+    "reason_code": "hardened_below_threshold"
+  },
+  {
+    "id": "strict_compatible_high_risk_still_allow",
+    "mode": "strict",
+    "class": "known_compatible",
+    "risk_score": 0.99,
+    "threshold": 0.7,
+    "expected_action": "allow",
+    "seed": 110,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md",
+      "artifacts/contracts/security_control_checks_v1.yaml"
+    ],
+    "reason_code": "strict_ignores_risk"
+  },
+  {
+    "id": "hardened_incompatible_high_risk_fail_closed",
+    "mode": "hardened",
+    "class": "known_incompatible",
+    "risk_score": 0.99,
+    "threshold": 0.7,
+    "expected_action": "fail_closed",
+    "seed": 111,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md",
+      "artifacts/contracts/hardened_mode_allowlist_v1.yaml"
+    ],
+    "reason_code": "known_incompatible"
+  },
+  {
+    "id": "strict_unknown_high_risk_fail_closed",
+    "mode": "strict",
+    "class": "unknown",
+    "risk_score": 0.99,
+    "threshold": 0.7,
+    "expected_action": "fail_closed",
+    "seed": 112,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md",
+      "artifacts/contracts/hardened_mode_allowlist_v1.yaml"
+    ],
+    "reason_code": "unknown_metadata_version"
   }
 ]

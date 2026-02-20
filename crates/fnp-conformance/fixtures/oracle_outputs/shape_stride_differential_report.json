@@ -1,7 +1,7 @@
 {
   "suite": "shape_stride_differential",
-  "total_cases": 14,
-  "passed_cases": 14,
+  "total_cases": 20,
+  "passed_cases": 20,
   "failed_cases": 0,
   "mismatches": []
 }

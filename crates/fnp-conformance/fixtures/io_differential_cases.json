@@ -306,5 +306,162 @@
     "expected_error_contains": "payload prefix does not map to allowed npy/npz/pickle branch",
     "payload_prefix": [1, 2, 3, 4, 5],
     "allow_pickle": false
+  },
+  {
+    "id": "io_magic_version_v1_golden",
+    "operation": "magic_version",
+    "seed": 9930,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_magic_contract",
+    "expected_reason_code": "io_magic_contract",
+    "payload_prefix": [147, 78, 85, 77, 80, 89, 1, 0],
+    "expected_magic_version": "1.0"
+  },
+  {
+    "id": "io_header_schema_1d_f64_golden",
+    "operation": "header_schema",
+    "seed": 9931,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_header_schema_contract",
+    "expected_reason_code": "io_header_schema_contract",
+    "shape": [10],
+    "fortran_order": false,
+    "dtype_descr": "<f8",
+    "header_len": 128
+  },
+  {
+    "id": "io_header_schema_4d_i64_golden",
+    "operation": "header_schema",
+    "seed": 9932,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_header_schema_contract",
+    "expected_reason_code": "io_header_schema_contract",
+    "shape": [2, 3, 4, 5],
+    "fortran_order": false,
+    "dtype_descr": "<i8",
+    "header_len": 256
+  },
+  {
+    "id": "io_dtype_decode_f32_golden",
+    "operation": "dtype_decode",
+    "seed": 9933,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_dtype_descriptor_contract",
+    "expected_reason_code": "io_dtype_descriptor_contract",
+    "dtype_descr": "<f4"
+  },
+  {
+    "id": "io_dtype_decode_i32_golden",
+    "operation": "dtype_decode",
+    "seed": 9934,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_dtype_descriptor_contract",
+    "expected_reason_code": "io_dtype_descriptor_contract",
+    "dtype_descr": "<i4"
+  },
+  {
+    "id": "io_dtype_decode_i64_golden",
+    "operation": "dtype_decode",
+    "seed": 9935,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_dtype_descriptor_contract",
+    "expected_reason_code": "io_dtype_descriptor_contract",
+    "dtype_descr": "<i8"
+  },
+  {
+    "id": "io_read_payload_i32_matrix_golden",
+    "operation": "read_payload",
+    "seed": 9936,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_read_payload_contract",
+    "expected_reason_code": "io_read_payload_contract",
+    "shape": [3, 4],
+    "dtype_descr": "<i4",
+    "payload_len_bytes": 48,
+    "expected_count": 12
+  },
+  {
+    "id": "io_memmap_contract_write_plus_golden",
+    "operation": "memmap_contract",
+    "seed": 9937,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_memmap_contract",
+    "expected_reason_code": "io_memmap_contract",
+    "memmap_mode": "w+",
+    "dtype_descr": "<f8",
+    "file_len_bytes": 2048,
+    "expected_bytes": 512,
+    "validation_retries": 0
+  },
+  {
+    "id": "io_npz_archive_budget_single_member_golden",
+    "operation": "npz_archive_budget",
+    "seed": 9938,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_npz_archive_contract",
+    "expected_reason_code": "io_npz_archive_contract",
+    "member_count": 1,
+    "uncompressed_bytes": 512,
+    "dispatch_retries": 0
+  },
+  {
+    "id": "io_policy_metadata_hardened_incompatible_golden",
+    "operation": "policy_metadata",
+    "seed": 9939,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_policy_metadata_contract",
+    "expected_reason_code": "io_policy_metadata_contract",
+    "mode_raw": "hardened",
+    "class_raw": "known_incompatible_semantics"
   }
 ]

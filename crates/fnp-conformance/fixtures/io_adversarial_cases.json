@@ -277,5 +277,272 @@
     "reason_code": "io_policy_unknown_metadata",
     "mode_raw": "hardened",
     "class_raw": "legacy_semantics"
+  },
+  {
+    "id": "io_magic_empty_prefix",
+    "operation": "magic_version",
+    "expected_error_contains": "invalid or unsupported npy/npz magic/version",
+    "expected_reason_code": "io_magic_invalid",
+    "severity": "high",
+    "seed": 918,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_magic_invalid",
+    "payload_prefix": []
+  },
+  {
+    "id": "io_magic_valid_prefix_bad_version",
+    "operation": "magic_version",
+    "expected_error_contains": "invalid or unsupported npy/npz magic/version",
+    "expected_reason_code": "io_magic_invalid",
+    "severity": "high",
+    "seed": 919,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_magic_invalid",
+    "payload_prefix": [147, 78, 85, 77, 80, 89, 99, 99]
+  },
+  {
+    "id": "io_header_schema_negative_dimension",
+    "operation": "header_schema",
+    "expected_error_contains": "shape rank exceeds packet validation budget",
+    "expected_reason_code": "io_header_schema_invalid",
+    "severity": "high",
+    "seed": 920,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_header_schema_invalid",
+    "shape": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    "fortran_order": true,
+    "dtype_descr": "<i4",
+    "header_len": 128
+  },
+  {
+    "id": "io_dtype_descriptor_structured_rejected",
+    "operation": "dtype_decode",
+    "expected_error_contains": "dtype descriptor is invalid or unsupported",
+    "expected_reason_code": "io_dtype_descriptor_invalid",
+    "severity": "medium",
+    "seed": 921,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/test_logging_contract_v1.json",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_dtype_descriptor_invalid",
+    "dtype_descr": "<U10"
+  },
+  {
+    "id": "io_payload_zero_bytes",
+    "operation": "read_payload",
+    "expected_error_contains": "payload bytes must exactly match expected shape/dtype footprint",
+    "expected_reason_code": "io_read_payload_incomplete",
+    "severity": "high",
+    "seed": 922,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/unit_property_evidence.json"
+    ],
+    "reason_code": "io_read_payload_incomplete",
+    "shape": [3],
+    "dtype_descr": "<f8",
+    "payload_len_bytes": 0
+  },
+  {
+    "id": "io_memmap_unknown_mode",
+    "operation": "memmap_contract",
+    "expected_error_contains": "invalid memmap mode token",
+    "expected_reason_code": "io_memmap_contract_violation",
+    "severity": "high",
+    "seed": 923,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_memmap_contract_violation",
+    "memmap_mode": "x",
+    "dtype_descr": "<f8",
+    "file_len_bytes": 4096,
+    "expected_bytes": 1024,
+    "validation_retries": 0
+  },
+  {
+    "id": "io_npz_archive_member_count_massive",
+    "operation": "npz_archive_budget",
+    "expected_error_contains": "archive member count is outside bounded limits",
+    "expected_reason_code": "io_npz_archive_contract_violation",
+    "severity": "critical",
+    "seed": 924,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_npz_archive_contract_violation",
+    "member_count": 999999,
+    "uncompressed_bytes": 1024,
+    "dispatch_retries": 0
+  },
+  {
+    "id": "io_policy_both_unknown_fail_closed",
+    "operation": "policy_metadata",
+    "expected_error_contains": "unknown mode/class metadata rejected fail-closed",
+    "expected_reason_code": "io_policy_unknown_metadata",
+    "severity": "critical",
+    "seed": 925,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/contracts/hardened_mode_allowlist_v1.yaml"
+    ],
+    "reason_code": "io_policy_unknown_metadata",
+    "mode_raw": "experimental_mode",
+    "class_raw": "alien_class"
+  },
+  {
+    "id": "io_header_schema_massive_header_len",
+    "operation": "header_schema",
+    "expected_error_contains": "header bytes must be within bounded budget",
+    "expected_reason_code": "io_header_schema_invalid",
+    "severity": "high",
+    "seed": 926,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_header_schema_invalid",
+    "shape": [2, 2],
+    "fortran_order": false,
+    "dtype_descr": "<f8",
+    "header_len": 10000000
+  },
+  {
+    "id": "io_dtype_descriptor_empty_string",
+    "operation": "dtype_decode",
+    "expected_error_contains": "dtype descriptor is invalid or unsupported",
+    "expected_reason_code": "io_dtype_descriptor_invalid",
+    "severity": "medium",
+    "seed": 927,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/test_logging_contract_v1.json",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_dtype_descriptor_invalid",
+    "dtype_descr": ""
+  },
+  {
+    "id": "io_memmap_file_smaller_than_expected",
+    "operation": "memmap_contract",
+    "expected_error_contains": "object dtype is invalid for memmap path",
+    "expected_reason_code": "io_memmap_contract_violation",
+    "severity": "high",
+    "seed": 928,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_memmap_contract_violation",
+    "memmap_mode": "r",
+    "dtype_descr": "|O",
+    "file_len_bytes": 512,
+    "expected_bytes": 4096,
+    "validation_retries": 0
+  },
+  {
+    "id": "io_load_dispatch_single_byte_prefix",
+    "operation": "load_dispatch",
+    "expected_error_contains": "payload prefix does not map to allowed npy/npz/pickle branch",
+    "expected_reason_code": "io_load_dispatch_invalid",
+    "severity": "medium",
+    "seed": 929,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_load_dispatch_invalid",
+    "payload_prefix": [255],
+    "allow_pickle": false
+  },
+  {
+    "id": "io_magic_version_almost_valid_prefix",
+    "operation": "magic_version",
+    "expected_error_contains": "invalid or unsupported npy/npz magic/version",
+    "expected_reason_code": "io_magic_invalid",
+    "severity": "high",
+    "seed": 930,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_magic_invalid",
+    "payload_prefix": [147, 78, 85, 77, 80, 89, 0, 0]
+  },
+  {
+    "id": "io_header_schema_rank_budget_exceeded_fortran_40d",
+    "operation": "header_schema",
+    "expected_error_contains": "shape rank exceeds packet validation budget",
+    "expected_reason_code": "io_header_schema_invalid",
+    "severity": "high",
+    "seed": 931,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_header_schema_invalid",
+    "shape": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    "fortran_order": true,
+    "dtype_descr": "<f4",
+    "header_len": 256
+  },
+  {
+    "id": "io_memmap_contract_file_zero_bytes",
+    "operation": "memmap_contract",
+    "expected_error_contains": "object dtype is invalid for memmap path",
+    "expected_reason_code": "io_memmap_contract_violation",
+    "severity": "high",
+    "seed": 932,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_memmap_contract_violation",
+    "memmap_mode": "r",
+    "dtype_descr": "|O",
+    "file_len_bytes": 0,
+    "expected_bytes": 1024,
+    "validation_retries": 0
+  },
+  {
+    "id": "io_dtype_descriptor_complex_rejected",
+    "operation": "dtype_decode",
+    "expected_error_contains": "dtype descriptor is invalid or unsupported",
+    "expected_reason_code": "io_dtype_descriptor_invalid",
+    "severity": "medium",
+    "seed": 933,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/test_logging_contract_v1.json",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_dtype_descriptor_invalid",
+    "dtype_descr": "<c16"
   }
 ]
