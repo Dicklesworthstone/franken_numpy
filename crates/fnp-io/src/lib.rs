@@ -1189,9 +1189,9 @@ mod tests {
             read_npy_bytes(&extra_key_bytes, false).expect_err("extra key must be rejected");
         assert_eq!(extra_key_err.reason_code(), "io_header_schema_invalid");
 
-        let singleton_without_comma =
-            "{'descr': '<i4', 'fortran_order': False, 'shape': (2), }";
-        let singleton_without_comma_bytes = make_manual_npy_payload(singleton_without_comma, &payload);
+        let singleton_without_comma = "{'descr': '<i4', 'fortran_order': False, 'shape': (2), }";
+        let singleton_without_comma_bytes =
+            make_manual_npy_payload(singleton_without_comma, &payload);
         let singleton_err = read_npy_bytes(&singleton_without_comma_bytes, false)
             .expect_err("singleton tuple without trailing comma must be rejected");
         assert_eq!(singleton_err.reason_code(), "io_header_schema_invalid");
