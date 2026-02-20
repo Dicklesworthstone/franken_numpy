@@ -8,6 +8,9 @@ pub const DEFAULT_SEED_SEQUENCE_POOL_SIZE: usize = 4;
 pub const MAX_SEED_SEQUENCE_POOL_SIZE: usize = 256;
 pub const MAX_SEED_SEQUENCE_CHILDREN: usize = 4096;
 pub const MAX_SEED_SEQUENCE_WORDS: usize = 1_048_576;
+pub const MAX_RNG_JUMP_OPERATIONS: u64 = 1024;
+pub const MAX_RNG_STATE_SCHEMA_FIELDS: usize = 4096;
+pub const BIT_GENERATOR_STATE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RandomRuntimeMode {
@@ -139,6 +142,82 @@ impl std::fmt::Display for SeedSequenceError {
 impl std::error::Error for SeedSequenceError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BitGeneratorKind {
+    Mt19937,
+    Pcg64,
+    Philox,
+    Sfc64,
+}
+
+impl BitGeneratorKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Mt19937 => "mt19937",
+            Self::Pcg64 => "pcg64",
+            Self::Philox => "philox",
+            Self::Sfc64 => "sfc64",
+        }
+    }
+
+    #[must_use]
+    const fn stream_tag(self) -> u64 {
+        match self {
+            Self::Mt19937 => 0x4D54_3139_3937_u64,
+            Self::Pcg64 => 0x5043_4736_3400_u64,
+            Self::Philox => 0x5048_494C_4F58_u64,
+            Self::Sfc64 => 0x5346_4336_3400_u64,
+        }
+    }
+
+    #[must_use]
+    const fn jump_stride(self) -> u64 {
+        match self {
+            Self::Mt19937 => 128,
+            Self::Pcg64 => 256,
+            Self::Philox => 512,
+            Self::Sfc64 => 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BitGeneratorError {
+    GeneratorBindingInvalid(&'static str),
+    InitFailed(&'static str),
+    JumpContractViolation(&'static str),
+    StateSchemaInvalid(&'static str),
+    PickleStateMismatch(&'static str),
+}
+
+impl BitGeneratorError {
+    #[must_use]
+    pub const fn reason_code(self) -> &'static str {
+        match self {
+            Self::GeneratorBindingInvalid(_) => "rng_generator_binding_invalid",
+            Self::InitFailed(_) => "rng_bitgenerator_init_failed",
+            Self::JumpContractViolation(_) => "rng_jump_contract_violation",
+            Self::StateSchemaInvalid(_) => "rng_state_schema_invalid",
+            Self::PickleStateMismatch(_) => "rng_pickle_state_mismatch",
+        }
+    }
+}
+
+impl std::fmt::Display for BitGeneratorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::GeneratorBindingInvalid(msg)
+            | Self::InitFailed(msg)
+            | Self::JumpContractViolation(msg)
+            | Self::StateSchemaInvalid(msg)
+            | Self::PickleStateMismatch(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for BitGeneratorError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeterministicRng {
     stream_seed: u64,
     counter: u64,
@@ -225,6 +304,15 @@ impl SeedSequence {
         spawn_key: &[u32],
         pool_size: usize,
     ) -> Result<Self, SeedSequenceError> {
+        Self::with_spawn_key_and_counter(entropy, spawn_key, pool_size, 0)
+    }
+
+    fn with_spawn_key_and_counter(
+        entropy: &[u32],
+        spawn_key: &[u32],
+        pool_size: usize,
+        spawn_counter: u64,
+    ) -> Result<Self, SeedSequenceError> {
         if entropy.is_empty() || pool_size == 0 || pool_size > MAX_SEED_SEQUENCE_POOL_SIZE {
             return Err(SeedSequenceError::GenerateStateContractViolation);
         }
@@ -233,7 +321,7 @@ impl SeedSequence {
             entropy: entropy.to_vec(),
             spawn_key: spawn_key.to_vec(),
             pool_size,
-            spawn_counter: 0,
+            spawn_counter,
         })
     }
 
@@ -257,6 +345,25 @@ impl SeedSequence {
         self.spawn_counter
     }
 
+    #[must_use]
+    pub fn snapshot(&self) -> SeedSequenceSnapshot {
+        SeedSequenceSnapshot {
+            entropy: self.entropy.clone(),
+            spawn_key: self.spawn_key.clone(),
+            pool_size: self.pool_size,
+            spawn_counter: self.spawn_counter,
+        }
+    }
+
+    pub fn from_snapshot(snapshot: &SeedSequenceSnapshot) -> Result<Self, SeedSequenceError> {
+        Self::with_spawn_key_and_counter(
+            &snapshot.entropy,
+            &snapshot.spawn_key,
+            snapshot.pool_size,
+            snapshot.spawn_counter,
+        )
+    }
+
     pub fn generate_state_u32(&self, words: usize) -> Result<Vec<u32>, SeedSequenceError> {
         if words > MAX_SEED_SEQUENCE_WORDS {
             return Err(SeedSequenceError::GenerateStateContractViolation);
@@ -273,8 +380,8 @@ impl SeedSequence {
 
         let mut generated = Vec::with_capacity(words);
         for idx in 0..words {
-            let idx_u64 =
-                u64::try_from(idx).map_err(|_| SeedSequenceError::GenerateStateContractViolation)?;
+            let idx_u64 = u64::try_from(idx)
+                .map_err(|_| SeedSequenceError::GenerateStateContractViolation)?;
             state = splitmix64(state.wrapping_add((idx_u64 + 1).wrapping_mul(GOLDEN_GAMMA)));
             let bytes = state.to_le_bytes();
             generated.push(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
@@ -301,16 +408,364 @@ impl SeedSequence {
             let bytes = child_counter.to_le_bytes();
             child_spawn_key.push(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
             child_spawn_key.push(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]));
-            children.push(Self {
-                entropy: self.entropy.clone(),
-                spawn_key: child_spawn_key,
-                pool_size: self.pool_size,
-                spawn_counter: 0,
-            });
+            children.push(Self::with_spawn_key_and_counter(
+                &self.entropy,
+                &child_spawn_key,
+                self.pool_size,
+                0,
+            )?);
         }
 
         self.spawn_counter = end;
         Ok(children)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeedSequenceSnapshot {
+    pub entropy: Vec<u32>,
+    pub spawn_key: Vec<u32>,
+    pub pool_size: usize,
+    pub spawn_counter: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BitGeneratorState {
+    pub kind: BitGeneratorKind,
+    pub schema_version: u32,
+    pub seed: u64,
+    pub counter: u64,
+    pub schema_entries: Vec<(String, u64)>,
+}
+
+impl BitGeneratorState {
+    fn validate(&self) -> Result<(), BitGeneratorError> {
+        if self.schema_version != BIT_GENERATOR_STATE_SCHEMA_VERSION {
+            return Err(BitGeneratorError::StateSchemaInvalid(
+                "bit-generator state schema version is unsupported",
+            ));
+        }
+
+        if self.schema_entries.is_empty() || self.schema_entries.len() > MAX_RNG_STATE_SCHEMA_FIELDS
+        {
+            return Err(BitGeneratorError::StateSchemaInvalid(
+                "bit-generator state schema entry count is invalid",
+            ));
+        }
+
+        let mut seen = std::collections::BTreeSet::new();
+        let mut stream_seed = None;
+        let mut counter = None;
+        let mut algorithm_tag = None;
+        let mut schema_version = None;
+
+        for (key, value) in &self.schema_entries {
+            let normalized = key.trim();
+            if normalized.is_empty() {
+                return Err(BitGeneratorError::StateSchemaInvalid(
+                    "bit-generator state schema key must not be empty",
+                ));
+            }
+            if !seen.insert(normalized.to_string()) {
+                return Err(BitGeneratorError::StateSchemaInvalid(
+                    "bit-generator state schema keys must be unique",
+                ));
+            }
+
+            match normalized {
+                "stream_seed" => stream_seed = Some(*value),
+                "counter" => counter = Some(*value),
+                "algorithm_tag" => algorithm_tag = Some(*value),
+                "schema_version" => schema_version = Some(*value),
+                _ => {}
+            }
+        }
+
+        if stream_seed != Some(self.seed) || counter != Some(self.counter) {
+            return Err(BitGeneratorError::StateSchemaInvalid(
+                "bit-generator state schema values do not match encoded state",
+            ));
+        }
+
+        if algorithm_tag != Some(self.kind.stream_tag()) {
+            return Err(BitGeneratorError::StateSchemaInvalid(
+                "bit-generator state algorithm tag mismatch",
+            ));
+        }
+
+        if schema_version != Some(u64::from(self.schema_version)) {
+            return Err(BitGeneratorError::StateSchemaInvalid(
+                "bit-generator state schema-version metadata mismatch",
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+fn default_state_schema_entries(
+    kind: BitGeneratorKind,
+    seed: u64,
+    counter: u64,
+) -> Vec<(String, u64)> {
+    vec![
+        ("stream_seed".to_string(), seed),
+        ("counter".to_string(), counter),
+        ("algorithm_tag".to_string(), kind.stream_tag()),
+        (
+            "schema_version".to_string(),
+            u64::from(BIT_GENERATOR_STATE_SCHEMA_VERSION),
+        ),
+    ]
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratorPicklePayload {
+    pub bit_generator_state: BitGeneratorState,
+    pub seed_sequence: Option<SeedSequenceSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BitGenerator {
+    kind: BitGeneratorKind,
+    rng: DeterministicRng,
+}
+
+impl BitGenerator {
+    pub fn new(kind: BitGeneratorKind, seed: SeedMaterial) -> Result<Self, BitGeneratorError> {
+        let (stream_seed, counter) = match seed {
+            SeedMaterial::State { seed, counter } => (seed, counter),
+            material => {
+                let rng = default_rng(material).map_err(|_| {
+                    BitGeneratorError::InitFailed(
+                        "bit-generator constructor rejected seed material",
+                    )
+                })?;
+                let (base_seed, base_counter) = rng.state();
+                (splitmix64(base_seed ^ kind.stream_tag()), base_counter)
+            }
+        };
+        Ok(Self {
+            kind,
+            rng: DeterministicRng::from_state(stream_seed, counter),
+        })
+    }
+
+    pub fn from_seed_sequence(
+        kind: BitGeneratorKind,
+        seed_sequence: &SeedSequence,
+    ) -> Result<Self, BitGeneratorError> {
+        let rng = generator_from_seed_sequence(seed_sequence).map_err(|_| {
+            BitGeneratorError::InitFailed("bit-generator constructor rejected SeedSequence state")
+        })?;
+        let (seed, counter) = rng.state();
+        Ok(Self {
+            kind,
+            rng: DeterministicRng::from_state(splitmix64(seed ^ kind.stream_tag()), counter),
+        })
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> BitGeneratorKind {
+        self.kind
+    }
+
+    fn raw_state(&self) -> (u64, u64) {
+        self.rng.state()
+    }
+
+    #[must_use]
+    pub fn next_u64(&mut self) -> u64 {
+        self.rng.next_u64()
+    }
+
+    #[must_use]
+    pub fn next_f64(&mut self) -> f64 {
+        self.rng.next_f64()
+    }
+
+    pub fn bounded_u64(&mut self, upper_bound: u64) -> Result<u64, RandomError> {
+        self.rng.bounded_u64(upper_bound)
+    }
+
+    #[must_use]
+    pub fn fill_u64(&mut self, len: usize) -> Vec<u64> {
+        self.rng.fill_u64(len)
+    }
+
+    pub fn jump_in_place(&mut self, jumps: u64) -> Result<(), BitGeneratorError> {
+        if jumps == 0 || jumps > MAX_RNG_JUMP_OPERATIONS {
+            return Err(BitGeneratorError::JumpContractViolation(
+                "jump count exceeded bounded packet-007 policy limits",
+            ));
+        }
+        let stride = self.kind.jump_stride();
+        let steps = jumps
+            .checked_mul(stride)
+            .ok_or(BitGeneratorError::JumpContractViolation(
+                "jump count overflowed deterministic step budget",
+            ))?;
+        self.rng.jump_ahead(steps);
+        Ok(())
+    }
+
+    pub fn jumped(&self, jumps: u64) -> Result<Self, BitGeneratorError> {
+        let mut jumped = self.clone();
+        jumped.jump_in_place(jumps)?;
+        Ok(jumped)
+    }
+
+    #[must_use]
+    pub fn state(&self) -> BitGeneratorState {
+        let (seed, counter) = self.raw_state();
+        BitGeneratorState {
+            kind: self.kind,
+            schema_version: BIT_GENERATOR_STATE_SCHEMA_VERSION,
+            seed,
+            counter,
+            schema_entries: default_state_schema_entries(self.kind, seed, counter),
+        }
+    }
+
+    pub fn set_state(&mut self, state: &BitGeneratorState) -> Result<(), BitGeneratorError> {
+        if state.kind != self.kind {
+            return Err(BitGeneratorError::StateSchemaInvalid(
+                "bit-generator state kind does not match target algorithm",
+            ));
+        }
+        state.validate()?;
+        self.rng = DeterministicRng::from_state(state.seed, state.counter);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratorFacade {
+    bit_generator: BitGenerator,
+    seed_sequence: Option<SeedSequence>,
+}
+
+impl GeneratorFacade {
+    #[must_use]
+    pub fn from_bit_generator(bit_generator: BitGenerator) -> Self {
+        Self {
+            bit_generator,
+            seed_sequence: None,
+        }
+    }
+
+    pub fn from_seed_sequence(
+        kind: BitGeneratorKind,
+        seed_sequence: &SeedSequence,
+    ) -> Result<Self, BitGeneratorError> {
+        let bit_generator = BitGenerator::from_seed_sequence(kind, seed_sequence)?;
+        Ok(Self {
+            bit_generator,
+            seed_sequence: Some(seed_sequence.clone()),
+        })
+    }
+
+    pub fn bind_seed_sequence(
+        bit_generator: BitGenerator,
+        seed_sequence: &SeedSequence,
+    ) -> Result<Self, BitGeneratorError> {
+        let expected = BitGenerator::from_seed_sequence(bit_generator.kind, seed_sequence)
+            .map_err(|_| {
+                BitGeneratorError::GeneratorBindingInvalid(
+                    "failed to derive deterministic bit-generator state for binding",
+                )
+            })?;
+        if expected.raw_state().0 != bit_generator.raw_state().0 {
+            return Err(BitGeneratorError::GeneratorBindingInvalid(
+                "bit-generator and seed-sequence deterministic identities diverge",
+            ));
+        }
+        Ok(Self {
+            bit_generator,
+            seed_sequence: Some(seed_sequence.clone()),
+        })
+    }
+
+    #[must_use]
+    pub fn bit_generator(&self) -> &BitGenerator {
+        &self.bit_generator
+    }
+
+    #[must_use]
+    pub fn next_u64(&mut self) -> u64 {
+        self.bit_generator.next_u64()
+    }
+
+    pub fn jump_in_place(&mut self, jumps: u64) -> Result<(), BitGeneratorError> {
+        self.bit_generator.jump_in_place(jumps)
+    }
+
+    pub fn jumped(&self, jumps: u64) -> Result<Self, BitGeneratorError> {
+        Ok(Self {
+            bit_generator: self.bit_generator.jumped(jumps)?,
+            seed_sequence: self.seed_sequence.clone(),
+        })
+    }
+
+    #[must_use]
+    pub fn state(&self) -> BitGeneratorState {
+        self.bit_generator.state()
+    }
+
+    pub fn set_state(&mut self, state: &BitGeneratorState) -> Result<(), BitGeneratorError> {
+        self.bit_generator.set_state(state)
+    }
+
+    #[must_use]
+    pub fn to_pickle_payload(&self) -> GeneratorPicklePayload {
+        GeneratorPicklePayload {
+            bit_generator_state: self.state(),
+            seed_sequence: self.seed_sequence.as_ref().map(SeedSequence::snapshot),
+        }
+    }
+
+    pub fn from_pickle_payload(payload: GeneratorPicklePayload) -> Result<Self, BitGeneratorError> {
+        let mut bit_generator = BitGenerator::new(
+            payload.bit_generator_state.kind,
+            SeedMaterial::State {
+                seed: payload.bit_generator_state.seed,
+                counter: payload.bit_generator_state.counter,
+            },
+        )
+        .map_err(|_| {
+            BitGeneratorError::PickleStateMismatch(
+                "pickle payload could not initialize bit-generator state",
+            )
+        })?;
+        bit_generator
+            .set_state(&payload.bit_generator_state)
+            .map_err(|_| {
+                BitGeneratorError::PickleStateMismatch(
+                    "pickle payload bit-generator state schema was invalid",
+                )
+            })?;
+
+        let seed_sequence = match payload.seed_sequence {
+            Some(snapshot) => Some(SeedSequence::from_snapshot(&snapshot).map_err(|_| {
+                BitGeneratorError::PickleStateMismatch(
+                    "pickle payload seed-sequence snapshot was invalid",
+                )
+            })?),
+            None => None,
+        };
+
+        if let Some(ref sequence) = seed_sequence {
+            return Self::bind_seed_sequence(bit_generator, sequence).map_err(|_| {
+                BitGeneratorError::PickleStateMismatch(
+                    "pickle payload seed-sequence binding was inconsistent",
+                )
+            });
+        }
+
+        Ok(Self {
+            bit_generator,
+            seed_sequence,
+        })
     }
 }
 
@@ -384,9 +839,12 @@ impl RandomLogRecord {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_RNG_SEED, DeterministicRng, MAX_SEED_SEQUENCE_CHILDREN, RANDOM_PACKET_REASON_CODES,
+        BIT_GENERATOR_STATE_SCHEMA_VERSION, BitGenerator, BitGeneratorError, BitGeneratorKind,
+        DEFAULT_RNG_SEED, DeterministicRng, GeneratorFacade, GeneratorPicklePayload,
+        MAX_RNG_JUMP_OPERATIONS, MAX_SEED_SEQUENCE_CHILDREN, RANDOM_PACKET_REASON_CODES,
         RNG_CORE_REASON_CODES, RandomError, RandomLogRecord, RandomRuntimeMode, SeedMaterial,
-        SeedSequence, SeedSequenceError, default_rng, generator_from_seed_sequence,
+        SeedSequence, SeedSequenceError, SeedSequenceSnapshot, default_rng,
+        generator_from_seed_sequence,
     };
 
     fn packet007_artifacts() -> Vec<String> {
@@ -476,7 +934,10 @@ mod tests {
         assert_eq!(first_children.len(), 2);
         assert_eq!(second_children.len(), 1);
         assert_ne!(first_children[0].spawn_key(), first_children[1].spawn_key());
-        assert_ne!(first_children[1].spawn_key(), second_children[0].spawn_key());
+        assert_ne!(
+            first_children[1].spawn_key(),
+            second_children[0].spawn_key()
+        );
     }
 
     #[test]
@@ -519,6 +980,141 @@ mod tests {
         for _ in 0..32 {
             assert_eq!(source.next_u64(), restored.next_u64());
         }
+    }
+
+    #[test]
+    fn bit_generator_constructor_is_deterministic_per_algorithm() {
+        let kinds = [
+            BitGeneratorKind::Mt19937,
+            BitGeneratorKind::Pcg64,
+            BitGeneratorKind::Philox,
+            BitGeneratorKind::Sfc64,
+        ];
+
+        for kind in kinds {
+            let mut lhs = BitGenerator::new(kind, SeedMaterial::U64(0xABCD_0123_u64)).expect("lhs");
+            let mut rhs = BitGenerator::new(kind, SeedMaterial::U64(0xABCD_0123_u64)).expect("rhs");
+            for _ in 0..64 {
+                assert_eq!(lhs.next_u64(), rhs.next_u64());
+            }
+        }
+    }
+
+    #[test]
+    fn bit_generator_kinds_do_not_alias_streams_for_same_seed() {
+        let mut mt = BitGenerator::new(BitGeneratorKind::Mt19937, SeedMaterial::U64(44))
+            .expect("mt generator");
+        let mut pcg = BitGenerator::new(BitGeneratorKind::Pcg64, SeedMaterial::U64(44))
+            .expect("pcg generator");
+        let diverged = (0..32).any(|_| mt.next_u64() != pcg.next_u64());
+        assert!(diverged);
+    }
+
+    #[test]
+    fn bit_generator_jump_and_state_contracts_hold() {
+        let source = BitGenerator::new(BitGeneratorKind::Philox, SeedMaterial::U64(71))
+            .expect("source generator");
+        let mut jumped = source.jumped(17).expect("jumped generator");
+        let mut stepped = source.clone();
+        stepped.jump_in_place(17).expect("stepped jump");
+        for _ in 0..32 {
+            assert_eq!(jumped.next_u64(), stepped.next_u64());
+        }
+
+        let zero_err = source
+            .jumped(0)
+            .expect_err("zero jump count must fail contract");
+        assert_eq!(zero_err.reason_code(), "rng_jump_contract_violation");
+        let too_many = source
+            .jumped(MAX_RNG_JUMP_OPERATIONS + 1)
+            .expect_err("jump count above packet cap must fail");
+        assert_eq!(too_many.reason_code(), "rng_jump_contract_violation");
+
+        let mut advanced = BitGenerator::new(BitGeneratorKind::Sfc64, SeedMaterial::U64(1234))
+            .expect("advanced generator");
+        for _ in 0..9 {
+            let _ = advanced.next_u64();
+        }
+        let state = advanced.state();
+        let mut restored =
+            BitGenerator::new(BitGeneratorKind::Sfc64, SeedMaterial::U64(1)).expect("restored");
+        restored.set_state(&state).expect("state roundtrip");
+        for _ in 0..32 {
+            assert_eq!(advanced.next_u64(), restored.next_u64());
+        }
+
+        let mut invalid = state.clone();
+        invalid.schema_entries.push(("".to_string(), 1));
+        let state_err = restored
+            .set_state(&invalid)
+            .expect_err("empty schema key must be rejected");
+        assert_eq!(state_err.reason_code(), "rng_state_schema_invalid");
+        assert_eq!(invalid.schema_version, BIT_GENERATOR_STATE_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn generator_facade_binding_and_pickle_roundtrip_contracts_hold() {
+        let sequence = SeedSequence::with_spawn_key(&[2, 4, 6], &[9], 8).expect("seed sequence");
+        let bit_generator = BitGenerator::new(BitGeneratorKind::Mt19937, SeedMaterial::U64(5))
+            .expect("mt generator");
+        let binding_err = GeneratorFacade::bind_seed_sequence(bit_generator, &sequence)
+            .expect_err("non-derived generator binding must fail closed");
+        assert_eq!(binding_err.reason_code(), "rng_generator_binding_invalid");
+
+        let mut facade = GeneratorFacade::from_seed_sequence(BitGeneratorKind::Philox, &sequence)
+            .expect("facade from seed-sequence");
+        facade.jump_in_place(3).expect("in-place jump");
+        for _ in 0..11 {
+            let _ = facade.next_u64();
+        }
+
+        let payload = facade.to_pickle_payload();
+        let mut restored =
+            GeneratorFacade::from_pickle_payload(payload).expect("pickle payload roundtrip");
+        for _ in 0..32 {
+            assert_eq!(facade.next_u64(), restored.next_u64());
+        }
+
+        let snapshot_state = restored.state();
+        let invalid_payload = GeneratorPicklePayload {
+            bit_generator_state: snapshot_state,
+            seed_sequence: Some(SeedSequenceSnapshot {
+                entropy: Vec::new(),
+                spawn_key: vec![1],
+                pool_size: 4,
+                spawn_counter: 0,
+            }),
+        };
+        let pickle_err = GeneratorFacade::from_pickle_payload(invalid_payload)
+            .expect_err("invalid seed-sequence snapshot must fail closed");
+        assert_eq!(pickle_err.reason_code(), "rng_pickle_state_mismatch");
+
+        let kind_label = restored.bit_generator().kind().as_str();
+        assert_eq!(kind_label, "philox");
+    }
+
+    #[test]
+    fn seed_sequence_snapshot_roundtrip_preserves_spawn_counter() {
+        let mut root = SeedSequence::new(&[10, 20, 30]).expect("seed sequence");
+        let _ = root.spawn(3).expect("spawn children");
+        let snapshot = root.snapshot();
+        let restored = SeedSequence::from_snapshot(&snapshot).expect("snapshot restore");
+        assert_eq!(restored.spawn_counter(), root.spawn_counter());
+        assert_eq!(restored.entropy(), root.entropy());
+        assert_eq!(restored.spawn_key(), root.spawn_key());
+    }
+
+    #[test]
+    fn bit_generator_error_reason_codes_match_contract_rows() {
+        let init_err = BitGenerator::new(
+            BitGeneratorKind::Mt19937,
+            SeedMaterial::U32Words(Vec::new()),
+        )
+        .expect_err("empty seed material must fail constructor");
+        assert_eq!(init_err.reason_code(), "rng_bitgenerator_init_failed");
+
+        let state_err = BitGeneratorError::StateSchemaInvalid("schema mismatch");
+        assert_eq!(state_err.reason_code(), "rng_state_schema_invalid");
     }
 
     #[test]
