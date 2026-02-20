@@ -70,6 +70,11 @@ pub enum BinaryOp {
     Ldexp,
     FloorDivide,
     FloatPower,
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
+    LeftShift,
+    RightShift,
 }
 
 impl BinaryOp {
@@ -273,6 +278,31 @@ impl BinaryOp {
                 }
             }
             Self::FloatPower => lhs.powf(rhs),
+            Self::BitwiseAnd => {
+                let a = lhs as i64;
+                let b = rhs as i64;
+                (a & b) as f64
+            }
+            Self::BitwiseOr => {
+                let a = lhs as i64;
+                let b = rhs as i64;
+                (a | b) as f64
+            }
+            Self::BitwiseXor => {
+                let a = lhs as i64;
+                let b = rhs as i64;
+                (a ^ b) as f64
+            }
+            Self::LeftShift => {
+                let a = lhs as i64;
+                let b = rhs as i64;
+                (a << (b & 63)) as f64
+            }
+            Self::RightShift => {
+                let a = lhs as i64;
+                let b = rhs as i64;
+                (a >> (b & 63)) as f64
+            }
         }
     }
 }
@@ -320,6 +350,7 @@ pub enum UnaryOp {
     Arccosh,
     Arcsinh,
     Arctanh,
+    Invert,
 }
 
 impl UnaryOp {
@@ -457,6 +488,10 @@ impl UnaryOp {
             Self::Arccosh => x.acosh(),
             Self::Arcsinh => x.asinh(),
             Self::Arctanh => x.atanh(),
+            Self::Invert => {
+                let a = x as i64;
+                (!a) as f64
+            }
         }
     }
 }
@@ -1084,29 +1119,35 @@ impl UFuncArray {
     pub fn reduce_argmin(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
         match axis {
             None => {
-                let idx = self
-                    .values
-                    .iter()
-                    .enumerate()
-                    .fold(
-                        (0usize, f64::INFINITY),
-                        |(min_idx, min_val), (idx, &val)| {
-                            if val < min_val {
-                                (idx, val)
-                            } else {
-                                (min_idx, min_val)
-                            }
-                        },
-                    )
-                    .0;
+                if self.values.is_empty() {
+                    return Err(UFuncError::EmptyReduction { op: "argmin" });
+                }
+                let mut min_idx = 0usize;
+                let mut min_val = self.values[0];
+                for (idx, &val) in self.values.iter().enumerate().skip(1) {
+                    if val.is_nan() {
+                        if !min_val.is_nan() {
+                            min_idx = idx;
+                            min_val = val;
+                        }
+                        continue;
+                    }
+                    if !min_val.is_nan() && val < min_val {
+                        min_idx = idx;
+                        min_val = val;
+                    }
+                }
                 Ok(Self {
                     shape: Vec::new(),
-                    values: vec![idx as f64],
+                    values: vec![min_idx as f64],
                     dtype: DType::I64,
                 })
             }
             Some(axis) => {
                 let axis = normalize_axis(axis, self.shape.len())?;
+                if self.shape[axis] == 0 {
+                    return Err(UFuncError::EmptyReduction { op: "argmin" });
+                }
                 let out_shape = reduced_shape(&self.shape, axis, false);
                 let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
                 let mut out_values = vec![0.0f64; out_count];
@@ -1132,29 +1173,35 @@ impl UFuncArray {
     pub fn reduce_argmax(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
         match axis {
             None => {
-                let idx = self
-                    .values
-                    .iter()
-                    .enumerate()
-                    .fold(
-                        (0usize, f64::NEG_INFINITY),
-                        |(max_idx, max_val), (idx, &val)| {
-                            if val > max_val {
-                                (idx, val)
-                            } else {
-                                (max_idx, max_val)
-                            }
-                        },
-                    )
-                    .0;
+                if self.values.is_empty() {
+                    return Err(UFuncError::EmptyReduction { op: "argmax" });
+                }
+                let mut max_idx = 0usize;
+                let mut max_val = self.values[0];
+                for (idx, &val) in self.values.iter().enumerate().skip(1) {
+                    if val.is_nan() {
+                        if !max_val.is_nan() {
+                            max_idx = idx;
+                            max_val = val;
+                        }
+                        continue;
+                    }
+                    if !max_val.is_nan() && val > max_val {
+                        max_idx = idx;
+                        max_val = val;
+                    }
+                }
                 Ok(Self {
                     shape: Vec::new(),
-                    values: vec![idx as f64],
+                    values: vec![max_idx as f64],
                     dtype: DType::I64,
                 })
             }
             Some(axis) => {
                 let axis = normalize_axis(axis, self.shape.len())?;
+                if self.shape[axis] == 0 {
+                    return Err(UFuncError::EmptyReduction { op: "argmax" });
+                }
                 let out_shape = reduced_shape(&self.shape, axis, false);
                 let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
                 let mut out_values = vec![0.0f64; out_count];
@@ -1180,6 +1227,7 @@ pub enum UFuncError {
     Shape(ShapeError),
     InvalidInputLength { expected: usize, actual: usize },
     AxisOutOfBounds { axis: isize, ndim: usize },
+    EmptyReduction { op: &'static str },
     SignatureConflict { sig: String, signature: String },
     SignatureParse { detail: String },
     FixedSignatureInvalid { detail: String },
@@ -1199,6 +1247,9 @@ impl std::fmt::Display for UFuncError {
             }
             Self::AxisOutOfBounds { axis, ndim } => {
                 write!(f, "axis {axis} out of bounds for ndim={ndim}")
+            }
+            Self::EmptyReduction { op } => {
+                write!(f, "attempt to get {op} of an empty sequence")
             }
             Self::SignatureConflict { sig, signature } => {
                 write!(
@@ -1231,6 +1282,7 @@ impl UFuncError {
             Self::Shape(_) => "ufunc_shape_contract_violation",
             Self::InvalidInputLength { .. } => "ufunc_invalid_input_length",
             Self::AxisOutOfBounds { .. } => "ufunc_axis_out_of_bounds",
+            Self::EmptyReduction { .. } => "ufunc_reduce_axis_contract",
             Self::SignatureConflict { .. } => "ufunc_signature_conflict",
             Self::SignatureParse { .. } => "ufunc_signature_parse_failed",
             Self::FixedSignatureInvalid { .. } => "ufunc_fixed_signature_invalid",
@@ -1597,8 +1649,14 @@ fn reduce_argfold_axis_contiguous(
             let mut best_idx = 0usize;
             offset += inner;
             for k in 1..axis_len {
-                if is_better(values[offset], best_val) {
-                    best_val = values[offset];
+                let cur = values[offset];
+                if cur.is_nan() {
+                    if !best_val.is_nan() {
+                        best_val = cur;
+                        best_idx = k;
+                    }
+                } else if !best_val.is_nan() && is_better(cur, best_val) {
+                    best_val = cur;
                     best_idx = k;
                 }
                 offset += inner;
@@ -3284,6 +3342,122 @@ mod tests {
         // first outer: col 0 max is 5.0 at row 1, col 1 max is 6.0 at row 2
         // second outer: col 0 max is 11.0 at row 2, col 1 max is 12.0 at row 2
         assert_eq!(out.values(), &[1.0, 2.0, 2.0, 2.0]);
+    }
+
+    #[test]
+    fn reduce_argmin_argmax_flat_select_first_nan_index() {
+        let arr = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 2.0], DType::F64).expect("arr");
+        let argmin = arr.reduce_argmin(None).expect("argmin");
+        let argmax = arr.reduce_argmax(None).expect("argmax");
+        assert_eq!(argmin.values(), &[1.0]);
+        assert_eq!(argmax.values(), &[1.0]);
+    }
+
+    #[test]
+    fn reduce_argmin_argmax_accept_negative_axis() {
+        let arr = UFuncArray::new(
+            vec![2, 3],
+            vec![5.0, 1.0, 3.0, 2.0, 4.0, 9.0],
+            DType::F64,
+        )
+        .expect("arr");
+        let argmin = arr.reduce_argmin(Some(-1)).expect("argmin axis=-1");
+        let argmax = arr.reduce_argmax(Some(-1)).expect("argmax axis=-1");
+        assert_eq!(argmin.shape(), &[2]);
+        assert_eq!(argmin.values(), &[1.0, 0.0]);
+        assert_eq!(argmax.shape(), &[2]);
+        assert_eq!(argmax.values(), &[0.0, 2.0]);
+    }
+
+    #[test]
+    fn reduce_argmin_rejects_empty_flattened_input() {
+        let arr = UFuncArray::new(vec![0], Vec::new(), DType::F64).expect("arr");
+        let err = arr.reduce_argmin(None).expect_err("argmin on empty should fail");
+        assert!(matches!(err, UFuncError::EmptyReduction { op: "argmin" }));
+        assert_eq!(err.reason_code(), "ufunc_reduce_axis_contract");
+    }
+
+    #[test]
+    fn reduce_argmax_rejects_zero_length_reduction_axis() {
+        let arr = UFuncArray::new(vec![2, 0], Vec::new(), DType::F64).expect("arr");
+        let err = arr
+            .reduce_argmax(Some(1))
+            .expect_err("argmax on zero-size axis should fail");
+        assert!(matches!(err, UFuncError::EmptyReduction { op: "argmax" }));
+        assert_eq!(err.reason_code(), "ufunc_reduce_axis_contract");
+    }
+
+    #[test]
+    fn reduce_argmin_allows_empty_outer_extent_when_axis_has_length() {
+        let arr = UFuncArray::new(vec![0, 2], Vec::new(), DType::F64).expect("arr");
+        let out = arr.reduce_argmin(Some(1)).expect("argmin axis=1");
+        assert_eq!(out.shape(), &[0]);
+        assert!(out.values().is_empty());
+    }
+
+    // ── bitwise operation tests ─────────────────────────────────────────
+
+    #[test]
+    fn binary_bitwise_and() {
+        // np.bitwise_and(12, 10) = 8
+        let a = UFuncArray::new(vec![3], vec![12.0, 255.0, 7.0], DType::I64).expect("a");
+        let b = UFuncArray::new(vec![3], vec![10.0, 15.0, 3.0], DType::I64).expect("b");
+        let out = a.elementwise_binary(&b, BinaryOp::BitwiseAnd).expect("ok");
+        assert_eq!(out.values(), &[8.0, 15.0, 3.0]);
+    }
+
+    #[test]
+    fn binary_bitwise_or() {
+        // np.bitwise_or(12, 10) = 14
+        let a = UFuncArray::new(vec![2], vec![12.0, 5.0], DType::I64).expect("a");
+        let b = UFuncArray::new(vec![2], vec![10.0, 3.0], DType::I64).expect("b");
+        let out = a.elementwise_binary(&b, BinaryOp::BitwiseOr).expect("ok");
+        assert_eq!(out.values(), &[14.0, 7.0]);
+    }
+
+    #[test]
+    fn binary_bitwise_xor() {
+        // np.bitwise_xor(12, 10) = 6
+        let a = UFuncArray::new(vec![2], vec![12.0, 255.0], DType::I64).expect("a");
+        let b = UFuncArray::new(vec![2], vec![10.0, 255.0], DType::I64).expect("b");
+        let out = a.elementwise_binary(&b, BinaryOp::BitwiseXor).expect("ok");
+        assert_eq!(out.values(), &[6.0, 0.0]);
+    }
+
+    #[test]
+    fn binary_left_shift() {
+        // np.left_shift(1, 4) = 16
+        let a = UFuncArray::new(vec![2], vec![1.0, 5.0], DType::I64).expect("a");
+        let b = UFuncArray::new(vec![2], vec![4.0, 2.0], DType::I64).expect("b");
+        let out = a.elementwise_binary(&b, BinaryOp::LeftShift).expect("ok");
+        assert_eq!(out.values(), &[16.0, 20.0]);
+    }
+
+    #[test]
+    fn binary_right_shift() {
+        // np.right_shift(16, 4) = 1
+        let a = UFuncArray::new(vec![2], vec![16.0, 20.0], DType::I64).expect("a");
+        let b = UFuncArray::new(vec![2], vec![4.0, 2.0], DType::I64).expect("b");
+        let out = a.elementwise_binary(&b, BinaryOp::RightShift).expect("ok");
+        assert_eq!(out.values(), &[1.0, 5.0]);
+    }
+
+    #[test]
+    fn unary_invert() {
+        // np.invert(0) = -1, np.invert(1) = -2, np.invert(-1) = 0
+        let a = UFuncArray::new(vec![3], vec![0.0, 1.0, -1.0], DType::I64).expect("a");
+        let out = a.elementwise_unary(UnaryOp::Invert);
+        assert_eq!(out.values(), &[-1.0, -2.0, 0.0]);
+    }
+
+    #[test]
+    fn bitwise_and_broadcast() {
+        // Scalar broadcast: np.bitwise_and([12, 7], 3) = [0, 3]
+        let a = UFuncArray::new(vec![2], vec![12.0, 7.0], DType::I64).expect("a");
+        let b = UFuncArray::new(vec![1], vec![3.0], DType::I64).expect("b");
+        let out = a.elementwise_binary(&b, BinaryOp::BitwiseAnd).expect("ok");
+        assert_eq!(out.shape(), &[2]);
+        assert_eq!(out.values(), &[0.0, 3.0]);
     }
 
     #[test]
