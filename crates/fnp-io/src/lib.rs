@@ -25,6 +25,7 @@ pub const IO_PACKET_REASON_CODES: [&str; 10] = [
     "io_npz_archive_contract_violation",
     "io_policy_unknown_metadata",
 ];
+const NPY_HEADER_REQUIRED_KEYS: [&str; 3] = ["descr", "fortran_order", "shape"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IORuntimeMode {
@@ -176,6 +177,13 @@ pub struct NpyHeader {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NpyArrayBytes {
+    pub version: (u8, u8),
+    pub header: NpyHeader,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IOLogRecord {
     pub ts_utc: String,
     pub suite_id: String,
@@ -240,6 +248,438 @@ fn element_count(shape: &[usize]) -> Result<usize, IOError> {
         .ok_or(IOError::HeaderSchemaInvalid(
             "shape element-count overflowed",
         ))
+}
+
+fn validate_npy_version(version: (u8, u8)) -> Result<(), IOError> {
+    if version == (1, 0) || version == (2, 0) || version == (3, 0) {
+        Ok(())
+    } else {
+        Err(IOError::MagicInvalid)
+    }
+}
+
+fn npy_length_field_size(version: (u8, u8)) -> Result<usize, IOError> {
+    match version {
+        (1, 0) => Ok(2),
+        (2, 0) | (3, 0) => Ok(4),
+        _ => Err(IOError::MagicInvalid),
+    }
+}
+
+fn format_shape_tuple(shape: &[usize]) -> String {
+    match shape {
+        [] => "()".to_string(),
+        [single] => format!("({single},)"),
+        _ => {
+            let joined = shape
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({joined},)")
+        }
+    }
+}
+
+fn encode_header_dict(header: &NpyHeader) -> String {
+    let fortran_order = if header.fortran_order {
+        "True"
+    } else {
+        "False"
+    };
+    let shape = format_shape_tuple(&header.shape);
+    format!(
+        "{{'descr': '{}', 'fortran_order': {fortran_order}, 'shape': {shape}, }}",
+        header.descr.descr()
+    )
+}
+
+fn encode_npy_header_bytes(header: &NpyHeader, version: (u8, u8)) -> Result<Vec<u8>, IOError> {
+    let length_field_size = npy_length_field_size(version)?;
+    let dictionary = encode_header_dict(header);
+    let dictionary_bytes = dictionary.as_bytes();
+    let prefix_len = NPY_MAGIC_PREFIX.len() + 2 + length_field_size;
+    let base_header_len =
+        dictionary_bytes
+            .len()
+            .checked_add(1)
+            .ok_or(IOError::HeaderSchemaInvalid(
+                "header bytes must be within bounded budget",
+            ))?;
+    let padding = (16 - ((prefix_len + base_header_len) % 16)) % 16;
+    let header_len = base_header_len
+        .checked_add(padding)
+        .ok_or(IOError::HeaderSchemaInvalid(
+            "header bytes must be within bounded budget",
+        ))?;
+    if header_len == 0 || header_len > MAX_HEADER_BYTES {
+        return Err(IOError::HeaderSchemaInvalid(
+            "header bytes must be within bounded budget",
+        ));
+    }
+
+    let mut header_bytes = Vec::with_capacity(header_len);
+    header_bytes.extend_from_slice(dictionary_bytes);
+    header_bytes.extend(std::iter::repeat_n(b' ', padding));
+    header_bytes.push(b'\n');
+    Ok(header_bytes)
+}
+
+fn write_npy_preamble(
+    buffer: &mut Vec<u8>,
+    version: (u8, u8),
+    header_len: usize,
+) -> Result<(), IOError> {
+    buffer.extend_from_slice(&NPY_MAGIC_PREFIX);
+    buffer.push(version.0);
+    buffer.push(version.1);
+    match version {
+        (1, 0) => {
+            let header_len = u16::try_from(header_len).map_err(|_| {
+                IOError::HeaderSchemaInvalid("version 1.0 header length exceeds u16 boundary")
+            })?;
+            buffer.extend_from_slice(&header_len.to_le_bytes());
+        }
+        (2, 0) | (3, 0) => {
+            let header_len = u32::try_from(header_len)
+                .map_err(|_| IOError::HeaderSchemaInvalid("header length exceeds u32 boundary"))?;
+            buffer.extend_from_slice(&header_len.to_le_bytes());
+        }
+        _ => return Err(IOError::MagicInvalid),
+    }
+    Ok(())
+}
+
+fn read_header_span(payload: &[u8], version: (u8, u8)) -> Result<(usize, usize), IOError> {
+    let length_field_size = npy_length_field_size(version)?;
+    let header_offset = NPY_MAGIC_PREFIX.len() + 2 + length_field_size;
+    let header_len = match version {
+        (1, 0) => {
+            if payload.len() < 10 {
+                return Err(IOError::HeaderSchemaInvalid(
+                    "payload truncated before v1 header length field",
+                ));
+            }
+            usize::from(u16::from_le_bytes([payload[8], payload[9]]))
+        }
+        (2, 0) | (3, 0) => {
+            if payload.len() < 12 {
+                return Err(IOError::HeaderSchemaInvalid(
+                    "payload truncated before v2/v3 header length field",
+                ));
+            }
+            let raw = u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]);
+            usize::try_from(raw).map_err(|_| {
+                IOError::HeaderSchemaInvalid("header length exceeds platform usize boundary")
+            })?
+        }
+        _ => return Err(IOError::MagicInvalid),
+    };
+
+    if header_len == 0 || header_len > MAX_HEADER_BYTES {
+        return Err(IOError::HeaderSchemaInvalid(
+            "header bytes must be within bounded budget",
+        ));
+    }
+    let end = header_offset
+        .checked_add(header_len)
+        .ok_or(IOError::HeaderSchemaInvalid(
+            "header offset/length overflowed",
+        ))?;
+    if payload.len() < end {
+        return Err(IOError::HeaderSchemaInvalid(
+            "payload truncated before declared header bytes",
+        ));
+    }
+
+    Ok((header_offset, header_len))
+}
+
+fn extract_after_key<'a>(dictionary: &'a str, key: &str) -> Result<&'a str, IOError> {
+    let single = format!("'{key}'");
+    let double = format!("\"{key}\"");
+    let key_start = dictionary
+        .find(&single)
+        .or_else(|| dictionary.find(&double))
+        .ok_or(IOError::HeaderSchemaInvalid(
+            "required header field is missing",
+        ))?;
+    let tail = &dictionary[key_start + single.len()..];
+    let tail = tail.trim_start();
+    let tail = tail.strip_prefix(':').ok_or(IOError::HeaderSchemaInvalid(
+        "header field is missing ':' separator",
+    ))?;
+    Ok(tail.trim_start())
+}
+
+fn parse_quoted_value(value: &str) -> Result<&str, IOError> {
+    let quote = value
+        .as_bytes()
+        .first()
+        .copied()
+        .ok_or(IOError::HeaderSchemaInvalid("header quoted value is empty"))?;
+    if quote != b'\'' && quote != b'"' {
+        return Err(IOError::HeaderSchemaInvalid(
+            "header quoted value must start with quote",
+        ));
+    }
+
+    let tail = &value[1..];
+    let end = tail
+        .find(char::from(quote))
+        .ok_or(IOError::HeaderSchemaInvalid(
+            "header quoted value missing closing quote",
+        ))?;
+    Ok(&tail[..end])
+}
+
+fn parse_shape_tuple(tuple_literal: &str) -> Result<Vec<usize>, IOError> {
+    let inner = tuple_literal.trim();
+    if inner.is_empty() {
+        return Ok(Vec::new());
+    }
+    let has_comma = inner.contains(',');
+
+    let mut shape = Vec::new();
+    let mut saw_non_empty = false;
+    for token in inner.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        saw_non_empty = true;
+        let dim = token
+            .parse::<usize>()
+            .map_err(|_| IOError::HeaderSchemaInvalid("shape tuple entries must be usize"))?;
+        shape.push(dim);
+    }
+
+    if !saw_non_empty {
+        return Err(IOError::HeaderSchemaInvalid(
+            "shape tuple contains no dimensions",
+        ));
+    }
+    if shape.len() == 1 && !has_comma {
+        return Err(IOError::HeaderSchemaInvalid(
+            "singleton shape tuples must include trailing comma",
+        ));
+    }
+
+    Ok(shape)
+}
+
+fn parse_header_keys(dictionary: &str) -> Result<Vec<String>, IOError> {
+    let bytes = dictionary.as_bytes();
+    let mut keys = Vec::new();
+    let mut idx = 0usize;
+
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        if byte != b'\'' && byte != b'"' {
+            idx += 1;
+            continue;
+        }
+
+        let quote = byte;
+        let start = idx + 1;
+        idx += 1;
+        while idx < bytes.len() {
+            let escaped = idx > start && bytes[idx - 1] == b'\\';
+            if bytes[idx] == quote && !escaped {
+                break;
+            }
+            idx += 1;
+        }
+        if idx >= bytes.len() {
+            return Err(IOError::HeaderSchemaInvalid(
+                "header key/value quote is not terminated",
+            ));
+        }
+
+        let token = &dictionary[start..idx];
+        idx += 1;
+
+        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx < bytes.len() && bytes[idx] == b':' {
+            if keys.iter().any(|existing| existing == token) {
+                return Err(IOError::HeaderSchemaInvalid(
+                    "header dictionary contains duplicate keys",
+                ));
+            }
+            keys.push(token.to_string());
+        }
+    }
+
+    Ok(keys)
+}
+
+fn parse_header_dictionary(header_bytes: &[u8], header_len: usize) -> Result<NpyHeader, IOError> {
+    let dictionary = std::str::from_utf8(header_bytes).map_err(|_| {
+        IOError::HeaderSchemaInvalid("header bytes must decode as utf-8/ascii dictionary")
+    })?;
+    let dictionary = dictionary.trim_end();
+    if !(dictionary.starts_with('{') && dictionary.ends_with('}')) {
+        return Err(IOError::HeaderSchemaInvalid(
+            "header dictionary must be wrapped in braces",
+        ));
+    }
+    let keys = parse_header_keys(dictionary)?;
+    if keys.len() != NPY_HEADER_REQUIRED_KEYS.len()
+        || NPY_HEADER_REQUIRED_KEYS
+            .iter()
+            .any(|required| !keys.iter().any(|key| key == required))
+    {
+        return Err(IOError::HeaderSchemaInvalid(
+            "header dictionary must contain exactly descr/fortran_order/shape keys",
+        ));
+    }
+
+    let descr_tail = extract_after_key(dictionary, "descr")?;
+    let descr_literal = parse_quoted_value(descr_tail)?;
+
+    let fortran_tail = extract_after_key(dictionary, "fortran_order")?;
+    let fortran_order = if fortran_tail.starts_with("True") {
+        true
+    } else if fortran_tail.starts_with("False") {
+        false
+    } else {
+        return Err(IOError::HeaderSchemaInvalid(
+            "fortran_order field must be True or False",
+        ));
+    };
+
+    let shape_tail = extract_after_key(dictionary, "shape")?;
+    let shape_tail = shape_tail
+        .strip_prefix('(')
+        .ok_or(IOError::HeaderSchemaInvalid(
+            "shape field must begin with tuple syntax",
+        ))?;
+    let shape_end = shape_tail.find(')').ok_or(IOError::HeaderSchemaInvalid(
+        "shape tuple missing closing ')'",
+    ))?;
+    let shape = parse_shape_tuple(&shape_tail[..shape_end])?;
+
+    validate_header_schema(&shape, fortran_order, descr_literal, header_len)
+}
+
+fn validate_object_write_payload(shape: &[usize], payload: &[u8]) -> Result<(), IOError> {
+    let expected_count = element_count(shape).map_err(|_| {
+        IOError::WriteContractViolation("failed to compute element count for object write path")
+    })?;
+    if expected_count == 0 {
+        if payload.is_empty() {
+            return Ok(());
+        }
+        return Err(IOError::WriteContractViolation(
+            "zero-sized object payload must be empty",
+        ));
+    }
+    if payload.is_empty() {
+        return Err(IOError::WriteContractViolation(
+            "object dtype payload requires explicit pickle byte stream",
+        ));
+    }
+    if payload.first().copied() != Some(0x80) {
+        return Err(IOError::WriteContractViolation(
+            "object dtype payload must start with pickle protocol marker",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_object_read_payload(shape: &[usize], payload: &[u8]) -> Result<(), IOError> {
+    let expected_count = element_count(shape)
+        .map_err(|_| IOError::ReadPayloadIncomplete("failed to compute expected element count"))?;
+    if expected_count == 0 {
+        if payload.is_empty() {
+            return Ok(());
+        }
+        return Err(IOError::ReadPayloadIncomplete(
+            "zero-sized object payload must be empty",
+        ));
+    }
+    if payload.is_empty() {
+        return Err(IOError::ReadPayloadIncomplete(
+            "object dtype payload requires explicit pickle byte stream",
+        ));
+    }
+    if payload.first().copied() != Some(0x80) {
+        return Err(IOError::ReadPayloadIncomplete(
+            "object dtype payload must start with pickle protocol marker",
+        ));
+    }
+    Ok(())
+}
+
+pub fn write_npy_bytes(
+    header: &NpyHeader,
+    payload: &[u8],
+    allow_pickle: bool,
+) -> Result<Vec<u8>, IOError> {
+    write_npy_bytes_with_version(header, payload, (1, 0), allow_pickle)
+}
+
+pub fn write_npy_bytes_with_version(
+    header: &NpyHeader,
+    payload: &[u8],
+    version: (u8, u8),
+    allow_pickle: bool,
+) -> Result<Vec<u8>, IOError> {
+    validate_npy_version(version)?;
+    enforce_pickle_policy(header.descr, allow_pickle)?;
+    if header.descr == IOSupportedDType::Object {
+        validate_object_write_payload(&header.shape, payload)?;
+    } else {
+        let item_size = header
+            .descr
+            .item_size()
+            .ok_or(IOError::WriteContractViolation(
+                "object dtype requires explicit pickle/object encode path",
+            ))?;
+        if !payload.len().is_multiple_of(item_size) {
+            return Err(IOError::WriteContractViolation(
+                "payload bytes must align with dtype item size",
+            ));
+        }
+        let value_count = payload.len() / item_size;
+        let _ = validate_write_contract(&header.shape, value_count, header.descr)?;
+    }
+
+    let header_bytes = encode_npy_header_bytes(header, version)?;
+    let mut encoded = Vec::with_capacity(
+        NPY_MAGIC_PREFIX.len()
+            + 2
+            + npy_length_field_size(version)?
+            + header_bytes.len()
+            + payload.len(),
+    );
+    write_npy_preamble(&mut encoded, version, header_bytes.len())?;
+    encoded.extend_from_slice(&header_bytes);
+    encoded.extend_from_slice(payload);
+    Ok(encoded)
+}
+
+pub fn read_npy_bytes(payload: &[u8], allow_pickle: bool) -> Result<NpyArrayBytes, IOError> {
+    let version = validate_magic_version(payload)?;
+    let (header_offset, header_len) = read_header_span(payload, version)?;
+    let header_end = header_offset + header_len;
+    let header = parse_header_dictionary(&payload[header_offset..header_end], header_len)?;
+    let body = &payload[header_end..];
+
+    enforce_pickle_policy(header.descr, allow_pickle)?;
+    if header.descr == IOSupportedDType::Object {
+        validate_object_read_payload(&header.shape, body)?;
+    } else {
+        let _ = validate_read_payload(&header.shape, body.len(), header.descr)?;
+    }
+
+    Ok(NpyArrayBytes {
+        version,
+        header,
+        payload: body.to_vec(),
+    })
 }
 
 pub fn validate_magic_version(payload: &[u8]) -> Result<(u8, u8), IOError> {
@@ -490,10 +930,12 @@ mod tests {
         IO_PACKET_ID, IO_PACKET_REASON_CODES, IOError, IOLogRecord, IORuntimeMode,
         IOSupportedDType, LoadDispatch, MAX_ARCHIVE_MEMBERS, MAX_DISPATCH_RETRIES,
         MAX_HEADER_BYTES, MAX_MEMMAP_VALIDATION_RETRIES, MemmapMode, NPY_MAGIC_PREFIX,
-        NPZ_MAGIC_PREFIX, classify_load_dispatch, enforce_pickle_policy,
-        synthesize_npz_member_names, validate_descriptor_roundtrip, validate_header_schema,
-        validate_io_policy_metadata, validate_magic_version, validate_memmap_contract,
-        validate_npz_archive_budget, validate_read_payload, validate_write_contract,
+        NPZ_MAGIC_PREFIX, NpyHeader, classify_load_dispatch, encode_npy_header_bytes,
+        enforce_pickle_policy, read_npy_bytes, synthesize_npz_member_names,
+        validate_descriptor_roundtrip, validate_header_schema, validate_io_policy_metadata,
+        validate_magic_version, validate_memmap_contract, validate_npz_archive_budget,
+        validate_read_payload, validate_write_contract, write_npy_bytes,
+        write_npy_bytes_with_version, write_npy_preamble,
     };
 
     fn packet009_artifacts() -> Vec<String> {
@@ -501,6 +943,18 @@ mod tests {
             "artifacts/phase2c/FNP-P2C-009/contract_table.md".to_string(),
             "artifacts/phase2c/FNP-P2C-009/unit_property_evidence.json".to_string(),
         ]
+    }
+
+    fn make_manual_npy_payload(header_literal: &str, body: &[u8]) -> Vec<u8> {
+        let mut header_bytes = header_literal.as_bytes().to_vec();
+        if !header_bytes.ends_with(b"\n") {
+            header_bytes.push(b'\n');
+        }
+        let mut encoded = Vec::new();
+        write_npy_preamble(&mut encoded, (1, 0), header_bytes.len()).expect("preamble");
+        encoded.extend_from_slice(&header_bytes);
+        encoded.extend_from_slice(body);
+        encoded
     }
 
     #[test]
@@ -615,6 +1069,169 @@ mod tests {
         let long = validate_read_payload(&[2, 3], 7 * 8, IOSupportedDType::F64)
             .expect_err("extra trailing bytes");
         assert_eq!(long.reason_code(), "io_read_payload_incomplete");
+    }
+
+    #[test]
+    fn npy_bytes_roundtrip_preserves_header_and_payload() {
+        let header = NpyHeader {
+            shape: vec![2, 2],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let payload = [1.0_f64, 2.0_f64, 3.0_f64, 4.0_f64]
+            .into_iter()
+            .flat_map(f64::to_le_bytes)
+            .collect::<Vec<_>>();
+
+        let encoded = write_npy_bytes(&header, &payload, false).expect("encode npy bytes");
+        let decoded = read_npy_bytes(&encoded, false).expect("decode npy bytes");
+        assert_eq!(decoded.version, (1, 0));
+        assert_eq!(decoded.header, header);
+        assert_eq!(decoded.payload, payload);
+    }
+
+    #[test]
+    fn npy_writer_rejects_payload_item_size_misalignment() {
+        let header = NpyHeader {
+            shape: vec![1],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let err = write_npy_bytes(&header, &[0u8; 7], false)
+            .expect_err("payload bytes must align with item size");
+        assert_eq!(err.reason_code(), "io_write_contract_violation");
+    }
+
+    #[test]
+    fn npy_reader_rejects_payload_count_mismatch() {
+        let header = NpyHeader {
+            shape: vec![2, 2],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let payload = vec![0u8; 4 * 8];
+        let mut encoded = write_npy_bytes(&header, &payload, false).expect("encode");
+        let _ = encoded.pop();
+
+        let err = read_npy_bytes(&encoded, false).expect_err("payload footprint mismatch");
+        assert_eq!(err.reason_code(), "io_read_payload_incomplete");
+    }
+
+    #[test]
+    fn npy_reader_rejects_truncated_header_region() {
+        let header = NpyHeader {
+            shape: vec![2, 2],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let payload = vec![0u8; 4 * 8];
+        let mut encoded = write_npy_bytes(&header, &payload, false).expect("encode");
+        encoded[8] = 0xFF;
+        encoded[9] = 0x7F;
+        encoded.truncate(64);
+
+        let err = read_npy_bytes(&encoded, false).expect_err("declared header exceeds payload");
+        assert_eq!(err.reason_code(), "io_header_schema_invalid");
+    }
+
+    #[test]
+    fn npy_object_dtype_is_policy_gated_on_read() {
+        let header = NpyHeader {
+            shape: vec![1],
+            fortran_order: false,
+            descr: IOSupportedDType::Object,
+        };
+        let header_bytes = encode_npy_header_bytes(&header, (1, 0)).expect("header bytes");
+        let mut encoded = Vec::new();
+        write_npy_preamble(&mut encoded, (1, 0), header_bytes.len()).expect("preamble");
+        encoded.extend_from_slice(&header_bytes);
+        encoded.extend_from_slice(&[0x80, 0x05, 0x4B, 0x01, 0x2E]);
+
+        let err = read_npy_bytes(&encoded, false).expect_err("pickle policy should reject");
+        assert_eq!(err.reason_code(), "io_pickle_policy_violation");
+
+        let decoded = read_npy_bytes(&encoded, true).expect("allow_pickle read");
+        assert_eq!(decoded.header.descr, IOSupportedDType::Object);
+        assert_eq!(decoded.payload, vec![0x80, 0x05, 0x4B, 0x01, 0x2E]);
+    }
+
+    #[test]
+    fn npy_v2_writer_roundtrip_is_supported() {
+        let header = NpyHeader {
+            shape: vec![3],
+            fortran_order: true,
+            descr: IOSupportedDType::I32,
+        };
+        let payload = [10_i32, 20_i32, 30_i32]
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect::<Vec<_>>();
+
+        let encoded =
+            write_npy_bytes_with_version(&header, &payload, (2, 0), false).expect("write v2");
+        let decoded = read_npy_bytes(&encoded, false).expect("read v2");
+        assert_eq!(decoded.version, (2, 0));
+        assert_eq!(decoded.header, header);
+        assert_eq!(decoded.payload, payload);
+    }
+
+    #[test]
+    fn npy_header_parser_rejects_extra_keys_and_singleton_without_comma() {
+        let payload = [10_i32, 20_i32]
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect::<Vec<_>>();
+
+        let extra_key_header =
+            "{'descr': '<i4', 'fortran_order': False, 'shape': (2,), 'extra': 1, }";
+        let extra_key_bytes = make_manual_npy_payload(extra_key_header, &payload);
+        let extra_key_err =
+            read_npy_bytes(&extra_key_bytes, false).expect_err("extra key must be rejected");
+        assert_eq!(extra_key_err.reason_code(), "io_header_schema_invalid");
+
+        let singleton_without_comma =
+            "{'descr': '<i4', 'fortran_order': False, 'shape': (2), }";
+        let singleton_without_comma_bytes = make_manual_npy_payload(singleton_without_comma, &payload);
+        let singleton_err = read_npy_bytes(&singleton_without_comma_bytes, false)
+            .expect_err("singleton tuple without trailing comma must be rejected");
+        assert_eq!(singleton_err.reason_code(), "io_header_schema_invalid");
+    }
+
+    #[test]
+    fn object_write_path_is_policy_gated_and_requires_pickle_marker() {
+        let header = NpyHeader {
+            shape: vec![1],
+            fortran_order: false,
+            descr: IOSupportedDType::Object,
+        };
+
+        let policy_err =
+            write_npy_bytes(&header, &[0x80, 0x05, 0x4B, 0x01, 0x2E], false).expect_err("policy");
+        assert_eq!(policy_err.reason_code(), "io_pickle_policy_violation");
+
+        let marker_err = write_npy_bytes(&header, b"not-pickle", true)
+            .expect_err("object payload must carry pickle marker");
+        assert_eq!(marker_err.reason_code(), "io_write_contract_violation");
+
+        let encoded =
+            write_npy_bytes(&header, &[0x80, 0x05, 0x4B, 0x01, 0x2E], true).expect("object write");
+        let decoded = read_npy_bytes(&encoded, true).expect("object read");
+        assert_eq!(decoded.header.descr, IOSupportedDType::Object);
+    }
+
+    #[test]
+    fn zero_sized_object_payload_must_be_empty() {
+        let header = NpyHeader {
+            shape: vec![0],
+            fortran_order: false,
+            descr: IOSupportedDType::Object,
+        };
+
+        write_npy_bytes(&header, &[], true).expect("zero-sized object payload may be empty");
+
+        let err = write_npy_bytes(&header, &[0x80], true)
+            .expect_err("zero-sized object payload must be empty");
+        assert_eq!(err.reason_code(), "io_write_contract_violation");
     }
 
     #[test]
