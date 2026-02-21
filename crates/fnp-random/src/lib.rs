@@ -1661,7 +1661,7 @@ fn cholesky_flat(a: &[f64], n: usize) -> Vec<f64> {
                 l[i * n + j] = if diag > 0.0 { diag.sqrt() } else { 0.0 };
             } else {
                 let denom = l[j * n + j];
-                l[i * n + j] = if denom.abs() > f64::EPSILON {
+                l[i * n + j] = if denom != 0.0 {
                     (a[i * n + j] - sum) / denom
                 } else {
                     0.0

@@ -943,6 +943,7 @@ pub fn loadtxt(
         if max_rows > 0 && nrows >= max_rows { break; }
         let row_vals: Vec<f64> = trimmed
             .split(delimiter)
+            .filter(|s| delimiter != ' ' || !s.is_empty())
             .map(|s| s.trim().parse::<f64>())
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))?;
@@ -1046,6 +1047,7 @@ pub fn genfromtxt(
         if trimmed.is_empty() || trimmed.starts_with(comments) { continue; }
         let row_vals: Vec<f64> = trimmed
             .split(delimiter)
+            .filter(|s| delimiter != ' ' || !s.is_empty())
             .map(|s| s.trim().parse::<f64>().unwrap_or(filling_values))
             .collect();
         match ncols {

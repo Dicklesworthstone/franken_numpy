@@ -308,7 +308,7 @@ pub fn validate_square_matrix(shape: &[usize]) -> Result<usize, LinAlgError> {
 
 pub fn solve_2x2(lhs: [[f64; 2]; 2], rhs: [f64; 2]) -> Result<[f64; 2], LinAlgError> {
     let det = lhs[0][0] * lhs[1][1] - lhs[0][1] * lhs[1][0];
-    if det.abs() <= f64::EPSILON {
+    if det == 0.0 {
         return Err(LinAlgError::SolverSingularity);
     }
 
@@ -345,7 +345,7 @@ pub fn slogdet_2x2(matrix: [[f64; 2]; 2]) -> Result<(f64, f64), LinAlgError> {
 
 pub fn inv_2x2(matrix: [[f64; 2]; 2]) -> Result<[[f64; 2]; 2], LinAlgError> {
     let det = det_2x2(matrix)?;
-    if det.abs() <= f64::EPSILON {
+    if det == 0.0 {
         return Err(LinAlgError::SolverSingularity);
     }
 
@@ -389,7 +389,7 @@ fn lu_decompose(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<usize>, f64), LinA
             }
         }
 
-        if max_val <= f64::EPSILON {
+        if max_val == 0.0 {
             return Err(LinAlgError::SolverSingularity);
         }
 
@@ -602,7 +602,7 @@ pub fn qr_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> 
             col_norm_sq += r[i * n + k] * r[i * n + k];
         }
         let col_norm = col_norm_sq.sqrt();
-        if col_norm <= f64::EPSILON {
+        if col_norm == 0.0 {
             continue;
         }
 
@@ -614,7 +614,7 @@ pub fn qr_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> 
         }
         v[k] += sign * col_norm;
         let v_norm_sq: f64 = v[k..].iter().map(|x| x * x).sum();
-        if v_norm_sq <= f64::EPSILON {
+        if v_norm_sq == 0.0 {
             continue;
         }
 
@@ -792,7 +792,7 @@ pub fn matrix_rank_nxn(a: &[f64], n: usize, rcond: f64) -> Result<usize, LinAlgE
     sigmas.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
 
     let sigma_max = sigmas.first().copied().unwrap_or(0.0);
-    if sigma_max <= f64::EPSILON {
+    if sigma_max == 0.0 {
         return Ok(0);
     }
     let threshold = sigma_max * rcond;
@@ -1026,7 +1026,7 @@ pub fn cond_nxn(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
     let sigmas = svd_nxn(a, n)?;
     let sigma_max = sigmas.first().copied().unwrap_or(0.0);
     let sigma_min = sigmas.last().copied().unwrap_or(0.0);
-    if sigma_min.abs() < f64::EPSILON {
+    if sigma_min == 0.0 {
         return Ok(f64::INFINITY);
     }
     Ok(sigma_max / sigma_min)
@@ -1204,7 +1204,7 @@ pub fn matrix_rank_2x2(matrix: [[f64; 2]; 2], rcond: f64) -> Result<usize, LinAl
     validate_tolerance_policy(rcond, 0)?;
     let singular_values = singular_values_2x2(matrix)?;
     let sigma_max = singular_values[0];
-    if sigma_max <= f64::EPSILON {
+    if sigma_max == 0.0 {
         return Ok(0);
     }
 
@@ -1515,7 +1515,7 @@ pub fn qr_2x2(matrix: [[f64; 2]; 2], mode: QrMode) -> Result<Qr2x2Result, LinAlg
 
     let mut q1 = [1.0_f64, 0.0_f64];
     let r11 = c1[0].hypot(c1[1]);
-    if r11 > f64::EPSILON {
+    if r11 > 0.0 {
         q1 = [c1[0] / r11, c1[1] / r11];
     }
 
@@ -1523,7 +1523,7 @@ pub fn qr_2x2(matrix: [[f64; 2]; 2], mode: QrMode) -> Result<Qr2x2Result, LinAlg
     let u2 = [c2[0] - r12 * q1[0], c2[1] - r12 * q1[1]];
     let mut q2 = [-q1[1], q1[0]];
     let mut r22 = u2[0].hypot(u2[1]);
-    if r22 > f64::EPSILON {
+    if r22 > 0.0 {
         q2 = [u2[0] / r22, u2[1] / r22];
     } else {
         r22 = q2[0].mul_add(c2[0], q2[1] * c2[1]);
@@ -1600,7 +1600,7 @@ pub fn svd_2x2(matrix: [[f64; 2]; 2], converged: bool) -> Result<Svd2x2Result, L
 
     let singular_values = [sigma_1, sigma_2];
     let mut u_cols = [[0.0_f64; 2]; 2];
-    if sigma_1 <= f64::EPSILON {
+    if sigma_1 <= 0.0 {
         u_cols[0] = [1.0, 0.0];
         u_cols[1] = [0.0, 1.0];
     } else {
@@ -1608,7 +1608,7 @@ pub fn svd_2x2(matrix: [[f64; 2]; 2], converged: bool) -> Result<Svd2x2Result, L
             let sigma = singular_values[idx];
             let v = vectors[idx];
 
-            let mut u = if sigma > f64::EPSILON {
+            let mut u = if sigma > 0.0 {
                 [
                     a.mul_add(v[0], b * v[1]) / sigma,
                     c.mul_add(v[0], d * v[1]) / sigma,
@@ -1617,14 +1617,14 @@ pub fn svd_2x2(matrix: [[f64; 2]; 2], converged: bool) -> Result<Svd2x2Result, L
                 [-u_cols[0][1], u_cols[0][0]]
             };
 
-            if idx == 1 && sigma > f64::EPSILON {
+            if idx == 1 && sigma > 0.0 {
                 let proj = u_cols[0][0].mul_add(u[0], u_cols[0][1] * u[1]);
                 u[0] -= proj * u_cols[0][0];
                 u[1] -= proj * u_cols[0][1];
             }
 
             let norm = u[0].hypot(u[1]);
-            if !norm.is_finite() || norm <= f64::EPSILON {
+            if !norm.is_finite() || norm <= 0.0 {
                 if idx == 0 {
                     return Err(LinAlgError::SvdNonConvergence);
                 }
