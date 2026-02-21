@@ -373,6 +373,9 @@ fn lu_decompose(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<usize>, f64), LinA
         ));
     }
 
+    let matrix_max_abs = a.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
+
     let mut lu = a.to_vec();
     let mut perm: Vec<usize> = (0..n).collect();
     let mut sign = 1.0_f64;
@@ -389,7 +392,7 @@ fn lu_decompose(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<usize>, f64), LinA
             }
         }
 
-        if max_val == 0.0 {
+        if max_val <= singularity_threshold {
             return Err(LinAlgError::SolverSingularity);
         }
 
@@ -534,6 +537,153 @@ pub fn inv_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
     }
 
     Ok(inv)
+}
+
+/// LU factorization of an NxN matrix with partial pivoting.
+/// Returns `(lu, perm, sign)`:
+///   - `lu`: packed LU factors in n*n flat row-major (L is unit-lower-triangular,
+///     U is upper-triangular, stored in the same buffer)
+///   - `perm`: row permutation vector (perm[i] = original row at position i)
+///   - `sign`: +1.0 or -1.0 (parity of permutation)
+///
+/// Matches `scipy.linalg.lu_factor` semantics.
+pub fn lu_factor_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<usize>, f64), LinAlgError> {
+    lu_decompose(a, n)
+}
+
+/// Solve a linear system using a pre-computed LU factorization.
+/// `lu` and `perm` are the outputs of `lu_factor_nxn`.
+/// `b` is the right-hand side vector of length n.
+///
+/// Matches `scipy.linalg.lu_solve` semantics.
+pub fn lu_solve(lu: &[f64], perm: &[usize], b: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
+    if lu.len() != n * n || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "lu_solve: LU buffer must be n*n with n > 0",
+        ));
+    }
+    if perm.len() != n {
+        return Err(LinAlgError::ShapeContractViolation(
+            "lu_solve: permutation length must equal n",
+        ));
+    }
+    if b.len() != n {
+        return Err(LinAlgError::ShapeContractViolation(
+            "lu_solve: rhs length must equal n",
+        ));
+    }
+    if b.iter().any(|v| !v.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "rhs entries must be finite for lu_solve",
+        ));
+    }
+
+    Ok(lu_forward_back(lu, perm, b, n))
+}
+
+/// Solve AX = B where B is an n*m matrix (multiple right-hand sides).
+/// `a` is n*n row-major, `b` is n*m row-major.
+/// Returns the n*m solution matrix X in row-major order.
+///
+/// Matches `numpy.linalg.solve` semantics when B is 2-D.
+pub fn solve_nxn_multi(a: &[f64], b: &[f64], n: usize, m: usize) -> Result<Vec<f64>, LinAlgError> {
+    if a.len() != n * n || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "solve_nxn_multi: A must be n*n with n > 0",
+        ));
+    }
+    if b.len() != n * m {
+        return Err(LinAlgError::ShapeContractViolation(
+            "solve_nxn_multi: B must be n*m",
+        ));
+    }
+    if b.iter().any(|v| !v.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "rhs entries must be finite for solve",
+        ));
+    }
+
+    let (lu, perm, _) = lu_decompose(a, n)?;
+
+    let mut result = vec![0.0; n * m];
+    for col in 0..m {
+        let b_col: Vec<f64> = (0..n).map(|row| b[row * m + col]).collect();
+        let x_col = lu_forward_back(&lu, &perm, &b_col, n);
+        for (row, &val) in x_col.iter().enumerate() {
+            result[row * m + col] = val;
+        }
+    }
+
+    Ok(result)
+}
+
+/// Solve a triangular linear system.
+/// `a` is n*n row-major triangular matrix, `b` has length n.
+/// If `lower` is true, solves Lx = b (forward substitution).
+/// If `lower` is false, solves Ux = b (back substitution).
+/// If `unit_diagonal` is true, the diagonal of A is assumed to be all 1s.
+///
+/// Matches `scipy.linalg.solve_triangular` semantics.
+pub fn solve_triangular(
+    a: &[f64],
+    b: &[f64],
+    n: usize,
+    lower: bool,
+    unit_diagonal: bool,
+) -> Result<Vec<f64>, LinAlgError> {
+    if a.len() != n * n || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "solve_triangular: A must be n*n with n > 0",
+        ));
+    }
+    if b.len() != n {
+        return Err(LinAlgError::ShapeContractViolation(
+            "solve_triangular: rhs length must equal n",
+        ));
+    }
+    if a.iter().any(|v| !v.is_finite()) || b.iter().any(|v| !v.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "entries must be finite for solve_triangular",
+        ));
+    }
+
+    let mut x = b.to_vec();
+
+    if lower {
+        // Forward substitution: Lx = b
+        for i in 0..n {
+            for j in 0..i {
+                x[i] -= a[i * n + j] * x[j];
+            }
+            if unit_diagonal {
+                // diagonal assumed to be 1
+            } else {
+                let diag = a[i * n + i];
+                if diag == 0.0 {
+                    return Err(LinAlgError::SolverSingularity);
+                }
+                x[i] /= diag;
+            }
+        }
+    } else {
+        // Back substitution: Ux = b
+        for i in (0..n).rev() {
+            for j in (i + 1)..n {
+                x[i] -= a[i * n + j] * x[j];
+            }
+            if unit_diagonal {
+                // diagonal assumed to be 1
+            } else {
+                let diag = a[i * n + i];
+                if diag == 0.0 {
+                    return Err(LinAlgError::SolverSingularity);
+                }
+                x[i] /= diag;
+            }
+        }
+    }
+
+    Ok(x)
 }
 
 /// Cholesky decomposition for NxN positive-definite matrix.
@@ -935,7 +1085,11 @@ pub fn eigh_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError
 
     // Sort eigenvalues descending and permute eigenvectors accordingly
     let mut indices: Vec<usize> = (0..n).collect();
-    indices.sort_by(|&a, &b| eigenvalues[b].partial_cmp(&eigenvalues[a]).unwrap_or(std::cmp::Ordering::Equal));
+    indices.sort_by(|&a, &b| {
+        eigenvalues[b]
+            .partial_cmp(&eigenvalues[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let sorted_eigenvalues: Vec<f64> = indices.iter().map(|&i| eigenvalues[i]).collect();
     let mut sorted_v = vec![0.0; n * n];
@@ -1050,11 +1204,7 @@ pub fn matrix_power_nxn(a: &[f64], n: usize, p: i64) -> Result<Vec<f64>, LinAlgE
         return Ok(eye);
     }
 
-    let base = if p < 0 {
-        inv_nxn(a, n)?
-    } else {
-        a.to_vec()
-    };
+    let base = if p < 0 { inv_nxn(a, n)? } else { a.to_vec() };
 
     let mut exp = p.unsigned_abs();
     let mut result = vec![0.0; n * n];
@@ -1843,13 +1993,11 @@ mod tests {
         LinAlgRuntimeMode, MAX_BACKEND_REVALIDATION_ATTEMPTS, MAX_BATCH_SHAPE_CHECKS,
         MAX_TOLERANCE_SEARCH_DEPTH, MatrixNormOrder, QrMode, VectorNormOrder, cholesky_2x2,
         cholesky_nxn, cond_nxn, det_2x2, det_nxn, eig_nxn, eigh_2x2, eigh_nxn, eigvals_2x2,
-        eigvalsh_nxn,
-        inv_2x2, inv_nxn, lstsq_2x2, lstsq_nxn,
-        lstsq_output_shapes, mat_mul_flat, matrix_norm_2x2, matrix_norm_frobenius,
-        matrix_norm_nxn, matrix_power_nxn, matrix_rank_2x2, matrix_rank_nxn,
-        pinv_2x2, pinv_nxn, trace_nxn,
-        qr_2x2, qr_nxn, qr_output_shapes, slogdet_2x2, slogdet_nxn,
-        solve_2x2, solve_nxn, svd_2x2, svd_nxn, svd_output_shapes, validate_backend_bridge,
+        eigvalsh_nxn, inv_2x2, inv_nxn, lstsq_2x2, lstsq_nxn, lstsq_output_shapes, lu_factor_nxn,
+        lu_solve, mat_mul_flat, matrix_norm_2x2, matrix_norm_frobenius, matrix_norm_nxn,
+        matrix_power_nxn, matrix_rank_2x2, matrix_rank_nxn, pinv_2x2, pinv_nxn, qr_2x2, qr_nxn,
+        qr_output_shapes, slogdet_2x2, slogdet_nxn, solve_2x2, solve_nxn, solve_nxn_multi,
+        solve_triangular, svd_2x2, svd_nxn, svd_output_shapes, trace_nxn, validate_backend_bridge,
         validate_cholesky_diagonal, validate_matrix_shape, validate_policy_metadata,
         validate_spectral_branch, validate_square_matrix, validate_tolerance_policy, vector_norm,
     };
@@ -2771,9 +2919,9 @@ mod tests {
         let a = [4.0, 2.0, 1.0, 2.0, 5.0, 3.0, 1.0, 3.0, 6.0];
         let l = cholesky_nxn(&a, 3).expect("3x3 cholesky");
         // Verify L is lower triangular
-        assert!(approx_equal(l[0 * 3 + 1], 0.0, 1e-12));
-        assert!(approx_equal(l[0 * 3 + 2], 0.0, 1e-12));
-        assert!(approx_equal(l[1 * 3 + 2], 0.0, 1e-12));
+        assert!(approx_equal(l[1], 0.0, 1e-12));
+        assert!(approx_equal(l[2], 0.0, 1e-12));
+        assert!(approx_equal(l[5], 0.0, 1e-12));
         // Verify L * L^T = A
         for i in 0..3 {
             for j in 0..3 {
@@ -2908,7 +3056,10 @@ mod tests {
             for row in 0..3 {
                 norm_sq += eigvecs[row * 3 + col] * eigvecs[row * 3 + col];
             }
-            assert!((norm_sq - 1.0).abs() < 1e-6, "eigvec col {col} norm^2={norm_sq}");
+            assert!(
+                (norm_sq - 1.0).abs() < 1e-6,
+                "eigvec col {col} norm^2={norm_sq}"
+            );
         }
     }
 
@@ -2930,8 +3081,12 @@ mod tests {
             }
         }
         for i in 0..n * n {
-            assert!((reconstructed[i] - a[i]).abs() < 1e-6,
-                "reconstruct[{i}]={}, expected {}", reconstructed[i], a[i]);
+            assert!(
+                (reconstructed[i] - a[i]).abs() < 1e-6,
+                "reconstruct[{i}]={}, expected {}",
+                reconstructed[i],
+                a[i]
+            );
         }
     }
 
@@ -2947,7 +3102,10 @@ mod tests {
         // Singular matrix: row 3 = row 1 + row 2
         let a = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0];
         let c = cond_nxn(&a, 3).expect("cond singular");
-        assert!(c.is_infinite(), "cond of singular matrix should be inf, got {c}");
+        assert!(
+            c.is_infinite(),
+            "cond of singular matrix should be inf, got {c}"
+        );
     }
 
     #[test]
@@ -2983,8 +3141,11 @@ mod tests {
         for i in 0..2 {
             for j in 0..2 {
                 let expected = if i == j { 1.0 } else { 0.0 };
-                assert!((product[i * 2 + j] - expected).abs() < 1e-10,
-                    "A*A^-1[{i},{j}]={}", product[i * 2 + j]);
+                assert!(
+                    (product[i * 2 + j] - expected).abs() < 1e-10,
+                    "A*A^-1[{i},{j}]={}",
+                    product[i * 2 + j]
+                );
             }
         }
     }
@@ -3012,8 +3173,11 @@ mod tests {
         for i in 0..2 {
             for j in 0..2 {
                 let expected = if i == j { 1.0 } else { 0.0 };
-                assert!((product[i * 2 + j] - expected).abs() < 1e-6,
-                    "A*A+[{i},{j}]={}", product[i * 2 + j]);
+                assert!(
+                    (product[i * 2 + j] - expected).abs() < 1e-6,
+                    "A*A+[{i},{j}]={}",
+                    product[i * 2 + j]
+                );
             }
         }
     }
@@ -3099,5 +3263,119 @@ mod tests {
         imags.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert!((imags[0] - 1.0).abs() < 1e-6, "im magnitude={}", imags[0]);
         assert!((imags[1] - 1.0).abs() < 1e-6, "im magnitude={}", imags[1]);
+    }
+
+    #[test]
+    fn lu_factor_and_lu_solve_roundtrip() {
+        let a = [2.0, 1.0, -1.0, -3.0, -1.0, 2.0, -2.0, 1.0, 2.0];
+        let b = [8.0, -11.0, -3.0];
+        let (lu, perm, _sign) = lu_factor_nxn(&a, 3).expect("lu_factor");
+        let x = lu_solve(&lu, &perm, &b, 3).expect("lu_solve");
+        assert!(approx_equal(x[0], 2.0, 1e-10));
+        assert!(approx_equal(x[1], 3.0, 1e-10));
+        assert!(approx_equal(x[2], -1.0, 1e-10));
+    }
+
+    #[test]
+    fn lu_factor_rejects_singular() {
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        let err = lu_factor_nxn(&a, 3).expect_err("singular");
+        assert_eq!(err.reason_code(), "linalg_solver_singularity");
+    }
+
+    #[test]
+    fn solve_nxn_multi_matches_column_wise() {
+        // A x1 = b1 and A x2 = b2
+        let a = [2.0, 1.0, -1.0, -3.0, -1.0, 2.0, -2.0, 1.0, 2.0];
+        let b1 = [8.0, -11.0, -3.0];
+        let b2 = [1.0, 0.0, 0.0];
+        // B matrix: columns are b1, b2 (row-major: B[i][j])
+        let b_mat = [b1[0], b2[0], b1[1], b2[1], b1[2], b2[2]];
+        let x_mat = solve_nxn_multi(&a, &b_mat, 3, 2).expect("multi solve");
+        let x1_single = solve_nxn(&a, &b1, 3).expect("single solve 1");
+        let x2_single = solve_nxn(&a, &b2, 3).expect("single solve 2");
+        for i in 0..3 {
+            assert!(
+                approx_equal(x_mat[i * 2], x1_single[i], 1e-10),
+                "col 0 row {i}: {} vs {}",
+                x_mat[i * 2],
+                x1_single[i]
+            );
+            assert!(
+                approx_equal(x_mat[i * 2 + 1], x2_single[i], 1e-10),
+                "col 1 row {i}: {} vs {}",
+                x_mat[i * 2 + 1],
+                x2_single[i]
+            );
+        }
+    }
+
+    #[test]
+    fn solve_triangular_lower() {
+        // L = [[2, 0, 0], [1, 3, 0], [4, 2, 5]]
+        let l = [2.0, 0.0, 0.0, 1.0, 3.0, 0.0, 4.0, 2.0, 5.0];
+        let b = [4.0, 7.0, 30.0];
+        let x = solve_triangular(&l, &b, 3, true, false).expect("lower tri solve");
+        // Verify L*x = b
+        for i in 0..3 {
+            let mut row_sum = 0.0;
+            for j in 0..3 {
+                row_sum += l[i * 3 + j] * x[j];
+            }
+            assert!(
+                approx_equal(row_sum, b[i], 1e-10),
+                "row {i}: {row_sum} vs {}",
+                b[i]
+            );
+        }
+    }
+
+    #[test]
+    fn solve_triangular_upper() {
+        // U = [[3, 1, 2], [0, 4, 1], [0, 0, 2]]
+        let u = [3.0, 1.0, 2.0, 0.0, 4.0, 1.0, 0.0, 0.0, 2.0];
+        let b = [10.0, 9.0, 4.0];
+        let x = solve_triangular(&u, &b, 3, false, false).expect("upper tri solve");
+        // Verify U*x = b
+        for i in 0..3 {
+            let mut row_sum = 0.0;
+            for j in 0..3 {
+                row_sum += u[i * 3 + j] * x[j];
+            }
+            assert!(
+                approx_equal(row_sum, b[i], 1e-10),
+                "row {i}: {row_sum} vs {}",
+                b[i]
+            );
+        }
+    }
+
+    #[test]
+    fn solve_triangular_unit_diagonal() {
+        // L with unit diagonal: [[1, 0, 0], [2, 1, 0], [3, 4, 1]]
+        let l = [1.0, 0.0, 0.0, 2.0, 1.0, 0.0, 3.0, 4.0, 1.0];
+        let b = [1.0, 4.0, 15.0];
+        let x = solve_triangular(&l, &b, 3, true, true).expect("unit diag solve");
+        // Verify L*x = b
+        for i in 0..3 {
+            let mut row_sum = 0.0;
+            for j in 0..3 {
+                row_sum += l[i * 3 + j] * x[j];
+            }
+            assert!(
+                approx_equal(row_sum, b[i], 1e-10),
+                "row {i}: {row_sum} vs {}",
+                b[i]
+            );
+        }
+    }
+
+    #[test]
+    fn solve_triangular_rejects_singular() {
+        // Lower triangular with zero on diagonal
+        let l = [1.0, 0.0, 0.0, 2.0, 0.0, 0.0, 3.0, 4.0, 5.0];
+        let b = [1.0, 2.0, 3.0];
+        let err = solve_triangular(&l, &b, 3, true, false).expect_err("singular tri");
+        assert_eq!(err.reason_code(), "linalg_solver_singularity");
     }
 }
