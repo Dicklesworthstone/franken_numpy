@@ -800,6 +800,39 @@ impl UFuncArray {
         Ok(Self { shape: shape.to_vec(), values, dtype })
     }
 
+    /// Construct an array from an iterator of values (np.fromiter).
+    /// The resulting array is 1-D.
+    pub fn fromiter(iter: impl IntoIterator<Item = f64>, dtype: DType) -> Self {
+        let values: Vec<f64> = iter.into_iter().collect();
+        let n = values.len();
+        Self { shape: vec![n], values, dtype }
+    }
+
+    /// Construct a 1-D array from a byte-like buffer of f64 values (np.frombuffer).
+    /// `data` is treated as raw f64 values.
+    pub fn frombuffer(data: &[f64], dtype: DType) -> Self {
+        let n = data.len();
+        Self { shape: vec![n], values: data.to_vec(), dtype }
+    }
+
+    /// Check if two arrays have the same shape and elements (np.array_equal).
+    pub fn array_equal(&self, other: &Self) -> bool {
+        self.shape == other.shape && self.values == other.values
+    }
+
+    /// Check if two arrays are element-wise equal within broadcasting (np.array_equiv).
+    /// Returns true if shapes are broadcastable and all corresponding elements match.
+    pub fn array_equiv(&self, other: &Self) -> bool {
+        if self.shape == other.shape {
+            return self.values == other.values;
+        }
+        // Try broadcasting
+        match self.allclose(other, 0.0, 0.0) {
+            Ok(true) => true,
+            _ => false,
+        }
+    }
+
     /// Return an array representing the indices of a grid.
     ///
     /// Mimics `np.indices(dimensions)`. Returns shape `[ndim, *dimensions]`.
@@ -11418,6 +11451,32 @@ mod tests {
         let a = UFuncArray::new(vec![3], vec![1.0, 0.0, 0.0], DType::F64).unwrap();
         let h = a.entropy().unwrap();
         assert!(h.abs() < 1e-10, "entropy of certain event should be 0, got {h}");
+    }
+
+    #[test]
+    fn fromiter_collects_values() {
+        let a = UFuncArray::fromiter((0..5).map(|i| i as f64 * 2.0), DType::F64);
+        assert_eq!(a.shape, vec![5]);
+        assert_eq!(a.values, vec![0.0, 2.0, 4.0, 6.0, 8.0]);
+    }
+
+    #[test]
+    fn frombuffer_copies_data() {
+        let data = [1.0, 2.0, 3.0];
+        let a = UFuncArray::frombuffer(&data, DType::F64);
+        assert_eq!(a.shape, vec![3]);
+        assert_eq!(a.values, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn array_equal_and_equiv() {
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let c = UFuncArray::new(vec![3], vec![1.0, 2.0, 4.0], DType::F64).unwrap();
+        assert!(a.array_equal(&b));
+        assert!(!a.array_equal(&c));
+        assert!(a.array_equiv(&b));
+        assert!(!a.array_equiv(&c));
     }
 
     #[test]
