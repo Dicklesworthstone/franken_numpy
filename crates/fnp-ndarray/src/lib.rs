@@ -179,7 +179,7 @@ pub fn fix_unknown_dimension(
                         new: known_product,
                     });
                 }
-            } else if old_element_count % known_product != 0 {
+            } else if !old_element_count.is_multiple_of(known_product) {
                 return Err(ShapeError::IncompatibleElementCount {
                     old: old_element_count,
                     new: known_product,
@@ -519,12 +519,11 @@ mod tests {
     }
 
     #[test]
-    fn zero_known_product_with_unknown_dimension_is_rejected() {
-        let err = fix_unknown_dimension(&[0, -1], 0).expect_err("zero known product is invalid");
-        assert!(matches!(
-            err,
-            ShapeError::IncompatibleElementCount { old: 0, new: 0 }
-        ));
+    fn zero_known_product_with_unknown_dimension_resolves_to_zero() {
+        // NumPy: np.zeros(0).reshape(0, -1) → shape (0, 0)
+        // When known_product is 0 and element_count is 0, the unknown dim resolves to 0.
+        let result = fix_unknown_dimension(&[0, -1], 0).expect("zero reshape is valid");
+        assert_eq!(result, vec![0, 0]);
     }
 
     #[test]

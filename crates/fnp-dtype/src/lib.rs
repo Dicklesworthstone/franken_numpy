@@ -559,7 +559,10 @@ mod tests {
     #[test]
     fn result_type_folds_promotion() {
         assert_eq!(result_type(&[DType::I32, DType::F32]), DType::F64);
-        assert_eq!(result_type(&[DType::I8, DType::I16, DType::I32]), DType::I32);
+        assert_eq!(
+            result_type(&[DType::I8, DType::I16, DType::I32]),
+            DType::I32
+        );
         assert_eq!(result_type(&[DType::Bool]), DType::Bool);
         assert_eq!(result_type(&[DType::U8, DType::I8]), DType::I16);
     }

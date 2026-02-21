@@ -46,8 +46,14 @@ impl IORuntimeMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IOSupportedDType {
     Bool,
+    I8,
+    I16,
     I32,
     I64,
+    U8,
+    U16,
+    U32,
+    U64,
     F32,
     F64,
     Object,
@@ -58,8 +64,14 @@ impl IOSupportedDType {
     pub const fn descr(self) -> &'static str {
         match self {
             Self::Bool => "|b1",
+            Self::I8 => "|i1",
+            Self::I16 => "<i2",
             Self::I32 => "<i4",
             Self::I64 => "<i8",
+            Self::U8 => "|u1",
+            Self::U16 => "<u2",
+            Self::U32 => "<u4",
+            Self::U64 => "<u8",
             Self::F32 => "<f4",
             Self::F64 => "<f8",
             Self::Object => "|O",
@@ -69,8 +81,14 @@ impl IOSupportedDType {
     pub fn decode(descr: &str) -> Result<Self, IOError> {
         match descr {
             "|b1" => Ok(Self::Bool),
+            "|i1" => Ok(Self::I8),
+            "<i2" => Ok(Self::I16),
             "<i4" => Ok(Self::I32),
             "<i8" => Ok(Self::I64),
+            "|u1" => Ok(Self::U8),
+            "<u2" => Ok(Self::U16),
+            "<u4" => Ok(Self::U32),
+            "<u8" => Ok(Self::U64),
             "<f4" => Ok(Self::F32),
             "<f8" => Ok(Self::F64),
             "|O" => Ok(Self::Object),
@@ -81,9 +99,10 @@ impl IOSupportedDType {
     #[must_use]
     pub const fn item_size(self) -> Option<usize> {
         match self {
-            Self::Bool => Some(1),
-            Self::I32 | Self::F32 => Some(4),
-            Self::I64 | Self::F64 => Some(8),
+            Self::Bool | Self::I8 | Self::U8 => Some(1),
+            Self::I16 | Self::U16 => Some(2),
+            Self::I32 | Self::U32 | Self::F32 => Some(4),
+            Self::I64 | Self::U64 | Self::F64 => Some(8),
             Self::Object => None,
         }
     }
@@ -933,24 +952,61 @@ pub fn loadtxt(
     skiprows: usize,
     max_rows: usize,
 ) -> Result<TextArrayData, IOError> {
+    loadtxt_usecols(text, delimiter, comments, skiprows, max_rows, None)
+}
+
+/// Load data from text with optional column selection (np.loadtxt with usecols).
+/// `usecols` selects specific columns by zero-based index. When `None`, all columns are loaded.
+pub fn loadtxt_usecols(
+    text: &str,
+    delimiter: char,
+    comments: char,
+    skiprows: usize,
+    max_rows: usize,
+    usecols: Option<&[usize]>,
+) -> Result<TextArrayData, IOError> {
     let mut values = Vec::new();
     let mut ncols: Option<usize> = None;
     let mut nrows = 0usize;
     for (line_idx, line) in text.lines().enumerate() {
-        if line_idx < skiprows { continue; }
+        if line_idx < skiprows {
+            continue;
+        }
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with(comments) { continue; }
-        if max_rows > 0 && nrows >= max_rows { break; }
-        let row_vals: Vec<f64> = trimmed
+        if trimmed.is_empty() || trimmed.starts_with(comments) {
+            continue;
+        }
+        if max_rows > 0 && nrows >= max_rows {
+            break;
+        }
+        let all_vals: Vec<f64> = trimmed
             .split(delimiter)
             .filter(|s| delimiter != ' ' || !s.is_empty())
             .map(|s| s.trim().parse::<f64>())
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))?;
+
+        let row_vals = if let Some(cols) = usecols {
+            let mut selected = Vec::with_capacity(cols.len());
+            for &col in cols {
+                if col >= all_vals.len() {
+                    return Err(IOError::ReadPayloadIncomplete(
+                        "loadtxt: usecols index out of bounds",
+                    ));
+                }
+                selected.push(all_vals[col]);
+            }
+            selected
+        } else {
+            all_vals
+        };
+
         match ncols {
             None => ncols = Some(row_vals.len()),
             Some(expected) if row_vals.len() != expected => {
-                return Err(IOError::ReadPayloadIncomplete("loadtxt: inconsistent number of columns"));
+                return Err(IOError::ReadPayloadIncomplete(
+                    "loadtxt: inconsistent number of columns",
+                ));
             }
             _ => {}
         }
@@ -1042,9 +1098,13 @@ pub fn genfromtxt(
     let mut ncols: Option<usize> = None;
     let mut nrows = 0usize;
     for (line_idx, line) in text.lines().enumerate() {
-        if line_idx < skip_header { continue; }
+        if line_idx < skip_header {
+            continue;
+        }
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with(comments) { continue; }
+        if trimmed.is_empty() || trimmed.starts_with(comments) {
+            continue;
+        }
         let row_vals: Vec<f64> = trimmed
             .split(delimiter)
             .filter(|s| delimiter != ' ' || !s.is_empty())
@@ -1094,13 +1154,12 @@ mod tests {
         IO_PACKET_ID, IO_PACKET_REASON_CODES, IOError, IOLogRecord, IORuntimeMode,
         IOSupportedDType, LoadDispatch, MAX_ARCHIVE_MEMBERS, MAX_DISPATCH_RETRIES,
         MAX_HEADER_BYTES, MAX_MEMMAP_VALIDATION_RETRIES, MemmapMode, NPY_MAGIC_PREFIX,
-        NPZ_MAGIC_PREFIX, NpyHeader, classify_load_dispatch, encode_npy_header_bytes,
-        SaveTxtConfig, enforce_pickle_policy, genfromtxt, loadtxt, read_npy_bytes, savetxt,
-        synthesize_npz_member_names,
-        validate_descriptor_roundtrip, validate_header_schema, validate_io_policy_metadata,
-        validate_magic_version, validate_memmap_contract, validate_npz_archive_budget,
-        validate_read_payload, validate_write_contract, write_npy_bytes,
-        write_npy_bytes_with_version, write_npy_preamble,
+        NPZ_MAGIC_PREFIX, NpyHeader, SaveTxtConfig, classify_load_dispatch,
+        encode_npy_header_bytes, enforce_pickle_policy, genfromtxt, loadtxt, loadtxt_usecols,
+        read_npy_bytes, savetxt, synthesize_npz_member_names, validate_descriptor_roundtrip,
+        validate_header_schema, validate_io_policy_metadata, validate_magic_version,
+        validate_memmap_contract, validate_npz_archive_budget, validate_read_payload,
+        validate_write_contract, write_npy_bytes, write_npy_bytes_with_version, write_npy_preamble,
     };
 
     fn packet009_artifacts() -> Vec<String> {
@@ -1184,8 +1243,14 @@ mod tests {
     fn descriptor_roundtrip_covers_all_supported_dtypes() {
         let dtypes = [
             IOSupportedDType::Bool,
+            IOSupportedDType::I8,
+            IOSupportedDType::I16,
             IOSupportedDType::I32,
             IOSupportedDType::I64,
+            IOSupportedDType::U8,
+            IOSupportedDType::U16,
+            IOSupportedDType::U32,
+            IOSupportedDType::U64,
             IOSupportedDType::F32,
             IOSupportedDType::F64,
             IOSupportedDType::Object,
@@ -1622,7 +1687,11 @@ mod tests {
     #[test]
     fn savetxt_with_header() {
         let values = vec![1.0, 2.0];
-        let cfg = SaveTxtConfig { delimiter: ",", header: "x,y", ..SaveTxtConfig::default() };
+        let cfg = SaveTxtConfig {
+            delimiter: ",",
+            header: "x,y",
+            ..SaveTxtConfig::default()
+        };
         let output = savetxt(&values, 1, 2, &cfg).unwrap();
         assert!(output.starts_with("# x,y\n"));
     }
@@ -1654,5 +1723,124 @@ mod tests {
         let result = genfromtxt(text, ',', '#', 1, 0.0).unwrap();
         assert_eq!(result.nrows, 2);
         assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn loadtxt_usecols_selects_columns() {
+        let text = "1,2,3,4\n5,6,7,8\n";
+        let result = loadtxt_usecols(text, ',', '#', 0, 0, Some(&[0, 2])).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 2);
+        assert_eq!(result.values, vec![1.0, 3.0, 5.0, 7.0]);
+    }
+
+    #[test]
+    fn loadtxt_usecols_single_column() {
+        let text = "10 20 30\n40 50 60\n";
+        let result = loadtxt_usecols(text, ' ', '#', 0, 0, Some(&[1])).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 1);
+        assert_eq!(result.values, vec![20.0, 50.0]);
+    }
+
+    #[test]
+    fn loadtxt_usecols_out_of_bounds() {
+        let text = "1,2,3\n4,5,6\n";
+        let err =
+            loadtxt_usecols(text, ',', '#', 0, 0, Some(&[5])).expect_err("usecols out of bounds");
+        assert_eq!(err.reason_code(), "io_read_payload_incomplete");
+    }
+
+    #[test]
+    fn loadtxt_usecols_none_loads_all() {
+        let text = "1,2,3\n4,5,6\n";
+        let result = loadtxt_usecols(text, ',', '#', 0, 0, None).unwrap();
+        assert_eq!(result.ncols, 3);
+        assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn npy_i8_u8_roundtrip() {
+        let header = NpyHeader {
+            shape: vec![3],
+            fortran_order: false,
+            descr: IOSupportedDType::I8,
+        };
+        let payload = vec![1u8, 2, 255]; // i8 bytes
+        let encoded = write_npy_bytes(&header, &payload, false).expect("write i8");
+        let decoded = read_npy_bytes(&encoded, false).expect("read i8");
+        assert_eq!(decoded.header.descr, IOSupportedDType::I8);
+        assert_eq!(decoded.payload, payload);
+
+        let header_u8 = NpyHeader {
+            shape: vec![4],
+            fortran_order: false,
+            descr: IOSupportedDType::U8,
+        };
+        let payload_u8 = vec![0u8, 127, 128, 255];
+        let encoded_u8 = write_npy_bytes(&header_u8, &payload_u8, false).expect("write u8");
+        let decoded_u8 = read_npy_bytes(&encoded_u8, false).expect("read u8");
+        assert_eq!(decoded_u8.header.descr, IOSupportedDType::U8);
+        assert_eq!(decoded_u8.payload, payload_u8);
+    }
+
+    #[test]
+    fn npy_i16_u16_roundtrip() {
+        let header = NpyHeader {
+            shape: vec![2],
+            fortran_order: false,
+            descr: IOSupportedDType::I16,
+        };
+        let payload: Vec<u8> = [100_i16, -200_i16]
+            .into_iter()
+            .flat_map(i16::to_le_bytes)
+            .collect();
+        let encoded = write_npy_bytes(&header, &payload, false).expect("write i16");
+        let decoded = read_npy_bytes(&encoded, false).expect("read i16");
+        assert_eq!(decoded.header.descr, IOSupportedDType::I16);
+        assert_eq!(decoded.payload, payload);
+    }
+
+    #[test]
+    fn npy_u32_u64_roundtrip() {
+        let header = NpyHeader {
+            shape: vec![2],
+            fortran_order: false,
+            descr: IOSupportedDType::U32,
+        };
+        let payload: Vec<u8> = [42_u32, 1_000_000_u32]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let encoded = write_npy_bytes(&header, &payload, false).expect("write u32");
+        let decoded = read_npy_bytes(&encoded, false).expect("read u32");
+        assert_eq!(decoded.header.descr, IOSupportedDType::U32);
+        assert_eq!(decoded.payload, payload);
+
+        let header_u64 = NpyHeader {
+            shape: vec![1],
+            fortran_order: false,
+            descr: IOSupportedDType::U64,
+        };
+        let payload_u64: Vec<u8> = u64::MAX.to_le_bytes().to_vec();
+        let encoded_u64 = write_npy_bytes(&header_u64, &payload_u64, false).expect("write u64");
+        let decoded_u64 = read_npy_bytes(&encoded_u64, false).expect("read u64");
+        assert_eq!(decoded_u64.header.descr, IOSupportedDType::U64);
+    }
+
+    #[test]
+    fn item_size_matches_dtype_byte_widths() {
+        assert_eq!(IOSupportedDType::Bool.item_size(), Some(1));
+        assert_eq!(IOSupportedDType::I8.item_size(), Some(1));
+        assert_eq!(IOSupportedDType::U8.item_size(), Some(1));
+        assert_eq!(IOSupportedDType::I16.item_size(), Some(2));
+        assert_eq!(IOSupportedDType::U16.item_size(), Some(2));
+        assert_eq!(IOSupportedDType::I32.item_size(), Some(4));
+        assert_eq!(IOSupportedDType::U32.item_size(), Some(4));
+        assert_eq!(IOSupportedDType::F32.item_size(), Some(4));
+        assert_eq!(IOSupportedDType::I64.item_size(), Some(8));
+        assert_eq!(IOSupportedDType::U64.item_size(), Some(8));
+        assert_eq!(IOSupportedDType::F64.item_size(), Some(8));
+        assert_eq!(IOSupportedDType::Object.item_size(), None);
     }
 }

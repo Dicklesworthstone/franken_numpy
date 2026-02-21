@@ -1165,7 +1165,10 @@ impl Generator {
     /// Mimics `rng.normal(loc, scale, size)`.
     #[must_use]
     pub fn normal(&mut self, loc: f64, scale: f64, size: usize) -> Vec<f64> {
-        self.standard_normal(size).into_iter().map(|z| loc + scale * z).collect()
+        self.standard_normal(size)
+            .into_iter()
+            .map(|z| loc + scale * z)
+            .collect()
     }
 
     /// Generate exponentially distributed samples.
@@ -1173,10 +1176,12 @@ impl Generator {
     /// Mimics `rng.exponential(scale, size)`.
     #[must_use]
     pub fn exponential(&mut self, scale: f64, size: usize) -> Vec<f64> {
-        (0..size).map(|_| {
-            let u = self.next_f64().max(f64::MIN_POSITIVE);
-            -scale * u.ln()
-        }).collect()
+        (0..size)
+            .map(|_| {
+                let u = self.next_f64().max(f64::MIN_POSITIVE);
+                -scale * u.ln()
+            })
+            .collect()
     }
 
     /// Generate Poisson-distributed samples using the inverse transform method
@@ -1185,20 +1190,22 @@ impl Generator {
     /// Mimics `rng.poisson(lam, size)`.
     #[must_use]
     pub fn poisson(&mut self, lam: f64, size: usize) -> Vec<u64> {
-        (0..size).map(|_| {
-            // Knuth's algorithm
-            let l = (-lam).exp();
-            let mut k = 0u64;
-            let mut p = 1.0;
-            loop {
-                k += 1;
-                p *= self.next_f64();
-                if p <= l {
-                    break;
+        (0..size)
+            .map(|_| {
+                // Knuth's algorithm
+                let l = (-lam).exp();
+                let mut k = 0u64;
+                let mut p = 1.0;
+                loop {
+                    k += 1;
+                    p *= self.next_f64();
+                    if p <= l {
+                        break;
+                    }
                 }
-            }
-            k - 1
-        }).collect()
+                k - 1
+            })
+            .collect()
     }
 
     /// Generate binomially distributed samples.
@@ -1206,21 +1213,28 @@ impl Generator {
     /// Mimics `rng.binomial(n, p, size)`.
     #[must_use]
     pub fn binomial(&mut self, n: u64, p: f64, size: usize) -> Vec<u64> {
-        (0..size).map(|_| {
-            let mut successes = 0u64;
-            for _ in 0..n {
-                if self.next_f64() < p {
-                    successes += 1;
+        (0..size)
+            .map(|_| {
+                let mut successes = 0u64;
+                for _ in 0..n {
+                    if self.next_f64() < p {
+                        successes += 1;
+                    }
                 }
-            }
-            successes
-        }).collect()
+                successes
+            })
+            .collect()
     }
 
     /// Randomly choose elements from a 1-D array, with or without replacement.
     ///
     /// Mimics `rng.choice(a, size, replace)`.
-    pub fn choice(&mut self, a: &[f64], size: usize, replace: bool) -> Result<Vec<f64>, RandomError> {
+    pub fn choice(
+        &mut self,
+        a: &[f64],
+        size: usize,
+        replace: bool,
+    ) -> Result<Vec<f64>, RandomError> {
         let n = a.len();
         if !replace && size > n {
             return Err(RandomError::InvalidUpperBound);
@@ -1280,7 +1294,9 @@ impl Generator {
 
     /// Gamma distribution using Marsaglia and Tsang's method.
     pub fn gamma(&mut self, shape_param: f64, scale: f64, size: usize) -> Vec<f64> {
-        (0..size).map(|_| self.sample_gamma(shape_param) * scale).collect()
+        (0..size)
+            .map(|_| self.sample_gamma(shape_param) * scale)
+            .collect()
     }
 
     fn sample_gamma(&mut self, shape_param: f64) -> f64 {
@@ -1296,7 +1312,9 @@ impl Generator {
         loop {
             let x = self.sample_standard_normal_single();
             let v = (1.0 + c * x).powi(3);
-            if v <= 0.0 { continue; }
+            if v <= 0.0 {
+                continue;
+            }
             let u = self.next_f64();
             if u < 1.0 - 0.0331 * x.powi(4) {
                 return d * v;
@@ -1316,27 +1334,33 @@ impl Generator {
 
     /// Beta distribution via gamma sampling.
     pub fn beta(&mut self, a: f64, b: f64, size: usize) -> Vec<f64> {
-        (0..size).map(|_| {
-            let x = self.sample_gamma(a);
-            let y = self.sample_gamma(b);
-            x / (x + y)
-        }).collect()
+        (0..size)
+            .map(|_| {
+                let x = self.sample_gamma(a);
+                let y = self.sample_gamma(b);
+                x / (x + y)
+            })
+            .collect()
     }
 
     /// Geometric distribution: number of trials until first success.
     pub fn geometric(&mut self, p: f64, size: usize) -> Vec<u64> {
-        (0..size).map(|_| {
-            let u = self.next_f64();
-            (u.ln() / (1.0 - p).ln()).ceil() as u64
-        }).collect()
+        (0..size)
+            .map(|_| {
+                let u = self.next_f64();
+                (u.ln() / (1.0 - p).ln()).ceil() as u64
+            })
+            .collect()
     }
 
     /// Log-normal distribution.
     pub fn lognormal(&mut self, mean: f64, sigma: f64, size: usize) -> Vec<f64> {
-        (0..size).map(|_| {
-            let z = self.sample_standard_normal_single();
-            (mean + sigma * z).exp()
-        }).collect()
+        (0..size)
+            .map(|_| {
+                let z = self.sample_standard_normal_single();
+                (mean + sigma * z).exp()
+            })
+            .collect()
     }
 
     /// Chi-squared distribution with df degrees of freedom.
@@ -1347,47 +1371,57 @@ impl Generator {
 
     /// Standard Cauchy distribution.
     pub fn standard_cauchy(&mut self, size: usize) -> Vec<f64> {
-        (0..size).map(|_| {
-            let u = self.next_f64();
-            (std::f64::consts::PI * (u - 0.5)).tan()
-        }).collect()
+        (0..size)
+            .map(|_| {
+                let u = self.next_f64();
+                (std::f64::consts::PI * (u - 0.5)).tan()
+            })
+            .collect()
     }
 
     /// Triangular distribution.
     pub fn triangular(&mut self, left: f64, mode: f64, right: f64, size: usize) -> Vec<f64> {
         let fc = (mode - left) / (right - left);
-        (0..size).map(|_| {
-            let u = self.next_f64();
-            if u < fc {
-                left + ((right - left) * (mode - left) * u).sqrt()
-            } else {
-                right - ((right - left) * (right - mode) * (1.0 - u)).sqrt()
-            }
-        }).collect()
+        (0..size)
+            .map(|_| {
+                let u = self.next_f64();
+                if u < fc {
+                    left + ((right - left) * (mode - left) * u).sqrt()
+                } else {
+                    right - ((right - left) * (right - mode) * (1.0 - u)).sqrt()
+                }
+            })
+            .collect()
     }
 
     /// Laplace (double exponential) distribution.
     pub fn laplace(&mut self, loc: f64, scale: f64, size: usize) -> Vec<f64> {
-        (0..size).map(|_| {
-            let u = self.next_f64() - 0.5;
-            loc - scale * u.signum() * (1.0 - 2.0 * u.abs()).ln()
-        }).collect()
+        (0..size)
+            .map(|_| {
+                let u = self.next_f64() - 0.5;
+                loc - scale * u.signum() * (1.0 - 2.0 * u.abs()).ln()
+            })
+            .collect()
     }
 
     /// Gumbel distribution.
     pub fn gumbel(&mut self, loc: f64, scale: f64, size: usize) -> Vec<f64> {
-        (0..size).map(|_| {
-            let u = self.next_f64();
-            loc - scale * (-(-u.ln()).ln())
-        }).collect()
+        (0..size)
+            .map(|_| {
+                let u = self.next_f64();
+                loc - scale * (-(-u.ln()).ln())
+            })
+            .collect()
     }
 
     /// Weibull distribution.
     pub fn weibull(&mut self, a: f64, size: usize) -> Vec<f64> {
-        (0..size).map(|_| {
-            let u = self.next_f64();
-            (-(-u).ln_1p()).powf(1.0 / a)
-        }).collect()
+        (0..size)
+            .map(|_| {
+                let u = self.next_f64();
+                (-(-u).ln_1p()).powf(1.0 / a)
+            })
+            .collect()
     }
 
     // ── multivariate distributions ────────
@@ -1396,23 +1430,27 @@ impl Generator {
     /// Returns `size` samples, each a vector of length `pvals.len()`.
     /// `n` is the number of trials, `pvals` are probabilities (must sum to ~1).
     pub fn multinomial(&mut self, n: u64, pvals: &[f64], size: usize) -> Vec<Vec<u64>> {
-        (0..size).map(|_| {
-            let mut result = vec![0u64; pvals.len()];
-            let mut remaining = n;
-            let mut p_remaining = 1.0;
-            for (i, &p) in pvals.iter().enumerate() {
-                if remaining == 0 || i == pvals.len() - 1 {
-                    result[i] = remaining;
-                    break;
+        (0..size)
+            .map(|_| {
+                let mut result = vec![0u64; pvals.len()];
+                let mut remaining = n;
+                let mut p_remaining = 1.0;
+                for (i, &p) in pvals.iter().enumerate() {
+                    if remaining == 0 || i == pvals.len() - 1 {
+                        result[i] = remaining;
+                        break;
+                    }
+                    let draws = self.sample_binomial_single(remaining, p / p_remaining);
+                    result[i] = draws;
+                    remaining -= draws;
+                    p_remaining -= p;
+                    if p_remaining <= 0.0 {
+                        p_remaining = 1e-15;
+                    }
                 }
-                let draws = self.sample_binomial_single(remaining, p / p_remaining);
-                result[i] = draws;
-                remaining -= draws;
-                p_remaining -= p;
-                if p_remaining <= 0.0 { p_remaining = 1e-15; }
-            }
-            result
-        }).collect()
+                result
+            })
+            .collect()
     }
 
     fn sample_binomial_single(&mut self, n: u64, p: f64) -> u64 {
@@ -1429,211 +1467,236 @@ impl Generator {
     /// Dirichlet distribution (np.random.dirichlet).
     /// Returns `size` samples, each a vector of length `alpha.len()`.
     pub fn dirichlet(&mut self, alpha: &[f64], size: usize) -> Vec<Vec<f64>> {
-        (0..size).map(|_| {
-            let gamma_samples: Vec<f64> = alpha.iter().map(|&a| self.sample_gamma(a)).collect();
-            let sum: f64 = gamma_samples.iter().sum();
-            gamma_samples.into_iter().map(|g| g / sum).collect()
-        }).collect()
+        (0..size)
+            .map(|_| {
+                let gamma_samples: Vec<f64> = alpha.iter().map(|&a| self.sample_gamma(a)).collect();
+                let sum: f64 = gamma_samples.iter().sum();
+                gamma_samples.into_iter().map(|g| g / sum).collect()
+            })
+            .collect()
     }
 
     /// Multivariate normal distribution (np.random.multivariate_normal).
     /// Simplified version using diagonal covariance only.
     /// `mean` is the mean vector, `cov_diag` is the diagonal of the covariance matrix.
-    pub fn multivariate_normal_diag(&mut self, mean: &[f64], cov_diag: &[f64], size: usize) -> Vec<Vec<f64>> {
-        (0..size).map(|_| {
-            mean.iter().zip(cov_diag).map(|(&m, &v)| {
-                m + self.sample_standard_normal_single() * v.sqrt()
-            }).collect()
-        }).collect()
+    pub fn multivariate_normal_diag(
+        &mut self,
+        mean: &[f64],
+        cov_diag: &[f64],
+        size: usize,
+    ) -> Vec<Vec<f64>> {
+        (0..size)
+            .map(|_| {
+                mean.iter()
+                    .zip(cov_diag)
+                    .map(|(&m, &v)| m + self.sample_standard_normal_single() * v.sqrt())
+                    .collect()
+            })
+            .collect()
     }
 
     /// Negative binomial distribution (np.random.negative_binomial).
     /// Number of failures before `n` successes, with success probability `p`.
     pub fn negative_binomial(&mut self, n: f64, p: f64, size: usize) -> Vec<u64> {
         // Gamma-Poisson mixture
-        (0..size).map(|_| {
-            let gamma_val = self.sample_gamma(n) * (1.0 - p) / p;
-            // Poisson with rate gamma_val
-            let l = (-gamma_val).exp();
-            let mut k = 0u64;
-            let mut pp = 1.0;
-            loop {
-                k += 1;
-                pp *= self.next_f64();
-                if pp <= l { break; }
-            }
-            k - 1
-        }).collect()
+        (0..size)
+            .map(|_| {
+                let gamma_val = self.sample_gamma(n) * (1.0 - p) / p;
+                // Poisson with rate gamma_val
+                let l = (-gamma_val).exp();
+                let mut k = 0u64;
+                let mut pp = 1.0;
+                loop {
+                    k += 1;
+                    pp *= self.next_f64();
+                    if pp <= l {
+                        break;
+                    }
+                }
+                k - 1
+            })
+            .collect()
     }
 
     /// F-distribution (Fisher-Snedecor).  Ratio of two scaled chi-squared
     /// variates: (X1/dfnum) / (X2/dfden).
     pub fn f_distribution(&mut self, dfnum: f64, dfden: f64, size: usize) -> Vec<f64> {
-        (0..size).map(|_| {
-            let x1 = self.sample_gamma(dfnum / 2.0) * 2.0 / dfnum;
-            let x2 = self.sample_gamma(dfden / 2.0) * 2.0 / dfden;
-            x1 / x2
-        }).collect()
+        (0..size)
+            .map(|_| {
+                let x1 = self.sample_gamma(dfnum / 2.0) * 2.0 / dfnum;
+                let x2 = self.sample_gamma(dfden / 2.0) * 2.0 / dfden;
+                x1 / x2
+            })
+            .collect()
     }
 
     /// Student's t-distribution with `df` degrees of freedom.
     pub fn standard_t(&mut self, df: f64, size: usize) -> Vec<f64> {
-        (0..size).map(|_| {
-            let z = self.sample_standard_normal_single();
-            let chi2 = self.sample_gamma(df / 2.0) * 2.0;
-            z / (chi2 / df).sqrt()
-        }).collect()
+        (0..size)
+            .map(|_| {
+                let z = self.sample_standard_normal_single();
+                let chi2 = self.sample_gamma(df / 2.0) * 2.0;
+                z / (chi2 / df).sqrt()
+            })
+            .collect()
     }
 
     /// Power distribution on [0, 1).  CDF = x^a, inverse-CDF = u^(1/a).
     pub fn power(&mut self, a: f64, size: usize) -> Vec<f64> {
-        (0..size).map(|_| {
-            self.next_f64().powf(1.0 / a)
-        }).collect()
+        (0..size).map(|_| self.next_f64().powf(1.0 / a)).collect()
     }
 
     /// Von Mises circular distribution (Best-Fisher algorithm).
     pub fn vonmises(&mut self, mu: f64, kappa: f64, size: usize) -> Vec<f64> {
-        (0..size).map(|_| {
-            if kappa < 1e-6 {
-                return mu + std::f64::consts::PI * (2.0 * self.next_f64() - 1.0);
-            }
-            let tau = 1.0 + (1.0 + 4.0 * kappa * kappa).sqrt();
-            let rho = (tau - (2.0 * tau).sqrt()) / (2.0 * kappa);
-            let r = (1.0 + rho * rho) / (2.0 * rho);
-            loop {
-                let u1 = self.next_f64();
-                let z = (std::f64::consts::PI * u1).cos();
-                let f = (1.0 + r * z) / (r + z);
-                let c = kappa * (r - f);
-                let u2 = self.next_f64();
-                if u2 < c * (2.0 - c) || u2 <= c * (-c).exp() {
-                    let u3 = self.next_f64();
-                    let theta = if u3 > 0.5 { f.acos() } else { -f.acos() };
-                    return mu + theta;
+        (0..size)
+            .map(|_| {
+                if kappa < 1e-6 {
+                    return mu + std::f64::consts::PI * (2.0 * self.next_f64() - 1.0);
                 }
-            }
-        }).collect()
+                let tau = 1.0 + (1.0 + 4.0 * kappa * kappa).sqrt();
+                let rho = (tau - (2.0 * tau).sqrt()) / (2.0 * kappa);
+                let r = (1.0 + rho * rho) / (2.0 * rho);
+                loop {
+                    let u1 = self.next_f64();
+                    let z = (std::f64::consts::PI * u1).cos();
+                    let f = (1.0 + r * z) / (r + z);
+                    let c = kappa * (r - f);
+                    let u2 = self.next_f64();
+                    if u2 < c * (2.0 - c) || u2 <= c * (-c).exp() {
+                        let u3 = self.next_f64();
+                        let theta = if u3 > 0.5 { f.acos() } else { -f.acos() };
+                        return mu + theta;
+                    }
+                }
+            })
+            .collect()
     }
 
     /// Rayleigh distribution.
     pub fn rayleigh(&mut self, scale: f64, size: usize) -> Vec<f64> {
-        (0..size).map(|_| {
-            let u = self.next_f64();
-            scale * (-2.0 * (1.0 - u).ln()).sqrt()
-        }).collect()
+        (0..size)
+            .map(|_| {
+                let u = self.next_f64();
+                scale * (-2.0 * (1.0 - u).ln()).sqrt()
+            })
+            .collect()
     }
 
     /// Pareto distribution (Lomax).  CDF = 1 - (1+x)^(-a) for x >= 0.
     pub fn pareto(&mut self, a: f64, size: usize) -> Vec<f64> {
-        (0..size).map(|_| {
-            let u = self.next_f64();
-            (1.0 - u).powf(-1.0 / a) - 1.0
-        }).collect()
+        (0..size)
+            .map(|_| {
+                let u = self.next_f64();
+                (1.0 - u).powf(-1.0 / a) - 1.0
+            })
+            .collect()
     }
 
     /// Logistic distribution via inverse-CDF.
     pub fn logistic(&mut self, loc: f64, scale: f64, size: usize) -> Vec<f64> {
-        (0..size).map(|_| {
-            let u = self.next_f64();
-            loc + scale * (u / (1.0 - u)).ln()
-        }).collect()
+        (0..size)
+            .map(|_| {
+                let u = self.next_f64();
+                loc + scale * (u / (1.0 - u)).ln()
+            })
+            .collect()
     }
 
     /// Hypergeometric distribution: draws from a population of `ngood + nbad`
     /// containing `ngood` success states, taking `nsample` draws without replacement.
     /// Uses the direct counting algorithm (draw balls one-by-one).
     pub fn hypergeometric(&mut self, ngood: u64, nbad: u64, nsample: u64, size: usize) -> Vec<u64> {
-        (0..size).map(|_| {
-            let mut good_remaining = ngood;
-            let mut total_remaining = ngood + nbad;
-            let mut successes: u64 = 0;
-            for _ in 0..nsample {
-                if total_remaining == 0 {
-                    break;
+        (0..size)
+            .map(|_| {
+                let mut good_remaining = ngood;
+                let mut total_remaining = ngood + nbad;
+                let mut successes: u64 = 0;
+                for _ in 0..nsample {
+                    if total_remaining == 0 {
+                        break;
+                    }
+                    let u = self.next_f64();
+                    if u < (good_remaining as f64) / (total_remaining as f64) {
+                        successes += 1;
+                        good_remaining -= 1;
+                    }
+                    total_remaining -= 1;
                 }
-                let u = self.next_f64();
-                if u < (good_remaining as f64) / (total_remaining as f64) {
-                    successes += 1;
-                    good_remaining -= 1;
-                }
-                total_remaining -= 1;
-            }
-            successes
-        }).collect()
+                successes
+            })
+            .collect()
     }
 
     /// Zipf (Zipfian) distribution with parameter `a > 1`.
     /// Uses rejection method based on Luc Devroye's algorithm.
     pub fn zipf(&mut self, a: f64, size: usize) -> Vec<f64> {
         let b = 2.0_f64.powf(a - 1.0);
-        (0..size).map(|_| {
-            loop {
-                let u = 1.0 - self.next_f64();
-                let v = self.next_f64();
-                let x = (u.powf(-1.0 / (a - 1.0))).floor();
-                let t = ((1.0 + 1.0 / x).powf(a - 1.0)) / b;
-                if v * x * (t - 1.0) / (b - 1.0) <= t / b {
-                    return x;
+        (0..size)
+            .map(|_| {
+                loop {
+                    let u = 1.0 - self.next_f64();
+                    let v = self.next_f64();
+                    let x = (u.powf(-1.0 / (a - 1.0))).floor();
+                    let t = ((1.0 + 1.0 / x).powf(a - 1.0)) / b;
+                    if v * x * (t - 1.0) / (b - 1.0) <= t / b {
+                        return x;
+                    }
                 }
-            }
-        }).collect()
+            })
+            .collect()
     }
 
     /// Wald (inverse Gaussian) distribution with given `mean` and `scale`.
     /// Uses the Michael-Schucany-Haas algorithm.
     pub fn wald(&mut self, mean: f64, scale: f64, size: usize) -> Vec<f64> {
-        (0..size).map(|_| {
-            let z = self.sample_standard_normal_single();
-            let v = z * z;
-            let mu = mean;
-            let lam = scale;
-            let x = mu + (mu * mu * v) / (2.0 * lam)
-                - (mu / (2.0 * lam)) * (4.0 * mu * lam * v + mu * mu * v * v).sqrt();
-            let u = self.next_f64();
-            if u <= mu / (mu + x) {
-                x
-            } else {
-                mu * mu / x
-            }
-        }).collect()
+        (0..size)
+            .map(|_| {
+                let z = self.sample_standard_normal_single();
+                let v = z * z;
+                let mu = mean;
+                let lam = scale;
+                let x = mu + (mu * mu * v) / (2.0 * lam)
+                    - (mu / (2.0 * lam)) * (4.0 * mu * lam * v + mu * mu * v * v).sqrt();
+                let u = self.next_f64();
+                if u <= mu / (mu + x) { x } else { mu * mu / x }
+            })
+            .collect()
     }
 
     /// Logarithmic (log-series) distribution with parameter `p` in (0, 1).
     /// Uses Kemp's algorithm.
     pub fn logseries(&mut self, p: f64, size: usize) -> Vec<u64> {
         let log_q = (1.0 - p).ln();
-        (0..size).map(|_| {
-            let u = self.next_f64();
-            let v = self.next_f64();
-            if u < -p / ((1.0 - p) * log_q) {
-                1
-            } else {
-                let y = 1.0 - (v.ln() / log_q).exp().min(1.0);
-                if y <= 0.0 {
+        (0..size)
+            .map(|_| {
+                let u = self.next_f64();
+                let v = self.next_f64();
+                if u < -p / ((1.0 - p) * log_q) {
                     1
                 } else {
-                    1 + (v.ln() / y.ln()).floor() as u64
+                    let y = 1.0 - (v.ln() / log_q).exp().min(1.0);
+                    if y <= 0.0 {
+                        1
+                    } else {
+                        1 + (v.ln() / y.ln()).floor() as u64
+                    }
                 }
-            }
-        }).collect()
+            })
+            .collect()
     }
 
     /// Full multivariate normal with arbitrary covariance matrix.
     /// Uses Cholesky decomposition: if Sigma = L L^T, then
     /// X = mean + L * z where z ~ N(0, I).
     /// `cov` is a flat n*n covariance matrix (row-major), must be symmetric positive definite.
-    pub fn multivariate_normal(
-        &mut self,
-        mean: &[f64],
-        cov: &[f64],
-        size: usize,
-    ) -> Vec<Vec<f64>> {
+    pub fn multivariate_normal(&mut self, mean: &[f64], cov: &[f64], size: usize) -> Vec<Vec<f64>> {
         let n = mean.len();
         let l = cholesky_flat(cov, n);
         (0..size)
             .map(|_| {
-                let z: Vec<f64> = (0..n).map(|_| self.sample_standard_normal_single()).collect();
+                let z: Vec<f64> = (0..n)
+                    .map(|_| self.sample_standard_normal_single())
+                    .collect();
                 let mut sample = mean.to_vec();
                 for i in 0..n {
                     for j in 0..=i {
@@ -2672,7 +2735,10 @@ mod tests {
         let mut rng1 = test_generator();
         let mut rng2 = test_generator();
         assert_eq!(rng1.random(10), rng2.random(10));
-        assert_eq!(rng1.integers(0, 100, 10).unwrap(), rng2.integers(0, 100, 10).unwrap());
+        assert_eq!(
+            rng1.integers(0, 100, 10).unwrap(),
+            rng2.integers(0, 100, 10).unwrap()
+        );
     }
 
     // ── additional distribution tests ────────
@@ -2742,7 +2808,7 @@ mod tests {
     fn triangular_basic() {
         let mut rng = test_generator();
         let samples = rng.triangular(0.0, 5.0, 10.0, 1000);
-        assert!(samples.iter().all(|&v| v >= 0.0 && v <= 10.0));
+        assert!(samples.iter().all(|&v| (0.0..=10.0).contains(&v)));
         let mean: f64 = samples.iter().sum::<f64>() / 1000.0;
         // E[tri(a,c,b)] = (a+b+c)/3 = (0+5+10)/3 = 5.0
         assert!((mean - 5.0).abs() < 0.5);
@@ -2858,7 +2924,10 @@ mod tests {
         assert!(samples.iter().all(|&v| v > 0.0));
         let mean: f64 = samples.iter().sum::<f64>() / 5000.0;
         let expected = scale * (std::f64::consts::FRAC_PI_2).sqrt();
-        assert!((mean - expected).abs() < 0.2, "rayleigh mean={mean}, expected={expected}");
+        assert!(
+            (mean - expected).abs() < 0.2,
+            "rayleigh mean={mean}, expected={expected}"
+        );
     }
 
     #[test]
@@ -2896,11 +2965,17 @@ mod tests {
         let samples = rng.zipf(2.0, 5000);
         for &s in &samples {
             assert!(s >= 1.0, "zipf values must be >= 1");
-            assert!((s - s.floor()).abs() < 1e-10, "zipf values must be integers");
+            assert!(
+                (s - s.floor()).abs() < 1e-10,
+                "zipf values must be integers"
+            );
         }
         // Mode should be 1; majority of values should be 1 or 2
         let count_one = samples.iter().filter(|&&x| x == 1.0).count();
-        assert!(count_one > 1500, "zipf(a=2) should produce many 1s, got {count_one}");
+        assert!(
+            count_one > 1500,
+            "zipf(a=2) should produce many 1s, got {count_one}"
+        );
     }
 
     #[test]
@@ -2924,7 +2999,10 @@ mod tests {
         }
         // With p=0.5, most values should be small (1 or 2)
         let count_one = samples.iter().filter(|&&x| x == 1).count();
-        assert!(count_one > 1000, "logseries(p=0.5) should produce many 1s, got {count_one}");
+        assert!(
+            count_one > 1000,
+            "logseries(p=0.5) should produce many 1s, got {count_one}"
+        );
     }
 
     #[test]
@@ -2944,9 +3022,11 @@ mod tests {
         assert!((mean1 - 2.0).abs() < 0.1, "mean1={mean1}");
 
         // Check correlation is positive (due to 0.5 covariance)
-        let cov_emp: f64 = samples.iter()
+        let cov_emp: f64 = samples
+            .iter()
             .map(|s| (s[0] - mean0) * (s[1] - mean1))
-            .sum::<f64>() / 5000.0;
+            .sum::<f64>()
+            / 5000.0;
         assert!(cov_emp > 0.2, "empirical cov={cov_emp}, expected positive");
     }
 }
