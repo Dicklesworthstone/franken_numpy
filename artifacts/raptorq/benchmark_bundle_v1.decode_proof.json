@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "bundle_id": "benchmark_bundle_v1",
-  "generated_at_unix_ms": 1771599594334,
+  "generated_at_unix_ms": 1771621590711,
   "dropped_symbol": "sbn=0 esi=0 kind=source",
   "recovery_symbols_used": 27,
   "recovery_success": true,

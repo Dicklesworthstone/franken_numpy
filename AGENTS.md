@@ -541,9 +541,12 @@ Quick commands:
 ```bash
 rch doctor                    # Health check
 rch workers probe --all       # Test connectivity to all 8 workers
+rch workers sync-toolchain --all  # Ensure pinned rust-toolchain is present on all workers
 rch status                    # Overview of current state
 rch queue                     # See active/waiting builds
 ```
+
+When `rust-toolchain.toml` is updated, run `rch workers sync-toolchain --all` before heavy builds/tests.
 
 If rch or its workers are unavailable, it fails open — builds run locally as normal.
 
