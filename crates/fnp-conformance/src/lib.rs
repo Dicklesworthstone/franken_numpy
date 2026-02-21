@@ -3694,8 +3694,12 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     rhs_dtype: Some(rhs_dtype.clone()),
                     axis: None,
                     keepdims: None,
+                    ddof: None,
                     clip_min: None,
                     clip_max: None,
+                    third_shape: None,
+                    third_values: None,
+                    third_dtype: None,
                     seed: case.seed,
                     mode: mode.clone(),
                     env_fingerprint: env_fingerprint.clone(),
@@ -3715,8 +3719,12 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     rhs_dtype: Some(case.lhs_dtype.clone()),
                     axis: None,
                     keepdims: None,
+                    ddof: None,
                     clip_min: None,
                     clip_max: None,
+                    third_shape: None,
+                    third_values: None,
+                    third_dtype: None,
                     seed: case.seed,
                     mode: mode.clone(),
                     env_fingerprint: env_fingerprint.clone(),
@@ -3778,8 +3786,12 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     rhs_dtype: Some(rhs_dtype.clone()),
                     axis: None,
                     keepdims: None,
+                    ddof: None,
                     clip_min: None,
                     clip_max: None,
+                    third_shape: None,
+                    third_values: None,
+                    third_dtype: None,
                     seed: case.seed,
                     mode: mode.clone(),
                     env_fingerprint: env_fingerprint.clone(),
@@ -3799,8 +3811,12 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     rhs_dtype: Some(case.lhs_dtype.clone()),
                     axis: None,
                     keepdims: None,
+                    ddof: None,
                     clip_min: None,
                     clip_max: None,
+                    third_shape: None,
+                    third_values: None,
+                    third_dtype: None,
                     seed: case.seed,
                     mode: mode.clone(),
                     env_fingerprint: env_fingerprint.clone(),
@@ -3834,8 +3850,12 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     rhs_dtype: None,
                     axis: None,
                     keepdims: Some(false),
+                    ddof: None,
                     clip_min: None,
                     clip_max: None,
+                    third_shape: None,
+                    third_values: None,
+                    third_dtype: None,
                     seed: case.seed,
                     mode: mode.clone(),
                     env_fingerprint: env_fingerprint.clone(),
@@ -3855,8 +3875,12 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     rhs_dtype: Some(default_f64_dtype_name()),
                     axis: None,
                     keepdims: None,
+                    ddof: None,
                     clip_min: None,
                     clip_max: None,
+                    third_shape: None,
+                    third_values: None,
+                    third_dtype: None,
                     seed: case.seed,
                     mode: mode.clone(),
                     env_fingerprint: env_fingerprint.clone(),
@@ -3905,8 +3929,12 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     rhs_dtype: None,
                     axis: None,
                     keepdims: Some(false),
+                    ddof: None,
                     clip_min: None,
                     clip_max: None,
+                    third_shape: None,
+                    third_values: None,
+                    third_dtype: None,
                     seed: case.seed,
                     mode: mode.clone(),
                     env_fingerprint: env_fingerprint.clone(),
@@ -4049,8 +4077,12 @@ pub fn run_ufunc_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport
             rhs_dtype: case.rhs_dtype.clone(),
             axis: case.axis,
             keepdims: case.keepdims,
+            ddof: None,
             clip_min: case.clip_min,
             clip_max: case.clip_max,
+            third_shape: None,
+            third_values: None,
+            third_dtype: None,
             seed: case.seed,
             mode: mode.clone(),
             env_fingerprint: env_fingerprint.clone(),
@@ -5633,8 +5665,14 @@ fn classify_ufunc_reason_code(op: UFuncOperation, detail: &str) -> String {
             | UFuncOperation::Min
             | UFuncOperation::Max
             | UFuncOperation::Mean
+            | UFuncOperation::Var
+            | UFuncOperation::Std
+            | UFuncOperation::Argmin
+            | UFuncOperation::Argmax
     ) && (lowered.contains("axis")
         || lowered.contains("keepdims")
+        || lowered.contains("argmin")
+        || lowered.contains("argmax")
         || lowered.contains("reduce"))
     {
         "ufunc_reduction_contract_violation".to_string()

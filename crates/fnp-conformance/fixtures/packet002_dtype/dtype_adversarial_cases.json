@@ -51,8 +51,8 @@
     "reason_code": "dtype_normalization_failed"
   },
   {
-    "id": "dtype002_adv_unknown_lhs_u8",
-    "lhs": "u8",
+    "id": "dtype002_adv_unknown_lhs_bfloat16",
+    "lhs": "bfloat16",
     "rhs": "i64",
     "expected_error_contains": "unknown lhs dtype",
     "expected_reason_code": "dtype_normalization_failed",

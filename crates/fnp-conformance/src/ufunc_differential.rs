@@ -14,6 +14,7 @@ import json
 import importlib
 import sys
 import math
+import bisect
 
 input_path = sys.argv[1]
 output_path = sys.argv[2]
@@ -180,6 +181,12 @@ def py_binary(lhs_vals, lhs_shape, rhs_vals, rhs_shape, op):
             out_vals.append(1.0 if (l != 0.0 or r != 0.0) else 0.0)
         elif op == 'logical_xor':
             out_vals.append(1.0 if ((l != 0.0) != (r != 0.0)) else 0.0)
+        elif op == 'bitwise_and':
+            out_vals.append(float(int(l) & int(r)))
+        elif op == 'bitwise_or':
+            out_vals.append(float(int(l) | int(r)))
+        elif op == 'bitwise_xor':
+            out_vals.append(float(int(l) ^ int(r)))
         elif op == 'equal':
             out_vals.append(1.0 if l == r else 0.0)
         elif op == 'not_equal':
@@ -387,6 +394,235 @@ def py_cumprod(vals, shape, axis):
                 offset += inner
     return list(shape), out
 
+def py_where(cond_vals, cond_shape, x_vals, x_shape, y_vals, y_shape):
+    out_shape = py_broadcast_shape(cond_shape, x_shape)
+    out_shape = py_broadcast_shape(out_shape, y_shape)
+    out_count = math.prod(out_shape) if out_shape else 1
+    out_strides = py_strides(out_shape)
+    cond_strides = py_strides(cond_shape)
+    x_strides = py_strides(x_shape)
+    y_strides = py_strides(y_shape)
+    out_vals = []
+    for flat in range(out_count):
+        multi = py_unravel(flat, out_shape, out_strides)
+        ci = py_src_index(multi, cond_shape, cond_strides, len(out_shape))
+        xi = py_src_index(multi, x_shape, x_strides, len(out_shape))
+        yi = py_src_index(multi, y_shape, y_strides, len(out_shape))
+        out_vals.append(x_vals[xi] if cond_vals[ci] != 0.0 else y_vals[yi])
+    return out_shape, out_vals
+
+def py_sort(vals, shape, axis):
+    if axis is None:
+        out = sorted(vals)
+        return [len(out)], out
+
+    raw_axis = axis
+    if axis < 0:
+        axis += len(shape)
+    if axis < 0 or axis >= len(shape):
+        raise ValueError(f'axis {raw_axis} out of bounds for shape {shape}')
+
+    axis_len = shape[axis]
+    if axis_len <= 1:
+        return list(shape), list(vals)
+
+    inner = math.prod(shape[axis+1:]) if axis + 1 < len(shape) else 1
+    outer = math.prod(shape[:axis]) if axis > 0 else 1
+    out = list(vals)
+    for oi in range(outer):
+        base = oi * axis_len * inner
+        for ii in range(inner):
+            lane = []
+            for k in range(axis_len):
+                lane.append(out[base + k * inner + ii])
+            lane.sort()
+            for k in range(axis_len):
+                out[base + k * inner + ii] = lane[k]
+    return list(shape), out
+
+def py_argsort(vals, shape, axis):
+    if axis is None:
+        indices = list(range(len(vals)))
+        indices.sort(key=lambda idx: vals[idx])
+        return [len(indices)], [float(idx) for idx in indices]
+
+    raw_axis = axis
+    if axis < 0:
+        axis += len(shape)
+    if axis < 0 or axis >= len(shape):
+        raise ValueError(f'axis {raw_axis} out of bounds for shape {shape}')
+
+    axis_len = shape[axis]
+    inner = math.prod(shape[axis+1:]) if axis + 1 < len(shape) else 1
+    outer = math.prod(shape[:axis]) if axis > 0 else 1
+    out = [0.0] * len(vals)
+    for oi in range(outer):
+        base = oi * axis_len * inner
+        for ii in range(inner):
+            idx_lane = list(range(axis_len))
+            idx_lane.sort(key=lambda idx: vals[base + idx * inner + ii])
+            for k in range(axis_len):
+                out[base + k * inner + ii] = float(idx_lane[k])
+    return list(shape), out
+
+def py_concat2(lhs_vals, lhs_shape, rhs_vals, rhs_shape, axis):
+    if len(lhs_shape) != len(rhs_shape):
+        raise ValueError(f'rank mismatch lhs={lhs_shape} rhs={rhs_shape}')
+    raw_axis = axis
+    if axis < 0:
+        axis += len(lhs_shape)
+    if axis < 0 or axis >= len(lhs_shape):
+        raise ValueError(f'axis {raw_axis} out of bounds for shape {lhs_shape}')
+
+    for dim, (l, r) in enumerate(zip(lhs_shape, rhs_shape)):
+        if dim != axis and l != r:
+            raise ValueError(f'cannot concatenate {lhs_shape} with {rhs_shape}')
+
+    out_shape = list(lhs_shape)
+    out_shape[axis] = lhs_shape[axis] + rhs_shape[axis]
+    out_count = math.prod(out_shape) if out_shape else 1
+    inner = math.prod(lhs_shape[axis+1:]) if axis + 1 < len(lhs_shape) else 1
+    outer = math.prod(lhs_shape[:axis]) if axis > 0 else 1
+    out = [0.0] * out_count
+
+    for oi in range(outer):
+        write_offset = oi * out_shape[axis] * inner
+        lhs_base = oi * lhs_shape[axis] * inner
+        rhs_base = oi * rhs_shape[axis] * inner
+        for k in range(lhs_shape[axis]):
+            for ii in range(inner):
+                out[write_offset + k * inner + ii] = lhs_vals[lhs_base + k * inner + ii]
+        write_offset += lhs_shape[axis] * inner
+        for k in range(rhs_shape[axis]):
+            for ii in range(inner):
+                out[write_offset + k * inner + ii] = rhs_vals[rhs_base + k * inner + ii]
+
+    return out_shape, out
+
+def py_stack2(lhs_vals, lhs_shape, rhs_vals, rhs_shape, axis):
+    if lhs_shape != rhs_shape:
+        raise ValueError(f'stack requires equal shapes lhs={lhs_shape} rhs={rhs_shape}')
+
+    result_ndim = len(lhs_shape) + 1
+    raw_axis = axis
+    if axis < 0:
+        axis += result_ndim
+    if axis < 0 or axis >= result_ndim:
+        raise ValueError(f'axis {raw_axis} out of bounds for stacked ndim={result_ndim}')
+
+    expanded_shape = list(lhs_shape)
+    expanded_shape.insert(axis, 1)
+    return py_concat2(lhs_vals, expanded_shape, rhs_vals, expanded_shape, axis)
+
+def py_searchsorted(sorted_vals, sorted_shape, probe_vals, probe_shape):
+    if len(sorted_shape) != 1:
+        raise ValueError(f'searchsorted expects 1-D sorted input, got shape {sorted_shape}')
+    out = [float(bisect.bisect_left(sorted_vals, needle)) for needle in probe_vals]
+    return list(probe_shape), out
+
+def py_var_std(vals, shape, axis, keepdims, ddof, emit_std):
+    ddof = int(ddof)
+    if axis is None:
+        count = len(vals)
+        if count - ddof <= 0:
+            raise ValueError(f'ddof {ddof} >= sample size {count}')
+        mean = sum(vals) / count
+        var = sum((v - mean) ** 2 for v in vals) / (count - ddof)
+        out_shape = [1] * len(shape) if keepdims else []
+        out_value = math.sqrt(var) if emit_std else var
+        return out_shape, [out_value]
+
+    raw_axis = axis
+    if axis < 0:
+        axis += len(shape)
+    if axis < 0 or axis >= len(shape):
+        raise ValueError(f'axis {raw_axis} out of bounds for shape {shape}')
+
+    axis_len = shape[axis]
+    if axis_len - ddof <= 0:
+        raise ValueError(f'ddof {ddof} >= axis length {axis_len}')
+
+    in_strides = py_strides(shape)
+    out_shape = py_reduced_shape(shape, axis, keepdims)
+    out_strides = py_strides(out_shape)
+    out_count = math.prod(out_shape) if out_shape else 1
+
+    sums = [0.0] * out_count
+    sums_sq = [0.0] * out_count
+    counts = [0] * out_count
+
+    for flat in range(len(vals)):
+        multi = py_unravel(flat, shape, in_strides)
+        out_multi = []
+        for i, idx in enumerate(multi):
+            if i == axis:
+                if keepdims:
+                    out_multi.append(0)
+            else:
+                out_multi.append(idx)
+        out_flat = py_ravel(out_multi, out_strides) if out_multi else 0
+        value = vals[flat]
+        sums[out_flat] += value
+        sums_sq[out_flat] += value * value
+        counts[out_flat] += 1
+
+    out = []
+    for i in range(out_count):
+        count = counts[i]
+        if count - ddof <= 0:
+            raise ValueError(f'ddof {ddof} >= reduction size {count}')
+        mean = sums[i] / count
+        var = (sums_sq[i] - count * mean * mean) / (count - ddof)
+        if var < 0.0 and abs(var) < 1e-15:
+            var = 0.0
+        out.append(math.sqrt(var) if emit_std else var)
+
+    return out_shape, out
+
+def py_arg_reduce(vals, shape, axis, find_min):
+    if axis is None:
+        if not vals:
+            raise ValueError('arg-reduction of empty sequence')
+        best_idx = 0
+        best_val = vals[0]
+        for idx in range(1, len(vals)):
+            candidate = vals[idx]
+            if (candidate < best_val) if find_min else (candidate > best_val):
+                best_val = candidate
+                best_idx = idx
+        return [], [float(best_idx)]
+
+    raw_axis = axis
+    if axis < 0:
+        axis += len(shape)
+    if axis < 0 or axis >= len(shape):
+        raise ValueError(f'axis {raw_axis} out of bounds for shape {shape}')
+
+    axis_len = shape[axis]
+    if axis_len == 0:
+        raise ValueError('arg-reduction axis has length 0')
+
+    inner = math.prod(shape[axis+1:]) if axis + 1 < len(shape) else 1
+    outer = math.prod(shape[:axis]) if axis > 0 else 1
+    out_shape = py_reduced_shape(shape, axis, False)
+    out_vals = []
+
+    for oi in range(outer):
+        base = oi * axis_len * inner
+        for ii in range(inner):
+            best_idx = 0
+            best_val = vals[base + ii]
+            offset = base + ii + inner
+            for k in range(1, axis_len):
+                candidate = vals[offset]
+                if (candidate < best_val) if find_min else (candidate > best_val):
+                    best_val = candidate
+                    best_idx = k
+                offset += inner
+            out_vals.append(float(best_idx))
+
+    return out_shape, out_vals
+
 def normalize_dtype_name(name):
     aliases = {
         'f64': 'float64',
@@ -406,10 +642,22 @@ def normalize_fallback_dtype(name):
     aliases = {
         'bool': 'bool',
         'bool_': 'bool',
+        'i8': 'i8',
+        'int8': 'i8',
+        'i16': 'i16',
+        'int16': 'i16',
         'i32': 'i32',
         'int32': 'i32',
         'i64': 'i64',
         'int64': 'i64',
+        'u8': 'u8',
+        'uint8': 'u8',
+        'u16': 'u16',
+        'uint16': 'u16',
+        'u32': 'u32',
+        'uint32': 'u32',
+        'u64': 'u64',
+        'uint64': 'u64',
         'f32': 'f32',
         'float32': 'f32',
         'f64': 'f64',
@@ -442,6 +690,20 @@ def fallback_promote(lhs_dtype, rhs_dtype):
         return 'f64'
     return 'f64'
 
+def fallback_sum_prod_dtype(dtype):
+    dt = normalize_fallback_dtype(dtype)
+    if dt in ('bool', 'i8', 'i16', 'i32'):
+        return 'i64'
+    if dt in ('u8', 'u16', 'u32', 'u64'):
+        return 'u64'
+    return dt
+
+def fallback_mean_dtype(dtype):
+    dt = normalize_fallback_dtype(dtype)
+    if dt in ('bool', 'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64'):
+        return 'f64'
+    return dt
+
 results = []
 
 for case in cases:
@@ -452,7 +714,7 @@ for case in cases:
             lhs_dtype = normalize_dtype_name(case.get('lhs_dtype', 'float64'))
             lhs = np.array(case['lhs_values'], dtype=lhs_dtype).reshape(tuple(case['lhs_shape']))
 
-            if op in ('add', 'sub', 'mul', 'div', 'power', 'remainder', 'minimum', 'maximum', 'arctan2', 'fmod', 'copysign', 'fmax', 'fmin', 'heaviside', 'nextafter', 'logical_and', 'logical_or', 'logical_xor', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'hypot', 'logaddexp', 'logaddexp2', 'ldexp', 'floor_divide', 'float_power'):
+            if op in ('add', 'sub', 'mul', 'div', 'power', 'remainder', 'minimum', 'maximum', 'arctan2', 'fmod', 'copysign', 'fmax', 'fmin', 'heaviside', 'nextafter', 'logical_and', 'logical_or', 'logical_xor', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'hypot', 'logaddexp', 'logaddexp2', 'ldexp', 'floor_divide', 'float_power', 'bitwise_and', 'bitwise_or', 'bitwise_xor'):
                 rhs_dtype = normalize_dtype_name(case.get('rhs_dtype', 'float64'))
                 rhs = np.array(case['rhs_values'], dtype=rhs_dtype).reshape(tuple(case['rhs_shape']))
                 if op == 'add':
@@ -515,6 +777,12 @@ for case in cases:
                     out = np.floor_divide(lhs, rhs)
                 elif op == 'float_power':
                     out = np.float_power(lhs, rhs)
+                elif op == 'bitwise_and':
+                    out = np.bitwise_and(lhs, rhs)
+                elif op == 'bitwise_or':
+                    out = np.bitwise_or(lhs, rhs)
+                elif op == 'bitwise_xor':
+                    out = np.bitwise_xor(lhs, rhs)
             elif op == 'sum':
                 axis = case.get('axis')
                 keepdims = bool(case.get('keepdims', False))
@@ -535,6 +803,22 @@ for case in cases:
                 axis = case.get('axis')
                 keepdims = bool(case.get('keepdims', False))
                 out = lhs.mean(axis=axis, keepdims=keepdims)
+            elif op == 'var':
+                axis = case.get('axis')
+                keepdims = bool(case.get('keepdims', False))
+                ddof = int(case.get('ddof', 0) or 0)
+                out = lhs.var(axis=axis, keepdims=keepdims, ddof=ddof)
+            elif op == 'std':
+                axis = case.get('axis')
+                keepdims = bool(case.get('keepdims', False))
+                ddof = int(case.get('ddof', 0) or 0)
+                out = lhs.std(axis=axis, keepdims=keepdims, ddof=ddof)
+            elif op == 'argmin':
+                axis = case.get('axis')
+                out = lhs.argmin(axis=axis)
+            elif op == 'argmax':
+                axis = case.get('axis')
+                out = lhs.argmax(axis=axis)
             elif op == 'cumsum':
                 axis = case.get('axis')
                 out = np.cumsum(lhs, axis=axis)
@@ -545,6 +829,32 @@ for case in cases:
                 clip_min = case.get('clip_min')
                 clip_max = case.get('clip_max')
                 out = np.clip(lhs, clip_min, clip_max)
+            elif op == 'where':
+                rhs_dtype = normalize_dtype_name(case.get('rhs_dtype', 'float64'))
+                rhs = np.array(case['rhs_values'], dtype=rhs_dtype).reshape(tuple(case['rhs_shape']))
+                third_dtype = normalize_dtype_name(case.get('third_dtype', 'float64'))
+                third = np.array(case['third_values'], dtype=third_dtype).reshape(tuple(case['third_shape']))
+                out = np.where(lhs, rhs, third)
+            elif op == 'sort':
+                axis = case.get('axis')
+                out = np.sort(lhs, axis=axis)
+            elif op == 'argsort':
+                axis = case.get('axis')
+                out = np.argsort(lhs, axis=axis)
+            elif op == 'searchsorted':
+                rhs_dtype = normalize_dtype_name(case.get('rhs_dtype', 'float64'))
+                rhs = np.array(case['rhs_values'], dtype=rhs_dtype).reshape(tuple(case['rhs_shape']))
+                out = np.searchsorted(lhs, rhs, side='left')
+            elif op == 'concatenate':
+                rhs_dtype = normalize_dtype_name(case.get('rhs_dtype', 'float64'))
+                rhs = np.array(case['rhs_values'], dtype=rhs_dtype).reshape(tuple(case['rhs_shape']))
+                axis = case.get('axis', 0)
+                out = np.concatenate((lhs, rhs), axis=axis)
+            elif op == 'stack':
+                rhs_dtype = normalize_dtype_name(case.get('rhs_dtype', 'float64'))
+                rhs = np.array(case['rhs_values'], dtype=rhs_dtype).reshape(tuple(case['rhs_shape']))
+                axis = case.get('axis', 0)
+                out = np.stack((lhs, rhs), axis=axis)
             elif op == 'abs':
                 out = np.abs(lhs)
             elif op == 'negative':
@@ -638,7 +948,7 @@ for case in cases:
             lhs_shape = case['lhs_shape']
             lhs_vals = [float(v) for v in case['lhs_values']]
             lhs_dtype = normalize_fallback_dtype(case.get('lhs_dtype', 'f64'))
-            if op in ('add', 'sub', 'mul', 'div', 'power', 'remainder', 'minimum', 'maximum', 'arctan2', 'fmod', 'copysign', 'fmax', 'fmin', 'heaviside', 'nextafter', 'logical_and', 'logical_or', 'logical_xor', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'hypot', 'logaddexp', 'logaddexp2', 'ldexp', 'floor_divide', 'float_power'):
+            if op in ('add', 'sub', 'mul', 'div', 'power', 'remainder', 'minimum', 'maximum', 'arctan2', 'fmod', 'copysign', 'fmax', 'fmin', 'heaviside', 'nextafter', 'logical_and', 'logical_or', 'logical_xor', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'hypot', 'logaddexp', 'logaddexp2', 'ldexp', 'floor_divide', 'float_power', 'bitwise_and', 'bitwise_or', 'bitwise_xor'):
                 rhs_shape = case['rhs_shape']
                 rhs_vals = [float(v) for v in case['rhs_values']]
                 rhs_dtype = normalize_fallback_dtype(case.get('rhs_dtype', 'f64'))
@@ -648,12 +958,42 @@ for case in cases:
                 axis = case.get('axis')
                 keepdims = bool(case.get('keepdims', False))
                 shape, values = py_sum(lhs_vals, lhs_shape, axis, keepdims)
-                dtype = lhs_dtype
-            elif op in ('prod', 'min', 'max', 'mean'):
+                dtype = fallback_sum_prod_dtype(lhs_dtype)
+            elif op == 'prod':
+                axis = case.get('axis')
+                keepdims = bool(case.get('keepdims', False))
+                shape, values = py_reduce(lhs_vals, lhs_shape, axis, keepdims, op)
+                dtype = fallback_sum_prod_dtype(lhs_dtype)
+            elif op in ('min', 'max'):
                 axis = case.get('axis')
                 keepdims = bool(case.get('keepdims', False))
                 shape, values = py_reduce(lhs_vals, lhs_shape, axis, keepdims, op)
                 dtype = lhs_dtype
+            elif op == 'mean':
+                axis = case.get('axis')
+                keepdims = bool(case.get('keepdims', False))
+                shape, values = py_reduce(lhs_vals, lhs_shape, axis, keepdims, op)
+                dtype = fallback_mean_dtype(lhs_dtype)
+            elif op == 'var':
+                axis = case.get('axis')
+                keepdims = bool(case.get('keepdims', False))
+                ddof = int(case.get('ddof', 0) or 0)
+                shape, values = py_var_std(lhs_vals, lhs_shape, axis, keepdims, ddof, False)
+                dtype = 'f64'
+            elif op == 'std':
+                axis = case.get('axis')
+                keepdims = bool(case.get('keepdims', False))
+                ddof = int(case.get('ddof', 0) or 0)
+                shape, values = py_var_std(lhs_vals, lhs_shape, axis, keepdims, ddof, True)
+                dtype = 'f64'
+            elif op == 'argmin':
+                axis = case.get('axis')
+                shape, values = py_arg_reduce(lhs_vals, lhs_shape, axis, True)
+                dtype = 'i64'
+            elif op == 'argmax':
+                axis = case.get('axis')
+                shape, values = py_arg_reduce(lhs_vals, lhs_shape, axis, False)
+                dtype = 'i64'
             elif op == 'abs':
                 shape = lhs_shape
                 values = [abs(v) for v in lhs_vals]
@@ -839,6 +1179,42 @@ for case in cases:
                 hi = clip_max if clip_max is not None else float('inf')
                 values = [max(lo, min(hi, v)) for v in lhs_vals]
                 dtype = lhs_dtype
+            elif op == 'where':
+                x_shape = case['rhs_shape']
+                x_vals = [float(v) for v in case['rhs_values']]
+                x_dtype = normalize_fallback_dtype(case.get('rhs_dtype', 'f64'))
+                y_shape = case['third_shape']
+                y_vals = [float(v) for v in case['third_values']]
+                y_dtype = normalize_fallback_dtype(case.get('third_dtype', 'f64'))
+                shape, values = py_where(lhs_vals, lhs_shape, x_vals, x_shape, y_vals, y_shape)
+                dtype = fallback_promote(x_dtype, y_dtype)
+            elif op == 'sort':
+                axis = case.get('axis')
+                shape, values = py_sort(lhs_vals, lhs_shape, axis)
+                dtype = lhs_dtype
+            elif op == 'argsort':
+                axis = case.get('axis')
+                shape, values = py_argsort(lhs_vals, lhs_shape, axis)
+                dtype = 'i64'
+            elif op == 'searchsorted':
+                rhs_shape = case['rhs_shape']
+                rhs_vals = [float(v) for v in case['rhs_values']]
+                shape, values = py_searchsorted(lhs_vals, lhs_shape, rhs_vals, rhs_shape)
+                dtype = 'i64'
+            elif op == 'concatenate':
+                rhs_shape = case['rhs_shape']
+                rhs_vals = [float(v) for v in case['rhs_values']]
+                rhs_dtype = normalize_fallback_dtype(case.get('rhs_dtype', 'f64'))
+                axis = case.get('axis', 0)
+                shape, values = py_concat2(lhs_vals, lhs_shape, rhs_vals, rhs_shape, axis)
+                dtype = fallback_promote(lhs_dtype, rhs_dtype)
+            elif op == 'stack':
+                rhs_shape = case['rhs_shape']
+                rhs_vals = [float(v) for v in case['rhs_values']]
+                rhs_dtype = normalize_fallback_dtype(case.get('rhs_dtype', 'f64'))
+                axis = case.get('axis', 0)
+                shape, values = py_stack2(lhs_vals, lhs_shape, rhs_vals, rhs_shape, axis)
+                dtype = fallback_promote(lhs_dtype, rhs_dtype)
             else:
                 raise ValueError(f'unsupported op: {op}')
 
@@ -887,6 +1263,10 @@ pub enum UFuncOperation {
     Min,
     Max,
     Mean,
+    Var,
+    Std,
+    Argmin,
+    Argmax,
     Abs,
     Negative,
     Sign,
@@ -950,6 +1330,15 @@ pub enum UFuncOperation {
     Arctanh,
     FloorDivide,
     FloatPower,
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
+    Where,
+    Sort,
+    Argsort,
+    Searchsorted,
+    Concatenate,
+    Stack,
     Cumsum,
     Cumprod,
     Clip,
@@ -968,8 +1357,12 @@ pub struct UFuncInputCase {
     pub rhs_dtype: Option<String>,
     pub axis: Option<isize>,
     pub keepdims: Option<bool>,
+    pub ddof: Option<usize>,
     pub clip_min: Option<f64>,
     pub clip_max: Option<f64>,
+    pub third_shape: Option<Vec<usize>>,
+    pub third_values: Option<Vec<f64>>,
+    pub third_dtype: Option<String>,
     #[serde(default)]
     pub seed: u64,
     #[serde(default)]
@@ -1081,10 +1474,24 @@ fn classify_reason_code(op: UFuncOperation, detail: &str) -> String {
         || lowered.contains("type resolution")
     {
         "ufunc_type_resolution_invalid".to_string()
-    } else if matches!(op, UFuncOperation::Sum)
-        && (lowered.contains("axis")
-            || lowered.contains("keepdims")
-            || lowered.contains("reduce sum"))
+    } else if matches!(
+        op,
+        UFuncOperation::Sum
+            | UFuncOperation::Prod
+            | UFuncOperation::Min
+            | UFuncOperation::Max
+            | UFuncOperation::Mean
+            | UFuncOperation::Var
+            | UFuncOperation::Std
+            | UFuncOperation::Argmin
+            | UFuncOperation::Argmax
+    ) && (lowered.contains("axis")
+        || lowered.contains("keepdims")
+        || lowered.contains("argmin")
+        || lowered.contains("argmax")
+        || lowered.contains("reduce var")
+        || lowered.contains("reduce std")
+        || lowered.contains("reduce sum"))
     {
         "ufunc_reduction_contract_violation".to_string()
     } else if lowered.contains("override") {
@@ -1490,7 +1897,10 @@ pub fn execute_input_case(case: &UFuncInputCase) -> Result<(Vec<usize>, Vec<f64>
         | UFuncOperation::Logaddexp2
         | UFuncOperation::Ldexp
         | UFuncOperation::FloorDivide
-        | UFuncOperation::FloatPower => {
+        | UFuncOperation::FloatPower
+        | UFuncOperation::BitwiseAnd
+        | UFuncOperation::BitwiseOr
+        | UFuncOperation::BitwiseXor => {
             let rhs_shape = case
                 .rhs_shape
                 .clone()
@@ -1535,6 +1945,9 @@ pub fn execute_input_case(case: &UFuncInputCase) -> Result<(Vec<usize>, Vec<f64>
                 UFuncOperation::Ldexp => BinaryOp::Ldexp,
                 UFuncOperation::FloorDivide => BinaryOp::FloorDivide,
                 UFuncOperation::FloatPower => BinaryOp::FloatPower,
+                UFuncOperation::BitwiseAnd => BinaryOp::BitwiseAnd,
+                UFuncOperation::BitwiseOr => BinaryOp::BitwiseOr,
+                UFuncOperation::BitwiseXor => BinaryOp::BitwiseXor,
                 _ => unreachable!("handled above"),
             };
 
@@ -1566,6 +1979,24 @@ pub fn execute_input_case(case: &UFuncInputCase) -> Result<(Vec<usize>, Vec<f64>
             lhs.reduce_mean(case.axis, keepdims)
                 .map_err(|err| format!("reduce mean error: {err}"))?
         }
+        UFuncOperation::Var => {
+            let keepdims = case.keepdims.unwrap_or(false);
+            let ddof = case.ddof.unwrap_or(0);
+            lhs.reduce_var(case.axis, keepdims, ddof)
+                .map_err(|err| format!("reduce var error: {err}"))?
+        }
+        UFuncOperation::Std => {
+            let keepdims = case.keepdims.unwrap_or(false);
+            let ddof = case.ddof.unwrap_or(0);
+            lhs.reduce_std(case.axis, keepdims, ddof)
+                .map_err(|err| format!("reduce std error: {err}"))?
+        }
+        UFuncOperation::Argmin => lhs
+            .reduce_argmin(case.axis)
+            .map_err(|err| format!("reduce argmin error: {err}"))?,
+        UFuncOperation::Argmax => lhs
+            .reduce_argmax(case.axis)
+            .map_err(|err| format!("reduce argmax error: {err}"))?,
         UFuncOperation::Cumsum => lhs
             .cumsum(case.axis)
             .map_err(|err| format!("cumsum error: {err}"))?,
@@ -1576,6 +2007,84 @@ pub fn execute_input_case(case: &UFuncInputCase) -> Result<(Vec<usize>, Vec<f64>
             let min_val = case.clip_min.unwrap_or(f64::NEG_INFINITY);
             let max_val = case.clip_max.unwrap_or(f64::INFINITY);
             lhs.clip(min_val, max_val)
+        }
+        UFuncOperation::Where => {
+            let x_shape = case
+                .rhs_shape
+                .clone()
+                .ok_or_else(|| "where requires rhs_shape for x".to_string())?;
+            let x_values = case
+                .rhs_values
+                .clone()
+                .ok_or_else(|| "where requires rhs_values for x".to_string())?;
+            let x_dtype = parse_dtype(case.rhs_dtype.as_deref().unwrap_or("f64"))?;
+            let x = UFuncArray::new(x_shape, x_values, x_dtype)
+                .map_err(|err| format!("where x array error: {err}"))?;
+
+            let y_shape = case
+                .third_shape
+                .clone()
+                .ok_or_else(|| "where requires third_shape for y".to_string())?;
+            let y_values = case
+                .third_values
+                .clone()
+                .ok_or_else(|| "where requires third_values for y".to_string())?;
+            let y_dtype = parse_dtype(case.third_dtype.as_deref().unwrap_or("f64"))?;
+            let y = UFuncArray::new(y_shape, y_values, y_dtype)
+                .map_err(|err| format!("where y array error: {err}"))?;
+
+            UFuncArray::where_select(&lhs, &x, &y).map_err(|err| format!("where error: {err}"))?
+        }
+        UFuncOperation::Sort => lhs
+            .sort(case.axis)
+            .map_err(|err| format!("sort error: {err}"))?,
+        UFuncOperation::Argsort => lhs
+            .argsort(case.axis)
+            .map_err(|err| format!("argsort error: {err}"))?,
+        UFuncOperation::Searchsorted => {
+            let probe_shape = case
+                .rhs_shape
+                .clone()
+                .ok_or_else(|| "searchsorted requires rhs_shape".to_string())?;
+            let probe_values = case
+                .rhs_values
+                .clone()
+                .ok_or_else(|| "searchsorted requires rhs_values".to_string())?;
+            let probe_dtype = parse_dtype(case.rhs_dtype.as_deref().unwrap_or("f64"))?;
+            let probes = UFuncArray::new(probe_shape, probe_values, probe_dtype)
+                .map_err(|err| format!("searchsorted probe error: {err}"))?;
+            lhs.searchsorted(&probes)
+                .map_err(|err| format!("searchsorted error: {err}"))?
+        }
+        UFuncOperation::Concatenate => {
+            let rhs_shape = case
+                .rhs_shape
+                .clone()
+                .ok_or_else(|| "concatenate requires rhs_shape".to_string())?;
+            let rhs_values = case
+                .rhs_values
+                .clone()
+                .ok_or_else(|| "concatenate requires rhs_values".to_string())?;
+            let rhs_dtype = parse_dtype(case.rhs_dtype.as_deref().unwrap_or("f64"))?;
+            let rhs = UFuncArray::new(rhs_shape, rhs_values, rhs_dtype)
+                .map_err(|err| format!("concatenate rhs error: {err}"))?;
+            UFuncArray::concatenate(&[&lhs, &rhs], case.axis.unwrap_or(0))
+                .map_err(|err| format!("concatenate error: {err}"))?
+        }
+        UFuncOperation::Stack => {
+            let rhs_shape = case
+                .rhs_shape
+                .clone()
+                .ok_or_else(|| "stack requires rhs_shape".to_string())?;
+            let rhs_values = case
+                .rhs_values
+                .clone()
+                .ok_or_else(|| "stack requires rhs_values".to_string())?;
+            let rhs_dtype = parse_dtype(case.rhs_dtype.as_deref().unwrap_or("f64"))?;
+            let rhs = UFuncArray::new(rhs_shape, rhs_values, rhs_dtype)
+                .map_err(|err| format!("stack rhs error: {err}"))?;
+            UFuncArray::stack(&[&lhs, &rhs], case.axis.unwrap_or(0))
+                .map_err(|err| format!("stack error: {err}"))?
         }
         UFuncOperation::Abs => lhs.elementwise_unary(UnaryOp::Abs),
         UFuncOperation::Negative => lhs.elementwise_unary(UnaryOp::Negative),
@@ -1778,8 +2287,12 @@ mod tests {
             rhs_dtype: None,
             axis: Some(-1),
             keepdims: Some(false),
+            ddof: None,
             clip_min: None,
             clip_max: None,
+            third_shape: None,
+            third_values: None,
+            third_dtype: None,
             seed: 0,
             mode: "strict".to_string(),
             env_fingerprint: "tests".to_string(),
@@ -1808,8 +2321,12 @@ mod tests {
             rhs_dtype: None,
             axis: Some(-3),
             keepdims: Some(false),
+            ddof: None,
             clip_min: None,
             clip_max: None,
+            third_shape: None,
+            third_values: None,
+            third_dtype: None,
             seed: 0,
             mode: "strict".to_string(),
             env_fingerprint: "tests".to_string(),
