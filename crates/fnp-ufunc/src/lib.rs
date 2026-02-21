@@ -6967,6 +6967,46 @@ impl UFuncArray {
         }
     }
 
+    /// Bessel function of the first kind, order 0 (scipy.special.j0).
+    pub fn j0(&self) -> Self {
+        let values: Vec<f64> = self.values.iter().map(|&x| bessel_j0(x)).collect();
+        Self {
+            shape: self.shape.clone(),
+            values,
+            dtype: DType::F64,
+        }
+    }
+
+    /// Bessel function of the first kind, order 1 (scipy.special.j1).
+    pub fn j1(&self) -> Self {
+        let values: Vec<f64> = self.values.iter().map(|&x| bessel_j1(x)).collect();
+        Self {
+            shape: self.shape.clone(),
+            values,
+            dtype: DType::F64,
+        }
+    }
+
+    /// Bessel function of the second kind, order 0 (scipy.special.y0).
+    pub fn y0(&self) -> Self {
+        let values: Vec<f64> = self.values.iter().map(|&x| bessel_y0(x)).collect();
+        Self {
+            shape: self.shape.clone(),
+            values,
+            dtype: DType::F64,
+        }
+    }
+
+    /// Bessel function of the second kind, order 1 (scipy.special.y1).
+    pub fn y1(&self) -> Self {
+        let values: Vec<f64> = self.values.iter().map(|&x| bessel_y1(x)).collect();
+        Self {
+            shape: self.shape.clone(),
+            values,
+            dtype: DType::F64,
+        }
+    }
+
     /// Unwrap phase angles by changing deltas > discont to their 2*pi complement (np.unwrap).
     pub fn unwrap(&self, discont: Option<f64>) -> Result<Self, UFuncError> {
         if self.shape.len() != 1 {
@@ -7871,6 +7911,133 @@ fn bessel_i0(x: f64) -> f64 {
                         + t * (0.00916281
                             + t * (-0.02057706
                                 + t * (0.02635537 + t * (-0.01647633 + t * 0.00392377))))))))
+    }
+}
+
+/// Bessel function of the first kind, order 0.
+/// Uses polynomial approximations from Abramowitz and Stegun (9.4.1, 9.4.3).
+fn bessel_j0(x: f64) -> f64 {
+    if x == 0.0 {
+        return 1.0;
+    }
+    let ax = x.abs();
+    if ax < 8.0 {
+        let y = x * x;
+        let num = 57_568_490_574.0
+            + y * (-13_362_590_354.0
+                + y * (651_619_640.7
+                    + y * (-11_214_424.18 + y * (77_392.33017 + y * (-184.9052456)))));
+        let den = 57_568_490_411.0
+            + y * (1_029_532_985.0
+                + y * (9_494_680.718 + y * (59_272.64853 + y * (267.8532712 + y))));
+        num / den
+    } else {
+        let z = 8.0 / ax;
+        let y = z * z;
+        let xx = ax - 0.785_398_163_4; // ax - pi/4
+        let p0 = 1.0
+            + y * (-0.1098628627e-2
+                + y * (0.2734510407e-4 + y * (-0.2073370639e-5 + y * 0.2093887211e-6)));
+        let q0 = -0.1562499995e-1
+            + y * (0.1430488765e-3
+                + y * (-0.6911147651e-5 + y * (0.7621095161e-6 - y * 0.934935152e-7)));
+        let factor = (0.636_619_772 / ax).sqrt();
+        factor * (p0 * xx.cos() - z * q0 * xx.sin())
+    }
+}
+
+/// Bessel function of the first kind, order 1.
+/// Uses polynomial approximations from Abramowitz and Stegun.
+fn bessel_j1(x: f64) -> f64 {
+    let ax = x.abs();
+    if ax < 8.0 {
+        let y = x * x;
+        let num = x
+            * (72_362_614_232.0
+                + y * (-7_895_059_235.0
+                    + y * (242_396_853.1
+                        + y * (-2_972_611.439 + y * (15_704.48260 + y * (-30.16036606))))));
+        let den = 144_725_228_442.0
+            + y * (2_300_535_178.0
+                + y * (18_583_304.74 + y * (99_447.43394 + y * (376.9991397 + y))));
+        num / den
+    } else {
+        let z = 8.0 / ax;
+        let y = z * z;
+        let xx = ax - 2.356_194_491; // ax - 3*pi/4
+        let p1 = 1.0
+            + y * (0.183105e-2
+                + y * (-0.3516396496e-4 + y * (0.2457520174e-5 - y * 0.240337019e-6)));
+        let q1 = 0.04687499995
+            + y * (-0.2002690873e-3
+                + y * (0.8449199096e-5 + y * (-0.88228987e-6 + y * 0.105787412e-6)));
+        let factor = (0.636_619_772 / ax).sqrt();
+        let result = factor * (p1 * xx.cos() - z * q1 * xx.sin());
+        if x < 0.0 { -result } else { result }
+    }
+}
+
+/// Bessel function of the second kind, order 0.
+/// Uses polynomial approximations from Abramowitz and Stegun.
+fn bessel_y0(x: f64) -> f64 {
+    if x <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    if x < 8.0 {
+        let y = x * x;
+        let num = -2_957_821_389.0
+            + y * (7_062_834_065.0
+                + y * (-512_359_803.6
+                    + y * (10_879_881.29 + y * (-86_327.92757 + y * 228.4622733))));
+        let den = 40_076_544_269.0
+            + y * (745_249_964.8
+                + y * (7_189_466.438 + y * (47_447.26470 + y * (226.1030244 + y))));
+        (num / den) + 0.636_619_772 * bessel_j0(x) * x.ln()
+    } else {
+        let z = 8.0 / x;
+        let y = z * z;
+        let xx = x - 0.785_398_163_4;
+        let p0 = 1.0
+            + y * (-0.1098628627e-2
+                + y * (0.2734510407e-4 + y * (-0.2073370639e-5 + y * 0.2093887211e-6)));
+        let q0 = -0.1562499995e-1
+            + y * (0.1430488765e-3
+                + y * (-0.6911147651e-5 + y * (0.7621095161e-6 - y * 0.934935152e-7)));
+        let factor = (0.636_619_772 / x).sqrt();
+        factor * (p0 * xx.sin() + z * q0 * xx.cos())
+    }
+}
+
+/// Bessel function of the second kind, order 1.
+/// Uses polynomial approximations from Abramowitz and Stegun.
+fn bessel_y1(x: f64) -> f64 {
+    if x <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    if x < 8.0 {
+        let y = x * x;
+        let num = x
+            * (-4_900_604_943_000.0
+                + y * (1_275_274_390_000.0
+                    + y * (-51_534_866_838.0
+                        + y * (622_785_432.7 + y * (-3_132_339.048 + y * 7_621.255_74)))));
+        let den = 24_995_805_700_000.0
+            + y * (424_441_966_400.0
+                + y * (3_733_650_367.0
+                    + y * (22_459_040.02 + y * (103_680.252 + y * 365.9584658))));
+        (num / den) + 0.636_619_772 * (bessel_j1(x) * x.ln() - 1.0 / x)
+    } else {
+        let z = 8.0 / x;
+        let y = z * z;
+        let xx = x - 2.356_194_491;
+        let p1 = 1.0
+            + y * (0.183105e-2
+                + y * (-0.3516396496e-4 + y * (0.2457520174e-5 - y * 0.240337019e-6)));
+        let q1 = 0.04687499995
+            + y * (-0.2002690873e-3
+                + y * (0.8449199096e-5 + y * (-0.88228987e-6 + y * 0.105787412e-6)));
+        let factor = (0.636_619_772 / x).sqrt();
+        factor * (p1 * xx.sin() + z * q1 * xx.cos())
     }
 }
 
@@ -13530,5 +13697,83 @@ mod tests {
             "digamma(1) = {}, expected ≈ -0.5772",
             d.values[0]
         );
+    }
+
+    // ── Bessel function tests ──
+
+    #[test]
+    fn j0_at_zero_is_one() {
+        let a = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+        let j = a.j0();
+        assert!(
+            (j.values[0] - 1.0).abs() < 1e-10,
+            "J0(0) = {}, expected 1",
+            j.values[0]
+        );
+    }
+
+    #[test]
+    fn j0_known_zeros() {
+        // J0 has zeros near 2.4048, 5.5201, 8.6537
+        let a = UFuncArray::new(vec![3], vec![2.4048, 5.5201, 8.6537], DType::F64).unwrap();
+        let j = a.j0();
+        for i in 0..3 {
+            assert!(
+                j.values[i].abs() < 1e-3,
+                "J0({}) = {}, expected ~0",
+                a.values[i],
+                j.values[i]
+            );
+        }
+    }
+
+    #[test]
+    fn j1_at_zero_is_zero() {
+        let a = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+        let j = a.j1();
+        assert!(j.values[0].abs() < 1e-10, "J1(0) = {}", j.values[0]);
+    }
+
+    #[test]
+    fn j1_known_value() {
+        // J1(1) ≈ 0.4400505857
+        let a = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
+        let j = a.j1();
+        assert!(
+            (j.values[0] - 0.4400505857).abs() < 1e-4,
+            "J1(1) = {}",
+            j.values[0]
+        );
+    }
+
+    #[test]
+    fn y0_known_value() {
+        // Y0(1) ≈ 0.0882569642
+        let a = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
+        let y = a.y0();
+        assert!(
+            (y.values[0] - 0.0882569642).abs() < 1e-3,
+            "Y0(1) = {}",
+            y.values[0]
+        );
+    }
+
+    #[test]
+    fn y1_known_value() {
+        // Y1(1) ≈ -0.7812128213
+        let a = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
+        let y = a.y1();
+        assert!(
+            (y.values[0] - (-0.7812128213)).abs() < 1e-3,
+            "Y1(1) = {}",
+            y.values[0]
+        );
+    }
+
+    #[test]
+    fn y0_negative_is_neg_infinity() {
+        let a = UFuncArray::new(vec![1], vec![-1.0], DType::F64).unwrap();
+        let y = a.y0();
+        assert!(y.values[0] == f64::NEG_INFINITY);
     }
 }

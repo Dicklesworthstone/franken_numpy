@@ -1174,6 +1174,188 @@ pub fn eig_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
     Ok(eigenvalues)
 }
 
+/// Schur decomposition of a general square matrix (scipy.linalg.schur).
+///
+/// Returns `(T, Z)` where `A = Z * T * Z^T`, `T` is quasi-upper-triangular
+/// (real Schur form: 1x1 and 2x2 blocks on diagonal), and `Z` is orthogonal.
+/// Both returned as row-major flat arrays of length `n*n`.
+pub fn schur_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
+    if a.len() != n * n || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "schur_nxn: input must be n*n with n > 0",
+        ));
+    }
+    if a.iter().any(|v| !v.is_finite()) {
+        return Err(LinAlgError::SpectralConvergenceFailed);
+    }
+
+    let mut t = a.to_vec();
+    let mut z = vec![0.0; n * n];
+    for i in 0..n {
+        z[i * n + i] = 1.0;
+    }
+
+    for _ in 0..500 {
+        let (q, r) = qr_nxn(&t, n)?;
+        // T = R * Q
+        let mut next = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut sum = 0.0;
+                for k in 0..n {
+                    sum += r[i * n + k] * q[k * n + j];
+                }
+                next[i * n + j] = sum;
+            }
+        }
+        // Z = Z * Q
+        let mut new_z = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut sum = 0.0;
+                for k in 0..n {
+                    sum += z[i * n + k] * q[k * n + j];
+                }
+                new_z[i * n + j] = sum;
+            }
+        }
+        t = next;
+        z = new_z;
+    }
+
+    Ok((t, z))
+}
+
+/// Cross product of two 3-element vectors (np.cross for 3-D).
+///
+/// Returns `a × b = [a1*b2 - a2*b1, a2*b0 - a0*b2, a0*b1 - a1*b0]`.
+pub fn cross_product(a: &[f64], b: &[f64]) -> Result<Vec<f64>, LinAlgError> {
+    if a.len() != 3 || b.len() != 3 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "cross_product: both inputs must have exactly 3 elements",
+        ));
+    }
+    Ok(vec![
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ])
+}
+
+/// Kronecker product of two matrices (np.kron).
+///
+/// Given `a` of shape `(m, n)` and `b` of shape `(p, q)`,
+/// returns a matrix of shape `(m*p, n*q)` as a row-major flat array.
+pub fn kron_nxn(
+    a: &[f64],
+    m: usize,
+    n: usize,
+    b: &[f64],
+    p: usize,
+    q: usize,
+) -> Result<Vec<f64>, LinAlgError> {
+    if a.len() != m * n || b.len() != p * q {
+        return Err(LinAlgError::ShapeContractViolation(
+            "kron_nxn: input size mismatch",
+        ));
+    }
+    let out_rows = m * p;
+    let out_cols = n * q;
+    let mut result = vec![0.0; out_rows * out_cols];
+    for i in 0..m {
+        for j in 0..n {
+            let a_val = a[i * n + j];
+            for k in 0..p {
+                for l in 0..q {
+                    result[(i * p + k) * out_cols + (j * q + l)] = a_val * b[k * q + l];
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// Optimal multi-matrix multiplication (np.linalg.multi_dot).
+///
+/// Takes a list of matrices (as flat row-major arrays with their dimensions)
+/// and finds the optimal parenthesization to minimize total scalar multiplications.
+/// Each entry is `(data, rows, cols)`.
+pub fn multi_dot(
+    matrices: &[(&[f64], usize, usize)],
+) -> Result<(Vec<f64>, usize, usize), LinAlgError> {
+    if matrices.is_empty() {
+        return Err(LinAlgError::ShapeContractViolation(
+            "multi_dot: need at least one matrix",
+        ));
+    }
+    if matrices.len() == 1 {
+        return Ok((matrices[0].0.to_vec(), matrices[0].1, matrices[0].2));
+    }
+    if matrices.len() == 2 {
+        let (a, m, k1) = matrices[0];
+        let (b, k2, n) = matrices[1];
+        if k1 != k2 {
+            return Err(LinAlgError::ShapeContractViolation(
+                "multi_dot: inner dimension mismatch",
+            ));
+        }
+        let c = mat_mul_rect(a, b, m, k1, n);
+        return Ok((c, m, n));
+    }
+
+    let count = matrices.len();
+    // Dimensions: matrices[i] is dims[i] x dims[i+1]
+    let mut dims = Vec::with_capacity(count + 1);
+    dims.push(matrices[0].1);
+    for (i, &(_, rows, cols)) in matrices.iter().enumerate() {
+        if i > 0 && rows != dims[i] {
+            return Err(LinAlgError::ShapeContractViolation(
+                "multi_dot: inner dimension mismatch",
+            ));
+        }
+        dims.push(cols);
+    }
+
+    // Dynamic programming for optimal parenthesization
+    let mut cost = vec![vec![0u64; count]; count];
+    let mut split = vec![vec![0usize; count]; count];
+    for len in 2..=count {
+        for i in 0..=count - len {
+            let j = i + len - 1;
+            cost[i][j] = u64::MAX;
+            for k in i..j {
+                let c = cost[i][k]
+                    + cost[k + 1][j]
+                    + (dims[i] as u64) * (dims[k + 1] as u64) * (dims[j + 1] as u64);
+                if c < cost[i][j] {
+                    cost[i][j] = c;
+                    split[i][j] = k;
+                }
+            }
+        }
+    }
+
+    // Recursively multiply using optimal order
+    fn multiply_range(
+        matrices: &[(&[f64], usize, usize)],
+        split: &[Vec<usize>],
+        i: usize,
+        j: usize,
+    ) -> (Vec<f64>, usize, usize) {
+        if i == j {
+            return (matrices[i].0.to_vec(), matrices[i].1, matrices[i].2);
+        }
+        let k = split[i][j];
+        let (a, m, ka) = multiply_range(matrices, split, i, k);
+        let (b, _kb, n) = multiply_range(matrices, split, k + 1, j);
+        let c = mat_mul_rect(&a, &b, m, ka, n);
+        (c, m, n)
+    }
+
+    let (result, rows, cols) = multiply_range(matrices, &split, 0, count - 1);
+    Ok((result, rows, cols))
+}
+
 /// Eigenvalues AND eigenvectors of a general (non-symmetric) matrix (np.linalg.eig).
 ///
 /// Returns `(eigenvalues, eigenvectors)` where:
@@ -1458,6 +1640,21 @@ fn mat_mul_flat(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
             let mut sum = 0.0;
             for k in 0..n {
                 sum += a[i * n + k] * b[k * n + j];
+            }
+            c[i * n + j] = sum;
+        }
+    }
+    c
+}
+
+/// Rectangular matrix multiply: A (m×k) × B (k×n) → C (m×n).
+fn mat_mul_rect(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
+    let mut c = vec![0.0; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            let mut sum = 0.0;
+            for p in 0..k {
+                sum += a[i * k + p] * b[p * n + j];
             }
             c[i * n + j] = sum;
         }
@@ -2154,15 +2351,15 @@ mod tests {
         LINALG_PACKET_ID, LINALG_PACKET_REASON_CODES, LinAlgError, LinAlgLogRecord,
         LinAlgRuntimeMode, MAX_BACKEND_REVALIDATION_ATTEMPTS, MAX_BATCH_SHAPE_CHECKS,
         MAX_TOLERANCE_SEARCH_DEPTH, MatrixNormOrder, QrMode, VectorNormOrder, cholesky_2x2,
-        cholesky_nxn, cond_nxn, det_2x2, det_nxn, eig_nxn, eig_nxn_full, eigh_2x2, eigh_nxn,
-        eigvals_2x2, eigvalsh_nxn, inv_2x2, inv_nxn, lstsq_2x2, lstsq_nxn, lstsq_output_shapes,
-        lu_factor_nxn, lu_solve, mat_mul_flat, matrix_norm_2x2, matrix_norm_frobenius,
-        matrix_norm_nxn, matrix_power_nxn, matrix_rank_2x2, matrix_rank_nxn, pinv_2x2, pinv_nxn,
-        qr_2x2, qr_nxn, qr_output_shapes, slogdet_2x2, slogdet_nxn, solve_2x2, solve_nxn,
-        solve_nxn_multi, solve_triangular, svd_2x2, svd_nxn, svd_output_shapes, trace_nxn,
-        validate_backend_bridge, validate_cholesky_diagonal, validate_matrix_shape,
-        validate_policy_metadata, validate_spectral_branch, validate_square_matrix,
-        validate_tolerance_policy, vector_norm,
+        cholesky_nxn, cond_nxn, cross_product, det_2x2, det_nxn, eig_nxn, eig_nxn_full, eigh_2x2,
+        eigh_nxn, eigvals_2x2, eigvalsh_nxn, inv_2x2, inv_nxn, kron_nxn, lstsq_2x2, lstsq_nxn,
+        lstsq_output_shapes, lu_factor_nxn, lu_solve, mat_mul_flat, mat_mul_rect, matrix_norm_2x2,
+        matrix_norm_frobenius, matrix_norm_nxn, matrix_power_nxn, matrix_rank_2x2, matrix_rank_nxn,
+        multi_dot, pinv_2x2, pinv_nxn, qr_2x2, qr_nxn, qr_output_shapes, schur_nxn, slogdet_2x2,
+        slogdet_nxn, solve_2x2, solve_nxn, solve_nxn_multi, solve_triangular, svd_2x2, svd_nxn,
+        svd_output_shapes, trace_nxn, validate_backend_bridge, validate_cholesky_diagonal,
+        validate_matrix_shape, validate_policy_metadata, validate_spectral_branch,
+        validate_square_matrix, validate_tolerance_policy, vector_norm,
     };
 
     fn packet008_artifacts() -> Vec<String> {
@@ -3634,5 +3831,168 @@ mod tests {
         let b = [1.0, 2.0, 3.0];
         let err = solve_triangular(&l, &b, 3, true, false).expect_err("singular tri");
         assert_eq!(err.reason_code(), "linalg_solver_singularity");
+    }
+
+    // ── Schur decomposition tests ──
+
+    #[test]
+    fn schur_diagonal_matrix() {
+        // Schur form of a diagonal matrix is itself
+        let a = [3.0, 0.0, 0.0, 5.0];
+        let (t, z) = schur_nxn(&a, 2).unwrap();
+        // T should have eigenvalues on diagonal
+        let mut diag = [t[0], t[3]];
+        diag.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        assert!((diag[0] - 5.0).abs() < 1e-6, "t00={}", diag[0]);
+        assert!((diag[1] - 3.0).abs() < 1e-6, "t11={}", diag[1]);
+
+        // Z should be orthogonal: Z * Z^T ≈ I
+        let zt = mat_mul_flat(&z, &[z[0], z[2], z[1], z[3]], 2);
+        assert!((zt[0] - 1.0).abs() < 1e-6);
+        assert!(zt[1].abs() < 1e-6);
+        assert!(zt[2].abs() < 1e-6);
+        assert!((zt[3] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn schur_reconstructs_original() {
+        // A = Z * T * Z^T
+        let a = [1.0, 2.0, 3.0, 4.0];
+        let (t, z) = schur_nxn(&a, 2).unwrap();
+        // Compute Z * T
+        let zt_product = mat_mul_flat(&z, &t, 2);
+        // Compute (Z * T) * Z^T
+        let z_t = [z[0], z[2], z[1], z[3]]; // transpose
+        let reconstructed = mat_mul_flat(&zt_product, &z_t, 2);
+        for i in 0..4 {
+            assert!(
+                (reconstructed[i] - a[i]).abs() < 1e-6,
+                "reconstructed[{i}] = {}, expected {}",
+                reconstructed[i],
+                a[i]
+            );
+        }
+    }
+
+    #[test]
+    fn schur_rejects_empty() {
+        assert!(schur_nxn(&[], 0).is_err());
+    }
+
+    // ── Cross product tests ──
+
+    #[test]
+    fn cross_product_standard_basis() {
+        // i × j = k
+        let result = cross_product(&[1.0, 0.0, 0.0], &[0.0, 1.0, 0.0]).unwrap();
+        assert!((result[0]).abs() < 1e-15);
+        assert!((result[1]).abs() < 1e-15);
+        assert!((result[2] - 1.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn cross_product_anticommutative() {
+        let a = [1.0, 2.0, 3.0];
+        let b = [4.0, 5.0, 6.0];
+        let ab = cross_product(&a, &b).unwrap();
+        let ba = cross_product(&b, &a).unwrap();
+        for i in 0..3 {
+            assert!((ab[i] + ba[i]).abs() < 1e-10, "not anticommutative at {i}");
+        }
+    }
+
+    #[test]
+    fn cross_product_self_is_zero() {
+        let a = [3.0, -1.0, 4.0];
+        let result = cross_product(&a, &a).unwrap();
+        for i in 0..3 {
+            assert!(result[i].abs() < 1e-15);
+        }
+    }
+
+    #[test]
+    fn cross_product_rejects_wrong_size() {
+        assert!(cross_product(&[1.0, 2.0], &[3.0, 4.0]).is_err());
+    }
+
+    // ── Kronecker product tests ──
+
+    #[test]
+    fn kron_identity_identity() {
+        // I2 ⊗ I2 = I4
+        let i2 = [1.0, 0.0, 0.0, 1.0];
+        let result = kron_nxn(&i2, 2, 2, &i2, 2, 2).unwrap();
+        assert_eq!(result.len(), 16);
+        let i4 = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        for i in 0..16 {
+            assert!((result[i] - i4[i]).abs() < 1e-15, "i4[{i}] mismatch");
+        }
+    }
+
+    #[test]
+    fn kron_scalar() {
+        // [3] ⊗ [1, 2; 3, 4] = [3, 6; 9, 12]
+        let a = [3.0];
+        let b = [1.0, 2.0, 3.0, 4.0];
+        let result = kron_nxn(&a, 1, 1, &b, 2, 2).unwrap();
+        assert_eq!(result, vec![3.0, 6.0, 9.0, 12.0]);
+    }
+
+    // ── multi_dot tests ──
+
+    #[test]
+    fn multi_dot_two_matrices() {
+        // Simple 2x2 * 2x2
+        let a = [1.0, 2.0, 3.0, 4.0];
+        let b = [5.0, 6.0, 7.0, 8.0];
+        let (result, rows, cols) = multi_dot(&[(&a, 2, 2), (&b, 2, 2)]).unwrap();
+        assert_eq!(rows, 2);
+        assert_eq!(cols, 2);
+        // Expected: [[19, 22], [43, 50]]
+        assert!((result[0] - 19.0).abs() < 1e-10);
+        assert!((result[1] - 22.0).abs() < 1e-10);
+        assert!((result[2] - 43.0).abs() < 1e-10);
+        assert!((result[3] - 50.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn multi_dot_three_matrices() {
+        // (2x3) * (3x2) * (2x1) - should use optimal parenthesization
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // 2x3
+        let b = [1.0, 0.0, 0.0, 1.0, 1.0, 1.0]; // 3x2
+        let c = [1.0, 1.0]; // 2x1
+        let (result, rows, cols) = multi_dot(&[(&a, 2, 3), (&b, 3, 2), (&c, 2, 1)]).unwrap();
+        assert_eq!(rows, 2);
+        assert_eq!(cols, 1);
+
+        // Verify by doing it step by step
+        let ab = mat_mul_rect(&a, &b, 2, 3, 2);
+        let expected = mat_mul_rect(&ab, &c, 2, 2, 1);
+        for i in 0..2 {
+            assert!(
+                (result[i] - expected[i]).abs() < 1e-10,
+                "multi_dot[{i}]={}, expected={}",
+                result[i],
+                expected[i]
+            );
+        }
+    }
+
+    #[test]
+    fn multi_dot_single_matrix() {
+        let a = [1.0, 2.0, 3.0, 4.0];
+        let (result, rows, cols) = multi_dot(&[(&a, 2, 2)]).unwrap();
+        assert_eq!(rows, 2);
+        assert_eq!(cols, 2);
+        assert_eq!(result, a.to_vec());
+    }
+
+    #[test]
+    fn multi_dot_dimension_mismatch() {
+        let a = [1.0, 2.0, 3.0, 4.0]; // 2x2
+        let b = [1.0, 2.0, 3.0]; // 1x3
+        assert!(multi_dot(&[(&a, 2, 2), (&b, 1, 3)]).is_err());
     }
 }
