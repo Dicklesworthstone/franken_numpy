@@ -797,6 +797,275 @@ pub fn qr_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> 
     Ok((q, r))
 }
 
+/// QR decomposition of an m×n rectangular matrix (Householder reflections).
+///
+/// Input `a` is row-major with shape (m, n). Returns `(Q, R)` where:
+/// - Q is m×m orthogonal matrix (row-major, m*m elements)
+/// - R is m×n upper-trapezoidal matrix (row-major, m*n elements)
+///
+/// This is the "complete" mode (full Q). For `reduced` mode, the caller
+/// can take only the first n columns of Q and first n rows of R.
+pub fn qr_mxn(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
+    if a.len() != m * n || m == 0 || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "qr_mxn: input must be m*n with m,n > 0",
+        ));
+    }
+    if a.iter().any(|v| !v.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "matrix entries must be finite for QR",
+        ));
+    }
+
+    // Q = I_m, R = copy of A
+    let mut q = vec![0.0; m * m];
+    for i in 0..m {
+        q[i * m + i] = 1.0;
+    }
+    let mut r = a.to_vec();
+    let k = m.min(n);
+
+    for col in 0..k {
+        // Compute norm of column `col` below the diagonal
+        let mut col_norm_sq = 0.0;
+        for i in col..m {
+            col_norm_sq += r[i * n + col] * r[i * n + col];
+        }
+        let col_norm = col_norm_sq.sqrt();
+        if col_norm == 0.0 {
+            continue;
+        }
+
+        // Householder vector v
+        let mut v = vec![0.0; m];
+        let sign = if r[col * n + col] >= 0.0 { 1.0 } else { -1.0 };
+        for i in col..m {
+            v[i] = r[i * n + col];
+        }
+        v[col] += sign * col_norm;
+        let v_norm_sq: f64 = v[col..].iter().map(|x| x * x).sum();
+        if v_norm_sq == 0.0 {
+            continue;
+        }
+
+        // Apply H = I - 2*v*v^T/||v||^2 to R (only columns col..n)
+        let scale = 2.0 / v_norm_sq;
+        for j in col..n {
+            let mut dot = 0.0;
+            for i in col..m {
+                dot += v[i] * r[i * n + j];
+            }
+            let factor = scale * dot;
+            for i in col..m {
+                r[i * n + j] -= factor * v[i];
+            }
+        }
+
+        // Accumulate Q = Q * H (Q is m×m, so we update all m rows)
+        for i in 0..m {
+            let mut dot = 0.0;
+            for j in col..m {
+                dot += q[i * m + j] * v[j];
+            }
+            let factor = scale * dot;
+            for j in col..m {
+                q[i * m + j] -= factor * v[j];
+            }
+        }
+    }
+
+    Ok((q, r))
+}
+
+/// SVD of an m×n rectangular matrix.
+///
+/// Input `a` is row-major with shape (m, n). Returns singular values in
+/// descending order. Uses the approach: compute A^T*A (n×n), find its
+/// eigenvalues via QR iteration, then take square roots.
+///
+/// For the full decomposition (U, S, V^T), use `svd_mxn_full`.
+pub fn svd_mxn(a: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgError> {
+    if a.len() != m * n || m == 0 || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "svd_mxn: input must be m*n with m,n > 0",
+        ));
+    }
+    if a.iter().any(|v| !v.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "matrix entries must be finite for SVD",
+        ));
+    }
+
+    // Compute A^T * A (n×n)
+    let mut ata = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            let mut sum = 0.0;
+            for k in 0..m {
+                sum += a[k * n + i] * a[k * n + j];
+            }
+            ata[i * n + j] = sum;
+        }
+    }
+
+    // QR iteration on A^T A
+    let mut mat = ata;
+    for _ in 0..300 {
+        let (q, r) = qr_nxn(&mat, n)?;
+        let mut next = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut sum = 0.0;
+                for k in 0..n {
+                    sum += r[i * n + k] * q[k * n + j];
+                }
+                next[i * n + j] = sum;
+            }
+        }
+        mat = next;
+    }
+
+    let k = m.min(n);
+    let mut sigmas: Vec<f64> = (0..k).map(|i| {
+        if i < n { mat[i * n + i].max(0.0).sqrt() } else { 0.0 }
+    }).collect();
+    sigmas.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(sigmas)
+}
+
+/// Full SVD of an m×n rectangular matrix: returns (U, S, Vt).
+///
+/// - U: m×m orthogonal matrix (row-major, m*m elements)
+/// - S: min(m,n) singular values in descending order
+/// - Vt: n×n orthogonal matrix (row-major, n*n elements)
+///
+/// Uses the approach: QR-iterate on A^T*A to get V and sigma^2,
+/// then recover U = A*V*diag(1/sigma).
+pub fn svd_mxn_full(
+    a: &[f64],
+    m: usize,
+    n: usize,
+) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), LinAlgError> {
+    if a.len() != m * n || m == 0 || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "svd_mxn_full: input must be m*n with m,n > 0",
+        ));
+    }
+    if a.iter().any(|v| !v.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "matrix entries must be finite for SVD",
+        ));
+    }
+
+    let k = m.min(n);
+
+    // Compute A^T * A (n×n)
+    let mut ata = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            let mut sum = 0.0;
+            for row in 0..m {
+                sum += a[row * n + i] * a[row * n + j];
+            }
+            ata[i * n + j] = sum;
+        }
+    }
+
+    // QR iteration on A^T A to get eigenvalues and eigenvectors (V)
+    let mut mat = ata;
+    let mut v_accum = vec![0.0; n * n];
+    for i in 0..n {
+        v_accum[i * n + i] = 1.0;
+    }
+    for _ in 0..300 {
+        let (q, r) = qr_nxn(&mat, n)?;
+        // mat = R * Q
+        let mut next = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut sum = 0.0;
+                for kk in 0..n {
+                    sum += r[i * n + kk] * q[kk * n + j];
+                }
+                next[i * n + j] = sum;
+            }
+        }
+        mat = next;
+        // Accumulate V = V * Q
+        let mut new_v = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut sum = 0.0;
+                for kk in 0..n {
+                    sum += v_accum[i * n + kk] * q[kk * n + j];
+                }
+                new_v[i * n + j] = sum;
+            }
+        }
+        v_accum = new_v;
+    }
+
+    // Extract singular values and sort by descending order
+    let mut sigma_sq: Vec<(f64, usize)> = (0..n)
+        .map(|i| (mat[i * n + i].max(0.0), i))
+        .collect();
+    sigma_sq.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let sigmas: Vec<f64> = sigma_sq.iter().take(k).map(|(s, _)| s.sqrt()).collect();
+    let order: Vec<usize> = sigma_sq.iter().map(|(_, idx)| *idx).collect();
+
+    // Reorder V columns by sorted singular values -> Vt (n×n)
+    let mut vt = vec![0.0; n * n];
+    for (new_col, &old_col) in order.iter().enumerate() {
+        for row in 0..n {
+            vt[new_col * n + row] = v_accum[row * n + old_col];
+        }
+    }
+
+    // Recover U: for each singular value sigma_i > 0, u_i = A * v_i / sigma_i
+    // Start with identity for U
+    let mut u = vec![0.0; m * m];
+    for i in 0..m {
+        u[i * m + i] = 1.0;
+    }
+
+    for j in 0..k {
+        if sigmas[j] > 1e-15 {
+            // u_j = A * v_j / sigma_j (v_j is row j of Vt, i.e. column j of V)
+            for i in 0..m {
+                let mut sum = 0.0;
+                for col in 0..n {
+                    sum += a[i * n + col] * vt[j * n + col];
+                }
+                u[i * m + j] = sum / sigmas[j];
+            }
+        }
+    }
+
+    // Orthogonalize remaining columns of U via Gram-Schmidt if m > k
+    for j in k..m {
+        // u_j is already e_j from identity; orthogonalize against previous columns
+        for prev in 0..j {
+            let mut dot = 0.0;
+            for i in 0..m {
+                dot += u[i * m + j] * u[i * m + prev];
+            }
+            for i in 0..m {
+                u[i * m + j] -= dot * u[i * m + prev];
+            }
+        }
+        // Normalize
+        let norm: f64 = (0..m).map(|i| u[i * m + j] * u[i * m + j]).sum::<f64>().sqrt();
+        if norm > 1e-15 {
+            for i in 0..m {
+                u[i * m + j] /= norm;
+            }
+        }
+    }
+
+    Ok((u, sigmas, vt))
+}
+
 /// Frobenius norm of an NxN matrix (flat row-major).
 pub fn matrix_norm_frobenius(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
     if a.len() != n * n || n == 0 {
@@ -2355,8 +2624,9 @@ mod tests {
         eigh_nxn, eigvals_2x2, eigvalsh_nxn, inv_2x2, inv_nxn, kron_nxn, lstsq_2x2, lstsq_nxn,
         lstsq_output_shapes, lu_factor_nxn, lu_solve, mat_mul_flat, mat_mul_rect, matrix_norm_2x2,
         matrix_norm_frobenius, matrix_norm_nxn, matrix_power_nxn, matrix_rank_2x2, matrix_rank_nxn,
-        multi_dot, pinv_2x2, pinv_nxn, qr_2x2, qr_nxn, qr_output_shapes, schur_nxn, slogdet_2x2,
-        slogdet_nxn, solve_2x2, solve_nxn, solve_nxn_multi, solve_triangular, svd_2x2, svd_nxn,
+        multi_dot, pinv_2x2, pinv_nxn, qr_2x2, qr_mxn, qr_nxn, qr_output_shapes, schur_nxn,
+        slogdet_2x2, slogdet_nxn, solve_2x2, solve_nxn, solve_nxn_multi, solve_triangular,
+        svd_2x2, svd_mxn, svd_mxn_full, svd_nxn,
         svd_output_shapes, trace_nxn, validate_backend_bridge, validate_cholesky_diagonal,
         validate_matrix_shape, validate_policy_metadata, validate_spectral_branch,
         validate_square_matrix, validate_tolerance_policy, vector_norm,
@@ -3994,5 +4264,269 @@ mod tests {
         let a = [1.0, 2.0, 3.0, 4.0]; // 2x2
         let b = [1.0, 2.0, 3.0]; // 1x3
         assert!(multi_dot(&[(&a, 2, 2), (&b, 1, 3)]).is_err());
+    }
+
+    // ── Rectangular QR tests ──
+
+    #[test]
+    fn qr_mxn_tall_matrix_reconstructs() {
+        // 3x2 matrix
+        #[rustfmt::skip]
+        let a = [
+            1.0, 2.0,
+            3.0, 4.0,
+            5.0, 6.0,
+        ];
+        let (q, r) = qr_mxn(&a, 3, 2).unwrap();
+        // Q is 3x3, R is 3x2
+        assert_eq!(q.len(), 9);
+        assert_eq!(r.len(), 6);
+
+        // Verify Q * R ≈ A
+        for i in 0..3 {
+            for j in 0..2 {
+                let mut sum: f64 = 0.0;
+                for k in 0..3 {
+                    sum += q[i * 3 + k] * r[k * 2 + j];
+                }
+                assert!(
+                    (sum - a[i * 2 + j]).abs() < 1e-10,
+                    "QR reconstruction mismatch at ({i},{j}): {sum} vs {}",
+                    a[i * 2 + j]
+                );
+            }
+        }
+
+        // Verify Q is orthogonal: Q^T * Q ≈ I
+        for i in 0..3 {
+            for j in 0..3 {
+                let mut dot: f64 = 0.0;
+                for k in 0..3 {
+                    dot += q[k * 3 + i] * q[k * 3 + j];
+                }
+                let expected: f64 = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (dot - expected).abs() < 1e-10,
+                    "Q orthogonality failed at ({i},{j})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn qr_mxn_wide_matrix_reconstructs() {
+        // 2x3 matrix
+        #[rustfmt::skip]
+        let a = [
+            1.0, 2.0, 3.0,
+            4.0, 5.0, 6.0,
+        ];
+        let (q, r) = qr_mxn(&a, 2, 3).unwrap();
+        // Q is 2x2, R is 2x3
+        assert_eq!(q.len(), 4);
+        assert_eq!(r.len(), 6);
+
+        // Verify Q * R ≈ A
+        for i in 0..2 {
+            for j in 0..3 {
+                let mut sum: f64 = 0.0;
+                for k in 0..2 {
+                    sum += q[i * 2 + k] * r[k * 3 + j];
+                }
+                assert!(
+                    (sum - a[i * 3 + j]).abs() < 1e-10,
+                    "QR reconstruction mismatch at ({i},{j})"
+                );
+            }
+        }
+    }
+
+    // ── Rectangular SVD tests ──
+
+    #[test]
+    fn svd_mxn_tall_matrix_singular_values() {
+        // 3x2 matrix
+        #[rustfmt::skip]
+        let a = [
+            1.0, 2.0,
+            3.0, 4.0,
+            5.0, 6.0,
+        ];
+        let sigmas = svd_mxn(&a, 3, 2).unwrap();
+        assert_eq!(sigmas.len(), 2);
+        // Singular values should be positive and in descending order
+        assert!(sigmas[0] >= sigmas[1]);
+        assert!(sigmas[1] >= 0.0);
+        // Known approximate values for this matrix
+        assert!((sigmas[0] - 9.525).abs() < 0.1, "sigma[0]={}", sigmas[0]);
+    }
+
+    #[test]
+    fn svd_mxn_wide_matrix_singular_values() {
+        // 2x3 matrix
+        #[rustfmt::skip]
+        let a = [
+            1.0, 2.0, 3.0,
+            4.0, 5.0, 6.0,
+        ];
+        let sigmas = svd_mxn(&a, 2, 3).unwrap();
+        assert_eq!(sigmas.len(), 2);
+        assert!(sigmas[0] >= sigmas[1]);
+    }
+
+    #[test]
+    fn svd_mxn_full_reconstructs() {
+        // 3x2 matrix
+        #[rustfmt::skip]
+        let a = [
+            1.0, 0.0,
+            0.0, 2.0,
+            0.0, 0.0,
+        ];
+        let (u, s, vt) = svd_mxn_full(&a, 3, 2).unwrap();
+        assert_eq!(u.len(), 9); // 3x3
+        assert_eq!(s.len(), 2); // min(3,2) = 2
+        assert_eq!(vt.len(), 4); // 2x2
+
+        // Singular values should be 2 and 1 (descending)
+        assert!((s[0] - 2.0).abs() < 1e-8, "s[0]={}", s[0]);
+        assert!((s[1] - 1.0).abs() < 1e-8, "s[1]={}", s[1]);
+
+        // Reconstruct: A ≈ U * diag(S) * Vt (using only first min(m,n) columns of U)
+        let k = 2;
+        for i in 0..3 {
+            for j in 0..2 {
+                let mut sum: f64 = 0.0;
+                for l in 0..k {
+                    sum += u[i * 3 + l] * s[l] * vt[l * 2 + j];
+                }
+                assert!(
+                    (sum - a[i * 2 + j]).abs() < 1e-8,
+                    "SVD reconstruction mismatch at ({i},{j}): {sum} vs {}",
+                    a[i * 2 + j]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn svd_mxn_full_identity() {
+        let a = [1.0, 0.0, 0.0, 1.0];
+        let (u, s, vt) = svd_mxn_full(&a, 2, 2).unwrap();
+        assert_eq!(s.len(), 2);
+        assert!((s[0] - 1.0).abs() < 1e-10);
+        assert!((s[1] - 1.0).abs() < 1e-10);
+        // U and Vt should be orthogonal
+        for i in 0..2 {
+            for j in 0..2 {
+                let mut dot_u: f64 = 0.0;
+                let mut dot_v: f64 = 0.0;
+                for k in 0..2 {
+                    dot_u += u[k * 2 + i] * u[k * 2 + j];
+                    dot_v += vt[i * 2 + k] * vt[j * 2 + k];
+                }
+                let expected: f64 = if i == j { 1.0 } else { 0.0 };
+                assert!((dot_u - expected).abs() < 1e-10);
+                assert!((dot_v - expected).abs() < 1e-10);
+            }
+        }
+    }
+
+    #[test]
+    fn svd_mxn_rejects_invalid() {
+        assert!(svd_mxn(&[], 0, 0).is_err());
+        assert!(svd_mxn(&[1.0, f64::NAN], 1, 2).is_err());
+        assert!(qr_mxn(&[], 0, 0).is_err());
+    }
+
+    // ── Rectangular QR tests ─────────────────────────────────────────
+
+    #[test]
+    fn qr_mxn_tall_3x2() {
+        #[rustfmt::skip]
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let (q, r) = qr_mxn(&a, 3, 2).unwrap();
+        assert_eq!(q.len(), 9);
+        assert_eq!(r.len(), 6);
+        let recon = mat_mul_rect(&q, &r, 3, 3, 2);
+        for i in 0..6 {
+            assert!((recon[i] - a[i]).abs() < 1e-10, "QR recon at {i}");
+        }
+    }
+
+    #[test]
+    fn qr_mxn_wide_2x3() {
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let (q, r) = qr_mxn(&a, 2, 3).unwrap();
+        assert_eq!(q.len(), 4);
+        assert_eq!(r.len(), 6);
+        let recon = mat_mul_rect(&q, &r, 2, 2, 3);
+        for i in 0..6 {
+            assert!((recon[i] - a[i]).abs() < 1e-10, "QR recon at {i}");
+        }
+    }
+
+    #[test]
+    fn qr_mxn_q_orthogonal() {
+        let a = [1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let (q, _) = qr_mxn(&a, 3, 2).unwrap();
+        let mut qtq = vec![0.0; 9];
+        for i in 0..3 {
+            for j in 0..3 {
+                let mut s = 0.0;
+                for k in 0..3 {
+                    s += q[k * 3 + i] * q[k * 3 + j];
+                }
+                qtq[i * 3 + j] = s;
+            }
+        }
+        for i in 0..3 {
+            for j in 0..3 {
+                let exp = if i == j { 1.0 } else { 0.0 };
+                assert!((qtq[i * 3 + j] - exp).abs() < 1e-10);
+            }
+        }
+    }
+
+    // ── Rectangular SVD tests ────────────────────────────────────────
+
+    #[test]
+    fn svd_mxn_tall_singular_values() {
+        let a = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let s = svd_mxn(&a, 3, 2).unwrap();
+        assert_eq!(s.len(), 2);
+        assert!((s[0] - 1.0).abs() < 1e-8);
+        assert!((s[1] - 1.0).abs() < 1e-8);
+    }
+
+    #[test]
+    fn svd_mxn_wide_singular_values() {
+        let a = [3.0, 0.0, 0.0, 0.0, 2.0, 0.0];
+        let s = svd_mxn(&a, 2, 3).unwrap();
+        assert_eq!(s.len(), 2);
+        assert!((s[0] - 3.0).abs() < 1e-8);
+        assert!((s[1] - 2.0).abs() < 1e-8);
+    }
+
+    #[test]
+    fn svd_mxn_full_reconstruction() {
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let (u, s, vt) = svd_mxn_full(&a, 3, 2).unwrap();
+        assert_eq!(u.len(), 9);
+        assert_eq!(s.len(), 2);
+        assert_eq!(vt.len(), 4);
+        let mut recon = vec![0.0; 6];
+        for i in 0..3 {
+            for j in 0..2 {
+                let mut sum = 0.0;
+                for kk in 0..2 {
+                    sum += u[i * 3 + kk] * s[kk] * vt[kk * 2 + j];
+                }
+                recon[i * 2 + j] = sum;
+            }
+        }
+        for i in 0..6 {
+            assert!((recon[i] - a[i]).abs() < 1e-8, "SVD recon at {i}");
+        }
     }
 }

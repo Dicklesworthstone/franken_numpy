@@ -298,22 +298,30 @@ fn required_view_nbytes(
         return Ok(0);
     }
 
-    let mut max_offset = 0usize;
+    // Compute the total byte span from the element with the smallest offset
+    // to the element with the largest offset, plus item_size.
+    // For negative strides, the minimum offset contribution is negative.
+    let mut max_offset: isize = 0;
+    let mut min_offset: isize = 0;
     for (&dim, &stride) in shape.iter().zip(strides) {
-        if stride < 0 {
-            return Err(ShapeError::NegativeStride(stride));
-        }
         if dim <= 1 {
             continue;
         }
-        let step = usize::try_from(stride).map_err(|_| ShapeError::NegativeStride(stride))?;
-        let axis_span = step.checked_mul(dim - 1).ok_or(ShapeError::Overflow)?;
-        max_offset = max_offset
-            .checked_add(axis_span)
+        let end = stride
+            .checked_mul((dim - 1) as isize)
             .ok_or(ShapeError::Overflow)?;
+        if end >= 0 {
+            max_offset = max_offset.checked_add(end).ok_or(ShapeError::Overflow)?;
+        } else {
+            min_offset = min_offset.checked_add(end).ok_or(ShapeError::Overflow)?;
+        }
     }
 
-    max_offset
+    let span = max_offset
+        .checked_sub(min_offset)
+        .ok_or(ShapeError::Overflow)?;
+    let span_usize = usize::try_from(span).map_err(|_| ShapeError::Overflow)?;
+    span_usize
         .checked_add(item_size)
         .ok_or(ShapeError::Overflow)
 }
@@ -679,12 +687,34 @@ mod tests {
     }
 
     #[test]
-    fn as_strided_rejects_negative_stride() {
+    fn as_strided_negative_stride_reverse() {
+        // A 4-element array with negative stride simulates arr[::-1]
         let base = NdLayout::contiguous(vec![4], 8, MemoryOrder::C).expect("layout");
+        let view = base
+            .as_strided(vec![4], vec![-8])
+            .expect("negative strides should be supported for reverse slicing");
+        assert_eq!(view.shape, vec![4]);
+        assert_eq!(view.strides, vec![-8]);
+    }
+
+    #[test]
+    fn as_strided_negative_stride_2d() {
+        // 3x3 array, reverse rows only
+        let base = NdLayout::contiguous(vec![3, 3], 8, MemoryOrder::C).expect("layout");
+        let view = base
+            .as_strided(vec![3, 3], vec![-24, 8])
+            .expect("negative row stride should be supported");
+        assert_eq!(view.strides, vec![-24, 8]);
+    }
+
+    #[test]
+    fn as_strided_negative_stride_oob_rejected() {
+        // Negative stride creating a span larger than base → should be rejected
+        let base = NdLayout::contiguous(vec![2], 8, MemoryOrder::C).expect("layout");
         let err = base
             .as_strided(vec![4], vec![-8])
-            .expect_err("negative strides are unsupported");
-        assert!(matches!(err, ShapeError::NegativeStride(-8)));
+            .expect_err("span exceeds base storage");
+        assert!(matches!(err, ShapeError::OutOfBoundsView { .. }));
     }
 
     #[test]

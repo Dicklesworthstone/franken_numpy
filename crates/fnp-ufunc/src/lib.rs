@@ -5656,6 +5656,244 @@ impl UFuncArray {
         })
     }
 
+    /// Compute the N-dimensional DFT (np.fft.fftn).
+    ///
+    /// Input is a real array of arbitrary shape `[d0, d1, ..., d_{n-1}]`.
+    /// Applies 1-D FFT along every axis in order.
+    /// Returns interleaved complex output of shape `[d0, d1, ..., d_{n-1}, 2]`.
+    pub fn fftn(&self) -> Result<Self, UFuncError> {
+        let ndim = self.shape.len();
+        if ndim == 0 {
+            return Ok(Self {
+                shape: vec![2],
+                values: vec![self.values.first().copied().unwrap_or(0.0), 0.0],
+                dtype: DType::F64,
+            });
+        }
+        let total: usize = self.shape.iter().product();
+        if total == 0 {
+            let mut out_shape = self.shape.clone();
+            out_shape.push(2);
+            return Ok(Self {
+                shape: out_shape,
+                values: vec![],
+                dtype: DType::F64,
+            });
+        }
+
+        // Initialize re/im arrays
+        let mut re = self.values.clone();
+        re.resize(total, 0.0);
+        let mut im = vec![0.0; total];
+
+        // Apply FFT along each axis
+        for axis in 0..ndim {
+            fftn_along_axis(&self.shape, &mut re, &mut im, axis, false);
+        }
+
+        // Interleave to output
+        let mut values = Vec::with_capacity(total * 2);
+        for i in 0..total {
+            values.push(re[i]);
+            values.push(im[i]);
+        }
+        let mut out_shape = self.shape.clone();
+        out_shape.push(2);
+        Ok(Self {
+            shape: out_shape,
+            values,
+            dtype: DType::F64,
+        })
+    }
+
+    /// Compute the N-dimensional inverse DFT (np.fft.ifftn).
+    ///
+    /// Input is interleaved complex of shape `[d0, d1, ..., d_{n-1}, 2]`.
+    /// Returns interleaved complex output of same shape.
+    pub fn ifftn(&self) -> Result<Self, UFuncError> {
+        let ndim = self.shape.len();
+        if ndim < 2 || self.shape[ndim - 1] != 2 {
+            return Err(UFuncError::Msg(
+                "ifftn: input must have trailing dimension 2 (interleaved complex)".to_string(),
+            ));
+        }
+        let spatial_shape = &self.shape[..ndim - 1];
+        let total: usize = spatial_shape.iter().product();
+        if total == 0 {
+            return Ok(self.clone());
+        }
+
+        // Deinterleave
+        let mut re = vec![0.0; total];
+        let mut im = vec![0.0; total];
+        for i in 0..total {
+            re[i] = self.values[i * 2];
+            im[i] = self.values[i * 2 + 1];
+        }
+
+        // Apply IFFT along each axis
+        let spatial_ndim = spatial_shape.len();
+        for axis in 0..spatial_ndim {
+            fftn_along_axis(spatial_shape, &mut re, &mut im, axis, true);
+        }
+
+        // Interleave
+        let mut values = Vec::with_capacity(total * 2);
+        for i in 0..total {
+            values.push(re[i]);
+            values.push(im[i]);
+        }
+        Ok(Self {
+            shape: self.shape.clone(),
+            values,
+            dtype: DType::F64,
+        })
+    }
+
+    /// Compute the N-dimensional real-input FFT (np.fft.rfftn).
+    ///
+    /// Input is a real array of shape `[d0, d1, ..., d_{n-1}]`.
+    /// Applies full FFT along all axes except the last, then rfft along the
+    /// last axis. Returns interleaved complex of shape
+    /// `[d0, d1, ..., d_{n-1}//2 + 1, 2]`.
+    pub fn rfftn(&self) -> Result<Self, UFuncError> {
+        let ndim = self.shape.len();
+        if ndim == 0 {
+            return Ok(Self {
+                shape: vec![1, 2],
+                values: vec![self.values.first().copied().unwrap_or(0.0), 0.0],
+                dtype: DType::F64,
+            });
+        }
+        let total: usize = self.shape.iter().product();
+        if total == 0 {
+            let mut out_shape = self.shape.clone();
+            let last = out_shape.last_mut().unwrap();
+            *last = *last / 2 + 1;
+            out_shape.push(2);
+            return Ok(Self {
+                shape: out_shape,
+                values: vec![],
+                dtype: DType::F64,
+            });
+        }
+
+        // Initialize re/im arrays
+        let mut re = self.values.clone();
+        re.resize(total, 0.0);
+        let mut im = vec![0.0; total];
+
+        // FFT along all axes except the last
+        for axis in 0..ndim.saturating_sub(1) {
+            fftn_along_axis(&self.shape, &mut re, &mut im, axis, false);
+        }
+
+        // FFT along last axis, then truncate to n//2+1
+        if ndim > 0 {
+            fftn_along_axis(&self.shape, &mut re, &mut im, ndim - 1, false);
+        }
+
+        // Truncate last axis to n//2+1
+        let last_n = self.shape[ndim - 1];
+        let half_n = last_n / 2 + 1;
+        let outer: usize = self.shape[..ndim - 1].iter().product::<usize>().max(1);
+        let mut values = Vec::with_capacity(outer * half_n * 2);
+        for o in 0..outer {
+            for k in 0..half_n {
+                let idx = o * last_n + k;
+                values.push(re[idx]);
+                values.push(im[idx]);
+            }
+        }
+        let mut out_shape = self.shape.clone();
+        *out_shape.last_mut().unwrap() = half_n;
+        out_shape.push(2);
+        Ok(Self {
+            shape: out_shape,
+            values,
+            dtype: DType::F64,
+        })
+    }
+
+    /// Compute the N-dimensional inverse real FFT (np.fft.irfftn).
+    ///
+    /// Input is interleaved complex of shape `[d0, ..., d_{n-2}, d_{n-1}//2+1, 2]`.
+    /// The `last_n` parameter specifies the output length along the last axis
+    /// (defaults to `2*(d_{n-1}//2+1 - 1)`).
+    /// Returns a real array of shape `[d0, ..., d_{n-2}, last_n]`.
+    pub fn irfftn(&self, last_n: Option<usize>) -> Result<Self, UFuncError> {
+        let ndim = self.shape.len();
+        if ndim < 2 || self.shape[ndim - 1] != 2 {
+            return Err(UFuncError::Msg(
+                "irfftn: input must have trailing dimension 2 (interleaved complex)".to_string(),
+            ));
+        }
+        let spatial_shape = &self.shape[..ndim - 1];
+        let spatial_ndim = spatial_shape.len();
+        if spatial_ndim == 0 {
+            return Err(UFuncError::Msg(
+                "irfftn: need at least one spatial dimension".to_string(),
+            ));
+        }
+        let half_n = spatial_shape[spatial_ndim - 1];
+        let output_n = last_n.unwrap_or(2 * (half_n - 1));
+        if output_n == 0 {
+            let mut out_shape: Vec<usize> = spatial_shape[..spatial_ndim - 1].to_vec();
+            out_shape.push(0);
+            return Ok(Self {
+                shape: out_shape,
+                values: vec![],
+                dtype: DType::F64,
+            });
+        }
+
+        // Reconstruct full spectrum along last axis
+        let outer: usize = spatial_shape[..spatial_ndim - 1]
+            .iter()
+            .product::<usize>()
+            .max(1);
+        let total_out = outer * output_n;
+        let mut re = vec![0.0; total_out];
+        let mut im = vec![0.0; total_out];
+        let spatial_total: usize = spatial_shape.iter().product();
+        for o in 0..outer {
+            for k in 0..half_n.min(output_n) {
+                let src = o * half_n + k;
+                if src < spatial_total {
+                    re[o * output_n + k] = self.values[src * 2];
+                    im[o * output_n + k] = self.values[src * 2 + 1];
+                }
+            }
+            // Hermitian symmetry for k > half_n
+            for k in half_n..output_n {
+                let conj_k = output_n - k;
+                if conj_k < half_n {
+                    let src = o * half_n + conj_k;
+                    if src < spatial_total {
+                        re[o * output_n + k] = self.values[src * 2];
+                        im[o * output_n + k] = -self.values[src * 2 + 1];
+                    }
+                }
+            }
+        }
+
+        // Build output shape for IFFT processing
+        let mut full_shape: Vec<usize> = spatial_shape[..spatial_ndim - 1].to_vec();
+        full_shape.push(output_n);
+
+        // IFFT along all axes
+        for axis in 0..full_shape.len() {
+            fftn_along_axis(&full_shape, &mut re, &mut im, axis, true);
+        }
+
+        // Return real part only
+        Ok(Self {
+            shape: full_shape,
+            values: re,
+            dtype: DType::F64,
+        })
+    }
+
     /// Return the DFT sample frequencies (np.fft.fftfreq).
     /// For a signal of length `n` sampled at spacing `d`.
     pub fn fftfreq(n: usize, d: f64) -> Self {
@@ -8140,6 +8378,56 @@ fn digamma_approx(mut x: f64) -> f64 {
 /// Mixed-radix Bluestein/Chirp-Z FFT supporting arbitrary lengths.
 /// For power-of-two lengths, uses Cooley-Tukey DIT.
 /// For non-power-of-two, uses Bluestein's algorithm (zero-pad to power-of-two).
+/// Apply 1-D FFT (or IFFT) along a single axis of an N-dimensional array.
+///
+/// `shape` is the full N-D shape of the data.
+/// `re` and `im` are flat row-major arrays of length `product(shape)`.
+/// `axis` is the axis along which to apply the 1-D FFT.
+fn fftn_along_axis(
+    shape: &[usize],
+    re: &mut [f64],
+    im: &mut [f64],
+    axis: usize,
+    inverse: bool,
+) {
+    let ndim = shape.len();
+    if axis >= ndim {
+        return;
+    }
+    let axis_len = shape[axis];
+    if axis_len <= 1 {
+        return;
+    }
+
+    // Compute the stride (number of elements) along the given axis:
+    // outer_size = product of shape[..axis]
+    // inner_size = product of shape[axis+1..]
+    let outer_size: usize = shape[..axis].iter().product::<usize>().max(1);
+    let inner_size: usize = shape[axis + 1..].iter().product::<usize>().max(1);
+
+    let mut buf_re = vec![0.0; axis_len];
+    let mut buf_im = vec![0.0; axis_len];
+
+    for outer in 0..outer_size {
+        for inner in 0..inner_size {
+            // Extract 1-D slice along axis
+            for k in 0..axis_len {
+                let idx = outer * axis_len * inner_size + k * inner_size + inner;
+                buf_re[k] = re[idx];
+                buf_im[k] = im[idx];
+            }
+            // Apply 1-D FFT
+            fft_dit(&mut buf_re, &mut buf_im, inverse);
+            // Write back
+            for k in 0..axis_len {
+                let idx = outer * axis_len * inner_size + k * inner_size + inner;
+                re[idx] = buf_re[k];
+                im[idx] = buf_im[k];
+            }
+        }
+    }
+}
+
 fn fft_dit(re: &mut [f64], im: &mut [f64], inverse: bool) {
     let n = re.len();
     if n <= 1 {
@@ -13789,5 +14077,88 @@ mod tests {
         let a = UFuncArray::new(vec![1], vec![-1.0], DType::F64).unwrap();
         let y = a.y0();
         assert!(y.values[0] == f64::NEG_INFINITY);
+    }
+
+    // ── fftn / ifftn / rfftn / irfftn ────────────────────────────────
+
+    #[test]
+    fn fftn_1d_matches_fft() {
+        let a = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let fft1 = a.fft(None).unwrap();
+        let fftn = a.fftn().unwrap();
+        // fftn on 1-D should match fft
+        assert_eq!(fft1.shape(), fftn.shape());
+        for (x, y) in fft1.values().iter().zip(fftn.values().iter()) {
+            assert!((x - y).abs() < 1e-10, "fftn vs fft mismatch");
+        }
+    }
+
+    #[test]
+    fn fftn_2d_matches_fft2() {
+        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
+            .unwrap();
+        let fft2_res = a.fft2().unwrap();
+        let fftn_res = a.fftn().unwrap();
+        assert_eq!(fft2_res.shape(), fftn_res.shape());
+        for (x, y) in fft2_res.values().iter().zip(fftn_res.values().iter()) {
+            assert!((x - y).abs() < 1e-10, "fftn vs fft2 mismatch");
+        }
+    }
+
+    #[test]
+    fn fftn_ifftn_roundtrip() {
+        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
+            .unwrap();
+        let transformed = a.fftn().unwrap();
+        let recovered = transformed.ifftn().unwrap();
+        // Extract real parts
+        for i in 0..6 {
+            let re = recovered.values()[i * 2];
+            assert!(
+                (re - a.values()[i]).abs() < 1e-10,
+                "roundtrip at {i}: {re} vs {}",
+                a.values()[i]
+            );
+        }
+    }
+
+    #[test]
+    fn fftn_3d_roundtrip() {
+        // 2×2×2 cube
+        let vals: Vec<f64> = (1..=8).map(|x| x as f64).collect();
+        let a = UFuncArray::new(vec![2, 2, 2], vals.clone(), DType::F64).unwrap();
+        let transformed = a.fftn().unwrap();
+        assert_eq!(transformed.shape(), &[2, 2, 2, 2]);
+        let recovered = transformed.ifftn().unwrap();
+        for i in 0..8 {
+            let re = recovered.values()[i * 2];
+            assert!((re - vals[i]).abs() < 1e-10, "3D roundtrip at {i}");
+        }
+    }
+
+    #[test]
+    fn rfftn_1d_matches_rfft() {
+        let a = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let rfft1 = a.rfft(None).unwrap();
+        let rfftn = a.rfftn().unwrap();
+        assert_eq!(rfft1.shape(), rfftn.shape());
+        for (x, y) in rfft1.values().iter().zip(rfftn.values().iter()) {
+            assert!((x - y).abs() < 1e-10, "rfftn vs rfft mismatch");
+        }
+    }
+
+    #[test]
+    fn rfftn_irfftn_roundtrip() {
+        let vals = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let a = UFuncArray::new(vec![2, 3], vals.clone(), DType::F64).unwrap();
+        let transformed = a.rfftn().unwrap();
+        let recovered = transformed.irfftn(Some(3)).unwrap();
+        assert_eq!(recovered.shape(), &[2, 3]);
+        for i in 0..6 {
+            assert!(
+                (recovered.values()[i] - vals[i]).abs() < 1e-10,
+                "rfftn roundtrip at {i}"
+            );
+        }
     }
 }
