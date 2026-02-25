@@ -5,3 +5,4 @@ edition = "2024"
 license-file = "../../LICENSE"
 
 [dependencies]
+flate2 = "1.0.35"

@@ -2,6 +2,9 @@
 
 use core::fmt;
 use std::collections::HashSet;
+use std::io::{Read, Write};
+
+use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
 
 pub const IO_PACKET_ID: &str = "FNP-P2C-009";
 pub const NPY_MAGIC_PREFIX: [u8; 6] = [0x93, b'N', b'U', b'M', b'P', b'Y'];
@@ -960,12 +963,28 @@ pub struct NpzEntry {
     pub array: NpyArrayBytes,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NpzCompression {
+    Store,
+    Deflate,
+}
+
 /// Write multiple named arrays into an uncompressed NPZ archive (np.savez).
 ///
 /// NPZ is a ZIP file containing .npy files. Each entry is stored without
 /// compression (STORE method). The entry name gets `.npy` appended if it
 /// doesn't already end with it.
 pub fn write_npz_bytes(entries: &[(&str, &NpyHeader, &[u8])]) -> Result<Vec<u8>, IOError> {
+    write_npz_bytes_with_compression(entries, NpzCompression::Store)
+}
+
+/// Write multiple named arrays into an NPZ archive with optional compression.
+///
+/// Supports ZIP STORE (method 0) and DEFLATE (method 8).
+pub fn write_npz_bytes_with_compression(
+    entries: &[(&str, &NpyHeader, &[u8])],
+    compression: NpzCompression,
+) -> Result<Vec<u8>, IOError> {
     if entries.is_empty() {
         return Err(IOError::NpzArchiveContractViolation(
             "npz: cannot write archive with zero entries",
@@ -991,36 +1010,56 @@ pub fn write_npz_bytes(entries: &[(&str, &NpyHeader, &[u8])]) -> Result<Vec<u8>,
         let fname_bytes = file_name.as_bytes();
 
         let local_offset = buf.len() as u32;
-
-        // CRC-32 (we store 0 since STORE method with no compression)
         let crc = crc32_ieee(&npy_data);
+        let encoded_data = match compression {
+            NpzCompression::Store => npy_data.clone(),
+            NpzCompression::Deflate => {
+                let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+                encoder.write_all(&npy_data).map_err(|_| {
+                    IOError::NpzArchiveContractViolation(
+                        "npz: failed to deflate-compress entry payload",
+                    )
+                })?;
+                encoder.finish().map_err(|_| {
+                    IOError::NpzArchiveContractViolation(
+                        "npz: failed to finalize deflate-compressed entry payload",
+                    )
+                })?
+            }
+        };
+        let compression_method = match compression {
+            NpzCompression::Store => 0_u16,
+            NpzCompression::Deflate => 8_u16,
+        };
+        let compressed_size = encoded_data.len() as u32;
+        let uncompressed_size = npy_data.len() as u32;
 
         // Local file header (30 bytes + filename)
         buf.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // signature
         buf.extend_from_slice(&20_u16.to_le_bytes()); // version needed (2.0)
         buf.extend_from_slice(&0_u16.to_le_bytes()); // flags
-        buf.extend_from_slice(&0_u16.to_le_bytes()); // compression: STORE
+        buf.extend_from_slice(&compression_method.to_le_bytes());
         buf.extend_from_slice(&0_u16.to_le_bytes()); // mod time
         buf.extend_from_slice(&0_u16.to_le_bytes()); // mod date
         buf.extend_from_slice(&crc.to_le_bytes()); // crc-32
-        buf.extend_from_slice(&(npy_data.len() as u32).to_le_bytes()); // compressed size
-        buf.extend_from_slice(&(npy_data.len() as u32).to_le_bytes()); // uncompressed size
+        buf.extend_from_slice(&compressed_size.to_le_bytes());
+        buf.extend_from_slice(&uncompressed_size.to_le_bytes());
         buf.extend_from_slice(&(fname_bytes.len() as u16).to_le_bytes()); // filename len
         buf.extend_from_slice(&0_u16.to_le_bytes()); // extra field len
         buf.extend_from_slice(fname_bytes);
-        buf.extend_from_slice(&npy_data);
+        buf.extend_from_slice(&encoded_data);
 
         // Central directory entry (46 bytes + filename)
         central_directory.extend_from_slice(&[0x50, 0x4B, 0x01, 0x02]); // signature
         central_directory.extend_from_slice(&20_u16.to_le_bytes()); // version made by
         central_directory.extend_from_slice(&20_u16.to_le_bytes()); // version needed
         central_directory.extend_from_slice(&0_u16.to_le_bytes()); // flags
-        central_directory.extend_from_slice(&0_u16.to_le_bytes()); // compression
+        central_directory.extend_from_slice(&compression_method.to_le_bytes());
         central_directory.extend_from_slice(&0_u16.to_le_bytes()); // mod time
         central_directory.extend_from_slice(&0_u16.to_le_bytes()); // mod date
         central_directory.extend_from_slice(&crc.to_le_bytes()); // crc-32
-        central_directory.extend_from_slice(&(npy_data.len() as u32).to_le_bytes());
-        central_directory.extend_from_slice(&(npy_data.len() as u32).to_le_bytes());
+        central_directory.extend_from_slice(&compressed_size.to_le_bytes());
+        central_directory.extend_from_slice(&uncompressed_size.to_le_bytes());
         central_directory.extend_from_slice(&(fname_bytes.len() as u16).to_le_bytes());
         central_directory.extend_from_slice(&0_u16.to_le_bytes()); // extra field len
         central_directory.extend_from_slice(&0_u16.to_le_bytes()); // comment len
@@ -1052,8 +1091,8 @@ pub fn write_npz_bytes(entries: &[(&str, &NpyHeader, &[u8])]) -> Result<Vec<u8>,
 
 /// Read an NPZ archive and return all named arrays (np.load for .npz files).
 ///
-/// Only supports uncompressed (STORE) entries. Each entry must be a valid
-/// `.npy` file.
+/// Supports uncompressed STORE (method 0) and DEFLATE-compressed (method 8)
+/// entries. Each entry must decode to a valid `.npy` file.
 pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
     if data.len() < 22 {
         return Err(IOError::NpzArchiveContractViolation(
@@ -1092,10 +1131,22 @@ pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
         data[eocd + 19],
     ]) as usize;
 
-    validate_npz_archive_budget(entry_count, cd_size, 0)?;
+    let cd_end = cd_offset
+        .checked_add(cd_size)
+        .ok_or(IOError::NpzArchiveContractViolation(
+            "npz: central directory bounds overflow",
+        ))?;
+    if cd_end > data.len() {
+        return Err(IOError::NpzArchiveContractViolation(
+            "npz: central directory extends beyond archive bounds",
+        ));
+    }
+
+    validate_npz_archive_budget(entry_count, 0, 0)?;
 
     let mut entries = Vec::with_capacity(entry_count);
     let mut pos = cd_offset;
+    let mut total_uncompressed_bytes = 0usize;
 
     for _ in 0..entry_count {
         if pos + 46 > data.len() {
@@ -1110,17 +1161,30 @@ pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
         }
 
         let compression = u16::from_le_bytes([data[pos + 10], data[pos + 11]]);
-        if compression != 0 {
+        if compression != 0 && compression != 8 {
             return Err(IOError::NpzArchiveContractViolation(
-                "npz: only uncompressed (STORE) entries are supported",
+                "npz: only STORE (0) and DEFLATE (8) entries are supported",
             ));
         }
+
+        let crc = u32::from_le_bytes([
+            data[pos + 16],
+            data[pos + 17],
+            data[pos + 18],
+            data[pos + 19],
+        ]);
 
         let compressed_size = u32::from_le_bytes([
             data[pos + 20],
             data[pos + 21],
             data[pos + 22],
             data[pos + 23],
+        ]) as usize;
+        let uncompressed_size = u32::from_le_bytes([
+            data[pos + 24],
+            data[pos + 25],
+            data[pos + 26],
+            data[pos + 27],
         ]) as usize;
         let fname_len = u16::from_le_bytes([data[pos + 28], data[pos + 29]]) as usize;
         let extra_len = u16::from_le_bytes([data[pos + 30], data[pos + 31]]) as usize;
@@ -1147,6 +1211,19 @@ pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
                 "npz: local header offset out of bounds",
             ));
         }
+        let local_signature = &data[local_offset..local_offset + 4];
+        if local_signature != [0x50, 0x4B, 0x03, 0x04] {
+            return Err(IOError::NpzArchiveContractViolation(
+                "npz: invalid local file header signature",
+            ));
+        }
+        let local_compression =
+            u16::from_le_bytes([data[local_offset + 8], data[local_offset + 9]]);
+        if local_compression != compression {
+            return Err(IOError::NpzArchiveContractViolation(
+                "npz: local/central directory compression mismatch",
+            ));
+        }
         let local_fname_len =
             u16::from_le_bytes([data[local_offset + 26], data[local_offset + 27]]) as usize;
         let local_extra_len =
@@ -1160,8 +1237,46 @@ pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
             ));
         }
 
-        let npy_bytes = &data[data_start..data_end];
-        let array = read_npy_bytes(npy_bytes, false)?;
+        let stored_entry_bytes = &data[data_start..data_end];
+        let npy_bytes = match compression {
+            0 => {
+                if compressed_size != uncompressed_size {
+                    return Err(IOError::NpzArchiveContractViolation(
+                        "npz: STORE entry has inconsistent compressed/uncompressed sizes",
+                    ));
+                }
+                stored_entry_bytes.to_vec()
+            }
+            8 => {
+                let mut decoder = DeflateDecoder::new(stored_entry_bytes);
+                let mut decoded = Vec::new();
+                decoder.read_to_end(&mut decoded).map_err(|_| {
+                    IOError::NpzArchiveContractViolation(
+                        "npz: failed to inflate DEFLATE entry payload",
+                    )
+                })?;
+                decoded
+            }
+            _ => unreachable!("compression validated before branch"),
+        };
+        if npy_bytes.len() != uncompressed_size {
+            return Err(IOError::NpzArchiveContractViolation(
+                "npz: decoded entry length does not match declared uncompressed size",
+            ));
+        }
+        if crc32_ieee(&npy_bytes) != crc {
+            return Err(IOError::NpzArchiveContractViolation(
+                "npz: decoded entry CRC-32 does not match central directory",
+            ));
+        }
+
+        total_uncompressed_bytes = total_uncompressed_bytes
+            .checked_add(uncompressed_size)
+            .ok_or(IOError::NpzArchiveContractViolation(
+                "npz: decoded archive size overflowed bounded budget",
+            ))?;
+        validate_npz_archive_budget(entry_count, total_uncompressed_bytes, 0)?;
+        let array = read_npy_bytes(&npy_bytes, false)?;
 
         // Strip .npy suffix from name for user convenience
         let clean_name = file_name
@@ -1423,13 +1538,14 @@ mod tests {
         IO_PACKET_ID, IO_PACKET_REASON_CODES, IOError, IOLogRecord, IORuntimeMode,
         IOSupportedDType, LoadDispatch, MAX_ARCHIVE_MEMBERS, MAX_DISPATCH_RETRIES,
         MAX_HEADER_BYTES, MAX_MEMMAP_VALIDATION_RETRIES, MemmapMode, NPY_MAGIC_PREFIX,
-        NPZ_MAGIC_PREFIX, NpyHeader, SaveTxtConfig, classify_load_dispatch,
+        NPZ_MAGIC_PREFIX, NpyHeader, NpzCompression, SaveTxtConfig, classify_load_dispatch,
         encode_npy_header_bytes, enforce_pickle_policy, genfromtxt, loadtxt, loadtxt_usecols,
         read_npy_bytes, read_npz_bytes, savetxt, synthesize_npz_member_names,
         validate_descriptor_roundtrip, validate_header_schema, validate_io_policy_metadata,
         validate_magic_version, validate_memmap_contract, validate_npz_archive_budget,
         validate_read_payload, validate_write_contract, write_npy_bytes,
         write_npy_bytes_with_version, write_npy_preamble, write_npz_bytes,
+        write_npz_bytes_with_compression,
     };
 
     fn packet009_artifacts() -> Vec<String> {
@@ -2205,6 +2321,81 @@ mod tests {
         assert_eq!(entries[1].array.header.shape, vec![2, 2]);
         assert_eq!(entries[1].array.header.descr, IOSupportedDType::I32);
         assert_eq!(entries[1].array.payload, p2);
+    }
+
+    #[test]
+    fn npz_deflate_single_array_roundtrip() {
+        let header = NpyHeader {
+            shape: vec![3],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let payload: Vec<u8> = [1.0_f64, 2.0, 3.0]
+            .into_iter()
+            .flat_map(f64::to_le_bytes)
+            .collect();
+        let npz = write_npz_bytes_with_compression(
+            &[("arr0", &header, &payload)],
+            NpzCompression::Deflate,
+        )
+        .expect("write deflate npz");
+
+        let entries = read_npz_bytes(&npz).expect("read deflate npz");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "arr0");
+        assert_eq!(entries[0].array.header.descr, IOSupportedDType::F64);
+        assert_eq!(entries[0].array.payload, payload);
+    }
+
+    #[test]
+    fn npz_unsupported_compression_rejected() {
+        let header = NpyHeader {
+            shape: vec![1],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let payload: Vec<u8> = 1.0_f64.to_le_bytes().to_vec();
+        let mut npz = write_npz_bytes(&[("a", &header, &payload)]).expect("write npz");
+
+        // Local header compression field.
+        npz[8] = 1;
+        npz[9] = 0;
+
+        // Central directory compression field.
+        let cd_pos = npz
+            .windows(4)
+            .position(|window| window == [0x50, 0x4B, 0x01, 0x02])
+            .expect("central directory signature");
+        npz[cd_pos + 10] = 1;
+        npz[cd_pos + 11] = 0;
+
+        let err = read_npz_bytes(&npz).expect_err("unsupported compression must be rejected");
+        assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
+    }
+
+    #[test]
+    fn npz_deflate_corrupted_payload_rejected() {
+        let header = NpyHeader {
+            shape: vec![2],
+            fortran_order: false,
+            descr: IOSupportedDType::I32,
+        };
+        let payload: Vec<u8> = [123_i32, -5_i32]
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect();
+        let mut npz =
+            write_npz_bytes_with_compression(&[("a", &header, &payload)], NpzCompression::Deflate)
+                .expect("write deflate npz");
+
+        let local_fname_len = u16::from_le_bytes([npz[26], npz[27]]) as usize;
+        let local_extra_len = u16::from_le_bytes([npz[28], npz[29]]) as usize;
+        let data_start = 30 + local_fname_len + local_extra_len;
+        assert!(data_start < npz.len(), "expected deflate payload bytes");
+        npz[data_start] ^= 0xFF;
+
+        let err = read_npz_bytes(&npz).expect_err("corrupted deflate payload must fail");
+        assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
     }
 
     #[test]
