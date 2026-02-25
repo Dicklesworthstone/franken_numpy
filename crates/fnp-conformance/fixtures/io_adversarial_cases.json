@@ -31,7 +31,7 @@
     "header_len": 128
   },
   {
-    "id": "io_dtype_descriptor_big_endian_rejected",
+    "id": "io_dtype_descriptor_invalid_width_rejected",
     "operation": "dtype_decode",
     "expected_error_contains": "dtype descriptor is invalid or unsupported",
     "severity": "medium",
@@ -42,7 +42,7 @@
       "artifacts/phase2c/FNP-P2C-009/contract_table.md"
     ],
     "reason_code": "io_dtype_descriptor_invalid",
-    "dtype_descr": ">i4"
+    "dtype_descr": ">i3"
   },
   {
     "id": "io_payload_len_mismatch",

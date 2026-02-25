@@ -48,14 +48,22 @@ pub enum IOSupportedDType {
     Bool,
     I8,
     I16,
+    I16Be,
     I32,
+    I32Be,
     I64,
+    I64Be,
     U8,
     U16,
+    U16Be,
     U32,
+    U32Be,
     U64,
+    U64Be,
     F32,
+    F32Be,
     F64,
+    F64Be,
     Object,
 }
 
@@ -66,14 +74,22 @@ impl IOSupportedDType {
             Self::Bool => "|b1",
             Self::I8 => "|i1",
             Self::I16 => "<i2",
+            Self::I16Be => ">i2",
             Self::I32 => "<i4",
+            Self::I32Be => ">i4",
             Self::I64 => "<i8",
+            Self::I64Be => ">i8",
             Self::U8 => "|u1",
             Self::U16 => "<u2",
+            Self::U16Be => ">u2",
             Self::U32 => "<u4",
+            Self::U32Be => ">u4",
             Self::U64 => "<u8",
+            Self::U64Be => ">u8",
             Self::F32 => "<f4",
+            Self::F32Be => ">f4",
             Self::F64 => "<f8",
+            Self::F64Be => ">f8",
             Self::Object => "|O",
         }
     }
@@ -83,14 +99,22 @@ impl IOSupportedDType {
             "|b1" => Ok(Self::Bool),
             "|i1" => Ok(Self::I8),
             "<i2" => Ok(Self::I16),
+            ">i2" => Ok(Self::I16Be),
             "<i4" => Ok(Self::I32),
+            ">i4" => Ok(Self::I32Be),
             "<i8" => Ok(Self::I64),
+            ">i8" => Ok(Self::I64Be),
             "|u1" => Ok(Self::U8),
             "<u2" => Ok(Self::U16),
+            ">u2" => Ok(Self::U16Be),
             "<u4" => Ok(Self::U32),
+            ">u4" => Ok(Self::U32Be),
             "<u8" => Ok(Self::U64),
+            ">u8" => Ok(Self::U64Be),
             "<f4" => Ok(Self::F32),
+            ">f4" => Ok(Self::F32Be),
             "<f8" => Ok(Self::F64),
+            ">f8" => Ok(Self::F64Be),
             "|O" => Ok(Self::Object),
             _ => Err(IOError::DTypeDescriptorInvalid),
         }
@@ -100,9 +124,9 @@ impl IOSupportedDType {
     pub const fn item_size(self) -> Option<usize> {
         match self {
             Self::Bool | Self::I8 | Self::U8 => Some(1),
-            Self::I16 | Self::U16 => Some(2),
-            Self::I32 | Self::U32 | Self::F32 => Some(4),
-            Self::I64 | Self::U64 | Self::F64 => Some(8),
+            Self::I16 | Self::I16Be | Self::U16 | Self::U16Be => Some(2),
+            Self::I32 | Self::I32Be | Self::U32 | Self::U32Be | Self::F32 | Self::F32Be => Some(4),
+            Self::I64 | Self::I64Be | Self::U64 | Self::U64Be | Self::F64 | Self::F64Be => Some(8),
             Self::Object => None,
         }
     }
@@ -1491,14 +1515,22 @@ mod tests {
             IOSupportedDType::Bool,
             IOSupportedDType::I8,
             IOSupportedDType::I16,
+            IOSupportedDType::I16Be,
             IOSupportedDType::I32,
+            IOSupportedDType::I32Be,
             IOSupportedDType::I64,
+            IOSupportedDType::I64Be,
             IOSupportedDType::U8,
             IOSupportedDType::U16,
+            IOSupportedDType::U16Be,
             IOSupportedDType::U32,
+            IOSupportedDType::U32Be,
             IOSupportedDType::U64,
+            IOSupportedDType::U64Be,
             IOSupportedDType::F32,
+            IOSupportedDType::F32Be,
             IOSupportedDType::F64,
+            IOSupportedDType::F64Be,
             IOSupportedDType::Object,
         ];
 
@@ -1506,7 +1538,7 @@ mod tests {
             validate_descriptor_roundtrip(dtype).expect("descriptor roundtrip");
         }
 
-        let err = IOSupportedDType::decode(">i4").expect_err("unsupported descriptor");
+        let err = IOSupportedDType::decode(">i3").expect_err("unsupported descriptor");
         assert_eq!(err.reason_code(), "io_dtype_descriptor_invalid");
     }
 
@@ -2075,18 +2107,43 @@ mod tests {
     }
 
     #[test]
+    fn npy_big_endian_descriptor_roundtrip() {
+        let header = NpyHeader {
+            shape: vec![2],
+            fortran_order: false,
+            descr: IOSupportedDType::F64Be,
+        };
+        let payload: Vec<u8> = [1.25_f64, -3.5_f64]
+            .into_iter()
+            .flat_map(f64::to_be_bytes)
+            .collect();
+        let encoded = write_npy_bytes(&header, &payload, false).expect("write big-endian f64");
+        let decoded = read_npy_bytes(&encoded, false).expect("read big-endian f64");
+        assert_eq!(decoded.header.descr, IOSupportedDType::F64Be);
+        assert_eq!(decoded.payload, payload);
+    }
+
+    #[test]
     fn item_size_matches_dtype_byte_widths() {
         assert_eq!(IOSupportedDType::Bool.item_size(), Some(1));
         assert_eq!(IOSupportedDType::I8.item_size(), Some(1));
         assert_eq!(IOSupportedDType::U8.item_size(), Some(1));
         assert_eq!(IOSupportedDType::I16.item_size(), Some(2));
+        assert_eq!(IOSupportedDType::I16Be.item_size(), Some(2));
         assert_eq!(IOSupportedDType::U16.item_size(), Some(2));
+        assert_eq!(IOSupportedDType::U16Be.item_size(), Some(2));
         assert_eq!(IOSupportedDType::I32.item_size(), Some(4));
+        assert_eq!(IOSupportedDType::I32Be.item_size(), Some(4));
         assert_eq!(IOSupportedDType::U32.item_size(), Some(4));
+        assert_eq!(IOSupportedDType::U32Be.item_size(), Some(4));
         assert_eq!(IOSupportedDType::F32.item_size(), Some(4));
+        assert_eq!(IOSupportedDType::F32Be.item_size(), Some(4));
         assert_eq!(IOSupportedDType::I64.item_size(), Some(8));
+        assert_eq!(IOSupportedDType::I64Be.item_size(), Some(8));
         assert_eq!(IOSupportedDType::U64.item_size(), Some(8));
+        assert_eq!(IOSupportedDType::U64Be.item_size(), Some(8));
         assert_eq!(IOSupportedDType::F64.item_size(), Some(8));
+        assert_eq!(IOSupportedDType::F64Be.item_size(), Some(8));
         assert_eq!(IOSupportedDType::Object.item_size(), None);
     }
 

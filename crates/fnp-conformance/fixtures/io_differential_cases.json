@@ -399,6 +399,20 @@
     "dtype_descr": "<i8"
   },
   {
+    "id": "io_dtype_decode_big_endian_i32_golden",
+    "operation": "dtype_decode",
+    "seed": 9996,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_dtype_descriptor_contract",
+    "expected_reason_code": "io_dtype_descriptor_contract",
+    "dtype_descr": ">i4"
+  },
+  {
     "id": "io_read_payload_i32_matrix_golden",
     "operation": "read_payload",
     "seed": 9936,
