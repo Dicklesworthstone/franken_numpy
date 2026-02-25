@@ -1836,6 +1836,206 @@ pub fn matrix_power_nxn(a: &[f64], n: usize, p: i64) -> Result<Vec<f64>, LinAlgE
     Ok(result)
 }
 
+/// Matrix exponential via scaling-and-squaring with Taylor series.
+///
+/// Mimics `scipy.linalg.expm(A)`. Computes e^A for an NxN matrix.
+/// Uses scaling-and-squaring: scale A by 2^(-s) so the norm is small,
+/// compute exp via truncated Taylor series, then square s times.
+pub fn expm_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
+    if a.len() != n * n || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "expm_nxn: input must be n*n with n > 0",
+        ));
+    }
+    if a.iter().any(|v| !v.is_finite()) {
+        return Err(LinAlgError::SpectralConvergenceFailed);
+    }
+
+    // 1-norm of matrix
+    let norm1 = {
+        let mut max_col = 0.0f64;
+        for j in 0..n {
+            let col_sum: f64 = (0..n).map(|i| a[i * n + j].abs()).sum();
+            if col_sum > max_col {
+                max_col = col_sum;
+            }
+        }
+        max_col
+    };
+
+    // Determine scaling factor s such that ||A/2^s|| < 1
+    let s = if norm1 > 1.0 {
+        (norm1.log2().ceil() as u32) + 1
+    } else {
+        0
+    };
+
+    // Scale: A_s = A / 2^s
+    let scale = 2.0f64.powi(s as i32);
+    let a_s: Vec<f64> = a.iter().map(|&v| v / scale).collect();
+
+    // Taylor series: exp(A_s) = I + A_s + A_s^2/2! + A_s^3/3! + ...
+    let mut result = vec![0.0; n * n];
+    // Initialize to identity
+    for i in 0..n {
+        result[i * n + i] = 1.0;
+    }
+
+    // term = A_s^k / k!
+    let mut term = vec![0.0; n * n];
+    for i in 0..n {
+        term[i * n + i] = 1.0; // identity = A^0 / 0!
+    }
+
+    for k in 1..=30 {
+        // term = term * A_s / k
+        let new_term = mat_mul_flat(&term, &a_s, n);
+        let inv_k = 1.0 / k as f64;
+        for i in 0..n * n {
+            term[i] = new_term[i] * inv_k;
+        }
+        // result += term
+        for i in 0..n * n {
+            result[i] += term[i];
+        }
+        // Check convergence
+        let norm: f64 = term.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
+        if norm < 1e-16 {
+            break;
+        }
+    }
+
+    // Undo scaling: square s times
+    for _ in 0..s {
+        result = mat_mul_flat(&result, &result, n);
+    }
+
+    Ok(result)
+}
+
+/// Matrix square root via Denman-Beavers iteration.
+///
+/// Mimics `scipy.linalg.sqrtm(A)`. Computes X such that X @ X = A.
+/// Uses the Denman-Beavers iteration which converges quadratically:
+///   Y_{k+1} = 0.5 * (Y_k + Z_k^{-1})
+///   Z_{k+1} = 0.5 * (Z_k + Y_k^{-1})
+/// with Y_0 = A, Z_0 = I, and Y_∞ = A^{1/2}.
+pub fn sqrtm_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
+    if a.len() != n * n || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "sqrtm_nxn: input must be n*n with n > 0",
+        ));
+    }
+    if a.iter().any(|v| !v.is_finite()) {
+        return Err(LinAlgError::SpectralConvergenceFailed);
+    }
+
+    let mut y = a.to_vec();
+    let mut z = vec![0.0; n * n];
+    for i in 0..n {
+        z[i * n + i] = 1.0; // Z_0 = I
+    }
+
+    for _ in 0..50 {
+        let z_inv = inv_nxn(&z, n)?;
+        let y_inv = inv_nxn(&y, n)?;
+
+        let mut y_new = vec![0.0; n * n];
+        let mut z_new = vec![0.0; n * n];
+        for i in 0..n * n {
+            y_new[i] = 0.5 * (y[i] + z_inv[i]);
+            z_new[i] = 0.5 * (z[i] + y_inv[i]);
+        }
+
+        // Check convergence: ||Y_new - Y|| < tol
+        let diff: f64 = y_new
+            .iter()
+            .zip(y.iter())
+            .map(|(&a, &b)| (a - b).abs())
+            .fold(0.0f64, f64::max);
+        y = y_new;
+        z = z_new;
+        if diff < 1e-14 {
+            break;
+        }
+    }
+
+    Ok(y)
+}
+
+/// Matrix logarithm via inverse scaling-and-squaring.
+///
+/// Mimics `scipy.linalg.logm(A)`. Computes X such that expm(X) = A.
+/// Uses repeated square roots to bring the matrix close to I, then
+/// applies the series log(I + X) ≈ X - X²/2 + X³/3 - ...
+pub fn logm_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
+    if a.len() != n * n || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "logm_nxn: input must be n*n with n > 0",
+        ));
+    }
+    if a.iter().any(|v| !v.is_finite()) {
+        return Err(LinAlgError::SpectralConvergenceFailed);
+    }
+
+    // Inverse scaling: compute A^{1/2^s} until close to identity
+    let mut m = a.to_vec();
+    let mut s = 0u32;
+    let max_s = 20;
+
+    let mut identity = vec![0.0; n * n];
+    for i in 0..n {
+        identity[i * n + i] = 1.0;
+    }
+
+    // Keep taking square roots until ||M - I|| is small
+    while s < max_s {
+        let diff: f64 = m
+            .iter()
+            .zip(identity.iter())
+            .map(|(&a, &b)| (a - b).abs())
+            .fold(0.0f64, f64::max);
+        if diff < 0.5 {
+            break;
+        }
+        m = sqrtm_nxn(&m, n)?;
+        s += 1;
+    }
+
+    // Now M ≈ I + X where X is small
+    // Compute X = M - I
+    let mut x = vec![0.0; n * n];
+    for i in 0..n * n {
+        x[i] = m[i] - identity[i];
+    }
+
+    // log(I + X) via Taylor series: X - X²/2 + X³/3 - X⁴/4 + ...
+    let mut result = vec![0.0; n * n];
+    let mut x_power = x.clone(); // X^1
+    for k in 1..=30 {
+        let sign = if k % 2 == 1 { 1.0 } else { -1.0 };
+        let coeff = sign / k as f64;
+        for i in 0..n * n {
+            result[i] += coeff * x_power[i];
+        }
+        x_power = mat_mul_flat(&x_power, &x, n);
+
+        // Check convergence
+        let norm: f64 = x_power.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
+        if norm < 1e-15 {
+            break;
+        }
+    }
+
+    // Undo scaling: multiply by 2^s
+    let scale = 2.0f64.powi(s as i32);
+    for v in &mut result {
+        *v *= scale;
+    }
+
+    Ok(result)
+}
+
 /// NxN least-squares solve: minimize ||Ax - b||_2 using normal equations.
 /// Returns the solution vector x.
 pub fn lstsq_nxn(a: &[f64], b: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgError> {
@@ -2630,6 +2830,7 @@ mod tests {
         svd_output_shapes, trace_nxn, validate_backend_bridge, validate_cholesky_diagonal,
         validate_matrix_shape, validate_policy_metadata, validate_spectral_branch,
         validate_square_matrix, validate_tolerance_policy, vector_norm,
+        expm_nxn, sqrtm_nxn, logm_nxn,
     };
 
     fn packet008_artifacts() -> Vec<String> {
@@ -4528,5 +4729,122 @@ mod tests {
         for i in 0..6 {
             assert!((recon[i] - a[i]).abs() < 1e-8, "SVD recon at {i}");
         }
+    }
+
+    // ── expm tests ──
+
+    #[test]
+    fn expm_identity_is_e_times_identity() {
+        // expm(I) = e*I
+        let eye = [1.0, 0.0, 0.0, 1.0];
+        let result = expm_nxn(&eye, 2).unwrap();
+        let e = std::f64::consts::E;
+        assert!((result[0] - e).abs() < 1e-6, "expm(I)[0,0] = e");
+        assert!(result[1].abs() < 1e-10, "expm(I)[0,1] = 0");
+        assert!(result[2].abs() < 1e-10, "expm(I)[1,0] = 0");
+        assert!((result[3] - e).abs() < 1e-6, "expm(I)[1,1] = e");
+    }
+
+    #[test]
+    fn expm_zero_is_identity() {
+        let zero = [0.0; 4];
+        let result = expm_nxn(&zero, 2).unwrap();
+        assert!((result[0] - 1.0).abs() < 1e-10);
+        assert!(result[1].abs() < 1e-10);
+        assert!(result[2].abs() < 1e-10);
+        assert!((result[3] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn expm_diagonal_matrix() {
+        // expm([[a,0],[0,b]]) = [[e^a,0],[0,e^b]]
+        let a = [2.0, 0.0, 0.0, 3.0];
+        let result = expm_nxn(&a, 2).unwrap();
+        assert!(
+            (result[0] - 2.0f64.exp()).abs() < 1e-4,
+            "expm diag [0,0]"
+        );
+        assert!(result[1].abs() < 1e-6, "expm diag [0,1]");
+        assert!(result[2].abs() < 1e-6, "expm diag [1,0]");
+        assert!(
+            (result[3] - 3.0f64.exp()).abs() < 1e-4,
+            "expm diag [1,1]"
+        );
+    }
+
+    // ── sqrtm tests ──
+
+    #[test]
+    fn sqrtm_identity_is_identity() {
+        let eye = [1.0, 0.0, 0.0, 1.0];
+        let result = sqrtm_nxn(&eye, 2).unwrap();
+        assert!((result[0] - 1.0).abs() < 1e-10);
+        assert!(result[1].abs() < 1e-10);
+        assert!(result[2].abs() < 1e-10);
+        assert!((result[3] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn sqrtm_squared_gives_original() {
+        // sqrtm(A)^2 ≈ A
+        let a = [4.0, 1.0, 2.0, 3.0];
+        let s = sqrtm_nxn(&a, 2).unwrap();
+        let s2 = mat_mul_flat(&s, &s, 2);
+        for i in 0..4 {
+            assert!(
+                (s2[i] - a[i]).abs() < 1e-8,
+                "sqrtm squared at {i}: {} vs {}",
+                s2[i],
+                a[i]
+            );
+        }
+    }
+
+    #[test]
+    fn sqrtm_diagonal() {
+        let a = [9.0, 0.0, 0.0, 16.0];
+        let result = sqrtm_nxn(&a, 2).unwrap();
+        assert!((result[0] - 3.0).abs() < 1e-8);
+        assert!(result[1].abs() < 1e-10);
+        assert!(result[2].abs() < 1e-10);
+        assert!((result[3] - 4.0).abs() < 1e-8);
+    }
+
+    // ── logm tests ──
+
+    #[test]
+    fn logm_identity_is_zero() {
+        let eye = [1.0, 0.0, 0.0, 1.0];
+        let result = logm_nxn(&eye, 2).unwrap();
+        for i in 0..4 {
+            assert!(result[i].abs() < 1e-10, "logm(I) should be zero at {i}");
+        }
+    }
+
+    #[test]
+    fn logm_expm_roundtrip() {
+        // logm(expm(A)) ≈ A for small A
+        let a = [0.1, 0.05, -0.03, 0.2];
+        let ea = expm_nxn(&a, 2).unwrap();
+        let la = logm_nxn(&ea, 2).unwrap();
+        for i in 0..4 {
+            assert!(
+                (la[i] - a[i]).abs() < 1e-4,
+                "roundtrip at {i}: {} vs {}",
+                la[i],
+                a[i]
+            );
+        }
+    }
+
+    #[test]
+    fn logm_diagonal() {
+        let e = std::f64::consts::E;
+        let a = [e, 0.0, 0.0, e * e];
+        let result = logm_nxn(&a, 2).unwrap();
+        assert!((result[0] - 1.0).abs() < 1e-4, "logm diag [0,0]");
+        assert!(result[1].abs() < 1e-6, "logm diag [0,1]");
+        assert!(result[2].abs() < 1e-6, "logm diag [1,0]");
+        assert!((result[3] - 2.0).abs() < 1e-4, "logm diag [1,1]");
     }
 }

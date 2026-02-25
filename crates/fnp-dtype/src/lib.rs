@@ -402,6 +402,76 @@ pub fn min_scalar_type(value: f64) -> DType {
     DType::F64
 }
 
+/// Integer type information (np.iinfo).
+///
+/// Returns `(min, max, bits)` for the given integer dtype.
+/// Returns `None` if the dtype is not an integer type.
+#[must_use]
+pub const fn iinfo(dtype: DType) -> Option<(i128, i128, u32)> {
+    match dtype {
+        DType::Bool => Some((0, 1, 1)),
+        DType::I8 => Some((i8::MIN as i128, i8::MAX as i128, 8)),
+        DType::I16 => Some((i16::MIN as i128, i16::MAX as i128, 16)),
+        DType::I32 => Some((i32::MIN as i128, i32::MAX as i128, 32)),
+        DType::I64 => Some((i64::MIN as i128, i64::MAX as i128, 64)),
+        DType::U8 => Some((0, u8::MAX as i128, 8)),
+        DType::U16 => Some((0, u16::MAX as i128, 16)),
+        DType::U32 => Some((0, u32::MAX as i128, 32)),
+        DType::U64 => Some((0, u64::MAX as i128, 64)),
+        _ => None,
+    }
+}
+
+/// Float type information (np.finfo).
+///
+/// Returns `(bits, eps, min_positive, max, min_exp, max_exp)` for the given
+/// float dtype. Returns `None` if the dtype is not a float type.
+///
+/// - `bits`: total number of bits
+/// - `eps`: machine epsilon (smallest representable positive number s.t. 1.0 + eps != 1.0)
+/// - `min_positive`: smallest positive normalized value (tiny)
+/// - `max`: largest finite value
+/// - `min_exp`: minimum exponent (base 2)
+/// - `max_exp`: maximum exponent (base 2)
+#[must_use]
+pub const fn finfo(dtype: DType) -> Option<(u32, f64, f64, f64, i32, i32)> {
+    match dtype {
+        DType::F32 => Some((
+            32,
+            f32::EPSILON as f64,
+            f32::MIN_POSITIVE as f64,
+            f32::MAX as f64,
+            f32::MIN_EXP,
+            f32::MAX_EXP,
+        )),
+        DType::F64 => Some((
+            64,
+            f64::EPSILON,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+            f64::MIN_EXP,
+            f64::MAX_EXP,
+        )),
+        DType::Complex64 => Some((
+            64,
+            f32::EPSILON as f64,
+            f32::MIN_POSITIVE as f64,
+            f32::MAX as f64,
+            f32::MIN_EXP,
+            f32::MAX_EXP,
+        )),
+        DType::Complex128 => Some((
+            128,
+            f64::EPSILON,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+            f64::MIN_EXP,
+            f64::MAX_EXP,
+        )),
+        _ => None,
+    }
+}
+
 /// Find common float type among dtypes (np.common_type).
 /// Integer types are promoted to F64; float types use normal promotion.
 #[must_use]
@@ -421,7 +491,7 @@ pub fn common_type(dtypes: &[DType]) -> DType {
 #[cfg(test)]
 mod tests {
     use super::{
-        DType, can_cast, can_cast_lossless, common_type, min_scalar_type, promote,
+        DType, can_cast, can_cast_lossless, common_type, finfo, iinfo, min_scalar_type, promote,
         promote_for_mean_reduction, promote_for_sum_reduction, result_type,
     };
 
@@ -779,5 +849,87 @@ mod tests {
         assert!(can_cast_lossless(DType::Complex64, DType::Complex128));
         assert!(!can_cast_lossless(DType::Complex128, DType::F64));
         assert!(!can_cast_lossless(DType::Complex64, DType::F32));
+    }
+
+    // ── iinfo tests ──
+
+    #[test]
+    fn iinfo_integer_types() {
+        let (min, max, bits) = iinfo(DType::I8).unwrap();
+        assert_eq!(min, -128);
+        assert_eq!(max, 127);
+        assert_eq!(bits, 8);
+
+        let (min, max, bits) = iinfo(DType::U8).unwrap();
+        assert_eq!(min, 0);
+        assert_eq!(max, 255);
+        assert_eq!(bits, 8);
+
+        let (min, max, bits) = iinfo(DType::I32).unwrap();
+        assert_eq!(min, i32::MIN as i128);
+        assert_eq!(max, i32::MAX as i128);
+        assert_eq!(bits, 32);
+
+        let (min, max, bits) = iinfo(DType::U64).unwrap();
+        assert_eq!(min, 0);
+        assert_eq!(max, u64::MAX as i128);
+        assert_eq!(bits, 64);
+    }
+
+    #[test]
+    fn iinfo_non_integer_returns_none() {
+        assert!(iinfo(DType::F32).is_none());
+        assert!(iinfo(DType::F64).is_none());
+        assert!(iinfo(DType::Str).is_none());
+        assert!(iinfo(DType::Complex128).is_none());
+    }
+
+    #[test]
+    fn iinfo_bool() {
+        let (min, max, bits) = iinfo(DType::Bool).unwrap();
+        assert_eq!(min, 0);
+        assert_eq!(max, 1);
+        assert_eq!(bits, 1);
+    }
+
+    // ── finfo tests ──
+
+    #[test]
+    fn finfo_float_types() {
+        let (bits, eps, tiny, max, min_exp, max_exp) = finfo(DType::F32).unwrap();
+        assert_eq!(bits, 32);
+        assert!((eps - f64::from(f32::EPSILON)).abs() < 1e-15);
+        assert!(tiny > 0.0);
+        assert!(max > 1e30);
+        assert!(min_exp < 0);
+        assert!(max_exp > 0);
+
+        let (bits, eps, tiny, max, min_exp, max_exp) = finfo(DType::F64).unwrap();
+        assert_eq!(bits, 64);
+        assert!((eps - f64::EPSILON).abs() < 1e-30);
+        assert!(tiny > 0.0);
+        assert!(max > 1e300);
+        assert!(min_exp < 0);
+        assert!(max_exp > 0);
+    }
+
+    #[test]
+    fn finfo_complex_types() {
+        // Complex64 has F32 components
+        let (bits, eps, _, _, _, _) = finfo(DType::Complex64).unwrap();
+        assert_eq!(bits, 64);
+        assert!((eps - f64::from(f32::EPSILON)).abs() < 1e-15);
+
+        // Complex128 has F64 components
+        let (bits, eps, _, _, _, _) = finfo(DType::Complex128).unwrap();
+        assert_eq!(bits, 128);
+        assert!((eps - f64::EPSILON).abs() < 1e-30);
+    }
+
+    #[test]
+    fn finfo_non_float_returns_none() {
+        assert!(finfo(DType::I32).is_none());
+        assert!(finfo(DType::Bool).is_none());
+        assert!(finfo(DType::Str).is_none());
     }
 }

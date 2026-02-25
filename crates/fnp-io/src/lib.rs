@@ -1516,6 +1516,135 @@ pub fn genfromtxt(
     })
 }
 
+/// Read raw binary data from bytes into a flat array of f64 values (np.fromfile).
+///
+/// Interprets `data` as a sequence of elements of the given `dtype`.
+/// If `count` is Some, reads at most that many elements.
+/// Returns the decoded f64 values.
+pub fn fromfile(
+    data: &[u8],
+    dtype: IOSupportedDType,
+    count: Option<usize>,
+) -> Result<Vec<f64>, IOError> {
+    let item_size = dtype
+        .item_size()
+        .ok_or(IOError::DTypeDescriptorInvalid)?;
+    if item_size == 0 {
+        return Ok(Vec::new());
+    }
+    let max_elems = data.len() / item_size;
+    let n = match count {
+        Some(c) => c.min(max_elems),
+        None => max_elems,
+    };
+
+    let mut values = Vec::with_capacity(n);
+    for i in 0..n {
+        let offset = i * item_size;
+        let chunk = &data[offset..offset + item_size];
+        let v = decode_element(chunk, dtype)?;
+        values.push(v);
+    }
+    Ok(values)
+}
+
+/// Write array values to raw binary bytes (np.ndarray.tofile).
+///
+/// Encodes each f64 value according to the given `dtype` and writes
+/// the binary representation.
+pub fn tofile(
+    values: &[f64],
+    dtype: IOSupportedDType,
+) -> Result<Vec<u8>, IOError> {
+    let item_size = dtype
+        .item_size()
+        .ok_or(IOError::DTypeDescriptorInvalid)?;
+    let mut buf = Vec::with_capacity(values.len() * item_size);
+    for &v in values {
+        encode_element(v, dtype, &mut buf)?;
+    }
+    Ok(buf)
+}
+
+/// Decode a single element from raw bytes to f64.
+fn decode_element(chunk: &[u8], dtype: IOSupportedDType) -> Result<f64, IOError> {
+    match dtype {
+        IOSupportedDType::Bool => Ok(if chunk[0] != 0 { 1.0 } else { 0.0 }),
+        IOSupportedDType::I8 => Ok(i8::from_le_bytes([chunk[0]]) as f64),
+        IOSupportedDType::U8 => Ok(chunk[0] as f64),
+        IOSupportedDType::I16 => Ok(i16::from_le_bytes([chunk[0], chunk[1]]) as f64),
+        IOSupportedDType::I16Be => Ok(i16::from_be_bytes([chunk[0], chunk[1]]) as f64),
+        IOSupportedDType::I32 => {
+            Ok(i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f64)
+        }
+        IOSupportedDType::I32Be => {
+            Ok(i32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f64)
+        }
+        IOSupportedDType::I64 => Ok(i64::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+        ]) as f64),
+        IOSupportedDType::I64Be => Ok(i64::from_be_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+        ]) as f64),
+        IOSupportedDType::U16 => Ok(u16::from_le_bytes([chunk[0], chunk[1]]) as f64),
+        IOSupportedDType::U16Be => Ok(u16::from_be_bytes([chunk[0], chunk[1]]) as f64),
+        IOSupportedDType::U32 => {
+            Ok(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f64)
+        }
+        IOSupportedDType::U32Be => {
+            Ok(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f64)
+        }
+        IOSupportedDType::U64 => Ok(u64::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+        ]) as f64),
+        IOSupportedDType::U64Be => Ok(u64::from_be_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+        ]) as f64),
+        IOSupportedDType::F32 => Ok(f32::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3],
+        ]) as f64),
+        IOSupportedDType::F32Be => Ok(f32::from_be_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3],
+        ]) as f64),
+        IOSupportedDType::F64 => Ok(f64::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+        ])),
+        IOSupportedDType::F64Be => Ok(f64::from_be_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+        ])),
+        IOSupportedDType::Object => Err(IOError::DTypeDescriptorInvalid),
+    }
+}
+
+/// Encode a single f64 value to raw bytes according to dtype.
+fn encode_element(v: f64, dtype: IOSupportedDType, buf: &mut Vec<u8>) -> Result<(), IOError> {
+    match dtype {
+        IOSupportedDType::Bool => {
+            buf.push(if v != 0.0 { 1 } else { 0 });
+        }
+        IOSupportedDType::I8 => buf.push((v as i8) as u8),
+        IOSupportedDType::U8 => buf.push(v as u8),
+        IOSupportedDType::I16 => buf.extend_from_slice(&(v as i16).to_le_bytes()),
+        IOSupportedDType::I16Be => buf.extend_from_slice(&(v as i16).to_be_bytes()),
+        IOSupportedDType::I32 => buf.extend_from_slice(&(v as i32).to_le_bytes()),
+        IOSupportedDType::I32Be => buf.extend_from_slice(&(v as i32).to_be_bytes()),
+        IOSupportedDType::I64 => buf.extend_from_slice(&(v as i64).to_le_bytes()),
+        IOSupportedDType::I64Be => buf.extend_from_slice(&(v as i64).to_be_bytes()),
+        IOSupportedDType::U16 => buf.extend_from_slice(&(v as u16).to_le_bytes()),
+        IOSupportedDType::U16Be => buf.extend_from_slice(&(v as u16).to_be_bytes()),
+        IOSupportedDType::U32 => buf.extend_from_slice(&(v as u32).to_le_bytes()),
+        IOSupportedDType::U32Be => buf.extend_from_slice(&(v as u32).to_be_bytes()),
+        IOSupportedDType::U64 => buf.extend_from_slice(&(v as u64).to_le_bytes()),
+        IOSupportedDType::U64Be => buf.extend_from_slice(&(v as u64).to_be_bytes()),
+        IOSupportedDType::F32 => buf.extend_from_slice(&(v as f32).to_le_bytes()),
+        IOSupportedDType::F32Be => buf.extend_from_slice(&(v as f32).to_be_bytes()),
+        IOSupportedDType::F64 => buf.extend_from_slice(&v.to_le_bytes()),
+        IOSupportedDType::F64Be => buf.extend_from_slice(&v.to_be_bytes()),
+        IOSupportedDType::Object => return Err(IOError::DTypeDescriptorInvalid),
+    }
+    Ok(())
+}
+
 pub fn validate_io_policy_metadata(mode: &str, class: &str) -> Result<(), IOError> {
     let known_mode = mode == "strict" || mode == "hardened";
     let known_class = class == "known_compatible_low_risk"
@@ -1545,7 +1674,7 @@ mod tests {
         validate_magic_version, validate_memmap_contract, validate_npz_archive_budget,
         validate_read_payload, validate_write_contract, write_npy_bytes,
         write_npy_bytes_with_version, write_npy_preamble, write_npz_bytes,
-        write_npz_bytes_with_compression,
+        write_npz_bytes_with_compression, fromfile, tofile,
     };
 
     fn packet009_artifacts() -> Vec<String> {
@@ -2444,5 +2573,87 @@ mod tests {
         // Truncate
         let truncated = &npz[..npz.len() / 2];
         assert!(read_npz_bytes(truncated).is_err());
+    }
+
+    // ── fromfile / tofile tests ──
+
+    #[test]
+    fn fromfile_f64_basic() {
+        let data: Vec<u8> = [1.0f64, 2.0, 3.0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let vals = fromfile(&data, IOSupportedDType::F64, None).unwrap();
+        assert_eq!(vals, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn fromfile_i32() {
+        let data: Vec<u8> = [42i32, -7]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let vals = fromfile(&data, IOSupportedDType::I32, None).unwrap();
+        assert_eq!(vals, vec![42.0, -7.0]);
+    }
+
+    #[test]
+    fn fromfile_with_count() {
+        let data: Vec<u8> = [1.0f64, 2.0, 3.0, 4.0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let vals = fromfile(&data, IOSupportedDType::F64, Some(2)).unwrap();
+        assert_eq!(vals, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn fromfile_bool() {
+        let data = vec![1u8, 0, 1, 1, 0];
+        let vals = fromfile(&data, IOSupportedDType::Bool, None).unwrap();
+        assert_eq!(vals, vec![1.0, 0.0, 1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn tofile_f64_basic() {
+        let vals = vec![1.0, 2.0, 3.0];
+        let data = tofile(&vals, IOSupportedDType::F64).unwrap();
+        let expected: Vec<u8> = vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+        assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn tofile_i32() {
+        let vals = vec![42.0, -7.0];
+        let data = tofile(&vals, IOSupportedDType::I32).unwrap();
+        let expected: Vec<u8> = [42i32, -7]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn fromfile_tofile_roundtrip() {
+        let original = vec![1.5, -2.7, 0.0, 1e10];
+        let encoded = tofile(&original, IOSupportedDType::F64).unwrap();
+        let decoded = fromfile(&encoded, IOSupportedDType::F64, None).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn fromfile_tofile_roundtrip_u16() {
+        let original = vec![100.0, 200.0, 65535.0];
+        let encoded = tofile(&original, IOSupportedDType::U16).unwrap();
+        let decoded = fromfile(&encoded, IOSupportedDType::U16, None).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn fromfile_truncated_data_reads_partial() {
+        // 7 bytes: only 3 complete u16 elements (6 bytes), last byte ignored
+        let data = vec![1, 0, 2, 0, 3, 0, 99];
+        let vals = fromfile(&data, IOSupportedDType::U16, None).unwrap();
+        assert_eq!(vals, vec![1.0, 2.0, 3.0]);
     }
 }

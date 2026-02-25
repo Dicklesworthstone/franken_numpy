@@ -1846,6 +1846,83 @@ impl Generator {
             .collect()
     }
 
+    /// Maxwell distribution (np.random.Generator.maxwell).
+    /// The Maxwell distribution with scale parameter `scale`.
+    /// PDF: sqrt(2/pi) * x^2 * exp(-x^2 / (2*scale^2)) / scale^3
+    /// Generated via: scale * sqrt(chi2(3)) = scale * sqrt(X1^2 + X2^2 + X3^2)
+    /// where X1, X2, X3 are independent standard normals.
+    pub fn maxwell(&mut self, scale: f64, size: usize) -> Vec<f64> {
+        (0..size)
+            .map(|_| {
+                let x1 = self.sample_standard_normal_single();
+                let x2 = self.sample_standard_normal_single();
+                let x3 = self.sample_standard_normal_single();
+                scale * (x1 * x1 + x2 * x2 + x3 * x3).sqrt()
+            })
+            .collect()
+    }
+
+    /// Multivariate hypergeometric distribution.
+    /// Draw `nsample` items without replacement from a population of groups
+    /// where `colors[i]` is the number of items in group `i`.
+    /// Returns a vector of vectors, each of length `colors.len()`.
+    pub fn multivariate_hypergeometric(
+        &mut self,
+        colors: &[u64],
+        nsample: u64,
+        size: usize,
+    ) -> Vec<Vec<u64>> {
+        let total: u64 = colors.iter().sum();
+        (0..size)
+            .map(|_| {
+                let mut remaining = total;
+                let mut draws_left = nsample;
+                let mut result = Vec::with_capacity(colors.len());
+                for &color_count in colors {
+                    if remaining == 0 || draws_left == 0 {
+                        result.push(0);
+                        continue;
+                    }
+                    // Draw from hypergeometric(color_count, remaining - color_count, draws_left)
+                    let ngood = color_count;
+                    let nbad = remaining - color_count;
+                    let n = draws_left;
+                    let drawn = self.hypergeometric_single(ngood, nbad, n);
+                    result.push(drawn);
+                    remaining -= color_count;
+                    draws_left -= drawn;
+                }
+                result
+            })
+            .collect()
+    }
+
+    /// Single draw from hypergeometric distribution (helper for multivariate_hypergeometric).
+    fn hypergeometric_single(&mut self, ngood: u64, nbad: u64, nsample: u64) -> u64 {
+        let total = ngood + nbad;
+        if nsample == 0 || ngood == 0 {
+            return 0;
+        }
+        if nsample >= total {
+            return ngood;
+        }
+        let mut good_remaining = ngood;
+        let mut total_remaining = total;
+        let mut successes = 0u64;
+        for _ in 0..nsample {
+            let u = self.next_f64();
+            if u < good_remaining as f64 / total_remaining as f64 {
+                successes += 1;
+                good_remaining -= 1;
+            }
+            total_remaining -= 1;
+            if good_remaining == 0 || total_remaining == 0 {
+                break;
+            }
+        }
+        successes
+    }
+
     /// Full multivariate normal with arbitrary covariance matrix.
     /// Uses Cholesky decomposition: if Sigma = L L^T, then
     /// X = mean + L * z where z ~ N(0, I).
@@ -3323,5 +3400,95 @@ mod tests {
         // Negative probability
         let p2 = [0.5, 0.7, -0.2];
         assert!(rng.choice_weighted(&a, 1, true, &p2).is_err());
+    }
+
+    // ── maxwell distribution tests ──
+
+    #[test]
+    fn maxwell_all_positive() {
+        let mut rng = test_generator();
+        let samples = rng.maxwell(1.0, 1000);
+        assert_eq!(samples.len(), 1000);
+        for &v in &samples {
+            assert!(v >= 0.0, "Maxwell samples must be non-negative, got {v}");
+        }
+    }
+
+    #[test]
+    fn maxwell_mean_approx() {
+        // E[X] = 2 * scale * sqrt(2/pi) ≈ 1.5958 * scale for scale=1
+        let mut rng = test_generator();
+        let n = 50_000;
+        let samples = rng.maxwell(1.0, n);
+        let mean: f64 = samples.iter().sum::<f64>() / n as f64;
+        let expected = 2.0 * (2.0 / std::f64::consts::PI).sqrt();
+        assert!(
+            (mean - expected).abs() < 0.05,
+            "Maxwell mean {mean}, expected ~{expected}"
+        );
+    }
+
+    #[test]
+    fn maxwell_scale_parameter() {
+        let mut rng1 = test_generator();
+        let mut rng2 = test_generator();
+        let samples1 = rng1.maxwell(1.0, 1000);
+        let samples2 = rng2.maxwell(3.0, 1000);
+        let mean1: f64 = samples1.iter().sum::<f64>() / 1000.0;
+        let mean2: f64 = samples2.iter().sum::<f64>() / 1000.0;
+        // Mean should scale linearly with scale parameter
+        assert!(
+            (mean2 / mean1 - 3.0).abs() < 0.3,
+            "Scale ratio: {}, expected ~3.0",
+            mean2 / mean1
+        );
+    }
+
+    // ── multivariate hypergeometric distribution tests ──
+
+    #[test]
+    fn multivariate_hypergeometric_sum_equals_nsample() {
+        let mut rng = test_generator();
+        let colors = [10, 20, 30];
+        let nsample = 15;
+        let results = rng.multivariate_hypergeometric(&colors, nsample, 100);
+        assert_eq!(results.len(), 100);
+        for sample in &results {
+            assert_eq!(sample.len(), 3);
+            let total: u64 = sample.iter().sum();
+            assert_eq!(
+                total, nsample,
+                "Each draw must sum to nsample={nsample}, got {total}"
+            );
+        }
+    }
+
+    #[test]
+    fn multivariate_hypergeometric_respects_bounds() {
+        let mut rng = test_generator();
+        let colors = [5, 10, 3];
+        let nsample = 8;
+        let results = rng.multivariate_hypergeometric(&colors, nsample, 200);
+        for sample in &results {
+            for (i, &drawn) in sample.iter().enumerate() {
+                assert!(
+                    drawn <= colors[i],
+                    "Drew {drawn} from group {i} with only {} items",
+                    colors[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn multivariate_hypergeometric_exhaustive() {
+        // If nsample >= total, draw all items
+        let mut rng = test_generator();
+        let colors = [3, 2, 1];
+        let nsample = 6; // = total
+        let results = rng.multivariate_hypergeometric(&colors, nsample, 10);
+        for sample in &results {
+            assert_eq!(sample, &[3, 2, 1]);
+        }
     }
 }
