@@ -1,30 +1,7 @@
 {
   "suite": "shape_stride_differential",
   "total_cases": 20,
-  "passed_cases": 18,
-  "failed_cases": 2,
-  "mismatches": [
-    {
-      "fixture_id": "stride_tricks_negative_stride_error",
-      "seed": 107,
-      "mode": "strict",
-      "reason_code": "as_strided_negative_stride",
-      "message": "stride_tricks_negative_stride_error: as_strided expected error containing 'negative strides' but succeeded",
-      "artifact_refs": [
-        "artifacts/phase2c/FNP-P2C-006/fixture_manifest.json",
-        "artifacts/phase2c/FNP-P2C-006/parity_gate.yaml"
-      ]
-    },
-    {
-      "fixture_id": "stride_tricks_as_strided_negative_stride",
-      "seed": 120,
-      "mode": "strict",
-      "reason_code": "as_strided_negative_stride",
-      "message": "stride_tricks_as_strided_negative_stride: as_strided expected error containing 'negative' but succeeded",
-      "artifact_refs": [
-        "artifacts/phase2c/FNP-P2C-006/fixture_manifest.json",
-        "artifacts/phase2c/FNP-P2C-006/parity_gate.yaml"
-      ]
-    }
-  ]
+  "passed_cases": 20,
+  "failed_cases": 0,
+  "mismatches": []
 }

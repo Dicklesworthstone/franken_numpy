@@ -155,6 +155,9 @@ impl fmt::Display for LinAlgError {
 
 impl std::error::Error for LinAlgError {}
 
+/// Full SVD result: (U, singular values, Vt).
+pub type SvdFullResult = (Vec<f64>, Vec<f64>, Vec<f64>);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QrOutputShapes {
     pub q_shape: Option<Vec<usize>>,
@@ -724,6 +727,190 @@ pub fn cholesky_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
     Ok(l)
 }
 
+/// Solve A*x = b given the lower Cholesky factor L where A = L*L^T.
+///
+/// Two-step forward/back substitution:
+///   1. Solve L*y = b  (forward substitution)
+///   2. Solve L^T*x = y (backward substitution)
+///
+/// `l` is the n×n lower-triangular Cholesky factor (row-major, n*n elements).
+/// `b` is the n-element right-hand side.
+pub fn cholesky_solve(l: &[f64], b: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
+    if l.len() != n * n || b.len() != n || n == 0 {
+        return Err(LinAlgError::CholeskyContractViolation(
+            "cholesky_solve: L must be n*n, b must be n, with n > 0",
+        ));
+    }
+    if l.iter().chain(b.iter()).any(|v| !v.is_finite()) {
+        return Err(LinAlgError::CholeskyContractViolation(
+            "cholesky_solve requires finite entries",
+        ));
+    }
+    // Check for zero diagonal (singular L)
+    for i in 0..n {
+        if l[i * n + i] == 0.0 {
+            return Err(LinAlgError::SolverSingularity);
+        }
+    }
+
+    // Forward substitution: L*y = b
+    let mut y = vec![0.0; n];
+    for i in 0..n {
+        let mut sum = b[i];
+        for j in 0..i {
+            sum -= l[i * n + j] * y[j];
+        }
+        y[i] = sum / l[i * n + i];
+    }
+
+    // Backward substitution: L^T*x = y
+    let mut x = vec![0.0; n];
+    for i in (0..n).rev() {
+        let mut sum = y[i];
+        for j in (i + 1)..n {
+            sum -= l[j * n + i] * x[j]; // L^T[i,j] = L[j,i]
+        }
+        x[i] = sum / l[i * n + i];
+    }
+    Ok(x)
+}
+
+/// Solve A*X = B for multiple right-hand sides given the Cholesky factor L.
+///
+/// `l` is n×n, `b` is n×m (row-major). Returns n×m solution matrix.
+pub fn cholesky_solve_multi(
+    l: &[f64],
+    b: &[f64],
+    n: usize,
+    m: usize,
+) -> Result<Vec<f64>, LinAlgError> {
+    if l.len() != n * n || b.len() != n * m || n == 0 || m == 0 {
+        return Err(LinAlgError::CholeskyContractViolation(
+            "cholesky_solve_multi: L must be n*n, B must be n*m, with n,m > 0",
+        ));
+    }
+    let mut result = Vec::with_capacity(n * m);
+    for col in 0..m {
+        let rhs: Vec<f64> = (0..n).map(|row| b[row * m + col]).collect();
+        let sol = cholesky_solve(l, &rhs, n)?;
+        result.extend_from_slice(&sol);
+    }
+    // result is currently column-major (m columns of n elements), convert to row-major
+    let mut out = vec![0.0; n * m];
+    for col in 0..m {
+        for row in 0..n {
+            out[row * m + col] = result[col * n + row];
+        }
+    }
+    Ok(out)
+}
+
+/// Solve the tensor equation `a x = b` for x.
+///
+/// Equivalent to `numpy.linalg.tensorsolve`. Reshapes `a` and `b` so that
+/// the equation becomes a standard linear system, solves it, then reshapes back.
+///
+/// `a_shape` and `b_shape` are the shapes of the operands, `a_data` and `b_data`
+/// are the flat row-major data buffers.
+pub fn tensorsolve(
+    a_data: &[f64],
+    a_shape: &[usize],
+    b_data: &[f64],
+    b_shape: &[usize],
+) -> Result<Vec<f64>, LinAlgError> {
+    if a_data.iter().chain(b_data.iter()).any(|v| !v.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "tensorsolve requires finite entries",
+        ));
+    }
+
+    // The equation a x = b: a has shape (b_shape..., x_shape...) and
+    // x has shape x_shape such that contracting the last len(x_shape) dims of a
+    // with x produces b.
+    let b_ndim = b_shape.len();
+    if a_shape.len() <= b_ndim {
+        return Err(LinAlgError::ShapeContractViolation(
+            "tensorsolve: a must have more dimensions than b",
+        ));
+    }
+
+    // Verify leading dims of a match b_shape
+    for (i, (&a_dim, &b_dim)) in a_shape.iter().zip(b_shape.iter()).enumerate() {
+        if a_dim != b_dim {
+            return Err(LinAlgError::ShapeContractViolation(
+                "tensorsolve: leading dimensions of a must match shape of b",
+            ));
+        }
+        let _ = i; // suppress unused warning
+    }
+
+    // x_shape is the trailing dims of a after b_shape
+    let x_shape = &a_shape[b_ndim..];
+    let n: usize = b_data.len(); // product of b_shape
+    let m: usize = x_shape.iter().product(); // product of x_shape
+
+    if n != m {
+        return Err(LinAlgError::ShapeContractViolation(
+            "tensorsolve: reshaped system must be square (prod(b_shape) == prod(x_shape))",
+        ));
+    }
+
+    if a_data.len() != n * m {
+        return Err(LinAlgError::ShapeContractViolation(
+            "tensorsolve: a_data length must be prod(a_shape)",
+        ));
+    }
+
+    // Now solve the n×n system
+    solve_nxn(a_data, b_data, n)
+}
+
+/// Compute the inverse of an N-dimensional array.
+///
+/// Equivalent to `numpy.linalg.tensorinv(a, ind)`. The first `ind` axes of `a`
+/// are "output" axes, remaining axes are "input" axes. The product of output axes
+/// must equal the product of input axes, forming a square matrix to invert.
+pub fn tensorinv(
+    a_data: &[f64],
+    a_shape: &[usize],
+    ind: usize,
+) -> Result<(Vec<f64>, Vec<usize>), LinAlgError> {
+    if ind == 0 || ind >= a_shape.len() {
+        return Err(LinAlgError::ShapeContractViolation(
+            "tensorinv: ind must be > 0 and < ndim(a)",
+        ));
+    }
+    if a_data.iter().any(|v| !v.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "tensorinv requires finite entries",
+        ));
+    }
+
+    let output_shape = &a_shape[..ind];
+    let input_shape = &a_shape[ind..];
+    let n: usize = output_shape.iter().product();
+    let m: usize = input_shape.iter().product();
+
+    if n != m {
+        return Err(LinAlgError::ShapeContractViolation(
+            "tensorinv: product of first ind dims must equal product of remaining dims",
+        ));
+    }
+    if a_data.len() != n * n {
+        return Err(LinAlgError::ShapeContractViolation(
+            "tensorinv: data length does not match shape",
+        ));
+    }
+
+    let inv = inv_nxn(a_data, n)?;
+
+    // Output shape is (input_shape..., output_shape...)
+    let mut result_shape = input_shape.to_vec();
+    result_shape.extend_from_slice(output_shape);
+
+    Ok((inv, result_shape))
+}
+
 /// QR decomposition via Householder reflections for NxN matrix.
 /// Returns (q, r) as flat row-major n*n buffers.
 pub fn qr_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
@@ -926,9 +1113,15 @@ pub fn svd_mxn(a: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgError> {
     }
 
     let k = m.min(n);
-    let mut sigmas: Vec<f64> = (0..k).map(|i| {
-        if i < n { mat[i * n + i].max(0.0).sqrt() } else { 0.0 }
-    }).collect();
+    let mut sigmas: Vec<f64> = (0..k)
+        .map(|i| {
+            if i < n {
+                mat[i * n + i].max(0.0).sqrt()
+            } else {
+                0.0
+            }
+        })
+        .collect();
     sigmas.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
     Ok(sigmas)
 }
@@ -941,11 +1134,7 @@ pub fn svd_mxn(a: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgError> {
 ///
 /// Uses the approach: QR-iterate on A^T*A to get V and sigma^2,
 /// then recover U = A*V*diag(1/sigma).
-pub fn svd_mxn_full(
-    a: &[f64],
-    m: usize,
-    n: usize,
-) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), LinAlgError> {
+pub fn svd_mxn_full(a: &[f64], m: usize, n: usize) -> Result<SvdFullResult, LinAlgError> {
     if a.len() != m * n || m == 0 || n == 0 {
         return Err(LinAlgError::ShapeContractViolation(
             "svd_mxn_full: input must be m*n with m,n > 0",
@@ -1006,9 +1195,7 @@ pub fn svd_mxn_full(
     }
 
     // Extract singular values and sort by descending order
-    let mut sigma_sq: Vec<(f64, usize)> = (0..n)
-        .map(|i| (mat[i * n + i].max(0.0), i))
-        .collect();
+    let mut sigma_sq: Vec<(f64, usize)> = (0..n).map(|i| (mat[i * n + i].max(0.0), i)).collect();
     sigma_sq.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
     let sigmas: Vec<f64> = sigma_sq.iter().take(k).map(|(s, _)| s.sqrt()).collect();
@@ -1055,7 +1242,10 @@ pub fn svd_mxn_full(
             }
         }
         // Normalize
-        let norm: f64 = (0..m).map(|i| u[i * m + j] * u[i * m + j]).sum::<f64>().sqrt();
+        let norm: f64 = (0..m)
+            .map(|i| u[i * m + j] * u[i * m + j])
+            .sum::<f64>()
+            .sqrt();
         if norm > 1e-15 {
             for i in 0..m {
                 u[i * m + j] /= norm;
@@ -2820,17 +3010,17 @@ mod tests {
         LINALG_PACKET_ID, LINALG_PACKET_REASON_CODES, LinAlgError, LinAlgLogRecord,
         LinAlgRuntimeMode, MAX_BACKEND_REVALIDATION_ATTEMPTS, MAX_BATCH_SHAPE_CHECKS,
         MAX_TOLERANCE_SEARCH_DEPTH, MatrixNormOrder, QrMode, VectorNormOrder, cholesky_2x2,
-        cholesky_nxn, cond_nxn, cross_product, det_2x2, det_nxn, eig_nxn, eig_nxn_full, eigh_2x2,
-        eigh_nxn, eigvals_2x2, eigvalsh_nxn, inv_2x2, inv_nxn, kron_nxn, lstsq_2x2, lstsq_nxn,
-        lstsq_output_shapes, lu_factor_nxn, lu_solve, mat_mul_flat, mat_mul_rect, matrix_norm_2x2,
+        cholesky_nxn, cholesky_solve, cholesky_solve_multi, cond_nxn, cross_product, det_2x2,
+        det_nxn, eig_nxn, eig_nxn_full, eigh_2x2, eigh_nxn, eigvals_2x2, eigvalsh_nxn, expm_nxn,
+        inv_2x2, inv_nxn, kron_nxn, logm_nxn, lstsq_2x2, lstsq_nxn, lstsq_output_shapes,
+        lu_factor_nxn, lu_solve, mat_mul_flat, mat_mul_rect, matrix_norm_2x2,
         matrix_norm_frobenius, matrix_norm_nxn, matrix_power_nxn, matrix_rank_2x2, matrix_rank_nxn,
         multi_dot, pinv_2x2, pinv_nxn, qr_2x2, qr_mxn, qr_nxn, qr_output_shapes, schur_nxn,
         slogdet_2x2, slogdet_nxn, solve_2x2, solve_nxn, solve_nxn_multi, solve_triangular,
-        svd_2x2, svd_mxn, svd_mxn_full, svd_nxn,
-        svd_output_shapes, trace_nxn, validate_backend_bridge, validate_cholesky_diagonal,
+        sqrtm_nxn, svd_2x2, svd_mxn, svd_mxn_full, svd_nxn, svd_output_shapes, tensorinv,
+        tensorsolve, trace_nxn, validate_backend_bridge, validate_cholesky_diagonal,
         validate_matrix_shape, validate_policy_metadata, validate_spectral_branch,
         validate_square_matrix, validate_tolerance_policy, vector_norm,
-        expm_nxn, sqrtm_nxn, logm_nxn,
     };
 
     fn packet008_artifacts() -> Vec<String> {
@@ -4671,7 +4861,7 @@ mod tests {
     fn qr_mxn_q_orthogonal() {
         let a = [1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
         let (q, _) = qr_mxn(&a, 3, 2).unwrap();
-        let mut qtq = vec![0.0; 9];
+        let mut qtq = [0.0; 9];
         for i in 0..3 {
             for j in 0..3 {
                 let mut s = 0.0;
@@ -4716,7 +4906,7 @@ mod tests {
         assert_eq!(u.len(), 9);
         assert_eq!(s.len(), 2);
         assert_eq!(vt.len(), 4);
-        let mut recon = vec![0.0; 6];
+        let mut recon = [0.0; 6];
         for i in 0..3 {
             for j in 0..2 {
                 let mut sum = 0.0;
@@ -4760,16 +4950,10 @@ mod tests {
         // expm([[a,0],[0,b]]) = [[e^a,0],[0,e^b]]
         let a = [2.0, 0.0, 0.0, 3.0];
         let result = expm_nxn(&a, 2).unwrap();
-        assert!(
-            (result[0] - 2.0f64.exp()).abs() < 1e-4,
-            "expm diag [0,0]"
-        );
+        assert!((result[0] - 2.0f64.exp()).abs() < 1e-4, "expm diag [0,0]");
         assert!(result[1].abs() < 1e-6, "expm diag [0,1]");
         assert!(result[2].abs() < 1e-6, "expm diag [1,0]");
-        assert!(
-            (result[3] - 3.0f64.exp()).abs() < 1e-4,
-            "expm diag [1,1]"
-        );
+        assert!((result[3] - 3.0f64.exp()).abs() < 1e-4, "expm diag [1,1]");
     }
 
     // ── sqrtm tests ──
@@ -4816,8 +5000,8 @@ mod tests {
     fn logm_identity_is_zero() {
         let eye = [1.0, 0.0, 0.0, 1.0];
         let result = logm_nxn(&eye, 2).unwrap();
-        for i in 0..4 {
-            assert!(result[i].abs() < 1e-10, "logm(I) should be zero at {i}");
+        for (i, &v) in result.iter().enumerate().take(4) {
+            assert!(v.abs() < 1e-10, "logm(I) should be zero at {i}");
         }
     }
 
@@ -4846,5 +5030,139 @@ mod tests {
         assert!(result[1].abs() < 1e-6, "logm diag [0,1]");
         assert!(result[2].abs() < 1e-6, "logm diag [1,0]");
         assert!((result[3] - 2.0).abs() < 1e-4, "logm diag [1,1]");
+    }
+
+    // ── Cholesky solve tests ──
+
+    #[test]
+    fn cholesky_solve_identity_system() {
+        // A = I, L = I, b = [1,2,3] → x = [1,2,3]
+        let l = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let b = [1.0, 2.0, 3.0];
+        let x = cholesky_solve(&l, &b, 3).unwrap();
+        for (i, (&xi, &bi)) in x.iter().zip(b.iter()).enumerate() {
+            assert!((xi - bi).abs() < 1e-12, "identity solve at {i}");
+        }
+    }
+
+    #[test]
+    fn cholesky_solve_2x2_pd_system() {
+        // A = [[4, 2], [2, 3]], L = [[2, 0], [1, sqrt(2)]]
+        // b = [1, 2]
+        let a = [4.0, 2.0, 2.0, 3.0];
+        let l = cholesky_nxn(&a, 2).unwrap();
+        let b = [1.0, 2.0];
+        let x = cholesky_solve(&l, &b, 2).unwrap();
+        // Verify A*x = b
+        let r0 = a[0] * x[0] + a[1] * x[1];
+        let r1 = a[2] * x[0] + a[3] * x[1];
+        assert!((r0 - b[0]).abs() < 1e-10, "Ax=b check row 0");
+        assert!((r1 - b[1]).abs() < 1e-10, "Ax=b check row 1");
+    }
+
+    #[test]
+    fn cholesky_solve_3x3_pd_system() {
+        // 3×3 positive definite matrix
+        let a = [4.0, 2.0, 1.0, 2.0, 5.0, 3.0, 1.0, 3.0, 6.0];
+        let l = cholesky_nxn(&a, 3).unwrap();
+        let b = [1.0, -1.0, 2.0];
+        let x = cholesky_solve(&l, &b, 3).unwrap();
+        // Verify A*x = b
+        for i in 0..3 {
+            let mut sum = 0.0;
+            for j in 0..3 {
+                sum += a[i * 3 + j] * x[j];
+            }
+            assert!((sum - b[i]).abs() < 1e-10, "Ax=b check row {i}");
+        }
+    }
+
+    #[test]
+    fn cholesky_solve_rejects_singular() {
+        let l = [1.0, 0.0, 0.0, 0.0]; // zero diagonal
+        let b = [1.0, 2.0];
+        let err = cholesky_solve(&l, &b, 2).expect_err("singular should fail");
+        assert!(matches!(err, LinAlgError::SolverSingularity));
+    }
+
+    #[test]
+    fn cholesky_solve_multi_roundtrip() {
+        let a = [4.0, 2.0, 2.0, 3.0];
+        let l = cholesky_nxn(&a, 2).unwrap();
+        // B = [[1, 2], [3, 4]] (2×2, two RHS columns)
+        let b = [1.0, 2.0, 3.0, 4.0];
+        let x = cholesky_solve_multi(&l, &b, 2, 2).unwrap();
+        // Verify A*X = B for each column
+        for col in 0..2 {
+            for row in 0..2 {
+                let mut sum = 0.0;
+                for k in 0..2 {
+                    sum += a[row * 2 + k] * x[k * 2 + col];
+                }
+                let expected = b[row * 2 + col];
+                assert!(
+                    (sum - expected).abs() < 1e-10,
+                    "A*X=B check row={row} col={col}"
+                );
+            }
+        }
+    }
+
+    // ── tensorsolve tests ──
+
+    #[test]
+    fn tensorsolve_2d_is_standard_solve() {
+        // When a is 2D (shape [2,2]) and b is 1D (shape [2]),
+        // tensorsolve reduces to standard linear solve.
+        let a = [2.0, 1.0, 1.0, 3.0];
+        let b = [5.0, 7.0];
+        let x = tensorsolve(&a, &[2, 2], &b, &[2]).unwrap();
+        // Verify A*x = b
+        let r0 = a[0] * x[0] + a[1] * x[1];
+        let r1 = a[2] * x[0] + a[3] * x[1];
+        assert!((r0 - b[0]).abs() < 1e-10);
+        assert!((r1 - b[1]).abs() < 1e-10);
+    }
+
+    #[test]
+    fn tensorsolve_rejects_non_square() {
+        // a_shape = [2, 3], b_shape = [2] → x_shape = [3], prod(b)=2 != prod(x)=3
+        let a = [1.0; 6];
+        let b = [1.0, 2.0];
+        let err = tensorsolve(&a, &[2, 3], &b, &[2]).expect_err("non-square system");
+        assert!(matches!(err, LinAlgError::ShapeContractViolation(_)));
+    }
+
+    // ── tensorinv tests ──
+
+    #[test]
+    fn tensorinv_4d_identity() {
+        // 2×2 identity reshaped as (2,2) with ind=1 → n=2, m=2
+        let a = [1.0, 0.0, 0.0, 1.0];
+        let (inv, result_shape) = tensorinv(&a, &[2, 2], 1).unwrap();
+        assert_eq!(result_shape, vec![2, 2]);
+        assert!((inv[0] - 1.0).abs() < 1e-10);
+        assert!(inv[1].abs() < 1e-10);
+        assert!(inv[2].abs() < 1e-10);
+        assert!((inv[3] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn tensorinv_rejects_invalid_ind() {
+        let a = [1.0; 4];
+        // ind=0 is invalid
+        let err = tensorinv(&a, &[2, 2], 0).expect_err("ind=0 should fail");
+        assert!(matches!(err, LinAlgError::ShapeContractViolation(_)));
+        // ind=2 is >= ndim
+        let err = tensorinv(&a, &[2, 2], 2).expect_err("ind=ndim should fail");
+        assert!(matches!(err, LinAlgError::ShapeContractViolation(_)));
+    }
+
+    #[test]
+    fn tensorinv_non_square_rejected() {
+        // shape [2, 3] with ind=1: n=2, m=3, not square
+        let a = [1.0; 6];
+        let err = tensorinv(&a, &[2, 3], 1).expect_err("non-square should fail");
+        assert!(matches!(err, LinAlgError::ShapeContractViolation(_)));
     }
 }

@@ -1339,11 +1339,7 @@ impl UFuncArray {
     ///
     /// Mimics `np.sum(a, axis=(0, 2))`. Axes are normalized, deduplicated,
     /// and reduced from highest to lowest to avoid index-shifting issues.
-    pub fn reduce_sum_axes(
-        &self,
-        axes: &[isize],
-        keepdims: bool,
-    ) -> Result<Self, UFuncError> {
+    pub fn reduce_sum_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
         if axes.is_empty() {
             return Ok(self.clone());
         }
@@ -1361,8 +1357,9 @@ impl UFuncArray {
 
         let mut result = self.clone();
         for ax in norm_axes {
-            let ax_isize = isize::try_from(ax).map_err(|_| {
-                UFuncError::AxisOutOfBounds { axis: ax as isize, ndim: self.shape.len() }
+            let ax_isize = isize::try_from(ax).map_err(|_| UFuncError::AxisOutOfBounds {
+                axis: ax as isize,
+                ndim: self.shape.len(),
             })?;
             result = result.reduce_sum(Some(ax_isize), keepdims)?;
         }
@@ -1370,11 +1367,7 @@ impl UFuncArray {
     }
 
     /// Reduce prod over multiple axes simultaneously.
-    pub fn reduce_prod_axes(
-        &self,
-        axes: &[isize],
-        keepdims: bool,
-    ) -> Result<Self, UFuncError> {
+    pub fn reduce_prod_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
         if axes.is_empty() {
             return Ok(self.clone());
         }
@@ -1391,8 +1384,9 @@ impl UFuncArray {
 
         let mut result = self.clone();
         for ax in norm_axes {
-            let ax_isize = isize::try_from(ax).map_err(|_| {
-                UFuncError::AxisOutOfBounds { axis: ax as isize, ndim: self.shape.len() }
+            let ax_isize = isize::try_from(ax).map_err(|_| UFuncError::AxisOutOfBounds {
+                axis: ax as isize,
+                ndim: self.shape.len(),
             })?;
             result = result.reduce_prod(Some(ax_isize), keepdims)?;
         }
@@ -1400,11 +1394,7 @@ impl UFuncArray {
     }
 
     /// Reduce min over multiple axes simultaneously.
-    pub fn reduce_min_axes(
-        &self,
-        axes: &[isize],
-        keepdims: bool,
-    ) -> Result<Self, UFuncError> {
+    pub fn reduce_min_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
         if axes.is_empty() {
             return Ok(self.clone());
         }
@@ -1421,8 +1411,9 @@ impl UFuncArray {
 
         let mut result = self.clone();
         for ax in norm_axes {
-            let ax_isize = isize::try_from(ax).map_err(|_| {
-                UFuncError::AxisOutOfBounds { axis: ax as isize, ndim: self.shape.len() }
+            let ax_isize = isize::try_from(ax).map_err(|_| UFuncError::AxisOutOfBounds {
+                axis: ax as isize,
+                ndim: self.shape.len(),
             })?;
             result = result.reduce_min(Some(ax_isize), keepdims)?;
         }
@@ -1430,11 +1421,7 @@ impl UFuncArray {
     }
 
     /// Reduce max over multiple axes simultaneously.
-    pub fn reduce_max_axes(
-        &self,
-        axes: &[isize],
-        keepdims: bool,
-    ) -> Result<Self, UFuncError> {
+    pub fn reduce_max_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
         if axes.is_empty() {
             return Ok(self.clone());
         }
@@ -1451,8 +1438,9 @@ impl UFuncArray {
 
         let mut result = self.clone();
         for ax in norm_axes {
-            let ax_isize = isize::try_from(ax).map_err(|_| {
-                UFuncError::AxisOutOfBounds { axis: ax as isize, ndim: self.shape.len() }
+            let ax_isize = isize::try_from(ax).map_err(|_| UFuncError::AxisOutOfBounds {
+                axis: ax as isize,
+                ndim: self.shape.len(),
             })?;
             result = result.reduce_max(Some(ax_isize), keepdims)?;
         }
@@ -1460,11 +1448,7 @@ impl UFuncArray {
     }
 
     /// Reduce mean over multiple axes simultaneously.
-    pub fn reduce_mean_axes(
-        &self,
-        axes: &[isize],
-        keepdims: bool,
-    ) -> Result<Self, UFuncError> {
+    pub fn reduce_mean_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
         if axes.is_empty() {
             return Ok(self.clone());
         }
@@ -1481,8 +1465,9 @@ impl UFuncArray {
 
         let mut result = self.clone();
         for ax in norm_axes {
-            let ax_isize = isize::try_from(ax).map_err(|_| {
-                UFuncError::AxisOutOfBounds { axis: ax as isize, ndim: self.shape.len() }
+            let ax_isize = isize::try_from(ax).map_err(|_| UFuncError::AxisOutOfBounds {
+                axis: ax as isize,
+                ndim: self.shape.len(),
             })?;
             result = result.reduce_mean(Some(ax_isize), keepdims)?;
         }
@@ -5195,10 +5180,7 @@ impl UFuncArray {
     /// the number of observations and D is the number of dimensions.
     /// `bins_per_dim` specifies the number of bins for each dimension.
     /// Returns `(histogram, Vec<edges>)` where histogram has shape `bins_per_dim`.
-    pub fn histogramdd(
-        &self,
-        bins_per_dim: &[usize],
-    ) -> Result<(Self, Vec<Self>), UFuncError> {
+    pub fn histogramdd(&self, bins_per_dim: &[usize]) -> Result<(Self, Vec<Self>), UFuncError> {
         if self.shape.len() != 2 {
             return Err(UFuncError::Msg(
                 "histogramdd: sample must be 2-D (N, D)".to_string(),
@@ -5330,6 +5312,79 @@ impl UFuncArray {
             dtype: kernel.dtype,
         };
         self.convolve(&reversed)
+    }
+
+    /// 2-D convolution (full mode). Equivalent to scipy.signal.convolve2d(mode='full').
+    ///
+    /// Both `self` and `kernel` must be 2-D arrays.
+    pub fn convolve2d(&self, kernel: &Self) -> Result<Self, UFuncError> {
+        if self.shape.len() != 2 || kernel.shape.len() != 2 {
+            return Err(UFuncError::Msg(
+                "convolve2d: both arrays must be 2-D".to_string(),
+            ));
+        }
+        let (h1, w1) = (self.shape[0], self.shape[1]);
+        let (h2, w2) = (kernel.shape[0], kernel.shape[1]);
+        if h1 == 0 || w1 == 0 || h2 == 0 || w2 == 0 {
+            return Ok(Self {
+                shape: vec![0, 0],
+                values: Vec::new(),
+                dtype: promote(self.dtype, kernel.dtype),
+            });
+        }
+        let out_h = h1 + h2 - 1;
+        let out_w = w1 + w2 - 1;
+        let mut values = vec![0.0f64; out_h * out_w];
+        for i in 0..h1 {
+            for j in 0..w1 {
+                let a_val = self.values[i * w1 + j];
+                for ki in 0..h2 {
+                    for kj in 0..w2 {
+                        values[(i + ki) * out_w + (j + kj)] += a_val * kernel.values[ki * w2 + kj];
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            shape: vec![out_h, out_w],
+            values,
+            dtype: promote(self.dtype, kernel.dtype),
+        })
+    }
+
+    /// 2-D cross-correlation (full mode). Equivalent to scipy.signal.correlate2d(mode='full').
+    ///
+    /// Both `self` and `kernel` must be 2-D arrays.
+    pub fn correlate2d(&self, kernel: &Self) -> Result<Self, UFuncError> {
+        if self.shape.len() != 2 || kernel.shape.len() != 2 {
+            return Err(UFuncError::Msg(
+                "correlate2d: both arrays must be 2-D".to_string(),
+            ));
+        }
+        // correlate2d(a, v) = convolve2d(a, v[::-1, ::-1])
+        let reversed = Self {
+            shape: kernel.shape.clone(),
+            values: kernel.values.iter().rev().copied().collect(),
+            dtype: kernel.dtype,
+        };
+        self.convolve2d(&reversed)
+    }
+
+    /// Apply a reduction function repeatedly over multiple axes.
+    ///
+    /// Equivalent to `numpy.apply_over_axes(func, a, axes)`.
+    /// The function is applied sequentially: reduce axis[0], then axis[1], etc.
+    /// Each reduction keeps dimensions (keepdims=true) so subsequent axis indices
+    /// remain valid.
+    pub fn apply_over_axes<F>(&self, func: F, axes: &[isize]) -> Result<Self, UFuncError>
+    where
+        F: Fn(&Self, Option<isize>, bool) -> Result<Self, UFuncError>,
+    {
+        let mut result = self.clone();
+        for &axis in axes {
+            result = func(&result, Some(axis), true)?;
+        }
+        Ok(result)
     }
 
     /// Evaluate a polynomial at given points (np.polyval).
@@ -7472,6 +7527,101 @@ impl UFuncArray {
         }
     }
 
+    /// `np.nanpercentile` — percentile ignoring NaN values.
+    /// q is in [0, 100]. Only `axis=None` (global) is supported; NaN elements
+    /// are removed before computing.
+    pub fn nanpercentile(&self, q: f64, axis: Option<isize>) -> Result<Self, UFuncError> {
+        if !(0.0..=100.0).contains(&q) {
+            return Err(UFuncError::Msg(format!(
+                "nanpercentile: q={q} must be in [0, 100]"
+            )));
+        }
+        if axis.is_some() {
+            return Err(UFuncError::Msg(
+                "nanpercentile: only axis=None is supported".to_string(),
+            ));
+        }
+        // Remove NaN values (flattens to 1-D), then compute percentile
+        let filtered = self.nan_removed();
+        if filtered.values.is_empty() {
+            return Ok(Self::scalar(f64::NAN, self.dtype));
+        }
+        filtered.percentile(q, None)
+    }
+
+    /// `np.nanquantile` — quantile ignoring NaN values.
+    /// q is in [0, 1]. Only `axis=None` (global) is supported.
+    pub fn nanquantile(&self, q: f64, axis: Option<isize>) -> Result<Self, UFuncError> {
+        self.nanpercentile(q * 100.0, axis)
+    }
+
+    /// Remove NaN values (flattened to 1-D).
+    fn nan_removed(&self) -> Self {
+        let values: Vec<f64> = self
+            .values
+            .iter()
+            .copied()
+            .filter(|v| !v.is_nan())
+            .collect();
+        let n = values.len();
+        Self {
+            shape: vec![n],
+            values,
+            dtype: self.dtype,
+        }
+    }
+
+    /// `np.real_if_close` — return real parts if imaginary parts are close to zero.
+    ///
+    /// For complex arrays (shape [..., 2] with interleaved real/imag), check if all
+    /// imaginary parts have magnitude <= `tol * machine_epsilon`. If so, return just
+    /// the real parts. Otherwise return the original array unchanged.
+    pub fn real_if_close(&self, tol: f64) -> Self {
+        if !matches!(self.dtype, DType::Complex64 | DType::Complex128) {
+            return self.clone();
+        }
+        // Complex arrays have trailing dimension 2: [real, imag, real, imag, ...]
+        let eps = if self.dtype == DType::Complex64 {
+            f64::from(f32::EPSILON)
+        } else {
+            f64::EPSILON
+        };
+        let threshold = tol * eps;
+        // Check all imaginary parts
+        let all_close = self
+            .values
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .all(|&im| im.abs() <= threshold);
+        if all_close {
+            // Extract real parts only
+            let real_values: Vec<f64> = self.values.iter().step_by(2).copied().collect();
+            let real_dtype = if self.dtype == DType::Complex64 {
+                DType::F32
+            } else {
+                DType::F64
+            };
+            // Remove trailing 2 from shape
+            let mut real_shape = self.shape.clone();
+            if let Some(last) = real_shape.last()
+                && *last == 2
+            {
+                real_shape.pop();
+            }
+            if real_shape.is_empty() {
+                real_shape.push(real_values.len());
+            }
+            Self {
+                shape: real_shape,
+                values: real_values,
+                dtype: real_dtype,
+            }
+        } else {
+            self.clone()
+        }
+    }
+
     // ── misc math ────────
 
     /// Vandermonde matrix (np.vander).
@@ -8351,7 +8501,11 @@ impl UFuncArray {
         let mut result = Vec::with_capacity(sections);
         let mut start = 0;
         for s in 0..sections {
-            let chunk = if s < remainder { base_size + 1 } else { base_size };
+            let chunk = if s < remainder {
+                base_size + 1
+            } else {
+                base_size
+            };
             let mut sub_shape = self.shape.clone();
             sub_shape[axis] = chunk;
             let count = element_count(&sub_shape).map_err(UFuncError::Shape)?;
@@ -8554,11 +8708,7 @@ fn interpolate_percentile(sorted: &[f64], fraction: f64) -> f64 {
     interpolate_percentile_method(sorted, fraction, QuantileInterp::Linear)
 }
 
-fn interpolate_percentile_method(
-    sorted: &[f64],
-    fraction: f64,
-    method: QuantileInterp,
-) -> f64 {
+fn interpolate_percentile_method(sorted: &[f64], fraction: f64, method: QuantileInterp) -> f64 {
     let n = sorted.len();
     if n == 1 {
         return sorted[0];
@@ -8572,9 +8722,7 @@ fn interpolate_percentile_method(
     }
     let hi = lo + 1;
     match method {
-        QuantileInterp::Linear => {
-            sorted[lo] * (1.0 - frac) + sorted[hi] * frac
-        }
+        QuantileInterp::Linear => sorted[lo] * (1.0 - frac) + sorted[hi] * frac,
         QuantileInterp::Lower => sorted[lo],
         QuantileInterp::Higher => sorted[hi],
         QuantileInterp::Nearest => {
@@ -9292,13 +9440,7 @@ fn digamma_approx(mut x: f64) -> f64 {
 /// `shape` is the full N-D shape of the data.
 /// `re` and `im` are flat row-major arrays of length `product(shape)`.
 /// `axis` is the axis along which to apply the 1-D FFT.
-fn fftn_along_axis(
-    shape: &[usize],
-    re: &mut [f64],
-    im: &mut [f64],
-    axis: usize,
-    inverse: bool,
-) {
+fn fftn_along_axis(shape: &[usize], re: &mut [f64], im: &mut [f64], axis: usize, inverse: bool) {
     let ndim = shape.len();
     if axis >= ndim {
         return;
@@ -9541,11 +9683,1332 @@ fn normalize_axis(axis: isize, ndim: usize) -> Result<usize, UFuncError> {
     usize::try_from(normalized).map_err(|_| UFuncError::AxisOutOfBounds { axis, ndim })
 }
 
+// ── numpy datetime/timedelta arithmetic ─────────────────────────────────
+
+/// Weekday for a date represented as days since Unix epoch (1970-01-01, Thursday).
+/// Returns 0=Monday .. 6=Sunday (NumPy convention).
+#[must_use]
+fn epoch_day_to_weekday(day: i64) -> u8 {
+    // 1970-01-01 is Thursday = 3
+    let wd = (day + 3).rem_euclid(7);
+    wd as u8
+}
+
+impl UFuncArray {
+    // ── datetime + timedelta → datetime ─────────────────────────────
+
+    /// Add timedelta array to datetime array element-wise.
+    /// `self` must be DateTime64, `delta` must be TimeDelta64.
+    pub fn datetime_add(&self, delta: &Self) -> Result<Self, UFuncError> {
+        if self.dtype != DType::DateTime64 {
+            return Err(UFuncError::Msg(
+                "datetime_add requires DateTime64 array".to_string(),
+            ));
+        }
+        if delta.dtype != DType::TimeDelta64 {
+            return Err(UFuncError::Msg(
+                "datetime_add requires TimeDelta64 delta".to_string(),
+            ));
+        }
+        let result = self.elementwise_binary(delta, BinaryOp::Add)?;
+        Ok(Self {
+            shape: result.shape,
+            values: result.values,
+            dtype: DType::DateTime64,
+        })
+    }
+
+    /// Subtract two datetime arrays → timedelta.
+    pub fn datetime_sub(&self, other: &Self) -> Result<Self, UFuncError> {
+        if self.dtype != DType::DateTime64 || other.dtype != DType::DateTime64 {
+            return Err(UFuncError::Msg(
+                "datetime_sub requires two DateTime64 arrays".to_string(),
+            ));
+        }
+        let result = self.elementwise_binary(other, BinaryOp::Sub)?;
+        Ok(Self {
+            shape: result.shape,
+            values: result.values,
+            dtype: DType::TimeDelta64,
+        })
+    }
+
+    /// Add two timedelta arrays.
+    pub fn timedelta_add(&self, other: &Self) -> Result<Self, UFuncError> {
+        if self.dtype != DType::TimeDelta64 || other.dtype != DType::TimeDelta64 {
+            return Err(UFuncError::Msg(
+                "timedelta_add requires two TimeDelta64 arrays".to_string(),
+            ));
+        }
+        let result = self.elementwise_binary(other, BinaryOp::Add)?;
+        Ok(Self {
+            shape: result.shape,
+            values: result.values,
+            dtype: DType::TimeDelta64,
+        })
+    }
+
+    /// Subtract two timedelta arrays.
+    pub fn timedelta_sub(&self, other: &Self) -> Result<Self, UFuncError> {
+        if self.dtype != DType::TimeDelta64 || other.dtype != DType::TimeDelta64 {
+            return Err(UFuncError::Msg(
+                "timedelta_sub requires two TimeDelta64 arrays".to_string(),
+            ));
+        }
+        let result = self.elementwise_binary(other, BinaryOp::Sub)?;
+        Ok(Self {
+            shape: result.shape,
+            values: result.values,
+            dtype: DType::TimeDelta64,
+        })
+    }
+
+    /// Multiply timedelta by scalar.
+    pub fn timedelta_mul(&self, scalar: f64) -> Result<Self, UFuncError> {
+        if self.dtype != DType::TimeDelta64 {
+            return Err(UFuncError::Msg(
+                "timedelta_mul requires TimeDelta64 array".to_string(),
+            ));
+        }
+        let values: Vec<f64> = self.values.iter().map(|&v| v * scalar).collect();
+        Ok(Self {
+            shape: self.shape.clone(),
+            values,
+            dtype: DType::TimeDelta64,
+        })
+    }
+
+    /// Divide timedelta by scalar.
+    pub fn timedelta_div(&self, scalar: f64) -> Result<Self, UFuncError> {
+        if self.dtype != DType::TimeDelta64 {
+            return Err(UFuncError::Msg(
+                "timedelta_div requires TimeDelta64 array".to_string(),
+            ));
+        }
+        if scalar == 0.0 {
+            return Err(UFuncError::Msg(
+                "division by zero in timedelta_div".to_string(),
+            ));
+        }
+        let values: Vec<f64> = self.values.iter().map(|&v| v / scalar).collect();
+        Ok(Self {
+            shape: self.shape.clone(),
+            values,
+            dtype: DType::TimeDelta64,
+        })
+    }
+
+    /// Negate a timedelta array.
+    #[must_use]
+    pub fn timedelta_neg(&self) -> Self {
+        Self {
+            shape: self.shape.clone(),
+            values: self.values.iter().map(|&v| -v).collect(),
+            dtype: DType::TimeDelta64,
+        }
+    }
+
+    /// Absolute value of timedelta array.
+    #[must_use]
+    pub fn timedelta_abs(&self) -> Self {
+        Self {
+            shape: self.shape.clone(),
+            values: self.values.iter().map(|&v| v.abs()).collect(),
+            dtype: DType::TimeDelta64,
+        }
+    }
+}
+
+/// Check whether each day (epoch days) is a business day (Mon-Fri).
+/// Returns a Bool-typed array: 1.0 = business day, 0.0 = weekend.
+///
+/// `np.is_busday(dates)`
+pub fn is_busday(dates: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let values: Vec<f64> = dates
+        .values()
+        .iter()
+        .map(|&d| {
+            let wd = epoch_day_to_weekday(d as i64);
+            if wd < 5 { 1.0 } else { 0.0 }
+        })
+        .collect();
+    UFuncArray::new(dates.shape().to_vec(), values, DType::Bool)
+}
+
+/// Count the number of business days between `start` and `end` (exclusive end).
+/// Both arrays contain epoch day values. Result dtype is I64.
+///
+/// `np.busday_count(start, end)`
+pub fn busday_count(start: &UFuncArray, end: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    if start.values().len() != end.values().len() {
+        return Err(UFuncError::InvalidInputLength {
+            expected: start.values().len(),
+            actual: end.values().len(),
+        });
+    }
+    let values: Vec<f64> = start
+        .values()
+        .iter()
+        .zip(end.values().iter())
+        .map(|(&s, &e)| {
+            let s_day = s as i64;
+            let e_day = e as i64;
+            if s_day == e_day {
+                return 0.0;
+            }
+            let (lo, hi, sign) = if s_day < e_day {
+                (s_day, e_day, 1.0)
+            } else {
+                (e_day, s_day, -1.0)
+            };
+            // Full weeks contain exactly 5 business days each
+            let total_days = hi - lo;
+            let full_weeks = total_days / 7;
+            let remainder = total_days % 7;
+            let mut count = full_weeks * 5;
+            // Count business days in the remaining partial week
+            let start_wd = epoch_day_to_weekday(lo);
+            for i in 0..remainder {
+                let wd = (start_wd as i64 + i) % 7;
+                if wd < 5 {
+                    count += 1;
+                }
+            }
+            count as f64 * sign
+        })
+        .collect();
+    UFuncArray::new(start.shape().to_vec(), values, DType::I64)
+}
+
+/// Offset dates by a number of business days.
+/// `dates` contains epoch day values, `offsets` contains integer business-day offsets.
+/// Result dtype is DateTime64.
+///
+/// `np.busday_offset(dates, offsets)`
+pub fn busday_offset(dates: &UFuncArray, offsets: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    if dates.values().len() != offsets.values().len() {
+        return Err(UFuncError::InvalidInputLength {
+            expected: dates.values().len(),
+            actual: offsets.values().len(),
+        });
+    }
+    let values: Vec<f64> = dates
+        .values()
+        .iter()
+        .zip(offsets.values().iter())
+        .map(|(&d, &off)| {
+            let mut current = d as i64;
+            let off_i = off as i64;
+            // First, if current day is not a business day, snap forward/backward
+            let wd = epoch_day_to_weekday(current);
+            if wd >= 5 {
+                // Weekend: snap to next Monday if offset >= 0, else previous Friday
+                if off_i >= 0 {
+                    current += i64::from(7 - wd); // next Monday
+                } else {
+                    current -= i64::from(wd - 4); // previous Friday
+                }
+            }
+            let abs_off = off_i.unsigned_abs();
+            let step: i64 = if off_i >= 0 { 1 } else { -1 };
+            let mut remaining = abs_off;
+            while remaining > 0 {
+                current += step;
+                if epoch_day_to_weekday(current) < 5 {
+                    remaining -= 1;
+                }
+            }
+            current as f64
+        })
+        .collect();
+    UFuncArray::new(dates.shape().to_vec(), values, DType::DateTime64)
+}
+
+// ── numpy.ma — Masked Array Module ──────────────────────────────────────
+
+/// Error type for masked array operations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MAError {
+    /// Shape mismatch between data and mask.
+    MaskShapeMismatch {
+        data_shape: Vec<usize>,
+        mask_shape: Vec<usize>,
+    },
+    /// Wrapped UFuncError from underlying array operation.
+    UFunc(UFuncError),
+    /// General message.
+    Msg(String),
+}
+
+impl std::fmt::Display for MAError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MaskShapeMismatch {
+                data_shape,
+                mask_shape,
+            } => write!(
+                f,
+                "mask shape {mask_shape:?} does not match data shape {data_shape:?}"
+            ),
+            Self::UFunc(e) => write!(f, "{e}"),
+            Self::Msg(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for MAError {}
+
+impl From<UFuncError> for MAError {
+    fn from(e: UFuncError) -> Self {
+        Self::UFunc(e)
+    }
+}
+
+/// A masked array analogous to `numpy.ma.MaskedArray`.
+///
+/// Mask convention (matching NumPy): `true` (1.0) = element is **masked** (excluded/invalid),
+/// `false` (0.0) = element is **valid**.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MaskedArray {
+    data: UFuncArray,
+    /// Boolean mask: 1.0 = masked (excluded), 0.0 = valid. `None` means no mask (all valid).
+    mask: Option<UFuncArray>,
+    fill_value: f64,
+    hard_mask: bool,
+}
+
+impl MaskedArray {
+    // ── Constructors ────────────────────────────────────────────────
+
+    /// Create a new masked array. If `mask` is `Some`, its shape must match `data`.
+    pub fn new(
+        data: UFuncArray,
+        mask: Option<UFuncArray>,
+        fill_value: Option<f64>,
+    ) -> Result<Self, MAError> {
+        if let Some(ref m) = mask
+            && m.shape() != data.shape()
+        {
+            return Err(MAError::MaskShapeMismatch {
+                data_shape: data.shape().to_vec(),
+                mask_shape: m.shape().to_vec(),
+            });
+        }
+        Ok(Self {
+            fill_value: fill_value.unwrap_or(1e20),
+            data,
+            mask,
+            hard_mask: false,
+        })
+    }
+
+    /// Create from raw components.
+    pub fn from_values(
+        shape: Vec<usize>,
+        values: Vec<f64>,
+        mask_values: Option<Vec<f64>>,
+        dtype: DType,
+    ) -> Result<Self, MAError> {
+        let data = UFuncArray::new(shape.clone(), values, dtype)?;
+        let mask = match mask_values {
+            Some(mv) => Some(UFuncArray::new(shape, mv, DType::Bool)?),
+            None => None,
+        };
+        Self::new(data, mask, None)
+    }
+
+    /// Mask elements where `condition` is true (non-zero).
+    /// `np.ma.masked_where(condition, data)`
+    pub fn masked_where(condition: &UFuncArray, data: &UFuncArray) -> Result<Self, MAError> {
+        if condition.shape() != data.shape() {
+            return Err(MAError::MaskShapeMismatch {
+                data_shape: data.shape().to_vec(),
+                mask_shape: condition.shape().to_vec(),
+            });
+        }
+        // Normalize: any nonzero → 1.0
+        let mask_vals: Vec<f64> = condition
+            .values()
+            .iter()
+            .map(|&v| if v != 0.0 { 1.0 } else { 0.0 })
+            .collect();
+        let mask = UFuncArray::new(condition.shape().to_vec(), mask_vals, DType::Bool)?;
+        Self::new(data.clone(), Some(mask), None)
+    }
+
+    /// Mask elements equal to `value`. `np.ma.masked_equal(data, value)`
+    pub fn masked_equal(data: &UFuncArray, value: f64) -> Result<Self, MAError> {
+        let mask_vals: Vec<f64> = data
+            .values()
+            .iter()
+            .map(|&v| if v == value { 1.0 } else { 0.0 })
+            .collect();
+        let mask = UFuncArray::new(data.shape().to_vec(), mask_vals, DType::Bool)?;
+        Self::new(data.clone(), Some(mask), None)
+    }
+
+    /// Mask elements not equal to `value`. `np.ma.masked_not_equal(data, value)`
+    pub fn masked_not_equal(data: &UFuncArray, value: f64) -> Result<Self, MAError> {
+        let mask_vals: Vec<f64> = data
+            .values()
+            .iter()
+            .map(|&v| if v != value { 1.0 } else { 0.0 })
+            .collect();
+        let mask = UFuncArray::new(data.shape().to_vec(), mask_vals, DType::Bool)?;
+        Self::new(data.clone(), Some(mask), None)
+    }
+
+    /// Mask elements greater than `value`. `np.ma.masked_greater(data, value)`
+    pub fn masked_greater(data: &UFuncArray, value: f64) -> Result<Self, MAError> {
+        let mask_vals: Vec<f64> = data
+            .values()
+            .iter()
+            .map(|&v| if v > value { 1.0 } else { 0.0 })
+            .collect();
+        let mask = UFuncArray::new(data.shape().to_vec(), mask_vals, DType::Bool)?;
+        Self::new(data.clone(), Some(mask), None)
+    }
+
+    /// Mask elements greater than or equal to `value`.
+    pub fn masked_greater_equal(data: &UFuncArray, value: f64) -> Result<Self, MAError> {
+        let mask_vals: Vec<f64> = data
+            .values()
+            .iter()
+            .map(|&v| if v >= value { 1.0 } else { 0.0 })
+            .collect();
+        let mask = UFuncArray::new(data.shape().to_vec(), mask_vals, DType::Bool)?;
+        Self::new(data.clone(), Some(mask), None)
+    }
+
+    /// Mask elements less than `value`. `np.ma.masked_less(data, value)`
+    pub fn masked_less(data: &UFuncArray, value: f64) -> Result<Self, MAError> {
+        let mask_vals: Vec<f64> = data
+            .values()
+            .iter()
+            .map(|&v| if v < value { 1.0 } else { 0.0 })
+            .collect();
+        let mask = UFuncArray::new(data.shape().to_vec(), mask_vals, DType::Bool)?;
+        Self::new(data.clone(), Some(mask), None)
+    }
+
+    /// Mask elements less than or equal to `value`.
+    pub fn masked_less_equal(data: &UFuncArray, value: f64) -> Result<Self, MAError> {
+        let mask_vals: Vec<f64> = data
+            .values()
+            .iter()
+            .map(|&v| if v <= value { 1.0 } else { 0.0 })
+            .collect();
+        let mask = UFuncArray::new(data.shape().to_vec(), mask_vals, DType::Bool)?;
+        Self::new(data.clone(), Some(mask), None)
+    }
+
+    /// Mask elements inside `[v1, v2]`. `np.ma.masked_inside(data, v1, v2)`
+    pub fn masked_inside(data: &UFuncArray, v1: f64, v2: f64) -> Result<Self, MAError> {
+        let lo = v1.min(v2);
+        let hi = v1.max(v2);
+        let mask_vals: Vec<f64> = data
+            .values()
+            .iter()
+            .map(|&v| if v >= lo && v <= hi { 1.0 } else { 0.0 })
+            .collect();
+        let mask = UFuncArray::new(data.shape().to_vec(), mask_vals, DType::Bool)?;
+        Self::new(data.clone(), Some(mask), None)
+    }
+
+    /// Mask elements outside `[v1, v2]`. `np.ma.masked_outside(data, v1, v2)`
+    pub fn masked_outside(data: &UFuncArray, v1: f64, v2: f64) -> Result<Self, MAError> {
+        let lo = v1.min(v2);
+        let hi = v1.max(v2);
+        let mask_vals: Vec<f64> = data
+            .values()
+            .iter()
+            .map(|&v| if v < lo || v > hi { 1.0 } else { 0.0 })
+            .collect();
+        let mask = UFuncArray::new(data.shape().to_vec(), mask_vals, DType::Bool)?;
+        Self::new(data.clone(), Some(mask), None)
+    }
+
+    /// Mask NaN and Inf values. `np.ma.masked_invalid(data)`
+    pub fn masked_invalid(data: &UFuncArray) -> Result<Self, MAError> {
+        let mask_vals: Vec<f64> = data
+            .values()
+            .iter()
+            .map(|&v| {
+                if v.is_nan() || v.is_infinite() {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let mask = UFuncArray::new(data.shape().to_vec(), mask_vals, DType::Bool)?;
+        Self::new(data.clone(), Some(mask), None)
+    }
+
+    // ── Accessors ───────────────────────────────────────────────────
+
+    /// The underlying data array (including masked elements).
+    #[must_use]
+    pub fn data(&self) -> &UFuncArray {
+        &self.data
+    }
+
+    /// The mask array (if any). `true` (1.0) = masked.
+    #[must_use]
+    pub fn mask(&self) -> Option<&UFuncArray> {
+        self.mask.as_ref()
+    }
+
+    #[must_use]
+    pub fn shape(&self) -> &[usize] {
+        self.data.shape()
+    }
+
+    #[must_use]
+    pub fn dtype(&self) -> DType {
+        self.data.dtype()
+    }
+
+    #[must_use]
+    pub fn fill_value(&self) -> f64 {
+        self.fill_value
+    }
+
+    /// Return data with masked elements replaced by `fill_value`.
+    #[must_use]
+    pub fn filled(&self, fill_value: f64) -> UFuncArray {
+        match &self.mask {
+            None => self.data.clone(),
+            Some(mask) => {
+                let vals: Vec<f64> = self
+                    .data
+                    .values()
+                    .iter()
+                    .zip(mask.values().iter())
+                    .map(|(&d, &m)| if m != 0.0 { fill_value } else { d })
+                    .collect();
+                UFuncArray {
+                    shape: self.data.shape().to_vec(),
+                    values: vals,
+                    dtype: self.data.dtype(),
+                }
+            }
+        }
+    }
+
+    /// Return only the valid (non-masked) elements as a 1-D array.
+    #[must_use]
+    pub fn compressed(&self) -> UFuncArray {
+        match &self.mask {
+            None => {
+                // Flatten all data
+                UFuncArray {
+                    shape: vec![self.data.values().len()],
+                    values: self.data.values().to_vec(),
+                    dtype: self.data.dtype(),
+                }
+            }
+            Some(mask) => {
+                let vals: Vec<f64> = self
+                    .data
+                    .values()
+                    .iter()
+                    .zip(mask.values().iter())
+                    .filter(|pair| *pair.1 == 0.0)
+                    .map(|pair| *pair.0)
+                    .collect();
+                UFuncArray {
+                    shape: vec![vals.len()],
+                    values: vals,
+                    dtype: self.data.dtype(),
+                }
+            }
+        }
+    }
+
+    /// Count valid (non-masked) elements along an axis.
+    pub fn count(&self, axis: Option<isize>) -> Result<UFuncArray, MAError> {
+        match &self.mask {
+            None => {
+                // No mask: count = size along axis (or total size)
+                match axis {
+                    None => {
+                        let total = self.data.values().len() as f64;
+                        Ok(UFuncArray::scalar(total, DType::I64))
+                    }
+                    Some(_) => {
+                        // All valid: sum of ones along axis gives dimension size
+                        let ones = UFuncArray {
+                            shape: self.data.shape().to_vec(),
+                            values: vec![1.0; self.data.values().len()],
+                            dtype: DType::F64,
+                        };
+                        Ok(ones.reduce_sum(axis, false)?)
+                    }
+                }
+            }
+            Some(mask) => {
+                // Count where mask == 0 (valid): invert mask, then sum
+                let inverted: Vec<f64> = mask
+                    .values()
+                    .iter()
+                    .map(|&m| if m == 0.0 { 1.0 } else { 0.0 })
+                    .collect();
+                let inv = UFuncArray {
+                    shape: mask.shape().to_vec(),
+                    values: inverted,
+                    dtype: DType::F64,
+                };
+                Ok(inv.reduce_sum(axis, false)?)
+            }
+        }
+    }
+
+    // ── Mask mutation ───────────────────────────────────────────────
+
+    /// Set the fill value.
+    pub fn set_fill_value(&mut self, fill_value: f64) {
+        self.fill_value = fill_value;
+    }
+
+    /// Harden the mask: once hardened, masked elements cannot be unmasked.
+    pub fn harden_mask(&mut self) {
+        self.hard_mask = true;
+    }
+
+    /// Soften the mask: allow masked elements to be unmasked.
+    pub fn soften_mask(&mut self) {
+        self.hard_mask = false;
+    }
+
+    #[must_use]
+    pub fn is_hard_mask(&self) -> bool {
+        self.hard_mask
+    }
+
+    // ── Helper: inverted mask for reduce_sum_where ──────────────────
+
+    /// Build an inverted mask (1.0 where valid) suitable for `reduce_sum_where`.
+    fn valid_mask(&self) -> Option<UFuncArray> {
+        self.mask.as_ref().map(|mask| {
+            let inverted: Vec<f64> = mask
+                .values()
+                .iter()
+                .map(|&m| if m == 0.0 { 1.0 } else { 0.0 })
+                .collect();
+            UFuncArray {
+                shape: mask.shape().to_vec(),
+                values: inverted,
+                dtype: DType::Bool,
+            }
+        })
+    }
+
+    // ── Arithmetic with mask propagation ────────────────────────────
+
+    /// Apply a binary operation, propagating masks (OR).
+    pub fn elementwise_binary(&self, other: &Self, op: BinaryOp) -> Result<Self, MAError> {
+        let result_data = self.data.elementwise_binary(&other.data, op)?;
+        let result_mask = match (&self.mask, &other.mask) {
+            (None, None) => None,
+            (Some(m), None) | (None, Some(m)) => Some(m.clone()),
+            (Some(m1), Some(m2)) => Some(m1.elementwise_binary(m2, BinaryOp::LogicalOr)?),
+        };
+        Ok(Self {
+            data: result_data,
+            mask: result_mask,
+            fill_value: self.fill_value,
+            hard_mask: self.hard_mask,
+        })
+    }
+
+    /// Apply a unary operation (mask unchanged).
+    #[must_use]
+    pub fn elementwise_unary(&self, op: UnaryOp) -> Self {
+        Self {
+            data: self.data.elementwise_unary(op),
+            mask: self.mask.clone(),
+            fill_value: self.fill_value,
+            hard_mask: self.hard_mask,
+        }
+    }
+
+    // ── Reductions (masked elements excluded) ───────────────────────
+
+    /// Sum of non-masked elements.
+    pub fn sum(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, MAError> {
+        let result_data = match self.valid_mask() {
+            None => self.data.reduce_sum(axis, keepdims)?,
+            Some(vmask) => self.data.reduce_sum_where(&vmask, axis, keepdims)?,
+        };
+        Ok(Self {
+            data: result_data,
+            mask: None,
+            fill_value: self.fill_value,
+            hard_mask: false,
+        })
+    }
+
+    /// Product of non-masked elements.
+    pub fn prod(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, MAError> {
+        // For product, replace masked values with 1.0 (identity), then reduce
+        let filled = self.filled(1.0);
+        let result_data = filled.reduce_prod(axis, keepdims)?;
+        Ok(Self {
+            data: result_data,
+            mask: None,
+            fill_value: self.fill_value,
+            hard_mask: false,
+        })
+    }
+
+    /// Mean of non-masked elements.
+    pub fn mean(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, MAError> {
+        let sum_result = match self.valid_mask() {
+            None => self.data.reduce_sum(axis, keepdims)?,
+            Some(vmask) => self.data.reduce_sum_where(&vmask, axis, keepdims)?,
+        };
+        let count_result = self.count(axis)?;
+        let count_broadcast = if keepdims {
+            let target: Vec<isize> = sum_result.shape().iter().map(|&d| d as isize).collect();
+            count_result.reshape(&target)?
+        } else {
+            count_result
+        };
+        let result_data = sum_result.elementwise_binary(&count_broadcast, BinaryOp::Div)?;
+        Ok(Self {
+            data: result_data,
+            mask: None,
+            fill_value: self.fill_value,
+            hard_mask: false,
+        })
+    }
+
+    /// Minimum of non-masked elements.
+    pub fn min(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, MAError> {
+        let filled = self.filled(f64::INFINITY);
+        let result_data = filled.reduce_min(axis, keepdims)?;
+        Ok(Self {
+            data: result_data,
+            mask: None,
+            fill_value: self.fill_value,
+            hard_mask: false,
+        })
+    }
+
+    /// Maximum of non-masked elements.
+    pub fn max(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, MAError> {
+        let filled = self.filled(f64::NEG_INFINITY);
+        let result_data = filled.reduce_max(axis, keepdims)?;
+        Ok(Self {
+            data: result_data,
+            mask: None,
+            fill_value: self.fill_value,
+            hard_mask: false,
+        })
+    }
+
+    /// Variance of non-masked elements.
+    pub fn var(&self, axis: Option<isize>, keepdims: bool, ddof: usize) -> Result<Self, MAError> {
+        // var = mean((x - mean(x))^2), adjusted for ddof
+        // mean with keepdims=true for broadcasting back to data shape
+        let mean_arr = self.mean(axis, true)?;
+        let deviations = self
+            .data
+            .elementwise_binary(&mean_arr.data, BinaryOp::Sub)?;
+        let sq_deviations = deviations.elementwise_binary(&deviations, BinaryOp::Mul)?;
+        // Mask the squared deviations the same way as self
+        let masked_sq = Self {
+            data: sq_deviations,
+            mask: self.mask.clone(),
+            fill_value: self.fill_value,
+            hard_mask: false,
+        };
+        let sum_sq = masked_sq.sum(axis, keepdims)?;
+        let count_result = self.count(axis)?;
+        // Subtract ddof from count
+        let ddof_val = UFuncArray::scalar(ddof as f64, DType::F64);
+        let adjusted_count = count_result.elementwise_binary(&ddof_val, BinaryOp::Sub)?;
+        let adjusted_broadcast = if keepdims {
+            let target: Vec<isize> = sum_sq.data.shape().iter().map(|&d| d as isize).collect();
+            adjusted_count.reshape(&target)?
+        } else {
+            adjusted_count
+        };
+        let result_data = sum_sq
+            .data
+            .elementwise_binary(&adjusted_broadcast, BinaryOp::Div)?;
+        Ok(Self {
+            data: result_data,
+            mask: None,
+            fill_value: self.fill_value,
+            hard_mask: false,
+        })
+    }
+
+    /// Standard deviation of non-masked elements.
+    pub fn std(&self, axis: Option<isize>, keepdims: bool, ddof: usize) -> Result<Self, MAError> {
+        let variance = self.var(axis, keepdims, ddof)?;
+        let result_data = variance.data.elementwise_unary(UnaryOp::Sqrt);
+        Ok(Self {
+            data: result_data,
+            mask: None,
+            fill_value: self.fill_value,
+            hard_mask: false,
+        })
+    }
+}
+
+// ── numpy.char — String Array Module ────────────────────────────────────
+
+/// A string array analogous to `numpy.char.chararray`.
+///
+/// Since `UFuncArray` stores `Vec<f64>`, string data lives in a dedicated
+/// `Vec<String>` with shape metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StringArray {
+    shape: Vec<usize>,
+    values: Vec<String>,
+}
+
+impl StringArray {
+    // ── Constructors ────────────────────────────────────────────────
+
+    pub fn new(shape: Vec<usize>, values: Vec<String>) -> Result<Self, UFuncError> {
+        let expected = fnp_ndarray::element_count(&shape).map_err(UFuncError::Shape)?;
+        if values.len() != expected {
+            return Err(UFuncError::InvalidInputLength {
+                expected,
+                actual: values.len(),
+            });
+        }
+        Ok(Self { shape, values })
+    }
+
+    /// Create from a slice of `&str`.
+    pub fn from_strs(shape: Vec<usize>, strs: &[&str]) -> Result<Self, UFuncError> {
+        Self::new(shape, strs.iter().map(|s| (*s).to_string()).collect())
+    }
+
+    // ── Accessors ───────────────────────────────────────────────────
+
+    #[must_use]
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    #[must_use]
+    pub fn values(&self) -> &[String] {
+        &self.values
+    }
+
+    // ── numpy.char element-wise string operations ───────────────────
+
+    /// `np.char.upper(a)` — convert to uppercase.
+    #[must_use]
+    pub fn upper(&self) -> Self {
+        Self {
+            shape: self.shape.clone(),
+            values: self.values.iter().map(|s| s.to_uppercase()).collect(),
+        }
+    }
+
+    /// `np.char.lower(a)` — convert to lowercase.
+    #[must_use]
+    pub fn lower(&self) -> Self {
+        Self {
+            shape: self.shape.clone(),
+            values: self.values.iter().map(|s| s.to_lowercase()).collect(),
+        }
+    }
+
+    /// `np.char.capitalize(a)` — capitalize first character.
+    #[must_use]
+    pub fn capitalize(&self) -> Self {
+        Self {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .map(|s| {
+                    let mut chars = s.chars();
+                    match chars.next() {
+                        None => String::new(),
+                        Some(c) => {
+                            let upper: String = c.to_uppercase().collect();
+                            let rest: String = chars.collect::<String>().to_lowercase();
+                            format!("{upper}{rest}")
+                        }
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    /// `np.char.title(a)` — titlecase words.
+    #[must_use]
+    pub fn title(&self) -> Self {
+        Self {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .map(|s| {
+                    let mut result = String::with_capacity(s.len());
+                    let mut prev_is_letter = false;
+                    for c in s.chars() {
+                        if c.is_alphabetic() {
+                            if prev_is_letter {
+                                for lc in c.to_lowercase() {
+                                    result.push(lc);
+                                }
+                            } else {
+                                for uc in c.to_uppercase() {
+                                    result.push(uc);
+                                }
+                            }
+                            prev_is_letter = true;
+                        } else {
+                            result.push(c);
+                            prev_is_letter = false;
+                        }
+                    }
+                    result
+                })
+                .collect(),
+        }
+    }
+
+    /// `np.char.strip(a)` — strip leading/trailing whitespace.
+    #[must_use]
+    pub fn strip(&self) -> Self {
+        Self {
+            shape: self.shape.clone(),
+            values: self.values.iter().map(|s| s.trim().to_string()).collect(),
+        }
+    }
+
+    /// `np.char.lstrip(a)` — strip leading whitespace.
+    #[must_use]
+    pub fn lstrip(&self) -> Self {
+        Self {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .map(|s| s.trim_start().to_string())
+                .collect(),
+        }
+    }
+
+    /// `np.char.rstrip(a)` — strip trailing whitespace.
+    #[must_use]
+    pub fn rstrip(&self) -> Self {
+        Self {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .map(|s| s.trim_end().to_string())
+                .collect(),
+        }
+    }
+
+    /// `np.char.center(a, width, fillchar=' ')` — center-justify.
+    #[must_use]
+    pub fn center(&self, width: usize, fillchar: char) -> Self {
+        Self {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .map(|s| {
+                    if s.len() >= width {
+                        s.clone()
+                    } else {
+                        let pad = width - s.len();
+                        let left = pad / 2;
+                        let right = pad - left;
+                        let mut r = String::with_capacity(width);
+                        for _ in 0..left {
+                            r.push(fillchar);
+                        }
+                        r.push_str(s);
+                        for _ in 0..right {
+                            r.push(fillchar);
+                        }
+                        r
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    /// `np.char.ljust(a, width, fillchar=' ')` — left-justify.
+    #[must_use]
+    pub fn ljust(&self, width: usize, fillchar: char) -> Self {
+        Self {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .map(|s| {
+                    if s.len() >= width {
+                        s.clone()
+                    } else {
+                        let mut r = s.clone();
+                        for _ in 0..(width - s.len()) {
+                            r.push(fillchar);
+                        }
+                        r
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    /// `np.char.rjust(a, width, fillchar=' ')` — right-justify.
+    #[must_use]
+    pub fn rjust(&self, width: usize, fillchar: char) -> Self {
+        Self {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .map(|s| {
+                    if s.len() >= width {
+                        s.clone()
+                    } else {
+                        let pad = width - s.len();
+                        let mut r = String::with_capacity(width);
+                        for _ in 0..pad {
+                            r.push(fillchar);
+                        }
+                        r.push_str(s);
+                        r
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    /// `np.char.zfill(a, width)` — pad with zeros.
+    #[must_use]
+    pub fn zfill(&self, width: usize) -> Self {
+        Self {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .map(|s| {
+                    if s.len() >= width {
+                        return s.clone();
+                    }
+                    let pad = width - s.len();
+                    let zeros: String = std::iter::repeat_n('0', pad).collect();
+                    // Preserve leading sign
+                    if s.starts_with('+') || s.starts_with('-') {
+                        let (sign, rest) = s.split_at(1);
+                        format!("{sign}{zeros}{rest}")
+                    } else {
+                        format!("{zeros}{s}")
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    /// `np.char.str_len(a)` — string length per element.
+    #[must_use]
+    pub fn str_len(&self) -> UFuncArray {
+        UFuncArray {
+            shape: self.shape.clone(),
+            values: self.values.iter().map(|s| s.len() as f64).collect(),
+            dtype: DType::I64,
+        }
+    }
+
+    /// `np.char.count(a, sub)` — count non-overlapping occurrences of `sub`.
+    #[must_use]
+    pub fn count_substr(&self, sub: &str) -> UFuncArray {
+        UFuncArray {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .map(|s| s.matches(sub).count() as f64)
+                .collect(),
+            dtype: DType::I64,
+        }
+    }
+
+    /// `np.char.find(a, sub)` — find first occurrence, -1 if not found.
+    #[must_use]
+    pub fn find(&self, sub: &str) -> UFuncArray {
+        UFuncArray {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .map(|s| s.find(sub).map_or(-1.0, |i| i as f64))
+                .collect(),
+            dtype: DType::I64,
+        }
+    }
+
+    /// `np.char.rfind(a, sub)` — find last occurrence, -1 if not found.
+    #[must_use]
+    pub fn rfind(&self, sub: &str) -> UFuncArray {
+        UFuncArray {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .map(|s| s.rfind(sub).map_or(-1.0, |i| i as f64))
+                .collect(),
+            dtype: DType::I64,
+        }
+    }
+
+    /// `np.char.startswith(a, prefix)` — test prefix.
+    #[must_use]
+    pub fn startswith(&self, prefix: &str) -> UFuncArray {
+        UFuncArray {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .map(|s| if s.starts_with(prefix) { 1.0 } else { 0.0 })
+                .collect(),
+            dtype: DType::Bool,
+        }
+    }
+
+    /// `np.char.endswith(a, suffix)` — test suffix.
+    #[must_use]
+    pub fn endswith(&self, suffix: &str) -> UFuncArray {
+        UFuncArray {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .map(|s| if s.ends_with(suffix) { 1.0 } else { 0.0 })
+                .collect(),
+            dtype: DType::Bool,
+        }
+    }
+
+    /// `np.char.replace(a, old, new)` — replace all occurrences.
+    #[must_use]
+    pub fn replace(&self, old: &str, new: &str) -> Self {
+        Self {
+            shape: self.shape.clone(),
+            values: self.values.iter().map(|s| s.replace(old, new)).collect(),
+        }
+    }
+
+    /// `np.char.add(a, b)` — element-wise string concatenation.
+    pub fn add(&self, other: &Self) -> Result<Self, UFuncError> {
+        if self.shape != other.shape {
+            return Err(UFuncError::Shape(
+                fnp_ndarray::ShapeError::IncompatibleBroadcast {
+                    lhs: self.shape.clone(),
+                    rhs: other.shape.clone(),
+                },
+            ));
+        }
+        Ok(Self {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .zip(other.values.iter())
+                .map(|(a, b)| format!("{a}{b}"))
+                .collect(),
+        })
+    }
+
+    /// `np.char.multiply(a, n)` — repeat each string n times.
+    #[must_use]
+    pub fn multiply(&self, n: usize) -> Self {
+        Self {
+            shape: self.shape.clone(),
+            values: self.values.iter().map(|s| s.repeat(n)).collect(),
+        }
+    }
+
+    // ── Character classification (returns Bool UFuncArray) ──────────
+
+    /// `np.char.isalpha(a)`
+    #[must_use]
+    pub fn isalpha(&self) -> UFuncArray {
+        UFuncArray {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .map(|s| {
+                    if !s.is_empty() && s.chars().all(|c| c.is_alphabetic()) {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect(),
+            dtype: DType::Bool,
+        }
+    }
+
+    /// `np.char.isdigit(a)`
+    #[must_use]
+    pub fn isdigit(&self) -> UFuncArray {
+        UFuncArray {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .map(|s| {
+                    if !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()) {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect(),
+            dtype: DType::Bool,
+        }
+    }
+
+    /// `np.char.isalnum(a)`
+    #[must_use]
+    pub fn isalnum(&self) -> UFuncArray {
+        UFuncArray {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .map(|s| {
+                    if !s.is_empty() && s.chars().all(|c| c.is_alphanumeric()) {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect(),
+            dtype: DType::Bool,
+        }
+    }
+
+    /// `np.char.isspace(a)`
+    #[must_use]
+    pub fn isspace(&self) -> UFuncArray {
+        UFuncArray {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .map(|s| {
+                    if !s.is_empty() && s.chars().all(|c| c.is_whitespace()) {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect(),
+            dtype: DType::Bool,
+        }
+    }
+
+    /// `np.char.isupper(a)`
+    #[must_use]
+    pub fn isupper(&self) -> UFuncArray {
+        UFuncArray {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .map(|s| {
+                    let has_cased = s.chars().any(|c| c.is_alphabetic());
+                    if has_cased && s.chars().all(|c| !c.is_alphabetic() || c.is_uppercase()) {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect(),
+            dtype: DType::Bool,
+        }
+    }
+
+    /// `np.char.islower(a)`
+    #[must_use]
+    pub fn islower(&self) -> UFuncArray {
+        UFuncArray {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .map(|s| {
+                    let has_cased = s.chars().any(|c| c.is_alphabetic());
+                    if has_cased && s.chars().all(|c| !c.is_alphabetic() || c.is_lowercase()) {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect(),
+            dtype: DType::Bool,
+        }
+    }
+
+    /// `np.char.join(sep, a)` — join characters of each string with separator.
+    #[must_use]
+    pub fn join(&self, sep: &str) -> Self {
+        Self {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .map(|s| {
+                    s.chars()
+                        .map(|c| c.to_string())
+                        .collect::<Vec<_>>()
+                        .join(sep)
+                })
+                .collect(),
+        }
+    }
+
+    /// `np.char.swapcase(a)` — swap case.
+    #[must_use]
+    pub fn swapcase(&self) -> Self {
+        Self {
+            shape: self.shape.clone(),
+            values: self
+                .values
+                .iter()
+                .map(|s| {
+                    s.chars()
+                        .flat_map(|c| {
+                            if c.is_uppercase() {
+                                c.to_lowercase().collect::<Vec<_>>()
+                            } else {
+                                c.to_uppercase().collect::<Vec<_>>()
+                            }
+                        })
+                        .collect()
+                })
+                .collect(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        BinaryOp, PrintOptions, QuantileInterp, UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncError,
-        UFuncLogRecord, UFuncRuntimeMode, UnaryOp, normalize_signature_keywords,
+        BinaryOp, MAError, MaskedArray, PrintOptions, QuantileInterp, StringArray,
+        UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncError, UFuncLogRecord, UFuncRuntimeMode,
+        UnaryOp, busday_count, busday_offset, is_busday, normalize_signature_keywords,
         parse_gufunc_signature, plan_binary_dispatch, register_custom_loop,
         validate_override_payload_class,
     };
@@ -12719,6 +14182,72 @@ mod tests {
     }
 
     #[test]
+    fn convolve2d_basic() {
+        // 2×2 array convolved with 2×2 kernel → 3×3 output
+        let a = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let k = UFuncArray::new(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0], DType::F64).unwrap();
+        let r = a.convolve2d(&k).unwrap();
+        assert_eq!(r.shape(), &[3, 3]);
+        // Manual: output[i+ki][j+kj] += a[i][j] * k[ki][kj]
+        // k[0][0]=1, k[1][1]=1
+        // So convolve2d = a[i][j] at (i,j) + a[i][j] at (i+1,j+1)
+        let expected = [1.0, 2.0, 0.0, 3.0, 5.0, 2.0, 0.0, 3.0, 4.0];
+        for (i, (&got, &exp)) in r.values().iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - exp).abs() < 1e-10,
+                "convolve2d at {i}: {got} vs {exp}"
+            );
+        }
+    }
+
+    #[test]
+    fn convolve2d_identity_kernel() {
+        // Convolution with [[1]] returns the same array
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let k = UFuncArray::new(vec![1, 1], vec![1.0], DType::F64).unwrap();
+        let r = a.convolve2d(&k).unwrap();
+        assert_eq!(r.shape(), &[2, 3]);
+        assert_eq!(r.values(), a.values());
+    }
+
+    #[test]
+    fn convolve2d_rejects_1d() {
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let k = UFuncArray::new(vec![2, 2], vec![1.0; 4], DType::F64).unwrap();
+        assert!(a.convolve2d(&k).is_err());
+    }
+
+    #[test]
+    fn correlate2d_is_reverse_convolve() {
+        let a = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let k = UFuncArray::new(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0], DType::F64).unwrap();
+        let r = a.correlate2d(&k).unwrap();
+        assert_eq!(r.shape(), &[3, 3]);
+        // Correlate reverses kernel to [[1,0],[0,1]] (already symmetric for this case)
+        // So correlate2d should equal convolve2d for symmetric kernels
+        let c = a.convolve2d(&k).unwrap();
+        assert_eq!(r.values(), c.values());
+    }
+
+    #[test]
+    fn apply_over_axes_sum() {
+        // 2×3 array, apply sum over axes [0, 1]
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = a
+            .apply_over_axes(
+                |arr, axis, keepdims| arr.reduce_sum(axis, keepdims),
+                &[0, 1],
+            )
+            .unwrap();
+        // After sum(axis=0, keepdims=true): shape [1,3], values [5,7,9]
+        // After sum(axis=1, keepdims=true): shape [1,1], values [21]
+        assert_eq!(r.shape(), &[1, 1]);
+        assert!((r.values()[0] - 21.0).abs() < 1e-10);
+    }
+
+    #[test]
     fn polyval_quadratic() {
         // p(x) = x^2 + 2x + 1 → coeffs = [1, 2, 1]
         let c = UFuncArray::new(vec![3], vec![1.0, 2.0, 1.0], DType::F64).unwrap();
@@ -15005,8 +16534,8 @@ mod tests {
 
     #[test]
     fn fftn_2d_matches_fft2() {
-        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
-            .unwrap();
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
         let fft2_res = a.fft2().unwrap();
         let fftn_res = a.fftn().unwrap();
         assert_eq!(fft2_res.shape(), fftn_res.shape());
@@ -15017,8 +16546,8 @@ mod tests {
 
     #[test]
     fn fftn_ifftn_roundtrip() {
-        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
-            .unwrap();
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
         let transformed = a.fftn().unwrap();
         let recovered = transformed.ifftn().unwrap();
         // Extract real parts
@@ -15040,9 +16569,9 @@ mod tests {
         let transformed = a.fftn().unwrap();
         assert_eq!(transformed.shape(), &[2, 2, 2, 2]);
         let recovered = transformed.ifftn().unwrap();
-        for i in 0..8 {
+        for (i, &v) in vals.iter().enumerate().take(8) {
             let re = recovered.values()[i * 2];
-            assert!((re - vals[i]).abs() < 1e-10, "3D roundtrip at {i}");
+            assert!((re - v).abs() < 1e-10, "3D roundtrip at {i}");
         }
     }
 
@@ -15064,9 +16593,9 @@ mod tests {
         let transformed = a.rfftn().unwrap();
         let recovered = transformed.irfftn(Some(3)).unwrap();
         assert_eq!(recovered.shape(), &[2, 3]);
-        for i in 0..6 {
+        for (i, &v) in vals.iter().enumerate().take(6) {
             assert!(
-                (recovered.values()[i] - vals[i]).abs() < 1e-10,
+                (recovered.values()[i] - v).abs() < 1e-10,
                 "rfftn roundtrip at {i}"
             );
         }
@@ -15101,8 +16630,7 @@ mod tests {
 
     #[test]
     fn real_basic() {
-        let a =
-            UFuncArray::new(vec![2, 2], vec![3.0, 4.0, 5.0, -2.0], DType::Complex128).unwrap();
+        let a = UFuncArray::new(vec![2, 2], vec![3.0, 4.0, 5.0, -2.0], DType::Complex128).unwrap();
         let re = a.real().unwrap();
         assert_eq!(re.shape(), &[2]);
         assert!((re.values()[0] - 3.0).abs() < 1e-10);
@@ -15111,8 +16639,7 @@ mod tests {
 
     #[test]
     fn imag_basic() {
-        let a =
-            UFuncArray::new(vec![2, 2], vec![3.0, 4.0, 5.0, -2.0], DType::Complex128).unwrap();
+        let a = UFuncArray::new(vec![2, 2], vec![3.0, 4.0, 5.0, -2.0], DType::Complex128).unwrap();
         let im = a.imag().unwrap();
         assert_eq!(im.shape(), &[2]);
         assert!((im.values()[0] - 4.0).abs() < 1e-10);
@@ -15141,8 +16668,7 @@ mod tests {
     #[test]
     fn abs_complex_basic() {
         // |3+4i| = 5, |0+1i| = 1
-        let a =
-            UFuncArray::new(vec![2, 2], vec![3.0, 4.0, 0.0, 1.0], DType::Complex128).unwrap();
+        let a = UFuncArray::new(vec![2, 2], vec![3.0, 4.0, 0.0, 1.0], DType::Complex128).unwrap();
         let abs = a.abs_complex().unwrap();
         assert_eq!(abs.shape(), &[2]);
         assert!((abs.values()[0] - 5.0).abs() < 1e-10);
@@ -15199,8 +16725,7 @@ mod tests {
 
     #[test]
     fn fix_basic() {
-        let a =
-            UFuncArray::new(vec![4], vec![2.7, -2.7, 0.5, -0.5], DType::F64).unwrap();
+        let a = UFuncArray::new(vec![4], vec![2.7, -2.7, 0.5, -0.5], DType::F64).unwrap();
         let r = a.fix();
         assert!((r.values()[0] - 2.0).abs() < 1e-10);
         assert!((r.values()[1] - (-2.0)).abs() < 1e-10);
@@ -15299,7 +16824,9 @@ mod tests {
     fn percentile_linear_default() {
         // [1, 2, 3, 4, 5] at 50th percentile = 3.0
         let a = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
-        let r = a.percentile_method(50.0, None, QuantileInterp::Linear).unwrap();
+        let r = a
+            .percentile_method(50.0, None, QuantileInterp::Linear)
+            .unwrap();
         assert!((r.values()[0] - 3.0).abs() < 1e-10);
     }
 
@@ -15307,7 +16834,9 @@ mod tests {
     fn percentile_linear_interpolates() {
         // [1, 2, 3, 4] at 25th percentile: idx = 0.25*3 = 0.75 -> 1*0.25 + 2*0.75 = 1.75
         let a = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
-        let r = a.percentile_method(25.0, None, QuantileInterp::Linear).unwrap();
+        let r = a
+            .percentile_method(25.0, None, QuantileInterp::Linear)
+            .unwrap();
         assert!((r.values()[0] - 1.75).abs() < 1e-10);
     }
 
@@ -15315,7 +16844,9 @@ mod tests {
     fn percentile_lower() {
         // [1, 2, 3, 4] at 25th percentile: idx = 0.75, lower = floor = 0 -> 1.0
         let a = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
-        let r = a.percentile_method(25.0, None, QuantileInterp::Lower).unwrap();
+        let r = a
+            .percentile_method(25.0, None, QuantileInterp::Lower)
+            .unwrap();
         assert!((r.values()[0] - 1.0).abs() < 1e-10);
     }
 
@@ -15323,7 +16854,9 @@ mod tests {
     fn percentile_higher() {
         // [1, 2, 3, 4] at 25th percentile: idx = 0.75, higher = ceil = 1 -> 2.0
         let a = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
-        let r = a.percentile_method(25.0, None, QuantileInterp::Higher).unwrap();
+        let r = a
+            .percentile_method(25.0, None, QuantileInterp::Higher)
+            .unwrap();
         assert!((r.values()[0] - 2.0).abs() < 1e-10);
     }
 
@@ -15331,7 +16864,9 @@ mod tests {
     fn percentile_nearest() {
         // [1, 2, 3, 4] at 25th: idx=0.75, >0.5 so nearest is higher -> 2.0
         let a = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
-        let r = a.percentile_method(25.0, None, QuantileInterp::Nearest).unwrap();
+        let r = a
+            .percentile_method(25.0, None, QuantileInterp::Nearest)
+            .unwrap();
         assert!((r.values()[0] - 2.0).abs() < 1e-10);
     }
 
@@ -15339,7 +16874,9 @@ mod tests {
     fn percentile_nearest_round_down() {
         // [1, 2, 3, 4, 5] at 30th: idx=0.3*4=1.2, fractional=0.2<=0.5 so nearest is lower -> 2.0
         let a = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
-        let r = a.percentile_method(30.0, None, QuantileInterp::Nearest).unwrap();
+        let r = a
+            .percentile_method(30.0, None, QuantileInterp::Nearest)
+            .unwrap();
         assert!((r.values()[0] - 2.0).abs() < 1e-10);
     }
 
@@ -15347,7 +16884,9 @@ mod tests {
     fn percentile_midpoint() {
         // [1, 2, 3, 4] at 25th: idx=0.75, midpoint of (1, 2) = 1.5
         let a = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
-        let r = a.percentile_method(25.0, None, QuantileInterp::Midpoint).unwrap();
+        let r = a
+            .percentile_method(25.0, None, QuantileInterp::Midpoint)
+            .unwrap();
         assert!((r.values()[0] - 1.5).abs() < 1e-10);
     }
 
@@ -15373,20 +16912,20 @@ mod tests {
     #[test]
     fn quantile_method_basic() {
         let a = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
-        let r = a.quantile_method(0.25, None, QuantileInterp::Lower).unwrap();
+        let r = a
+            .quantile_method(0.25, None, QuantileInterp::Lower)
+            .unwrap();
         assert!((r.values()[0] - 1.0).abs() < 1e-10);
     }
 
     #[test]
     fn percentile_method_with_axis() {
         // 2x3 array, percentile along axis 1
-        let a = UFuncArray::new(
-            vec![2, 3],
-            vec![3.0, 1.0, 2.0, 6.0, 4.0, 5.0],
-            DType::F64,
-        )
-        .unwrap();
-        let r = a.percentile_method(50.0, Some(1), QuantileInterp::Lower).unwrap();
+        let a =
+            UFuncArray::new(vec![2, 3], vec![3.0, 1.0, 2.0, 6.0, 4.0, 5.0], DType::F64).unwrap();
+        let r = a
+            .percentile_method(50.0, Some(1), QuantileInterp::Lower)
+            .unwrap();
         assert_eq!(r.shape(), &[2]);
         // Row 0 sorted: [1, 2, 3], 50th lower = idx=1, -> 2.0
         assert!((r.values()[0] - 2.0).abs() < 1e-10);
@@ -15409,12 +16948,8 @@ mod tests {
     #[test]
     fn array_split_uneven() {
         // 7 elements into 3: sizes 3, 2, 2
-        let a = UFuncArray::new(
-            vec![7],
-            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
-            DType::F64,
-        )
-        .unwrap();
+        let a =
+            UFuncArray::new(vec![7], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], DType::F64).unwrap();
         let parts = a.array_split(3, 0).unwrap();
         assert_eq!(parts.len(), 3);
         assert_eq!(parts[0].shape(), &[3]); // first gets remainder
@@ -15428,12 +16963,8 @@ mod tests {
     #[test]
     fn array_split_2d_axis0() {
         // 3x2 array split into 2 along axis 0: sizes 2, 1
-        let a = UFuncArray::new(
-            vec![3, 2],
-            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-            DType::F64,
-        )
-        .unwrap();
+        let a =
+            UFuncArray::new(vec![3, 2], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
         let parts = a.array_split(2, 0).unwrap();
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0].shape(), &[2, 2]);
@@ -15523,7 +17054,8 @@ mod tests {
 
     #[test]
     fn reduce_sum_axes_empty_axes() {
-        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
         let r = a.reduce_sum_axes(&[], false).unwrap();
         assert_eq!(r.values(), a.values());
     }
@@ -15538,21 +17070,24 @@ mod tests {
 
     #[test]
     fn reduce_min_axes_basic() {
-        let a = UFuncArray::new(vec![2, 3], vec![5.0, 1.0, 3.0, 2.0, 4.0, 6.0], DType::F64).unwrap();
+        let a =
+            UFuncArray::new(vec![2, 3], vec![5.0, 1.0, 3.0, 2.0, 4.0, 6.0], DType::F64).unwrap();
         let r = a.reduce_min_axes(&[0, 1], false).unwrap();
         assert!((r.values()[0] - 1.0).abs() < 1e-9);
     }
 
     #[test]
     fn reduce_max_axes_basic() {
-        let a = UFuncArray::new(vec![2, 3], vec![5.0, 1.0, 3.0, 2.0, 4.0, 6.0], DType::F64).unwrap();
+        let a =
+            UFuncArray::new(vec![2, 3], vec![5.0, 1.0, 3.0, 2.0, 4.0, 6.0], DType::F64).unwrap();
         let r = a.reduce_max_axes(&[0, 1], false).unwrap();
         assert!((r.values()[0] - 6.0).abs() < 1e-9);
     }
 
     #[test]
     fn reduce_mean_axes_basic() {
-        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
         let r = a.reduce_mean_axes(&[0, 1], false).unwrap();
         assert!((r.values()[0] - 3.5).abs() < 1e-9);
     }
@@ -15569,8 +17104,10 @@ mod tests {
 
     #[test]
     fn reduce_sum_where_axis() {
-        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
-        let mask = UFuncArray::new(vec![2, 3], vec![1.0, 0.0, 1.0, 0.0, 1.0, 0.0], DType::F64).unwrap();
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let mask =
+            UFuncArray::new(vec![2, 3], vec![1.0, 0.0, 1.0, 0.0, 1.0, 0.0], DType::F64).unwrap();
         let r = a.reduce_sum_where(&mask, Some(0), false).unwrap();
         assert_eq!(r.shape(), &[3]);
         assert!((r.values()[0] - 1.0).abs() < 1e-9); // only row 0
@@ -15619,7 +17156,8 @@ mod tests {
             vec![4, 2],
             vec![0.5, 0.5, 1.5, 0.5, 0.5, 1.5, 1.5, 1.5],
             DType::F64,
-        ).unwrap();
+        )
+        .unwrap();
         let (hist, edges) = sample.histogramdd(&[2, 2]).unwrap();
         assert_eq!(hist.shape(), &[2, 2]);
         assert_eq!(edges.len(), 2);
@@ -15633,15 +17171,12 @@ mod tests {
         let sample = UFuncArray::new(
             vec![6, 3],
             vec![
-                0.0, 0.0, 0.0,
-                1.0, 1.0, 1.0,
-                0.0, 1.0, 0.0,
-                1.0, 0.0, 1.0,
-                0.5, 0.5, 0.5,
-                0.2, 0.8, 0.3,
+                0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.5, 0.5, 0.5, 0.2,
+                0.8, 0.3,
             ],
             DType::F64,
-        ).unwrap();
+        )
+        .unwrap();
         let (hist, edges) = sample.histogramdd(&[2, 2, 2]).unwrap();
         assert_eq!(hist.shape(), &[2, 2, 2]);
         assert_eq!(edges.len(), 3);
@@ -15704,9 +17239,12 @@ mod tests {
         // 3x4 array, 2x2 windows → (2, 3, 2, 2)
         let a = UFuncArray::new(
             vec![3, 4],
-            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+            vec![
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+            ],
             DType::F64,
-        ).unwrap();
+        )
+        .unwrap();
         let r = a.sliding_window_view(&[2, 2]).unwrap();
         assert_eq!(r.shape(), &[2, 3, 2, 2]); // (3-2+1, 4-2+1, 2, 2)
         // First window [0,0]: [[1,2],[5,6]]
@@ -15727,5 +17265,651 @@ mod tests {
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         assert!(a.sliding_window_view(&[4]).is_err()); // window > array
         assert!(a.sliding_window_view(&[0]).is_err()); // zero window
+    }
+
+    // ── MaskedArray tests ──────────────────────────────────────────
+
+    #[test]
+    fn masked_array_new_no_mask() {
+        let data = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let ma = MaskedArray::new(data.clone(), None, None).unwrap();
+        assert_eq!(ma.shape(), &[3]);
+        assert!(ma.mask().is_none());
+        assert_eq!(ma.data().values(), &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn masked_array_new_with_mask() {
+        let data = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![4], vec![0.0, 1.0, 0.0, 1.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        assert!(ma.mask().is_some());
+        assert_eq!(ma.mask().unwrap().values(), &[0.0, 1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn masked_array_shape_mismatch() {
+        let data = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::Bool).unwrap();
+        let err = MaskedArray::new(data, Some(mask), None).unwrap_err();
+        assert!(matches!(err, MAError::MaskShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn masked_array_filled() {
+        let data = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![4], vec![0.0, 1.0, 0.0, 1.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        let filled = ma.filled(-999.0);
+        assert_eq!(filled.values(), &[1.0, -999.0, 3.0, -999.0]);
+    }
+
+    #[test]
+    fn masked_array_compressed() {
+        let data = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![4], vec![0.0, 1.0, 0.0, 1.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        let comp = ma.compressed();
+        assert_eq!(comp.shape(), &[2]);
+        assert_eq!(comp.values(), &[1.0, 3.0]);
+    }
+
+    #[test]
+    fn masked_array_compressed_no_mask() {
+        let data = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let ma = MaskedArray::new(data, None, None).unwrap();
+        let comp = ma.compressed();
+        assert_eq!(comp.shape(), &[3]);
+        assert_eq!(comp.values(), &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn masked_array_count() {
+        let data = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![4], vec![0.0, 1.0, 0.0, 1.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        let c = ma.count(None).unwrap();
+        assert_eq!(c.values(), &[2.0]); // 2 valid elements
+    }
+
+    #[test]
+    fn masked_equal_test() {
+        let data = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 2.0, 5.0], DType::F64).unwrap();
+        let ma = MaskedArray::masked_equal(&data, 2.0).unwrap();
+        // Elements equal to 2 are masked
+        assert_eq!(ma.mask().unwrap().values(), &[0.0, 1.0, 0.0, 1.0, 0.0]);
+        let comp = ma.compressed();
+        assert_eq!(comp.values(), &[1.0, 3.0, 5.0]);
+    }
+
+    #[test]
+    fn masked_greater_test() {
+        let data = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
+        let ma = MaskedArray::masked_greater(&data, 3.0).unwrap();
+        assert_eq!(ma.mask().unwrap().values(), &[0.0, 0.0, 0.0, 1.0, 1.0]);
+        let comp = ma.compressed();
+        assert_eq!(comp.values(), &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn masked_less_test() {
+        let data = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
+        let ma = MaskedArray::masked_less(&data, 3.0).unwrap();
+        assert_eq!(ma.mask().unwrap().values(), &[1.0, 1.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn masked_inside_test() {
+        let data = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
+        let ma = MaskedArray::masked_inside(&data, 2.0, 4.0).unwrap();
+        assert_eq!(ma.mask().unwrap().values(), &[0.0, 1.0, 1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn masked_outside_test() {
+        let data = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
+        let ma = MaskedArray::masked_outside(&data, 2.0, 4.0).unwrap();
+        assert_eq!(ma.mask().unwrap().values(), &[1.0, 0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn masked_invalid_test() {
+        let data =
+            UFuncArray::new(vec![4], vec![1.0, f64::NAN, f64::INFINITY, 4.0], DType::F64).unwrap();
+        let ma = MaskedArray::masked_invalid(&data).unwrap();
+        assert_eq!(ma.mask().unwrap().values(), &[0.0, 1.0, 1.0, 0.0]);
+        let comp = ma.compressed();
+        assert_eq!(comp.values(), &[1.0, 4.0]);
+    }
+
+    #[test]
+    fn masked_where_test() {
+        let data = UFuncArray::new(vec![4], vec![10.0, 20.0, 30.0, 40.0], DType::F64).unwrap();
+        let cond = UFuncArray::new(vec![4], vec![0.0, 1.0, 0.0, 1.0], DType::Bool).unwrap();
+        let ma = MaskedArray::masked_where(&cond, &data).unwrap();
+        let comp = ma.compressed();
+        assert_eq!(comp.values(), &[10.0, 30.0]);
+    }
+
+    #[test]
+    fn masked_array_sum() {
+        let data = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![4], vec![0.0, 1.0, 0.0, 1.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        let result = ma.sum(None, false).unwrap();
+        assert_eq!(result.data().values(), &[4.0]); // 1 + 3
+    }
+
+    #[test]
+    fn masked_array_sum_no_mask() {
+        let data = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let ma = MaskedArray::new(data, None, None).unwrap();
+        let result = ma.sum(None, false).unwrap();
+        assert_eq!(result.data().values(), &[6.0]);
+    }
+
+    #[test]
+    fn masked_array_prod() {
+        let data = UFuncArray::new(vec![4], vec![2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![4], vec![0.0, 1.0, 0.0, 1.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        let result = ma.prod(None, false).unwrap();
+        assert_eq!(result.data().values(), &[8.0]); // 2 * 4
+    }
+
+    #[test]
+    fn masked_array_mean() {
+        let data = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![4], vec![0.0, 1.0, 0.0, 1.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        let result = ma.mean(None, false).unwrap();
+        assert_eq!(result.data().values(), &[2.0]); // (1+3)/2
+    }
+
+    #[test]
+    fn masked_array_min_max() {
+        let data = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![4], vec![1.0, 0.0, 0.0, 1.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        let min_result = ma.min(None, false).unwrap();
+        let max_result = ma.max(None, false).unwrap();
+        assert_eq!(min_result.data().values(), &[2.0]);
+        assert_eq!(max_result.data().values(), &[3.0]);
+    }
+
+    #[test]
+    fn masked_array_binary_op_mask_propagation() {
+        let d1 = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let m1 = UFuncArray::new(vec![3], vec![0.0, 1.0, 0.0], DType::Bool).unwrap();
+        let ma1 = MaskedArray::new(d1, Some(m1), None).unwrap();
+
+        let d2 = UFuncArray::new(vec![3], vec![10.0, 20.0, 30.0], DType::F64).unwrap();
+        let m2 = UFuncArray::new(vec![3], vec![0.0, 0.0, 1.0], DType::Bool).unwrap();
+        let ma2 = MaskedArray::new(d2, Some(m2), None).unwrap();
+
+        let result = ma1.elementwise_binary(&ma2, BinaryOp::Add).unwrap();
+        // Mask OR: [0,1,0] OR [0,0,1] = [0,1,1]
+        assert_eq!(result.mask().unwrap().values(), &[0.0, 1.0, 1.0]);
+        // Data values computed regardless of mask
+        assert_eq!(result.data().values(), &[11.0, 22.0, 33.0]);
+    }
+
+    #[test]
+    fn masked_array_unary_preserves_mask() {
+        let data = UFuncArray::new(vec![3], vec![1.0, -2.0, 3.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![3], vec![0.0, 1.0, 0.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        let result = ma.elementwise_unary(UnaryOp::Abs);
+        assert_eq!(result.data().values(), &[1.0, 2.0, 3.0]);
+        assert_eq!(result.mask().unwrap().values(), &[0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn masked_array_fill_value() {
+        let data = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        let mut ma = MaskedArray::new(data, None, Some(42.0)).unwrap();
+        assert!((ma.fill_value() - 42.0).abs() < f64::EPSILON);
+        ma.set_fill_value(-1.0);
+        assert!((ma.fill_value() - (-1.0)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn masked_array_hard_mask() {
+        let data = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        let mut ma = MaskedArray::new(data, None, None).unwrap();
+        assert!(!ma.is_hard_mask());
+        ma.harden_mask();
+        assert!(ma.is_hard_mask());
+        ma.soften_mask();
+        assert!(!ma.is_hard_mask());
+    }
+
+    #[test]
+    fn masked_not_equal_test() {
+        let data = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 2.0], DType::F64).unwrap();
+        let ma = MaskedArray::masked_not_equal(&data, 2.0).unwrap();
+        assert_eq!(ma.mask().unwrap().values(), &[1.0, 0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn masked_greater_equal_test() {
+        let data = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let ma = MaskedArray::masked_greater_equal(&data, 3.0).unwrap();
+        assert_eq!(ma.mask().unwrap().values(), &[0.0, 0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn masked_less_equal_test() {
+        let data = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let ma = MaskedArray::masked_less_equal(&data, 2.0).unwrap();
+        assert_eq!(ma.mask().unwrap().values(), &[1.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn masked_array_from_values() {
+        let ma = MaskedArray::from_values(
+            vec![3],
+            vec![10.0, 20.0, 30.0],
+            Some(vec![0.0, 1.0, 0.0]),
+            DType::F64,
+        )
+        .unwrap();
+        assert_eq!(ma.compressed().values(), &[10.0, 30.0]);
+    }
+
+    #[test]
+    fn masked_array_2d_sum_axis() {
+        // [[1,2,3],[4,5,6]] with mask [[0,1,0],[0,0,1]]
+        let data =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let mask =
+            UFuncArray::new(vec![2, 3], vec![0.0, 1.0, 0.0, 0.0, 0.0, 1.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        // Sum along axis 1: row 0 = 1+3=4, row 1 = 4+5=9
+        let result = ma.sum(Some(1), false).unwrap();
+        assert_eq!(result.data().values(), &[4.0, 9.0]);
+    }
+
+    // ── datetime/timedelta arithmetic tests ────────────────────────
+
+    #[test]
+    fn datetime_add_timedelta() {
+        // day 100 + delta 5 = day 105
+        let dates = UFuncArray::new(vec![3], vec![100.0, 200.0, 300.0], DType::DateTime64).unwrap();
+        let deltas = UFuncArray::new(vec![3], vec![5.0, 10.0, -1.0], DType::TimeDelta64).unwrap();
+        let result = dates.datetime_add(&deltas).unwrap();
+        assert_eq!(result.dtype(), DType::DateTime64);
+        assert_eq!(result.values(), &[105.0, 210.0, 299.0]);
+    }
+
+    #[test]
+    fn datetime_sub_datetimes() {
+        let d1 = UFuncArray::new(vec![2], vec![110.0, 205.0], DType::DateTime64).unwrap();
+        let d2 = UFuncArray::new(vec![2], vec![100.0, 200.0], DType::DateTime64).unwrap();
+        let result = d1.datetime_sub(&d2).unwrap();
+        assert_eq!(result.dtype(), DType::TimeDelta64);
+        assert_eq!(result.values(), &[10.0, 5.0]);
+    }
+
+    #[test]
+    fn timedelta_add_sub() {
+        let t1 = UFuncArray::new(vec![2], vec![10.0, 20.0], DType::TimeDelta64).unwrap();
+        let t2 = UFuncArray::new(vec![2], vec![3.0, 7.0], DType::TimeDelta64).unwrap();
+        let sum = t1.timedelta_add(&t2).unwrap();
+        assert_eq!(sum.values(), &[13.0, 27.0]);
+        let diff = t1.timedelta_sub(&t2).unwrap();
+        assert_eq!(diff.values(), &[7.0, 13.0]);
+    }
+
+    #[test]
+    fn timedelta_mul_div() {
+        let td = UFuncArray::new(vec![3], vec![10.0, 20.0, 30.0], DType::TimeDelta64).unwrap();
+        let doubled = td.timedelta_mul(2.0).unwrap();
+        assert_eq!(doubled.values(), &[20.0, 40.0, 60.0]);
+        let halved = td.timedelta_div(2.0).unwrap();
+        assert_eq!(halved.values(), &[5.0, 10.0, 15.0]);
+    }
+
+    #[test]
+    fn timedelta_div_by_zero_rejected() {
+        let td = UFuncArray::new(vec![1], vec![10.0], DType::TimeDelta64).unwrap();
+        assert!(td.timedelta_div(0.0).is_err());
+    }
+
+    #[test]
+    fn timedelta_neg_abs() {
+        let td = UFuncArray::new(vec![3], vec![-5.0, 0.0, 3.0], DType::TimeDelta64).unwrap();
+        let neg = td.timedelta_neg();
+        assert_eq!(neg.values(), &[5.0, 0.0, -3.0]);
+        let abs = td.timedelta_abs();
+        assert_eq!(abs.values(), &[5.0, 0.0, 3.0]);
+    }
+
+    #[test]
+    fn datetime_type_checks() {
+        let f = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
+        let dt = UFuncArray::new(vec![1], vec![1.0], DType::DateTime64).unwrap();
+        let td = UFuncArray::new(vec![1], vec![1.0], DType::TimeDelta64).unwrap();
+        // datetime_add requires DateTime64 + TimeDelta64
+        assert!(f.datetime_add(&td).is_err());
+        assert!(dt.datetime_add(&f).is_err());
+        // datetime_sub requires two DateTime64
+        assert!(dt.datetime_sub(&td).is_err());
+        // timedelta_add requires two TimeDelta64
+        assert!(td.timedelta_add(&dt).is_err());
+    }
+
+    #[test]
+    fn is_busday_test() {
+        // 1970-01-01 (day 0) = Thursday (business day)
+        // 1970-01-02 (day 1) = Friday (business day)
+        // 1970-01-03 (day 2) = Saturday (not business)
+        // 1970-01-04 (day 3) = Sunday (not business)
+        // 1970-01-05 (day 4) = Monday (business day)
+        let dates =
+            UFuncArray::new(vec![5], vec![0.0, 1.0, 2.0, 3.0, 4.0], DType::DateTime64).unwrap();
+        let result = is_busday(&dates).unwrap();
+        assert_eq!(result.values(), &[1.0, 1.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn busday_count_basic() {
+        // Count business days from Monday (day 4) to next Monday (day 11) = 5
+        let start = UFuncArray::new(vec![1], vec![4.0], DType::DateTime64).unwrap();
+        let end = UFuncArray::new(vec![1], vec![11.0], DType::DateTime64).unwrap();
+        let result = busday_count(&start, &end).unwrap();
+        assert_eq!(result.values(), &[5.0]);
+    }
+
+    #[test]
+    fn busday_count_same_day() {
+        let start = UFuncArray::new(vec![1], vec![0.0], DType::DateTime64).unwrap();
+        let end = UFuncArray::new(vec![1], vec![0.0], DType::DateTime64).unwrap();
+        let result = busday_count(&start, &end).unwrap();
+        assert_eq!(result.values(), &[0.0]);
+    }
+
+    #[test]
+    fn busday_count_backwards() {
+        // day 11 to day 4 = -5 business days (reverse direction)
+        let start = UFuncArray::new(vec![1], vec![11.0], DType::DateTime64).unwrap();
+        let end = UFuncArray::new(vec![1], vec![4.0], DType::DateTime64).unwrap();
+        let result = busday_count(&start, &end).unwrap();
+        assert_eq!(result.values(), &[-5.0]);
+    }
+
+    #[test]
+    fn busday_offset_basic() {
+        // From Monday (day 4), offset +1 business day = Tuesday (day 5)
+        let dates = UFuncArray::new(vec![1], vec![4.0], DType::DateTime64).unwrap();
+        let offsets = UFuncArray::new(vec![1], vec![1.0], DType::I64).unwrap();
+        let result = busday_offset(&dates, &offsets).unwrap();
+        assert_eq!(result.values(), &[5.0]);
+    }
+
+    #[test]
+    fn busday_offset_over_weekend() {
+        // From Friday (day 1), offset +1 business day = Monday (day 4)
+        let dates = UFuncArray::new(vec![1], vec![1.0], DType::DateTime64).unwrap();
+        let offsets = UFuncArray::new(vec![1], vec![1.0], DType::I64).unwrap();
+        let result = busday_offset(&dates, &offsets).unwrap();
+        assert_eq!(result.values(), &[4.0]);
+    }
+
+    #[test]
+    fn busday_offset_negative() {
+        // From Monday (day 4), offset -1 business day = Friday (day 1)
+        let dates = UFuncArray::new(vec![1], vec![4.0], DType::DateTime64).unwrap();
+        let offsets = UFuncArray::new(vec![1], vec![-1.0], DType::I64).unwrap();
+        let result = busday_offset(&dates, &offsets).unwrap();
+        assert_eq!(result.values(), &[1.0]);
+    }
+
+    #[test]
+    fn busday_offset_from_weekend() {
+        // From Saturday (day 2), offset +1 should snap to Monday then +1 = Tuesday (day 5)
+        let dates = UFuncArray::new(vec![1], vec![2.0], DType::DateTime64).unwrap();
+        let offsets = UFuncArray::new(vec![1], vec![1.0], DType::I64).unwrap();
+        let result = busday_offset(&dates, &offsets).unwrap();
+        assert_eq!(result.values(), &[5.0]);
+    }
+
+    #[test]
+    fn busday_offset_zero() {
+        // From Monday (day 4), offset 0 = same Monday (day 4)
+        let dates = UFuncArray::new(vec![1], vec![4.0], DType::DateTime64).unwrap();
+        let offsets = UFuncArray::new(vec![1], vec![0.0], DType::I64).unwrap();
+        let result = busday_offset(&dates, &offsets).unwrap();
+        assert_eq!(result.values(), &[4.0]);
+    }
+
+    // ── StringArray tests ──────────────────────────────────────────
+
+    #[test]
+    fn string_array_new() {
+        let sa = StringArray::from_strs(vec![3], &["hello", "world", "test"]).unwrap();
+        assert_eq!(sa.shape(), &[3]);
+        assert_eq!(sa.values()[0], "hello");
+    }
+
+    #[test]
+    fn string_array_shape_mismatch() {
+        let err = StringArray::from_strs(vec![2], &["hello", "world", "extra"]).unwrap_err();
+        assert!(matches!(err, UFuncError::InvalidInputLength { .. }));
+    }
+
+    #[test]
+    fn string_upper_lower() {
+        let sa = StringArray::from_strs(vec![2], &["Hello", "World"]).unwrap();
+        let upper = sa.upper();
+        assert_eq!(upper.values()[0], "HELLO");
+        assert_eq!(upper.values()[1], "WORLD");
+        let lower = sa.lower();
+        assert_eq!(lower.values()[0], "hello");
+        assert_eq!(lower.values()[1], "world");
+    }
+
+    #[test]
+    fn string_capitalize() {
+        let sa = StringArray::from_strs(vec![2], &["hello WORLD", "tEST"]).unwrap();
+        let cap = sa.capitalize();
+        assert_eq!(cap.values()[0], "Hello world");
+        assert_eq!(cap.values()[1], "Test");
+    }
+
+    #[test]
+    fn string_title() {
+        let sa = StringArray::from_strs(vec![1], &["hello world test"]).unwrap();
+        let t = sa.title();
+        assert_eq!(t.values()[0], "Hello World Test");
+    }
+
+    #[test]
+    fn string_strip() {
+        let sa = StringArray::from_strs(vec![3], &["  hello  ", "  left", "right  "]).unwrap();
+        let stripped = sa.strip();
+        assert_eq!(stripped.values()[0], "hello");
+        let lstripped = sa.lstrip();
+        assert_eq!(lstripped.values()[0], "hello  ");
+        assert_eq!(lstripped.values()[1], "left");
+        let rstripped = sa.rstrip();
+        assert_eq!(rstripped.values()[0], "  hello");
+        assert_eq!(rstripped.values()[2], "right");
+    }
+
+    #[test]
+    fn string_center_ljust_rjust() {
+        let sa = StringArray::from_strs(vec![1], &["hi"]).unwrap();
+        assert_eq!(sa.center(6, '*').values()[0], "**hi**");
+        assert_eq!(sa.ljust(6, '-').values()[0], "hi----");
+        assert_eq!(sa.rjust(6, '-').values()[0], "----hi");
+    }
+
+    #[test]
+    fn string_zfill() {
+        let sa = StringArray::from_strs(vec![3], &["42", "-7", "+3"]).unwrap();
+        let z = sa.zfill(5);
+        assert_eq!(z.values()[0], "00042");
+        assert_eq!(z.values()[1], "-0007");
+        assert_eq!(z.values()[2], "+0003");
+    }
+
+    #[test]
+    fn string_str_len() {
+        let sa = StringArray::from_strs(vec![3], &["", "hi", "hello"]).unwrap();
+        let lens = sa.str_len();
+        assert_eq!(lens.values(), &[0.0, 2.0, 5.0]);
+    }
+
+    #[test]
+    fn string_count_find() {
+        let sa = StringArray::from_strs(vec![2], &["abcabc", "xyz"]).unwrap();
+        let counts = sa.count_substr("abc");
+        assert_eq!(counts.values(), &[2.0, 0.0]);
+        let finds = sa.find("abc");
+        assert_eq!(finds.values(), &[0.0, -1.0]);
+        let rfinds = sa.rfind("abc");
+        assert_eq!(rfinds.values(), &[3.0, -1.0]);
+    }
+
+    #[test]
+    fn string_startswith_endswith() {
+        let sa = StringArray::from_strs(vec![3], &["hello", "help", "world"]).unwrap();
+        let sw = sa.startswith("hel");
+        assert_eq!(sw.values(), &[1.0, 1.0, 0.0]);
+        let ew = sa.endswith("lo");
+        assert_eq!(ew.values(), &[1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn string_replace() {
+        let sa = StringArray::from_strs(vec![2], &["hello world", "foo bar"]).unwrap();
+        let replaced = sa.replace("o", "0");
+        assert_eq!(replaced.values()[0], "hell0 w0rld");
+        assert_eq!(replaced.values()[1], "f00 bar");
+    }
+
+    #[test]
+    fn string_add() {
+        let a = StringArray::from_strs(vec![2], &["hello", "foo"]).unwrap();
+        let b = StringArray::from_strs(vec![2], &[" world", " bar"]).unwrap();
+        let result = a.add(&b).unwrap();
+        assert_eq!(result.values()[0], "hello world");
+        assert_eq!(result.values()[1], "foo bar");
+    }
+
+    #[test]
+    fn string_multiply() {
+        let sa = StringArray::from_strs(vec![2], &["ab", "x"]).unwrap();
+        let repeated = sa.multiply(3);
+        assert_eq!(repeated.values()[0], "ababab");
+        assert_eq!(repeated.values()[1], "xxx");
+    }
+
+    #[test]
+    fn string_isalpha_isdigit() {
+        let sa = StringArray::from_strs(vec![4], &["hello", "123", "abc123", ""]).unwrap();
+        let alpha = sa.isalpha();
+        assert_eq!(alpha.values(), &[1.0, 0.0, 0.0, 0.0]);
+        let digit = sa.isdigit();
+        assert_eq!(digit.values(), &[0.0, 1.0, 0.0, 0.0]);
+        let alnum = sa.isalnum();
+        assert_eq!(alnum.values(), &[1.0, 1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn string_isspace_isupper_islower() {
+        let sa = StringArray::from_strs(vec![4], &["  ", "HELLO", "hello", "Hello"]).unwrap();
+        let space = sa.isspace();
+        assert_eq!(space.values(), &[1.0, 0.0, 0.0, 0.0]);
+        let upper = sa.isupper();
+        assert_eq!(upper.values(), &[0.0, 1.0, 0.0, 0.0]);
+        let lower = sa.islower();
+        assert_eq!(lower.values(), &[0.0, 0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn string_join() {
+        let sa = StringArray::from_strs(vec![1], &["abc"]).unwrap();
+        let joined = sa.join("-");
+        assert_eq!(joined.values()[0], "a-b-c");
+    }
+
+    #[test]
+    fn string_swapcase() {
+        let sa = StringArray::from_strs(vec![1], &["Hello World"]).unwrap();
+        let swapped = sa.swapcase();
+        assert_eq!(swapped.values()[0], "hELLO wORLD");
+    }
+
+    // ── nanpercentile / nanquantile / real_if_close tests ──────────
+
+    #[test]
+    fn nanpercentile_basic() {
+        let a =
+            UFuncArray::new(vec![5], vec![1.0, f64::NAN, 3.0, f64::NAN, 5.0], DType::F64).unwrap();
+        let result = a.nanpercentile(50.0, None).unwrap();
+        assert!((result.values()[0] - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn nanpercentile_all_nan() {
+        let a = UFuncArray::new(vec![2], vec![f64::NAN, f64::NAN], DType::F64).unwrap();
+        let result = a.nanpercentile(50.0, None).unwrap();
+        assert!(result.values()[0].is_nan());
+    }
+
+    #[test]
+    fn nanpercentile_no_nan() {
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let result = a.nanpercentile(0.0, None).unwrap();
+        assert!((result.values()[0] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn nanpercentile_out_of_range() {
+        let a = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        assert!(a.nanpercentile(101.0, None).is_err());
+        assert!(a.nanpercentile(-1.0, None).is_err());
+    }
+
+    #[test]
+    fn nanquantile_basic() {
+        let a =
+            UFuncArray::new(vec![5], vec![1.0, f64::NAN, 3.0, f64::NAN, 5.0], DType::F64).unwrap();
+        let result = a.nanquantile(0.5, None).unwrap();
+        assert!((result.values()[0] - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn real_if_close_complex_with_zero_imag() {
+        // Complex array with shape [3, 2]: interleaved [real, imag] pairs
+        let a = UFuncArray::new(
+            vec![3, 2],
+            vec![1.0, 0.0, 2.0, 0.0, 3.0, 0.0],
+            DType::Complex128,
+        )
+        .unwrap();
+        let result = a.real_if_close(100.0);
+        assert_eq!(result.dtype(), DType::F64);
+        assert_eq!(result.shape(), &[3]);
+        assert_eq!(result.values(), &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn real_if_close_complex_with_nonzero_imag() {
+        let a = UFuncArray::new(vec![2, 2], vec![1.0, 0.5, 2.0, 0.0], DType::Complex128).unwrap();
+        let result = a.real_if_close(100.0);
+        // Should keep complex because imag part 0.5 is not close to zero
+        assert_eq!(result.dtype(), DType::Complex128);
+        assert_eq!(result.shape(), &[2, 2]);
+    }
+
+    #[test]
+    fn real_if_close_non_complex() {
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let result = a.real_if_close(100.0);
+        assert_eq!(result.dtype(), DType::F64);
+        assert_eq!(result.values(), &[1.0, 2.0, 3.0]);
     }
 }

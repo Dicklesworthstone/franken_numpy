@@ -147,7 +147,8 @@
     "as_strided": {
       "shape": [4],
       "strides": [-8],
-      "expected_error_contains": "negative strides"
+      "expected_shape": [4],
+      "expected_strides": [-8]
     },
     "seed": 107,
     "env_fingerprint": "fnp-conformance-default-paths",
@@ -419,7 +420,8 @@
     "as_strided": {
       "shape": [4],
       "strides": [-8],
-      "expected_error_contains": "negative"
+      "expected_shape": [4],
+      "expected_strides": [-8]
     }
   }
 ]

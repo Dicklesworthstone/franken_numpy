@@ -1526,9 +1526,7 @@ pub fn fromfile(
     dtype: IOSupportedDType,
     count: Option<usize>,
 ) -> Result<Vec<f64>, IOError> {
-    let item_size = dtype
-        .item_size()
-        .ok_or(IOError::DTypeDescriptorInvalid)?;
+    let item_size = dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?;
     if item_size == 0 {
         return Ok(Vec::new());
     }
@@ -1552,13 +1550,8 @@ pub fn fromfile(
 ///
 /// Encodes each f64 value according to the given `dtype` and writes
 /// the binary representation.
-pub fn tofile(
-    values: &[f64],
-    dtype: IOSupportedDType,
-) -> Result<Vec<u8>, IOError> {
-    let item_size = dtype
-        .item_size()
-        .ok_or(IOError::DTypeDescriptorInvalid)?;
+pub fn tofile(values: &[f64], dtype: IOSupportedDType) -> Result<Vec<u8>, IOError> {
+    let item_size = dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?;
     let mut buf = Vec::with_capacity(values.len() * item_size);
     for &v in values {
         encode_element(v, dtype, &mut buf)?;
@@ -1600,12 +1593,12 @@ fn decode_element(chunk: &[u8], dtype: IOSupportedDType) -> Result<f64, IOError>
         IOSupportedDType::U64Be => Ok(u64::from_be_bytes([
             chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
         ]) as f64),
-        IOSupportedDType::F32 => Ok(f32::from_le_bytes([
-            chunk[0], chunk[1], chunk[2], chunk[3],
-        ]) as f64),
-        IOSupportedDType::F32Be => Ok(f32::from_be_bytes([
-            chunk[0], chunk[1], chunk[2], chunk[3],
-        ]) as f64),
+        IOSupportedDType::F32 => {
+            Ok(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f64)
+        }
+        IOSupportedDType::F32Be => {
+            Ok(f32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f64)
+        }
         IOSupportedDType::F64 => Ok(f64::from_le_bytes([
             chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
         ])),
@@ -1661,6 +1654,57 @@ pub fn validate_io_policy_metadata(mode: &str, class: &str) -> Result<(), IOErro
     Ok(())
 }
 
+/// Parse a string of numbers into an array of f64 values (np.fromstring equivalent).
+///
+/// Supports two modes:
+/// - Text mode (`sep` is non-empty): split text on separator, parse as floats
+/// - Binary mode (`sep` is empty): interpret raw bytes as binary data of the given dtype
+///
+/// For text mode, `dtype` is ignored (always parsed as f64).
+pub fn fromstring(data: &[u8], dtype: IOSupportedDType, sep: &str) -> Result<Vec<f64>, IOError> {
+    if sep.is_empty() {
+        // Binary mode: decode bytes as dtype
+        fromfile(data, dtype, None)
+    } else {
+        // Text mode: parse as space/comma/etc separated numbers
+        let text = std::str::from_utf8(data).map_err(|_| {
+            IOError::ReadPayloadIncomplete("fromstring: invalid UTF-8 in text mode")
+        })?;
+        let values: Vec<f64> = text
+            .split(sep)
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().parse::<f64>())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| IOError::ReadPayloadIncomplete("fromstring: parse error"))?;
+        Ok(values)
+    }
+}
+
+/// Serialize array values to a byte buffer (np.ndarray.tobytes equivalent).
+///
+/// Returns the raw bytes of the array data in the specified dtype encoding.
+/// This is an alias for `tofile` providing the NumPy `.tobytes()` method name.
+pub fn tobytes(values: &[f64], dtype: IOSupportedDType) -> Result<Vec<u8>, IOError> {
+    tofile(values, dtype)
+}
+
+/// Serialize array values to a text string (np.ndarray.tostring equivalent).
+///
+/// Returns a text representation of the values with the given separator.
+pub fn tostring(values: &[f64], sep: &str) -> String {
+    values
+        .iter()
+        .map(|v| {
+            if v.fract() == 0.0 && v.is_finite() && v.abs() < 1e15 {
+                format!("{}", *v as i64)
+            } else {
+                format!("{v}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(sep)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1668,13 +1712,13 @@ mod tests {
         IOSupportedDType, LoadDispatch, MAX_ARCHIVE_MEMBERS, MAX_DISPATCH_RETRIES,
         MAX_HEADER_BYTES, MAX_MEMMAP_VALIDATION_RETRIES, MemmapMode, NPY_MAGIC_PREFIX,
         NPZ_MAGIC_PREFIX, NpyHeader, NpzCompression, SaveTxtConfig, classify_load_dispatch,
-        encode_npy_header_bytes, enforce_pickle_policy, genfromtxt, loadtxt, loadtxt_usecols,
-        read_npy_bytes, read_npz_bytes, savetxt, synthesize_npz_member_names,
-        validate_descriptor_roundtrip, validate_header_schema, validate_io_policy_metadata,
-        validate_magic_version, validate_memmap_contract, validate_npz_archive_budget,
-        validate_read_payload, validate_write_contract, write_npy_bytes,
-        write_npy_bytes_with_version, write_npy_preamble, write_npz_bytes,
-        write_npz_bytes_with_compression, fromfile, tofile,
+        encode_npy_header_bytes, enforce_pickle_policy, fromfile, fromstring, genfromtxt, loadtxt,
+        loadtxt_usecols, read_npy_bytes, read_npz_bytes, savetxt, synthesize_npz_member_names,
+        tobytes, tofile, tostring, validate_descriptor_roundtrip, validate_header_schema,
+        validate_io_policy_metadata, validate_magic_version, validate_memmap_contract,
+        validate_npz_archive_budget, validate_read_payload, validate_write_contract,
+        write_npy_bytes, write_npy_bytes_with_version, write_npy_preamble, write_npz_bytes,
+        write_npz_bytes_with_compression,
     };
 
     fn packet009_artifacts() -> Vec<String> {
@@ -2589,10 +2633,7 @@ mod tests {
 
     #[test]
     fn fromfile_i32() {
-        let data: Vec<u8> = [42i32, -7]
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
+        let data: Vec<u8> = [42i32, -7].iter().flat_map(|v| v.to_le_bytes()).collect();
         let vals = fromfile(&data, IOSupportedDType::I32, None).unwrap();
         assert_eq!(vals, vec![42.0, -7.0]);
     }
@@ -2626,10 +2667,7 @@ mod tests {
     fn tofile_i32() {
         let vals = vec![42.0, -7.0];
         let data = tofile(&vals, IOSupportedDType::I32).unwrap();
-        let expected: Vec<u8> = [42i32, -7]
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
+        let expected: Vec<u8> = [42i32, -7].iter().flat_map(|v| v.to_le_bytes()).collect();
         assert_eq!(data, expected);
     }
 
@@ -2655,5 +2693,74 @@ mod tests {
         let data = vec![1, 0, 2, 0, 3, 0, 99];
         let vals = fromfile(&data, IOSupportedDType::U16, None).unwrap();
         assert_eq!(vals, vec![1.0, 2.0, 3.0]);
+    }
+
+    // ── fromstring / tobytes / tostring tests ──
+
+    #[test]
+    fn fromstring_text_mode_space_separated() {
+        let data = b"1.0 2.5 3.7 4.0";
+        let vals = fromstring(data, IOSupportedDType::F64, " ").unwrap();
+        assert_eq!(vals, vec![1.0, 2.5, 3.7, 4.0]);
+    }
+
+    #[test]
+    fn fromstring_text_mode_comma_separated() {
+        let data = b"10, 20, 30";
+        let vals = fromstring(data, IOSupportedDType::F64, ",").unwrap();
+        assert_eq!(vals, vec![10.0, 20.0, 30.0]);
+    }
+
+    #[test]
+    fn fromstring_binary_mode_f64() {
+        let original = vec![1.5, -2.7, 3.25];
+        let bytes = tobytes(&original, IOSupportedDType::F64).unwrap();
+        let decoded = fromstring(&bytes, IOSupportedDType::F64, "").unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn fromstring_binary_mode_i32() {
+        let original = vec![1.0, 2.0, 3.0];
+        let bytes = tobytes(&original, IOSupportedDType::I32).unwrap();
+        let decoded = fromstring(&bytes, IOSupportedDType::I32, "").unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn fromstring_text_empty_input() {
+        let data = b"";
+        let vals = fromstring(data, IOSupportedDType::F64, " ").unwrap();
+        assert!(vals.is_empty());
+    }
+
+    #[test]
+    fn fromstring_text_invalid_parse() {
+        let data = b"1.0 abc 3.0";
+        let err = fromstring(data, IOSupportedDType::F64, " ").expect_err("parse should fail");
+        assert!(matches!(err, IOError::ReadPayloadIncomplete(_)));
+    }
+
+    #[test]
+    fn tobytes_f64_roundtrip() {
+        let original = vec![42.0, -1.5, 0.0, f64::INFINITY];
+        let bytes = tobytes(&original, IOSupportedDType::F64).unwrap();
+        assert_eq!(bytes.len(), 4 * 8);
+        let decoded = fromstring(&bytes, IOSupportedDType::F64, "").unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn tostring_basic() {
+        let vals = vec![1.0, 2.0, 3.0];
+        let text = tostring(&vals, ", ");
+        assert_eq!(text, "1, 2, 3");
+    }
+
+    #[test]
+    fn tostring_float_values() {
+        let vals = vec![1.5, 2.7, 3.25];
+        let text = tostring(&vals, " ");
+        assert_eq!(text, "1.5 2.7 3.25");
     }
 }
