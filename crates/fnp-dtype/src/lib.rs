@@ -488,11 +488,231 @@ pub fn common_type(dtypes: &[DType]) -> DType {
     result
 }
 
+/// Polymorphic typed storage backend for array data.
+///
+/// Replaces the `Vec<f64>`-only storage pattern. Each variant holds a
+/// homogeneous typed buffer matching a NumPy dtype. This enables correct
+/// integer fidelity (i64 > 2^53), proper f32 identity, native complex
+/// storage, and memory-efficient booleans.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArrayStorage {
+    Bool(Vec<bool>),
+    I8(Vec<i8>),
+    I16(Vec<i16>),
+    I32(Vec<i32>),
+    I64(Vec<i64>),
+    U8(Vec<u8>),
+    U16(Vec<u16>),
+    U32(Vec<u32>),
+    U64(Vec<u64>),
+    F32(Vec<f32>),
+    F64(Vec<f64>),
+    Complex64(Vec<(f32, f32)>),
+    Complex128(Vec<(f64, f64)>),
+    String(Vec<std::string::String>),
+}
+
+/// Error type for storage operations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StorageError {
+    IndexOutOfBounds { index: usize, len: usize },
+    UnsupportedCast { from: DType, to: DType },
+}
+
+impl std::fmt::Display for StorageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IndexOutOfBounds { index, len } => {
+                write!(f, "index {index} out of bounds for storage of length {len}")
+            }
+            Self::UnsupportedCast { from, to } => {
+                write!(f, "cannot cast from {} to {}", from.name(), to.name())
+            }
+        }
+    }
+}
+
+impl ArrayStorage {
+    /// Number of elements in the storage.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Bool(v) => v.len(),
+            Self::I8(v) => v.len(),
+            Self::I16(v) => v.len(),
+            Self::I32(v) => v.len(),
+            Self::I64(v) => v.len(),
+            Self::U8(v) => v.len(),
+            Self::U16(v) => v.len(),
+            Self::U32(v) => v.len(),
+            Self::U64(v) => v.len(),
+            Self::F32(v) => v.len(),
+            Self::F64(v) => v.len(),
+            Self::Complex64(v) => v.len(),
+            Self::Complex128(v) => v.len(),
+            Self::String(v) => v.len(),
+        }
+    }
+
+    /// Whether the storage is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The dtype this storage represents.
+    #[must_use]
+    pub fn dtype(&self) -> DType {
+        match self {
+            Self::Bool(_) => DType::Bool,
+            Self::I8(_) => DType::I8,
+            Self::I16(_) => DType::I16,
+            Self::I32(_) => DType::I32,
+            Self::I64(_) => DType::I64,
+            Self::U8(_) => DType::U8,
+            Self::U16(_) => DType::U16,
+            Self::U32(_) => DType::U32,
+            Self::U64(_) => DType::U64,
+            Self::F32(_) => DType::F32,
+            Self::F64(_) => DType::F64,
+            Self::Complex64(_) => DType::Complex64,
+            Self::Complex128(_) => DType::Complex128,
+            Self::String(_) => DType::Str,
+        }
+    }
+
+    /// Read element at `index` as f64 (lossy for integer types > 2^53).
+    /// Complex types return the real part. Bool maps 0.0/1.0.
+    /// String returns NaN.
+    pub fn get_f64(&self, index: usize) -> Result<f64, StorageError> {
+        let n = self.len();
+        if index >= n {
+            return Err(StorageError::IndexOutOfBounds { index, len: n });
+        }
+        Ok(match self {
+            Self::Bool(v) => if v[index] { 1.0 } else { 0.0 },
+            Self::I8(v) => f64::from(v[index]),
+            Self::I16(v) => f64::from(v[index]),
+            Self::I32(v) => f64::from(v[index]),
+            Self::I64(v) => v[index] as f64,
+            Self::U8(v) => f64::from(v[index]),
+            Self::U16(v) => f64::from(v[index]),
+            Self::U32(v) => f64::from(v[index]),
+            Self::U64(v) => v[index] as f64,
+            Self::F32(v) => f64::from(v[index]),
+            Self::F64(v) => v[index],
+            Self::Complex64(v) => f64::from(v[index].0),
+            Self::Complex128(v) => v[index].0,
+            Self::String(_) => f64::NAN,
+        })
+    }
+
+    /// Write element at `index` from an f64 value (lossy cast to target type).
+    pub fn set_f64(&mut self, index: usize, val: f64) -> Result<(), StorageError> {
+        let n = self.len();
+        if index >= n {
+            return Err(StorageError::IndexOutOfBounds { index, len: n });
+        }
+        match self {
+            Self::Bool(v) => v[index] = val != 0.0 && !val.is_nan(),
+            Self::I8(v) => v[index] = val as i8,
+            Self::I16(v) => v[index] = val as i16,
+            Self::I32(v) => v[index] = val as i32,
+            Self::I64(v) => v[index] = val as i64,
+            Self::U8(v) => v[index] = val as u8,
+            Self::U16(v) => v[index] = val as u16,
+            Self::U32(v) => v[index] = val as u32,
+            Self::U64(v) => v[index] = val as u64,
+            Self::F32(v) => v[index] = val as f32,
+            Self::F64(v) => v[index] = val,
+            Self::Complex64(v) => v[index] = (val as f32, 0.0),
+            Self::Complex128(v) => v[index] = (val, 0.0),
+            Self::String(v) => v[index] = val.to_string(),
+        }
+        Ok(())
+    }
+
+    /// Create a new storage of the given dtype with `n` zero-valued elements.
+    #[must_use]
+    pub fn zeros(dtype: DType, n: usize) -> Self {
+        match dtype {
+            DType::Bool => Self::Bool(vec![false; n]),
+            DType::I8 => Self::I8(vec![0; n]),
+            DType::I16 => Self::I16(vec![0; n]),
+            DType::I32 => Self::I32(vec![0; n]),
+            DType::I64 => Self::I64(vec![0; n]),
+            DType::U8 => Self::U8(vec![0; n]),
+            DType::U16 => Self::U16(vec![0; n]),
+            DType::U32 => Self::U32(vec![0; n]),
+            DType::U64 => Self::U64(vec![0; n]),
+            DType::F32 => Self::F32(vec![0.0; n]),
+            DType::F64 => Self::F64(vec![0.0; n]),
+            DType::Complex64 => Self::Complex64(vec![(0.0, 0.0); n]),
+            DType::Complex128 => Self::Complex128(vec![(0.0, 0.0); n]),
+            DType::Str => Self::String(vec![std::string::String::new(); n]),
+            DType::DateTime64 | DType::TimeDelta64 => Self::I64(vec![0; n]),
+        }
+    }
+
+    /// Cast this storage to a different dtype.
+    /// Returns a new storage with elements converted to the target type.
+    pub fn cast_to(&self, target: DType) -> Result<Self, StorageError> {
+        if self.dtype() == target {
+            return Ok(self.clone());
+        }
+        let n = self.len();
+        // String target: convert all elements to string representation
+        if target == DType::Str {
+            let strings: Vec<std::string::String> = (0..n)
+                .map(|i| match self {
+                    Self::Bool(v) => if v[i] { "True".into() } else { "False".into() },
+                    Self::String(v) => v[i].clone(),
+                    _ => {
+                        // Use get_f64 for numeric types
+                        let val = self.get_f64(i).unwrap_or(f64::NAN);
+                        format!("{val}")
+                    }
+                })
+                .collect();
+            return Ok(Self::String(strings));
+        }
+        // String source: cannot cast to numeric
+        if matches!(self, Self::String(_)) {
+            return Err(StorageError::UnsupportedCast {
+                from: DType::Str,
+                to: target,
+            });
+        }
+        // Numeric-to-numeric: go through f64 intermediary
+        // (This is lossy for large integers but mirrors current behavior)
+        let mut result = Self::zeros(target, n);
+        for i in 0..n {
+            let val = self.get_f64(i)?;
+            result.set_f64(i, val)?;
+        }
+        Ok(result)
+    }
+
+    /// Extract the underlying data as a `Vec<f64>` (lossy for non-f64 types).
+    #[must_use]
+    pub fn to_f64_vec(&self) -> Vec<f64> {
+        let n = self.len();
+        (0..n).map(|i| self.get_f64(i).unwrap_or(f64::NAN)).collect()
+    }
+
+    /// Create F64 storage from a Vec<f64>.
+    #[must_use]
+    pub fn from_f64_vec(data: Vec<f64>) -> Self {
+        Self::F64(data)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DType, can_cast, can_cast_lossless, common_type, finfo, iinfo, min_scalar_type, promote,
-        promote_for_mean_reduction, promote_for_sum_reduction, result_type,
+        ArrayStorage, DType, StorageError, can_cast, can_cast_lossless, common_type, finfo, iinfo,
+        min_scalar_type, promote, promote_for_mean_reduction, promote_for_sum_reduction,
+        result_type,
     };
 
     fn all_numeric_dtypes() -> [DType; 13] {
@@ -931,5 +1151,177 @@ mod tests {
         assert!(finfo(DType::I32).is_none());
         assert!(finfo(DType::Bool).is_none());
         assert!(finfo(DType::Str).is_none());
+    }
+
+    // ── ArrayStorage tests ──
+
+    #[test]
+    fn storage_dtype_roundtrip() {
+        let dtypes = [
+            DType::Bool,
+            DType::I8,
+            DType::I16,
+            DType::I32,
+            DType::I64,
+            DType::U8,
+            DType::U16,
+            DType::U32,
+            DType::U64,
+            DType::F32,
+            DType::F64,
+            DType::Complex64,
+            DType::Complex128,
+            DType::Str,
+        ];
+        for dt in dtypes {
+            let storage = ArrayStorage::zeros(dt, 5);
+            assert_eq!(storage.dtype(), dt, "dtype mismatch for {}", dt.name());
+            assert_eq!(storage.len(), 5);
+            assert!(!storage.is_empty());
+        }
+    }
+
+    #[test]
+    fn storage_zeros_are_zero() {
+        let storage = ArrayStorage::zeros(DType::F64, 3);
+        for i in 0..3 {
+            assert_eq!(storage.get_f64(i).unwrap(), 0.0);
+        }
+    }
+
+    #[test]
+    fn storage_f64_get_set() {
+        let mut storage = ArrayStorage::F64(vec![1.5, 2.5, 3.5]);
+        assert_eq!(storage.get_f64(0).unwrap(), 1.5);
+        assert_eq!(storage.get_f64(2).unwrap(), 3.5);
+        storage.set_f64(1, 99.0).unwrap();
+        assert_eq!(storage.get_f64(1).unwrap(), 99.0);
+    }
+
+    #[test]
+    fn storage_i64_roundtrip() {
+        let mut storage = ArrayStorage::I64(vec![100, -200, 300]);
+        assert_eq!(storage.get_f64(0).unwrap(), 100.0);
+        assert_eq!(storage.get_f64(1).unwrap(), -200.0);
+        storage.set_f64(2, 42.0).unwrap();
+        assert_eq!(storage.get_f64(2).unwrap(), 42.0);
+    }
+
+    #[test]
+    fn storage_bool_roundtrip() {
+        let mut storage = ArrayStorage::Bool(vec![true, false, true]);
+        assert_eq!(storage.get_f64(0).unwrap(), 1.0);
+        assert_eq!(storage.get_f64(1).unwrap(), 0.0);
+        storage.set_f64(1, 5.0).unwrap(); // nonzero -> true
+        assert_eq!(storage.get_f64(1).unwrap(), 1.0);
+        storage.set_f64(0, 0.0).unwrap(); // zero -> false
+        assert_eq!(storage.get_f64(0).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn storage_complex128_roundtrip() {
+        let storage = ArrayStorage::Complex128(vec![(3.0, 4.0), (1.0, -2.0)]);
+        // get_f64 returns real part
+        assert_eq!(storage.get_f64(0).unwrap(), 3.0);
+        assert_eq!(storage.get_f64(1).unwrap(), 1.0);
+    }
+
+    #[test]
+    fn storage_u8_roundtrip() {
+        let mut storage = ArrayStorage::U8(vec![0, 128, 255]);
+        assert_eq!(storage.get_f64(0).unwrap(), 0.0);
+        assert_eq!(storage.get_f64(1).unwrap(), 128.0);
+        assert_eq!(storage.get_f64(2).unwrap(), 255.0);
+        storage.set_f64(0, 42.0).unwrap();
+        assert_eq!(storage.get_f64(0).unwrap(), 42.0);
+    }
+
+    #[test]
+    fn storage_f32_roundtrip() {
+        let storage = ArrayStorage::F32(vec![1.25, 2.75]);
+        assert!((storage.get_f64(0).unwrap() - 1.25).abs() < 1e-6);
+        assert!((storage.get_f64(1).unwrap() - 2.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn storage_out_of_bounds() {
+        let storage = ArrayStorage::F64(vec![1.0, 2.0]);
+        let err = storage.get_f64(5).unwrap_err();
+        assert_eq!(
+            err,
+            StorageError::IndexOutOfBounds { index: 5, len: 2 }
+        );
+    }
+
+    #[test]
+    fn storage_cast_f64_to_i32() {
+        let storage = ArrayStorage::F64(vec![1.0, 2.5, -3.7]);
+        let cast = storage.cast_to(DType::I32).unwrap();
+        assert_eq!(cast.dtype(), DType::I32);
+        assert_eq!(cast.get_f64(0).unwrap(), 1.0);
+        assert_eq!(cast.get_f64(1).unwrap(), 2.0); // truncated
+        assert_eq!(cast.get_f64(2).unwrap(), -3.0); // truncated
+    }
+
+    #[test]
+    fn storage_cast_i64_to_f64() {
+        let storage = ArrayStorage::I64(vec![10, 20, 30]);
+        let cast = storage.cast_to(DType::F64).unwrap();
+        assert_eq!(cast.dtype(), DType::F64);
+        assert_eq!(cast.get_f64(0).unwrap(), 10.0);
+        assert_eq!(cast.get_f64(2).unwrap(), 30.0);
+    }
+
+    #[test]
+    fn storage_cast_same_dtype_is_clone() {
+        let storage = ArrayStorage::F64(vec![1.0, 2.0, 3.0]);
+        let cast = storage.cast_to(DType::F64).unwrap();
+        assert_eq!(storage, cast);
+    }
+
+    #[test]
+    fn storage_cast_to_string() {
+        let storage = ArrayStorage::Bool(vec![true, false]);
+        let cast = storage.cast_to(DType::Str).unwrap();
+        assert_eq!(cast.dtype(), DType::Str);
+        if let ArrayStorage::String(v) = &cast {
+            assert_eq!(v[0], "True");
+            assert_eq!(v[1], "False");
+        } else {
+            panic!("expected String storage");
+        }
+    }
+
+    #[test]
+    fn storage_cast_string_to_numeric_fails() {
+        let storage = ArrayStorage::String(vec!["hello".into()]);
+        let err = storage.cast_to(DType::F64).unwrap_err();
+        assert_eq!(
+            err,
+            StorageError::UnsupportedCast {
+                from: DType::Str,
+                to: DType::F64
+            }
+        );
+    }
+
+    #[test]
+    fn storage_to_f64_vec() {
+        let storage = ArrayStorage::I32(vec![10, 20, 30]);
+        assert_eq!(storage.to_f64_vec(), vec![10.0, 20.0, 30.0]);
+    }
+
+    #[test]
+    fn storage_from_f64_vec() {
+        let storage = ArrayStorage::from_f64_vec(vec![1.0, 2.0]);
+        assert_eq!(storage.dtype(), DType::F64);
+        assert_eq!(storage.len(), 2);
+    }
+
+    #[test]
+    fn storage_empty() {
+        let storage = ArrayStorage::zeros(DType::F64, 0);
+        assert!(storage.is_empty());
+        assert_eq!(storage.len(), 0);
     }
 }

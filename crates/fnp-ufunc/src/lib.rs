@@ -2578,11 +2578,15 @@ impl UFuncArray {
 
     /// Sort along `axis`. When `axis` is `None`, flatten and sort.
     /// Returns a new sorted array (non-mutating, like `numpy.sort`).
-    pub fn sort(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
+    ///
+    /// `kind` selects the sorting algorithm: `"quicksort"` (default),
+    /// `"mergesort"` / `"stable"` (guaranteed stable), or `"heapsort"`.
+    pub fn sort(&self, axis: Option<isize>, kind: Option<&str>) -> Result<Self, UFuncError> {
+        let kind = validate_sort_kind(kind)?;
         match axis {
             None => {
                 let mut values = self.values.clone();
-                values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                sort_slice_by_kind(&mut values, kind);
                 Ok(Self {
                     shape: vec![values.len()],
                     values,
@@ -2604,12 +2608,10 @@ impl UFuncArray {
                 for outer_idx in 0..outer {
                     let base = outer_idx * axis_len * inner;
                     for inner_idx in 0..inner {
-                        // Extract lane
                         for k in 0..axis_len {
                             lane[k] = values[base + k * inner + inner_idx];
                         }
-                        lane.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                        // Write back
+                        sort_slice_by_kind(&mut lane, kind);
                         for k in 0..axis_len {
                             values[base + k * inner + inner_idx] = lane[k];
                         }
@@ -2627,15 +2629,16 @@ impl UFuncArray {
 
     /// Return indices that would sort the array along `axis`.
     /// When `axis` is `None`, operates on the flattened array.
-    pub fn argsort(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
+    ///
+    /// `kind` selects the sorting algorithm: `"quicksort"` (default),
+    /// `"mergesort"` / `"stable"` (guaranteed stable), or `"heapsort"`.
+    pub fn argsort(&self, axis: Option<isize>, kind: Option<&str>) -> Result<Self, UFuncError> {
+        let kind = validate_sort_kind(kind)?;
         match axis {
             None => {
                 let mut indices: Vec<usize> = (0..self.values.len()).collect();
-                indices.sort_by(|&a, &b| {
-                    self.values[a]
-                        .partial_cmp(&self.values[b])
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                let vals = &self.values;
+                argsort_slice_by_kind(&mut indices, &|i| vals[i], kind);
                 Ok(Self {
                     shape: vec![self.values.len()],
                     values: indices.iter().map(|&i| i as f64).collect(),
@@ -2654,11 +2657,12 @@ impl UFuncArray {
                     let base = outer_idx * axis_len * inner;
                     for inner_idx in 0..inner {
                         idx_lane.iter_mut().enumerate().for_each(|(i, v)| *v = i);
-                        idx_lane.sort_by(|&a, &b| {
-                            let va = self.values[base + a * inner + inner_idx];
-                            let vb = self.values[base + b * inner + inner_idx];
-                            va.partial_cmp(&vb).unwrap_or(std::cmp::Ordering::Equal)
-                        });
+                        let vals = &self.values;
+                        argsort_slice_by_kind(
+                            &mut idx_lane,
+                            &|k| vals[base + k * inner + inner_idx],
+                            kind,
+                        );
                         for k in 0..axis_len {
                             out_values[base + k * inner + inner_idx] = idx_lane[k] as f64;
                         }
@@ -5471,12 +5475,28 @@ impl UFuncArray {
 
     /// Compute gradient along a specific axis (np.gradient with axis parameter).
     pub fn gradient_axis(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
+        self.gradient_advanced(axis, 1, None)
+    }
+
+    /// Compute gradient with full options (np.gradient).
+    ///
+    /// - `axis`: axis along which to compute gradient (None = default).
+    /// - `edge_order`: 1 (first-order one-sided at edges) or
+    ///                 2 (second-order one-sided at edges).
+    /// - `spacing`: optional coordinate array for non-uniform spacing along
+    ///              the specified axis. Length must match axis length.
+    pub fn gradient_advanced(
+        &self,
+        axis: Option<isize>,
+        edge_order: usize,
+        spacing: Option<&[f64]>,
+    ) -> Result<Self, UFuncError> {
         let ax = match axis {
             None => {
                 if self.shape.len() == 1 {
                     0
                 } else {
-                    return self.gradient_all_axes();
+                    return self.gradient_all_axes_advanced(edge_order, spacing);
                 }
             }
             Some(a) => normalize_axis(a, self.shape.len())?,
@@ -5486,6 +5506,25 @@ impl UFuncArray {
             return Err(UFuncError::Msg(
                 "gradient: need at least 2 elements along axis".to_string(),
             ));
+        }
+        if edge_order == 2 && n < 3 {
+            return Err(UFuncError::Msg(
+                "gradient: edge_order=2 requires at least 3 elements along axis".to_string(),
+            ));
+        }
+        if edge_order != 1 && edge_order != 2 {
+            return Err(UFuncError::Msg(
+                "gradient: edge_order must be 1 or 2".to_string(),
+            ));
+        }
+        if let Some(coords) = spacing {
+            if coords.len() != n {
+                return Err(UFuncError::Msg(format!(
+                    "gradient: spacing length {} does not match axis length {}",
+                    coords.len(),
+                    n
+                )));
+            }
         }
         let strides = c_strides_elems(&self.shape);
         let total: usize = self.shape.iter().product();
@@ -5502,15 +5541,62 @@ impl UFuncArray {
                     }
                 }
                 let base = flat - k_val * strides[ax];
-                if k_val == 0 {
-                    self.values[base + strides[ax]] - self.values[base]
-                } else if k_val == n - 1 {
-                    self.values[base + k_val * strides[ax]]
-                        - self.values[base + (k_val - 1) * strides[ax]]
+                let f = |k: usize| self.values[base + k * strides[ax]];
+
+                if let Some(coords) = spacing {
+                    // Non-uniform spacing
+                    if k_val == 0 {
+                        if edge_order == 2 {
+                            // Second-order one-sided (3-point) with non-uniform spacing
+                            let h0 = coords[1] - coords[0];
+                            let h1 = coords[2] - coords[1];
+                            let a_coeff = -(2.0 * h0 + h1) / (h0 * (h0 + h1));
+                            let b_coeff = (h0 + h1) / (h0 * h1);
+                            let c_coeff = -h0 / (h1 * (h0 + h1));
+                            a_coeff * f(0) + b_coeff * f(1) + c_coeff * f(2)
+                        } else {
+                            (f(1) - f(0)) / (coords[1] - coords[0])
+                        }
+                    } else if k_val == n - 1 {
+                        if edge_order == 2 {
+                            let h0 = coords[n - 2] - coords[n - 3];
+                            let h1 = coords[n - 1] - coords[n - 2];
+                            let a_coeff = h1 / (h0 * (h0 + h1));
+                            let b_coeff = -(h0 + h1) / (h0 * h1);
+                            let c_coeff = (2.0 * h1 + h0) / (h1 * (h0 + h1));
+                            a_coeff * f(n - 3) + b_coeff * f(n - 2) + c_coeff * f(n - 1)
+                        } else {
+                            (f(n - 1) - f(n - 2)) / (coords[n - 1] - coords[n - 2])
+                        }
+                    } else {
+                        // Central difference with non-uniform spacing
+                        let h_minus = coords[k_val] - coords[k_val - 1];
+                        let h_plus = coords[k_val + 1] - coords[k_val];
+                        let hs = h_minus + h_plus;
+                        (h_minus * h_minus * f(k_val + 1)
+                            + (h_plus * h_plus - h_minus * h_minus) * f(k_val)
+                            - h_plus * h_plus * f(k_val - 1))
+                            / (h_minus * h_plus * hs)
+                    }
                 } else {
-                    (self.values[base + (k_val + 1) * strides[ax]]
-                        - self.values[base + (k_val - 1) * strides[ax]])
-                        / 2.0
+                    // Uniform spacing (dx=1.0)
+                    if k_val == 0 {
+                        if edge_order == 2 {
+                            // Second-order: (-3*f(0) + 4*f(1) - f(2)) / 2
+                            (-3.0 * f(0) + 4.0 * f(1) - f(2)) / 2.0
+                        } else {
+                            f(1) - f(0)
+                        }
+                    } else if k_val == n - 1 {
+                        if edge_order == 2 {
+                            // Second-order: (3*f(n-1) - 4*f(n-2) + f(n-3)) / 2
+                            (3.0 * f(n - 1) - 4.0 * f(n - 2) + f(n - 3)) / 2.0
+                        } else {
+                            f(k_val) - f(k_val - 1)
+                        }
+                    } else {
+                        (f(k_val + 1) - f(k_val - 1)) / 2.0
+                    }
                 }
             })
             .collect();
@@ -5524,6 +5610,15 @@ impl UFuncArray {
     /// Compute gradient along all axes, returning the first axis only (for backwards compat).
     fn gradient_all_axes(&self) -> Result<Self, UFuncError> {
         self.gradient_axis(Some(0))
+    }
+
+    /// Compute gradient along all axes with options.
+    fn gradient_all_axes_advanced(
+        &self,
+        edge_order: usize,
+        spacing: Option<&[f64]>,
+    ) -> Result<Self, UFuncError> {
+        self.gradient_advanced(Some(0), edge_order, spacing)
     }
 
     /// Evaluate a piecewise-defined function (np.piecewise).
@@ -6356,6 +6451,94 @@ impl UFuncArray {
         }
     }
 
+    /// Apply a binary scalar function element-wise with broadcasting (np.vectorize with 2 args).
+    pub fn vectorize_binary<F: Fn(f64, f64) -> f64>(
+        a: &Self,
+        b: &Self,
+        func: F,
+    ) -> Result<Self, UFuncError> {
+        let broadcast = Self::broadcast_arrays(&[a, b])?;
+        let ba = &broadcast[0];
+        let bb = &broadcast[1];
+        let values: Vec<f64> = ba
+            .values
+            .iter()
+            .zip(bb.values.iter())
+            .map(|(&va, &vb)| func(va, vb))
+            .collect();
+        Ok(Self {
+            shape: ba.shape.clone(),
+            values,
+            dtype: DType::F64,
+        })
+    }
+
+    /// Apply an N-ary scalar function element-wise with broadcasting (np.vectorize).
+    /// `arrays` are the input arrays; `excluded` indices are passed through as-is
+    /// (their first element is used as a scalar constant).
+    pub fn vectorize_n<F: Fn(&[f64]) -> f64>(
+        arrays: &[&Self],
+        excluded: &[usize],
+        func: F,
+    ) -> Result<Self, UFuncError> {
+        if arrays.is_empty() {
+            return Err(UFuncError::Msg(
+                "vectorize: need at least one input array".to_string(),
+            ));
+        }
+
+        // Separate excluded and vectorized arrays
+        let mut vectorized_indices: Vec<usize> = Vec::new();
+        let mut vectorized_arrays: Vec<&Self> = Vec::new();
+        for (i, &arr) in arrays.iter().enumerate() {
+            if !excluded.contains(&i) {
+                vectorized_indices.push(i);
+                vectorized_arrays.push(arr);
+            }
+        }
+
+        if vectorized_arrays.is_empty() {
+            // All excluded — apply func once with scalar values
+            let scalar_args: Vec<f64> = arrays.iter().map(|a| a.values[0]).collect();
+            let val = func(&scalar_args);
+            return Ok(Self {
+                shape: vec![1],
+                values: vec![val],
+                dtype: DType::F64,
+            });
+        }
+
+        // Broadcast vectorized arrays
+        let broadcast = Self::broadcast_arrays(&vectorized_arrays)?;
+        let n = broadcast[0].values.len();
+        let out_shape = broadcast[0].shape.clone();
+
+        // Build args buffer and apply func element-wise
+        let nargs = arrays.len();
+        let mut args = vec![0.0f64; nargs];
+        // Pre-fill excluded args with their scalar values
+        for &ei in excluded {
+            if ei < nargs {
+                args[ei] = arrays[ei].values[0];
+            }
+        }
+
+        let mut values = Vec::with_capacity(n);
+        for elem_idx in 0..n {
+            // Fill vectorized args from broadcast arrays
+            for (bc_idx, &orig_idx) in vectorized_indices.iter().enumerate() {
+                args[orig_idx] = broadcast[bc_idx].values[elem_idx];
+            }
+            values.push(func(&args));
+        }
+
+        Ok(Self {
+            shape: out_shape,
+            values,
+            dtype: DType::F64,
+        })
+    }
+
     /// Evaluate a polynomial at given points (np.polyval).
     /// `coeffs` are in descending order: p(x) = c[0]*x^n + c[1]*x^(n-1) + ... + c[n].
     pub fn polyval(coeffs: &Self, x: &Self) -> Result<Self, UFuncError> {
@@ -6535,47 +6718,115 @@ impl UFuncArray {
                 "roots: coefficients must be 1-D".to_string(),
             ));
         }
-        let n = self.values.len();
-        if n <= 1 {
-            return Ok(Self {
-                shape: vec![0],
-                values: Vec::new(),
-                dtype: DType::F64,
-            });
-        }
-        if n == 2 {
-            // Linear: ax + b = 0 -> x = -b/a
-            let root = -self.values[1] / self.values[0];
-            return Ok(Self {
-                shape: vec![1],
-                values: vec![root],
-                dtype: DType::F64,
-            });
-        }
-        if n == 3 {
-            // Quadratic: ax^2 + bx + c = 0
-            let (a, b, c) = (self.values[0], self.values[1], self.values[2]);
-            let disc = b * b - 4.0 * a * c;
-            if disc < 0.0 {
-                // Complex roots — return NaN for now (complex dtype not supported)
+
+        // Strip leading zeros
+        let first_nonzero = self.values.iter().position(|&v| v != 0.0);
+        let coeffs = match first_nonzero {
+            None => {
                 return Ok(Self {
-                    shape: vec![2],
-                    values: vec![f64::NAN, f64::NAN],
+                    shape: vec![0],
+                    values: Vec::new(),
                     dtype: DType::F64,
                 });
             }
-            let sqrt_disc = disc.sqrt();
-            let r1 = (-b + sqrt_disc) / (2.0 * a);
-            let r2 = (-b - sqrt_disc) / (2.0 * a);
+            Some(idx) => &self.values[idx..],
+        };
+
+        // Count trailing zeros (these are roots at zero)
+        let last_nonzero = coeffs.iter().rposition(|&v| v != 0.0).unwrap_or(0);
+        let trailing_zeros = coeffs.len() - 1 - last_nonzero;
+        let coeffs = &coeffs[..=last_nonzero];
+
+        let degree = coeffs.len() - 1;
+        if degree == 0 {
+            // Constant polynomial — no roots (just trailing zeros if any)
+            let mut values: Vec<f64> = vec![0.0; trailing_zeros];
+            values.sort_by(|a, b| b.abs().partial_cmp(&a.abs()).unwrap_or(std::cmp::Ordering::Equal));
             return Ok(Self {
-                shape: vec![2],
-                values: vec![r1, r2],
+                shape: vec![values.len()],
+                values,
                 dtype: DType::F64,
             });
         }
-        Err(UFuncError::Msg(
-            "roots: only degree 1 and 2 polynomials supported".to_string(),
-        ))
+        if degree == 1 {
+            let root = -coeffs[1] / coeffs[0];
+            let mut values = vec![root];
+            values.extend(std::iter::repeat(0.0).take(trailing_zeros));
+            return Ok(Self {
+                shape: vec![values.len()],
+                values,
+                dtype: DType::F64,
+            });
+        }
+        if degree == 2 {
+            let (a, b, c) = (coeffs[0], coeffs[1], coeffs[2]);
+            let disc = b * b - 4.0 * a * c;
+            let mut values = if disc < 0.0 {
+                vec![f64::NAN, f64::NAN]
+            } else {
+                let sqrt_disc = disc.sqrt();
+                let r1 = (-b + sqrt_disc) / (2.0 * a);
+                let r2 = (-b - sqrt_disc) / (2.0 * a);
+                vec![r1, r2]
+            };
+            values.extend(std::iter::repeat(0.0).take(trailing_zeros));
+            return Ok(Self {
+                shape: vec![values.len()],
+                values,
+                dtype: DType::F64,
+            });
+        }
+
+        // Degree >= 3: Use companion matrix eigenvalue method
+        // Build companion matrix A of size degree × degree
+        // A[0, j] = -coeffs[j+1] / coeffs[0]  (first row)
+        // A[i+1, i] = 1                         (sub-diagonal)
+        let d = degree;
+        let lead = coeffs[0];
+        let mut comp = vec![0.0f64; d * d];
+
+        // First row: -p[1:] / p[0]
+        for j in 0..d {
+            comp[j] = -coeffs[j + 1] / lead;
+        }
+        // Sub-diagonal: ones
+        for i in 0..d - 1 {
+            comp[(i + 1) * d + i] = 1.0;
+        }
+
+        // Compute eigenvalues
+        let eigenvalues = fnp_linalg::eig_nxn(&comp, d).map_err(|e| {
+            UFuncError::Msg(format!("roots: eigenvalue computation failed: {e}"))
+        })?;
+
+        // eigenvalues are interleaved (real, imag) pairs
+        let mut values: Vec<f64> = Vec::with_capacity(d + trailing_zeros);
+        for i in 0..d {
+            let re = eigenvalues[2 * i];
+            let im = eigenvalues[2 * i + 1];
+            if im.abs() < 1e-10 {
+                values.push(re);
+            } else {
+                // Complex root — return real part (NaN convention for full complex)
+                values.push(re);
+            }
+        }
+
+        // Sort by descending absolute value (NumPy convention)
+        values.sort_by(|a, b| {
+            b.abs()
+                .partial_cmp(&a.abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Append trailing zeros
+        values.extend(std::iter::repeat(0.0).take(trailing_zeros));
+
+        Ok(Self {
+            shape: vec![values.len()],
+            values,
+            dtype: DType::F64,
+        })
     }
 
     // ── polynomial extensions ────────
@@ -8855,21 +9106,67 @@ impl UFuncArray {
     }
 
     /// Trapezoidal integration (np.trapezoid / np.trapz).
-    pub fn trapezoid(&self, dx: f64) -> Result<Self, UFuncError> {
-        if self.shape.len() != 1 {
+    ///
+    /// `axis` selects the axis to integrate along (default last axis).
+    /// The result has the integration axis removed.
+    pub fn trapezoid(&self, dx: f64, axis: Option<isize>) -> Result<Self, UFuncError> {
+        let ndim = self.shape.len();
+        if ndim == 0 {
             return Err(UFuncError::Msg(
-                "trapezoid: only 1-D arrays supported".to_string(),
+                "trapezoid: input must have at least 1 dimension".to_string(),
             ));
         }
-        if self.values.len() < 2 {
-            return Ok(Self::scalar(0.0, self.dtype));
+        let ax = match axis {
+            Some(a) => normalize_axis(a, ndim)?,
+            None => ndim - 1,
+        };
+        let axis_len = self.shape[ax];
+        if axis_len < 2 {
+            // NumPy returns 0 for length-1 axis
+            let mut out_shape: Vec<usize> = self.shape.clone();
+            out_shape.remove(ax);
+            if out_shape.is_empty() {
+                return Ok(Self::scalar(0.0, DType::F64));
+            }
+            let total: usize = out_shape.iter().product();
+            return Ok(Self {
+                shape: out_shape,
+                values: vec![0.0; total],
+                dtype: DType::F64,
+            });
         }
-        let sum: f64 = self
-            .values
-            .windows(2)
-            .map(|w| (w[0] + w[1]) / 2.0 * dx)
-            .sum();
-        Ok(Self::scalar(sum, DType::F64))
+
+        // Compute output shape (input shape with axis removed)
+        let mut out_shape: Vec<usize> = self.shape.clone();
+        out_shape.remove(ax);
+
+        let outer: usize = self.shape[..ax].iter().copied().product();
+        let inner: usize = self.shape[ax + 1..].iter().copied().product();
+
+        let out_total = outer * inner;
+        let mut out_values = vec![0.0f64; out_total];
+
+        for o in 0..outer {
+            for i in 0..inner {
+                let mut sum = 0.0f64;
+                for k in 0..axis_len - 1 {
+                    let idx0 = o * axis_len * inner + k * inner + i;
+                    let idx1 = o * axis_len * inner + (k + 1) * inner + i;
+                    sum += (self.values[idx0] + self.values[idx1]) / 2.0 * dx;
+                }
+                out_values[o * inner + i] = sum;
+            }
+        }
+
+        if out_shape.is_empty() {
+            Ok(Self::scalar(out_values[0], DType::F64))
+        } else {
+            Ok(Self {
+                shape: out_shape,
+                values: out_values,
+                dtype: DType::F64,
+            })
+        }
     }
 
     /// Sinc function (np.sinc): sin(pi*x) / (pi*x), with sinc(0)=1.
@@ -10408,6 +10705,128 @@ fn interpolate_percentile_method(sorted: &[f64], fraction: f64, method: Quantile
             }
         }
         QuantileInterp::Midpoint => (sorted[lo] + sorted[hi]) / 2.0,
+    }
+}
+
+/// Validate sort kind parameter. Returns normalized kind string.
+fn validate_sort_kind(kind: Option<&str>) -> Result<&str, UFuncError> {
+    match kind {
+        None | Some("quicksort") => Ok("quicksort"),
+        Some("mergesort") | Some("stable") => Ok("stable"),
+        Some("heapsort") => Ok("heapsort"),
+        Some(other) => Err(UFuncError::Msg(format!(
+            "sort: unknown kind '{other}'. Must be quicksort, mergesort, heapsort, or stable"
+        ))),
+    }
+}
+
+/// Heapsort a mutable f64 slice in ascending order.
+fn heapsort_f64(data: &mut [f64]) {
+    let n = data.len();
+    if n <= 1 {
+        return;
+    }
+    let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+
+    // Build max-heap (sift down from last parent to root)
+    for i in (0..n / 2).rev() {
+        sift_down(data, i, n, &cmp);
+    }
+    // Extract max repeatedly
+    for end in (1..n).rev() {
+        data.swap(0, end);
+        sift_down(data, 0, end, &cmp);
+    }
+}
+
+fn sift_down(data: &mut [f64], mut root: usize, end: usize, cmp: &dyn Fn(&f64, &f64) -> std::cmp::Ordering) {
+    loop {
+        let left = 2 * root + 1;
+        if left >= end {
+            break;
+        }
+        let right = left + 1;
+        let mut largest = root;
+        if cmp(&data[left], &data[largest]) == std::cmp::Ordering::Greater {
+            largest = left;
+        }
+        if right < end && cmp(&data[right], &data[largest]) == std::cmp::Ordering::Greater {
+            largest = right;
+        }
+        if largest == root {
+            break;
+        }
+        data.swap(root, largest);
+        root = largest;
+    }
+}
+
+/// Heapsort indices by their corresponding values (for argsort).
+fn heapsort_indices_by(indices: &mut [usize], values: &dyn Fn(usize) -> f64) {
+    let n = indices.len();
+    if n <= 1 {
+        return;
+    }
+    let cmp = |a: &usize, b: &usize| {
+        values(*a)
+            .partial_cmp(&values(*b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    };
+
+    for i in (0..n / 2).rev() {
+        sift_down_idx(indices, i, n, &cmp);
+    }
+    for end in (1..n).rev() {
+        indices.swap(0, end);
+        sift_down_idx(indices, 0, end, &cmp);
+    }
+}
+
+fn sift_down_idx(data: &mut [usize], mut root: usize, end: usize, cmp: &dyn Fn(&usize, &usize) -> std::cmp::Ordering) {
+    loop {
+        let left = 2 * root + 1;
+        if left >= end {
+            break;
+        }
+        let right = left + 1;
+        let mut largest = root;
+        if cmp(&data[left], &data[largest]) == std::cmp::Ordering::Greater {
+            largest = left;
+        }
+        if right < end && cmp(&data[right], &data[largest]) == std::cmp::Ordering::Greater {
+            largest = right;
+        }
+        if largest == root {
+            break;
+        }
+        data.swap(root, largest);
+        root = largest;
+    }
+}
+
+/// Sort a slice using the specified algorithm kind.
+fn sort_slice_by_kind(data: &mut [f64], kind: &str) {
+    let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+    match kind {
+        "quicksort" => data.sort_unstable_by(cmp),
+        "stable" => data.sort_by(cmp),
+        "heapsort" => heapsort_f64(data),
+        _ => data.sort_unstable_by(cmp),
+    }
+}
+
+/// Sort indices using the specified algorithm kind.
+fn argsort_slice_by_kind(indices: &mut [usize], values: &dyn Fn(usize) -> f64, kind: &str) {
+    let cmp = |a: &usize, b: &usize| {
+        values(*a)
+            .partial_cmp(&values(*b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    };
+    match kind {
+        "quicksort" => indices.sort_unstable_by(cmp),
+        "stable" => indices.sort_by(cmp),
+        "heapsort" => heapsort_indices_by(indices, values),
+        _ => indices.sort_unstable_by(cmp),
     }
 }
 
@@ -12326,7 +12745,7 @@ impl MaskedArray {
     /// Sort unmasked elements, pushing masked to end (np.ma.sort).
     pub fn sort(&self, axis: Option<isize>) -> Result<Self, MAError> {
         let filled = self.filled(f64::MAX);
-        let sorted = filled.sort(axis)?;
+        let sorted = filled.sort(axis, None)?;
         // Reconstruct mask: masked elements are those equal to f64::MAX after sort
         let mask_vals: Vec<f64> = sorted
             .values()
@@ -12353,7 +12772,7 @@ impl MaskedArray {
     /// Argsort unmasked elements, masked indices appear at the end (np.ma.argsort).
     pub fn argsort(&self, axis: Option<isize>) -> Result<UFuncArray, MAError> {
         let filled = self.filled(f64::MAX);
-        Ok(filled.argsort(axis)?)
+        Ok(filled.argsort(axis, None)?)
     }
 
     /// Index of minimum value among unmasked elements (np.ma.argmin).
@@ -13478,6 +13897,213 @@ pub fn legfit(x: &[f64], y: &[f64], deg: usize) -> Result<Vec<f64>, UFuncError> 
         vty[i] = sum;
     }
     solve_linear_system(&vtv, &vty, ncols)
+}
+
+/// Add two Legendre coefficient arrays.
+pub fn legadd(c1: &[f64], c2: &[f64]) -> Vec<f64> {
+    let len = c1.len().max(c2.len());
+    let mut result = vec![0.0; len];
+    for (i, &v) in c1.iter().enumerate() {
+        result[i] += v;
+    }
+    for (i, &v) in c2.iter().enumerate() {
+        result[i] += v;
+    }
+    result
+}
+
+/// Subtract two Legendre coefficient arrays.
+pub fn legsub(c1: &[f64], c2: &[f64]) -> Vec<f64> {
+    let len = c1.len().max(c2.len());
+    let mut result = vec![0.0; len];
+    for (i, &v) in c1.iter().enumerate() {
+        result[i] += v;
+    }
+    for (i, &v) in c2.iter().enumerate() {
+        result[i] -= v;
+    }
+    result
+}
+
+/// Multiply two Legendre coefficient arrays.
+///
+/// Uses the linearization identity for Legendre products:
+/// P_m(x) * P_n(x) = sum_{k=|m-n|, step 2}^{m+n}  c(m,n,k) P_k(x)
+/// where c(m,n,k) are the Clebsch-Gordan-like linearization coefficients.
+///
+/// For simplicity, we convert to power basis, multiply, and convert back.
+pub fn legmul(c1: &[f64], c2: &[f64]) -> Vec<f64> {
+    if c1.is_empty() || c2.is_empty() {
+        return Vec::new();
+    }
+    let p1 = leg2poly(c1);
+    let p2 = leg2poly(c2);
+    // Standard polynomial multiplication
+    let len = p1.len() + p2.len() - 1;
+    let mut prod = vec![0.0; len];
+    for (i, &a) in p1.iter().enumerate() {
+        for (j, &b) in p2.iter().enumerate() {
+            prod[i + j] += a * b;
+        }
+    }
+    poly2leg(&prod)
+}
+
+/// Divide Legendre coefficient arrays. Returns (quotient, remainder).
+pub fn legdiv(c1: &[f64], c2: &[f64]) -> Result<(Vec<f64>, Vec<f64>), UFuncError> {
+    if c2.is_empty() || c2.iter().all(|&v| v == 0.0) {
+        return Err(UFuncError::Msg(
+            "legdiv: division by zero polynomial".to_string(),
+        ));
+    }
+    let p1 = leg2poly(c1);
+    let p2 = leg2poly(c2);
+    let (pq, pr) = poly_div(&p1, &p2)?;
+    Ok((poly2leg(&pq), poly2leg(&pr)))
+}
+
+/// Find the roots of a Legendre series via companion matrix eigenvalues.
+pub fn legroots(c: &[f64]) -> Result<Vec<f64>, UFuncError> {
+    // Remove trailing zeros
+    let mut coeffs: Vec<f64> = c.to_vec();
+    while coeffs.len() > 1 && *coeffs.last().unwrap() == 0.0 {
+        coeffs.pop();
+    }
+    let n = coeffs.len();
+    if n <= 1 {
+        return Ok(Vec::new());
+    }
+    if n == 2 {
+        // Linear: c[0]*P_0 + c[1]*P_1 = c[0] + c[1]*x = 0
+        return Ok(vec![-coeffs[0] / coeffs[1]]);
+    }
+
+    // Convert to power basis and use standard companion matrix
+    let poly_coeffs = leg2poly(&coeffs);
+    let d = poly_coeffs.len() - 1;
+    if d == 0 {
+        return Ok(Vec::new());
+    }
+    let lead = poly_coeffs[d];
+    let mut comp = vec![0.0f64; d * d];
+    // Companion matrix: first row = -p[d-1..0] / p[d], sub-diagonal = 1
+    for j in 0..d {
+        comp[j] = -poly_coeffs[d - 1 - j] / lead;
+    }
+    for i in 0..d - 1 {
+        comp[(i + 1) * d + i] = 1.0;
+    }
+
+    let eigenvalues = fnp_linalg::eig_nxn(&comp, d)
+        .map_err(|e| UFuncError::Msg(format!("legroots eigenvalue error: {e}")))?;
+    let mut roots: Vec<f64> = eigenvalues.chunks_exact(2).map(|pair| pair[0]).collect();
+    roots.sort_by(|a, b| a.total_cmp(b));
+    Ok(roots)
+}
+
+/// Build a Legendre series from its roots.
+pub fn legfromroots(roots: &[f64]) -> Vec<f64> {
+    if roots.is_empty() {
+        return vec![1.0];
+    }
+    // Start with (x - r[0]) in Legendre basis: [-r[0], 1]
+    let mut result = vec![-roots[0], 1.0];
+    for &r in &roots[1..] {
+        let factor = vec![-r, 1.0];
+        result = legmul(&result, &factor);
+    }
+    result
+}
+
+/// Convert Legendre coefficients to power series (standard polynomial) coefficients.
+///
+/// Uses the Legendre polynomial expansion:
+/// P_0 = 1, P_1 = x, P_{n+1} = ((2n+1)*x*P_n - n*P_{n-1}) / (n+1)
+pub fn leg2poly(c: &[f64]) -> Vec<f64> {
+    if c.is_empty() {
+        return Vec::new();
+    }
+    if c.len() == 1 {
+        return vec![c[0]];
+    }
+    let n = c.len();
+    let mut result = vec![0.0; n];
+    // Build P_k(x) as power series and accumulate c[k] * P_k
+    let mut p_prev = vec![0.0; n]; // P_0
+    let mut p_curr = vec![0.0; n]; // P_1
+    p_prev[0] = 1.0;
+    p_curr[1] = 1.0;
+
+    // Accumulate c[0]*P_0
+    for j in 0..n {
+        result[j] += c[0] * p_prev[j];
+    }
+    // Accumulate c[1]*P_1
+    if n > 1 {
+        for j in 0..n {
+            result[j] += c[1] * p_curr[j];
+        }
+    }
+    // Build higher-order P_k using recurrence
+    for k in 2..n {
+        let mut p_next = vec![0.0; n];
+        // P_{k} = ((2k-1)*x*P_{k-1} - (k-1)*P_{k-2}) / k
+        let kf = k as f64;
+        for j in 0..n - 1 {
+            p_next[j + 1] += (2.0 * kf - 1.0) * p_curr[j] / kf;
+        }
+        for j in 0..n {
+            p_next[j] -= (kf - 1.0) * p_prev[j] / kf;
+        }
+        for j in 0..n {
+            result[j] += c[k] * p_next[j];
+        }
+        p_prev = p_curr;
+        p_curr = p_next;
+    }
+    // Trim trailing zeros
+    while result.len() > 1 && result.last().map_or(false, |&v| v.abs() < 1e-15) {
+        result.pop();
+    }
+    result
+}
+
+/// Convert power series (standard polynomial) coefficients to Legendre coefficients.
+///
+/// Uses the inverse transformation: given p(x) = sum a_k x^k,
+/// find c_k such that p(x) = sum c_k P_k(x).
+pub fn poly2leg(p: &[f64]) -> Vec<f64> {
+    if p.is_empty() {
+        return Vec::new();
+    }
+    if p.len() == 1 {
+        return vec![p[0]];
+    }
+    // Strategy: build the power-basis representations of P_0, P_1, ..., P_{n-1}
+    // and solve the linear system to find Legendre coefficients.
+    // More efficient: use legval at Gauss-Legendre nodes for projection.
+    // Simplest correct approach: use the inner product with Legendre polys.
+    // Since we know the polynomial exactly, use the relation:
+    // c_k = (2k+1)/2 * integral_{-1}^{1} p(x) P_k(x) dx
+    // But p(x) and P_k(x) are known, so compute exactly via polynomial multiplication.
+
+    // Actually, the simplest approach: build the Legendre Vandermonde and solve.
+    let n = p.len();
+    // We need to find c such that leg2poly(c) == p
+    // Build the transformation matrix M where M[i][j] = coeff of x^i in P_j
+    let mut m = vec![0.0; n * n];
+    for j in 0..n {
+        let mut basis = vec![0.0; n];
+        basis[j] = 1.0;
+        let poly = leg2poly(&basis);
+        for (i, &v) in poly.iter().enumerate() {
+            if i < n {
+                m[i * n + j] = v;
+            }
+        }
+    }
+    // Solve M * c = p
+    solve_linear_system(&m, p, n).unwrap_or_else(|_| p.to_vec())
 }
 
 // ── Hermite polynomial modules ──────────────────────────────────────────
@@ -15232,10 +15858,11 @@ mod tests {
         chebint, chebmul, chebsub, chebval, divmod_arrays, financial_fv, financial_ipmt,
         financial_irr, financial_mirr, financial_nper, financial_npv, financial_pmt,
         financial_ppmt, financial_pv, financial_rate, frexp, gcd_arrays, hermder, hermeval,
-        hermint, hermval, is_busday, isneginf, isposinf, lagder, lagint, lagval, lcm_arrays,
-        legder, legfit, legint, legval, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or, modf,
+        hermint, hermval, is_busday, isneginf, isposinf, lagder, lagval, lcm_arrays,
+        leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub,
+        legval, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or, modf,
         normalize_signature_keywords, pad_empty, pad_linear_ramp, pad_stat, parse_gufunc_signature,
-        plan_binary_dispatch, poly2cheb, register_custom_loop, scimath_arccos, scimath_arcsin,
+        plan_binary_dispatch, poly2cheb, poly2leg, register_custom_loop, scimath_arccos, scimath_arcsin,
         scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_power, scimath_sqrt,
         sort_complex, unique_all, unique_counts, unique_inverse, unique_values,
         validate_override_payload_class, where_nonzero,
@@ -17148,7 +17775,7 @@ mod tests {
     fn sort_axis_none() {
         let arr = UFuncArray::new(vec![2, 3], vec![5.0, 1.0, 3.0, 2.0, 4.0, 0.0], DType::F64)
             .expect("arr");
-        let out = arr.sort(None).expect("sort");
+        let out = arr.sort(None, None).expect("sort");
         assert_eq!(out.shape(), &[6]);
         assert_eq!(out.values(), &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
     }
@@ -17158,7 +17785,7 @@ mod tests {
         // np.sort([[5,1,3],[2,4,0]], axis=1) = [[1,3,5],[0,2,4]]
         let arr = UFuncArray::new(vec![2, 3], vec![5.0, 1.0, 3.0, 2.0, 4.0, 0.0], DType::F64)
             .expect("arr");
-        let out = arr.sort(Some(1)).expect("sort axis=1");
+        let out = arr.sort(Some(1), None).expect("sort axis=1");
         assert_eq!(out.shape(), &[2, 3]);
         assert_eq!(out.values(), &[1.0, 3.0, 5.0, 0.0, 2.0, 4.0]);
     }
@@ -17167,7 +17794,7 @@ mod tests {
     fn sort_axis_zero() {
         // np.sort([[5,1],[2,4]], axis=0) = [[2,1],[5,4]]
         let arr = UFuncArray::new(vec![2, 2], vec![5.0, 1.0, 2.0, 4.0], DType::F64).expect("arr");
-        let out = arr.sort(Some(0)).expect("sort axis=0");
+        let out = arr.sort(Some(0), None).expect("sort axis=0");
         assert_eq!(out.shape(), &[2, 2]);
         assert_eq!(out.values(), &[2.0, 1.0, 5.0, 4.0]);
     }
@@ -17176,7 +17803,7 @@ mod tests {
     fn argsort_axis_none() {
         // np.argsort([3,1,2]) = [1,2,0]
         let arr = UFuncArray::new(vec![3], vec![3.0, 1.0, 2.0], DType::F64).expect("arr");
-        let out = arr.argsort(None).expect("argsort");
+        let out = arr.argsort(None, None).expect("argsort");
         assert_eq!(out.values(), &[1.0, 2.0, 0.0]);
         assert_eq!(out.dtype(), DType::I64);
     }
@@ -17186,9 +17813,77 @@ mod tests {
         // np.argsort([[5,1,3],[2,4,0]], axis=1) = [[1,2,0],[2,0,1]]
         let arr = UFuncArray::new(vec![2, 3], vec![5.0, 1.0, 3.0, 2.0, 4.0, 0.0], DType::F64)
             .expect("arr");
-        let out = arr.argsort(Some(1)).expect("argsort axis=1");
+        let out = arr.argsort(Some(1), None).expect("argsort axis=1");
         assert_eq!(out.shape(), &[2, 3]);
         assert_eq!(out.values(), &[1.0, 2.0, 0.0, 2.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn sort_kind_quicksort() {
+        let arr = UFuncArray::new(vec![5], vec![5.0, 3.0, 1.0, 4.0, 2.0], DType::F64).unwrap();
+        let out = arr.sort(None, Some("quicksort")).unwrap();
+        assert_eq!(out.values(), &[1.0, 2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn sort_kind_mergesort() {
+        let arr = UFuncArray::new(vec![5], vec![5.0, 3.0, 1.0, 4.0, 2.0], DType::F64).unwrap();
+        let out = arr.sort(None, Some("mergesort")).unwrap();
+        assert_eq!(out.values(), &[1.0, 2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn sort_kind_stable() {
+        let arr = UFuncArray::new(vec![5], vec![5.0, 3.0, 1.0, 4.0, 2.0], DType::F64).unwrap();
+        let out = arr.sort(None, Some("stable")).unwrap();
+        assert_eq!(out.values(), &[1.0, 2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn sort_kind_heapsort() {
+        let arr = UFuncArray::new(vec![5], vec![5.0, 3.0, 1.0, 4.0, 2.0], DType::F64).unwrap();
+        let out = arr.sort(None, Some("heapsort")).unwrap();
+        assert_eq!(out.values(), &[1.0, 2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn sort_kind_invalid() {
+        let arr = UFuncArray::new(vec![3], vec![3.0, 1.0, 2.0], DType::F64).unwrap();
+        assert!(arr.sort(None, Some("bogus")).is_err());
+    }
+
+    #[test]
+    fn sort_kind_heapsort_with_axis() {
+        let arr = UFuncArray::new(vec![2, 3], vec![5.0, 1.0, 3.0, 2.0, 4.0, 0.0], DType::F64)
+            .unwrap();
+        let out = arr.sort(Some(1), Some("heapsort")).unwrap();
+        assert_eq!(out.shape(), &[2, 3]);
+        assert_eq!(out.values(), &[1.0, 3.0, 5.0, 0.0, 2.0, 4.0]);
+    }
+
+    #[test]
+    fn argsort_kind_heapsort() {
+        let arr = UFuncArray::new(vec![3], vec![3.0, 1.0, 2.0], DType::F64).unwrap();
+        let out = arr.argsort(None, Some("heapsort")).unwrap();
+        assert_eq!(out.values(), &[1.0, 2.0, 0.0]);
+    }
+
+    #[test]
+    fn argsort_kind_stable() {
+        let arr = UFuncArray::new(vec![3], vec![3.0, 1.0, 2.0], DType::F64).unwrap();
+        let out = arr.argsort(None, Some("stable")).unwrap();
+        assert_eq!(out.values(), &[1.0, 2.0, 0.0]);
+    }
+
+    #[test]
+    fn sort_kind_stable_preserves_order() {
+        // Stable sort preserves relative order of equal elements
+        // Use argsort to verify stability: for equal values, earlier indices come first
+        let arr = UFuncArray::new(vec![6], vec![2.0, 1.0, 2.0, 1.0, 2.0, 1.0], DType::F64)
+            .unwrap();
+        let indices = arr.argsort(None, Some("stable")).unwrap();
+        // All 1.0s first (indices 1, 3, 5), then all 2.0s (indices 0, 2, 4)
+        assert_eq!(indices.values(), &[1.0, 3.0, 5.0, 0.0, 2.0, 4.0]);
     }
 
     #[test]
@@ -19203,6 +19898,82 @@ mod tests {
         assert!(r.values()[0].is_nan()); // complex root represented as NaN
     }
 
+    #[test]
+    fn roots_cubic_all_real() {
+        // (x-1)(x-2)(x-3) = x^3 - 6x^2 + 11x - 6
+        let p = UFuncArray::new(vec![4], vec![1.0, -6.0, 11.0, -6.0], DType::F64).unwrap();
+        let r = p.roots().unwrap();
+        assert_eq!(r.shape(), &[3]);
+        let mut roots = r.values().to_vec();
+        roots.sort_by(|a, b| a.total_cmp(b));
+        assert!((roots[0] - 1.0).abs() < 1e-8, "root 1: {}", roots[0]);
+        assert!((roots[1] - 2.0).abs() < 1e-8, "root 2: {}", roots[1]);
+        assert!((roots[2] - 3.0).abs() < 1e-8, "root 3: {}", roots[2]);
+    }
+
+    #[test]
+    fn roots_quartic() {
+        // (x-1)(x+1)(x-2)(x+2) = (x^2-1)(x^2-4) = x^4 - 5x^2 + 4
+        let p = UFuncArray::new(vec![5], vec![1.0, 0.0, -5.0, 0.0, 4.0], DType::F64).unwrap();
+        let r = p.roots().unwrap();
+        assert_eq!(r.shape(), &[4]);
+        let mut roots: Vec<f64> = r.values().to_vec();
+        roots.sort_by(|a, b| a.total_cmp(b));
+        assert!((roots[0] - (-2.0)).abs() < 1e-8, "root -2: {}", roots[0]);
+        assert!((roots[1] - (-1.0)).abs() < 1e-8, "root -1: {}", roots[1]);
+        assert!((roots[2] - 1.0).abs() < 1e-8, "root 1: {}", roots[2]);
+        assert!((roots[3] - 2.0).abs() < 1e-8, "root 2: {}", roots[3]);
+    }
+
+    #[test]
+    fn roots_with_leading_zeros() {
+        // Leading zero coefficients should be stripped: [0, 0, 1, -3, 2] -> degree 2
+        let p = UFuncArray::new(vec![5], vec![0.0, 0.0, 1.0, -3.0, 2.0], DType::F64).unwrap();
+        let r = p.roots().unwrap();
+        assert_eq!(r.shape(), &[2]);
+        let mut roots = r.values().to_vec();
+        roots.sort_by(|a, b| a.total_cmp(b));
+        assert!((roots[0] - 1.0).abs() < 1e-12);
+        assert!((roots[1] - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn roots_with_trailing_zeros() {
+        // [1, -3, 2, 0] -> (x^3 - 3x^2 + 2x) = x(x-1)(x-2), roots: 0, 1, 2
+        let p = UFuncArray::new(vec![4], vec![1.0, -3.0, 2.0, 0.0], DType::F64).unwrap();
+        let r = p.roots().unwrap();
+        assert_eq!(r.shape(), &[3]);
+        let mut roots = r.values().to_vec();
+        roots.sort_by(|a, b| a.total_cmp(b));
+        assert!((roots[0] - 0.0).abs() < 1e-8, "root 0: {}", roots[0]);
+        assert!((roots[1] - 1.0).abs() < 1e-8, "root 1: {}", roots[1]);
+        assert!((roots[2] - 2.0).abs() < 1e-8, "root 2: {}", roots[2]);
+    }
+
+    #[test]
+    fn roots_degree5() {
+        // (x-1)(x-2)(x-3)(x-4)(x-5) = x^5 - 15x^4 + 85x^3 - 225x^2 + 274x - 120
+        let p = UFuncArray::new(
+            vec![6],
+            vec![1.0, -15.0, 85.0, -225.0, 274.0, -120.0],
+            DType::F64,
+        )
+        .unwrap();
+        let r = p.roots().unwrap();
+        assert_eq!(r.shape(), &[5]);
+        let mut roots = r.values().to_vec();
+        roots.sort_by(|a, b| a.total_cmp(b));
+        for (i, &expected) in [1.0, 2.0, 3.0, 4.0, 5.0].iter().enumerate() {
+            assert!(
+                (roots[i] - expected).abs() < 1e-6,
+                "root {}: expected {}, got {}",
+                i,
+                expected,
+                roots[i]
+            );
+        }
+    }
+
     // ── sorting: partition, argpartition, lexsort ──
 
     #[test]
@@ -20316,6 +21087,80 @@ mod tests {
     }
 
     #[test]
+    fn gradient_edge_order2_quadratic() {
+        // f(x) = x^2 at x=[0,1,2,3,4], gradient should be [0,2,4,6,8]
+        // edge_order=1: left=1, right=7; edge_order=2: left=0, right=8 (exact!)
+        let a = UFuncArray::new(vec![5], vec![0.0, 1.0, 4.0, 9.0, 16.0], DType::F64).unwrap();
+        let r = a.gradient_advanced(None, 2, None).unwrap();
+        assert!((r.values()[0] - 0.0).abs() < 1e-10, "left edge_order=2");
+        assert!((r.values()[1] - 2.0).abs() < 1e-10);
+        assert!((r.values()[2] - 4.0).abs() < 1e-10);
+        assert!((r.values()[3] - 6.0).abs() < 1e-10);
+        assert!((r.values()[4] - 8.0).abs() < 1e-10, "right edge_order=2");
+    }
+
+    #[test]
+    fn gradient_edge_order2_linear() {
+        // f(x) = 2*x + 1 at x=[0,1,2,3], gradient = [2,2,2,2]
+        let a = UFuncArray::new(vec![4], vec![1.0, 3.0, 5.0, 7.0], DType::F64).unwrap();
+        let r = a.gradient_advanced(None, 2, None).unwrap();
+        for &v in r.values() {
+            assert!((v - 2.0).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn gradient_edge_order2_rejects_short() {
+        // edge_order=2 requires at least 3 elements
+        let a = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        assert!(a.gradient_advanced(None, 2, None).is_err());
+    }
+
+    #[test]
+    fn gradient_nonuniform_spacing() {
+        // f(x) = x^2 at x=[0, 1, 3], gradient should be [2*0, 2*1, 2*3] = [0, 2, 6]
+        // but with non-uniform differences:
+        //   left (order=1): (1 - 0)/(1 - 0) = 1
+        //   central: non-uniform formula
+        //   right (order=1): (9 - 1)/(3 - 1) = 4
+        let a = UFuncArray::new(vec![3], vec![0.0, 1.0, 9.0], DType::F64).unwrap();
+        let coords = [0.0, 1.0, 3.0];
+        let r = a.gradient_advanced(None, 1, Some(&coords)).unwrap();
+        // Left: (f(1)-f(0))/(x(1)-x(0)) = (1-0)/(1-0) = 1.0
+        assert!((r.values()[0] - 1.0).abs() < 1e-10);
+        // Central: non-uniform central diff for x^2 at x=1
+        // h- = 1, h+ = 2, hs = 3
+        // (h-^2 * f(2) + (h+^2 - h-^2) * f(1) - h+^2 * f(0)) / (h- * h+ * hs)
+        // = (1*9 + (4-1)*1 - 4*0) / (1*2*3) = (9+3-0)/6 = 2.0
+        assert!((r.values()[1] - 2.0).abs() < 1e-10);
+        // Right: (f(2)-f(1))/(x(2)-x(1)) = (9-1)/(3-1) = 4.0
+        assert!((r.values()[2] - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn gradient_nonuniform_edge_order2() {
+        // f(x) = x^2 at x=[0, 1, 3, 6], gradient = 2*x = [0, 2, 6, 12]
+        let a = UFuncArray::new(vec![4], vec![0.0, 1.0, 9.0, 36.0], DType::F64).unwrap();
+        let coords = [0.0, 1.0, 3.0, 6.0];
+        let r = a.gradient_advanced(None, 2, Some(&coords)).unwrap();
+        // For quadratic function, edge_order=2 should give exact gradient
+        assert!((r.values()[0] - 0.0).abs() < 1e-10, "left edge");
+        assert!((r.values()[1] - 2.0).abs() < 1e-10);
+        // Right edge: edge_order=2 with non-uniform spacing
+        assert!((r.values()[3] - 12.0).abs() < 1e-10, "right edge");
+    }
+
+    #[test]
+    fn gradient_default_unchanged() {
+        // Verify gradient_axis (edge_order=1, uniform) still works
+        let a = UFuncArray::new(vec![3], vec![1.0, 3.0, 6.0], DType::F64).unwrap();
+        let r = a.gradient_axis(None).unwrap();
+        assert_eq!(r.values()[0], 2.0); // forward: 3-1
+        assert_eq!(r.values()[1], 2.5); // central: (6-1)/2
+        assert_eq!(r.values()[2], 3.0); // backward: 6-3
+    }
+
+    #[test]
     fn piecewise_basic() {
         let x = UFuncArray::new(vec![6], vec![-2.0, -1.0, 0.0, 1.0, 2.0, 3.0], DType::F64).unwrap();
         let cond_neg =
@@ -20430,8 +21275,85 @@ mod tests {
     fn trapezoid_basic() {
         // trapezoid([1, 2, 3], dx=1) = 0.5*(1+2)*1 + 0.5*(2+3)*1 = 1.5 + 2.5 = 4.0
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
-        let r = a.trapezoid(1.0).unwrap();
+        let r = a.trapezoid(1.0, None).unwrap();
         assert!((r.values()[0] - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn trapezoid_2d_axis0() {
+        // np.trapezoid([[1, 2], [3, 4], [5, 6]], dx=1.0, axis=0)
+        // Along axis 0: column 0: trap([1,3,5], dx=1) = (1+3)/2 + (3+5)/2 = 6.0
+        //               column 1: trap([2,4,6], dx=1) = (2+4)/2 + (4+6)/2 = 8.0
+        let a = UFuncArray::new(vec![3, 2], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
+            .unwrap();
+        let r = a.trapezoid(1.0, Some(0)).unwrap();
+        assert_eq!(r.shape(), &[2]);
+        assert!((r.values()[0] - 6.0).abs() < 1e-10);
+        assert!((r.values()[1] - 8.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn trapezoid_2d_axis1() {
+        // np.trapezoid([[1, 2, 3], [4, 5, 6]], dx=1.0, axis=1)
+        // Along axis 1: row 0: trap([1,2,3]) = 4.0
+        //               row 1: trap([4,5,6]) = 10.0
+        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
+            .unwrap();
+        let r = a.trapezoid(1.0, Some(1)).unwrap();
+        assert_eq!(r.shape(), &[2]);
+        assert!((r.values()[0] - 4.0).abs() < 1e-10);
+        assert!((r.values()[1] - 10.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn trapezoid_2d_axis_neg1() {
+        // axis=-1 is same as axis=1 for 2-D
+        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
+            .unwrap();
+        let r = a.trapezoid(1.0, Some(-1)).unwrap();
+        assert_eq!(r.shape(), &[2]);
+        assert!((r.values()[0] - 4.0).abs() < 1e-10);
+        assert!((r.values()[1] - 10.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn trapezoid_3d_axis1() {
+        // shape (2, 3, 2) - integrate along axis 1
+        // result shape (2, 2)
+        // Data: [[[1,2],[3,4],[5,6]], [[7,8],[9,10],[11,12]]]
+        let vals: Vec<f64> = (1..=12).map(|x| x as f64).collect();
+        let a = UFuncArray::new(vec![2, 3, 2], vals, DType::F64).unwrap();
+        let r = a.trapezoid(1.0, Some(1)).unwrap();
+        assert_eq!(r.shape(), &[2, 2]);
+        // First block [[1,2],[3,4],[5,6]]:
+        //   col0: trap([1,3,5]) = (1+3)/2 + (3+5)/2 = 2 + 4 = 6.0
+        //   col1: trap([2,4,6]) = (2+4)/2 + (4+6)/2 = 3 + 5 = 8.0
+        // Second block [[7,8],[9,10],[11,12]]:
+        //   col0: trap([7,9,11]) = (7+9)/2 + (9+11)/2 = 8 + 10 = 18.0
+        //   col1: trap([8,10,12]) = (8+10)/2 + (10+12)/2 = 9 + 11 = 20.0
+        assert!((r.values()[0] - 6.0).abs() < 1e-10);
+        assert!((r.values()[1] - 8.0).abs() < 1e-10);
+        assert!((r.values()[2] - 18.0).abs() < 1e-10);
+        assert!((r.values()[3] - 20.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn trapezoid_custom_dx() {
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let r = a.trapezoid(0.5, None).unwrap();
+        // 0.5*(1+2)*0.5 + 0.5*(2+3)*0.5 = 0.75 + 1.25 = 2.0
+        assert!((r.values()[0] - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn trapezoid_none_axis_defaults_to_last() {
+        // For 2-D array, axis=None defaults to last axis
+        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
+            .unwrap();
+        let r = a.trapezoid(1.0, None).unwrap();
+        assert_eq!(r.shape(), &[2]);
+        assert!((r.values()[0] - 4.0).abs() < 1e-10);
+        assert!((r.values()[1] - 10.0).abs() < 1e-10);
     }
 
     #[test]
@@ -23296,6 +24218,79 @@ mod tests {
         assert_eq!(result.values(), &[11.0, 12.0, 13.0, 14.0]);
     }
 
+    #[test]
+    fn vectorize_binary_same_shape() {
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3], vec![10.0, 20.0, 30.0], DType::F64).unwrap();
+        let result = UFuncArray::vectorize_binary(&a, &b, |x, y| x + y).unwrap();
+        assert_eq!(result.values(), &[11.0, 22.0, 33.0]);
+    }
+
+    #[test]
+    fn vectorize_binary_broadcasting() {
+        // [2,3] + [3] -> [2,3]
+        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3], vec![10.0, 20.0, 30.0], DType::F64).unwrap();
+        let result = UFuncArray::vectorize_binary(&a, &b, |x, y| x * y).unwrap();
+        assert_eq!(result.shape(), &[2, 3]);
+        assert_eq!(result.values(), &[10.0, 40.0, 90.0, 40.0, 100.0, 180.0]);
+    }
+
+    #[test]
+    fn vectorize_n_three_args() {
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3], vec![4.0, 5.0, 6.0], DType::F64).unwrap();
+        let c = UFuncArray::new(vec![3], vec![7.0, 8.0, 9.0], DType::F64).unwrap();
+        let result = UFuncArray::vectorize_n(
+            &[&a, &b, &c],
+            &[],
+            |args| args[0] + args[1] * args[2],
+        ).unwrap();
+        assert_eq!(result.values(), &[29.0, 42.0, 57.0]);
+    }
+
+    #[test]
+    fn vectorize_n_with_excluded() {
+        // a = [1, 2, 3], b = [10] (scalar excluded), c = [4, 5, 6]
+        // func(a, b, c) = a + b + c, where b is excluded (constant 10)
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1], vec![10.0], DType::F64).unwrap();
+        let c = UFuncArray::new(vec![3], vec![4.0, 5.0, 6.0], DType::F64).unwrap();
+        let result = UFuncArray::vectorize_n(
+            &[&a, &b, &c],
+            &[1], // exclude arg index 1
+            |args| args[0] + args[1] + args[2],
+        ).unwrap();
+        assert_eq!(result.shape(), &[3]);
+        assert_eq!(result.values(), &[15.0, 17.0, 19.0]);
+    }
+
+    #[test]
+    fn vectorize_n_broadcasting() {
+        // a = [2,1] shape, b = [1,3] shape -> [2,3] output
+        let a = UFuncArray::new(vec![2, 1], vec![1.0, 2.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1, 3], vec![10.0, 20.0, 30.0], DType::F64).unwrap();
+        let result = UFuncArray::vectorize_n(
+            &[&a, &b],
+            &[],
+            |args| args[0] + args[1],
+        ).unwrap();
+        assert_eq!(result.shape(), &[2, 3]);
+        assert_eq!(result.values(), &[11.0, 21.0, 31.0, 12.0, 22.0, 32.0]);
+    }
+
+    #[test]
+    fn vectorize_n_all_excluded() {
+        let a = UFuncArray::new(vec![1], vec![5.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1], vec![3.0], DType::F64).unwrap();
+        let result = UFuncArray::vectorize_n(
+            &[&a, &b],
+            &[0, 1],
+            |args| args[0] * args[1],
+        ).unwrap();
+        assert_eq!(result.values(), &[15.0]);
+    }
+
     // --- string comparison tests ---
 
     #[test]
@@ -23934,12 +24929,12 @@ mod tests {
         let vals: Vec<f64> = vec![1.5, 3.25, 100.0, 0.125, -7.75, 1e10];
         let arr = UFuncArray::new(vec![vals.len()], vals.clone(), DType::F64).unwrap();
         let (m, e) = frexp(&arr).unwrap();
-        for i in 0..vals.len() {
+        for (i, &v) in vals.iter().enumerate() {
             let reconstructed = m.values()[i] * (2.0_f64).powi(e.values()[i] as i32);
             assert!(
-                (reconstructed - vals[i]).abs() < 1e-12,
+                (reconstructed - v).abs() < 1e-12,
                 "frexp roundtrip failed for {}",
-                vals[i]
+                v
             );
         }
     }
@@ -24015,12 +25010,12 @@ mod tests {
         let vals = vec![1.5, -2.75, 100.125, -0.001, 3.0];
         let arr = UFuncArray::new(vec![vals.len()], vals.clone(), DType::F64).unwrap();
         let (frac, int) = modf(&arr).unwrap();
-        for i in 0..vals.len() {
+        for (i, &v) in vals.iter().enumerate() {
             let sum = frac.values()[i] + int.values()[i];
             assert!(
-                (sum - vals[i]).abs() < 1e-15,
+                (sum - v).abs() < 1e-15,
                 "modf roundtrip failed for {}",
-                vals[i]
+                v
             );
         }
     }
@@ -24929,6 +25924,108 @@ mod tests {
         );
     }
 
+    #[test]
+    fn legadd_basic() {
+        // [1, 2] + [3, 4, 5] = [4, 6, 5]
+        let r = legadd(&[1.0, 2.0], &[3.0, 4.0, 5.0]);
+        assert_eq!(r, vec![4.0, 6.0, 5.0]);
+    }
+
+    #[test]
+    fn legsub_basic() {
+        // [5, 3] - [1, 2] = [4, 1]
+        let r = legsub(&[5.0, 3.0], &[1.0, 2.0]);
+        assert_eq!(r, vec![4.0, 1.0]);
+    }
+
+    #[test]
+    fn legmul_p1_times_p1() {
+        // P_1 * P_1 = x * x = (P_0 + 2*P_2)/3 = [1/3, 0, 2/3]
+        let r = legmul(&[0.0, 1.0], &[0.0, 1.0]);
+        assert_eq!(r.len(), 3);
+        assert!((r[0] - 1.0 / 3.0).abs() < 1e-12, "r[0] = {}", r[0]);
+        assert!(r[1].abs() < 1e-12, "r[1] = {}", r[1]);
+        assert!((r[2] - 2.0 / 3.0).abs() < 1e-12, "r[2] = {}", r[2]);
+    }
+
+    #[test]
+    fn legdiv_basic() {
+        // Divide P_1^2 by P_1: should give quotient P_1, remainder ~0
+        let p1_sq = legmul(&[0.0, 1.0], &[0.0, 1.0]);
+        let (q, r) = legdiv(&p1_sq, &[0.0, 1.0]).unwrap();
+        // q should be [0, 1] (P_1)
+        assert!(q.len() >= 2);
+        assert!(q[0].abs() < 1e-10, "q[0] = {}", q[0]);
+        assert!((q[1] - 1.0).abs() < 1e-10, "q[1] = {}", q[1]);
+        // remainder should be ~0
+        for (i, &v) in r.iter().enumerate() {
+            assert!(v.abs() < 1e-10, "r[{i}] = {v}");
+        }
+    }
+
+    #[test]
+    fn legroots_linear() {
+        // c[0]*P_0 + c[1]*P_1 = 2 + 3*x = 0 → x = -2/3
+        let roots = legroots(&[2.0, 3.0]).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert!((roots[0] - (-2.0 / 3.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn legroots_quadratic() {
+        // P_2(x) = (3x^2 - 1)/2, roots at ±1/√3
+        let roots = legroots(&[0.0, 0.0, 1.0]).unwrap();
+        assert_eq!(roots.len(), 2);
+        let expected = 1.0 / 3.0_f64.sqrt();
+        assert!((roots[0] - (-expected)).abs() < 1e-10, "root0 = {}", roots[0]);
+        assert!((roots[1] - expected).abs() < 1e-10, "root1 = {}", roots[1]);
+    }
+
+    #[test]
+    fn legfromroots_roundtrip() {
+        // Build polynomial from roots [0.5, -0.5], then find roots again
+        let c = legfromroots(&[0.5, -0.5]);
+        let roots = legroots(&c).unwrap();
+        assert_eq!(roots.len(), 2);
+        assert!((roots[0] - (-0.5)).abs() < 1e-10, "root0 = {}", roots[0]);
+        assert!((roots[1] - 0.5).abs() < 1e-10, "root1 = {}", roots[1]);
+    }
+
+    #[test]
+    fn leg2poly_p2() {
+        // P_2 in Legendre basis: [0, 0, 1]
+        // P_2(x) = (3x^2 - 1)/2
+        // In power basis: [-0.5, 0, 1.5]
+        let p = leg2poly(&[0.0, 0.0, 1.0]);
+        assert!(p.len() >= 3);
+        assert!((p[0] - (-0.5)).abs() < 1e-12, "p[0] = {}", p[0]);
+        assert!(p[1].abs() < 1e-12, "p[1] = {}", p[1]);
+        assert!((p[2] - 1.5).abs() < 1e-12, "p[2] = {}", p[2]);
+    }
+
+    #[test]
+    fn poly2leg_x_squared() {
+        // x^2 in power basis: [0, 0, 1]
+        // x^2 = (P_0 + 2*P_2)/3 → Legendre coeffs: [1/3, 0, 2/3]
+        let c = poly2leg(&[0.0, 0.0, 1.0]);
+        assert_eq!(c.len(), 3);
+        assert!((c[0] - 1.0 / 3.0).abs() < 1e-10, "c[0] = {}", c[0]);
+        assert!(c[1].abs() < 1e-10, "c[1] = {}", c[1]);
+        assert!((c[2] - 2.0 / 3.0).abs() < 1e-10, "c[2] = {}", c[2]);
+    }
+
+    #[test]
+    fn leg2poly_poly2leg_roundtrip() {
+        // Random Legendre coefficients
+        let orig = vec![1.0, 2.0, 3.0, 4.0];
+        let poly = leg2poly(&orig);
+        let back = poly2leg(&poly);
+        assert_eq!(back.len(), orig.len());
+        for i in 0..orig.len() {
+            assert!((back[i] - orig[i]).abs() < 1e-8, "c[{i}]: {} vs {}", back[i], orig[i]);
+        }
+    }
+
     // ── Hermite polynomial tests ────────────────────────────────────────
 
     #[test]
@@ -25439,7 +26536,7 @@ mod tests {
     fn e2e_cross_crate_sort_searchsorted() {
         // Create array, sort it, then searchsorted should find correct positions
         let x = UFuncArray::new(vec![6], vec![5.0, 2.0, 8.0, 1.0, 9.0, 3.0], DType::F64).unwrap();
-        let sorted = x.sort(Some(0)).unwrap();
+        let sorted = x.sort(Some(0), None).unwrap();
         assert_eq!(sorted.values(), &[1.0, 2.0, 3.0, 5.0, 8.0, 9.0]);
         let probes = UFuncArray::new(vec![3], vec![2.5, 5.0, 10.0], DType::F64).unwrap();
         let indices = sorted.searchsorted(&probes, Some("left"), None).unwrap();

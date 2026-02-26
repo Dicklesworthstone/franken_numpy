@@ -2036,10 +2036,10 @@ pub fn execute_input_case(case: &UFuncInputCase) -> Result<(Vec<usize>, Vec<f64>
             UFuncArray::where_select(&lhs, &x, &y).map_err(|err| format!("where error: {err}"))?
         }
         UFuncOperation::Sort => lhs
-            .sort(case.axis)
+            .sort(case.axis, None)
             .map_err(|err| format!("sort error: {err}"))?,
         UFuncOperation::Argsort => lhs
-            .argsort(case.axis)
+            .argsort(case.axis, None)
             .map_err(|err| format!("argsort error: {err}"))?,
         UFuncOperation::Searchsorted => {
             let probe_shape = case
@@ -2558,8 +2558,8 @@ mod tests {
     fn metamorphic_sort_idempotent() {
         // sort(sort(x)) == sort(x)
         let x = make_arr(&[6], &[5.0, 2.0, 8.0, 1.0, 9.0, 3.0]);
-        let s1 = x.sort(Some(0)).unwrap();
-        let s2 = s1.sort(Some(0)).unwrap();
+        let s1 = x.sort(Some(0), None).unwrap();
+        let s2 = s1.sort(Some(0), None).unwrap();
         assert_arrays_close(&s1, &s2, 0.0, "sort idempotent");
     }
 
@@ -2567,7 +2567,7 @@ mod tests {
     fn metamorphic_sum_invariant_under_permutation() {
         // sum(A) == sum(sort(A))
         let x = make_arr(&[6], &[5.0, 2.0, 8.0, 1.0, 9.0, 3.0]);
-        let sorted = x.sort(Some(0)).unwrap();
+        let sorted = x.sort(Some(0), None).unwrap();
         let sum_orig = x.reduce_sum(None, false).unwrap();
         let sum_sorted = sorted.reduce_sum(None, false).unwrap();
         assert_arrays_close(&sum_orig, &sum_sorted, 1e-12, "sum permutation invariant");
@@ -2586,8 +2586,8 @@ mod tests {
     fn metamorphic_argsort_consistency() {
         // A[argsort(A)] == sort(A)
         let a = make_arr(&[5], &[5.0, 1.0, 3.0, 2.0, 4.0]);
-        let sorted = a.sort(Some(0)).unwrap();
-        let indices = a.argsort(Some(0)).unwrap();
+        let sorted = a.sort(Some(0), None).unwrap();
+        let indices = a.argsort(Some(0), None).unwrap();
         let mut gathered = Vec::new();
         for &idx in indices.values() {
             gathered.push(a.values()[idx as usize]);
@@ -2738,7 +2738,7 @@ mod tests {
         let sum = x.reduce_sum(None, false).unwrap();
         assert!(sum.values()[0].is_nan(), "NaN should propagate through sum");
         // sort with NaN
-        let sorted = x.sort(Some(0)).unwrap();
+        let sorted = x.sort(Some(0), None).unwrap();
         assert_eq!(sorted.values().len(), 3);
     }
 
