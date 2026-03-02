@@ -679,13 +679,30 @@ impl UFuncArray {
             .map_err(|err| UFuncError::Msg(format!("storage cast failed: {err}")))
     }
 
+    /// Build an array from f64 values by routing through typed storage casting.
+    fn from_values_with_dtype(
+        shape: Vec<usize>,
+        values: Vec<f64>,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        Self::from_storage_with_dtype(shape, ArrayStorage::from_f64_vec(values), dtype)
+    }
+
+    /// Best-effort storage bridge for APIs that cannot return `Result`.
+    fn from_values_with_dtype_lossy(shape: Vec<usize>, values: Vec<f64>, dtype: DType) -> Self {
+        match Self::from_values_with_dtype(shape.clone(), values.clone(), dtype) {
+            Ok(array) => array,
+            Err(_) => Self {
+                shape,
+                values,
+                dtype,
+            },
+        }
+    }
+
     #[must_use]
     pub fn scalar(value: f64, dtype: DType) -> Self {
-        Self {
-            shape: Vec::new(),
-            values: vec![value],
-            dtype,
-        }
+        Self::from_values_with_dtype_lossy(Vec::new(), vec![value], dtype)
     }
 
     // ── Array creation functions ──────────────────────────────────────
@@ -693,58 +710,46 @@ impl UFuncArray {
     /// Create an array filled with zeros.
     pub fn zeros(shape: Vec<usize>, dtype: DType) -> Result<Self, UFuncError> {
         let count = element_count(&shape).map_err(UFuncError::Shape)?;
-        Ok(Self {
-            shape,
-            values: vec![0.0; count],
-            dtype,
-        })
+        Self::from_values_with_dtype(shape, vec![0.0; count], dtype)
     }
 
     /// Create a zero-filled array with the same shape and dtype as another.
     pub fn zeros_like(other: &Self) -> Self {
-        Self {
-            shape: other.shape.clone(),
-            values: vec![0.0; other.values.len()],
-            dtype: other.dtype,
-        }
+        Self::from_values_with_dtype_lossy(
+            other.shape.clone(),
+            vec![0.0; other.values.len()],
+            other.dtype,
+        )
     }
 
     /// Create an array filled with ones.
     pub fn ones(shape: Vec<usize>, dtype: DType) -> Result<Self, UFuncError> {
         let count = element_count(&shape).map_err(UFuncError::Shape)?;
-        Ok(Self {
-            shape,
-            values: vec![1.0; count],
-            dtype,
-        })
+        Self::from_values_with_dtype(shape, vec![1.0; count], dtype)
     }
 
     /// Create a ones-filled array with the same shape and dtype as another.
     pub fn ones_like(other: &Self) -> Self {
-        Self {
-            shape: other.shape.clone(),
-            values: vec![1.0; other.values.len()],
-            dtype: other.dtype,
-        }
+        Self::from_values_with_dtype_lossy(
+            other.shape.clone(),
+            vec![1.0; other.values.len()],
+            other.dtype,
+        )
     }
 
     /// Create an array filled with a given value.
     pub fn full(shape: Vec<usize>, fill_value: f64, dtype: DType) -> Result<Self, UFuncError> {
         let count = element_count(&shape).map_err(UFuncError::Shape)?;
-        Ok(Self {
-            shape,
-            values: vec![fill_value; count],
-            dtype,
-        })
+        Self::from_values_with_dtype(shape, vec![fill_value; count], dtype)
     }
 
     /// Create a filled array with the same shape and dtype as another.
     pub fn full_like(other: &Self, fill_value: f64) -> Self {
-        Self {
-            shape: other.shape.clone(),
-            values: vec![fill_value; other.values.len()],
-            dtype: other.dtype,
-        }
+        Self::from_values_with_dtype_lossy(
+            other.shape.clone(),
+            vec![fill_value; other.values.len()],
+            other.dtype,
+        )
     }
 
     /// Create an uninitialized array (filled with zeros in safe Rust).
@@ -764,36 +769,20 @@ impl UFuncArray {
         }
         let n = ((stop - start) / step).ceil().max(0.0) as usize;
         let values: Vec<f64> = (0..n).map(|i| start + step * i as f64).collect();
-        Ok(Self {
-            shape: vec![n],
-            values,
-            dtype,
-        })
+        Self::from_values_with_dtype(vec![n], values, dtype)
     }
 
     /// Create an array with evenly spaced values over a closed interval.
     pub fn linspace(start: f64, stop: f64, num: usize, dtype: DType) -> Result<Self, UFuncError> {
         if num == 0 {
-            return Ok(Self {
-                shape: vec![0],
-                values: Vec::new(),
-                dtype,
-            });
+            return Self::from_values_with_dtype(vec![0], Vec::new(), dtype);
         }
         if num == 1 {
-            return Ok(Self {
-                shape: vec![1],
-                values: vec![start],
-                dtype,
-            });
+            return Self::from_values_with_dtype(vec![1], vec![start], dtype);
         }
         let step = (stop - start) / (num - 1) as f64;
         let values: Vec<f64> = (0..num).map(|i| start + step * i as f64).collect();
-        Ok(Self {
-            shape: vec![num],
-            values,
-            dtype,
-        })
+        Self::from_values_with_dtype(vec![num], values, dtype)
     }
 
     /// Create an array with values spaced evenly on a log scale.
@@ -808,11 +797,7 @@ impl UFuncArray {
     ) -> Result<Self, UFuncError> {
         let lin = Self::linspace(start, stop, num, dtype)?;
         let values: Vec<f64> = lin.values.iter().map(|&v| base.powf(v)).collect();
-        Ok(Self {
-            shape: vec![num],
-            values,
-            dtype,
-        })
+        Self::from_values_with_dtype(vec![num], values, dtype)
     }
 
     /// Create an array with values spaced evenly on a geometric (multiplicative) scale.
@@ -825,26 +810,14 @@ impl UFuncArray {
             ));
         }
         if num == 0 {
-            return Ok(Self {
-                shape: vec![0],
-                values: Vec::new(),
-                dtype,
-            });
+            return Self::from_values_with_dtype(vec![0], Vec::new(), dtype);
         }
         if num == 1 {
-            return Ok(Self {
-                shape: vec![1],
-                values: vec![start],
-                dtype,
-            });
+            return Self::from_values_with_dtype(vec![1], vec![start], dtype);
         }
         let ratio = (stop / start).powf(1.0 / (num - 1) as f64);
         let values: Vec<f64> = (0..num).map(|i| start * ratio.powi(i as i32)).collect();
-        Ok(Self {
-            shape: vec![num],
-            values,
-            dtype,
-        })
+        Self::from_values_with_dtype(vec![num], values, dtype)
     }
 
     /// Create an array by applying a function to each index.
@@ -869,11 +842,7 @@ impl UFuncArray {
             }
             values.push(f(&idx));
         }
-        Ok(Self {
-            shape: shape.to_vec(),
-            values,
-            dtype,
-        })
+        Self::from_values_with_dtype(shape.to_vec(), values, dtype)
     }
 
     /// Construct an array from an iterator of values (np.fromiter).
@@ -881,22 +850,14 @@ impl UFuncArray {
     pub fn fromiter(iter: impl IntoIterator<Item = f64>, dtype: DType) -> Self {
         let values: Vec<f64> = iter.into_iter().collect();
         let n = values.len();
-        Self {
-            shape: vec![n],
-            values,
-            dtype,
-        }
+        Self::from_values_with_dtype_lossy(vec![n], values, dtype)
     }
 
     /// Construct a 1-D array from a byte-like buffer of f64 values (np.frombuffer).
     /// `data` is treated as raw f64 values.
     pub fn frombuffer(data: &[f64], dtype: DType) -> Self {
         let n = data.len();
-        Self {
-            shape: vec![n],
-            values: data.to_vec(),
-            dtype,
-        }
+        Self::from_values_with_dtype_lossy(vec![n], data.to_vec(), dtype)
     }
 
     /// Check if two arrays have the same shape and elements (np.array_equal).
@@ -934,11 +895,7 @@ impl UFuncArray {
         let mut shape = Vec::with_capacity(ndim + 1);
         shape.push(ndim);
         shape.extend_from_slice(dimensions);
-        Ok(Self {
-            shape,
-            values,
-            dtype,
-        })
+        Self::from_values_with_dtype(shape, values, dtype)
     }
 
     /// Create a square identity matrix.
@@ -1165,11 +1122,7 @@ impl UFuncArray {
                 .zip(&rhs.values)
                 .map(|(&lhs, &rhs)| op.apply(lhs, rhs))
                 .collect::<Vec<_>>();
-            return Ok(Self {
-                shape: out_shape,
-                values,
-                dtype: out_dtype,
-            });
+            return Self::from_values_with_dtype(out_shape, values, out_dtype);
         }
 
         let lhs_strides = contiguous_strides_elems(&self.shape);
@@ -1209,11 +1162,7 @@ impl UFuncArray {
             }
         }
 
-        Ok(Self {
-            shape: out_shape,
-            values: out_values,
-            dtype: out_dtype,
-        })
+        Self::from_values_with_dtype(out_shape, out_values, out_dtype)
     }
 
     #[must_use]
@@ -1224,11 +1173,7 @@ impl UFuncArray {
         } else {
             self.dtype
         };
-        Self {
-            shape: self.shape.clone(),
-            values,
-            dtype,
-        }
+        Self::from_values_with_dtype_lossy(self.shape.clone(), values, dtype)
     }
 
     pub fn reduce_sum(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
@@ -16713,6 +16658,56 @@ mod tests {
                 actual: 3
             }
         ));
+    }
+
+    #[test]
+    fn zeros_routes_through_storage_bridge_dtype() {
+        let arr = UFuncArray::zeros(vec![3], DType::Bool).expect("zeros");
+        assert_eq!(arr.dtype(), DType::Bool);
+        assert_eq!(arr.values(), &[0.0, 0.0, 0.0]);
+        assert_eq!(
+            arr.to_storage().expect("to_storage"),
+            ArrayStorage::Bool(vec![false, false, false])
+        );
+    }
+
+    #[test]
+    fn linspace_routes_through_storage_bridge_dtype_cast() {
+        let arr = UFuncArray::linspace(0.2, 2.8, 3, DType::I64).expect("linspace");
+        assert_eq!(arr.dtype(), DType::I64);
+        assert_eq!(arr.values(), &[0.0, 1.0, 2.0]);
+        assert_eq!(
+            arr.to_storage().expect("to_storage"),
+            ArrayStorage::I64(vec![0, 1, 2])
+        );
+    }
+
+    #[test]
+    fn elementwise_binary_bool_output_stays_storage_compatible() {
+        let lhs = UFuncArray::new(vec![3], vec![1.0, 0.0, 2.0], DType::F64).expect("lhs");
+        let rhs = UFuncArray::new(vec![3], vec![0.0, 0.0, 3.0], DType::F64).expect("rhs");
+        let out = lhs
+            .elementwise_binary(&rhs, BinaryOp::Greater)
+            .expect("binary greater");
+        assert_eq!(out.dtype(), DType::Bool);
+        assert_eq!(out.values(), &[1.0, 0.0, 0.0]);
+        assert_eq!(
+            out.to_storage().expect("to_storage"),
+            ArrayStorage::Bool(vec![true, false, false])
+        );
+    }
+
+    #[test]
+    fn elementwise_unary_bool_output_stays_storage_compatible() {
+        let arr = UFuncArray::new(vec![3], vec![1.0, f64::NAN, f64::INFINITY], DType::F64)
+            .expect("array");
+        let out = arr.elementwise_unary(UnaryOp::Isfinite);
+        assert_eq!(out.dtype(), DType::Bool);
+        assert_eq!(out.values(), &[1.0, 0.0, 0.0]);
+        assert_eq!(
+            out.to_storage().expect("to_storage"),
+            ArrayStorage::Bool(vec![true, false, false])
+        );
     }
 
     #[test]
