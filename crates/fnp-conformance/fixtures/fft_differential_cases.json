@@ -1,0 +1,345 @@
+[
+  {
+    "id": "fft_len4_golden",
+    "operation": "fft",
+    "seed": 8801,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [4],
+    "input_values": [0.0, 1.0, 2.0, 3.0],
+    "expected_shape": [4, 2],
+    "expected_values": [6.0, 0.0, -2.0, 2.0, -2.0, 0.0, -2.0, -2.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "fft_len5_bluestein_golden",
+    "operation": "fft",
+    "seed": 8802,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [4],
+    "input_values": [0.0, 1.0, 2.0, 3.0],
+    "n": 5,
+    "expected_shape": [5, 2],
+    "expected_values": [
+      6.0,
+      0.0,
+      -3.73606797749979,
+      -0.3632712640026804,
+      0.7360679774997898,
+      -1.5388417685876266,
+      0.7360679774997898,
+      1.5388417685876266,
+      -3.73606797749979,
+      0.3632712640026804
+    ],
+    "abs_tol": 1e-9,
+    "rel_tol": 1e-9
+  },
+  {
+    "id": "ifft_len4_roundtrip_golden",
+    "operation": "ifft",
+    "seed": 8803,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [4, 2],
+    "input_values": [6.0, 0.0, -2.0, 2.0, -2.0, 0.0, -2.0, -2.0],
+    "expected_shape": [4, 2],
+    "expected_values": [0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 3.0, 0.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "rfft_len4_golden",
+    "operation": "rfft",
+    "seed": 8804,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [4],
+    "input_values": [0.0, 1.0, 2.0, 3.0],
+    "expected_shape": [3, 2],
+    "expected_values": [6.0, 0.0, -2.0, 2.0, -2.0, 0.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "irfft_len4_roundtrip_golden",
+    "operation": "irfft",
+    "seed": 8805,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [3, 2],
+    "input_values": [6.0, 0.0, -2.0, 2.0, -2.0, 0.0],
+    "output_n": 4,
+    "expected_shape": [4],
+    "expected_values": [0.0, 1.0, 2.0, 3.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "fft2_2x2_golden",
+    "operation": "fft2",
+    "seed": 8806,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [2, 2],
+    "input_values": [1.0, 2.0, 3.0, 4.0],
+    "expected_shape": [2, 2, 2],
+    "expected_values": [10.0, 0.0, -2.0, 0.0, -4.0, 0.0, 0.0, 0.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "ifft2_2x2_roundtrip_golden",
+    "operation": "ifft2",
+    "seed": 8807,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [2, 2, 2],
+    "input_values": [10.0, 0.0, -2.0, 0.0, -4.0, 0.0, 0.0, 0.0],
+    "expected_shape": [2, 2, 2],
+    "expected_values": [1.0, 0.0, 2.0, 0.0, 3.0, 0.0, 4.0, 0.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "fftn_2x2x2_golden",
+    "operation": "fftn",
+    "seed": 8808,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [2, 2, 2],
+    "input_values": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+    "expected_shape": [2, 2, 2, 2],
+    "expected_values": [
+      28.0,
+      0.0,
+      -4.0,
+      0.0,
+      -8.0,
+      0.0,
+      0.0,
+      0.0,
+      -16.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "ifftn_2x2x2_roundtrip_golden",
+    "operation": "ifftn",
+    "seed": 8809,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [2, 2, 2, 2],
+    "input_values": [
+      28.0,
+      0.0,
+      -4.0,
+      0.0,
+      -8.0,
+      0.0,
+      0.0,
+      0.0,
+      -16.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "expected_shape": [2, 2, 2, 2],
+    "expected_values": [
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      2.0,
+      0.0,
+      3.0,
+      0.0,
+      4.0,
+      0.0,
+      5.0,
+      0.0,
+      6.0,
+      0.0,
+      7.0,
+      0.0
+    ],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "fftfreq_n8_d1_golden",
+    "operation": "fftfreq",
+    "seed": 8810,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "n": 8,
+    "d": 1.0,
+    "expected_shape": [8],
+    "expected_values": [0.0, 0.125, 0.25, 0.375, -0.5, -0.375, -0.25, -0.125],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "rfftfreq_n8_d1_golden",
+    "operation": "rfftfreq",
+    "seed": 8811,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "n": 8,
+    "d": 1.0,
+    "expected_shape": [5],
+    "expected_values": [0.0, 0.125, 0.25, 0.375, 0.5],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "fftshift_n8_freq_golden",
+    "operation": "fftshift",
+    "seed": 8812,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [8],
+    "input_values": [0.0, 0.125, 0.25, 0.375, -0.5, -0.375, -0.25, -0.125],
+    "expected_shape": [8],
+    "expected_values": [-0.5, -0.375, -0.25, -0.125, 0.0, 0.125, 0.25, 0.375],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "ifftshift_n8_shifted_golden",
+    "operation": "ifftshift",
+    "seed": 8813,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [8],
+    "input_values": [-0.5, -0.375, -0.25, -0.125, 0.0, 0.125, 0.25, 0.375],
+    "expected_shape": [8],
+    "expected_values": [0.0, 0.125, 0.25, 0.375, -0.5, -0.375, -0.25, -0.125],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "ifft_requires_complex_shape_error",
+    "operation": "ifft",
+    "seed": 8814,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_error",
+    "expected_reason_code": "ufunc_operation_error",
+    "input_shape": [4],
+    "input_values": [0.0, 1.0, 2.0, 3.0],
+    "expected_error_contains": "ifft: input must have shape [n, 2]"
+  },
+  {
+    "id": "fftshift_requires_1d_error",
+    "operation": "fftshift",
+    "seed": 8815,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_error",
+    "expected_reason_code": "ufunc_operation_error",
+    "input_shape": [2, 2],
+    "input_values": [1.0, 2.0, 3.0, 4.0],
+    "expected_error_contains": "fftshift: only 1-D arrays supported"
+  }
+]

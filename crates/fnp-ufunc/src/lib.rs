@@ -11771,24 +11771,24 @@ fn fft_dit(re: &mut [f64], im: &mut [f64], inverse: bool) {
             chirp_im[k] = angle.sin();
         }
 
-        // a[k] = x[k] * conj(chirp[k])  — zero-padded to m
+        // a[k] = x[k] * chirp[k]  — zero-padded to m
         let mut a_re = vec![0.0; m];
         let mut a_im = vec![0.0; m];
         for k in 0..n {
-            a_re[k] = re[k] * chirp_re[k] + im[k] * chirp_im[k];
-            a_im[k] = im[k] * chirp_re[k] - re[k] * chirp_im[k];
+            a_re[k] = re[k] * chirp_re[k] - im[k] * chirp_im[k];
+            a_im[k] = re[k] * chirp_im[k] + im[k] * chirp_re[k];
         }
 
-        // b[k] = chirp[k] for k=0..n-1, chirp[m-k] = chirp[k] for k=1..n-1, rest zero
+        // b[k] = conj(chirp[k]) for k=0..n-1, b[m-k] = conj(chirp[k]) for k=1..n-1, rest zero
         let mut b_re = vec![0.0; m];
         let mut b_im = vec![0.0; m];
         b_re[0] = chirp_re[0];
-        b_im[0] = chirp_im[0];
+        b_im[0] = -chirp_im[0];
         for k in 1..n {
             b_re[k] = chirp_re[k];
-            b_im[k] = chirp_im[k];
+            b_im[k] = -chirp_im[k];
             b_re[m - k] = chirp_re[k];
-            b_im[m - k] = chirp_im[k];
+            b_im[m - k] = -chirp_im[k];
         }
 
         // FFT both, multiply, IFFT
@@ -11805,13 +11805,12 @@ fn fft_dit(re: &mut [f64], im: &mut [f64], inverse: bool) {
 
         fft_pow2(&mut a_re, &mut a_im, true);
 
-        // Extract result: X[k] = conj(chirp[k]) * conv[k]
+        // Extract result: X[k] = chirp[k] * conv[k]
         for k in 0..n {
             let cr = chirp_re[k];
             let ci = chirp_im[k];
-            // conj(chirp) = (cr, -ci)
-            re[k] = a_re[k] * cr + a_im[k] * ci;
-            im[k] = a_im[k] * cr - a_re[k] * ci;
+            re[k] = a_re[k] * cr - a_im[k] * ci;
+            im[k] = a_re[k] * ci + a_im[k] * cr;
         }
 
         if inverse {

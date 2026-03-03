@@ -36,6 +36,7 @@ use fnp_runtime::{
     CompatibilityClass, DecisionAction, DecisionAuditContext, EvidenceLedger, RuntimeMode,
     decide_and_record_with_context, decide_compatibility_from_wire,
 };
+use fnp_ufunc::{UFuncArray, UFuncError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
@@ -733,6 +734,44 @@ struct RngAdversarialCase {
     kind: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct FftDifferentialCase {
+    id: String,
+    operation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    expected_reason_code: String,
+    #[serde(default)]
+    expected_error_contains: String,
+    #[serde(default)]
+    input_shape: Vec<usize>,
+    #[serde(default)]
+    input_values: Vec<f64>,
+    #[serde(default)]
+    n: Option<usize>,
+    #[serde(default)]
+    output_n: Option<usize>,
+    #[serde(default)]
+    d: Option<f64>,
+    #[serde(default)]
+    expected_shape: Vec<usize>,
+    #[serde(default)]
+    expected_values: Vec<f64>,
+    #[serde(default)]
+    abs_tol: f64,
+    #[serde(default)]
+    rel_tol: f64,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct IterSelectorFixtureInput {
     src_stride: isize,
@@ -1019,6 +1058,27 @@ struct RngDifferentialReportArtifact {
 }
 
 #[derive(Debug, Serialize)]
+struct FftDifferentialMismatch {
+    fixture_id: String,
+    seed: u64,
+    mode: String,
+    operation: String,
+    expected_reason_code: String,
+    actual_reason_code: String,
+    message: String,
+    artifact_refs: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct FftDifferentialReportArtifact {
+    suite: &'static str,
+    total_cases: usize,
+    passed_cases: usize,
+    failed_cases: usize,
+    mismatches: Vec<FftDifferentialMismatch>,
+}
+
+#[derive(Debug, Serialize)]
 struct IoDifferentialMismatch {
     fixture_id: String,
     seed: u64,
@@ -1186,6 +1246,13 @@ fn load_dtype_metamorphic_cases(fixture_root: &Path) -> Result<Vec<DTypeMetamorp
 
 fn load_dtype_adversarial_cases(fixture_root: &Path) -> Result<Vec<DTypeAdversarialCase>, String> {
     let path = fixture_root.join("dtype_adversarial_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
+}
+
+fn load_fft_differential_cases(fixture_root: &Path) -> Result<Vec<FftDifferentialCase>, String> {
+    let path = fixture_root.join("fft_differential_cases.json");
     let raw = fs::read_to_string(&path)
         .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
     serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
@@ -4738,6 +4805,296 @@ pub fn run_linalg_adversarial_suite(config: &HarnessConfig) -> Result<SuiteRepor
     Ok(report)
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum FftOperationOutcome {
+    Array { shape: Vec<usize>, values: Vec<f64> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FftSuiteError {
+    reason_code: String,
+    message: String,
+}
+
+impl FftSuiteError {
+    fn new(reason_code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            reason_code: reason_code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for FftSuiteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for FftSuiteError {}
+
+pub fn run_fft_differential_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let cases = load_fft_differential_cases(&config.fixture_root)?;
+
+    let mut report = SuiteReport {
+        suite: "fft_differential",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+    let mut mismatches = Vec::new();
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+        let expected_reason_code = if case.expected_reason_code.trim().is_empty() {
+            reason_code.clone()
+        } else {
+            case.expected_reason_code.trim().to_string()
+        };
+        let expected_error = case.expected_error_contains.trim().to_lowercase();
+
+        match execute_fft_differential_operation(&case) {
+            Ok(outcome) => {
+                if !expected_error.is_empty() {
+                    let rendered = format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} expected error containing '{}' but operation '{}' succeeded",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(","),
+                        case.expected_error_contains,
+                        case.operation
+                    );
+                    report.failures.push(rendered.clone());
+                    mismatches.push(FftDifferentialMismatch {
+                        fixture_id: case.id,
+                        seed: case.seed,
+                        mode,
+                        operation: case.operation,
+                        expected_reason_code,
+                        actual_reason_code: "none".to_string(),
+                        message: rendered,
+                        artifact_refs,
+                    });
+                    continue;
+                }
+
+                match validate_fft_differential_expectation(&case, &outcome) {
+                    Ok(()) => report.pass_count += 1,
+                    Err(message) => {
+                        let rendered = format!(
+                            "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} {}",
+                            case.id,
+                            case.seed,
+                            mode,
+                            reason_code,
+                            env_fingerprint,
+                            artifact_refs.join(","),
+                            message
+                        );
+                        report.failures.push(rendered.clone());
+                        mismatches.push(FftDifferentialMismatch {
+                            fixture_id: case.id,
+                            seed: case.seed,
+                            mode,
+                            operation: case.operation,
+                            expected_reason_code,
+                            actual_reason_code: "fft_differential_mismatch".to_string(),
+                            message: rendered,
+                            artifact_refs,
+                        });
+                    }
+                }
+            }
+            Err(err) => {
+                if expected_error.is_empty() {
+                    let rendered = format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} expected success but got error '{}' (reason_code={})",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(","),
+                        err.message,
+                        err.reason_code
+                    );
+                    report.failures.push(rendered.clone());
+                    mismatches.push(FftDifferentialMismatch {
+                        fixture_id: case.id,
+                        seed: case.seed,
+                        mode,
+                        operation: case.operation,
+                        expected_reason_code,
+                        actual_reason_code: err.reason_code,
+                        message: rendered,
+                        artifact_refs,
+                    });
+                    continue;
+                }
+
+                let contains_expected = err.message.to_lowercase().contains(&expected_error);
+                let reason_match = err.reason_code == expected_reason_code;
+                if contains_expected && reason_match {
+                    report.pass_count += 1;
+                } else {
+                    let rendered = format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} expected error containing '{}' with reason_code='{}' but got '{}' (reason_code='{}')",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(","),
+                        case.expected_error_contains,
+                        expected_reason_code,
+                        err.message,
+                        err.reason_code
+                    );
+                    report.failures.push(rendered.clone());
+                    mismatches.push(FftDifferentialMismatch {
+                        fixture_id: case.id,
+                        seed: case.seed,
+                        mode,
+                        operation: case.operation,
+                        expected_reason_code,
+                        actual_reason_code: err.reason_code,
+                        message: rendered,
+                        artifact_refs,
+                    });
+                }
+            }
+        }
+    }
+
+    let artifact = FftDifferentialReportArtifact {
+        suite: "fft_differential",
+        total_cases: report.case_count,
+        passed_cases: report.pass_count,
+        failed_cases: report.case_count.saturating_sub(report.pass_count),
+        mismatches,
+    };
+    let report_path = config
+        .fixture_root
+        .join("oracle_outputs/fft_differential_report.json");
+    if let Some(parent) = report_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed creating {}: {err}", parent.display()))?;
+    }
+    let payload = serde_json::to_string_pretty(&artifact)
+        .map_err(|err| format!("failed serializing fft differential report: {err}"))?;
+    fs::write(&report_path, payload.as_bytes())
+        .map_err(|err| format!("failed writing {}: {err}", report_path.display()))?;
+
+    Ok(report)
+}
+
+fn execute_fft_differential_operation(
+    case: &FftDifferentialCase,
+) -> Result<FftOperationOutcome, FftSuiteError> {
+    let to_outcome = |array: UFuncArray| FftOperationOutcome::Array {
+        shape: array.shape().to_vec(),
+        values: array.values().to_vec(),
+    };
+
+    match case.operation.as_str() {
+        "fftfreq" => {
+            let n = case.n.ok_or_else(|| {
+                FftSuiteError::new("fft_input_contract_violation", "fftfreq requires field 'n'")
+            })?;
+            Ok(to_outcome(UFuncArray::fftfreq(n, case.d.unwrap_or(1.0))))
+        }
+        "rfftfreq" => {
+            let n = case.n.ok_or_else(|| {
+                FftSuiteError::new(
+                    "fft_input_contract_violation",
+                    "rfftfreq requires field 'n'",
+                )
+            })?;
+            Ok(to_outcome(UFuncArray::rfftfreq(n, case.d.unwrap_or(1.0))))
+        }
+        operation => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_fft_suite)?;
+            let output = match operation {
+                "fft" => input.fft(case.n),
+                "ifft" => input.ifft(),
+                "rfft" => input.rfft(case.n),
+                "irfft" => input.irfft(case.output_n),
+                "fft2" => input.fft2(),
+                "ifft2" => input.ifft2(),
+                "fftn" => input.fftn(),
+                "ifftn" => input.ifftn(),
+                "fftshift" => input.fftshift(),
+                "ifftshift" => input.ifftshift(),
+                other => {
+                    return Err(FftSuiteError::new(
+                        "fft_policy_unknown_operation",
+                        format!("unsupported fft differential operation {other}"),
+                    ));
+                }
+            }
+            .map_err(map_ufunc_error_to_fft_suite)?;
+            Ok(to_outcome(output))
+        }
+    }
+}
+
+fn validate_fft_differential_expectation(
+    case: &FftDifferentialCase,
+    outcome: &FftOperationOutcome,
+) -> Result<(), String> {
+    match outcome {
+        FftOperationOutcome::Array { shape, values } => {
+            if !case.expected_shape.is_empty() && case.expected_shape != *shape {
+                return Err(format!(
+                    "shape mismatch expected={:?} actual={shape:?}",
+                    case.expected_shape
+                ));
+            }
+            if !case.expected_values.is_empty() {
+                if case.expected_values.len() != values.len() {
+                    return Err(format!(
+                        "value length mismatch expected={} actual={}",
+                        case.expected_values.len(),
+                        values.len()
+                    ));
+                }
+                let abs_tol = if case.abs_tol > 0.0 {
+                    case.abs_tol
+                } else {
+                    1e-9
+                };
+                let rel_tol = if case.rel_tol > 0.0 {
+                    case.rel_tol
+                } else {
+                    1e-9
+                };
+                if !approx_equal_values(&case.expected_values, values, abs_tol, rel_tol) {
+                    return Err(format!(
+                        "value mismatch expected={:?} actual={values:?} abs_tol={} rel_tol={}",
+                        case.expected_values, abs_tol, rel_tol
+                    ));
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn map_ufunc_error_to_fft_suite(error: UFuncError) -> FftSuiteError {
+    FftSuiteError::new(error.reason_code(), error.to_string())
+}
+
 #[derive(Debug, Clone)]
 struct RngSuiteError {
     reason_code: String,
@@ -5521,6 +5878,7 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
         run_rng_differential_suite(config)?,
         run_rng_metamorphic_suite(config)?,
         run_rng_adversarial_suite(config)?,
+        run_fft_differential_suite(config)?,
         run_linalg_differential_suite(config)?,
         run_linalg_metamorphic_suite(config)?,
         run_linalg_adversarial_suite(config)?,
@@ -6826,15 +7184,16 @@ mod tests {
     use super::{
         HarnessConfig, run_all_core_suites, run_crash_signature_regression_suite,
         run_dtype_adversarial_suite, run_dtype_differential_suite, run_dtype_metamorphic_suite,
-        run_dtype_promotion_suite, run_io_adversarial_suite, run_io_differential_suite,
-        run_io_metamorphic_suite, run_iter_adversarial_suite, run_iter_differential_suite,
-        run_iter_metamorphic_suite, run_linalg_adversarial_suite, run_linalg_differential_suite,
-        run_linalg_metamorphic_suite, run_rng_adversarial_suite, run_rng_differential_suite,
-        run_rng_metamorphic_suite, run_runtime_policy_adversarial_suite,
-        run_shape_stride_adversarial_suite, run_shape_stride_differential_suite,
-        run_shape_stride_metamorphic_suite, run_shape_stride_suite, run_smoke,
-        run_ufunc_adversarial_suite, run_ufunc_differential_suite, run_ufunc_metamorphic_suite,
-        set_dtype_promotion_log_path, set_shape_stride_log_path,
+        run_dtype_promotion_suite, run_fft_differential_suite, run_io_adversarial_suite,
+        run_io_differential_suite, run_io_metamorphic_suite, run_iter_adversarial_suite,
+        run_iter_differential_suite, run_iter_metamorphic_suite, run_linalg_adversarial_suite,
+        run_linalg_differential_suite, run_linalg_metamorphic_suite, run_rng_adversarial_suite,
+        run_rng_differential_suite, run_rng_metamorphic_suite,
+        run_runtime_policy_adversarial_suite, run_shape_stride_adversarial_suite,
+        run_shape_stride_differential_suite, run_shape_stride_metamorphic_suite,
+        run_shape_stride_suite, run_smoke, run_ufunc_adversarial_suite,
+        run_ufunc_differential_suite, run_ufunc_metamorphic_suite, set_dtype_promotion_log_path,
+        set_shape_stride_log_path,
     };
     use fnp_iter::{
         RuntimeMode as IterRuntimeMode, TRANSFER_PACKET_REASON_CODES, TransferLogRecord,
@@ -7341,6 +7700,13 @@ mod tests {
     fn rng_adversarial_suite_is_green() {
         let cfg = HarnessConfig::default_paths();
         let suite = run_rng_adversarial_suite(&cfg).expect("adversarial suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn fft_differential_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite = run_fft_differential_suite(&cfg).expect("fft differential suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 

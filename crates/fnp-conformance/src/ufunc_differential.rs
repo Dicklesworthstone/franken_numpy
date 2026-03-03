@@ -2705,10 +2705,9 @@ mod tests {
         let empty = make_arr(&[0], &[]);
         let sum_result = empty.reduce_sum(None, false);
         // Should either return 0 or error, but NOT panic
-        match sum_result {
-            Ok(s) => assert_eq!(s.values().len(), 1, "empty sum should produce scalar"),
-            Err(_) => {} // Error is also acceptable
-        }
+        if let Ok(s) = sum_result {
+            assert_eq!(s.values().len(), 1, "empty sum should produce scalar");
+        } // Error is also acceptable
     }
 
     #[test]
