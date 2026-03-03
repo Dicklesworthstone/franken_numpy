@@ -37,11 +37,11 @@ use fnp_runtime::{
     decide_and_record_with_context, decide_compatibility_from_wire,
 };
 use fnp_ufunc::{
-    StringArray, UFuncArray, UFuncError, cheb2poly, chebadd, chebdiv, chebfit, chebfromroots,
-    chebmul, chebroots, chebsub, chebval, herm2poly, hermadd, hermdiv, hermfromroots, hermmul,
-    hermroots, hermsub, hermval, lag2poly, lagadd, lagdiv, lagfromroots, lagmul, lagroots, lagsub,
-    lagval, leg2poly, legadd, legdiv, legfromroots, legmul, legroots, legsub, legval, poly2cheb,
-    poly2herm, poly2lag, poly2leg,
+    BinaryOp, MAError, MaskedArray, StringArray, UFuncArray, UFuncError, cheb2poly, chebadd,
+    chebdiv, chebfit, chebfromroots, chebmul, chebroots, chebsub, chebval, herm2poly, hermadd,
+    hermdiv, hermfromroots, hermmul, hermroots, hermsub, hermval, lag2poly, lagadd, lagdiv,
+    lagfromroots, lagmul, lagroots, lagsub, lagval, leg2poly, legadd, legdiv, legfromroots, legmul,
+    legroots, legsub, legval, poly2cheb, poly2herm, poly2lag, poly2leg,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -856,6 +856,60 @@ struct StringDifferentialCase {
     rel_tol: f64,
 }
 
+#[derive(Debug, Deserialize)]
+struct MaskedDifferentialCase {
+    id: String,
+    operation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    expected_reason_code: String,
+    #[serde(default)]
+    expected_error_contains: String,
+    #[serde(default)]
+    lhs_shape: Vec<usize>,
+    #[serde(default)]
+    lhs_values: Vec<f64>,
+    #[serde(default)]
+    lhs_mask: Vec<f64>,
+    #[serde(default)]
+    rhs_shape: Vec<usize>,
+    #[serde(default)]
+    rhs_values: Vec<f64>,
+    #[serde(default)]
+    rhs_mask: Vec<f64>,
+    #[serde(default)]
+    fill_value: Option<f64>,
+    #[serde(default)]
+    axis: Option<isize>,
+    #[serde(default)]
+    reshape_shape: Vec<isize>,
+    #[serde(default)]
+    nan_indices: Vec<usize>,
+    #[serde(default)]
+    inf_indices: Vec<usize>,
+    #[serde(default)]
+    expected_shape: Vec<usize>,
+    #[serde(default)]
+    expected_values: Vec<f64>,
+    #[serde(default)]
+    expected_mask: Vec<f64>,
+    #[serde(default)]
+    expect_mask_none: bool,
+    #[serde(default)]
+    abs_tol: f64,
+    #[serde(default)]
+    rel_tol: f64,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct IterSelectorFixtureInput {
     src_stride: isize,
@@ -1205,6 +1259,27 @@ struct StringDifferentialReportArtifact {
 }
 
 #[derive(Debug, Serialize)]
+struct MaskedDifferentialMismatch {
+    fixture_id: String,
+    seed: u64,
+    mode: String,
+    operation: String,
+    expected_reason_code: String,
+    actual_reason_code: String,
+    message: String,
+    artifact_refs: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MaskedDifferentialReportArtifact {
+    suite: &'static str,
+    total_cases: usize,
+    passed_cases: usize,
+    failed_cases: usize,
+    mismatches: Vec<MaskedDifferentialMismatch>,
+}
+
+#[derive(Debug, Serialize)]
 struct IoDifferentialMismatch {
     fixture_id: String,
     seed: u64,
@@ -1397,6 +1472,15 @@ fn load_string_differential_cases(
     fixture_root: &Path,
 ) -> Result<Vec<StringDifferentialCase>, String> {
     let path = fixture_root.join("string_differential_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
+}
+
+fn load_masked_differential_cases(
+    fixture_root: &Path,
+) -> Result<Vec<MaskedDifferentialCase>, String> {
+    let path = fixture_root.join("masked_differential_cases.json");
     let raw = fs::read_to_string(&path)
         .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
     serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
@@ -6191,6 +6275,520 @@ fn map_ufunc_error_to_string_suite(error: UFuncError) -> StringSuiteError {
     StringSuiteError::new(error.reason_code(), error.to_string())
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum MaskedOperationOutcome {
+    Array {
+        shape: Vec<usize>,
+        values: Vec<f64>,
+    },
+    Masked {
+        shape: Vec<usize>,
+        values: Vec<f64>,
+        mask: Option<Vec<f64>>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MaskedSuiteError {
+    reason_code: String,
+    message: String,
+}
+
+impl MaskedSuiteError {
+    fn new(reason_code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            reason_code: reason_code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for MaskedSuiteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for MaskedSuiteError {}
+
+pub fn run_masked_differential_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let cases = load_masked_differential_cases(&config.fixture_root)?;
+    let mut report = SuiteReport {
+        suite: "masked_differential",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+    let mut mismatches = Vec::new();
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+        let expected_reason_code = if case.expected_reason_code.trim().is_empty() {
+            reason_code.clone()
+        } else {
+            case.expected_reason_code.trim().to_string()
+        };
+        let expected_error = case.expected_error_contains.trim().to_lowercase();
+
+        match execute_masked_differential_operation(&case) {
+            Ok(outcome) => {
+                if !expected_error.is_empty() {
+                    let rendered = format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} expected error containing '{}' but operation '{}' succeeded",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(","),
+                        case.expected_error_contains,
+                        case.operation
+                    );
+                    report.failures.push(rendered.clone());
+                    mismatches.push(MaskedDifferentialMismatch {
+                        fixture_id: case.id,
+                        seed: case.seed,
+                        mode,
+                        operation: case.operation,
+                        expected_reason_code,
+                        actual_reason_code: "none".to_string(),
+                        message: rendered,
+                        artifact_refs,
+                    });
+                    continue;
+                }
+
+                match validate_masked_differential_expectation(&case, &outcome) {
+                    Ok(()) => {
+                        report.pass_count += 1;
+                    }
+                    Err(message) => {
+                        let rendered = format!(
+                            "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} {}",
+                            case.id,
+                            case.seed,
+                            mode,
+                            reason_code,
+                            env_fingerprint,
+                            artifact_refs.join(","),
+                            message
+                        );
+                        report.failures.push(rendered.clone());
+                        mismatches.push(MaskedDifferentialMismatch {
+                            fixture_id: case.id,
+                            seed: case.seed,
+                            mode,
+                            operation: case.operation,
+                            expected_reason_code,
+                            actual_reason_code: reason_code,
+                            message: rendered,
+                            artifact_refs,
+                        });
+                    }
+                }
+            }
+            Err(error) => {
+                let error_lower = error.message.to_lowercase();
+                if expected_error.is_empty() {
+                    let rendered = format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} operation '{}' failed unexpectedly with reason_code={} message={}",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(","),
+                        case.operation,
+                        error.reason_code,
+                        error.message
+                    );
+                    report.failures.push(rendered.clone());
+                    mismatches.push(MaskedDifferentialMismatch {
+                        fixture_id: case.id,
+                        seed: case.seed,
+                        mode,
+                        operation: case.operation,
+                        expected_reason_code,
+                        actual_reason_code: error.reason_code,
+                        message: rendered,
+                        artifact_refs,
+                    });
+                    continue;
+                }
+
+                if !error_lower.contains(&expected_error) {
+                    let rendered = format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} expected error containing '{}' but got '{}'",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(","),
+                        case.expected_error_contains,
+                        error.message
+                    );
+                    report.failures.push(rendered.clone());
+                    mismatches.push(MaskedDifferentialMismatch {
+                        fixture_id: case.id,
+                        seed: case.seed,
+                        mode,
+                        operation: case.operation,
+                        expected_reason_code,
+                        actual_reason_code: error.reason_code,
+                        message: rendered,
+                        artifact_refs,
+                    });
+                    continue;
+                }
+
+                if expected_reason_code != error.reason_code {
+                    let rendered = format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} expected reason_code='{}' but got '{}'",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(","),
+                        expected_reason_code,
+                        error.reason_code
+                    );
+                    report.failures.push(rendered.clone());
+                    mismatches.push(MaskedDifferentialMismatch {
+                        fixture_id: case.id,
+                        seed: case.seed,
+                        mode,
+                        operation: case.operation,
+                        expected_reason_code,
+                        actual_reason_code: error.reason_code,
+                        message: rendered,
+                        artifact_refs,
+                    });
+                    continue;
+                }
+
+                report.pass_count += 1;
+            }
+        }
+    }
+
+    let artifact = MaskedDifferentialReportArtifact {
+        suite: report.suite,
+        total_cases: report.case_count,
+        passed_cases: report.pass_count,
+        failed_cases: report.case_count.saturating_sub(report.pass_count),
+        mismatches,
+    };
+    let report_path = config
+        .fixture_root
+        .join("oracle_outputs/masked_differential_report.json");
+    if let Some(parent) = report_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed creating {}: {err}", parent.display()))?;
+    }
+    let payload = serde_json::to_string_pretty(&artifact)
+        .map_err(|err| format!("failed serializing masked differential report: {err}"))?;
+    fs::write(&report_path, payload.as_bytes())
+        .map_err(|err| format!("failed writing {}: {err}", report_path.display()))?;
+
+    Ok(report)
+}
+
+fn execute_masked_differential_operation(
+    case: &MaskedDifferentialCase,
+) -> Result<MaskedOperationOutcome, MaskedSuiteError> {
+    let mut lhs = masked_values_to_array(
+        &case.lhs_shape,
+        &case.lhs_values,
+        &case.lhs_mask,
+        case.fill_value,
+        &case.nan_indices,
+        &case.inf_indices,
+    )?;
+    if let Some(fill_value) = case.fill_value {
+        lhs.set_fill_value(fill_value);
+    }
+
+    let mut rhs = if case.rhs_values.is_empty() {
+        None
+    } else {
+        let rhs_array = masked_values_to_array(
+            &case.rhs_shape,
+            &case.rhs_values,
+            &case.rhs_mask,
+            case.fill_value,
+            &[],
+            &[],
+        )?;
+        Some(rhs_array)
+    };
+    if let Some(fill_value) = case.fill_value
+        && let Some(rhs_array) = rhs.as_mut()
+    {
+        rhs_array.set_fill_value(fill_value);
+    }
+
+    match case.operation.as_str() {
+        "add" => {
+            let rhs = rhs.ok_or_else(|| {
+                MaskedSuiteError::new("masked_input_contract_violation", "add requires rhs_values")
+            })?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::Add)
+                .map_err(map_ma_error_to_masked_suite)?;
+            Ok(masked_array_to_outcome(&result))
+        }
+        "equal" => {
+            let rhs = rhs.ok_or_else(|| {
+                MaskedSuiteError::new(
+                    "masked_input_contract_violation",
+                    "equal requires rhs_values",
+                )
+            })?;
+            let result = lhs.equal(&rhs).map_err(map_ma_error_to_masked_suite)?;
+            Ok(masked_array_to_outcome(&result))
+        }
+        "greater_than" => {
+            let rhs = rhs.ok_or_else(|| {
+                MaskedSuiteError::new(
+                    "masked_input_contract_violation",
+                    "greater_than requires rhs_values",
+                )
+            })?;
+            let result = lhs
+                .greater_than(&rhs)
+                .map_err(map_ma_error_to_masked_suite)?;
+            Ok(masked_array_to_outcome(&result))
+        }
+        "filled" => {
+            let fill_value = case.fill_value.unwrap_or_else(|| lhs.fill_value());
+            let result = lhs.filled(fill_value);
+            Ok(MaskedOperationOutcome::Array {
+                shape: result.shape().to_vec(),
+                values: result.values().to_vec(),
+            })
+        }
+        "compressed" => {
+            let result = lhs.compressed();
+            Ok(MaskedOperationOutcome::Array {
+                shape: result.shape().to_vec(),
+                values: result.values().to_vec(),
+            })
+        }
+        "reshape" => {
+            if case.reshape_shape.is_empty() {
+                return Err(MaskedSuiteError::new(
+                    "masked_input_contract_violation",
+                    "reshape requires reshape_shape",
+                ));
+            }
+            let result = lhs
+                .reshape(&case.reshape_shape)
+                .map_err(map_ma_error_to_masked_suite)?;
+            Ok(masked_array_to_outcome(&result))
+        }
+        "concatenate" => {
+            let rhs = rhs.ok_or_else(|| {
+                MaskedSuiteError::new(
+                    "masked_input_contract_violation",
+                    "concatenate requires rhs_values",
+                )
+            })?;
+            let axis = case.axis.unwrap_or(0);
+            let result = MaskedArray::concatenate(&[&lhs, &rhs], axis)
+                .map_err(map_ma_error_to_masked_suite)?;
+            Ok(masked_array_to_outcome(&result))
+        }
+        "anom" => {
+            let result = lhs.anom().map_err(map_ma_error_to_masked_suite)?;
+            Ok(masked_array_to_outcome(&result))
+        }
+        "fix_invalid" => {
+            lhs.fix_invalid();
+            Ok(masked_array_to_outcome(&lhs))
+        }
+        "shrink_mask" => {
+            lhs.shrink_mask();
+            Ok(masked_array_to_outcome(&lhs))
+        }
+        other => Err(MaskedSuiteError::new(
+            "masked_policy_unknown_operation",
+            format!("unsupported masked differential operation {other}"),
+        )),
+    }
+}
+
+fn validate_masked_differential_expectation(
+    case: &MaskedDifferentialCase,
+    outcome: &MaskedOperationOutcome,
+) -> Result<(), String> {
+    let abs_tol = if case.abs_tol > 0.0 {
+        case.abs_tol
+    } else {
+        1e-9
+    };
+    let rel_tol = if case.rel_tol > 0.0 {
+        case.rel_tol
+    } else {
+        1e-9
+    };
+
+    let check_shape = |expected: &[usize], actual: &[usize]| -> Result<(), String> {
+        if expected.is_empty() {
+            return Ok(());
+        }
+        if expected != actual {
+            return Err(format!(
+                "shape mismatch expected={expected:?} actual={actual:?}"
+            ));
+        }
+        Ok(())
+    };
+
+    let check_values = |expected: &[f64], actual: &[f64], label: &str| -> Result<(), String> {
+        if expected.len() != actual.len() {
+            return Err(format!(
+                "{label} length mismatch expected={} actual={}",
+                expected.len(),
+                actual.len()
+            ));
+        }
+        if !approx_equal_values(expected, actual, abs_tol, rel_tol) {
+            return Err(format!(
+                "{label} mismatch expected={expected:?} actual={actual:?} abs_tol={abs_tol} rel_tol={rel_tol}"
+            ));
+        }
+        Ok(())
+    };
+
+    match outcome {
+        MaskedOperationOutcome::Array { shape, values } => {
+            check_shape(&case.expected_shape, shape)?;
+            check_values(&case.expected_values, values, "values")?;
+            Ok(())
+        }
+        MaskedOperationOutcome::Masked {
+            shape,
+            values,
+            mask,
+        } => {
+            check_shape(&case.expected_shape, shape)?;
+            check_values(&case.expected_values, values, "values")?;
+            if case.expect_mask_none {
+                if mask.is_some() {
+                    return Err(format!("expected mask=None but found mask={mask:?}"));
+                }
+                return Ok(());
+            }
+            if !case.expected_mask.is_empty() {
+                let actual_mask = mask.as_ref().ok_or_else(|| {
+                    "expected mask values but operation returned mask=None".to_string()
+                })?;
+                check_values(&case.expected_mask, actual_mask, "mask")?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn masked_values_to_array(
+    shape_hint: &[usize],
+    values: &[f64],
+    mask_values: &[f64],
+    fill_value: Option<f64>,
+    nan_indices: &[usize],
+    inf_indices: &[usize],
+) -> Result<MaskedArray, MaskedSuiteError> {
+    let shape = if shape_hint.is_empty() {
+        vec![values.len()]
+    } else {
+        shape_hint.to_vec()
+    };
+    let expected_len = shape.iter().product::<usize>();
+    if expected_len != values.len() {
+        return Err(MaskedSuiteError::new(
+            "masked_input_contract_violation",
+            format!(
+                "values length {} does not match shape {shape:?} (len={expected_len})",
+                values.len()
+            ),
+        ));
+    }
+    let mut data_values = values.to_vec();
+    for &idx in nan_indices {
+        if idx >= data_values.len() {
+            return Err(MaskedSuiteError::new(
+                "masked_input_contract_violation",
+                format!(
+                    "nan index {idx} out of bounds for len={}",
+                    data_values.len()
+                ),
+            ));
+        }
+        data_values[idx] = f64::NAN;
+    }
+    for &idx in inf_indices {
+        if idx >= data_values.len() {
+            return Err(MaskedSuiteError::new(
+                "masked_input_contract_violation",
+                format!(
+                    "inf index {idx} out of bounds for len={}",
+                    data_values.len()
+                ),
+            ));
+        }
+        data_values[idx] = f64::INFINITY;
+    }
+
+    let data = UFuncArray::new(shape.clone(), data_values, DType::F64)
+        .map_err(map_ufunc_error_to_masked_suite)?;
+    let mask = if mask_values.is_empty() {
+        None
+    } else {
+        if mask_values.len() != expected_len {
+            return Err(MaskedSuiteError::new(
+                "masked_input_contract_violation",
+                format!(
+                    "mask length {} does not match shape {shape:?} (len={expected_len})",
+                    mask_values.len()
+                ),
+            ));
+        }
+        Some(
+            UFuncArray::new(shape.clone(), mask_values.to_vec(), DType::Bool)
+                .map_err(map_ufunc_error_to_masked_suite)?,
+        )
+    };
+
+    MaskedArray::new(data, mask, fill_value).map_err(map_ma_error_to_masked_suite)
+}
+
+fn masked_array_to_outcome(array: &MaskedArray) -> MaskedOperationOutcome {
+    MaskedOperationOutcome::Masked {
+        shape: array.shape().to_vec(),
+        values: array.data().values().to_vec(),
+        mask: array.mask().map(|m| m.values().to_vec()),
+    }
+}
+
+fn map_ufunc_error_to_masked_suite(error: UFuncError) -> MaskedSuiteError {
+    MaskedSuiteError::new(error.reason_code(), error.to_string())
+}
+
+fn map_ma_error_to_masked_suite(error: MAError) -> MaskedSuiteError {
+    match error {
+        MAError::UFunc(inner) => map_ufunc_error_to_masked_suite(inner),
+        MAError::MaskShapeMismatch { .. } => {
+            MaskedSuiteError::new("masked_shape_mismatch", error.to_string())
+        }
+        MAError::Msg(_) => MaskedSuiteError::new("masked_operation_error", error.to_string()),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RngSuiteError {
     reason_code: String,
@@ -6975,6 +7573,7 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
         run_rng_metamorphic_suite(config)?,
         run_rng_adversarial_suite(config)?,
         run_string_differential_suite(config)?,
+        run_masked_differential_suite(config)?,
         run_polynomial_differential_suite(config)?,
         run_fft_differential_suite(config)?,
         run_linalg_differential_suite(config)?,
@@ -8285,7 +8884,7 @@ mod tests {
         run_dtype_promotion_suite, run_fft_differential_suite, run_io_adversarial_suite,
         run_io_differential_suite, run_io_metamorphic_suite, run_iter_adversarial_suite,
         run_iter_differential_suite, run_iter_metamorphic_suite, run_linalg_adversarial_suite,
-        run_linalg_differential_suite, run_linalg_metamorphic_suite,
+        run_linalg_differential_suite, run_linalg_metamorphic_suite, run_masked_differential_suite,
         run_polynomial_differential_suite, run_rng_adversarial_suite, run_rng_differential_suite,
         run_rng_metamorphic_suite, run_runtime_policy_adversarial_suite,
         run_shape_stride_adversarial_suite, run_shape_stride_differential_suite,
@@ -8814,6 +9413,14 @@ mod tests {
         let cfg = HarnessConfig::default_paths();
         let suite =
             run_string_differential_suite(&cfg).expect("string differential suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn masked_differential_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite =
+            run_masked_differential_suite(&cfg).expect("masked differential suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 
