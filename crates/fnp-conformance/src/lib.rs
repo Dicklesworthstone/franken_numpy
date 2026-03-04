@@ -29,7 +29,7 @@ use fnp_linalg::{
 };
 use fnp_ndarray::{MemoryOrder, NdLayout, broadcast_shape, contiguous_strides};
 use fnp_random::{
-    BitGenerator, BitGeneratorError, BitGeneratorKind, DeterministicRng, RandomError,
+    BitGenerator, BitGeneratorError, BitGeneratorKind, DeterministicRng, Generator, RandomError,
     RandomPolicyError, SeedMaterial, SeedSequence, SeedSequenceError, validate_rng_policy_metadata,
 };
 use fnp_runtime::{
@@ -742,6 +742,52 @@ struct RngAdversarialCase {
 }
 
 #[derive(Debug, Deserialize)]
+struct RngStatisticalCase {
+    id: String,
+    distribution: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    draws: usize,
+    #[serde(default)]
+    param_a: f64,
+    #[serde(default)]
+    param_b: f64,
+    #[serde(default)]
+    param_c: f64,
+    #[serde(default)]
+    param_d: f64,
+    #[serde(default)]
+    expected_mean: Option<f64>,
+    #[serde(default)]
+    expected_variance: Option<f64>,
+    #[serde(default = "default_rng_mean_abs_tol")]
+    mean_abs_tol: f64,
+    #[serde(default = "default_rng_variance_abs_tol")]
+    variance_abs_tol: f64,
+    #[serde(default)]
+    support_min: Option<f64>,
+    #[serde(default)]
+    support_max: Option<f64>,
+    #[serde(default = "default_true")]
+    support_min_inclusive: bool,
+    #[serde(default = "default_true")]
+    support_max_inclusive: bool,
+    #[serde(default)]
+    ks_distribution: String,
+    #[serde(default)]
+    ks_alpha: f64,
+}
+
+#[derive(Debug, Deserialize)]
 struct FftDifferentialCase {
     id: String,
     operation: String,
@@ -1430,6 +1476,14 @@ fn default_true() -> bool {
     true
 }
 
+fn default_rng_mean_abs_tol() -> f64 {
+    0.1
+}
+
+fn default_rng_variance_abs_tol() -> f64 {
+    0.2
+}
+
 pub fn set_runtime_policy_log_path(path: Option<PathBuf>) {
     let cell = RUNTIME_POLICY_LOG_PATH.get_or_init(|| Mutex::new(None));
     if let Ok(mut slot) = cell.lock() {
@@ -1556,6 +1610,13 @@ fn load_datetime_differential_cases(
     fixture_root: &Path,
 ) -> Result<Vec<DateTimeDifferentialCase>, String> {
     let path = fixture_root.join("datetime_differential_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
+}
+
+fn load_rng_statistical_cases(fixture_root: &Path) -> Result<Vec<RngStatisticalCase>, String> {
+    let path = fixture_root.join("rng_statistical_cases.json");
     let raw = fs::read_to_string(&path)
         .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
     serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
@@ -7637,6 +7698,44 @@ pub fn run_rng_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport, 
     Ok(report)
 }
 
+pub fn run_rng_statistical_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let cases = load_rng_statistical_cases(&config.fixture_root)?;
+    let mut report = SuiteReport {
+        suite: "rng_statistical",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+
+        match evaluate_rng_statistical_case(&case) {
+            Ok(()) => {
+                report.pass_count += 1;
+            }
+            Err(err) => {
+                report.failures.push(format!(
+                    "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} {} (actual_reason_code={})",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    err.message,
+                    err.reason_code
+                ));
+            }
+        }
+    }
+
+    Ok(report)
+}
+
 pub fn run_io_differential_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
     let path = config.fixture_root.join("io_differential_cases.json");
     let raw = fs::read_to_string(&path)
@@ -8154,6 +8253,7 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
         run_rng_differential_suite(config)?,
         run_rng_metamorphic_suite(config)?,
         run_rng_adversarial_suite(config)?,
+        run_rng_statistical_suite(config)?,
         run_string_differential_suite(config)?,
         run_masked_differential_suite(config)?,
         run_datetime_differential_suite(config)?,
@@ -8782,6 +8882,443 @@ const DEFAULT_RNG_PREFIX_DRAWS: usize = 8;
 const DEFAULT_RNG_JUMP_STEPS: u64 = 32;
 const RNG_MAX_JUMP_OPS: u64 = 1024;
 const RNG_MAX_STATE_SCHEMA_FIELDS: u64 = 4096;
+const DEFAULT_RNG_STAT_DRAWS: usize = 8_192;
+const DEFAULT_RNG_KS_ALPHA: f64 = 0.01;
+const KS_CRITICAL_01: f64 = 1.63;
+const KS_CRITICAL_05: f64 = 1.36;
+
+fn evaluate_rng_statistical_case(case: &RngStatisticalCase) -> Result<(), RngSuiteError> {
+    let draws = case.draws.max(DEFAULT_RNG_STAT_DRAWS);
+    let reason_code = if case.reason_code.trim().is_empty() {
+        "random_distribution_statistical_contract".to_string()
+    } else {
+        case.reason_code.trim().to_string()
+    };
+
+    let samples = generate_rng_samples(case, draws)?;
+    if samples.is_empty() {
+        return Err(RngSuiteError::new(
+            reason_code.clone(),
+            "statistical sample set is empty",
+        ));
+    }
+
+    let (sample_mean, sample_variance) = sample_mean_variance(&samples);
+    if let Some(expected_mean) = case.expected_mean
+        && (sample_mean - expected_mean).abs() > case.mean_abs_tol
+    {
+        return Err(RngSuiteError::new(
+            reason_code.clone(),
+            format!(
+                "sample mean mismatch expected={} actual={} abs_tol={}",
+                expected_mean, sample_mean, case.mean_abs_tol
+            ),
+        ));
+    }
+    if let Some(expected_variance) = case.expected_variance
+        && (sample_variance - expected_variance).abs() > case.variance_abs_tol
+    {
+        return Err(RngSuiteError::new(
+            reason_code.clone(),
+            format!(
+                "sample variance mismatch expected={} actual={} abs_tol={}",
+                expected_variance, sample_variance, case.variance_abs_tol
+            ),
+        ));
+    }
+
+    validate_rng_support_bounds(case, &samples, &reason_code)?;
+
+    let ks_distribution = case.ks_distribution.trim();
+    if !ks_distribution.is_empty() {
+        let statistic = ks_statistic(case, &samples).map_err(|detail| {
+            RngSuiteError::new(reason_code.clone(), format!("ks setup failed: {detail}"))
+        })?;
+        let alpha = if case.ks_alpha > 0.0 {
+            case.ks_alpha
+        } else {
+            DEFAULT_RNG_KS_ALPHA
+        };
+        let critical = ks_critical_value(samples.len(), alpha);
+        if statistic > critical {
+            return Err(RngSuiteError::new(
+                reason_code,
+                format!(
+                    "ks statistic {} exceeded critical {} (alpha={}, n={})",
+                    statistic,
+                    critical,
+                    alpha,
+                    samples.len()
+                ),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn generate_rng_samples(
+    case: &RngStatisticalCase,
+    draws: usize,
+) -> Result<Vec<f64>, RngSuiteError> {
+    let mut generator =
+        Generator::from_pcg64_dxsm(case.seed).map_err(map_seedsequence_error_to_rng_suite)?;
+    match case.distribution.as_str() {
+        "random" => Ok(generator.random(draws)),
+        "uniform" => Ok(generator.uniform(case.param_a, case.param_b, draws)),
+        "standard_normal" => Ok(generator.standard_normal(draws)),
+        "normal" => Ok(generator.normal(case.param_a, case.param_b, draws)),
+        "standard_exponential" => Ok(generator.standard_exponential(draws)),
+        "exponential" => Ok(generator.exponential(case.param_a, draws)),
+        "standard_gamma" => Ok(generator.standard_gamma(case.param_a, draws)),
+        "integers" => {
+            let low = f64_to_i64_param(case.param_a, "param_a")?;
+            let high = f64_to_i64_param(case.param_b, "param_b")?;
+            generator
+                .integers(low, high, draws)
+                .map(|values| values.into_iter().map(|value| value as f64).collect())
+                .map_err(map_random_error_to_rng_suite)
+        }
+        "poisson" => Ok(generator
+            .poisson(case.param_a, draws)
+            .into_iter()
+            .map(|value| value as f64)
+            .collect()),
+        "binomial" => {
+            let n = f64_to_u64_param(case.param_a, "param_a")?;
+            Ok(generator
+                .binomial(n, case.param_b, draws)
+                .into_iter()
+                .map(|value| value as f64)
+                .collect())
+        }
+        "gamma" => Ok(generator.gamma(case.param_a, case.param_b, draws)),
+        "beta" => Ok(generator.beta(case.param_a, case.param_b, draws)),
+        "geometric" => Ok(generator
+            .geometric(case.param_a, draws)
+            .into_iter()
+            .map(|value| value as f64)
+            .collect()),
+        "lognormal" => Ok(generator.lognormal(case.param_a, case.param_b, draws)),
+        "chisquare" => Ok(generator.chisquare(case.param_a, draws)),
+        "standard_cauchy" => Ok(generator.standard_cauchy(draws)),
+        "triangular" => Ok(generator.triangular(case.param_a, case.param_b, case.param_c, draws)),
+        "laplace" => Ok(generator.laplace(case.param_a, case.param_b, draws)),
+        "gumbel" => Ok(generator.gumbel(case.param_a, case.param_b, draws)),
+        "weibull" => Ok(generator.weibull(case.param_a, draws)),
+        "negative_binomial" => Ok(generator
+            .negative_binomial(case.param_a, case.param_b, draws)
+            .into_iter()
+            .map(|value| value as f64)
+            .collect()),
+        "f_distribution" => Ok(generator.f_distribution(case.param_a, case.param_b, draws)),
+        "standard_t" => Ok(generator.standard_t(case.param_a, draws)),
+        "noncentral_chisquare" => {
+            Ok(generator.noncentral_chisquare(case.param_a, case.param_b, draws))
+        }
+        "noncentral_f" => {
+            Ok(generator.noncentral_f(case.param_a, case.param_b, case.param_c, draws))
+        }
+        "power" => Ok(generator.power(case.param_a, draws)),
+        "vonmises" => Ok(generator.vonmises(case.param_a, case.param_b, draws)),
+        "rayleigh" => Ok(generator.rayleigh(case.param_a, draws)),
+        "pareto" => Ok(generator.pareto(case.param_a, draws)),
+        "logistic" => Ok(generator.logistic(case.param_a, case.param_b, draws)),
+        "hypergeometric" => {
+            let ngood = f64_to_u64_param(case.param_a, "param_a")?;
+            let nbad = f64_to_u64_param(case.param_b, "param_b")?;
+            let nsample = f64_to_u64_param(case.param_c, "param_c")?;
+            Ok(generator
+                .hypergeometric(ngood, nbad, nsample, draws)
+                .into_iter()
+                .map(|value| value as f64)
+                .collect())
+        }
+        "zipf" => Ok(generator.zipf(case.param_a, draws)),
+        "wald" => Ok(generator.wald(case.param_a, case.param_b, draws)),
+        "logseries" => Ok(generator
+            .logseries(case.param_a, draws)
+            .into_iter()
+            .map(|value| value as f64)
+            .collect()),
+        "maxwell" => Ok(generator.maxwell(case.param_a, draws)),
+        "halfnormal" => Ok(generator.halfnormal(case.param_a, draws)),
+        "truncated_normal" => Ok(generator.truncated_normal(
+            case.param_a,
+            case.param_b,
+            case.param_c,
+            case.param_d,
+            draws,
+        )),
+        "lomax" => Ok(generator.lomax(case.param_a, draws)),
+        "levy" => Ok(generator.levy(case.param_a, case.param_b, draws)),
+        other => Err(RngSuiteError::new(
+            "rng_policy_unknown_metadata",
+            format!("unsupported statistical distribution {other}"),
+        )),
+    }
+}
+
+fn f64_to_i64_param(value: f64, label: &str) -> Result<i64, RngSuiteError> {
+    if !value.is_finite() || value.fract() != 0.0 {
+        return Err(RngSuiteError::new(
+            "rng_policy_unknown_metadata",
+            format!("{label} must be a finite integer-like value"),
+        ));
+    }
+    if value < i64::MIN as f64 || value > i64::MAX as f64 {
+        return Err(RngSuiteError::new(
+            "rng_policy_unknown_metadata",
+            format!("{label} out of i64 bounds"),
+        ));
+    }
+    Ok(value as i64)
+}
+
+fn f64_to_u64_param(value: f64, label: &str) -> Result<u64, RngSuiteError> {
+    if !value.is_finite() || value.fract() != 0.0 || value < 0.0 {
+        return Err(RngSuiteError::new(
+            "rng_policy_unknown_metadata",
+            format!("{label} must be a non-negative finite integer-like value"),
+        ));
+    }
+    if value > u64::MAX as f64 {
+        return Err(RngSuiteError::new(
+            "rng_policy_unknown_metadata",
+            format!("{label} out of u64 bounds"),
+        ));
+    }
+    Ok(value as u64)
+}
+
+fn sample_mean_variance(samples: &[f64]) -> (f64, f64) {
+    let n = samples.len() as f64;
+    let mean = samples.iter().sum::<f64>() / n;
+    let variance = samples
+        .iter()
+        .map(|sample| {
+            let diff = sample - mean;
+            diff * diff
+        })
+        .sum::<f64>()
+        / n;
+    (mean, variance)
+}
+
+fn validate_rng_support_bounds(
+    case: &RngStatisticalCase,
+    samples: &[f64],
+    reason_code: &str,
+) -> Result<(), RngSuiteError> {
+    if let Some(min_bound) = case.support_min {
+        let invalid = samples.iter().enumerate().find(|(_, sample)| {
+            if case.support_min_inclusive {
+                **sample < min_bound
+            } else {
+                **sample <= min_bound
+            }
+        });
+        if let Some((index, sample)) = invalid {
+            return Err(RngSuiteError::new(
+                reason_code.to_string(),
+                format!(
+                    "support minimum violated at index {}: sample={} bound={} inclusive={}",
+                    index, sample, min_bound, case.support_min_inclusive
+                ),
+            ));
+        }
+    }
+
+    if let Some(max_bound) = case.support_max {
+        let invalid = samples.iter().enumerate().find(|(_, sample)| {
+            if case.support_max_inclusive {
+                **sample > max_bound
+            } else {
+                **sample >= max_bound
+            }
+        });
+        if let Some((index, sample)) = invalid {
+            return Err(RngSuiteError::new(
+                reason_code.to_string(),
+                format!(
+                    "support maximum violated at index {}: sample={} bound={} inclusive={}",
+                    index, sample, max_bound, case.support_max_inclusive
+                ),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn ks_statistic(case: &RngStatisticalCase, samples: &[f64]) -> Result<f64, String> {
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(|lhs, rhs| lhs.total_cmp(rhs));
+    let n = sorted.len() as f64;
+
+    let cdf = build_ks_cdf(case)?;
+    let mut max_distance = 0.0f64;
+    for (index, sample) in sorted.iter().enumerate() {
+        let empirical_upper = (index as f64 + 1.0) / n;
+        let empirical_lower = index as f64 / n;
+        let expected = cdf(*sample).clamp(0.0, 1.0);
+        let diff_upper = (empirical_upper - expected).abs();
+        let diff_lower = (expected - empirical_lower).abs();
+        max_distance = max_distance.max(diff_upper.max(diff_lower));
+    }
+
+    Ok(max_distance)
+}
+
+fn ks_critical_value(sample_len: usize, alpha: f64) -> f64 {
+    let factor = if alpha <= 0.01 {
+        KS_CRITICAL_01
+    } else {
+        KS_CRITICAL_05
+    };
+    factor / (sample_len as f64).sqrt()
+}
+
+fn build_ks_cdf(case: &RngStatisticalCase) -> Result<Box<dyn Fn(f64) -> f64>, String> {
+    match case.ks_distribution.as_str() {
+        "uniform" => {
+            let low = case.param_a;
+            let high = case.param_b;
+            if !(low.is_finite() && high.is_finite() && high > low) {
+                return Err("uniform ks parameters require finite high > low".to_string());
+            }
+            Ok(Box::new(move |x| {
+                if x < low {
+                    0.0
+                } else if x >= high {
+                    1.0
+                } else {
+                    (x - low) / (high - low)
+                }
+            }))
+        }
+        "normal" => {
+            let mean = case.param_a;
+            let std_dev = case.param_b;
+            if !(mean.is_finite() && std_dev.is_finite() && std_dev > 0.0) {
+                return Err("normal ks parameters require finite std_dev > 0".to_string());
+            }
+            Ok(Box::new(move |x| {
+                let z = (x - mean) / (std_dev * std::f64::consts::SQRT_2);
+                0.5 * (1.0 + erf_approx(z))
+            }))
+        }
+        "exponential" => {
+            let scale = case.param_a;
+            if !(scale.is_finite() && scale > 0.0) {
+                return Err("exponential ks parameters require finite scale > 0".to_string());
+            }
+            Ok(Box::new(move |x| {
+                if x <= 0.0 {
+                    0.0
+                } else {
+                    1.0 - (-x / scale).exp()
+                }
+            }))
+        }
+        "cauchy" => {
+            let loc = case.param_a;
+            let scale = case.param_b;
+            if !(loc.is_finite() && scale.is_finite() && scale > 0.0) {
+                return Err("cauchy ks parameters require finite scale > 0".to_string());
+            }
+            Ok(Box::new(move |x| {
+                0.5 + ((x - loc) / scale).atan() / std::f64::consts::PI
+            }))
+        }
+        "logistic" => {
+            let loc = case.param_a;
+            let scale = case.param_b;
+            if !(loc.is_finite() && scale.is_finite() && scale > 0.0) {
+                return Err("logistic ks parameters require finite scale > 0".to_string());
+            }
+            Ok(Box::new(move |x| 1.0 / (1.0 + (-(x - loc) / scale).exp())))
+        }
+        "laplace" => {
+            let loc = case.param_a;
+            let scale = case.param_b;
+            if !(loc.is_finite() && scale.is_finite() && scale > 0.0) {
+                return Err("laplace ks parameters require finite scale > 0".to_string());
+            }
+            Ok(Box::new(move |x| {
+                if x < loc {
+                    0.5 * ((x - loc) / scale).exp()
+                } else {
+                    1.0 - 0.5 * (-(x - loc) / scale).exp()
+                }
+            }))
+        }
+        "gumbel" => {
+            let loc = case.param_a;
+            let scale = case.param_b;
+            if !(loc.is_finite() && scale.is_finite() && scale > 0.0) {
+                return Err("gumbel ks parameters require finite scale > 0".to_string());
+            }
+            Ok(Box::new(move |x| {
+                let z = (x - loc) / scale;
+                (-(-z).exp()).exp()
+            }))
+        }
+        "rayleigh" => {
+            let scale = case.param_a;
+            if !(scale.is_finite() && scale > 0.0) {
+                return Err("rayleigh ks parameters require finite scale > 0".to_string());
+            }
+            Ok(Box::new(move |x| {
+                if x <= 0.0 {
+                    0.0
+                } else {
+                    1.0 - (-(x * x) / (2.0 * scale * scale)).exp()
+                }
+            }))
+        }
+        "pareto" => {
+            let alpha = case.param_a;
+            if !(alpha.is_finite() && alpha > 0.0) {
+                return Err("pareto ks parameters require finite alpha > 0".to_string());
+            }
+            Ok(Box::new(move |x| {
+                if x <= 0.0 {
+                    0.0
+                } else {
+                    1.0 - (1.0 + x).powf(-alpha)
+                }
+            }))
+        }
+        "power" => {
+            let alpha = case.param_a;
+            if !(alpha.is_finite() && alpha > 0.0) {
+                return Err("power ks parameters require finite alpha > 0".to_string());
+            }
+            Ok(Box::new(move |x| {
+                if x <= 0.0 {
+                    0.0
+                } else if x >= 1.0 {
+                    1.0
+                } else {
+                    x.powf(alpha)
+                }
+            }))
+        }
+        other => Err(format!("unsupported ks_distribution {other}")),
+    }
+}
+
+fn erf_approx(x: f64) -> f64 {
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x_abs = x.abs();
+    let t = 1.0 / (1.0 + 0.3275911 * x_abs);
+    let polynomial =
+        (((((1.061_405_429 * t - 1.453_152_027) * t) + 1.421_413_741) * t - 0.284_496_736) * t
+            + 0.254_829_592)
+            * t;
+    sign * (1.0 - polynomial * (-x_abs * x_abs).exp())
+}
 
 fn execute_rng_differential_operation(case: &RngDifferentialCase) -> Result<(), RngSuiteError> {
     match case.operation.as_str() {
@@ -9555,11 +10092,11 @@ mod tests {
         run_linalg_adversarial_suite, run_linalg_differential_suite, run_linalg_metamorphic_suite,
         run_masked_differential_suite, run_polynomial_differential_suite,
         run_rng_adversarial_suite, run_rng_differential_suite, run_rng_metamorphic_suite,
-        run_runtime_policy_adversarial_suite, run_shape_stride_adversarial_suite,
-        run_shape_stride_differential_suite, run_shape_stride_metamorphic_suite,
-        run_shape_stride_suite, run_smoke, run_string_differential_suite,
-        run_ufunc_adversarial_suite, run_ufunc_differential_suite, run_ufunc_metamorphic_suite,
-        set_dtype_promotion_log_path, set_shape_stride_log_path,
+        run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
+        run_shape_stride_adversarial_suite, run_shape_stride_differential_suite,
+        run_shape_stride_metamorphic_suite, run_shape_stride_suite, run_smoke,
+        run_string_differential_suite, run_ufunc_adversarial_suite, run_ufunc_differential_suite,
+        run_ufunc_metamorphic_suite, set_dtype_promotion_log_path, set_shape_stride_log_path,
     };
     use fnp_iter::{
         RuntimeMode as IterRuntimeMode, TRANSFER_PACKET_REASON_CODES, TransferLogRecord,
@@ -10066,6 +10603,13 @@ mod tests {
     fn rng_adversarial_suite_is_green() {
         let cfg = HarnessConfig::default_paths();
         let suite = run_rng_adversarial_suite(&cfg).expect("adversarial suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn rng_statistical_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite = run_rng_statistical_suite(&cfg).expect("statistical suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 

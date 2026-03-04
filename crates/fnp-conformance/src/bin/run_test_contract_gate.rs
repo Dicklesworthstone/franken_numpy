@@ -6,11 +6,11 @@ use fnp_conformance::{
     run_io_differential_suite, run_io_metamorphic_suite, run_iter_adversarial_suite,
     run_iter_differential_suite, run_iter_metamorphic_suite, run_linalg_adversarial_suite,
     run_linalg_differential_suite, run_linalg_metamorphic_suite, run_rng_adversarial_suite,
-    run_rng_differential_suite, run_rng_metamorphic_suite, run_runtime_policy_adversarial_suite,
-    run_runtime_policy_suite, run_shape_stride_adversarial_suite,
-    run_shape_stride_differential_suite, run_shape_stride_metamorphic_suite,
-    run_ufunc_adversarial_suite, run_ufunc_differential_suite, run_ufunc_metamorphic_suite,
-    set_runtime_policy_log_path, test_contracts,
+    run_rng_differential_suite, run_rng_metamorphic_suite, run_rng_statistical_suite,
+    run_runtime_policy_adversarial_suite, run_runtime_policy_suite,
+    run_shape_stride_adversarial_suite, run_shape_stride_differential_suite,
+    run_shape_stride_metamorphic_suite, run_ufunc_adversarial_suite, run_ufunc_differential_suite,
+    run_ufunc_metamorphic_suite, set_runtime_policy_log_path, test_contracts,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -365,6 +365,7 @@ fn run_gate_suites(cfg: &HarnessConfig, log_path: &Path) -> Result<Vec<SuiteRepo
         run_rng_differential_suite(cfg)?,
         run_rng_metamorphic_suite(cfg)?,
         run_rng_adversarial_suite(cfg)?,
+        run_rng_statistical_suite(cfg)?,
         run_linalg_differential_suite(cfg)?,
         run_linalg_metamorphic_suite(cfg)?,
         run_linalg_adversarial_suite(cfg)?,
