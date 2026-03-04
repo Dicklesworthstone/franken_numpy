@@ -4,6 +4,7 @@ use fnp_dtype::{
     ArrayStorage, DType, promote, promote_for_mean_reduction, promote_for_sum_reduction,
 };
 use fnp_ndarray::{ShapeError, broadcast_shape, element_count, fix_unknown_dimension};
+use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -661,6 +662,7 @@ pub struct UFuncArrayView {
     buffer: SharedBuffer,
     offset: isize,
     strides: Vec<isize>,
+    writable: bool,
     dtype: DType,
 }
 
@@ -671,6 +673,17 @@ impl UFuncArrayView {
         offset: isize,
         strides: Vec<isize>,
         dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        Self::new_with_writable(shape, buffer, offset, strides, dtype, true)
+    }
+
+    pub fn new_with_writable(
+        shape: Vec<usize>,
+        buffer: SharedBuffer,
+        offset: isize,
+        strides: Vec<isize>,
+        dtype: DType,
+        writable: bool,
     ) -> Result<Self, UFuncError> {
         if shape.len() != strides.len() {
             return Err(UFuncError::Msg(format!(
@@ -691,6 +704,7 @@ impl UFuncArrayView {
             buffer,
             offset,
             strides,
+            writable,
             dtype,
         })
     }
@@ -716,8 +730,65 @@ impl UFuncArrayView {
     }
 
     #[must_use]
+    pub fn is_writable(&self) -> bool {
+        self.writable
+    }
+
+    #[must_use]
+    pub fn as_read_only(&self) -> Self {
+        let mut cloned = self.clone();
+        cloned.writable = false;
+        cloned
+    }
+
+    #[must_use]
     pub fn shares_memory(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.buffer, &other.buffer)
+        if !Arc::ptr_eq(&self.buffer, &other.buffer) {
+            return false;
+        }
+
+        let (self_lo, self_hi) = match self.offset_span() {
+            Ok(Some(bounds)) => bounds,
+            Ok(None) | Err(_) => return false,
+        };
+        let (other_lo, other_hi) = match other.offset_span() {
+            Ok(Some(bounds)) => bounds,
+            Ok(None) | Err(_) => return false,
+        };
+
+        if self_hi < other_lo || other_hi < self_lo {
+            return false;
+        }
+
+        const MAX_EXACT_OFFSETS: usize = 200_000;
+        match (
+            self.collect_offsets(MAX_EXACT_OFFSETS),
+            other.collect_offsets(MAX_EXACT_OFFSETS),
+        ) {
+            (Ok(Some(lhs_offsets)), Ok(Some(rhs_offsets))) => {
+                let rhs: HashSet<usize> = rhs_offsets.into_iter().collect();
+                lhs_offsets.into_iter().any(|idx| rhs.contains(&idx))
+            }
+            _ => true,
+        }
+    }
+
+    #[must_use]
+    pub fn may_share_memory(&self, other: &Self) -> bool {
+        if !Arc::ptr_eq(&self.buffer, &other.buffer) {
+            return false;
+        }
+
+        let (self_lo, self_hi) = match self.offset_span() {
+            Ok(Some(bounds)) => bounds,
+            Ok(None) | Err(_) => return false,
+        };
+        let (other_lo, other_hi) = match other.offset_span() {
+            Ok(Some(bounds)) => bounds,
+            Ok(None) | Err(_) => return false,
+        };
+
+        !(self_hi < other_lo || other_hi < self_lo)
     }
 
     #[must_use]
@@ -779,6 +850,26 @@ impl UFuncArrayView {
         let offset = self.compute_offset(index, data.len())?;
         data[offset] = value;
         Ok(())
+    }
+
+    pub fn itemset_cow(&mut self, index: &[i64], value: f64) -> Result<(), UFuncError> {
+        if !self.writable {
+            return Err(UFuncError::Msg(
+                "shared view: attempted write to read-only view".to_string(),
+            ));
+        }
+
+        // Copy-on-write: if the buffer is shared, detach before mutating.
+        if Arc::strong_count(&self.buffer) > 1 {
+            let cloned = self
+                .buffer
+                .read()
+                .map_err(|_| UFuncError::Msg("shared view: read lock poisoned".to_string()))?
+                .clone();
+            self.buffer = Arc::new(RwLock::new(cloned));
+        }
+
+        self.itemset(index, value)
     }
 
     pub fn slice_axis(
@@ -865,6 +956,10 @@ impl UFuncArrayView {
             new_strides,
             self.dtype,
         )
+        .map(|mut view| {
+            view.writable = self.writable;
+            view
+        })
     }
 
     pub fn to_array(&self) -> Result<UFuncArray, UFuncError> {
@@ -951,6 +1046,73 @@ impl UFuncArrayView {
             )));
         }
         Ok(offset as usize)
+    }
+
+    fn offset_span(&self) -> Result<Option<(isize, isize)>, UFuncError> {
+        let count = element_count(&self.shape).map_err(UFuncError::Shape)?;
+        if count == 0 {
+            return Ok(None);
+        }
+
+        let mut min_offset = self.offset;
+        let mut max_offset = self.offset;
+        for (&dim, &stride) in self.shape.iter().zip(&self.strides) {
+            if dim <= 1 {
+                continue;
+            }
+            let span = stride
+                .checked_mul((dim - 1) as isize)
+                .ok_or_else(|| UFuncError::Msg("shared view: stride span overflow".to_string()))?;
+            if span >= 0 {
+                max_offset = max_offset.checked_add(span).ok_or_else(|| {
+                    UFuncError::Msg("shared view: max offset overflow".to_string())
+                })?;
+            } else {
+                min_offset = min_offset.checked_add(span).ok_or_else(|| {
+                    UFuncError::Msg("shared view: min offset overflow".to_string())
+                })?;
+            }
+        }
+        Ok(Some((min_offset, max_offset)))
+    }
+
+    fn collect_offsets(&self, limit: usize) -> Result<Option<Vec<usize>>, UFuncError> {
+        let total = element_count(&self.shape).map_err(UFuncError::Shape)?;
+        if total == 0 {
+            return Ok(Some(Vec::new()));
+        }
+        if total > limit {
+            return Ok(None);
+        }
+
+        let out_strides = c_strides_elems(&self.shape);
+        let mut offsets = Vec::with_capacity(total);
+        for flat in 0..total {
+            let mut rem = flat;
+            let mut offset = self.offset;
+            for (axis, &stride) in self.strides.iter().enumerate() {
+                let idx = if self.shape.is_empty() {
+                    0
+                } else {
+                    rem / out_strides[axis]
+                };
+                if !self.shape.is_empty() {
+                    rem %= out_strides[axis];
+                }
+                offset = offset
+                    .checked_add((idx as isize).checked_mul(stride).ok_or_else(|| {
+                        UFuncError::Msg("shared view: offset overflow".to_string())
+                    })?)
+                    .ok_or_else(|| UFuncError::Msg("shared view: offset overflow".to_string()))?;
+            }
+            if offset < 0 {
+                return Err(UFuncError::Msg(
+                    "shared view: negative computed offset during overlap check".to_string(),
+                ));
+            }
+            offsets.push(offset as usize);
+        }
+        Ok(Some(offsets))
     }
 
     fn validate_bounds(
@@ -1443,6 +1605,48 @@ impl UFuncArray {
 
     pub fn slice_view(&self, slices: &[AxisSlice]) -> Result<UFuncArrayView, UFuncError> {
         self.shared_view()?.slice_axes(slices)
+    }
+
+    pub fn broadcast_to_view(&self, target_shape: &[usize]) -> Result<UFuncArrayView, UFuncError> {
+        let base = self.shared_view()?;
+        let src_ndim = self.shape.len();
+        let out_ndim = target_shape.len();
+        if src_ndim > out_ndim {
+            return Err(UFuncError::Msg(format!(
+                "broadcast_to_view: cannot broadcast shape {:?} to {:?}",
+                self.shape, target_shape
+            )));
+        }
+
+        let pad = out_ndim - src_ndim;
+        let mut padded_shape = vec![1usize; pad];
+        padded_shape.extend_from_slice(&self.shape);
+
+        let mut padded_strides = vec![0isize; pad];
+        padded_strides.extend_from_slice(base.strides());
+
+        let mut out_strides = Vec::with_capacity(out_ndim);
+        for (axis, (&src_dim, &dst_dim)) in padded_shape.iter().zip(target_shape).enumerate() {
+            if src_dim == dst_dim {
+                out_strides.push(padded_strides[axis]);
+            } else if src_dim == 1 {
+                out_strides.push(0);
+            } else {
+                return Err(UFuncError::Msg(format!(
+                    "broadcast_to_view: operands could not be broadcast, shape {:?} vs {:?} at axis {axis}",
+                    self.shape, target_shape
+                )));
+            }
+        }
+
+        UFuncArrayView::new_with_writable(
+            target_shape.to_vec(),
+            Arc::clone(&base.buffer),
+            base.offset,
+            out_strides,
+            self.dtype,
+            false,
+        )
     }
 
     #[must_use]
@@ -20745,6 +20949,39 @@ mod tests {
     }
 
     #[test]
+    fn shared_view_memory_overlap_disjoint_ranges() {
+        let a = UFuncArray::new(vec![6], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let root = a.shared_view().unwrap();
+        let left = root.slice_axis(0, Some(0), Some(3), 1).unwrap();
+        let right = root.slice_axis(0, Some(3), Some(6), 1).unwrap();
+
+        assert!(!left.shares_memory(&right));
+        assert!(!left.may_share_memory(&right));
+    }
+
+    #[test]
+    fn shared_view_may_share_memory_conservative_for_strided_views() {
+        let a = UFuncArray::new(vec![6], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let root = a.shared_view().unwrap();
+        let even = root.slice_axis(0, Some(0), Some(6), 2).unwrap(); // indices 0,2,4
+        let odd = root.slice_axis(0, Some(1), Some(6), 2).unwrap(); // indices 1,3,5
+
+        assert!(!even.shares_memory(&odd));
+        assert!(even.may_share_memory(&odd));
+    }
+
+    #[test]
+    fn shared_view_shares_memory_detects_true_overlap() {
+        let a = UFuncArray::new(vec![6], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let root = a.shared_view().unwrap();
+        let broad = root.slice_axis(0, Some(0), Some(6), 2).unwrap(); // 0,2,4
+        let tail = root.slice_axis(0, Some(2), Some(6), 2).unwrap(); // 2,4
+
+        assert!(broad.shares_memory(&tail));
+        assert!(broad.may_share_memory(&tail));
+    }
+
+    #[test]
     fn slice_axis_view_from_array_supports_negative_step() {
         let a = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
         let view = a.slice_axis_view(0, None, None, -1).unwrap();
@@ -20798,6 +21035,41 @@ mod tests {
         let s = UFuncArray::from_shared_view(&stepwise).unwrap();
         assert_eq!(c.shape(), s.shape());
         assert_eq!(c.values(), s.values());
+    }
+
+    #[test]
+    fn broadcast_to_view_is_read_only() {
+        let a = UFuncArray::new(vec![1, 3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let mut v = a.broadcast_to_view(&[2, 3]).unwrap();
+
+        assert!(!v.is_writable());
+        assert!(v.itemset_cow(&[0, 0], 99.0).is_err());
+
+        let materialized = UFuncArray::from_shared_view(&v).unwrap();
+        assert_eq!(materialized.values(), &[1.0, 2.0, 3.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn itemset_cow_detaches_shared_buffer_before_mutation() {
+        let a = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let root = a.shared_view().unwrap();
+        let mut cow = root.slice_axis(0, None, None, 1).unwrap();
+
+        assert!(root.shares_memory(&cow));
+        cow.itemset_cow(&[0], 99.0).unwrap();
+        assert!(!root.shares_memory(&cow));
+        assert_eq!(root.item(&[0]).unwrap(), 1.0);
+        assert_eq!(cow.item(&[0]).unwrap(), 99.0);
+    }
+
+    #[test]
+    fn itemset_cow_updates_unique_writable_view() {
+        let a = UFuncArray::new(vec![3], vec![10.0, 20.0, 30.0], DType::F64).unwrap();
+        let mut view = a.shared_view().unwrap();
+
+        assert!(view.is_writable());
+        view.itemset_cow(&[1], 77.0).unwrap();
+        assert_eq!(view.item(&[1]).unwrap(), 77.0);
     }
 
     #[test]
