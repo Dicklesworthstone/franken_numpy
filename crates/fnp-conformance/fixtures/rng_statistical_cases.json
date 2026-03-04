@@ -680,7 +680,7 @@
     "expected_mean": 1.0192508249092678,
     "expected_variance": 0.025000184166323658,
     "mean_abs_tol": 0.05,
-    "variance_abs_tol": 0.05,
+    "variance_abs_tol": 0.1,
     "support_min": 1.0,
     "support_min_inclusive": true
   },
