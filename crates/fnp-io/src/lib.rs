@@ -67,6 +67,10 @@ pub enum IOSupportedDType {
     F32Be,
     F64,
     F64Be,
+    Complex64,
+    Complex64Be,
+    Complex128,
+    Complex128Be,
     Object,
 }
 
@@ -93,6 +97,10 @@ impl IOSupportedDType {
             Self::F32Be => ">f4",
             Self::F64 => "<f8",
             Self::F64Be => ">f8",
+            Self::Complex64 => "<c8",
+            Self::Complex64Be => ">c8",
+            Self::Complex128 => "<c16",
+            Self::Complex128Be => ">c16",
             Self::Object => "|O",
         }
     }
@@ -118,6 +126,10 @@ impl IOSupportedDType {
             ">f4" => Ok(Self::F32Be),
             "<f8" => Ok(Self::F64),
             ">f8" => Ok(Self::F64Be),
+            "<c8" => Ok(Self::Complex64),
+            ">c8" => Ok(Self::Complex64Be),
+            "<c16" => Ok(Self::Complex128),
+            ">c16" => Ok(Self::Complex128Be),
             "|O" => Ok(Self::Object),
             _ => Err(IOError::DTypeDescriptorInvalid),
         }
@@ -129,9 +141,25 @@ impl IOSupportedDType {
             Self::Bool | Self::I8 | Self::U8 => Some(1),
             Self::I16 | Self::I16Be | Self::U16 | Self::U16Be => Some(2),
             Self::I32 | Self::I32Be | Self::U32 | Self::U32Be | Self::F32 | Self::F32Be => Some(4),
-            Self::I64 | Self::I64Be | Self::U64 | Self::U64Be | Self::F64 | Self::F64Be => Some(8),
+            Self::I64
+            | Self::I64Be
+            | Self::U64
+            | Self::U64Be
+            | Self::F64
+            | Self::F64Be
+            | Self::Complex64
+            | Self::Complex64Be => Some(8),
+            Self::Complex128 | Self::Complex128Be => Some(16),
             Self::Object => None,
         }
+    }
+
+    #[must_use]
+    pub const fn is_complex(self) -> bool {
+        matches!(
+            self,
+            Self::Complex64 | Self::Complex64Be | Self::Complex128 | Self::Complex128Be
+        )
     }
 }
 
@@ -1526,6 +1554,9 @@ pub fn fromfile(
     dtype: IOSupportedDType,
     count: Option<usize>,
 ) -> Result<Vec<f64>, IOError> {
+    if dtype.is_complex() {
+        return Err(IOError::DTypeDescriptorInvalid);
+    }
     let item_size = dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?;
     if item_size == 0 {
         return Ok(Vec::new());
@@ -1551,6 +1582,9 @@ pub fn fromfile(
 /// Encodes each f64 value according to the given `dtype` and writes
 /// the binary representation.
 pub fn tofile(values: &[f64], dtype: IOSupportedDType) -> Result<Vec<u8>, IOError> {
+    if dtype.is_complex() {
+        return Err(IOError::DTypeDescriptorInvalid);
+    }
     let item_size = dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?;
     let mut buf = Vec::with_capacity(values.len() * item_size);
     for &v in values {
@@ -1605,7 +1639,11 @@ fn decode_element(chunk: &[u8], dtype: IOSupportedDType) -> Result<f64, IOError>
         IOSupportedDType::F64Be => Ok(f64::from_be_bytes([
             chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
         ])),
-        IOSupportedDType::Object => Err(IOError::DTypeDescriptorInvalid),
+        IOSupportedDType::Complex64
+        | IOSupportedDType::Complex64Be
+        | IOSupportedDType::Complex128
+        | IOSupportedDType::Complex128Be
+        | IOSupportedDType::Object => Err(IOError::DTypeDescriptorInvalid),
     }
 }
 
@@ -1633,7 +1671,112 @@ fn encode_element(v: f64, dtype: IOSupportedDType, buf: &mut Vec<u8>) -> Result<
         IOSupportedDType::F32Be => buf.extend_from_slice(&(v as f32).to_be_bytes()),
         IOSupportedDType::F64 => buf.extend_from_slice(&v.to_le_bytes()),
         IOSupportedDType::F64Be => buf.extend_from_slice(&v.to_be_bytes()),
-        IOSupportedDType::Object => return Err(IOError::DTypeDescriptorInvalid),
+        IOSupportedDType::Complex64
+        | IOSupportedDType::Complex64Be
+        | IOSupportedDType::Complex128
+        | IOSupportedDType::Complex128Be
+        | IOSupportedDType::Object => return Err(IOError::DTypeDescriptorInvalid),
+    }
+    Ok(())
+}
+
+/// Read raw binary data from bytes into a flat array of complex values.
+///
+/// Complex values are represented as `(real, imag)` pairs and decoded from the
+/// interleaved NPY memory layout used by NumPy complex dtypes.
+pub fn fromfile_complex(
+    data: &[u8],
+    dtype: IOSupportedDType,
+    count: Option<usize>,
+) -> Result<Vec<(f64, f64)>, IOError> {
+    if !dtype.is_complex() {
+        return Err(IOError::DTypeDescriptorInvalid);
+    }
+    let item_size = dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?;
+    let max_elems = data.len() / item_size;
+    let n = match count {
+        Some(c) => c.min(max_elems),
+        None => max_elems,
+    };
+
+    let mut values = Vec::with_capacity(n);
+    for i in 0..n {
+        let offset = i * item_size;
+        let chunk = &data[offset..offset + item_size];
+        values.push(decode_complex_element(chunk, dtype)?);
+    }
+    Ok(values)
+}
+
+/// Write complex values to raw binary bytes using NumPy interleaved layout.
+pub fn tofile_complex(values: &[(f64, f64)], dtype: IOSupportedDType) -> Result<Vec<u8>, IOError> {
+    if !dtype.is_complex() {
+        return Err(IOError::DTypeDescriptorInvalid);
+    }
+    let item_size = dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?;
+    let mut buf = Vec::with_capacity(values.len() * item_size);
+    for &(re, im) in values {
+        encode_complex_element(re, im, dtype, &mut buf)?;
+    }
+    Ok(buf)
+}
+
+fn decode_complex_element(chunk: &[u8], dtype: IOSupportedDType) -> Result<(f64, f64), IOError> {
+    match dtype {
+        IOSupportedDType::Complex64 => Ok((
+            f64::from(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])),
+            f64::from(f32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]])),
+        )),
+        IOSupportedDType::Complex64Be => Ok((
+            f64::from(f32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])),
+            f64::from(f32::from_be_bytes([chunk[4], chunk[5], chunk[6], chunk[7]])),
+        )),
+        IOSupportedDType::Complex128 => Ok((
+            f64::from_le_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+            ]),
+            f64::from_le_bytes([
+                chunk[8], chunk[9], chunk[10], chunk[11], chunk[12], chunk[13], chunk[14],
+                chunk[15],
+            ]),
+        )),
+        IOSupportedDType::Complex128Be => Ok((
+            f64::from_be_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+            ]),
+            f64::from_be_bytes([
+                chunk[8], chunk[9], chunk[10], chunk[11], chunk[12], chunk[13], chunk[14],
+                chunk[15],
+            ]),
+        )),
+        _ => Err(IOError::DTypeDescriptorInvalid),
+    }
+}
+
+fn encode_complex_element(
+    re: f64,
+    im: f64,
+    dtype: IOSupportedDType,
+    buf: &mut Vec<u8>,
+) -> Result<(), IOError> {
+    match dtype {
+        IOSupportedDType::Complex64 => {
+            buf.extend_from_slice(&(re as f32).to_le_bytes());
+            buf.extend_from_slice(&(im as f32).to_le_bytes());
+        }
+        IOSupportedDType::Complex64Be => {
+            buf.extend_from_slice(&(re as f32).to_be_bytes());
+            buf.extend_from_slice(&(im as f32).to_be_bytes());
+        }
+        IOSupportedDType::Complex128 => {
+            buf.extend_from_slice(&re.to_le_bytes());
+            buf.extend_from_slice(&im.to_le_bytes());
+        }
+        IOSupportedDType::Complex128Be => {
+            buf.extend_from_slice(&re.to_be_bytes());
+            buf.extend_from_slice(&im.to_be_bytes());
+        }
+        _ => return Err(IOError::DTypeDescriptorInvalid),
     }
     Ok(())
 }
@@ -1733,6 +1876,39 @@ pub fn load(data: &[u8]) -> Result<(Vec<usize>, Vec<f64>, IOSupportedDType), IOE
     Ok((shape, values, dtype))
 }
 
+pub type ComplexValue = (f64, f64);
+pub type NpyLoadedComplex = (Vec<usize>, Vec<ComplexValue>, IOSupportedDType);
+
+/// High-level save for complex arrays using NumPy interleaved complex layout.
+pub fn save_complex(
+    shape: &[usize],
+    values: &[ComplexValue],
+    dtype: IOSupportedDType,
+) -> Result<Vec<u8>, IOError> {
+    if !dtype.is_complex() {
+        return Err(IOError::DTypeDescriptorInvalid);
+    }
+    let header = NpyHeader {
+        shape: shape.to_vec(),
+        fortran_order: false,
+        descr: dtype,
+    };
+    let payload = tofile_complex(values, dtype)?;
+    write_npy_bytes(&header, &payload, false)
+}
+
+/// High-level load for complex-valued NPY arrays.
+pub fn load_complex(data: &[u8]) -> Result<NpyLoadedComplex, IOError> {
+    let npy = read_npy_bytes(data, false)?;
+    let dtype = npy.header.descr;
+    if !dtype.is_complex() {
+        return Err(IOError::DTypeDescriptorInvalid);
+    }
+    let shape = npy.header.shape;
+    let values = fromfile_complex(&npy.payload, dtype, None)?;
+    Ok((shape, values, dtype))
+}
+
 /// Entry returned by `load_npz`: (name, shape, values, dtype).
 pub type NpzLoadedEntry = (String, Vec<usize>, Vec<f64>, IOSupportedDType);
 
@@ -1813,9 +1989,10 @@ mod tests {
         IOSupportedDType, LoadDispatch, MAX_ARCHIVE_MEMBERS, MAX_DISPATCH_RETRIES,
         MAX_HEADER_BYTES, MAX_MEMMAP_VALIDATION_RETRIES, MemmapMode, NPY_MAGIC_PREFIX,
         NPZ_MAGIC_PREFIX, NpyHeader, NpzCompression, SaveTxtConfig, classify_load_dispatch,
-        encode_npy_header_bytes, enforce_pickle_policy, fromfile, fromstring, genfromtxt, load,
-        load_npz, loadtxt, loadtxt_usecols, read_npy_bytes, read_npz_bytes, save, savetxt, savez,
-        savez_compressed, synthesize_npz_member_names, tobytes, tofile, tostring,
+        encode_npy_header_bytes, enforce_pickle_policy, fromfile, fromfile_complex, fromstring,
+        genfromtxt, load, load_complex, load_npz, loadtxt, loadtxt_usecols, read_npy_bytes,
+        read_npz_bytes, save, save_complex, savetxt, savez, savez_compressed,
+        synthesize_npz_member_names, tobytes, tofile, tofile_complex, tostring,
         validate_descriptor_roundtrip, validate_header_schema, validate_io_policy_metadata,
         validate_magic_version, validate_memmap_contract, validate_npz_archive_budget,
         validate_read_payload, validate_write_contract, write_npy_bytes,
@@ -1922,6 +2099,10 @@ mod tests {
             IOSupportedDType::F32Be,
             IOSupportedDType::F64,
             IOSupportedDType::F64Be,
+            IOSupportedDType::Complex64,
+            IOSupportedDType::Complex64Be,
+            IOSupportedDType::Complex128,
+            IOSupportedDType::Complex128Be,
             IOSupportedDType::Object,
         ];
 
@@ -2535,6 +2716,10 @@ mod tests {
         assert_eq!(IOSupportedDType::U64Be.item_size(), Some(8));
         assert_eq!(IOSupportedDType::F64.item_size(), Some(8));
         assert_eq!(IOSupportedDType::F64Be.item_size(), Some(8));
+        assert_eq!(IOSupportedDType::Complex64.item_size(), Some(8));
+        assert_eq!(IOSupportedDType::Complex64Be.item_size(), Some(8));
+        assert_eq!(IOSupportedDType::Complex128.item_size(), Some(16));
+        assert_eq!(IOSupportedDType::Complex128Be.item_size(), Some(16));
         assert_eq!(IOSupportedDType::Object.item_size(), None);
     }
 
@@ -2790,6 +2975,32 @@ mod tests {
     }
 
     #[test]
+    fn fromfile_tofile_complex128_roundtrip() {
+        let original = vec![(1.25, -2.5), (0.0, 3.5), (-4.0, 0.25)];
+        let encoded = tofile_complex(&original, IOSupportedDType::Complex128).unwrap();
+        let decoded = fromfile_complex(&encoded, IOSupportedDType::Complex128, None).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn fromfile_tofile_complex64_big_endian_roundtrip() {
+        let original = vec![(1.5, -2.0), (3.25, 0.5)];
+        let encoded = tofile_complex(&original, IOSupportedDType::Complex64Be).unwrap();
+        let decoded = fromfile_complex(&encoded, IOSupportedDType::Complex64Be, None).unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn scalar_binary_helpers_reject_complex_dtype() {
+        let err = tofile(&[1.0, 2.0], IOSupportedDType::Complex128).expect_err("complex dtype");
+        assert_eq!(err.reason_code(), "io_dtype_descriptor_invalid");
+
+        let err =
+            fromfile(&[0u8; 16], IOSupportedDType::Complex128, None).expect_err("complex dtype");
+        assert_eq!(err.reason_code(), "io_dtype_descriptor_invalid");
+    }
+
+    #[test]
     fn fromfile_truncated_data_reads_partial() {
         // 7 bytes: only 3 complete u16 elements (6 bytes), last byte ignored
         let data = vec![1, 0, 2, 0, 3, 0, 99];
@@ -2877,6 +3088,24 @@ mod tests {
         assert_eq!(loaded_shape, shape);
         assert_eq!(loaded_values, values);
         assert_eq!(loaded_dtype, IOSupportedDType::F64);
+    }
+
+    #[test]
+    fn save_load_complex_roundtrip() {
+        let shape = &[2];
+        let values = &[(1.0, -1.5), (2.5, 3.0)];
+        let bytes = save_complex(shape, values, IOSupportedDType::Complex128).unwrap();
+        let (loaded_shape, loaded_values, loaded_dtype) = load_complex(&bytes).unwrap();
+        assert_eq!(loaded_shape, shape);
+        assert_eq!(loaded_values, values);
+        assert_eq!(loaded_dtype, IOSupportedDType::Complex128);
+    }
+
+    #[test]
+    fn load_complex_rejects_non_complex_dtype() {
+        let bytes = save(&[2], &[1.0, 2.0], IOSupportedDType::F64).unwrap();
+        let err = load_complex(&bytes).expect_err("non-complex dtype should fail");
+        assert_eq!(err.reason_code(), "io_dtype_descriptor_invalid");
     }
 
     #[test]
