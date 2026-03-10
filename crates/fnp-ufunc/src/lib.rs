@@ -4,6 +4,7 @@ use fnp_dtype::{
     ArrayStorage, DType, promote, promote_for_mean_reduction, promote_for_sum_reduction,
 };
 use fnp_ndarray::{ShapeError, broadcast_shape, element_count, fix_unknown_dimension};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
@@ -20,6 +21,436 @@ impl UFuncRuntimeMode {
             Self::Strict => "strict",
             Self::Hardened => "hardened",
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatErrorMode {
+    Ignore,
+    Warn,
+    Raise,
+    Call,
+    Print,
+    Log,
+}
+
+impl FloatErrorMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ignore => "ignore",
+            Self::Warn => "warn",
+            Self::Raise => "raise",
+            Self::Call => "call",
+            Self::Print => "print",
+            Self::Log => "log",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatErrorKind {
+    Divide,
+    Over,
+    Under,
+    Invalid,
+}
+
+impl FloatErrorKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Divide => "divide",
+            Self::Over => "over",
+            Self::Under => "under",
+            Self::Invalid => "invalid",
+        }
+    }
+
+    #[must_use]
+    pub fn default_message(self, op: &'static str) -> String {
+        match self {
+            Self::Divide => format!("divide by zero encountered in {op}"),
+            Self::Over => format!("overflow encountered in {op}"),
+            Self::Under => format!("underflow encountered in {op}"),
+            Self::Invalid => format!("invalid value encountered in {op}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FloatErrorState {
+    pub divide: FloatErrorMode,
+    pub over: FloatErrorMode,
+    pub under: FloatErrorMode,
+    pub invalid: FloatErrorMode,
+}
+
+impl Default for FloatErrorState {
+    fn default() -> Self {
+        Self {
+            divide: FloatErrorMode::Warn,
+            over: FloatErrorMode::Warn,
+            under: FloatErrorMode::Ignore,
+            invalid: FloatErrorMode::Warn,
+        }
+    }
+}
+
+impl FloatErrorState {
+    #[must_use]
+    pub const fn mode_for(self, kind: FloatErrorKind) -> FloatErrorMode {
+        match kind {
+            FloatErrorKind::Divide => self.divide,
+            FloatErrorKind::Over => self.over,
+            FloatErrorKind::Under => self.under,
+            FloatErrorKind::Invalid => self.invalid,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_updates(
+        self,
+        all: Option<FloatErrorMode>,
+        divide: Option<FloatErrorMode>,
+        over: Option<FloatErrorMode>,
+        under: Option<FloatErrorMode>,
+        invalid: Option<FloatErrorMode>,
+    ) -> Self {
+        let divide_mode = if let Some(mode) = divide {
+            mode
+        } else if let Some(mode) = all {
+            mode
+        } else {
+            self.divide
+        };
+        let over_mode = if let Some(mode) = over {
+            mode
+        } else if let Some(mode) = all {
+            mode
+        } else {
+            self.over
+        };
+        let under_mode = if let Some(mode) = under {
+            mode
+        } else if let Some(mode) = all {
+            mode
+        } else {
+            self.under
+        };
+        let invalid_mode = if let Some(mode) = invalid {
+            mode
+        } else if let Some(mode) = all {
+            mode
+        } else {
+            self.invalid
+        };
+        Self {
+            divide: divide_mode,
+            over: over_mode,
+            under: under_mode,
+            invalid: invalid_mode,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FloatErrorEvent {
+    pub kind: FloatErrorKind,
+    pub mode: FloatErrorMode,
+    pub op: &'static str,
+    pub message: String,
+}
+
+pub type FloatErrorCallback = Arc<dyn Fn(FloatErrorEvent) + Send + Sync + 'static>;
+
+thread_local! {
+    static FLOAT_ERROR_STATE: RefCell<FloatErrorState> = const { RefCell::new(FloatErrorState {
+        divide: FloatErrorMode::Warn,
+        over: FloatErrorMode::Warn,
+        under: FloatErrorMode::Ignore,
+        invalid: FloatErrorMode::Warn,
+    }) };
+    static FLOAT_ERROR_CALLBACK: RefCell<Option<FloatErrorCallback>> = const { RefCell::new(None) };
+    static FLOAT_ERROR_EVENTS: RefCell<Vec<FloatErrorEvent>> = const { RefCell::new(Vec::new()) };
+}
+
+#[must_use]
+pub fn geterr() -> FloatErrorState {
+    FLOAT_ERROR_STATE.with(|state| *state.borrow())
+}
+
+#[must_use]
+pub fn seterr(
+    all: Option<FloatErrorMode>,
+    divide: Option<FloatErrorMode>,
+    over: Option<FloatErrorMode>,
+    under: Option<FloatErrorMode>,
+    invalid: Option<FloatErrorMode>,
+) -> FloatErrorState {
+    let previous = geterr();
+    let updated = previous.with_updates(all, divide, over, under, invalid);
+    FLOAT_ERROR_STATE.with(|state| {
+        *state.borrow_mut() = updated;
+    });
+    previous
+}
+
+#[must_use]
+pub fn seterr_state(state: FloatErrorState) -> FloatErrorState {
+    let previous = geterr();
+    FLOAT_ERROR_STATE.with(|slot| {
+        *slot.borrow_mut() = state;
+    });
+    previous
+}
+
+#[must_use]
+pub fn seterrcall(callback: Option<FloatErrorCallback>) -> Option<FloatErrorCallback> {
+    FLOAT_ERROR_CALLBACK.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), callback))
+}
+
+pub fn errstate(
+    all: Option<FloatErrorMode>,
+    divide: Option<FloatErrorMode>,
+    over: Option<FloatErrorMode>,
+    under: Option<FloatErrorMode>,
+    invalid: Option<FloatErrorMode>,
+) -> FloatErrorStateGuard {
+    FloatErrorStateGuard {
+        previous: seterr(all, divide, over, under, invalid),
+    }
+}
+
+pub fn take_float_error_events() -> Vec<FloatErrorEvent> {
+    FLOAT_ERROR_EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
+}
+
+#[must_use = "hold the guard for the scope where the floating-point error state should apply"]
+pub struct FloatErrorStateGuard {
+    previous: FloatErrorState,
+}
+
+impl Drop for FloatErrorStateGuard {
+    fn drop(&mut self) {
+        let _ = seterr_state(self.previous);
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct FloatErrorFlags {
+    divide: bool,
+    over: bool,
+    under: bool,
+    invalid: bool,
+}
+
+impl FloatErrorFlags {
+    fn note(&mut self, kind: FloatErrorKind) {
+        match kind {
+            FloatErrorKind::Divide => self.divide = true,
+            FloatErrorKind::Over => self.over = true,
+            FloatErrorKind::Under => self.under = true,
+            FloatErrorKind::Invalid => self.invalid = true,
+        }
+    }
+
+    #[must_use]
+    fn kinds(self) -> Vec<FloatErrorKind> {
+        let mut kinds = Vec::new();
+        if self.divide {
+            kinds.push(FloatErrorKind::Divide);
+        }
+        if self.over {
+            kinds.push(FloatErrorKind::Over);
+        }
+        if self.under {
+            kinds.push(FloatErrorKind::Under);
+        }
+        if self.invalid {
+            kinds.push(FloatErrorKind::Invalid);
+        }
+        kinds
+    }
+}
+
+fn push_float_error_event(event: FloatErrorEvent) {
+    FLOAT_ERROR_EVENTS.with(|events| {
+        events.borrow_mut().push(event);
+    });
+}
+
+fn dispatch_float_error(kind: FloatErrorKind, op: &'static str) -> Result<(), UFuncError> {
+    let mode = geterr().mode_for(kind);
+    if matches!(mode, FloatErrorMode::Ignore) {
+        return Ok(());
+    }
+
+    let event = FloatErrorEvent {
+        kind,
+        mode,
+        op,
+        message: kind.default_message(op),
+    };
+
+    match mode {
+        FloatErrorMode::Ignore => Ok(()),
+        FloatErrorMode::Warn | FloatErrorMode::Log => {
+            push_float_error_event(event);
+            Ok(())
+        }
+        FloatErrorMode::Print => {
+            eprintln!("{}", event.message);
+            push_float_error_event(event);
+            Ok(())
+        }
+        FloatErrorMode::Call => {
+            let mut handled = false;
+            FLOAT_ERROR_CALLBACK.with(|slot| {
+                if let Some(callback) = slot.borrow().clone() {
+                    callback(event.clone());
+                    handled = true;
+                }
+            });
+            if !handled {
+                push_float_error_event(event);
+            }
+            Ok(())
+        }
+        FloatErrorMode::Raise => Err(UFuncError::FloatingPoint {
+            kind,
+            detail: event.message,
+        }),
+    }
+}
+
+fn dispatch_float_error_flags(flags: FloatErrorFlags, op: &'static str) -> Result<(), UFuncError> {
+    for kind in flags.kinds() {
+        dispatch_float_error(kind, op)?;
+    }
+    Ok(())
+}
+
+fn note_binary_float_errors(
+    flags: &mut FloatErrorFlags,
+    op: BinaryOp,
+    lhs: f64,
+    rhs: f64,
+    result: f64,
+) {
+    match op {
+        BinaryOp::Div | BinaryOp::FloorDivide => {
+            if lhs.is_finite() && rhs == 0.0 {
+                if lhs == 0.0 {
+                    flags.note(FloatErrorKind::Invalid);
+                } else {
+                    flags.note(FloatErrorKind::Divide);
+                }
+                return;
+            }
+            if lhs.is_finite() && rhs.is_finite() && result.is_infinite() {
+                flags.note(FloatErrorKind::Over);
+            }
+            if lhs.is_finite() && rhs.is_finite() && lhs != 0.0 && rhs != 0.0 && result == 0.0 {
+                flags.note(FloatErrorKind::Under);
+            }
+            if lhs.is_finite() && rhs.is_finite() && result.is_nan() {
+                flags.note(FloatErrorKind::Invalid);
+            }
+        }
+        BinaryOp::Remainder | BinaryOp::Fmod => {
+            if lhs.is_finite() && rhs == 0.0 {
+                flags.note(FloatErrorKind::Invalid);
+            }
+        }
+        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Power | BinaryOp::FloatPower => {
+            if lhs.is_finite() && rhs.is_finite() && result.is_infinite() {
+                flags.note(FloatErrorKind::Over);
+            }
+            if matches!(op, BinaryOp::Mul | BinaryOp::Power | BinaryOp::FloatPower)
+                && lhs.is_finite()
+                && rhs.is_finite()
+                && lhs != 0.0
+                && rhs != 0.0
+                && result == 0.0
+            {
+                flags.note(FloatErrorKind::Under);
+            }
+        }
+        BinaryOp::Ldexp => {
+            if lhs.is_finite() && rhs.is_finite() && result.is_infinite() {
+                flags.note(FloatErrorKind::Over);
+            }
+            if lhs.is_finite() && lhs != 0.0 && rhs.is_finite() && result == 0.0 {
+                flags.note(FloatErrorKind::Under);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn note_unary_float_errors(flags: &mut FloatErrorFlags, op: UnaryOp, value: f64, result: f64) {
+    match op {
+        UnaryOp::Reciprocal => {
+            if value == 0.0 {
+                flags.note(FloatErrorKind::Divide);
+            } else if value.is_finite() && result.is_infinite() {
+                flags.note(FloatErrorKind::Over);
+            }
+        }
+        UnaryOp::Log | UnaryOp::Log2 | UnaryOp::Log10 => {
+            if value == 0.0 {
+                flags.note(FloatErrorKind::Divide);
+            } else if value.is_finite() && value < 0.0 {
+                flags.note(FloatErrorKind::Invalid);
+            }
+        }
+        UnaryOp::Log1p => {
+            if value == -1.0 {
+                flags.note(FloatErrorKind::Divide);
+            } else if value.is_finite() && value < -1.0 {
+                flags.note(FloatErrorKind::Invalid);
+            }
+        }
+        UnaryOp::Sqrt => {
+            if value.is_finite() && value < 0.0 {
+                flags.note(FloatErrorKind::Invalid);
+            }
+        }
+        UnaryOp::Arcsin | UnaryOp::Arccos => {
+            if value.is_finite() && value.abs() > 1.0 {
+                flags.note(FloatErrorKind::Invalid);
+            }
+        }
+        UnaryOp::Arctanh => {
+            if value.abs() == 1.0 {
+                flags.note(FloatErrorKind::Divide);
+            } else if value.is_finite() && value.abs() > 1.0 {
+                flags.note(FloatErrorKind::Invalid);
+            }
+        }
+        UnaryOp::Arccosh => {
+            if value.is_finite() && value < 1.0 {
+                flags.note(FloatErrorKind::Invalid);
+            }
+        }
+        UnaryOp::Exp | UnaryOp::Exp2 | UnaryOp::Expm1 | UnaryOp::Sinh | UnaryOp::Cosh => {
+            if value.is_finite() && result.is_infinite() {
+                flags.note(FloatErrorKind::Over);
+            }
+            if value.is_finite() && value != 0.0 && result == 0.0 {
+                flags.note(FloatErrorKind::Under);
+            }
+        }
+        UnaryOp::Square => {
+            if value.is_finite() && result.is_infinite() {
+                flags.note(FloatErrorKind::Over);
+            }
+            if value.is_finite() && value != 0.0 && result == 0.0 {
+                flags.note(FloatErrorKind::Under);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -82,6 +513,47 @@ pub enum BinaryOp {
 }
 
 impl BinaryOp {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Sub => "subtract",
+            Self::Mul => "multiply",
+            Self::Div => "divide",
+            Self::Power => "power",
+            Self::Remainder => "remainder",
+            Self::Minimum => "minimum",
+            Self::Maximum => "maximum",
+            Self::Arctan2 => "arctan2",
+            Self::Fmod => "fmod",
+            Self::Copysign => "copysign",
+            Self::Fmax => "fmax",
+            Self::Fmin => "fmin",
+            Self::Heaviside => "heaviside",
+            Self::Nextafter => "nextafter",
+            Self::LogicalAnd => "logical_and",
+            Self::LogicalOr => "logical_or",
+            Self::LogicalXor => "logical_xor",
+            Self::Equal => "equal",
+            Self::NotEqual => "not_equal",
+            Self::Less => "less",
+            Self::LessEqual => "less_equal",
+            Self::Greater => "greater",
+            Self::GreaterEqual => "greater_equal",
+            Self::Hypot => "hypot",
+            Self::Logaddexp => "logaddexp",
+            Self::Logaddexp2 => "logaddexp2",
+            Self::Ldexp => "ldexp",
+            Self::FloorDivide => "floor_divide",
+            Self::FloatPower => "float_power",
+            Self::BitwiseAnd => "bitwise_and",
+            Self::BitwiseOr => "bitwise_or",
+            Self::BitwiseXor => "bitwise_xor",
+            Self::LeftShift => "left_shift",
+            Self::RightShift => "right_shift",
+        }
+    }
+
     /// Returns `true` if this operation always produces Bool output regardless of input dtype.
     #[must_use]
     pub const fn is_bool_output(self) -> bool {
@@ -363,6 +835,54 @@ pub enum UnaryOp {
 }
 
 impl UnaryOp {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Abs => "absolute",
+            Self::Negative => "negative",
+            Self::Sign => "sign",
+            Self::Sqrt => "sqrt",
+            Self::Square => "square",
+            Self::Exp => "exp",
+            Self::Log => "log",
+            Self::Log2 => "log2",
+            Self::Log10 => "log10",
+            Self::Sin => "sin",
+            Self::Cos => "cos",
+            Self::Tan => "tan",
+            Self::Floor => "floor",
+            Self::Ceil => "ceil",
+            Self::Round => "round",
+            Self::Reciprocal => "reciprocal",
+            Self::Sinh => "sinh",
+            Self::Cosh => "cosh",
+            Self::Tanh => "tanh",
+            Self::Arcsin => "arcsin",
+            Self::Arccos => "arccos",
+            Self::Arctan => "arctan",
+            Self::Cbrt => "cbrt",
+            Self::Expm1 => "expm1",
+            Self::Log1p => "log1p",
+            Self::Degrees => "degrees",
+            Self::Radians => "radians",
+            Self::Rint => "rint",
+            Self::Trunc => "trunc",
+            Self::Positive => "positive",
+            Self::Spacing => "spacing",
+            Self::LogicalNot => "logical_not",
+            Self::Isnan => "isnan",
+            Self::Isinf => "isinf",
+            Self::Isfinite => "isfinite",
+            Self::Signbit => "signbit",
+            Self::Exp2 => "exp2",
+            Self::Fabs => "fabs",
+            Self::Arccosh => "arccosh",
+            Self::Arcsinh => "arcsinh",
+            Self::Arctanh => "arctanh",
+            Self::Invert => "invert",
+        }
+    }
+
     /// Returns `true` if this operation always produces Bool output regardless of input dtype.
     #[must_use]
     pub const fn is_bool_output(self) -> bool {
@@ -1701,6 +2221,7 @@ impl UFuncArray {
         let plan = plan_binary_dispatch(self, rhs)?;
         let out_shape = plan.out_shape;
         let out_count = plan.out_count;
+        let mut float_error_flags = FloatErrorFlags::default();
         let true_division_from_integral = matches!(op, BinaryOp::Div)
             && (self.dtype.is_integer() || self.dtype == DType::Bool)
             && (rhs.dtype.is_integer() || rhs.dtype == DType::Bool);
@@ -1718,8 +2239,13 @@ impl UFuncArray {
                 .values
                 .iter()
                 .zip(&rhs.values)
-                .map(|(&lhs, &rhs)| op.apply(lhs, rhs))
+                .map(|(&lhs, &rhs)| {
+                    let result = op.apply(lhs, rhs);
+                    note_binary_float_errors(&mut float_error_flags, op, lhs, rhs, result);
+                    result
+                })
                 .collect::<Vec<_>>();
+            dispatch_float_error_flags(float_error_flags, op.name())?;
             return Self::from_values_with_dtype(out_shape, values, out_dtype);
         }
 
@@ -1736,7 +2262,11 @@ impl UFuncArray {
         let mut out_values = Vec::with_capacity(out_count);
 
         for flat in 0..out_count {
-            out_values.push(op.apply(self.values[lhs_flat], rhs.values[rhs_flat]));
+            let lhs_value = self.values[lhs_flat];
+            let rhs_value = rhs.values[rhs_flat];
+            let result = op.apply(lhs_value, rhs_value);
+            note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+            out_values.push(result);
 
             // Increment the output index as an odometer and adjust source flat
             // indices incrementally. This avoids re-unraveling and re-mapping
@@ -1760,18 +2290,49 @@ impl UFuncArray {
             }
         }
 
+        dispatch_float_error_flags(float_error_flags, op.name())?;
         Self::from_values_with_dtype(out_shape, out_values, out_dtype)
     }
 
-    #[must_use]
-    pub fn elementwise_unary(&self, op: UnaryOp) -> Self {
-        let values = self.values.iter().map(|&v| op.apply(v)).collect();
+    pub fn try_elementwise_unary(&self, op: UnaryOp) -> Result<Self, UFuncError> {
+        let mut float_error_flags = FloatErrorFlags::default();
+        let values = self
+            .values
+            .iter()
+            .map(|&value| {
+                let result = op.apply(value);
+                note_unary_float_errors(&mut float_error_flags, op, value, result);
+                result
+            })
+            .collect();
+        dispatch_float_error_flags(float_error_flags, op.name())?;
         let dtype = if op.is_bool_output() {
             DType::Bool
         } else {
             self.dtype
         };
-        Self::from_values_with_dtype_lossy(self.shape.clone(), values, dtype)
+        Self::from_values_with_dtype(self.shape.clone(), values, dtype)
+    }
+
+    #[must_use]
+    pub fn elementwise_unary(&self, op: UnaryOp) -> Self {
+        self.try_elementwise_unary(op).unwrap_or_else(|err| {
+            if let UFuncError::FloatingPoint { kind, detail } = err {
+                push_float_error_event(FloatErrorEvent {
+                    kind,
+                    mode: FloatErrorMode::Raise,
+                    op: op.name(),
+                    message: detail,
+                });
+            }
+            let values = self.values.iter().map(|&v| op.apply(v)).collect();
+            let dtype = if op.is_bool_output() {
+                DType::Bool
+            } else {
+                self.dtype
+            };
+            Self::from_values_with_dtype_lossy(self.shape.clone(), values, dtype)
+        })
     }
 
     pub fn reduce_sum(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
@@ -11650,14 +12211,37 @@ fn c_strides_elems(shape: &[usize]) -> Vec<usize> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum UFuncError {
     Shape(ShapeError),
-    InvalidInputLength { expected: usize, actual: usize },
-    AxisOutOfBounds { axis: isize, ndim: usize },
-    EmptyReduction { op: &'static str },
-    SignatureConflict { sig: String, signature: String },
-    SignatureParse { detail: String },
-    FixedSignatureInvalid { detail: String },
-    OverridePrecedenceViolation { detail: String },
-    LoopRegistryInvalid { detail: String },
+    InvalidInputLength {
+        expected: usize,
+        actual: usize,
+    },
+    AxisOutOfBounds {
+        axis: isize,
+        ndim: usize,
+    },
+    EmptyReduction {
+        op: &'static str,
+    },
+    FloatingPoint {
+        kind: FloatErrorKind,
+        detail: String,
+    },
+    SignatureConflict {
+        sig: String,
+        signature: String,
+    },
+    SignatureParse {
+        detail: String,
+    },
+    FixedSignatureInvalid {
+        detail: String,
+    },
+    OverridePrecedenceViolation {
+        detail: String,
+    },
+    LoopRegistryInvalid {
+        detail: String,
+    },
     Msg(String),
 }
 
@@ -11677,6 +12261,7 @@ impl std::fmt::Display for UFuncError {
             Self::EmptyReduction { op } => {
                 write!(f, "attempt to get {op} of an empty sequence")
             }
+            Self::FloatingPoint { detail, .. } => write!(f, "{detail}"),
             Self::SignatureConflict { sig, signature } => {
                 write!(
                     f,
@@ -11710,6 +12295,12 @@ impl UFuncError {
             Self::InvalidInputLength { .. } => "ufunc_invalid_input_length",
             Self::AxisOutOfBounds { .. } => "ufunc_axis_out_of_bounds",
             Self::EmptyReduction { .. } => "ufunc_reduce_axis_contract",
+            Self::FloatingPoint { kind, .. } => match kind {
+                FloatErrorKind::Divide => "ufunc_division_by_zero_observed",
+                FloatErrorKind::Over | FloatErrorKind::Under | FloatErrorKind::Invalid => {
+                    "ufunc_operation_error"
+                }
+            },
             Self::SignatureConflict { .. } => "ufunc_signature_conflict",
             Self::SignatureParse { .. } => "ufunc_signature_parse_failed",
             Self::FixedSignatureInvalid { .. } => "ufunc_fixed_signature_invalid",
@@ -17170,26 +17761,27 @@ impl StringArray {
 #[cfg(test)]
 mod tests {
     use super::{
-        AxisSlice, BinaryOp, MAError, MaskedArray, PrintOptions, QuantileInterp, StringArray,
-        UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncArrayView, UFuncError, UFuncLogRecord,
-        UFuncRuntimeMode, UnaryOp, bitwise_count, busday_count, busday_offset, cheb2poly, chebadd,
-        chebder, chebfit, chebint, chebmul, chebsub, chebval, divmod_arrays, financial_fv,
-        financial_ipmt, financial_irr, financial_mirr, financial_nper, financial_npv,
-        financial_pmt, financial_ppmt, financial_pv, financial_rate, frexp, gcd_arrays, herm2poly,
-        hermadd, hermder, herme2poly, hermeadd, hermemul, hermeroots, hermeval, hermfromroots,
-        hermint, hermmul, hermroots, hermsub, hermval, is_busday, isneginf, isposinf, lag2poly,
-        lagadd, lagder, lagfromroots, lagmul, lagroots, lagsub, lagval, lcm_arrays, leg2poly,
-        legadd, legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub, legval,
-        ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or, modf, normalize_signature_keywords,
-        pad_empty, pad_linear_ramp, pad_stat, parse_gufunc_signature, plan_binary_dispatch,
-        poly2cheb, poly2herm, poly2lag, poly2leg, register_custom_loop, scimath_arccos,
-        scimath_arcsin, scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_power,
-        scimath_sqrt, sort_complex, unique_all, unique_counts, unique_inverse, unique_values,
+        AxisSlice, BinaryOp, FloatErrorKind, FloatErrorMode, MAError, MaskedArray, PrintOptions,
+        QuantileInterp, StringArray, UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncArrayView,
+        UFuncError, UFuncLogRecord, UFuncRuntimeMode, UnaryOp, bitwise_count, busday_count,
+        busday_offset, cheb2poly, chebadd, chebder, chebfit, chebint, chebmul, chebsub, chebval,
+        divmod_arrays, errstate, financial_fv, financial_ipmt, financial_irr, financial_mirr,
+        financial_nper, financial_npv, financial_pmt, financial_ppmt, financial_pv, financial_rate,
+        frexp, gcd_arrays, geterr, herm2poly, hermadd, hermder, herme2poly, hermeadd, hermemul,
+        hermeroots, hermeval, hermfromroots, hermint, hermmul, hermroots, hermsub, hermval,
+        is_busday, isneginf, isposinf, lag2poly, lagadd, lagder, lagfromroots, lagmul, lagroots,
+        lagsub, lagval, lcm_arrays, leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint,
+        legmul, legroots, legsub, legval, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or, modf,
+        normalize_signature_keywords, pad_empty, pad_linear_ramp, pad_stat, parse_gufunc_signature,
+        plan_binary_dispatch, poly2cheb, poly2herm, poly2lag, poly2leg, register_custom_loop,
+        scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log, scimath_log2, scimath_log10,
+        scimath_power, scimath_sqrt, seterr, seterr_state, seterrcall, sort_complex,
+        take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
         validate_override_payload_class, where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, f16, promote};
     use fnp_ndarray::broadcast_shape;
-    use std::sync::{Arc, RwLock};
+    use std::sync::{Arc, Mutex, RwLock};
 
     fn packet005_artifacts() -> Vec<String> {
         vec![
@@ -17378,6 +17970,151 @@ mod tests {
 
         assert!(out.values()[0].is_infinite() && out.values()[0].is_sign_positive());
         assert!(out.values()[1].is_infinite() && out.values()[1].is_sign_negative());
+    }
+
+    #[test]
+    fn seterr_and_geterr_round_trip() {
+        let original = geterr();
+        let previous = seterr(
+            Some(FloatErrorMode::Ignore),
+            None,
+            None,
+            None,
+            Some(FloatErrorMode::Raise),
+        );
+
+        assert_eq!(previous, original);
+        assert_eq!(geterr().divide, FloatErrorMode::Ignore);
+        assert_eq!(geterr().over, FloatErrorMode::Ignore);
+        assert_eq!(geterr().under, FloatErrorMode::Ignore);
+        assert_eq!(geterr().invalid, FloatErrorMode::Raise);
+
+        let _ = seterr_state(original);
+    }
+
+    #[test]
+    fn errstate_restores_previous_modes_on_drop() {
+        let original = geterr();
+
+        {
+            let _guard = errstate(
+                None,
+                Some(FloatErrorMode::Raise),
+                Some(FloatErrorMode::Ignore),
+                None,
+                None,
+            );
+            assert_eq!(geterr().divide, FloatErrorMode::Raise);
+            assert_eq!(geterr().over, FloatErrorMode::Ignore);
+        }
+
+        assert_eq!(geterr(), original);
+    }
+
+    #[test]
+    fn seterr_warn_records_divide_event() {
+        let lhs = UFuncArray::new(vec![1], vec![1.0], DType::F64).expect("lhs");
+        let rhs = UFuncArray::new(vec![1], vec![0.0], DType::F64).expect("rhs");
+        take_float_error_events();
+
+        {
+            let _guard = errstate(None, Some(FloatErrorMode::Warn), None, None, None);
+            let out = lhs
+                .elementwise_binary(&rhs, BinaryOp::Div)
+                .expect("warn mode should not raise");
+            assert!(out.values()[0].is_infinite());
+        }
+
+        let events = take_float_error_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, FloatErrorKind::Divide);
+        assert_eq!(events[0].mode, FloatErrorMode::Warn);
+        assert_eq!(events[0].op, "divide");
+        assert!(events[0].message.contains("divide by zero"));
+    }
+
+    #[test]
+    fn seterr_ignore_suppresses_divide_events() {
+        let lhs = UFuncArray::new(vec![1], vec![1.0], DType::F64).expect("lhs");
+        let rhs = UFuncArray::new(vec![1], vec![0.0], DType::F64).expect("rhs");
+        take_float_error_events();
+
+        {
+            let _guard = errstate(Some(FloatErrorMode::Ignore), None, None, None, None);
+            let out = lhs
+                .elementwise_binary(&rhs, BinaryOp::Div)
+                .expect("ignore mode should not raise");
+            assert!(out.values()[0].is_infinite());
+        }
+
+        assert!(take_float_error_events().is_empty());
+    }
+
+    #[test]
+    fn seterr_raise_returns_divide_by_zero_error() {
+        let lhs = UFuncArray::new(vec![1], vec![1.0], DType::F64).expect("lhs");
+        let rhs = UFuncArray::new(vec![1], vec![0.0], DType::F64).expect("rhs");
+
+        let err = {
+            let _guard = errstate(None, Some(FloatErrorMode::Raise), None, None, None);
+            lhs.elementwise_binary(&rhs, BinaryOp::Div)
+                .expect_err("raise mode should surface floating-point error")
+        };
+
+        match err {
+            UFuncError::FloatingPoint { kind, detail } => {
+                assert_eq!(kind, FloatErrorKind::Divide);
+                assert!(detail.contains("divide by zero"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn seterr_call_invokes_registered_callback() {
+        let lhs = UFuncArray::new(vec![1], vec![1.0], DType::F64).expect("lhs");
+        let rhs = UFuncArray::new(vec![1], vec![0.0], DType::F64).expect("rhs");
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let callback_sink = Arc::clone(&sink);
+        let previous_callback = seterrcall(Some(Arc::new(move |event| {
+            callback_sink
+                .lock()
+                .expect("callback sink lock")
+                .push(event);
+        })));
+
+        {
+            let _guard = errstate(None, Some(FloatErrorMode::Call), None, None, None);
+            lhs.elementwise_binary(&rhs, BinaryOp::Div)
+                .expect("call mode should not raise");
+        }
+
+        let _ = seterrcall(previous_callback);
+        let events = sink.lock().expect("sink lock");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, FloatErrorKind::Divide);
+        assert_eq!(events[0].mode, FloatErrorMode::Call);
+        assert_eq!(events[0].op, "divide");
+    }
+
+    #[test]
+    fn try_elementwise_unary_respects_raise_mode() {
+        let arr = UFuncArray::new(vec![2], vec![0.0, 2.0], DType::F64).expect("arr");
+
+        let err = {
+            let _guard = errstate(None, Some(FloatErrorMode::Raise), None, None, None);
+            arr.try_elementwise_unary(UnaryOp::Reciprocal)
+                .expect_err("raise mode should trap reciprocal divide by zero")
+        };
+
+        assert_eq!(err.reason_code(), "ufunc_division_by_zero_observed");
+        match err {
+            UFuncError::FloatingPoint { kind, detail } => {
+                assert_eq!(kind, FloatErrorKind::Divide);
+                assert!(detail.contains("reciprocal"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
