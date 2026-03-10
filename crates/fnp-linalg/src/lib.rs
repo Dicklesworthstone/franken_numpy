@@ -3873,15 +3873,12 @@ mod tests {
         batch_cholesky,
         batch_det,
         batch_eig,
-        batch_eigh,
         batch_eigvalsh,
         batch_inv,
-        batch_matrix_norm,
         batch_qr,
         batch_slogdet,
         batch_solve,
         batch_svd,
-        batch_svd_full,
         batch_trace,
         cholesky_2x2,
         cholesky_nxn,
@@ -6691,8 +6688,8 @@ mod tests {
         assert!((eigvals[1] - 3.0).abs() < 1e-10);
         assert!((eigvals[2] - 2.0).abs() < 1e-10);
         // Second matrix: [1, 1, 1]
-        for i in 3..6 {
-            assert!((eigvals[i] - 1.0).abs() < 1e-10, "eig[{i}]={}", eigvals[i]);
+        for (i, eigval) in eigvals.iter().enumerate().skip(3).take(3) {
+            assert!((*eigval - 1.0).abs() < 1e-10, "eig[{i}]={eigval}");
         }
     }
 

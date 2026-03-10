@@ -5,3 +5,4 @@ edition = "2024"
 license-file = "../../LICENSE"
 
 [dependencies]
+half = "2.7.1"

@@ -406,6 +406,9 @@ dependencies = [
 [[package]]
 name = "fnp-dtype"
 version = "0.1.0"
+dependencies = [
+ "half",
+]
 
 [[package]]
 name = "fnp-io"

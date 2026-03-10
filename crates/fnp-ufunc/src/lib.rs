@@ -5174,6 +5174,11 @@ impl UFuncArray {
             DType::U8 | DType::U16 | DType::U32 | DType::U64 => {
                 self.values.iter().map(|&v| (v as u64) as f64).collect()
             }
+            DType::F16 => self
+                .values
+                .iter()
+                .map(|&v| f64::from(fnp_dtype::f16::from_f64(v)))
+                .collect(),
             DType::F32 => self.values.iter().map(|&v| (v as f32) as f64).collect(),
             DType::F64 => self.values.clone(),
             // Complex: store real parts (imaginary zeroed); Str/DateTime/TimeDelta: identity
@@ -11123,6 +11128,7 @@ impl UFuncArray {
                 'I' | 'L' => DType::U32,
                 'q' => DType::I64,
                 'Q' => DType::U64,
+                'e' => DType::F16,
                 'f' => DType::F32,
                 'd' => DType::F64,
                 'F' => DType::Complex64,
@@ -11142,6 +11148,7 @@ impl UFuncArray {
             DType::U16 => 'H',
             DType::U32 => 'I',
             DType::U64 => 'Q',
+            DType::F16 => 'e',
             DType::F32 => 'f',
             DType::F64 => 'd',
             DType::Complex64 => 'F',
@@ -11394,6 +11401,7 @@ impl UFuncArray {
             DType::U16 => "uint16",
             DType::U32 => "uint32",
             DType::U64 => "uint64",
+            DType::F16 => "float16",
             DType::F32 => "float32",
             DType::Complex64 => "complex64",
             DType::Complex128 => "complex128",
@@ -17179,7 +17187,7 @@ mod tests {
         scimath_sqrt, sort_complex, unique_all, unique_counts, unique_inverse, unique_values,
         validate_override_payload_class, where_nonzero,
     };
-    use fnp_dtype::{ArrayStorage, DType, promote};
+    use fnp_dtype::{ArrayStorage, DType, f16, promote};
     use fnp_ndarray::broadcast_shape;
     use std::sync::{Arc, RwLock};
 
@@ -17277,6 +17285,57 @@ mod tests {
         assert_eq!(
             arr.to_storage().expect("to_storage"),
             ArrayStorage::I64(vec![0, 1, 2])
+        );
+    }
+
+    #[test]
+    fn from_storage_supports_f16_roundtrip() {
+        let arr = UFuncArray::from_storage(
+            vec![2],
+            ArrayStorage::F16(vec![f16::from_f32(0.1), f16::from_f32(1.5)]),
+        )
+        .expect("from_storage");
+        assert_eq!(arr.dtype(), DType::F16);
+        assert!((arr.values()[0] - 0.099_975_585_937_5).abs() < 1e-15);
+        assert_eq!(arr.values()[1], 1.5);
+        assert_eq!(
+            arr.to_storage().expect("to_storage"),
+            ArrayStorage::F16(vec![f16::from_f32(0.1), f16::from_f32(1.5)])
+        );
+    }
+
+    #[test]
+    fn astype_to_f16_quantizes_values() {
+        let arr = UFuncArray::new(vec![2], vec![0.1, 1.5], DType::F64).expect("array");
+        let cast = arr.astype(DType::F16);
+        assert_eq!(cast.dtype(), DType::F16);
+        assert!((cast.values()[0] - 0.099_975_585_937_5).abs() < 1e-15);
+        assert_eq!(cast.values()[1], 1.5);
+        assert_eq!(
+            cast.to_storage().expect("to_storage"),
+            ArrayStorage::F16(vec![f16::from_f32(0.1), f16::from_f32(1.5)])
+        );
+    }
+
+    #[test]
+    fn elementwise_binary_preserves_f16_dtype() {
+        let lhs = UFuncArray::from_storage(
+            vec![2],
+            ArrayStorage::F16(vec![f16::from_f32(1.0), f16::from_f32(2.0)]),
+        )
+        .expect("lhs");
+        let rhs = UFuncArray::from_storage(
+            vec![2],
+            ArrayStorage::F16(vec![f16::from_f32(0.5), f16::from_f32(1.5)]),
+        )
+        .expect("rhs");
+        let out = lhs
+            .elementwise_binary(&rhs, BinaryOp::Add)
+            .expect("binary add");
+        assert_eq!(out.dtype(), DType::F16);
+        assert_eq!(
+            out.to_storage().expect("to_storage"),
+            ArrayStorage::F16(vec![f16::from_f32(1.5), f16::from_f32(3.5)])
         );
     }
 

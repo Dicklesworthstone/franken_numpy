@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub use half::f16;
+
 /// Canonical NumPy-like dtypes for FrankenNumPy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DType {
@@ -12,6 +14,7 @@ pub enum DType {
     U16,
     U32,
     U64,
+    F16,
     F32,
     F64,
     Complex64,
@@ -36,6 +39,7 @@ impl DType {
             Self::U16 => "u16",
             Self::U32 => "u32",
             Self::U64 => "u64",
+            Self::F16 => "f16",
             Self::F32 => "f32",
             Self::F64 => "f64",
             Self::Complex64 => "complex64",
@@ -51,7 +55,7 @@ impl DType {
     pub const fn item_size(self) -> usize {
         match self {
             Self::Bool | Self::I8 | Self::U8 => 1,
-            Self::I16 | Self::U16 => 2,
+            Self::I16 | Self::U16 | Self::F16 => 2,
             Self::I32 | Self::U32 | Self::F32 => 4,
             Self::I64
             | Self::U64
@@ -76,6 +80,7 @@ impl DType {
             "u16" | "uint16" => Some(Self::U16),
             "u32" | "uint32" => Some(Self::U32),
             "u64" | "uint64" => Some(Self::U64),
+            "f16" | "float16" | "half" => Some(Self::F16),
             "f32" | "float32" => Some(Self::F32),
             "f64" | "float64" => Some(Self::F64),
             "c8" | "complex64" => Some(Self::Complex64),
@@ -123,7 +128,7 @@ impl DType {
     /// Returns `true` if this is a floating-point type.
     #[must_use]
     pub const fn is_float(self) -> bool {
-        matches!(self, Self::F32 | Self::F64)
+        matches!(self, Self::F16 | Self::F32 | Self::F64)
     }
 
     /// Returns `true` if this is a complex floating-point type.
@@ -145,7 +150,9 @@ impl DType {
 /// - `promote(Bool, X) = X` for any X (Bool is the weakest type)
 /// - Same kind: pick the wider type
 /// - Signed + unsigned: smallest signed that fits both ranges, or F64 for U64+signed
-/// - Any integer + any float: F64 (because F32 cannot represent all I32/I64 values)
+/// - Float16 mirrors NumPy promotion rules: only 8-bit integers stay in
+///   float16; 16-bit integers widen to float32 and 32/64-bit integers widen
+///   to float64.
 /// - Float + Float: wider float
 #[must_use]
 pub const fn promote(lhs: DType, rhs: DType) -> DType {
@@ -195,20 +202,34 @@ pub const fn promote(lhs: DType, rhs: DType) -> DType {
         | (U64, I64)
         | (I64, U64) => F64,
 
+        // Small integers + F16 -> F16 (NumPy preserves float16 for 8-bit ints)
+        (F16, I8 | U8) | (I8 | U8, F16) => F16,
+        // 16-bit integers widen float16 to float32
+        (F16, I16 | U16) | (I16 | U16, F16) => F32,
+        // 32/64-bit integers widen float16 to float64
+        (F16, I32 | I64 | U32 | U64) | (I32 | I64 | U32 | U64, F16) => F64,
+        // Float-float: pick wider
+        (F16, F16) => F16,
+        (F16, F32) | (F32, F16) | (F32, F32) => F32,
+        (F16, F64) | (F64, F16) => F64,
         // Small integers + F32 -> F32 (F32 has 24-bit mantissa, enough for 8/16-bit ints)
         (F32, I8 | I16 | U8 | U16) | (I8 | I16 | U8 | U16, F32) => F32,
         // Larger integers + F32 -> F64 (F32 can't exactly represent all I32/I64/U32/U64 values)
         (F32, I32 | I64 | U32 | U64) | (I32 | I64 | U32 | U64, F32) => F64,
-        // Float-float: pick wider
-        (F32, F32) => F32,
 
         // Complex promotion: complex absorbs float and integer
         (Complex64, Complex64) => Complex64,
         (Complex128, Complex128) => Complex128,
         (Complex64, Complex128) | (Complex128, Complex64) => Complex128,
         // Float + Complex: promote to matching complex
+        (F16, Complex64) | (Complex64, F16) => Complex64,
         (F32, Complex64) | (Complex64, F32) => Complex64,
-        (F64, Complex64) | (Complex64, F64) | (F32, Complex128) | (Complex128, F32) => Complex128,
+        (F64, Complex64)
+        | (Complex64, F64)
+        | (F16, Complex128)
+        | (Complex128, F16)
+        | (F32, Complex128)
+        | (Complex128, F32) => Complex128,
         (F64, Complex128) | (Complex128, F64) => Complex128,
         // Small integers + Complex64 -> Complex64 (mirrors F32 mantissa rule)
         // Note: Bool is already handled by the (Bool, x) | (x, Bool) => x rule above
@@ -241,6 +262,7 @@ pub const fn promote_for_sum_reduction(dt: DType) -> DType {
         DType::U8 | DType::U16 | DType::U32 => DType::U64,
         DType::U64 => DType::U64,
         DType::I64 => DType::I64,
+        DType::F16 => DType::F16,
         DType::F32 => DType::F32,
         DType::F64 => DType::F64,
         DType::Complex64 => DType::Complex64,
@@ -265,6 +287,7 @@ pub const fn promote_for_mean_reduction(dt: DType) -> DType {
         | DType::U16
         | DType::U32
         | DType::U64 => DType::F64,
+        DType::F16 => DType::F16,
         DType::F32 => DType::F32,
         DType::F64 => DType::F64,
         DType::Complex64 => DType::Complex64,
@@ -282,18 +305,19 @@ pub const fn can_cast_lossless(src: DType, dst: DType) -> bool {
     matches!(
         (src, dst),
         // Bool can cast to anything numeric
-        (Bool, Bool | I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | F32 | F64 | Complex64 | Complex128)
+        (Bool, Bool | I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | F16 | F32 | F64 | Complex64 | Complex128)
         // Signed integers: can cast to wider signed or to F64
-        | (I8, I8 | I16 | I32 | I64 | F32 | F64 | Complex64 | Complex128)
+        | (I8, I8 | I16 | I32 | I64 | F16 | F32 | F64 | Complex64 | Complex128)
         | (I16, I16 | I32 | I64 | F32 | F64 | Complex64 | Complex128)
         | (I32, I32 | I64 | F64 | Complex128)
         | (I64, I64 | F64 | Complex128)
         // Unsigned integers: can cast to wider unsigned, wider signed, or F64
-        | (U8, U8 | U16 | U32 | U64 | I16 | I32 | I64 | F32 | F64 | Complex64 | Complex128)
+        | (U8, U8 | U16 | U32 | U64 | I16 | I32 | I64 | F16 | F32 | F64 | Complex64 | Complex128)
         | (U16, U16 | U32 | U64 | I32 | I64 | F32 | F64 | Complex64 | Complex128)
         | (U32, U32 | U64 | I64 | F64 | Complex128)
         | (U64, U64 | F64 | Complex128)
         // Floats: can cast to wider float or matching complex
+        | (F16, F16 | F32 | F64 | Complex64 | Complex128)
         | (F32, F32 | F64 | Complex64 | Complex128)
         | (F64, F64 | Complex128)
         // Complex: can cast to wider complex
@@ -439,6 +463,14 @@ pub const fn iinfo(dtype: DType) -> Option<(i128, i128, u32)> {
 #[must_use]
 pub const fn finfo(dtype: DType) -> Option<(u32, f64, f64, f64, i32, i32)> {
     match dtype {
+        DType::F16 => Some((
+            16,
+            0.000_976_562_5,
+            0.000_061_035_156_25,
+            65_504.0,
+            f16::MIN_EXP,
+            f16::MAX_EXP,
+        )),
         DType::F32 => Some((
             32,
             f32::EPSILON as f64,
@@ -479,8 +511,16 @@ pub const fn finfo(dtype: DType) -> Option<(u32, f64, f64, f64, i32, i32)> {
 /// Integer types are promoted to F64; float types use normal promotion.
 #[must_use]
 pub fn common_type(dtypes: &[DType]) -> DType {
-    let mut result = DType::F32;
-    for &dt in dtypes {
+    let mut iter = dtypes.iter().copied();
+    let Some(first) = iter.next() else {
+        return DType::F64;
+    };
+    let mut result = if first.is_float() || first.is_complex() {
+        first
+    } else {
+        DType::F64
+    };
+    for dt in iter {
         let as_float = if dt.is_float() || dt.is_complex() {
             dt
         } else {
@@ -642,6 +682,7 @@ pub enum ArrayStorage {
     U16(Vec<u16>),
     U32(Vec<u32>),
     U64(Vec<u64>),
+    F16(Vec<f16>),
     F32(Vec<f32>),
     F64(Vec<f64>),
     Complex64(Vec<(f32, f32)>),
@@ -691,6 +732,7 @@ impl ArrayStorage {
             Self::U16(v) => v.len(),
             Self::U32(v) => v.len(),
             Self::U64(v) => v.len(),
+            Self::F16(v) => v.len(),
             Self::F32(v) => v.len(),
             Self::F64(v) => v.len(),
             Self::Complex64(v) => v.len(),
@@ -719,6 +761,7 @@ impl ArrayStorage {
             Self::U16(_) => DType::U16,
             Self::U32(_) => DType::U32,
             Self::U64(_) => DType::U64,
+            Self::F16(_) => DType::F16,
             Self::F32(_) => DType::F32,
             Self::F64(_) => DType::F64,
             Self::Complex64(_) => DType::Complex64,
@@ -752,6 +795,7 @@ impl ArrayStorage {
             Self::U16(v) => f64::from(v[index]),
             Self::U32(v) => f64::from(v[index]),
             Self::U64(v) => v[index] as f64,
+            Self::F16(v) => f64::from(v[index]),
             Self::F32(v) => f64::from(v[index]),
             Self::F64(v) => v[index],
             Self::Complex64(v) => f64::from(v[index].0),
@@ -776,6 +820,7 @@ impl ArrayStorage {
             Self::U16(v) => v[index] = val as u16,
             Self::U32(v) => v[index] = val as u32,
             Self::U64(v) => v[index] = val as u64,
+            Self::F16(v) => v[index] = f16::from_f64(val),
             Self::F32(v) => v[index] = val as f32,
             Self::F64(v) => v[index] = val,
             Self::Complex64(v) => v[index] = (val as f32, 0.0),
@@ -804,6 +849,7 @@ impl ArrayStorage {
             DType::U16 => Self::U16(vec![0; n]),
             DType::U32 => Self::U32(vec![0; n]),
             DType::U64 => Self::U64(vec![0; n]),
+            DType::F16 => Self::F16(vec![f16::from_f32(0.0); n]),
             DType::F32 => Self::F32(vec![0.0; n]),
             DType::F64 => Self::F64(vec![0.0; n]),
             DType::Complex64 => Self::Complex64(vec![(0.0, 0.0); n]),
@@ -872,6 +918,12 @@ impl ArrayStorage {
     #[must_use]
     pub fn from_f64_vec(data: Vec<f64>) -> Self {
         Self::F64(data)
+    }
+
+    /// Create F16 storage from a Vec<f16>.
+    #[must_use]
+    pub fn from_f16_vec(data: Vec<f16>) -> Self {
+        Self::F16(data)
     }
 
     /// Create Complex128 storage from a Vec of (real, imag) pairs.
@@ -1226,11 +1278,11 @@ impl ArrayStorage {
 mod tests {
     use super::{
         ArrayStorage, DType, StorageError, StructuredField, StructuredStorage, can_cast,
-        can_cast_lossless, common_type, finfo, iinfo, min_scalar_type, promote,
+        can_cast_lossless, common_type, f16, finfo, iinfo, min_scalar_type, promote,
         promote_for_mean_reduction, promote_for_sum_reduction, result_type,
     };
 
-    fn all_numeric_dtypes() -> [DType; 13] {
+    fn all_numeric_dtypes() -> [DType; 14] {
         [
             DType::Bool,
             DType::I8,
@@ -1241,6 +1293,7 @@ mod tests {
             DType::U16,
             DType::U32,
             DType::U64,
+            DType::F16,
             DType::F32,
             DType::F64,
             DType::Complex64,
@@ -1282,6 +1335,7 @@ mod tests {
     fn promotion_expectations_hold() {
         assert_eq!(promote(DType::Bool, DType::I32), DType::I32);
         assert_eq!(promote(DType::I32, DType::I64), DType::I64);
+        assert_eq!(promote(DType::I8, DType::F16), DType::F16);
         assert_eq!(promote(DType::I32, DType::F32), DType::F64);
         assert_eq!(promote(DType::F32, DType::F64), DType::F64);
     }
@@ -1303,6 +1357,13 @@ mod tests {
 
     #[test]
     fn promotion_int_float_rules() {
+        // Float16 follows NumPy's narrower integer thresholds
+        assert_eq!(promote(DType::I8, DType::F16), DType::F16);
+        assert_eq!(promote(DType::U8, DType::F16), DType::F16);
+        assert_eq!(promote(DType::I16, DType::F16), DType::F32);
+        assert_eq!(promote(DType::U16, DType::F16), DType::F32);
+        assert_eq!(promote(DType::I32, DType::F16), DType::F64);
+        assert_eq!(promote(DType::U64, DType::F16), DType::F64);
         // Small ints + F32 -> F32 (F32 mantissa can hold 8/16-bit values)
         assert_eq!(promote(DType::I8, DType::F32), DType::F32);
         assert_eq!(promote(DType::I16, DType::F32), DType::F32);
@@ -1331,6 +1392,7 @@ mod tests {
     #[test]
     fn cast_matrix_smoke() {
         assert!(can_cast_lossless(DType::Bool, DType::F64));
+        assert!(can_cast_lossless(DType::I8, DType::F16));
         assert!(can_cast_lossless(DType::I32, DType::I64));
         assert!(!can_cast_lossless(DType::I64, DType::I32));
         assert!(!can_cast_lossless(DType::F64, DType::F32));
@@ -1361,6 +1423,7 @@ mod tests {
         assert_eq!(DType::parse("int16"), Some(DType::I16));
         assert_eq!(DType::parse("uint8"), Some(DType::U8));
         assert_eq!(DType::parse("uint64"), Some(DType::U64));
+        assert_eq!(DType::parse("float16"), Some(DType::F16));
         assert_eq!(DType::parse("float32"), Some(DType::F32));
         assert_eq!(DType::parse("float64"), Some(DType::F64));
     }
@@ -1372,6 +1435,7 @@ mod tests {
         assert_eq!(DType::U8.item_size(), 1);
         assert_eq!(DType::I16.item_size(), 2);
         assert_eq!(DType::U16.item_size(), 2);
+        assert_eq!(DType::F16.item_size(), 2);
         assert_eq!(DType::I32.item_size(), 4);
         assert_eq!(DType::U32.item_size(), 4);
         assert_eq!(DType::F32.item_size(), 4);
@@ -1441,6 +1505,7 @@ mod tests {
         assert_eq!(promote_for_sum_reduction(DType::U16), DType::U64);
         assert_eq!(promote_for_sum_reduction(DType::U32), DType::U64);
         assert_eq!(promote_for_sum_reduction(DType::U64), DType::U64);
+        assert_eq!(promote_for_sum_reduction(DType::F16), DType::F16);
         assert_eq!(promote_for_sum_reduction(DType::F32), DType::F32);
         assert_eq!(promote_for_sum_reduction(DType::F64), DType::F64);
     }
@@ -1452,6 +1517,7 @@ mod tests {
         assert_eq!(promote_for_mean_reduction(DType::I64), DType::F64);
         assert_eq!(promote_for_mean_reduction(DType::U8), DType::F64);
         assert_eq!(promote_for_mean_reduction(DType::U64), DType::F64);
+        assert_eq!(promote_for_mean_reduction(DType::F16), DType::F16);
         assert_eq!(promote_for_mean_reduction(DType::F32), DType::F32);
         assert_eq!(promote_for_mean_reduction(DType::F64), DType::F64);
     }
@@ -1468,6 +1534,7 @@ mod tests {
 
     #[test]
     fn result_type_folds_promotion() {
+        assert_eq!(result_type(&[DType::F16, DType::U8]), DType::F16);
         assert_eq!(result_type(&[DType::I32, DType::F32]), DType::F64);
         assert_eq!(
             result_type(&[DType::I8, DType::I16, DType::I32]),
@@ -1484,6 +1551,7 @@ mod tests {
         assert!(!can_cast(DType::I32, DType::I64, "no"));
         // safe: lossless only
         assert!(can_cast(DType::I32, DType::I64, "safe"));
+        assert!(can_cast(DType::F16, DType::F32, "safe"));
         assert!(!can_cast(DType::I64, DType::I32, "safe"));
         // same_kind: within kind or int -> float
         assert!(can_cast(DType::I32, DType::F32, "same_kind"));
@@ -1508,6 +1576,8 @@ mod tests {
 
     #[test]
     fn common_type_promotes_to_float() {
+        assert_eq!(common_type(&[DType::F16]), DType::F16);
+        assert_eq!(common_type(&[DType::F16, DType::F32]), DType::F32);
         assert_eq!(common_type(&[DType::F32, DType::F32]), DType::F32);
         assert_eq!(common_type(&[DType::F32, DType::F64]), DType::F64);
         assert_eq!(common_type(&[DType::I32, DType::F32]), DType::F64);
@@ -1631,6 +1701,14 @@ mod tests {
 
     #[test]
     fn finfo_float_types() {
+        let (bits, eps, tiny, max, min_exp, max_exp) = finfo(DType::F16).unwrap();
+        assert_eq!(bits, 16);
+        assert!((eps - f64::from(f16::EPSILON)).abs() < 1e-15);
+        assert_eq!(tiny, f64::from(f16::MIN_POSITIVE));
+        assert_eq!(max, f64::from(f16::MAX));
+        assert_eq!(min_exp, f16::MIN_EXP);
+        assert_eq!(max_exp, f16::MAX_EXP);
+
         let (bits, eps, tiny, max, min_exp, max_exp) = finfo(DType::F32).unwrap();
         assert_eq!(bits, 32);
         assert!((eps - f64::from(f32::EPSILON)).abs() < 1e-15);
@@ -1682,6 +1760,7 @@ mod tests {
             DType::U16,
             DType::U32,
             DType::U64,
+            DType::F16,
             DType::F32,
             DType::F64,
             DType::Complex64,
@@ -1759,6 +1838,15 @@ mod tests {
     }
 
     #[test]
+    fn storage_f16_roundtrip() {
+        let mut storage = ArrayStorage::F16(vec![f16::from_f32(0.1), f16::from_f32(1.5)]);
+        assert!((storage.get_f64(0).unwrap() - 0.099_975_585_937_5).abs() < 1e-15);
+        assert_eq!(storage.get_f64(1).unwrap(), 1.5);
+        storage.set_f64(1, 2.25).unwrap();
+        assert_eq!(storage.get_f64(1).unwrap(), 2.25);
+    }
+
+    #[test]
     fn storage_out_of_bounds() {
         let storage = ArrayStorage::F64(vec![1.0, 2.0]);
         let err = storage.get_f64(5).unwrap_err();
@@ -1773,6 +1861,16 @@ mod tests {
         assert_eq!(cast.get_f64(0).unwrap(), 1.0);
         assert_eq!(cast.get_f64(1).unwrap(), 2.0); // truncated
         assert_eq!(cast.get_f64(2).unwrap(), -3.0); // truncated
+    }
+
+    #[test]
+    fn storage_cast_f64_to_f16_quantizes_like_numpy() {
+        let storage = ArrayStorage::F64(vec![0.1, 1.5, 65_504.0]);
+        let cast = storage.cast_to(DType::F16).unwrap();
+        assert_eq!(cast.dtype(), DType::F16);
+        assert!((cast.get_f64(0).unwrap() - 0.099_975_585_937_5).abs() < 1e-15);
+        assert_eq!(cast.get_f64(1).unwrap(), 1.5);
+        assert_eq!(cast.get_f64(2).unwrap(), 65_504.0);
     }
 
     #[test]
