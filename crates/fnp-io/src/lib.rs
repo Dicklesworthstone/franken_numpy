@@ -197,10 +197,7 @@ impl IOSupportedDType {
 
     #[must_use]
     pub const fn is_string(self) -> bool {
-        matches!(
-            self,
-            Self::Bytes(_) | Self::Unicode(_) | Self::UnicodeBe(_)
-        )
+        matches!(self, Self::Bytes(_) | Self::Unicode(_) | Self::UnicodeBe(_))
     }
 }
 
@@ -2095,10 +2092,14 @@ impl MemmapArray {
         let item_size = self
             .dtype
             .item_size()
-            .ok_or(IOError::MemmapContractViolation("unsupported dtype for memmap"))?;
+            .ok_or(IOError::MemmapContractViolation(
+                "unsupported dtype for memmap",
+            ))?;
         count
             .checked_mul(item_size)
-            .ok_or(IOError::MemmapContractViolation("array byte size overflowed"))
+            .ok_or(IOError::MemmapContractViolation(
+                "array byte size overflowed",
+            ))
     }
 
     /// Flush changes to disk for writable mappings.
@@ -2164,13 +2165,15 @@ pub fn memmap(
             "object dtype is invalid for memmap path",
         ));
     }
-    let item_size = dtype
-        .item_size()
-        .ok_or(IOError::MemmapContractViolation("unsupported dtype for memmap"))?;
+    let item_size = dtype.item_size().ok_or(IOError::MemmapContractViolation(
+        "unsupported dtype for memmap",
+    ))?;
     let count = element_count(shape)?;
     let expected_bytes = count
         .checked_mul(item_size)
-        .ok_or(IOError::MemmapContractViolation("array byte size overflowed"))?;
+        .ok_or(IOError::MemmapContractViolation(
+            "array byte size overflowed",
+        ))?;
 
     match mode {
         MemmapMode::Write => {
@@ -2276,10 +2279,7 @@ pub fn memmap(
 ///
 /// Reads the NPY header to determine shape/dtype, then memory-maps the
 /// data payload region of the file.
-pub fn memmap_npy(
-    path: &std::path::Path,
-    mode: MemmapMode,
-) -> Result<MemmapArray, IOError> {
+pub fn memmap_npy(path: &std::path::Path, mode: MemmapMode) -> Result<MemmapArray, IOError> {
     // Read the header to determine shape/dtype/offset
     let header_bytes = std::fs::read(path)
         .map_err(|_| IOError::MemmapContractViolation("failed to read NPY file for header"))?;
@@ -2316,7 +2316,10 @@ impl StructuredIODescriptor {
     pub fn record_size(&self) -> Result<usize, IOError> {
         let mut total = 0usize;
         for field in &self.fields {
-            let sz = field.dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?;
+            let sz = field
+                .dtype
+                .item_size()
+                .ok_or(IOError::DTypeDescriptorInvalid)?;
             total = total
                 .checked_add(sz)
                 .ok_or(IOError::HeaderSchemaInvalid("record size overflowed"))?;
@@ -2330,7 +2333,10 @@ impl StructuredIODescriptor {
         let mut offset = 0usize;
         for field in &self.fields {
             offsets.push(offset);
-            let sz = field.dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?;
+            let sz = field
+                .dtype
+                .item_size()
+                .ok_or(IOError::DTypeDescriptorInvalid)?;
             offset = offset
                 .checked_add(sz)
                 .ok_or(IOError::HeaderSchemaInvalid("field offset overflowed"))?;
@@ -2508,7 +2514,10 @@ pub fn fromfile_structured(
     for record_idx in 0..n {
         let record_start = record_idx * record_size;
         for (field_idx, field) in descriptor.fields.iter().enumerate() {
-            let field_size = field.dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?;
+            let field_size = field
+                .dtype
+                .item_size()
+                .ok_or(IOError::DTypeDescriptorInvalid)?;
             let field_start = record_start + offsets[field_idx];
             let field_end = field_start + field_size;
             if field_end > data.len() {
@@ -2561,7 +2570,10 @@ pub fn tofile_structured(
 
     // Validate all columns have the same record count
     for (i, field) in descriptor.fields.iter().enumerate() {
-        let item_size = field.dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?;
+        let item_size = field
+            .dtype
+            .item_size()
+            .ok_or(IOError::DTypeDescriptorInvalid)?;
         let col_records = columns[i].len().checked_div(item_size).unwrap_or(0);
         if col_records != n {
             return Err(IOError::WriteContractViolation(
@@ -2573,7 +2585,10 @@ pub fn tofile_structured(
     let mut buf = Vec::with_capacity(n * record_size);
     for record_idx in 0..n {
         for (field_idx, field) in descriptor.fields.iter().enumerate() {
-            let item_size = field.dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?;
+            let item_size = field
+                .dtype
+                .item_size()
+                .ok_or(IOError::DTypeDescriptorInvalid)?;
             let start = record_idx * item_size;
             let end = start + item_size;
             buf.extend_from_slice(&columns[field_idx][start..end]);
@@ -2691,10 +2706,7 @@ pub fn load_structured(data: &[u8]) -> Result<StructuredNpyData, IOError> {
 /// NumPy `|Sn` stores each element as exactly `n` bytes, null-padded.
 /// Returns the string with trailing null bytes stripped.
 fn decode_bytes_element(chunk: &[u8]) -> String {
-    let end = chunk
-        .iter()
-        .rposition(|&b| b != 0)
-        .map_or(0, |pos| pos + 1);
+    let end = chunk.iter().rposition(|&b| b != 0).map_or(0, |pos| pos + 1);
     String::from_utf8_lossy(&chunk[..end]).into_owned()
 }
 
@@ -2856,14 +2868,13 @@ mod tests {
         StructuredIOField, classify_load_dispatch, encode_npy_header_bytes, enforce_pickle_policy,
         fromfile, fromfile_complex, fromfile_strings, fromfile_structured, fromstring, genfromtxt,
         load, load_complex, load_npz, load_strings, load_structured, loadtxt, loadtxt_usecols,
-        parse_structured_descr, read_npy_bytes, read_npz_bytes, save, save_complex, save_strings,
-        save_structured, savetxt, savez, savez_compressed, synthesize_npz_member_names, tobytes,
-        tofile, tofile_complex, tofile_strings, tofile_structured, tostring,
-        validate_descriptor_roundtrip, validate_header_schema, validate_io_policy_metadata,
-        validate_magic_version, validate_memmap_contract, validate_npz_archive_budget,
-        validate_read_payload, validate_write_contract, memmap, memmap_npy,
-        write_npy_bytes,
-        write_npy_bytes_with_version, write_npy_preamble, write_npz_bytes,
+        memmap, memmap_npy, parse_structured_descr, read_npy_bytes, read_npz_bytes, save,
+        save_complex, save_strings, save_structured, savetxt, savez, savez_compressed,
+        synthesize_npz_member_names, tobytes, tofile, tofile_complex, tofile_strings,
+        tofile_structured, tostring, validate_descriptor_roundtrip, validate_header_schema,
+        validate_io_policy_metadata, validate_magic_version, validate_memmap_contract,
+        validate_npz_archive_budget, validate_read_payload, validate_write_contract,
+        write_npy_bytes, write_npy_bytes_with_version, write_npy_preamble, write_npz_bytes,
         write_npz_bytes_with_compression,
     };
 
@@ -4225,8 +4236,7 @@ mod tests {
 
     #[test]
     fn npy_header_with_string_dtype_parses() {
-        let header_literal =
-            "{'descr': '|S5', 'fortran_order': False, 'shape': (3,), }          ";
+        let header_literal = "{'descr': '|S5', 'fortran_order': False, 'shape': (3,), }          ";
         // 3 elements × 5 bytes each = 15 bytes total
         let body = b"helloworldhi\x00\x00\x00";
         let payload = make_manual_npy_payload(header_literal, body);
@@ -4239,8 +4249,7 @@ mod tests {
 
     #[test]
     fn npy_header_with_unicode_dtype_parses() {
-        let header =
-            "{'descr': '<U3', 'fortran_order': False, 'shape': (2,), }          ";
+        let header = "{'descr': '<U3', 'fortran_order': False, 'shape': (2,), }          ";
         let mut body = Vec::new();
         for c in "abc".chars() {
             body.extend_from_slice(&(c as u32).to_le_bytes());
@@ -4304,8 +4313,7 @@ mod tests {
 
     #[test]
     fn parse_structured_descr_with_string_field() {
-        let desc =
-            parse_structured_descr("[('name', '|S10'), ('value', '<f8')]").unwrap();
+        let desc = parse_structured_descr("[('name', '|S10'), ('value', '<f8')]").unwrap();
         assert_eq!(desc.fields.len(), 2);
         assert_eq!(desc.fields[0].name, "name");
         assert_eq!(desc.fields[0].dtype, IOSupportedDType::Bytes(10));
@@ -4357,16 +4365,24 @@ mod tests {
     #[test]
     fn fromfile_structured_with_count() {
         let desc = make_test_descriptor();
-        let col_x: Vec<u8> = [1.0f64.to_le_bytes(), 2.0f64.to_le_bytes(), 3.0f64.to_le_bytes()]
-            .concat();
-        let col_y: Vec<u8> = [10i32.to_le_bytes(), 20i32.to_le_bytes(), 30i32.to_le_bytes()]
-            .concat();
+        let col_x: Vec<u8> = [
+            1.0f64.to_le_bytes(),
+            2.0f64.to_le_bytes(),
+            3.0f64.to_le_bytes(),
+        ]
+        .concat();
+        let col_y: Vec<u8> = [
+            10i32.to_le_bytes(),
+            20i32.to_le_bytes(),
+            30i32.to_le_bytes(),
+        ]
+        .concat();
         let encoded = tofile_structured(&desc, &[col_x, col_y]).unwrap();
         let result = fromfile_structured(&encoded, &desc, Some(2)).unwrap();
         assert_eq!(result.shape, vec![2]);
         // Only first 2 records decoded
         assert_eq!(result.columns[0].len(), 16); // 2 * 8 bytes
-        assert_eq!(result.columns[1].len(), 8);  // 2 * 4 bytes
+        assert_eq!(result.columns[1].len(), 8); // 2 * 4 bytes
     }
 
     #[test]
@@ -4381,7 +4397,7 @@ mod tests {
         let desc = make_test_descriptor();
         // col_x has 2 records but col_y has 1
         let col_x = vec![0u8; 16]; // 2 * 8
-        let col_y = vec![0u8; 4];  // 1 * 4
+        let col_y = vec![0u8; 4]; // 1 * 4
         let err = tofile_structured(&desc, &[col_x, col_y]).unwrap_err();
         assert_eq!(err.reason_code(), "io_write_contract_violation");
     }
@@ -4389,10 +4405,18 @@ mod tests {
     #[test]
     fn save_load_structured_roundtrip() {
         let desc = make_test_descriptor();
-        let col_x: Vec<u8> = [1.5f64.to_le_bytes(), 2.75f64.to_le_bytes(), 3.25f64.to_le_bytes()]
-            .concat();
-        let col_y: Vec<u8> = [10i32.to_le_bytes(), 20i32.to_le_bytes(), 30i32.to_le_bytes()]
-            .concat();
+        let col_x: Vec<u8> = [
+            1.5f64.to_le_bytes(),
+            2.75f64.to_le_bytes(),
+            3.25f64.to_le_bytes(),
+        ]
+        .concat();
+        let col_y: Vec<u8> = [
+            10i32.to_le_bytes(),
+            20i32.to_le_bytes(),
+            30i32.to_le_bytes(),
+        ]
+        .concat();
 
         let npy_bytes = save_structured(&[3], &desc, &[col_x.clone(), col_y.clone()]).unwrap();
         let loaded = load_structured(&npy_bytes).unwrap();
@@ -4429,7 +4453,8 @@ mod tests {
         assert_eq!(loaded.columns[0], col_id);
         assert_eq!(loaded.columns[1], col_label);
         // Decode string column
-        let strings = fromfile_strings(&loaded.columns[1], IOSupportedDType::Bytes(5), None).unwrap();
+        let strings =
+            fromfile_strings(&loaded.columns[1], IOSupportedDType::Bytes(5), None).unwrap();
         assert_eq!(strings, vec!["hello", "world"]);
     }
 
@@ -4437,7 +4462,7 @@ mod tests {
     fn save_structured_rejects_shape_mismatch() {
         let desc = make_test_descriptor();
         let col_x = vec![0u8; 16]; // 2 records
-        let col_y = vec![0u8; 8];  // 2 records
+        let col_y = vec![0u8; 8]; // 2 records
         // Shape says 5 but only 2 records
         let err = save_structured(&[5], &desc, &[col_x, col_y]).unwrap_err();
         assert_eq!(err.reason_code(), "io_write_contract_violation");
@@ -4483,14 +4508,8 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("write_test.bin");
         let shape = [4];
-        let mut arr = memmap(
-            &path,
-            IOSupportedDType::F64,
-            MemmapMode::Write,
-            0,
-            &shape,
-        )
-        .expect("memmap write");
+        let mut arr = memmap(&path, IOSupportedDType::F64, MemmapMode::Write, 0, &shape)
+            .expect("memmap write");
         assert_eq!(arr.shape, vec![4]);
         assert_eq!(arr.as_bytes().len(), 32); // 4 × 8 bytes
         assert!(arr.as_bytes().iter().all(|&b| b == 0));
@@ -4519,14 +4538,8 @@ mod tests {
         data.extend_from_slice(&2.0_f64.to_le_bytes());
         data.extend_from_slice(&3.0_f64.to_le_bytes());
         std::fs::write(&path, &data).unwrap();
-        let mut arr = memmap(
-            &path,
-            IOSupportedDType::F64,
-            MemmapMode::ReadWrite,
-            0,
-            &[3],
-        )
-        .expect("memmap r+");
+        let mut arr = memmap(&path, IOSupportedDType::F64, MemmapMode::ReadWrite, 0, &[3])
+            .expect("memmap r+");
         let values = arr.to_f64_values().unwrap();
         assert_eq!(values, vec![1.0, 2.0, 3.0]);
         // Modify second element to 99.0 and flush
@@ -4548,14 +4561,8 @@ mod tests {
         data.extend_from_slice(&5.0_f64.to_le_bytes());
         data.extend_from_slice(&6.0_f64.to_le_bytes());
         std::fs::write(&path, &data).unwrap();
-        let mut arr = memmap(
-            &path,
-            IOSupportedDType::F64,
-            MemmapMode::ReadOnly,
-            0,
-            &[2],
-        )
-        .expect("memmap r");
+        let mut arr =
+            memmap(&path, IOSupportedDType::F64, MemmapMode::ReadOnly, 0, &[2]).expect("memmap r");
         assert!(!arr.is_writable());
         assert!(arr.as_bytes_mut().is_none());
         let values = arr.to_f64_values().unwrap();
@@ -4603,14 +4610,8 @@ mod tests {
         file_data.extend_from_slice(&20.0_f64.to_le_bytes());
         file_data.extend_from_slice(&30.0_f64.to_le_bytes());
         std::fs::write(&path, &file_data).unwrap();
-        let arr = memmap(
-            &path,
-            IOSupportedDType::F64,
-            MemmapMode::ReadOnly,
-            16,
-            &[3],
-        )
-        .expect("memmap with offset");
+        let arr = memmap(&path, IOSupportedDType::F64, MemmapMode::ReadOnly, 16, &[3])
+            .expect("memmap with offset");
         let values = arr.to_f64_values().unwrap();
         assert_eq!(values, vec![10.0, 20.0, 30.0]);
         let _ = std::fs::remove_dir_all(&dir);
@@ -4621,14 +4622,8 @@ mod tests {
         let dir = std::env::temp_dir().join("fnp_memmap_test_small");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("small_test.bin");
-        std::fs::write(&path, &[0u8; 8]).unwrap();
-        let result = memmap(
-            &path,
-            IOSupportedDType::F64,
-            MemmapMode::ReadOnly,
-            0,
-            &[4],
-        );
+        std::fs::write(&path, [0u8; 8]).unwrap();
+        let result = memmap(&path, IOSupportedDType::F64, MemmapMode::ReadOnly, 0, &[4]);
         assert!(result.is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4638,7 +4633,7 @@ mod tests {
         let dir = std::env::temp_dir().join("fnp_memmap_test_obj");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("obj_test.bin");
-        std::fs::write(&path, &[0u8; 32]).unwrap();
+        std::fs::write(&path, [0u8; 32]).unwrap();
         let result = memmap(
             &path,
             IOSupportedDType::Object,
@@ -4655,13 +4650,7 @@ mod tests {
         let dir = std::env::temp_dir().join("fnp_memmap_test_empty");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("empty_test.bin");
-        let result = memmap(
-            &path,
-            IOSupportedDType::F64,
-            MemmapMode::Write,
-            0,
-            &[0],
-        );
+        let result = memmap(&path, IOSupportedDType::F64, MemmapMode::Write, 0, &[0]);
         assert!(result.is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4675,14 +4664,8 @@ mod tests {
         data.extend_from_slice(&42_i32.to_le_bytes());
         data.extend_from_slice(&(-7_i32).to_le_bytes());
         std::fs::write(&path, &data).unwrap();
-        let arr = memmap(
-            &path,
-            IOSupportedDType::I32,
-            MemmapMode::ReadOnly,
-            0,
-            &[2],
-        )
-        .expect("memmap i32");
+        let arr = memmap(&path, IOSupportedDType::I32, MemmapMode::ReadOnly, 0, &[2])
+            .expect("memmap i32");
         let values = arr.to_f64_values().unwrap();
         assert_eq!(values, vec![42.0, -7.0]);
         let _ = std::fs::remove_dir_all(&dir);
@@ -4693,14 +4676,8 @@ mod tests {
         let dir = std::env::temp_dir().join("fnp_memmap_test_nb");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("nb_test.bin");
-        let arr = memmap(
-            &path,
-            IOSupportedDType::F64,
-            MemmapMode::Write,
-            0,
-            &[3, 2],
-        )
-        .expect("memmap 3x2");
+        let arr = memmap(&path, IOSupportedDType::F64, MemmapMode::Write, 0, &[3, 2])
+            .expect("memmap 3x2");
         assert_eq!(arr.element_count().unwrap(), 6);
         assert_eq!(arr.nbytes().unwrap(), 48);
         assert_eq!(arr.shape, vec![3, 2]);

@@ -39,12 +39,12 @@ use fnp_runtime::{
 use fnp_ufunc::{
     BinaryOp, MAError, MaskedArray, StringArray, UFuncArray, UFuncError, busday_count,
     busday_offset, cheb2poly, chebadd, chebder, chebdiv, chebfit, chebfromroots, chebint, chebmul,
-    chebroots, chebsub, chebval, herm2poly, hermadd, hermder, hermdiv, hermfromroots, hermint,
-    hermmul, hermroots, hermsub, hermval, herme2poly, hermeadd, hermediv, hermefromroots, hermemul,
-    hermeroots, hermesub, hermeval, is_busday, lag2poly, lagadd, lagder, lagdiv, lagfromroots,
-    lagint, lagmul, lagroots, lagsub, lagval, leg2poly, legadd, legder, legdiv, legfit,
-    legfromroots, legint, legmul, legroots, legsub, legval, poly2cheb, poly2herm, poly2herme,
-    poly2lag, poly2leg,
+    chebroots, chebsub, chebval, herm2poly, hermadd, hermder, hermdiv, herme2poly, hermeadd,
+    hermediv, hermefromroots, hermemul, hermeroots, hermesub, hermeval, hermfromroots, hermint,
+    hermmul, hermroots, hermsub, hermval, is_busday, lag2poly, lagadd, lagder, lagdiv,
+    lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, leg2poly, legadd, legder, legdiv,
+    legfit, legfromroots, legint, legmul, legroots, legsub, legval, poly2cheb, poly2herm,
+    poly2herme, poly2lag, poly2leg,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -10752,6 +10752,7 @@ mod tests {
     /// These lock in exact output sequences for seed=12345, n=5 samples each,
     /// ensuring the PRNG produces identical results across builds/platforms.
     #[test]
+    #[allow(clippy::excessive_precision)]
     fn rng_sequence_witness_continuous() {
         use fnp_random::Generator;
         const SEED: u64 = 12345;
@@ -10763,64 +10764,300 @@ mod tests {
                 for (i, (a, e)) in actual.iter().zip($expected.iter()).enumerate() {
                     assert!(
                         (a - e).abs() < 1e-12,
-                        "{} sample {}: got {a:.17e}, expected {e:.17e}", $name, i
+                        "{} sample {}: got {a:.17e}, expected {e:.17e}",
+                        $name,
+                        i
                     );
                 }
             }};
         }
 
-        check_seq!("random", |g: &mut Generator| g.random(5),
-            [9.32081690319876310e-1, 3.37505601117676801e-1, 2.16981970195010643e-1, 3.52706249766546187e-1, 5.50105102114212707e-1]);
-        check_seq!("uniform(0,10)", |g: &mut Generator| g.uniform(0.0, 10.0, 5),
-            [9.32081690319876266e0, 3.37505601117676779e0, 2.16981970195010643e0, 3.52706249766546165e0, 5.50105102114212663e0]);
-        check_seq!("standard_normal", |g: &mut Generator| g.standard_normal(5),
-            [6.48970595720086973e-1, 1.08908349922134495e0, 1.47033729140938529e0, 6.60548357473366710e-1, -4.42344548278891359e-1]);
-        check_seq!("normal(5,2)", |g: &mut Generator| g.normal(5.0, 2.0, 5),
-            [6.29794119144017372e0, 7.17816699844268946e0, 7.94067458281877059e0, 6.32109671494673364e0, 4.11531090344221706e0]);
-        check_seq!("standard_exponential", |g: &mut Generator| g.standard_exponential(5),
-            [1.71403481620221210e0, 1.30485733047918495e-1, 2.59681276258719784e-1, 4.84283249016193712e-2, 2.18645107617135359e0]);
-        check_seq!("exponential(2)", |g: &mut Generator| g.exponential(2.0, 5),
-            [3.42806963240442419e0, 2.60971466095836990e-1, 5.19362552517439569e-1, 9.68566498032387424e-2, 4.37290215234270718e0]);
-        check_seq!("standard_gamma(2)", |g: &mut Generator| g.standard_gamma(2.0, 5),
-            [2.65271299374846858e0, 4.37668779876149294e0, 1.15834211198835813e0, 2.09794988661814186e0, 8.94578313531806613e-1]);
-        check_seq!("gamma(2,3)", |g: &mut Generator| g.gamma(2.0, 3.0, 5),
-            [7.95813898124540575e0, 1.31300633962844788e1, 3.47502633596507415e0, 6.29384965985442513e0, 2.68373494059541962e0]);
-        check_seq!("beta(2,5)", |g: &mut Generator| g.beta(2.0, 5.0, 5),
-            [2.35361548599163445e-1, 1.77540741643774563e-1, 1.58668678806063196e-1, 2.10563771290120133e-1, 7.16530287407453614e-1]);
-        check_seq!("chisquare(3)", |g: &mut Generator| g.chisquare(3.0, 5),
-            [4.03478951589785773e0, 7.16887968014016952e0, 1.50226995394899498e0, 3.06599749104649311e0, 1.09083707666572383e0]);
-        check_seq!("lognormal(0,1)", |g: &mut Generator| g.lognormal(0.0, 1.0, 5),
-            [1.91356997766160775e0, 2.97154939683406250e0, 4.35070234813747891e0, 1.93585358318327083e0, 6.42528215322030416e-1]);
-        check_seq!("standard_cauchy", |g: &mut Generator| g.standard_cauchy(5),
-            [5.95886905075760809e-1, 2.22593436918608845e0, 5.46450807795340765e0, -3.20374970349365296e-1, 5.98660229079376771e-1]);
-        check_seq!("triangular(0,5,10)", |g: &mut Generator| g.triangular(0.0, 5.0, 10.0, 5),
-            [8.15719901128575842e0, 4.10795326846397302e0, 3.29379697457972265e0, 4.19944192581910958e0, 5.25713747887529781e0]);
-        check_seq!("laplace(0,1)", |g: &mut Generator| g.laplace(0.0, 1.0, 5),
-            [1.99630244365275855e0, -3.93025992343090158e-1, -8.34793834992556993e-1, -3.48972541556781424e-1, 1.05594103191076080e-1]);
-        check_seq!("gumbel(0,1)", |g: &mut Generator| g.gumbel(0.0, 1.0, 5),
-            [-9.89336572015754090e-1, 8.87355484014991536e-1, 1.40813286813637495e0, 8.32512543783072045e-1, 2.24718185711721308e-1]);
-        check_seq!("weibull(2)", |g: &mut Generator| g.weibull(2.0, 5),
-            [1.30921152462167556e0, 3.61228090059339813e-1, 5.09589321178063770e-1, 2.20064365360726599e-1, 1.47866530228153858e0]);
-        check_seq!("f_distribution(5,2)", |g: &mut Generator| g.f_distribution(5.0, 2.0, 5),
-            [4.78649519936872048e-1, 6.63333763311594216e-1, 7.26859295968262931e-1, 6.36445209081938246e-1, 7.81540427662359161e0]);
-        check_seq!("standard_t(5)", |g: &mut Generator| g.standard_t(5.0, 5),
-            [5.00833320479618593e-1, 8.31263707118225392e-1, 4.79910878609732861e-1, -1.28621448250016712e0, -4.07072148213456428e-3]);
-        check_seq!("power(3)", |g: &mut Generator| g.power(3.0, 5),
-            [9.35937841864501463e-1, 4.96415680680427018e-1, 6.11538375049609506e-1, 3.61583498974891560e-1, 9.61065570914075296e-1]);
-        check_seq!("vonmises(0,2)", |g: &mut Generator| g.vonmises(0.0, 2.0, 5),
-            [2.47613248673183906e-1, -3.58286679084546367e-1, 4.66402244787470999e-1, 5.12425113175970989e-2, 4.42636174325620857e-1]);
-        check_seq!("rayleigh(1)", |g: &mut Generator| g.rayleigh(1.0, 5),
-            [1.85150469413513075e0, 5.10853664072048130e-1, 7.20668129250516820e-1, 3.11218010088167518e-1, 2.09114852469706403e0]);
-        check_seq!("pareto(3)", |g: &mut Generator| g.pareto(3.0, 5),
-            [7.70646862274550370e-1, 4.44550272369403851e-2, 9.04172546472586519e-2, 1.62737735030588949e-2, 1.07262729139401491e0]);
-        check_seq!("logistic(0,1)", |g: &mut Generator| g.logistic(0.0, 1.0, 5),
-            [2.61911480663287932e0, -6.74429997228288114e-1, -1.28334145886692852e0, -6.07164653508057151e-1, 2.01095359492238307e-1]);
-        check_seq!("wald(3,2)", |g: &mut Generator| g.wald(3.0, 2.0, 5),
-            [1.38174906568860378e0, 5.94694599526367829e-1, 5.12410478413090154e0, 2.05985324281523852e0, 1.26745020708461498e0]);
-        check_seq!("maxwell(1)", |g: &mut Generator| g.maxwell(1.0, 5),
-            [1.94143180485294953e0, 7.99090430292215381e-1, 1.24525858258412470e0, 1.24195756573983673e0, 7.27134631213512517e-1]);
-        check_seq!("halfnormal(1)", |g: &mut Generator| g.halfnormal(1.0, 5),
-            [6.48970595720086973e-1, 1.08908349922134495e0, 1.47033729140938529e0, 6.60548357473366710e-1, 4.42344548278891359e-1]);
+        check_seq!(
+            "random",
+            |g: &mut Generator| g.random(5),
+            [
+                9.32081690319876310e-1,
+                3.37505601117676801e-1,
+                2.16981970195010643e-1,
+                3.52706249766546187e-1,
+                5.50105102114212707e-1
+            ]
+        );
+        check_seq!(
+            "uniform(0,10)",
+            |g: &mut Generator| g.uniform(0.0, 10.0, 5),
+            [
+                9.32081690319876266e0,
+                3.37505601117676779e0,
+                2.16981970195010643e0,
+                3.52706249766546165e0,
+                5.50105102114212663e0
+            ]
+        );
+        check_seq!(
+            "standard_normal",
+            |g: &mut Generator| g.standard_normal(5),
+            [
+                6.48970595720086973e-1,
+                1.08908349922134495e0,
+                1.47033729140938529e0,
+                6.60548357473366710e-1,
+                -4.42344548278891359e-1
+            ]
+        );
+        check_seq!(
+            "normal(5,2)",
+            |g: &mut Generator| g.normal(5.0, 2.0, 5),
+            [
+                6.29794119144017372e0,
+                7.17816699844268946e0,
+                7.94067458281877059e0,
+                6.32109671494673364e0,
+                4.11531090344221706e0
+            ]
+        );
+        check_seq!(
+            "standard_exponential",
+            |g: &mut Generator| g.standard_exponential(5),
+            [
+                1.71403481620221210e0,
+                1.30485733047918495e-1,
+                2.59681276258719784e-1,
+                4.84283249016193712e-2,
+                2.18645107617135359e0
+            ]
+        );
+        check_seq!(
+            "exponential(2)",
+            |g: &mut Generator| g.exponential(2.0, 5),
+            [
+                3.42806963240442419e0,
+                2.60971466095836990e-1,
+                5.19362552517439569e-1,
+                9.68566498032387424e-2,
+                4.37290215234270718e0
+            ]
+        );
+        check_seq!(
+            "standard_gamma(2)",
+            |g: &mut Generator| g.standard_gamma(2.0, 5),
+            [
+                2.65271299374846858e0,
+                4.37668779876149294e0,
+                1.15834211198835813e0,
+                2.09794988661814186e0,
+                8.94578313531806613e-1
+            ]
+        );
+        check_seq!(
+            "gamma(2,3)",
+            |g: &mut Generator| g.gamma(2.0, 3.0, 5),
+            [
+                7.95813898124540575e0,
+                1.31300633962844788e1,
+                3.47502633596507415e0,
+                6.29384965985442513e0,
+                2.68373494059541962e0
+            ]
+        );
+        check_seq!(
+            "beta(2,5)",
+            |g: &mut Generator| g.beta(2.0, 5.0, 5),
+            [
+                2.35361548599163445e-1,
+                1.77540741643774563e-1,
+                1.58668678806063196e-1,
+                2.10563771290120133e-1,
+                7.16530287407453614e-1
+            ]
+        );
+        check_seq!(
+            "chisquare(3)",
+            |g: &mut Generator| g.chisquare(3.0, 5),
+            [
+                4.03478951589785773e0,
+                7.16887968014016952e0,
+                1.50226995394899498e0,
+                3.06599749104649311e0,
+                1.09083707666572383e0
+            ]
+        );
+        check_seq!(
+            "lognormal(0,1)",
+            |g: &mut Generator| g.lognormal(0.0, 1.0, 5),
+            [
+                1.91356997766160775e0,
+                2.97154939683406250e0,
+                4.35070234813747891e0,
+                1.93585358318327083e0,
+                6.42528215322030416e-1
+            ]
+        );
+        check_seq!(
+            "standard_cauchy",
+            |g: &mut Generator| g.standard_cauchy(5),
+            [
+                5.95886905075760809e-1,
+                2.22593436918608845e0,
+                5.46450807795340765e0,
+                -3.20374970349365296e-1,
+                5.98660229079376771e-1
+            ]
+        );
+        check_seq!(
+            "triangular(0,5,10)",
+            |g: &mut Generator| g.triangular(0.0, 5.0, 10.0, 5),
+            [
+                8.15719901128575842e0,
+                4.10795326846397302e0,
+                3.29379697457972265e0,
+                4.19944192581910958e0,
+                5.25713747887529781e0
+            ]
+        );
+        check_seq!(
+            "laplace(0,1)",
+            |g: &mut Generator| g.laplace(0.0, 1.0, 5),
+            [
+                1.99630244365275855e0,
+                -3.93025992343090158e-1,
+                -8.34793834992556993e-1,
+                -3.48972541556781424e-1,
+                1.05594103191076080e-1
+            ]
+        );
+        check_seq!(
+            "gumbel(0,1)",
+            |g: &mut Generator| g.gumbel(0.0, 1.0, 5),
+            [
+                -9.89336572015754090e-1,
+                8.87355484014991536e-1,
+                1.40813286813637495e0,
+                8.32512543783072045e-1,
+                2.24718185711721308e-1
+            ]
+        );
+        check_seq!(
+            "weibull(2)",
+            |g: &mut Generator| g.weibull(2.0, 5),
+            [
+                1.30921152462167556e0,
+                3.61228090059339813e-1,
+                5.09589321178063770e-1,
+                2.20064365360726599e-1,
+                1.47866530228153858e0
+            ]
+        );
+        check_seq!(
+            "f_distribution(5,2)",
+            |g: &mut Generator| g.f_distribution(5.0, 2.0, 5),
+            [
+                4.78649519936872048e-1,
+                6.63333763311594216e-1,
+                7.26859295968262931e-1,
+                6.36445209081938246e-1,
+                7.81540427662359161e0
+            ]
+        );
+        check_seq!(
+            "standard_t(5)",
+            |g: &mut Generator| g.standard_t(5.0, 5),
+            [
+                5.00833320479618593e-1,
+                8.31263707118225392e-1,
+                4.79910878609732861e-1,
+                -1.28621448250016712e0,
+                -4.07072148213456428e-3
+            ]
+        );
+        check_seq!(
+            "power(3)",
+            |g: &mut Generator| g.power(3.0, 5),
+            [
+                9.35937841864501463e-1,
+                4.96415680680427018e-1,
+                6.11538375049609506e-1,
+                3.61583498974891560e-1,
+                9.61065570914075296e-1
+            ]
+        );
+        check_seq!(
+            "vonmises(0,2)",
+            |g: &mut Generator| g.vonmises(0.0, 2.0, 5),
+            [
+                2.47613248673183906e-1,
+                -3.58286679084546367e-1,
+                4.66402244787470999e-1,
+                5.12425113175970989e-2,
+                4.42636174325620857e-1
+            ]
+        );
+        check_seq!(
+            "rayleigh(1)",
+            |g: &mut Generator| g.rayleigh(1.0, 5),
+            [
+                1.85150469413513075e0,
+                5.10853664072048130e-1,
+                7.20668129250516820e-1,
+                3.11218010088167518e-1,
+                2.09114852469706403e0
+            ]
+        );
+        check_seq!(
+            "pareto(3)",
+            |g: &mut Generator| g.pareto(3.0, 5),
+            [
+                7.70646862274550370e-1,
+                4.44550272369403851e-2,
+                9.04172546472586519e-2,
+                1.62737735030588949e-2,
+                1.07262729139401491e0
+            ]
+        );
+        check_seq!(
+            "logistic(0,1)",
+            |g: &mut Generator| g.logistic(0.0, 1.0, 5),
+            [
+                2.61911480663287932e0,
+                -6.74429997228288114e-1,
+                -1.28334145886692852e0,
+                -6.07164653508057151e-1,
+                2.01095359492238307e-1
+            ]
+        );
+        check_seq!(
+            "wald(3,2)",
+            |g: &mut Generator| g.wald(3.0, 2.0, 5),
+            [
+                1.38174906568860378e0,
+                5.94694599526367829e-1,
+                5.12410478413090154e0,
+                2.05985324281523852e0,
+                1.26745020708461498e0
+            ]
+        );
+        check_seq!(
+            "maxwell(1)",
+            |g: &mut Generator| g.maxwell(1.0, 5),
+            [
+                1.94143180485294953e0,
+                7.99090430292215381e-1,
+                1.24525858258412470e0,
+                1.24195756573983673e0,
+                7.27134631213512517e-1
+            ]
+        );
+        check_seq!(
+            "halfnormal(1)",
+            |g: &mut Generator| g.halfnormal(1.0, 5),
+            [
+                6.48970595720086973e-1,
+                1.08908349922134495e0,
+                1.47033729140938529e0,
+                6.60548357473366710e-1,
+                4.42344548278891359e-1
+            ]
+        );
     }
 
     #[test]
@@ -10834,21 +11071,33 @@ mod tests {
 
         let mut g = Generator::from_pcg64_dxsm(SEED).unwrap();
         let binom: Vec<u64> = g.binomial(10, 0.3, 5);
-        assert_eq!(binom, vec![1, 2, 4, 2, 2], "binomial(10,0.3) sequence mismatch");
+        assert_eq!(
+            binom,
+            vec![1, 2, 4, 2, 2],
+            "binomial(10,0.3) sequence mismatch"
+        );
 
         let mut g = Generator::from_pcg64_dxsm(SEED).unwrap();
         let geom: Vec<u64> = g.geometric(0.4, 5);
-        assert_eq!(geom, vec![6, 1, 1, 1, 2], "geometric(0.4) sequence mismatch");
+        assert_eq!(
+            geom,
+            vec![6, 1, 1, 1, 2],
+            "geometric(0.4) sequence mismatch"
+        );
 
         let mut g = Generator::from_pcg64_dxsm(SEED).unwrap();
         let zipf_vals: Vec<f64> = g.zipf(2.0, 5);
         let expected_zipf = [14.0, 1.0, 2.0, 8.0, 1.0];
         for (i, (a, e)) in zipf_vals.iter().zip(expected_zipf.iter()).enumerate() {
-            assert!((a - e).abs() < 1e-12, "zipf(2) sample {i}: got {a}, expected {e}");
+            assert!(
+                (a - e).abs() < 1e-12,
+                "zipf(2) sample {i}: got {a}, expected {e}"
+            );
         }
     }
 
     #[test]
+    #[allow(clippy::excessive_precision)]
     fn rng_sequence_witness_remaining() {
         use fnp_random::Generator;
         const SEED: u64 = 12345;
@@ -10860,19 +11109,40 @@ mod tests {
                 for (i, (a, e)) in actual.iter().zip($expected.iter()).enumerate() {
                     assert!(
                         (a - e).abs() < 1e-12,
-                        "{} sample {}: got {a:.17e}, expected {e:.17e}", $name, i
+                        "{} sample {}: got {a:.17e}, expected {e:.17e}",
+                        $name,
+                        i
                     );
                 }
             }};
         }
 
-        check_seq!("lomax(3)", |g: &mut Generator| g.lomax(3.0, 5),
-            [1.45096839094341590e0, 1.47112281973488912e-1, 8.49492216360963059e-2, 1.56022256242237534e-1, 3.05057491487117360e-1]);
-        check_seq!("levy(0,1)", |g: &mut Generator| g.levy(0.0, 1.0, 5),
-            [2.37437855150465893e0, 8.43097193967099146e-1, 4.62557849977695501e-1, 2.29187414899802677e0, 5.11067944493424164e0]);
+        check_seq!(
+            "lomax(3)",
+            |g: &mut Generator| g.lomax(3.0, 5),
+            [
+                1.45096839094341590e0,
+                1.47112281973488912e-1,
+                8.49492216360963059e-2,
+                1.56022256242237534e-1,
+                3.05057491487117360e-1
+            ]
+        );
+        check_seq!(
+            "levy(0,1)",
+            |g: &mut Generator| g.levy(0.0, 1.0, 5),
+            [
+                2.37437855150465893e0,
+                8.43097193967099146e-1,
+                4.62557849977695501e-1,
+                2.29187414899802677e0,
+                5.11067944493424164e0
+            ]
+        );
     }
 
     #[test]
+    #[allow(clippy::excessive_precision)]
     fn rng_sequence_witness_advanced() {
         use fnp_random::Generator;
         const SEED: u64 = 12345;
@@ -10880,15 +11150,30 @@ mod tests {
         // noncentral_chisquare(df=3, nonc=2)
         let mut g = Generator::from_pcg64_dxsm(SEED).unwrap();
         let nc_chi = g.noncentral_chisquare(3.0, 2.0, 5);
-        let expected_nc_chi = [11.01930303136872, 4.506629598994665, 2.3782160110252524, 3.007529631466314, 5.613755426026094];
+        let expected_nc_chi = [
+            11.01930303136872,
+            4.506629598994665,
+            2.3782160110252524,
+            3.007529631466314,
+            5.613755426026094,
+        ];
         for (i, (a, e)) in nc_chi.iter().zip(expected_nc_chi.iter()).enumerate() {
-            assert!((a - e).abs() < 1e-12, "noncentral_chisquare sample {i}: {a} != {e}");
+            assert!(
+                (a - e).abs() < 1e-12,
+                "noncentral_chisquare sample {i}: {a} != {e}"
+            );
         }
 
         // noncentral_f(dfnum=5, dfden=2, nonc=1)
         let mut g = Generator::from_pcg64_dxsm(SEED).unwrap();
         let nc_f = g.noncentral_f(5.0, 2.0, 1.0, 5);
-        let expected_nc_f = [1.672092203943124, 2.693113212076875, 1.9993165011170622, 1.4139413610053955, 2.721460644070409];
+        let expected_nc_f = [
+            1.672092203943124,
+            2.693113212076875,
+            1.9993165011170622,
+            1.4139413610053955,
+            2.721460644070409,
+        ];
         for (i, (a, e)) in nc_f.iter().zip(expected_nc_f.iter()).enumerate() {
             assert!((a - e).abs() < 1e-12, "noncentral_f sample {i}: {a} != {e}");
         }
@@ -10906,7 +11191,11 @@ mod tests {
         // multinomial(n=10, pvals=[0.2, 0.3, 0.5])
         let mut g = Generator::from_pcg64_dxsm(SEED).unwrap();
         let multi = g.multinomial(10, &[0.2, 0.3, 0.5], 3);
-        assert_eq!(multi, vec![vec![0, 3, 7], vec![0, 3, 7], vec![2, 7, 1]], "multinomial mismatch");
+        assert_eq!(
+            multi,
+            vec![vec![0, 3, 7], vec![0, 3, 7], vec![2, 7, 1]],
+            "multinomial mismatch"
+        );
 
         // dirichlet(alpha=[2, 3, 5])
         let mut g = Generator::from_pcg64_dxsm(SEED).unwrap();
@@ -10925,7 +11214,11 @@ mod tests {
         // multivariate_hypergeometric(colors=[10,20,30], nsample=25)
         let mut g = Generator::from_pcg64_dxsm(SEED).unwrap();
         let mv_hyper = g.multivariate_hypergeometric(&[10, 20, 30], 25, 3);
-        assert_eq!(mv_hyper, vec![vec![3, 9, 13], vec![3, 8, 14], vec![1, 8, 16]], "multivariate_hypergeometric mismatch");
+        assert_eq!(
+            mv_hyper,
+            vec![vec![3, 9, 13], vec![3, 8, 14], vec![1, 8, 16]],
+            "multivariate_hypergeometric mismatch"
+        );
     }
 
     #[test]
@@ -10945,7 +11238,10 @@ mod tests {
         let second_run = g2.multivariate_normal_diag(&[1.0, 2.0], &[0.5, 0.5], 3);
         for (i, (r1, r2)) in first_run.iter().zip(second_run.iter()).enumerate() {
             for (j, (a, b)) in r1.iter().zip(r2.iter()).enumerate() {
-                assert!((a - b).abs() < 1e-15, "multivariate_normal_diag[{i}][{j}] not deterministic: {a} vs {b}");
+                assert!(
+                    (a - b).abs() < 1e-15,
+                    "multivariate_normal_diag[{i}][{j}] not deterministic: {a} vs {b}"
+                );
             }
         }
 
@@ -10959,7 +11255,10 @@ mod tests {
         let second_run = g2.multivariate_normal(&[0.0, 0.0], &[1.0, 0.0, 0.0, 1.0], 3);
         for (i, (r1, r2)) in first_run.iter().zip(second_run.iter()).enumerate() {
             for (j, (a, b)) in r1.iter().zip(r2.iter()).enumerate() {
-                assert!((a - b).abs() < 1e-15, "multivariate_normal[{i}][{j}] not deterministic: {a} vs {b}");
+                assert!(
+                    (a - b).abs() < 1e-15,
+                    "multivariate_normal[{i}][{j}] not deterministic: {a} vs {b}"
+                );
             }
         }
     }

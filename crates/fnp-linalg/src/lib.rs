@@ -3950,7 +3950,12 @@ fn complex_lu_decompose(
         let pivot_re = lu[2 * (k * n + k)];
         let pivot_im = lu[2 * (k * n + k) + 1];
         for i in (k + 1)..n {
-            let (fr, fi) = cdiv(lu[2 * (i * n + k)], lu[2 * (i * n + k) + 1], pivot_re, pivot_im);
+            let (fr, fi) = cdiv(
+                lu[2 * (i * n + k)],
+                lu[2 * (i * n + k) + 1],
+                pivot_re,
+                pivot_im,
+            );
             lu[2 * (i * n + k)] = fr;
             lu[2 * (i * n + k) + 1] = fi;
             for j in (k + 1)..n {
@@ -3995,7 +4000,12 @@ fn complex_lu_forward_back(lu: &[f64], perm: &[usize], b: &[f64], n: usize) -> V
             x[2 * i] -= pr;
             x[2 * i + 1] -= pi;
         }
-        let (dr, di) = cdiv(x[2 * i], x[2 * i + 1], lu[2 * (i * n + i)], lu[2 * (i * n + i) + 1]);
+        let (dr, di) = cdiv(
+            x[2 * i],
+            x[2 * i + 1],
+            lu[2 * (i * n + i)],
+            lu[2 * (i * n + i) + 1],
+        );
         x[2 * i] = dr;
         x[2 * i + 1] = di;
     }
@@ -4204,8 +4214,12 @@ pub fn complex_qr_mxn(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f6
             let mut dot_re = 0.0;
             let mut dot_im = 0.0;
             for i in 0..sub_len {
-                let (pr, pi) = cmul_conj_a(v[2 * i], v[2 * i + 1],
-                    r[2 * ((col + i) * n + j)], r[2 * ((col + i) * n + j) + 1]);
+                let (pr, pi) = cmul_conj_a(
+                    v[2 * i],
+                    v[2 * i + 1],
+                    r[2 * ((col + i) * n + j)],
+                    r[2 * ((col + i) * n + j) + 1],
+                );
                 dot_re += pr;
                 dot_im += pi;
             }
@@ -4224,8 +4238,10 @@ pub fn complex_qr_mxn(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f6
             let mut dot_im = 0.0;
             for kk in 0..sub_len {
                 let (pr, pi) = cmul(
-                    q[2 * (i * m + col + kk)], q[2 * (i * m + col + kk) + 1],
-                    v[2 * kk], v[2 * kk + 1],
+                    q[2 * (i * m + col + kk)],
+                    q[2 * (i * m + col + kk) + 1],
+                    v[2 * kk],
+                    v[2 * kk + 1],
                 );
                 dot_re += pr;
                 dot_im += pi;
@@ -4274,8 +4290,10 @@ pub fn complex_matvec(a: &[f64], x: &[f64], m: usize, n: usize) -> Vec<f64> {
     for i in 0..m {
         for j in 0..n {
             let (pr, pi) = cmul(
-                a[2 * (i * n + j)], a[2 * (i * n + j) + 1],
-                x[2 * j], x[2 * j + 1],
+                a[2 * (i * n + j)],
+                a[2 * (i * n + j) + 1],
+                x[2 * j],
+                x[2 * j + 1],
             );
             y[2 * i] += pr;
             y[2 * i + 1] += pi;
@@ -4294,8 +4312,10 @@ pub fn complex_matmul(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec
             let mut si = 0.0;
             for p in 0..k {
                 let (pr, pi) = cmul(
-                    a[2 * (i * k + p)], a[2 * (i * k + p) + 1],
-                    b[2 * (p * n + j)], b[2 * (p * n + j) + 1],
+                    a[2 * (i * k + p)],
+                    a[2 * (i * k + p) + 1],
+                    b[2 * (p * n + j)],
+                    b[2 * (p * n + j) + 1],
                 );
                 sr += pr;
                 si += pi;
@@ -4349,6 +4369,17 @@ mod tests {
         cholesky_nxn,
         cholesky_solve,
         cholesky_solve_multi,
+        // Complex linalg
+        complex_cholesky_nxn,
+        complex_conjugate_transpose,
+        complex_det_nxn,
+        complex_inv_nxn,
+        complex_matmul,
+        complex_matrix_norm_frobenius,
+        complex_matvec,
+        complex_qr_mxn,
+        complex_solve_nxn,
+        complex_trace_nxn,
         cond_nxn,
         cross_product,
         det_2x2,
@@ -4410,17 +4441,6 @@ mod tests {
         validate_square_matrix,
         validate_tolerance_policy,
         vector_norm,
-        // Complex linalg
-        complex_cholesky_nxn,
-        complex_conjugate_transpose,
-        complex_det_nxn,
-        complex_inv_nxn,
-        complex_matmul,
-        complex_matrix_norm_frobenius,
-        complex_matvec,
-        complex_qr_mxn,
-        complex_solve_nxn,
-        complex_trace_nxn,
     };
 
     fn packet008_artifacts() -> Vec<String> {
@@ -7372,22 +7392,21 @@ mod tests {
         // A·A⁻¹ should be identity
         let prod = complex_matmul(&a, &inv, 2, 2, 2);
         assert!((prod[0] - 1.0).abs() < 1e-12); // (0,0) re
-        assert!(prod[1].abs() < 1e-12);            // (0,0) im
-        assert!(prod[2].abs() < 1e-12);            // (0,1) re
-        assert!(prod[3].abs() < 1e-12);            // (0,1) im
-        assert!(prod[4].abs() < 1e-12);            // (1,0) re
-        assert!(prod[5].abs() < 1e-12);            // (1,0) im
+        assert!(prod[1].abs() < 1e-12); // (0,0) im
+        assert!(prod[2].abs() < 1e-12); // (0,1) re
+        assert!(prod[3].abs() < 1e-12); // (0,1) im
+        assert!(prod[4].abs() < 1e-12); // (1,0) re
+        assert!(prod[5].abs() < 1e-12); // (1,0) im
         assert!((prod[6] - 1.0).abs() < 1e-12); // (1,1) re
-        assert!(prod[7].abs() < 1e-12);            // (1,1) im
+        assert!(prod[7].abs() < 1e-12); // (1,1) im
     }
 
     #[test]
     fn complex_inv_general_3x3() {
         // A general complex 3×3 matrix
         let a = [
-            1.0, 0.0, 2.0, 1.0, 0.0, -1.0,
-            0.0, 1.0, 3.0, 0.0, 1.0, 2.0,
-            2.0, -1.0, 0.0, 0.0, 4.0, 1.0,
+            1.0, 0.0, 2.0, 1.0, 0.0, -1.0, 0.0, 1.0, 3.0, 0.0, 1.0, 2.0, 2.0, -1.0, 0.0, 0.0, 4.0,
+            1.0,
         ];
         let inv = complex_inv_nxn(&a, 3).expect("inv");
         let prod = complex_matmul(&a, &inv, 3, 3, 3);
@@ -7409,10 +7428,7 @@ mod tests {
     #[test]
     fn complex_cholesky_hermitian() {
         // Hermitian PD: A = [[4, 2+i], [2-i, 3]]
-        let a = [
-            4.0, 0.0, 2.0, 1.0,
-            2.0, -1.0, 3.0, 0.0,
-        ];
+        let a = [4.0, 0.0, 2.0, 1.0, 2.0, -1.0, 3.0, 0.0];
         let l = complex_cholesky_nxn(&a, 2).expect("cholesky");
 
         // L·L^H should equal A
@@ -7431,9 +7447,8 @@ mod tests {
     fn complex_cholesky_3x3_hermitian() {
         // A = [[9, 3-i, 1], [3+i, 5, 2-i], [1, 2+i, 4]]
         let a = [
-            9.0, 0.0, 3.0, -1.0, 1.0, 0.0,
-            3.0, 1.0, 5.0, 0.0, 2.0, -1.0,
-            1.0, 0.0, 2.0, 1.0, 4.0, 0.0,
+            9.0, 0.0, 3.0, -1.0, 1.0, 0.0, 3.0, 1.0, 5.0, 0.0, 2.0, -1.0, 1.0, 0.0, 2.0, 1.0, 4.0,
+            0.0,
         ];
         let l = complex_cholesky_nxn(&a, 3).expect("cholesky");
         let lh = complex_conjugate_transpose(&l, 3, 3);
@@ -7443,7 +7458,10 @@ mod tests {
                 (prod[2 * i] - a[2 * i]).abs() < 1e-10
                     && (prod[2 * i + 1] - a[2 * i + 1]).abs() < 1e-10,
                 "reconstruction mismatch at entry {i}: got {}+{}i, expected {}+{}i",
-                prod[2 * i], prod[2 * i + 1], a[2 * i], a[2 * i + 1]
+                prod[2 * i],
+                prod[2 * i + 1],
+                a[2 * i],
+                a[2 * i + 1]
             );
         }
     }
@@ -7490,11 +7508,7 @@ mod tests {
     #[test]
     fn complex_qr_3x2_tall() {
         // Tall 3×2 complex matrix
-        let a = [
-            1.0, 0.0, 0.0, 1.0,
-            0.0, 0.0, 1.0, 0.0,
-            1.0, 1.0, 0.0, 0.0,
-        ];
+        let a = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0];
         let (q, r) = complex_qr_mxn(&a, 3, 2).expect("qr");
 
         // Q is 3×3, R is 3×2
@@ -7568,9 +7582,8 @@ mod tests {
     fn complex_solve_3x3() {
         // Build a well-conditioned 3×3 complex system, solve, then verify A·x = b
         let a = [
-            2.0, 1.0, 0.0, -1.0, 1.0, 0.0,
-            1.0, 0.0, 3.0, 1.0, 0.0, 2.0,
-            0.0, 1.0, 1.0, -1.0, 4.0, 0.0,
+            2.0, 1.0, 0.0, -1.0, 1.0, 0.0, 1.0, 0.0, 3.0, 1.0, 0.0, 2.0, 0.0, 1.0, 1.0, -1.0, 4.0,
+            0.0,
         ];
         let b = [1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
         let x = complex_solve_nxn(&a, &b, 3).expect("solve");
@@ -7582,7 +7595,10 @@ mod tests {
                 (ax[2 * i] - b[2 * i]).abs() < 1e-10
                     && (ax[2 * i + 1] - b[2 * i + 1]).abs() < 1e-10,
                 "Ax[{i}] = {}+{}i, expected {}+{}i",
-                ax[2 * i], ax[2 * i + 1], b[2 * i], b[2 * i + 1]
+                ax[2 * i],
+                ax[2 * i + 1],
+                b[2 * i],
+                b[2 * i + 1]
             );
         }
     }
