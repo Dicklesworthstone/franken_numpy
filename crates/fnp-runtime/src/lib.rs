@@ -197,7 +197,14 @@ pub fn decide_compatibility(
         CompatibilityClass::KnownCompatible => match mode {
             RuntimeMode::Strict => DecisionAction::Allow,
             RuntimeMode::Hardened => {
-                if risk_score >= hardened_validation_threshold {
+                if is_malformed_probability_input(risk_score)
+                    || is_malformed_probability_input(hardened_validation_threshold)
+                {
+                    return DecisionAction::FullValidate;
+                }
+                let risk = clamp_probability(risk_score);
+                let threshold = clamp_probability(hardened_validation_threshold);
+                if risk >= threshold {
                     DecisionAction::FullValidate
                 } else {
                     DecisionAction::Allow
@@ -381,6 +388,10 @@ fn clamp_probability(p: f64) -> f64 {
     p.clamp(1e-9, 1.0 - 1e-9)
 }
 
+fn is_malformed_probability_input(p: f64) -> bool {
+    !p.is_finite() || !(0.0..=1.0).contains(&p)
+}
+
 fn class_prior_incompatible(class: CompatibilityClass) -> f64 {
     match class {
         CompatibilityClass::KnownCompatible => 0.01,
@@ -503,6 +514,54 @@ mod tests {
     }
 
     #[test]
+    fn hardened_mode_full_validates_nan_risk() {
+        assert_eq!(
+            decide_compatibility(
+                RuntimeMode::Hardened,
+                CompatibilityClass::KnownCompatible,
+                f64::NAN,
+                0.7,
+            ),
+            DecisionAction::FullValidate
+        );
+    }
+
+    #[test]
+    fn hardened_mode_full_validates_nan_threshold() {
+        assert_eq!(
+            decide_compatibility(
+                RuntimeMode::Hardened,
+                CompatibilityClass::KnownCompatible,
+                0.1,
+                f64::NAN,
+            ),
+            DecisionAction::FullValidate
+        );
+    }
+
+    #[test]
+    fn hardened_mode_full_validates_out_of_range_probability_inputs() {
+        assert_eq!(
+            decide_compatibility(
+                RuntimeMode::Hardened,
+                CompatibilityClass::KnownCompatible,
+                1.5,
+                0.7,
+            ),
+            DecisionAction::FullValidate
+        );
+        assert_eq!(
+            decide_compatibility(
+                RuntimeMode::Hardened,
+                CompatibilityClass::KnownCompatible,
+                0.1,
+                -0.2,
+            ),
+            DecisionAction::FullValidate
+        );
+    }
+
+    #[test]
     fn records_evidence() {
         let mut ledger = EvidenceLedger::new();
         let action = decide_and_record(
@@ -522,6 +581,23 @@ mod tests {
         assert!(event.selected_expected_loss.is_finite());
         assert_eq!(event.fixture_id, "unknown_fixture");
         assert_eq!(event.reason_code, "unspecified");
+    }
+
+    #[test]
+    fn recorded_decision_full_validates_malformed_probability_inputs() {
+        let mut ledger = EvidenceLedger::new();
+        let action = decide_and_record(
+            &mut ledger,
+            RuntimeMode::Hardened,
+            CompatibilityClass::KnownCompatible,
+            f64::NAN,
+            0.7,
+            "nan-risk",
+        );
+        assert_eq!(action, DecisionAction::FullValidate);
+        let event = ledger.last().expect("event should be present");
+        assert_eq!(event.action, DecisionAction::FullValidate);
+        assert!(event.posterior_incompatible.is_finite());
     }
 
     #[test]

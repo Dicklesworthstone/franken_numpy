@@ -558,9 +558,15 @@ impl StructuredStorage {
     /// Create a structured storage with no fields and no records.
     #[must_use]
     pub fn empty() -> Self {
+        Self::empty_with_len(0)
+    }
+
+    /// Create a structured storage with no fields and a fixed logical record count.
+    #[must_use]
+    pub fn empty_with_len(num_records: usize) -> Self {
         Self {
             fields: Vec::new(),
-            num_records: 0,
+            num_records,
             columns: Vec::new(),
         }
     }
@@ -581,18 +587,17 @@ impl StructuredStorage {
             0
         } else {
             let n = columns[0].len();
-            for (i, col) in columns.iter().enumerate().skip(1) {
+            for (field, col) in fields.iter().zip(columns.iter()) {
                 if col.len() != n {
                     return Err(StorageError::StructuredFieldMismatch {
                         expected: n,
                         got: col.len(),
                     });
                 }
-                // Verify dtype matches field descriptor
-                if col.dtype() != fields[i].dtype {
+                if col.dtype() != field.dtype {
                     return Err(StorageError::UnsupportedCast {
                         from: col.dtype(),
-                        to: fields[i].dtype,
+                        to: field.dtype,
                     });
                 }
             }
@@ -605,10 +610,14 @@ impl StructuredStorage {
         })
     }
 
-    /// Total byte size per record (sum of field item sizes).
+    /// Total byte width of one logical record, respecting explicit field offsets.
     #[must_use]
     pub fn record_size(&self) -> usize {
-        self.fields.iter().map(|f| f.dtype.item_size()).sum()
+        self.fields
+            .iter()
+            .map(|field| field.offset.saturating_add(field.dtype.item_size()))
+            .max()
+            .unwrap_or(0)
     }
 
     /// Number of records.
@@ -856,7 +865,7 @@ impl ArrayStorage {
             DType::Complex128 => Self::Complex128(vec![(0.0, 0.0); n]),
             DType::Str => Self::String(vec![std::string::String::new(); n]),
             DType::DateTime64 | DType::TimeDelta64 => Self::I64(vec![0; n]),
-            DType::Structured => Self::Structured(StructuredStorage::empty()),
+            DType::Structured => Self::Structured(StructuredStorage::empty_with_len(n)),
         }
     }
 
@@ -865,6 +874,18 @@ impl ArrayStorage {
     pub fn cast_to(&self, target: DType) -> Result<Self, StorageError> {
         if self.dtype() == target {
             return Ok(self.clone());
+        }
+        if matches!(self, Self::Structured(_)) {
+            return Err(StorageError::UnsupportedCast {
+                from: DType::Structured,
+                to: target,
+            });
+        }
+        if target == DType::Structured {
+            return Err(StorageError::UnsupportedCast {
+                from: self.dtype(),
+                to: DType::Structured,
+            });
         }
         let n = self.len();
         // String target: convert all elements to string representation
@@ -1459,6 +1480,21 @@ mod tests {
                 "{dtype:?} must cast to itself"
             );
         }
+    }
+
+    #[test]
+    fn lossless_cast_is_reflexive_for_non_numeric_dtypes() {
+        for dtype in [DType::Str, DType::DateTime64, DType::TimeDelta64] {
+            assert!(
+                can_cast_lossless(dtype, dtype),
+                "{dtype:?} must cast to itself"
+            );
+        }
+    }
+
+    #[test]
+    fn lossless_cast_rejects_schema_erased_structured_dtype() {
+        assert!(!can_cast_lossless(DType::Structured, DType::Structured));
     }
 
     #[test]
@@ -2426,6 +2462,23 @@ mod tests {
     }
 
     #[test]
+    fn structured_storage_first_column_dtype_mismatch() {
+        let fields = vec![StructuredField {
+            name: "x".into(),
+            dtype: DType::I64,
+            offset: 0,
+        }];
+        let columns = vec![ArrayStorage::F64(vec![1.0])];
+        assert_eq!(
+            StructuredStorage::new(fields, columns).unwrap_err(),
+            StorageError::UnsupportedCast {
+                from: DType::F64,
+                to: DType::I64,
+            }
+        );
+    }
+
+    #[test]
     fn structured_storage_record_size() {
         let fields = vec![
             StructuredField {
@@ -2451,6 +2504,25 @@ mod tests {
         ];
         let s = StructuredStorage::new(fields, columns).unwrap();
         assert_eq!(s.record_size(), 8 + 4 + 1); // f64 + i32 + bool = 13
+    }
+
+    #[test]
+    fn structured_storage_record_size_respects_offsets() {
+        let fields = vec![
+            StructuredField {
+                name: "x".into(),
+                dtype: DType::F64,
+                offset: 0,
+            },
+            StructuredField {
+                name: "y".into(),
+                dtype: DType::I32,
+                offset: 16,
+            },
+        ];
+        let columns = vec![ArrayStorage::F64(vec![1.0]), ArrayStorage::I32(vec![2])];
+        let s = StructuredStorage::new(fields, columns).unwrap();
+        assert_eq!(s.record_size(), 20);
     }
 
     #[test]
@@ -2503,6 +2575,49 @@ mod tests {
         let s = ArrayStorage::zeros(DType::Structured, 0);
         assert_eq!(s.dtype(), DType::Structured);
         assert!(s.is_empty());
+    }
+
+    #[test]
+    fn structured_storage_zeros_preserve_requested_len() {
+        let s = ArrayStorage::zeros(DType::Structured, 3);
+        assert_eq!(s.dtype(), DType::Structured);
+        assert_eq!(s.len(), 3);
+        assert!(!s.is_empty());
+        let ArrayStorage::Structured(storage) = s else {
+            panic!("expected structured storage");
+        };
+        assert_eq!(storage.len(), 3);
+        assert_eq!(storage.num_fields(), 0);
+    }
+
+    #[test]
+    fn storage_cast_numeric_to_structured_fails() {
+        let storage = ArrayStorage::F64(vec![1.0]);
+        assert_eq!(
+            storage.cast_to(DType::Structured).unwrap_err(),
+            StorageError::UnsupportedCast {
+                from: DType::F64,
+                to: DType::Structured,
+            }
+        );
+    }
+
+    #[test]
+    fn storage_cast_structured_to_numeric_fails() {
+        let fields = vec![StructuredField {
+            name: "x".into(),
+            dtype: DType::F64,
+            offset: 0,
+        }];
+        let columns = vec![ArrayStorage::F64(vec![1.0])];
+        let storage = ArrayStorage::Structured(StructuredStorage::new(fields, columns).unwrap());
+        assert_eq!(
+            storage.cast_to(DType::F64).unwrap_err(),
+            StorageError::UnsupportedCast {
+                from: DType::Structured,
+                to: DType::F64,
+            }
+        );
     }
 
     #[test]

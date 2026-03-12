@@ -1760,11 +1760,20 @@ impl UFuncArray {
     fn from_values_with_dtype_lossy(shape: Vec<usize>, values: Vec<f64>, dtype: DType) -> Self {
         match Self::from_values_with_dtype(shape.clone(), values.clone(), dtype) {
             Ok(array) => array,
-            Err(_) => Self {
-                shape,
-                values,
-                dtype,
-            },
+            Err(err) => {
+                let fallback_dtype = if dtype.is_complex()
+                    || (matches!(err, UFuncError::Msg(_)) && is_bridge_dtype_supported(dtype))
+                {
+                    DType::F64
+                } else {
+                    dtype
+                };
+                Self::new(shape.clone(), values.clone(), fallback_dtype).unwrap_or_else(|_| Self {
+                    shape: vec![values.len()],
+                    values,
+                    dtype: fallback_dtype,
+                })
+            }
         }
     }
 
@@ -12436,26 +12445,34 @@ const MAX_EXACT_F64_I64: i64 = 9_007_199_254_740_992;
 const MAX_EXACT_F64_U64: u64 = 9_007_199_254_740_992;
 const MAX_EXACT_F64_INTEGER: f64 = 9_007_199_254_740_992.0;
 
-fn ensure_bridge_dtype_supported(dtype: DType, context: &str) -> Result<(), UFuncError> {
-    match dtype {
+fn is_bridge_dtype_supported(dtype: DType) -> bool {
+    matches!(
+        dtype,
         DType::Bool
-        | DType::I8
-        | DType::I16
-        | DType::I32
-        | DType::I64
-        | DType::U8
-        | DType::U16
-        | DType::U32
-        | DType::U64
-        | DType::F16
-        | DType::F32
-        | DType::F64
-        | DType::DateTime64
-        | DType::TimeDelta64 => Ok(()),
-        _ => Err(UFuncError::Msg(format!(
+            | DType::I8
+            | DType::I16
+            | DType::I32
+            | DType::I64
+            | DType::U8
+            | DType::U16
+            | DType::U32
+            | DType::U64
+            | DType::F16
+            | DType::F32
+            | DType::F64
+            | DType::DateTime64
+            | DType::TimeDelta64
+    )
+}
+
+fn ensure_bridge_dtype_supported(dtype: DType, context: &str) -> Result<(), UFuncError> {
+    if is_bridge_dtype_supported(dtype) {
+        Ok(())
+    } else {
+        Err(UFuncError::Msg(format!(
             "{context}: dtype {} is not supported by the temporary Vec<f64> storage bridge",
             dtype.name()
-        ))),
+        )))
     }
 }
 
@@ -18428,6 +18445,45 @@ mod tests {
         )
         .expect_err("fractional datetime target should fail closed");
         assert!(matches!(err, UFuncError::Msg(message) if message.contains("datetime64")));
+    }
+
+    #[test]
+    fn scalar_fractional_datetime_lossy_fallback_uses_f64_dtype() {
+        let arr = UFuncArray::scalar(1.5, DType::DateTime64);
+        assert_eq!(arr.shape(), &[]);
+        assert_eq!(arr.dtype(), DType::F64);
+        assert_eq!(arr.values(), &[1.5]);
+    }
+
+    #[test]
+    fn fromiter_fractional_timedelta_lossy_fallback_uses_f64_dtype() {
+        let arr = UFuncArray::fromiter([1.0, 1.5], DType::TimeDelta64);
+        assert_eq!(arr.shape(), &[2]);
+        assert_eq!(arr.dtype(), DType::F64);
+        assert_eq!(arr.values(), &[1.0, 1.5]);
+    }
+
+    #[test]
+    fn scalar_complex_lossy_fallback_uses_f64_dtype() {
+        let arr = UFuncArray::scalar(1.0, DType::Complex128);
+        assert_eq!(arr.shape(), &[]);
+        assert_eq!(arr.dtype(), DType::F64);
+        assert_eq!(arr.values(), &[1.0]);
+        let real = arr.isreal();
+        assert_eq!(real.shape(), &[]);
+        assert_eq!(real.dtype(), DType::Bool);
+        assert_eq!(real.values(), &[1.0]);
+        let complex = arr.iscomplex();
+        assert_eq!(complex.shape(), &[]);
+        assert_eq!(complex.dtype(), DType::Bool);
+        assert_eq!(complex.values(), &[0.0]);
+    }
+
+    #[test]
+    fn lossy_fallback_does_not_downgrade_dtype_for_shape_only_error() {
+        let arr = UFuncArray::from_values_with_dtype_lossy(vec![2], vec![1.0], DType::DateTime64);
+        assert_eq!(arr.dtype(), DType::DateTime64);
+        assert_eq!(arr.values(), &[1.0]);
     }
 
     #[test]
