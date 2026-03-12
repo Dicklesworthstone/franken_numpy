@@ -1757,6 +1757,10 @@ impl UFuncArray {
     }
 
     /// Best-effort storage bridge for APIs that cannot return `Result`.
+    ///
+    /// When the requested dtype cannot be represented safely through the temporary
+    /// `Vec<f64>` bridge, this falls back to `F64` rather than manufacturing
+    /// invalid complex or temporal metadata.
     fn from_values_with_dtype_lossy(shape: Vec<usize>, values: Vec<f64>, dtype: DType) -> Self {
         match Self::from_values_with_dtype(shape.clone(), values.clone(), dtype) {
             Ok(array) => array,
@@ -1820,7 +1824,7 @@ impl UFuncArray {
         Self::from_values_with_dtype(shape, vec![fill_value; count], dtype)
     }
 
-    /// Create a filled array with the same shape and dtype as another.
+    /// Create a filled array with the same shape and, when representable, the same dtype as another.
     pub fn full_like(other: &Self, fill_value: f64) -> Self {
         Self::from_values_with_dtype_lossy(
             other.shape.clone(),
