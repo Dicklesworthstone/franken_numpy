@@ -1715,6 +1715,7 @@ impl UFuncArray {
         if actual != expected {
             return Err(UFuncError::InvalidInputLength { expected, actual });
         }
+        ensure_storage_bridge_input_supported(&storage, "from_storage")?;
         Ok(Self {
             shape,
             values: storage.to_f64_vec(),
@@ -1728,14 +1729,19 @@ impl UFuncArray {
         storage: ArrayStorage,
         dtype: DType,
     ) -> Result<Self, UFuncError> {
+        ensure_bridge_dtype_supported(dtype, "from_storage_with_dtype")?;
+        ensure_storage_bridge_input_supported(&storage, "from_storage_with_dtype")?;
+        ensure_storage_cast_target_supported(&storage, dtype, "from_storage_with_dtype")?;
         let casted = storage
             .cast_to(dtype)
             .map_err(|err| UFuncError::Msg(format!("storage cast failed: {err}")))?;
-        Self::from_storage(shape, casted)
+        let values = casted.to_f64_vec();
+        Self::new(shape, values, dtype)
     }
 
     /// Export this array into typed storage using its dtype as the cast target.
     pub fn to_storage(&self) -> Result<ArrayStorage, UFuncError> {
+        ensure_values_bridge_output_supported(&self.values, self.dtype, "to_storage")?;
         ArrayStorage::from_f64_vec(self.values.clone())
             .cast_to(self.dtype)
             .map_err(|err| UFuncError::Msg(format!("storage cast failed: {err}")))
@@ -12208,6 +12214,232 @@ fn c_strides_elems(shape: &[usize]) -> Vec<usize> {
     strides
 }
 
+const MAX_EXACT_F64_I64: i64 = 9_007_199_254_740_992;
+const MAX_EXACT_F64_U64: u64 = 9_007_199_254_740_992;
+const MAX_EXACT_F64_INTEGER: f64 = 9_007_199_254_740_992.0;
+
+fn ensure_bridge_dtype_supported(dtype: DType, context: &str) -> Result<(), UFuncError> {
+    match dtype {
+        DType::Bool
+        | DType::I8
+        | DType::I16
+        | DType::I32
+        | DType::I64
+        | DType::U8
+        | DType::U16
+        | DType::U32
+        | DType::U64
+        | DType::F16
+        | DType::F32
+        | DType::F64
+        | DType::DateTime64
+        | DType::TimeDelta64 => Ok(()),
+        _ => Err(UFuncError::Msg(format!(
+            "{context}: dtype {} is not supported by the temporary Vec<f64> storage bridge",
+            dtype.name()
+        ))),
+    }
+}
+
+fn is_exact_temporal_bridge_target(dtype: DType) -> bool {
+    matches!(dtype, DType::DateTime64 | DType::TimeDelta64)
+}
+
+fn ensure_exact_integer_bridge_value_supported(
+    value: f64,
+    dtype: DType,
+    context: &str,
+    index: usize,
+) -> Result<(), UFuncError> {
+    let is_unsigned = matches!(dtype, DType::U64);
+    if !value.is_finite()
+        || value.fract() != 0.0
+        || value.abs() > MAX_EXACT_F64_INTEGER
+        || (is_unsigned && value < 0.0)
+    {
+        return Err(UFuncError::Msg(format!(
+            "{context}: value at index {index} ({value}) cannot be represented exactly as {} through the temporary Vec<f64> storage bridge",
+            dtype.name()
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_storage_bridge_input_supported(
+    storage: &ArrayStorage,
+    context: &str,
+) -> Result<(), UFuncError> {
+    ensure_bridge_dtype_supported(storage.dtype(), context)?;
+    match storage {
+        ArrayStorage::I64(values) => {
+            if let Some((index, value)) = values
+                .iter()
+                .copied()
+                .enumerate()
+                .find(|(_, value)| value.abs() > MAX_EXACT_F64_I64)
+            {
+                return Err(UFuncError::Msg(format!(
+                    "{context}: i64 value at index {index} ({value}) exceeds exact f64 bridge range"
+                )));
+            }
+        }
+        ArrayStorage::U64(values) => {
+            if let Some((index, value)) = values
+                .iter()
+                .copied()
+                .enumerate()
+                .find(|(_, value)| *value > MAX_EXACT_F64_U64)
+            {
+                return Err(UFuncError::Msg(format!(
+                    "{context}: u64 value at index {index} ({value}) exceeds exact f64 bridge range"
+                )));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn ensure_storage_cast_target_supported(
+    storage: &ArrayStorage,
+    dtype: DType,
+    context: &str,
+) -> Result<(), UFuncError> {
+    if !is_exact_temporal_bridge_target(dtype) {
+        return Ok(());
+    }
+
+    match storage {
+        ArrayStorage::Bool(values) => {
+            for (index, value) in values.iter().copied().enumerate() {
+                ensure_exact_integer_bridge_value_supported(
+                    if value { 1.0 } else { 0.0 },
+                    dtype,
+                    context,
+                    index,
+                )?;
+            }
+        }
+        ArrayStorage::I8(values) => {
+            for (index, value) in values.iter().copied().enumerate() {
+                ensure_exact_integer_bridge_value_supported(
+                    f64::from(value),
+                    dtype,
+                    context,
+                    index,
+                )?;
+            }
+        }
+        ArrayStorage::I16(values) => {
+            for (index, value) in values.iter().copied().enumerate() {
+                ensure_exact_integer_bridge_value_supported(
+                    f64::from(value),
+                    dtype,
+                    context,
+                    index,
+                )?;
+            }
+        }
+        ArrayStorage::I32(values) => {
+            for (index, value) in values.iter().copied().enumerate() {
+                ensure_exact_integer_bridge_value_supported(
+                    f64::from(value),
+                    dtype,
+                    context,
+                    index,
+                )?;
+            }
+        }
+        ArrayStorage::I64(values) => {
+            for (index, value) in values.iter().copied().enumerate() {
+                ensure_exact_integer_bridge_value_supported(value as f64, dtype, context, index)?;
+            }
+        }
+        ArrayStorage::U8(values) => {
+            for (index, value) in values.iter().copied().enumerate() {
+                ensure_exact_integer_bridge_value_supported(
+                    f64::from(value),
+                    dtype,
+                    context,
+                    index,
+                )?;
+            }
+        }
+        ArrayStorage::U16(values) => {
+            for (index, value) in values.iter().copied().enumerate() {
+                ensure_exact_integer_bridge_value_supported(
+                    f64::from(value),
+                    dtype,
+                    context,
+                    index,
+                )?;
+            }
+        }
+        ArrayStorage::U32(values) => {
+            for (index, value) in values.iter().copied().enumerate() {
+                ensure_exact_integer_bridge_value_supported(
+                    f64::from(value),
+                    dtype,
+                    context,
+                    index,
+                )?;
+            }
+        }
+        ArrayStorage::U64(values) => {
+            for (index, value) in values.iter().copied().enumerate() {
+                ensure_exact_integer_bridge_value_supported(value as f64, dtype, context, index)?;
+            }
+        }
+        ArrayStorage::F16(values) => {
+            for (index, value) in values.iter().copied().enumerate() {
+                ensure_exact_integer_bridge_value_supported(
+                    f64::from(value),
+                    dtype,
+                    context,
+                    index,
+                )?;
+            }
+        }
+        ArrayStorage::F32(values) => {
+            for (index, value) in values.iter().copied().enumerate() {
+                ensure_exact_integer_bridge_value_supported(
+                    f64::from(value),
+                    dtype,
+                    context,
+                    index,
+                )?;
+            }
+        }
+        ArrayStorage::F64(values) => {
+            for (index, value) in values.iter().copied().enumerate() {
+                ensure_exact_integer_bridge_value_supported(value, dtype, context, index)?;
+            }
+        }
+        ArrayStorage::Complex64(_)
+        | ArrayStorage::Complex128(_)
+        | ArrayStorage::String(_)
+        | ArrayStorage::Structured(_) => {}
+    }
+    Ok(())
+}
+
+fn ensure_values_bridge_output_supported(
+    values: &[f64],
+    dtype: DType,
+    context: &str,
+) -> Result<(), UFuncError> {
+    ensure_bridge_dtype_supported(dtype, context)?;
+    match dtype {
+        DType::I64 | DType::U64 | DType::DateTime64 | DType::TimeDelta64 => {
+            for (index, value) in values.iter().copied().enumerate() {
+                ensure_exact_integer_bridge_value_supported(value, dtype, context, index)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum UFuncError {
     Shape(ShapeError),
@@ -17779,7 +18011,7 @@ mod tests {
         take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
         validate_override_payload_class, where_nonzero,
     };
-    use fnp_dtype::{ArrayStorage, DType, f16, promote};
+    use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
     use std::sync::{Arc, Mutex, RwLock};
 
@@ -17897,6 +18129,90 @@ mod tests {
     }
 
     #[test]
+    fn from_storage_rejects_complex_storage_bridge() {
+        let err = UFuncArray::from_storage(vec![1], ArrayStorage::Complex128(vec![(1.0, 2.0)]))
+            .expect_err("complex bridge should fail closed");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("complex128")));
+    }
+
+    #[test]
+    fn from_storage_rejects_string_storage_bridge() {
+        let err = UFuncArray::from_storage(vec![1], ArrayStorage::String(vec!["abc".into()]))
+            .expect_err("string bridge should fail closed");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("str")));
+    }
+
+    #[test]
+    fn from_storage_rejects_structured_storage_bridge() {
+        let fields = vec![StructuredField {
+            name: "value".into(),
+            dtype: DType::F64,
+            offset: 0,
+        }];
+        let storage = ArrayStorage::Structured(
+            StructuredStorage::new(fields, vec![ArrayStorage::F64(vec![1.0])])
+                .expect("structured storage"),
+        );
+        let err = UFuncArray::from_storage(vec![1], storage)
+            .expect_err("structured bridge should fail closed");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("void")));
+    }
+
+    #[test]
+    fn from_storage_rejects_large_i64_precision_loss() {
+        let err = UFuncArray::from_storage(vec![1], ArrayStorage::I64(vec![9_007_199_254_740_993]))
+            .expect_err("large i64 should fail closed");
+        assert!(matches!(
+            err,
+            UFuncError::Msg(message) if message.contains("exceeds exact f64 bridge range")
+        ));
+    }
+
+    #[test]
+    fn from_storage_rejects_large_u64_precision_loss() {
+        let err = UFuncArray::from_storage(vec![1], ArrayStorage::U64(vec![9_007_199_254_740_993]))
+            .expect_err("large u64 should fail closed");
+        assert!(matches!(
+            err,
+            UFuncError::Msg(message) if message.contains("exceeds exact f64 bridge range")
+        ));
+    }
+
+    #[test]
+    fn from_storage_with_dtype_rejects_complex_target() {
+        let err = UFuncArray::from_storage_with_dtype(
+            vec![1],
+            ArrayStorage::F64(vec![1.0]),
+            DType::Complex128,
+        )
+        .expect_err("complex target should fail closed");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("complex128")));
+    }
+
+    #[test]
+    fn from_storage_with_dtype_supports_exact_datetime_target() {
+        let arr = UFuncArray::from_storage_with_dtype(
+            vec![1],
+            ArrayStorage::F64(vec![1.0]),
+            DType::DateTime64,
+        )
+        .expect("datetime target should preserve exact integer ticks");
+        assert_eq!(arr.dtype(), DType::DateTime64);
+        assert_eq!(arr.values(), &[1.0]);
+    }
+
+    #[test]
+    fn from_storage_with_dtype_rejects_fractional_datetime_target() {
+        let err = UFuncArray::from_storage_with_dtype(
+            vec![1],
+            ArrayStorage::F64(vec![1.5]),
+            DType::DateTime64,
+        )
+        .expect_err("fractional datetime target should fail closed");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("datetime64")));
+    }
+
+    #[test]
     fn astype_to_f16_quantizes_values() {
         let arr = UFuncArray::new(vec![2], vec![0.1, 1.5], DType::F64).expect("array");
         let cast = arr.astype(DType::F16);
@@ -17957,6 +18273,46 @@ mod tests {
             out.to_storage().expect("to_storage"),
             ArrayStorage::Bool(vec![true, false, false])
         );
+    }
+
+    #[test]
+    fn to_storage_rejects_complex_dtype_bridge() {
+        let arr = UFuncArray::new(vec![1, 2], vec![1.0, 2.0], DType::Complex128).expect("array");
+        let err = arr
+            .to_storage()
+            .expect_err("complex dtype bridge should fail closed");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("complex128")));
+    }
+
+    #[test]
+    fn to_storage_supports_exact_datetime_dtype_bridge() {
+        let arr = UFuncArray::new(vec![1], vec![1.0], DType::DateTime64).expect("array");
+        assert_eq!(
+            arr.to_storage().expect("to_storage"),
+            ArrayStorage::I64(vec![1])
+        );
+    }
+
+    #[test]
+    fn to_storage_rejects_fractional_datetime_dtype_bridge() {
+        let arr = UFuncArray::new(vec![1], vec![1.5], DType::DateTime64).expect("array");
+        let err = arr
+            .to_storage()
+            .expect_err("fractional datetime dtype bridge should fail closed");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("datetime64")));
+    }
+
+    #[test]
+    fn to_storage_rejects_large_i64_precision_loss() {
+        let arr =
+            UFuncArray::new(vec![1], vec![9_007_199_254_740_994.0], DType::I64).expect("array");
+        let err = arr
+            .to_storage()
+            .expect_err("large i64 bridge should fail closed");
+        assert!(matches!(
+            err,
+            UFuncError::Msg(message) if message.contains("cannot be represented exactly")
+        ));
     }
 
     #[test]
