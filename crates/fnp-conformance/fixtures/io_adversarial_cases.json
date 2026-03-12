@@ -339,7 +339,7 @@
       "artifacts/phase2c/FNP-P2C-009/contract_table.md"
     ],
     "reason_code": "io_dtype_descriptor_invalid",
-    "dtype_descr": "<U10"
+    "dtype_descr": "[('x','<f8'),('y','<i4')]"
   },
   {
     "id": "io_payload_zero_bytes",
@@ -543,6 +543,6 @@
       "artifacts/phase2c/FNP-P2C-009/contract_table.md"
     ],
     "reason_code": "io_dtype_descriptor_invalid",
-    "dtype_descr": "<c16"
+    "dtype_descr": "<c32"
   }
 ]

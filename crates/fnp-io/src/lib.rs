@@ -2,7 +2,7 @@
 
 use core::fmt;
 use std::collections::HashSet;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
 
@@ -71,37 +71,46 @@ pub enum IOSupportedDType {
     Complex64Be,
     Complex128,
     Complex128Be,
+    /// Fixed-width byte string, e.g. `|S10` = 10-byte ASCII string.
+    Bytes(usize),
+    /// Fixed-width Unicode string (UCS-4/UTF-32-LE), e.g. `<U20` = 20-char string.
+    Unicode(usize),
+    /// Fixed-width Unicode string (UCS-4/UTF-32-BE), e.g. `>U20` = 20-char string.
+    UnicodeBe(usize),
     Object,
 }
 
 impl IOSupportedDType {
     #[must_use]
-    pub const fn descr(self) -> &'static str {
+    pub fn descr(self) -> String {
         match self {
-            Self::Bool => "|b1",
-            Self::I8 => "|i1",
-            Self::I16 => "<i2",
-            Self::I16Be => ">i2",
-            Self::I32 => "<i4",
-            Self::I32Be => ">i4",
-            Self::I64 => "<i8",
-            Self::I64Be => ">i8",
-            Self::U8 => "|u1",
-            Self::U16 => "<u2",
-            Self::U16Be => ">u2",
-            Self::U32 => "<u4",
-            Self::U32Be => ">u4",
-            Self::U64 => "<u8",
-            Self::U64Be => ">u8",
-            Self::F32 => "<f4",
-            Self::F32Be => ">f4",
-            Self::F64 => "<f8",
-            Self::F64Be => ">f8",
-            Self::Complex64 => "<c8",
-            Self::Complex64Be => ">c8",
-            Self::Complex128 => "<c16",
-            Self::Complex128Be => ">c16",
-            Self::Object => "|O",
+            Self::Bool => "|b1".to_string(),
+            Self::I8 => "|i1".to_string(),
+            Self::I16 => "<i2".to_string(),
+            Self::I16Be => ">i2".to_string(),
+            Self::I32 => "<i4".to_string(),
+            Self::I32Be => ">i4".to_string(),
+            Self::I64 => "<i8".to_string(),
+            Self::I64Be => ">i8".to_string(),
+            Self::U8 => "|u1".to_string(),
+            Self::U16 => "<u2".to_string(),
+            Self::U16Be => ">u2".to_string(),
+            Self::U32 => "<u4".to_string(),
+            Self::U32Be => ">u4".to_string(),
+            Self::U64 => "<u8".to_string(),
+            Self::U64Be => ">u8".to_string(),
+            Self::F32 => "<f4".to_string(),
+            Self::F32Be => ">f4".to_string(),
+            Self::F64 => "<f8".to_string(),
+            Self::F64Be => ">f8".to_string(),
+            Self::Complex64 => "<c8".to_string(),
+            Self::Complex64Be => ">c8".to_string(),
+            Self::Complex128 => "<c16".to_string(),
+            Self::Complex128Be => ">c16".to_string(),
+            Self::Bytes(n) => format!("|S{n}"),
+            Self::Unicode(n) => format!("<U{n}"),
+            Self::UnicodeBe(n) => format!(">U{n}"),
+            Self::Object => "|O".to_string(),
         }
     }
 
@@ -131,12 +140,34 @@ impl IOSupportedDType {
             "<c16" => Ok(Self::Complex128),
             ">c16" => Ok(Self::Complex128Be),
             "|O" => Ok(Self::Object),
+            _ => Self::decode_variable_width(descr),
+        }
+    }
+
+    fn decode_variable_width(descr: &str) -> Result<Self, IOError> {
+        let bytes = descr.as_bytes();
+        if bytes.len() < 3 {
+            return Err(IOError::DTypeDescriptorInvalid);
+        }
+        let endian = bytes[0];
+        let kind = bytes[1];
+        let width_str = &descr[2..];
+        let width: usize = width_str
+            .parse()
+            .map_err(|_| IOError::DTypeDescriptorInvalid)?;
+        if width == 0 {
+            return Err(IOError::DTypeDescriptorInvalid);
+        }
+        match (endian, kind) {
+            (b'|', b'S') => Ok(Self::Bytes(width)),
+            (b'<', b'U') => Ok(Self::Unicode(width)),
+            (b'>', b'U') => Ok(Self::UnicodeBe(width)),
             _ => Err(IOError::DTypeDescriptorInvalid),
         }
     }
 
     #[must_use]
-    pub const fn item_size(self) -> Option<usize> {
+    pub fn item_size(self) -> Option<usize> {
         match self {
             Self::Bool | Self::I8 | Self::U8 => Some(1),
             Self::I16 | Self::I16Be | Self::U16 | Self::U16Be => Some(2),
@@ -150,6 +181,8 @@ impl IOSupportedDType {
             | Self::Complex64
             | Self::Complex64Be => Some(8),
             Self::Complex128 | Self::Complex128Be => Some(16),
+            Self::Bytes(n) => Some(n),
+            Self::Unicode(n) | Self::UnicodeBe(n) => Some(n * 4),
             Self::Object => None,
         }
     }
@@ -159,6 +192,14 @@ impl IOSupportedDType {
         matches!(
             self,
             Self::Complex64 | Self::Complex64Be | Self::Complex128 | Self::Complex128Be
+        )
+    }
+
+    #[must_use]
+    pub const fn is_string(self) -> bool {
+        matches!(
+            self,
+            Self::Bytes(_) | Self::Unicode(_) | Self::UnicodeBe(_)
         )
     }
 }
@@ -802,7 +843,7 @@ pub fn validate_header_schema(
 
 pub fn validate_descriptor_roundtrip(dtype: IOSupportedDType) -> Result<(), IOError> {
     let encoded = dtype.descr();
-    let decoded = IOSupportedDType::decode(encoded)?;
+    let decoded = IOSupportedDType::decode(&encoded)?;
     if decoded == dtype {
         Ok(())
     } else {
@@ -1554,7 +1595,7 @@ pub fn fromfile(
     dtype: IOSupportedDType,
     count: Option<usize>,
 ) -> Result<Vec<f64>, IOError> {
-    if dtype.is_complex() {
+    if dtype.is_complex() || dtype.is_string() {
         return Err(IOError::DTypeDescriptorInvalid);
     }
     let item_size = dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?;
@@ -1582,7 +1623,7 @@ pub fn fromfile(
 /// Encodes each f64 value according to the given `dtype` and writes
 /// the binary representation.
 pub fn tofile(values: &[f64], dtype: IOSupportedDType) -> Result<Vec<u8>, IOError> {
-    if dtype.is_complex() {
+    if dtype.is_complex() || dtype.is_string() {
         return Err(IOError::DTypeDescriptorInvalid);
     }
     let item_size = dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?;
@@ -1643,6 +1684,9 @@ fn decode_element(chunk: &[u8], dtype: IOSupportedDType) -> Result<f64, IOError>
         | IOSupportedDType::Complex64Be
         | IOSupportedDType::Complex128
         | IOSupportedDType::Complex128Be
+        | IOSupportedDType::Bytes(_)
+        | IOSupportedDType::Unicode(_)
+        | IOSupportedDType::UnicodeBe(_)
         | IOSupportedDType::Object => Err(IOError::DTypeDescriptorInvalid),
     }
 }
@@ -1675,6 +1719,9 @@ fn encode_element(v: f64, dtype: IOSupportedDType, buf: &mut Vec<u8>) -> Result<
         | IOSupportedDType::Complex64Be
         | IOSupportedDType::Complex128
         | IOSupportedDType::Complex128Be
+        | IOSupportedDType::Bytes(_)
+        | IOSupportedDType::Unicode(_)
+        | IOSupportedDType::UnicodeBe(_)
         | IOSupportedDType::Object => return Err(IOError::DTypeDescriptorInvalid),
     }
     Ok(())
@@ -1982,20 +2029,840 @@ pub fn savez_compressed(
     write_npz_bytes_with_compression(&raw_entries, NpzCompression::Deflate)
 }
 
+// ── Memory-mapped file arrays (np.memmap) ──
+
+/// A memory-mapped array backed by a file on disk.
+///
+/// Provides NumPy-compatible `np.memmap` semantics: the array data lives in a
+/// file and is accessed through OS-level memory mapping. Changes to writable
+/// mappings are flushed to disk via `flush()`.
+///
+/// File-backed array that provides the same API surface as `numpy.memmap`.
+///
+/// Instead of OS-level memory-mapping (which requires `unsafe`), this uses
+/// safe standard I/O: the data region is read into an in-memory buffer,
+/// and `flush()` writes modifications back to the backing file.
+#[derive(Debug)]
+pub struct MemmapArray {
+    /// Array shape.
+    pub shape: Vec<usize>,
+    /// Element dtype.
+    pub dtype: IOSupportedDType,
+    /// Byte offset from file start to the array data region.
+    pub offset: usize,
+    /// Whether this is a fortran-order mapping.
+    pub fortran_order: bool,
+    /// In-memory buffer holding the array data.
+    buffer: Vec<u8>,
+    /// Backing file path (for flush support).
+    backing_path: Option<std::path::PathBuf>,
+    /// Whether this mapping is writable.
+    writable: bool,
+}
+
+impl MemmapArray {
+    /// Get a read-only byte slice of the array data.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.buffer
+    }
+
+    /// Get a mutable byte slice of the array data.
+    ///
+    /// Returns `None` if the mapping is read-only.
+    pub fn as_bytes_mut(&mut self) -> Option<&mut [u8]> {
+        if self.writable {
+            Some(&mut self.buffer)
+        } else {
+            None
+        }
+    }
+
+    /// Whether this memmap is writable.
+    #[must_use]
+    pub fn is_writable(&self) -> bool {
+        self.writable
+    }
+
+    /// Total number of elements in the array.
+    pub fn element_count(&self) -> Result<usize, IOError> {
+        element_count(&self.shape)
+    }
+
+    /// Total byte size of the mapped array data region.
+    pub fn nbytes(&self) -> Result<usize, IOError> {
+        let count = self.element_count()?;
+        let item_size = self
+            .dtype
+            .item_size()
+            .ok_or(IOError::MemmapContractViolation("unsupported dtype for memmap"))?;
+        count
+            .checked_mul(item_size)
+            .ok_or(IOError::MemmapContractViolation("array byte size overflowed"))
+    }
+
+    /// Flush changes to disk for writable mappings.
+    ///
+    /// No-op for read-only or copy-on-write mappings (no backing path).
+    pub fn flush(&mut self) -> Result<(), IOError> {
+        let path = match &self.backing_path {
+            Some(p) => p.clone(),
+            None => return Ok(()),
+        };
+        if !self.writable {
+            return Ok(());
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .map_err(|_| IOError::MemmapContractViolation("flush: failed to open backing file"))?;
+        file.seek(SeekFrom::Start(self.offset as u64))
+            .map_err(|_| IOError::MemmapContractViolation("flush: failed to seek"))?;
+        file.write_all(&self.buffer)
+            .map_err(|_| IOError::MemmapContractViolation("flush: failed to write"))?;
+        file.flush()
+            .map_err(|_| IOError::MemmapContractViolation("flush: failed to sync"))?;
+        Ok(())
+    }
+
+    /// Decode the mapped bytes as f64 values (for numeric dtypes).
+    pub fn to_f64_values(&self) -> Result<Vec<f64>, IOError> {
+        fromfile(self.as_bytes(), self.dtype, None)
+    }
+
+    /// Decode the mapped bytes as strings (for string dtypes).
+    pub fn to_strings(&self) -> Result<Vec<String>, IOError> {
+        fromfile_strings(self.as_bytes(), self.dtype, None)
+    }
+}
+
+/// Open a memory-mapped array backed by a file.
+///
+/// This is the equivalent of `numpy.memmap(filename, dtype, mode, offset, shape)`.
+///
+/// # Modes
+/// - `ReadOnly` ("r"): Open existing file read-only
+/// - `ReadWrite` ("r+"): Open existing file read-write
+/// - `Write` ("w+"): Create or truncate file, then map read-write
+/// - `CopyOnWrite` ("c"): Map read-only with copy-on-write (changes not written to file)
+///
+/// # Arguments
+/// - `path`: File path
+/// - `dtype`: Element data type
+/// - `mode`: Access mode
+/// - `offset`: Byte offset into the file where array data begins
+/// - `shape`: Array dimensions
+pub fn memmap(
+    path: &std::path::Path,
+    dtype: IOSupportedDType,
+    mode: MemmapMode,
+    offset: usize,
+    shape: &[usize],
+) -> Result<MemmapArray, IOError> {
+    if dtype == IOSupportedDType::Object {
+        return Err(IOError::MemmapContractViolation(
+            "object dtype is invalid for memmap path",
+        ));
+    }
+    let item_size = dtype
+        .item_size()
+        .ok_or(IOError::MemmapContractViolation("unsupported dtype for memmap"))?;
+    let count = element_count(shape)?;
+    let expected_bytes = count
+        .checked_mul(item_size)
+        .ok_or(IOError::MemmapContractViolation("array byte size overflowed"))?;
+
+    match mode {
+        MemmapMode::Write => {
+            if expected_bytes == 0 {
+                return Err(IOError::MemmapContractViolation(
+                    "write memmap requires non-empty byte footprint",
+                ));
+            }
+            // Create/truncate the file and pre-allocate it to the required size.
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(path)
+                .map_err(|_| IOError::MemmapContractViolation("failed to create file"))?;
+            let total_len = offset
+                .checked_add(expected_bytes)
+                .ok_or(IOError::MemmapContractViolation("file size overflowed"))?;
+            file.set_len(total_len as u64)
+                .map_err(|_| IOError::MemmapContractViolation("failed to set file length"))?;
+            // Start with a zero-filled buffer (matches OS mmap behavior).
+            let buffer = vec![0u8; expected_bytes];
+            Ok(MemmapArray {
+                shape: shape.to_vec(),
+                dtype,
+                offset,
+                fortran_order: false,
+                buffer,
+                backing_path: Some(path.to_path_buf()),
+                writable: true,
+            })
+        }
+        MemmapMode::ReadWrite => {
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .map_err(|_| IOError::MemmapContractViolation("failed to open file for rw"))?;
+            let file_len = file
+                .metadata()
+                .map_err(|_| IOError::MemmapContractViolation("failed to read file metadata"))?
+                .len() as usize;
+            let end = offset
+                .checked_add(expected_bytes)
+                .ok_or(IOError::MemmapContractViolation("mapping range overflowed"))?;
+            if file_len < end {
+                return Err(IOError::MemmapContractViolation(
+                    "backing file is too small for requested mapping",
+                ));
+            }
+            file.seek(SeekFrom::Start(offset as u64))
+                .map_err(|_| IOError::MemmapContractViolation("failed to seek in file"))?;
+            let mut buffer = vec![0u8; expected_bytes];
+            file.read_exact(&mut buffer)
+                .map_err(|_| IOError::MemmapContractViolation("failed to read file data"))?;
+            Ok(MemmapArray {
+                shape: shape.to_vec(),
+                dtype,
+                offset,
+                fortran_order: false,
+                buffer,
+                backing_path: Some(path.to_path_buf()),
+                writable: true,
+            })
+        }
+        MemmapMode::ReadOnly | MemmapMode::CopyOnWrite => {
+            let mut file = std::fs::File::open(path)
+                .map_err(|_| IOError::MemmapContractViolation("failed to open file"))?;
+            let file_len = file
+                .metadata()
+                .map_err(|_| IOError::MemmapContractViolation("failed to read file metadata"))?
+                .len() as usize;
+            let end = offset
+                .checked_add(expected_bytes)
+                .ok_or(IOError::MemmapContractViolation("mapping range overflowed"))?;
+            if file_len < end {
+                return Err(IOError::MemmapContractViolation(
+                    "backing file is too small for requested mapping",
+                ));
+            }
+            file.seek(SeekFrom::Start(offset as u64))
+                .map_err(|_| IOError::MemmapContractViolation("failed to seek in file"))?;
+            let mut buffer = vec![0u8; expected_bytes];
+            file.read_exact(&mut buffer)
+                .map_err(|_| IOError::MemmapContractViolation("failed to read file data"))?;
+            let writable = mode == MemmapMode::CopyOnWrite;
+            Ok(MemmapArray {
+                shape: shape.to_vec(),
+                dtype,
+                offset,
+                fortran_order: false,
+                buffer,
+                // ReadOnly and CopyOnWrite: no flush-back to the file.
+                backing_path: None,
+                writable,
+            })
+        }
+    }
+}
+
+/// Open a memory-mapped array from an existing NPY file.
+///
+/// Reads the NPY header to determine shape/dtype, then memory-maps the
+/// data payload region of the file.
+pub fn memmap_npy(
+    path: &std::path::Path,
+    mode: MemmapMode,
+) -> Result<MemmapArray, IOError> {
+    // Read the header to determine shape/dtype/offset
+    let header_bytes = std::fs::read(path)
+        .map_err(|_| IOError::MemmapContractViolation("failed to read NPY file for header"))?;
+    let version = validate_magic_version(&header_bytes)?;
+    let (header_offset, header_len) = read_header_span(&header_bytes, version)?;
+    let header_end = header_offset + header_len;
+    let header = parse_header_dictionary(&header_bytes[header_offset..header_end], header_len)?;
+
+    memmap(path, header.descr, mode, header_end, &header.shape)
+}
+
+// ── Structured / Record Dtype NPY support ──
+
+/// A field in a structured/record dtype descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuredIOField {
+    /// Field name (e.g. "x", "label").
+    pub name: String,
+    /// Field dtype (e.g. `IOSupportedDType::F64`, `IOSupportedDType::Bytes(5)`).
+    pub dtype: IOSupportedDType,
+}
+
+/// Descriptor for a structured/record dtype: an ordered list of named, typed fields.
+///
+/// Corresponds to NumPy's compound dtype descriptors such as
+/// `[('x', '<f8'), ('y', '<i4'), ('label', '|S5')]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuredIODescriptor {
+    pub fields: Vec<StructuredIOField>,
+}
+
+impl StructuredIODescriptor {
+    /// Total byte size per record (sum of field item sizes).
+    pub fn record_size(&self) -> Result<usize, IOError> {
+        let mut total = 0usize;
+        for field in &self.fields {
+            let sz = field.dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?;
+            total = total
+                .checked_add(sz)
+                .ok_or(IOError::HeaderSchemaInvalid("record size overflowed"))?;
+        }
+        Ok(total)
+    }
+
+    /// Byte offset of each field within a record.
+    pub fn field_offsets(&self) -> Result<Vec<usize>, IOError> {
+        let mut offsets = Vec::with_capacity(self.fields.len());
+        let mut offset = 0usize;
+        for field in &self.fields {
+            offsets.push(offset);
+            let sz = field.dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?;
+            offset = offset
+                .checked_add(sz)
+                .ok_or(IOError::HeaderSchemaInvalid("field offset overflowed"))?;
+        }
+        Ok(offsets)
+    }
+
+    /// Format as a NumPy-style structured descriptor string for NPY headers.
+    ///
+    /// E.g. `[('x', '<f8'), ('y', '<i4'), ('label', '|S5')]`
+    pub fn to_descr_string(&self) -> String {
+        let parts: Vec<String> = self
+            .fields
+            .iter()
+            .map(|f| format!("('{}', '{}')", f.name, f.dtype.descr()))
+            .collect();
+        format!("[{}]", parts.join(", "))
+    }
+}
+
+/// Parse a NumPy structured dtype descriptor string.
+///
+/// Handles the format: `[('x', '<f8'), ('y', '<i4'), ('label', '|S5')]`
+pub fn parse_structured_descr(value: &str) -> Result<StructuredIODescriptor, IOError> {
+    let value = value.trim();
+    if !value.starts_with('[') || !value.ends_with(']') {
+        return Err(IOError::DTypeDescriptorInvalid);
+    }
+    let inner = &value[1..value.len() - 1];
+    let inner = inner.trim();
+    if inner.is_empty() {
+        return Err(IOError::DTypeDescriptorInvalid);
+    }
+
+    let mut fields = Vec::new();
+    let mut pos = 0;
+    let bytes = inner.as_bytes();
+
+    while pos < bytes.len() {
+        // Skip whitespace and commas between tuples
+        while pos < bytes.len() && (bytes[pos].is_ascii_whitespace() || bytes[pos] == b',') {
+            pos += 1;
+        }
+        if pos >= bytes.len() {
+            break;
+        }
+
+        // Expect '('
+        if bytes[pos] != b'(' {
+            return Err(IOError::DTypeDescriptorInvalid);
+        }
+        pos += 1;
+
+        // Parse field name (quoted string)
+        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        let (name, new_pos) = parse_structured_quoted_string(inner, pos)?;
+        pos = new_pos;
+
+        // Skip comma
+        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        if pos >= bytes.len() || bytes[pos] != b',' {
+            return Err(IOError::DTypeDescriptorInvalid);
+        }
+        pos += 1;
+
+        // Parse dtype descriptor (quoted string)
+        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        let (dtype_str, new_pos) = parse_structured_quoted_string(inner, pos)?;
+        pos = new_pos;
+
+        // Skip to closing ')'
+        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        if pos >= bytes.len() || bytes[pos] != b')' {
+            return Err(IOError::DTypeDescriptorInvalid);
+        }
+        pos += 1;
+
+        let dtype = IOSupportedDType::decode(&dtype_str)?;
+        fields.push(StructuredIOField { name, dtype });
+    }
+
+    if fields.is_empty() {
+        return Err(IOError::DTypeDescriptorInvalid);
+    }
+
+    Ok(StructuredIODescriptor { fields })
+}
+
+/// Parse a single-quoted or double-quoted string starting at `pos`.
+/// Returns (string_content, position_after_closing_quote).
+fn parse_structured_quoted_string(s: &str, pos: usize) -> Result<(String, usize), IOError> {
+    let bytes = s.as_bytes();
+    if pos >= bytes.len() {
+        return Err(IOError::DTypeDescriptorInvalid);
+    }
+    let quote = bytes[pos];
+    if quote != b'\'' && quote != b'"' {
+        return Err(IOError::DTypeDescriptorInvalid);
+    }
+    let start = pos + 1;
+    let mut end = start;
+    while end < bytes.len() && bytes[end] != quote {
+        end += 1;
+    }
+    if end >= bytes.len() {
+        return Err(IOError::DTypeDescriptorInvalid);
+    }
+    let content = s[start..end].to_string();
+    Ok((content, end + 1))
+}
+
+/// Encode a structured NPY header dictionary line.
+fn encode_structured_header_dict(
+    shape: &[usize],
+    fortran_order: bool,
+    descriptor: &StructuredIODescriptor,
+) -> String {
+    let fo = if fortran_order { "True" } else { "False" };
+    let shape_str = format_shape_tuple(shape);
+    format!(
+        "{{'descr': {}, 'fortran_order': {fo}, 'shape': {shape_str}, }}",
+        descriptor.to_descr_string()
+    )
+}
+
+/// Result type for loading structured NPY arrays.
+#[derive(Debug, Clone)]
+pub struct StructuredNpyData {
+    /// Array shape (excluding the structured field dimension).
+    pub shape: Vec<usize>,
+    /// Structured dtype descriptor (field names, types).
+    pub descriptor: StructuredIODescriptor,
+    /// Per-field raw bytes. Each entry corresponds to a field; the bytes
+    /// are concatenated record-by-record (each chunk is field.item_size bytes).
+    pub columns: Vec<Vec<u8>>,
+}
+
+/// Read raw binary bytes into structured per-field column data.
+///
+/// Each record in the binary data has fields packed consecutively
+/// (field 0 bytes, then field 1 bytes, ..., then next record).
+pub fn fromfile_structured(
+    data: &[u8],
+    descriptor: &StructuredIODescriptor,
+    count: Option<usize>,
+) -> Result<StructuredNpyData, IOError> {
+    let record_size = descriptor.record_size()?;
+    if record_size == 0 {
+        return Err(IOError::DTypeDescriptorInvalid);
+    }
+    let max_records = data.len() / record_size;
+    let n = match count {
+        Some(c) => c.min(max_records),
+        None => max_records,
+    };
+
+    let offsets = descriptor.field_offsets()?;
+    let mut columns: Vec<Vec<u8>> = descriptor
+        .fields
+        .iter()
+        .map(|f| {
+            let sz = f.dtype.item_size().unwrap_or(0);
+            Vec::with_capacity(n * sz)
+        })
+        .collect();
+
+    for record_idx in 0..n {
+        let record_start = record_idx * record_size;
+        for (field_idx, field) in descriptor.fields.iter().enumerate() {
+            let field_size = field.dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?;
+            let field_start = record_start + offsets[field_idx];
+            let field_end = field_start + field_size;
+            if field_end > data.len() {
+                return Err(IOError::ReadPayloadIncomplete(
+                    "structured record extends past end of data",
+                ));
+            }
+            columns[field_idx].extend_from_slice(&data[field_start..field_end]);
+        }
+    }
+
+    Ok(StructuredNpyData {
+        shape: vec![n],
+        descriptor: descriptor.clone(),
+        columns,
+    })
+}
+
+/// Write structured per-field column data to interleaved record bytes.
+///
+/// All columns must have the same number of records (column.len() / field.item_size).
+pub fn tofile_structured(
+    descriptor: &StructuredIODescriptor,
+    columns: &[Vec<u8>],
+) -> Result<Vec<u8>, IOError> {
+    if columns.len() != descriptor.fields.len() {
+        return Err(IOError::WriteContractViolation(
+            "column count does not match structured descriptor field count",
+        ));
+    }
+
+    let record_size = descriptor.record_size()?;
+    if record_size == 0 {
+        return Err(IOError::DTypeDescriptorInvalid);
+    }
+
+    // Determine record count from first column
+    let n = if descriptor.fields.is_empty() {
+        0
+    } else {
+        let first_item_size = descriptor.fields[0]
+            .dtype
+            .item_size()
+            .ok_or(IOError::DTypeDescriptorInvalid)?;
+        if first_item_size == 0 {
+            return Err(IOError::DTypeDescriptorInvalid);
+        }
+        columns[0].len() / first_item_size
+    };
+
+    // Validate all columns have the same record count
+    for (i, field) in descriptor.fields.iter().enumerate() {
+        let item_size = field.dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?;
+        let col_records = columns[i].len().checked_div(item_size).unwrap_or(0);
+        if col_records != n {
+            return Err(IOError::WriteContractViolation(
+                "structured columns have inconsistent record counts",
+            ));
+        }
+    }
+
+    let mut buf = Vec::with_capacity(n * record_size);
+    for record_idx in 0..n {
+        for (field_idx, field) in descriptor.fields.iter().enumerate() {
+            let item_size = field.dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?;
+            let start = record_idx * item_size;
+            let end = start + item_size;
+            buf.extend_from_slice(&columns[field_idx][start..end]);
+        }
+    }
+
+    Ok(buf)
+}
+
+/// High-level save for structured arrays to NPY bytes.
+pub fn save_structured(
+    shape: &[usize],
+    descriptor: &StructuredIODescriptor,
+    columns: &[Vec<u8>],
+) -> Result<Vec<u8>, IOError> {
+    let expected_records = element_count(shape)?;
+    let record_size = descriptor.record_size()?;
+
+    // Validate record count matches shape
+    if !descriptor.fields.is_empty() {
+        let first_item_size = descriptor.fields[0]
+            .dtype
+            .item_size()
+            .ok_or(IOError::DTypeDescriptorInvalid)?;
+        if first_item_size > 0 {
+            let n = columns.first().map_or(0, |c| c.len() / first_item_size);
+            if n != expected_records {
+                return Err(IOError::WriteContractViolation(
+                    "structured record count does not match shape",
+                ));
+            }
+        }
+    }
+
+    let payload = tofile_structured(descriptor, columns)?;
+
+    // Build NPY header manually for structured dtype
+    let dict_str = encode_structured_header_dict(shape, false, descriptor);
+    let dict_bytes = dict_str.as_bytes();
+    let version = (1u8, 0u8);
+    let length_field_size = 2usize;
+    let prefix_len = NPY_MAGIC_PREFIX.len() + 2 + length_field_size;
+    let base_header_len = dict_bytes.len() + 1; // +1 for trailing newline
+    let padding = (16 - ((prefix_len + base_header_len) % 16)) % 16;
+    let header_len = base_header_len + padding;
+
+    if header_len > MAX_HEADER_BYTES {
+        return Err(IOError::HeaderSchemaInvalid(
+            "structured header exceeds budget",
+        ));
+    }
+
+    let total_size = prefix_len + header_len + expected_records * record_size;
+    let mut out = Vec::with_capacity(total_size);
+    write_npy_preamble(&mut out, version, header_len)?;
+    out.extend_from_slice(dict_bytes);
+    out.extend(std::iter::repeat_n(b' ', padding));
+    out.push(b'\n');
+    out.extend_from_slice(&payload);
+
+    Ok(out)
+}
+
+/// High-level load for structured NPY arrays.
+///
+/// Detects structured dtype from the NPY header and returns per-field column data.
+pub fn load_structured(data: &[u8]) -> Result<StructuredNpyData, IOError> {
+    let version = validate_magic_version(data)?;
+    let (header_offset, header_len) = read_header_span(data, version)?;
+    let header_end = header_offset + header_len;
+    let header_bytes = &data[header_offset..header_end];
+
+    let dictionary = std::str::from_utf8(header_bytes).map_err(|_| {
+        IOError::HeaderSchemaInvalid("header bytes must decode as utf-8/ascii dictionary")
+    })?;
+    let dictionary = dictionary.trim_end();
+    if !(dictionary.starts_with('{') && dictionary.ends_with('}')) {
+        return Err(IOError::HeaderSchemaInvalid(
+            "header dictionary must be wrapped in braces",
+        ));
+    }
+
+    // Parse shape
+    let shape_tail = extract_after_key(dictionary, "shape")?;
+    let shape_tail = shape_tail
+        .strip_prefix('(')
+        .ok_or(IOError::HeaderSchemaInvalid("shape tuple missing '('"))?;
+    let shape_end = shape_tail
+        .find(')')
+        .ok_or(IOError::HeaderSchemaInvalid("shape tuple missing ')'"))?;
+    let shape = parse_shape_tuple(&shape_tail[..shape_end])?;
+
+    // Parse structured descriptor
+    let descr_tail = extract_after_key(dictionary, "descr")?;
+    let descr_tail = descr_tail.trim_start();
+    if !descr_tail.starts_with('[') {
+        return Err(IOError::DTypeDescriptorInvalid);
+    }
+    let list_end = descr_tail
+        .find(']')
+        .ok_or(IOError::DTypeDescriptorInvalid)?;
+    let descriptor = parse_structured_descr(&descr_tail[..=list_end])?;
+
+    let body = &data[header_end..];
+    let expected_records = element_count(&shape)?;
+    let mut result = fromfile_structured(body, &descriptor, Some(expected_records))?;
+    result.shape = shape;
+    Ok(result)
+}
+
+// ── String / Unicode NPY support ──
+
+/// Decode a single fixed-width byte string element from raw bytes.
+///
+/// NumPy `|Sn` stores each element as exactly `n` bytes, null-padded.
+/// Returns the string with trailing null bytes stripped.
+fn decode_bytes_element(chunk: &[u8]) -> String {
+    let end = chunk
+        .iter()
+        .rposition(|&b| b != 0)
+        .map_or(0, |pos| pos + 1);
+    String::from_utf8_lossy(&chunk[..end]).into_owned()
+}
+
+/// Decode a single fixed-width Unicode element from raw UCS-4/UTF-32 bytes.
+///
+/// NumPy `<Un` or `>Un` stores each element as `n` UCS-4 code points (4 bytes each),
+/// null-padded. Little-endian if `is_le`, big-endian otherwise.
+fn decode_unicode_element(chunk: &[u8], is_le: bool) -> String {
+    let mut chars = Vec::with_capacity(chunk.len() / 4);
+    for code_unit in chunk.chunks_exact(4) {
+        let cp = if is_le {
+            u32::from_le_bytes([code_unit[0], code_unit[1], code_unit[2], code_unit[3]])
+        } else {
+            u32::from_be_bytes([code_unit[0], code_unit[1], code_unit[2], code_unit[3]])
+        };
+        if cp == 0 {
+            break;
+        }
+        if let Some(c) = char::from_u32(cp) {
+            chars.push(c);
+        }
+    }
+    chars.into_iter().collect()
+}
+
+/// Encode a string as a fixed-width byte string (NumPy `|Sn`).
+///
+/// Pads with null bytes to exactly `width` bytes. Truncates if the string is longer.
+fn encode_bytes_element(s: &str, width: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; width];
+    let bytes = s.as_bytes();
+    let copy_len = bytes.len().min(width);
+    buf[..copy_len].copy_from_slice(&bytes[..copy_len]);
+    buf
+}
+
+/// Encode a string as a fixed-width Unicode element (NumPy `<Un` or `>Un`).
+///
+/// Each character is encoded as a 4-byte UCS-4/UTF-32 code point.
+/// Pads with null code points to exactly `char_count` characters.
+fn encode_unicode_element(s: &str, char_count: usize, is_le: bool) -> Vec<u8> {
+    let mut buf = vec![0u8; char_count * 4];
+    for (i, c) in s.chars().take(char_count).enumerate() {
+        let cp = c as u32;
+        let bytes = if is_le {
+            cp.to_le_bytes()
+        } else {
+            cp.to_be_bytes()
+        };
+        let offset = i * 4;
+        buf[offset..offset + 4].copy_from_slice(&bytes);
+    }
+    buf
+}
+
+/// Read raw binary data from bytes into a flat array of strings.
+///
+/// Handles `|Sn` (byte strings), `<Un` (LE Unicode), and `>Un` (BE Unicode) dtypes.
+pub fn fromfile_strings(
+    data: &[u8],
+    dtype: IOSupportedDType,
+    count: Option<usize>,
+) -> Result<Vec<String>, IOError> {
+    if !dtype.is_string() {
+        return Err(IOError::DTypeDescriptorInvalid);
+    }
+    let item_size = dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?;
+    if item_size == 0 {
+        return Ok(Vec::new());
+    }
+    let max_elems = data.len() / item_size;
+    let n = match count {
+        Some(c) => c.min(max_elems),
+        None => max_elems,
+    };
+
+    let mut strings = Vec::with_capacity(n);
+    for i in 0..n {
+        let offset = i * item_size;
+        let chunk = &data[offset..offset + item_size];
+        let s = match dtype {
+            IOSupportedDType::Bytes(_) => decode_bytes_element(chunk),
+            IOSupportedDType::Unicode(_) => decode_unicode_element(chunk, true),
+            IOSupportedDType::UnicodeBe(_) => decode_unicode_element(chunk, false),
+            _ => return Err(IOError::DTypeDescriptorInvalid),
+        };
+        strings.push(s);
+    }
+    Ok(strings)
+}
+
+/// Write string array values to raw binary bytes.
+///
+/// Encodes each string according to the given string `dtype` (`|Sn`, `<Un`, `>Un`).
+pub fn tofile_strings(strings: &[String], dtype: IOSupportedDType) -> Result<Vec<u8>, IOError> {
+    if !dtype.is_string() {
+        return Err(IOError::DTypeDescriptorInvalid);
+    }
+    let item_size = dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?;
+    let mut buf = Vec::with_capacity(strings.len() * item_size);
+    for s in strings {
+        let encoded = match dtype {
+            IOSupportedDType::Bytes(w) => encode_bytes_element(s, w),
+            IOSupportedDType::Unicode(w) => encode_unicode_element(s, w, true),
+            IOSupportedDType::UnicodeBe(w) => encode_unicode_element(s, w, false),
+            _ => return Err(IOError::DTypeDescriptorInvalid),
+        };
+        buf.extend_from_slice(&encoded);
+    }
+    Ok(buf)
+}
+
+/// High-level save for string arrays to NPY bytes (np.save equivalent for string dtypes).
+pub fn save_strings(
+    shape: &[usize],
+    strings: &[String],
+    dtype: IOSupportedDType,
+) -> Result<Vec<u8>, IOError> {
+    if !dtype.is_string() {
+        return Err(IOError::DTypeDescriptorInvalid);
+    }
+    let expected = element_count(shape)?;
+    if strings.len() != expected {
+        return Err(IOError::WriteContractViolation(
+            "string count does not match shape element count",
+        ));
+    }
+    let header = NpyHeader {
+        shape: shape.to_vec(),
+        fortran_order: false,
+        descr: dtype,
+    };
+    let payload = tofile_strings(strings, dtype)?;
+    write_npy_bytes(&header, &payload, false)
+}
+
+/// Result type for loading string NPY arrays.
+pub type NpyLoadedStrings = (Vec<usize>, Vec<String>, IOSupportedDType);
+
+/// High-level load for string-typed NPY arrays (np.load equivalent for string dtypes).
+pub fn load_strings(data: &[u8]) -> Result<NpyLoadedStrings, IOError> {
+    let npy = read_npy_bytes(data, false)?;
+    let dtype = npy.header.descr;
+    if !dtype.is_string() {
+        return Err(IOError::DTypeDescriptorInvalid);
+    }
+    let shape = npy.header.shape;
+    let strings = fromfile_strings(&npy.payload, dtype, None)?;
+    Ok((shape, strings, dtype))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         IO_PACKET_ID, IO_PACKET_REASON_CODES, IOError, IOLogRecord, IORuntimeMode,
         IOSupportedDType, LoadDispatch, MAX_ARCHIVE_MEMBERS, MAX_DISPATCH_RETRIES,
         MAX_HEADER_BYTES, MAX_MEMMAP_VALIDATION_RETRIES, MemmapMode, NPY_MAGIC_PREFIX,
-        NPZ_MAGIC_PREFIX, NpyHeader, NpzCompression, SaveTxtConfig, classify_load_dispatch,
-        encode_npy_header_bytes, enforce_pickle_policy, fromfile, fromfile_complex, fromstring,
-        genfromtxt, load, load_complex, load_npz, loadtxt, loadtxt_usecols, read_npy_bytes,
-        read_npz_bytes, save, save_complex, savetxt, savez, savez_compressed,
-        synthesize_npz_member_names, tobytes, tofile, tofile_complex, tostring,
+        NPZ_MAGIC_PREFIX, NpyHeader, NpzCompression, SaveTxtConfig, StructuredIODescriptor,
+        StructuredIOField, classify_load_dispatch, encode_npy_header_bytes, enforce_pickle_policy,
+        fromfile, fromfile_complex, fromfile_strings, fromfile_structured, fromstring, genfromtxt,
+        load, load_complex, load_npz, load_strings, load_structured, loadtxt, loadtxt_usecols,
+        parse_structured_descr, read_npy_bytes, read_npz_bytes, save, save_complex, save_strings,
+        save_structured, savetxt, savez, savez_compressed, synthesize_npz_member_names, tobytes,
+        tofile, tofile_complex, tofile_strings, tofile_structured, tostring,
         validate_descriptor_roundtrip, validate_header_schema, validate_io_policy_metadata,
         validate_magic_version, validate_memmap_contract, validate_npz_archive_budget,
-        validate_read_payload, validate_write_contract, write_npy_bytes,
+        validate_read_payload, validate_write_contract, memmap, memmap_npy,
+        write_npy_bytes,
         write_npy_bytes_with_version, write_npy_preamble, write_npz_bytes,
         write_npz_bytes_with_compression,
     };
@@ -3137,5 +4004,775 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].0, "arr");
         assert_eq!(loaded[0].2, vec![10.0, 20.0, 30.0, 40.0]);
+    }
+
+    // ── String / Unicode NPY tests ──
+
+    #[test]
+    fn bytes_dtype_descriptor_roundtrip() {
+        let dt = IOSupportedDType::Bytes(10);
+        assert_eq!(dt.descr(), "|S10");
+        assert_eq!(IOSupportedDType::decode("|S10").unwrap(), dt);
+        assert_eq!(dt.item_size(), Some(10));
+        assert!(dt.is_string());
+        assert!(!dt.is_complex());
+        validate_descriptor_roundtrip(dt).unwrap();
+    }
+
+    #[test]
+    fn unicode_le_dtype_descriptor_roundtrip() {
+        let dt = IOSupportedDType::Unicode(20);
+        assert_eq!(dt.descr(), "<U20");
+        assert_eq!(IOSupportedDType::decode("<U20").unwrap(), dt);
+        assert_eq!(dt.item_size(), Some(80));
+        assert!(dt.is_string());
+        validate_descriptor_roundtrip(dt).unwrap();
+    }
+
+    #[test]
+    fn unicode_be_dtype_descriptor_roundtrip() {
+        let dt = IOSupportedDType::UnicodeBe(5);
+        assert_eq!(dt.descr(), ">U5");
+        assert_eq!(IOSupportedDType::decode(">U5").unwrap(), dt);
+        assert_eq!(dt.item_size(), Some(20));
+        assert!(dt.is_string());
+        validate_descriptor_roundtrip(dt).unwrap();
+    }
+
+    #[test]
+    fn string_dtype_decode_rejects_zero_width() {
+        assert!(IOSupportedDType::decode("|S0").is_err());
+        assert!(IOSupportedDType::decode("<U0").is_err());
+    }
+
+    #[test]
+    fn string_dtype_decode_rejects_invalid() {
+        assert!(IOSupportedDType::decode("|S").is_err());
+        assert!(IOSupportedDType::decode("<Uabc").is_err());
+        assert!(IOSupportedDType::decode("|X5").is_err());
+    }
+
+    #[test]
+    fn fromfile_tofile_bytes_roundtrip() {
+        let strings = vec!["hello".to_string(), "world".to_string(), "hi".to_string()];
+        let dtype = IOSupportedDType::Bytes(10);
+        let encoded = tofile_strings(&strings, dtype).unwrap();
+        assert_eq!(encoded.len(), 30); // 3 * 10 bytes
+        let decoded = fromfile_strings(&encoded, dtype, None).unwrap();
+        assert_eq!(decoded, strings);
+    }
+
+    #[test]
+    fn fromfile_tofile_unicode_le_roundtrip() {
+        let strings = vec!["alpha".to_string(), "beta".to_string()];
+        let dtype = IOSupportedDType::Unicode(8);
+        let encoded = tofile_strings(&strings, dtype).unwrap();
+        assert_eq!(encoded.len(), 64); // 2 * 8 * 4 bytes
+        let decoded = fromfile_strings(&encoded, dtype, None).unwrap();
+        assert_eq!(decoded, strings);
+    }
+
+    #[test]
+    fn fromfile_tofile_unicode_be_roundtrip() {
+        let strings = vec!["abc".to_string(), "xyz".to_string()];
+        let dtype = IOSupportedDType::UnicodeBe(5);
+        let encoded = tofile_strings(&strings, dtype).unwrap();
+        assert_eq!(encoded.len(), 40); // 2 * 5 * 4 bytes
+        let decoded = fromfile_strings(&encoded, dtype, None).unwrap();
+        assert_eq!(decoded, strings);
+    }
+
+    #[test]
+    fn fromfile_strings_with_count() {
+        let strings = vec!["aa".to_string(), "bb".to_string(), "cc".to_string()];
+        let dtype = IOSupportedDType::Bytes(4);
+        let encoded = tofile_strings(&strings, dtype).unwrap();
+        let decoded = fromfile_strings(&encoded, dtype, Some(2)).unwrap();
+        assert_eq!(decoded, vec!["aa", "bb"]);
+    }
+
+    #[test]
+    fn bytes_truncation_on_encode() {
+        let strings = vec!["toolongstring".to_string()];
+        let dtype = IOSupportedDType::Bytes(5);
+        let encoded = tofile_strings(&strings, dtype).unwrap();
+        let decoded = fromfile_strings(&encoded, dtype, None).unwrap();
+        assert_eq!(decoded, vec!["toolo"]);
+    }
+
+    #[test]
+    fn unicode_truncation_on_encode() {
+        let strings = vec!["abcdefgh".to_string()];
+        let dtype = IOSupportedDType::Unicode(3);
+        let encoded = tofile_strings(&strings, dtype).unwrap();
+        let decoded = fromfile_strings(&encoded, dtype, None).unwrap();
+        assert_eq!(decoded, vec!["abc"]);
+    }
+
+    #[test]
+    fn bytes_null_padding() {
+        let dtype = IOSupportedDType::Bytes(8);
+        let strings = vec!["hi".to_string()];
+        let encoded = tofile_strings(&strings, dtype).unwrap();
+        assert_eq!(encoded.len(), 8);
+        assert_eq!(&encoded[..2], b"hi");
+        assert_eq!(&encoded[2..], &[0, 0, 0, 0, 0, 0]);
+        let decoded = fromfile_strings(&encoded, dtype, None).unwrap();
+        assert_eq!(decoded, vec!["hi"]);
+    }
+
+    #[test]
+    fn empty_string_roundtrip() {
+        let strings = vec!["".to_string(), "x".to_string(), "".to_string()];
+        let dtype = IOSupportedDType::Bytes(4);
+        let encoded = tofile_strings(&strings, dtype).unwrap();
+        let decoded = fromfile_strings(&encoded, dtype, None).unwrap();
+        assert_eq!(decoded, strings);
+    }
+
+    #[test]
+    fn unicode_non_ascii_roundtrip() {
+        let strings = vec!["caf\u{00e9}".to_string(), "\u{03b1}\u{03b2}".to_string()];
+        let dtype = IOSupportedDType::Unicode(10);
+        let encoded = tofile_strings(&strings, dtype).unwrap();
+        let decoded = fromfile_strings(&encoded, dtype, None).unwrap();
+        assert_eq!(decoded, strings);
+    }
+
+    #[test]
+    fn save_load_strings_bytes_roundtrip() {
+        let strings = vec![
+            "foo".to_string(),
+            "bar".to_string(),
+            "baz".to_string(),
+            "qux".to_string(),
+        ];
+        let dtype = IOSupportedDType::Bytes(6);
+        let npy_bytes = save_strings(&[4], &strings, dtype).unwrap();
+        let (shape, loaded, loaded_dtype) = load_strings(&npy_bytes).unwrap();
+        assert_eq!(shape, vec![4]);
+        assert_eq!(loaded, strings);
+        assert_eq!(loaded_dtype, dtype);
+    }
+
+    #[test]
+    fn save_load_strings_unicode_le_roundtrip() {
+        let strings = vec!["hello".to_string(), "world".to_string()];
+        let dtype = IOSupportedDType::Unicode(10);
+        let npy_bytes = save_strings(&[2], &strings, dtype).unwrap();
+        let (shape, loaded, loaded_dtype) = load_strings(&npy_bytes).unwrap();
+        assert_eq!(shape, vec![2]);
+        assert_eq!(loaded, strings);
+        assert_eq!(loaded_dtype, dtype);
+    }
+
+    #[test]
+    fn save_load_strings_2d_roundtrip() {
+        let strings = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+            "e".to_string(),
+            "f".to_string(),
+        ];
+        let dtype = IOSupportedDType::Bytes(3);
+        let npy_bytes = save_strings(&[2, 3], &strings, dtype).unwrap();
+        let (shape, loaded, loaded_dtype) = load_strings(&npy_bytes).unwrap();
+        assert_eq!(shape, vec![2, 3]);
+        assert_eq!(loaded, strings);
+        assert_eq!(loaded_dtype, dtype);
+    }
+
+    #[test]
+    fn save_strings_rejects_non_string_dtype() {
+        let strings = vec!["test".to_string()];
+        let err = save_strings(&[1], &strings, IOSupportedDType::F64).unwrap_err();
+        assert_eq!(err.reason_code(), "io_dtype_descriptor_invalid");
+    }
+
+    #[test]
+    fn save_strings_rejects_shape_mismatch() {
+        let strings = vec!["a".to_string(), "b".to_string()];
+        let err = save_strings(&[3], &strings, IOSupportedDType::Bytes(4)).unwrap_err();
+        assert_eq!(err.reason_code(), "io_write_contract_violation");
+    }
+
+    #[test]
+    fn load_strings_rejects_non_string_npy() {
+        let npy_bytes = save(&[2], &[1.0, 2.0], IOSupportedDType::F64).unwrap();
+        let err = load_strings(&npy_bytes).unwrap_err();
+        assert_eq!(err.reason_code(), "io_dtype_descriptor_invalid");
+    }
+
+    #[test]
+    fn fromfile_rejects_string_dtype() {
+        let err = fromfile(&[0; 10], IOSupportedDType::Bytes(5), None).unwrap_err();
+        assert_eq!(err.reason_code(), "io_dtype_descriptor_invalid");
+    }
+
+    #[test]
+    fn tofile_rejects_string_dtype() {
+        let err = tofile(&[1.0], IOSupportedDType::Bytes(5)).unwrap_err();
+        assert_eq!(err.reason_code(), "io_dtype_descriptor_invalid");
+    }
+
+    #[test]
+    fn fromfile_strings_rejects_numeric_dtype() {
+        let err = fromfile_strings(&[0; 8], IOSupportedDType::F64, None).unwrap_err();
+        assert_eq!(err.reason_code(), "io_dtype_descriptor_invalid");
+    }
+
+    #[test]
+    fn npy_header_with_string_dtype_parses() {
+        let header_literal =
+            "{'descr': '|S5', 'fortran_order': False, 'shape': (3,), }          ";
+        // 3 elements × 5 bytes each = 15 bytes total
+        let body = b"helloworldhi\x00\x00\x00";
+        let payload = make_manual_npy_payload(header_literal, body);
+        let npy = read_npy_bytes(&payload, false).unwrap();
+        assert_eq!(npy.header.descr, IOSupportedDType::Bytes(5));
+        assert_eq!(npy.header.shape, vec![3]);
+        let strings = fromfile_strings(&npy.payload, npy.header.descr, None).unwrap();
+        assert_eq!(strings, vec!["hello", "world", "hi"]);
+    }
+
+    #[test]
+    fn npy_header_with_unicode_dtype_parses() {
+        let header =
+            "{'descr': '<U3', 'fortran_order': False, 'shape': (2,), }          ";
+        let mut body = Vec::new();
+        for c in "abc".chars() {
+            body.extend_from_slice(&(c as u32).to_le_bytes());
+        }
+        for c in "xy".chars() {
+            body.extend_from_slice(&(c as u32).to_le_bytes());
+        }
+        body.extend_from_slice(&0u32.to_le_bytes()); // null padding for 3rd char
+        let payload = make_manual_npy_payload(header, &body);
+        let npy = read_npy_bytes(&payload, false).unwrap();
+        assert_eq!(npy.header.descr, IOSupportedDType::Unicode(3));
+        let strings = fromfile_strings(&npy.payload, npy.header.descr, None).unwrap();
+        assert_eq!(strings, vec!["abc", "xy"]);
+    }
+
+    // ── Structured / Record Dtype NPY tests ──
+
+    fn make_test_descriptor() -> StructuredIODescriptor {
+        StructuredIODescriptor {
+            fields: vec![
+                StructuredIOField {
+                    name: "x".to_string(),
+                    dtype: IOSupportedDType::F64,
+                },
+                StructuredIOField {
+                    name: "y".to_string(),
+                    dtype: IOSupportedDType::I32,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn structured_descriptor_record_size() {
+        let desc = make_test_descriptor();
+        assert_eq!(desc.record_size().unwrap(), 12); // 8 + 4
+    }
+
+    #[test]
+    fn structured_descriptor_field_offsets() {
+        let desc = make_test_descriptor();
+        let offsets = desc.field_offsets().unwrap();
+        assert_eq!(offsets, vec![0, 8]);
+    }
+
+    #[test]
+    fn structured_descriptor_to_descr_string() {
+        let desc = make_test_descriptor();
+        assert_eq!(desc.to_descr_string(), "[('x', '<f8'), ('y', '<i4')]");
+    }
+
+    #[test]
+    fn parse_structured_descr_basic() {
+        let desc = parse_structured_descr("[('x', '<f8'), ('y', '<i4')]").unwrap();
+        assert_eq!(desc.fields.len(), 2);
+        assert_eq!(desc.fields[0].name, "x");
+        assert_eq!(desc.fields[0].dtype, IOSupportedDType::F64);
+        assert_eq!(desc.fields[1].name, "y");
+        assert_eq!(desc.fields[1].dtype, IOSupportedDType::I32);
+    }
+
+    #[test]
+    fn parse_structured_descr_with_string_field() {
+        let desc =
+            parse_structured_descr("[('name', '|S10'), ('value', '<f8')]").unwrap();
+        assert_eq!(desc.fields.len(), 2);
+        assert_eq!(desc.fields[0].name, "name");
+        assert_eq!(desc.fields[0].dtype, IOSupportedDType::Bytes(10));
+        assert_eq!(desc.fields[1].name, "value");
+        assert_eq!(desc.fields[1].dtype, IOSupportedDType::F64);
+    }
+
+    #[test]
+    fn parse_structured_descr_single_field() {
+        let desc = parse_structured_descr("[('z', '<f4')]").unwrap();
+        assert_eq!(desc.fields.len(), 1);
+        assert_eq!(desc.fields[0].name, "z");
+        assert_eq!(desc.fields[0].dtype, IOSupportedDType::F32);
+    }
+
+    #[test]
+    fn parse_structured_descr_rejects_empty() {
+        assert!(parse_structured_descr("[]").is_err());
+        assert!(parse_structured_descr("").is_err());
+        assert!(parse_structured_descr("<f8").is_err());
+    }
+
+    #[test]
+    fn structured_descriptor_roundtrip() {
+        let desc = make_test_descriptor();
+        let s = desc.to_descr_string();
+        let parsed = parse_structured_descr(&s).unwrap();
+        assert_eq!(parsed, desc);
+    }
+
+    #[test]
+    fn fromfile_tofile_structured_roundtrip() {
+        let desc = make_test_descriptor();
+        // 2 records: (1.5, 10), (2.75, 20)
+        let col_x: Vec<u8> = [1.5f64.to_le_bytes(), 2.75f64.to_le_bytes()].concat();
+        let col_y: Vec<u8> = [10i32.to_le_bytes(), 20i32.to_le_bytes()].concat();
+        let columns = vec![col_x.clone(), col_y.clone()];
+
+        let encoded = tofile_structured(&desc, &columns).unwrap();
+        // Each record is 12 bytes (8+4), 2 records = 24 bytes
+        assert_eq!(encoded.len(), 24);
+
+        let result = fromfile_structured(&encoded, &desc, None).unwrap();
+        assert_eq!(result.columns.len(), 2);
+        assert_eq!(result.columns[0], col_x);
+        assert_eq!(result.columns[1], col_y);
+    }
+
+    #[test]
+    fn fromfile_structured_with_count() {
+        let desc = make_test_descriptor();
+        let col_x: Vec<u8> = [1.0f64.to_le_bytes(), 2.0f64.to_le_bytes(), 3.0f64.to_le_bytes()]
+            .concat();
+        let col_y: Vec<u8> = [10i32.to_le_bytes(), 20i32.to_le_bytes(), 30i32.to_le_bytes()]
+            .concat();
+        let encoded = tofile_structured(&desc, &[col_x, col_y]).unwrap();
+        let result = fromfile_structured(&encoded, &desc, Some(2)).unwrap();
+        assert_eq!(result.shape, vec![2]);
+        // Only first 2 records decoded
+        assert_eq!(result.columns[0].len(), 16); // 2 * 8 bytes
+        assert_eq!(result.columns[1].len(), 8);  // 2 * 4 bytes
+    }
+
+    #[test]
+    fn tofile_structured_rejects_column_mismatch() {
+        let desc = make_test_descriptor();
+        let err = tofile_structured(&desc, &[vec![0u8; 8]]).unwrap_err();
+        assert_eq!(err.reason_code(), "io_write_contract_violation");
+    }
+
+    #[test]
+    fn tofile_structured_rejects_inconsistent_records() {
+        let desc = make_test_descriptor();
+        // col_x has 2 records but col_y has 1
+        let col_x = vec![0u8; 16]; // 2 * 8
+        let col_y = vec![0u8; 4];  // 1 * 4
+        let err = tofile_structured(&desc, &[col_x, col_y]).unwrap_err();
+        assert_eq!(err.reason_code(), "io_write_contract_violation");
+    }
+
+    #[test]
+    fn save_load_structured_roundtrip() {
+        let desc = make_test_descriptor();
+        let col_x: Vec<u8> = [1.5f64.to_le_bytes(), 2.75f64.to_le_bytes(), 3.25f64.to_le_bytes()]
+            .concat();
+        let col_y: Vec<u8> = [10i32.to_le_bytes(), 20i32.to_le_bytes(), 30i32.to_le_bytes()]
+            .concat();
+
+        let npy_bytes = save_structured(&[3], &desc, &[col_x.clone(), col_y.clone()]).unwrap();
+        let loaded = load_structured(&npy_bytes).unwrap();
+
+        assert_eq!(loaded.shape, vec![3]);
+        assert_eq!(loaded.descriptor, desc);
+        assert_eq!(loaded.columns.len(), 2);
+        assert_eq!(loaded.columns[0], col_x);
+        assert_eq!(loaded.columns[1], col_y);
+    }
+
+    #[test]
+    fn save_load_structured_with_string_field() {
+        let desc = StructuredIODescriptor {
+            fields: vec![
+                StructuredIOField {
+                    name: "id".to_string(),
+                    dtype: IOSupportedDType::I32,
+                },
+                StructuredIOField {
+                    name: "label".to_string(),
+                    dtype: IOSupportedDType::Bytes(5),
+                },
+            ],
+        };
+        // 2 records: (1, "hello"), (2, "world")
+        let col_id: Vec<u8> = [1i32.to_le_bytes(), 2i32.to_le_bytes()].concat();
+        let col_label: Vec<u8> = [b"hello".to_vec(), b"world".to_vec()].concat();
+
+        let npy_bytes = save_structured(&[2], &desc, &[col_id.clone(), col_label.clone()]).unwrap();
+        let loaded = load_structured(&npy_bytes).unwrap();
+
+        assert_eq!(loaded.shape, vec![2]);
+        assert_eq!(loaded.columns[0], col_id);
+        assert_eq!(loaded.columns[1], col_label);
+        // Decode string column
+        let strings = fromfile_strings(&loaded.columns[1], IOSupportedDType::Bytes(5), None).unwrap();
+        assert_eq!(strings, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn save_structured_rejects_shape_mismatch() {
+        let desc = make_test_descriptor();
+        let col_x = vec![0u8; 16]; // 2 records
+        let col_y = vec![0u8; 8];  // 2 records
+        // Shape says 5 but only 2 records
+        let err = save_structured(&[5], &desc, &[col_x, col_y]).unwrap_err();
+        assert_eq!(err.reason_code(), "io_write_contract_violation");
+    }
+
+    #[test]
+    fn structured_three_fields_roundtrip() {
+        let desc = StructuredIODescriptor {
+            fields: vec![
+                StructuredIOField {
+                    name: "a".to_string(),
+                    dtype: IOSupportedDType::F32,
+                },
+                StructuredIOField {
+                    name: "b".to_string(),
+                    dtype: IOSupportedDType::I64,
+                },
+                StructuredIOField {
+                    name: "c".to_string(),
+                    dtype: IOSupportedDType::U8,
+                },
+            ],
+        };
+        assert_eq!(desc.record_size().unwrap(), 13); // 4 + 8 + 1
+        let col_a: Vec<u8> = [1.5f32.to_le_bytes(), 2.5f32.to_le_bytes()].concat();
+        let col_b: Vec<u8> = [100i64.to_le_bytes(), 200i64.to_le_bytes()].concat();
+        let col_c: Vec<u8> = vec![42u8, 84u8];
+
+        let npy_bytes =
+            save_structured(&[2], &desc, &[col_a.clone(), col_b.clone(), col_c.clone()]).unwrap();
+        let loaded = load_structured(&npy_bytes).unwrap();
+        assert_eq!(loaded.shape, vec![2]);
+        assert_eq!(loaded.columns[0], col_a);
+        assert_eq!(loaded.columns[1], col_b);
+        assert_eq!(loaded.columns[2], col_c);
+    }
+
+    // ── Memmap (file-backed array) tests ──
+
+    #[test]
+    fn memmap_write_mode_creates_zeroed_file() {
+        let dir = std::env::temp_dir().join("fnp_memmap_test_write");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("write_test.bin");
+        let shape = [4];
+        let mut arr = memmap(
+            &path,
+            IOSupportedDType::F64,
+            MemmapMode::Write,
+            0,
+            &shape,
+        )
+        .expect("memmap write");
+        assert_eq!(arr.shape, vec![4]);
+        assert_eq!(arr.as_bytes().len(), 32); // 4 × 8 bytes
+        assert!(arr.as_bytes().iter().all(|&b| b == 0));
+        assert!(arr.is_writable());
+        // Write some data and flush
+        let bytes = arr.as_bytes_mut().unwrap();
+        bytes[..8].copy_from_slice(&1.5_f64.to_le_bytes());
+        bytes[8..16].copy_from_slice(&2.5_f64.to_le_bytes());
+        arr.flush().expect("flush");
+        // Verify file contents
+        let file_data = std::fs::read(&path).unwrap();
+        assert_eq!(file_data.len(), 32);
+        assert_eq!(&file_data[..8], &1.5_f64.to_le_bytes());
+        assert_eq!(&file_data[8..16], &2.5_f64.to_le_bytes());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn memmap_readwrite_mode_reads_existing() {
+        let dir = std::env::temp_dir().join("fnp_memmap_test_rw");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("rw_test.bin");
+        // Create a file with known data: [1.0, 2.0, 3.0]
+        let mut data = Vec::new();
+        data.extend_from_slice(&1.0_f64.to_le_bytes());
+        data.extend_from_slice(&2.0_f64.to_le_bytes());
+        data.extend_from_slice(&3.0_f64.to_le_bytes());
+        std::fs::write(&path, &data).unwrap();
+        let mut arr = memmap(
+            &path,
+            IOSupportedDType::F64,
+            MemmapMode::ReadWrite,
+            0,
+            &[3],
+        )
+        .expect("memmap r+");
+        let values = arr.to_f64_values().unwrap();
+        assert_eq!(values, vec![1.0, 2.0, 3.0]);
+        // Modify second element to 99.0 and flush
+        let bytes = arr.as_bytes_mut().unwrap();
+        bytes[8..16].copy_from_slice(&99.0_f64.to_le_bytes());
+        arr.flush().expect("flush");
+        // Re-read file
+        let file_data = std::fs::read(&path).unwrap();
+        assert_eq!(&file_data[8..16], &99.0_f64.to_le_bytes());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn memmap_readonly_mode_prevents_mutation() {
+        let dir = std::env::temp_dir().join("fnp_memmap_test_ro");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("ro_test.bin");
+        let mut data = Vec::new();
+        data.extend_from_slice(&5.0_f64.to_le_bytes());
+        data.extend_from_slice(&6.0_f64.to_le_bytes());
+        std::fs::write(&path, &data).unwrap();
+        let mut arr = memmap(
+            &path,
+            IOSupportedDType::F64,
+            MemmapMode::ReadOnly,
+            0,
+            &[2],
+        )
+        .expect("memmap r");
+        assert!(!arr.is_writable());
+        assert!(arr.as_bytes_mut().is_none());
+        let values = arr.to_f64_values().unwrap();
+        assert_eq!(values, vec![5.0, 6.0]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn memmap_copy_on_write_does_not_flush_to_file() {
+        let dir = std::env::temp_dir().join("fnp_memmap_test_cow");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("cow_test.bin");
+        let mut data = Vec::new();
+        data.extend_from_slice(&7.0_f64.to_le_bytes());
+        data.extend_from_slice(&8.0_f64.to_le_bytes());
+        std::fs::write(&path, &data).unwrap();
+        let mut arr = memmap(
+            &path,
+            IOSupportedDType::F64,
+            MemmapMode::CopyOnWrite,
+            0,
+            &[2],
+        )
+        .expect("memmap c");
+        assert!(arr.is_writable());
+        // Mutate in-memory buffer
+        let bytes = arr.as_bytes_mut().unwrap();
+        bytes[..8].copy_from_slice(&999.0_f64.to_le_bytes());
+        // Flush is a no-op (no backing path)
+        arr.flush().expect("flush noop");
+        // File should be unchanged
+        let file_data = std::fs::read(&path).unwrap();
+        assert_eq!(&file_data[..8], &7.0_f64.to_le_bytes());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn memmap_with_offset() {
+        let dir = std::env::temp_dir().join("fnp_memmap_test_offset");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("offset_test.bin");
+        // 16 bytes header + 24 bytes data
+        let mut file_data = vec![0xAA_u8; 16];
+        file_data.extend_from_slice(&10.0_f64.to_le_bytes());
+        file_data.extend_from_slice(&20.0_f64.to_le_bytes());
+        file_data.extend_from_slice(&30.0_f64.to_le_bytes());
+        std::fs::write(&path, &file_data).unwrap();
+        let arr = memmap(
+            &path,
+            IOSupportedDType::F64,
+            MemmapMode::ReadOnly,
+            16,
+            &[3],
+        )
+        .expect("memmap with offset");
+        let values = arr.to_f64_values().unwrap();
+        assert_eq!(values, vec![10.0, 20.0, 30.0]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn memmap_file_too_small_error() {
+        let dir = std::env::temp_dir().join("fnp_memmap_test_small");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("small_test.bin");
+        std::fs::write(&path, &[0u8; 8]).unwrap();
+        let result = memmap(
+            &path,
+            IOSupportedDType::F64,
+            MemmapMode::ReadOnly,
+            0,
+            &[4],
+        );
+        assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn memmap_object_dtype_rejected() {
+        let dir = std::env::temp_dir().join("fnp_memmap_test_obj");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("obj_test.bin");
+        std::fs::write(&path, &[0u8; 32]).unwrap();
+        let result = memmap(
+            &path,
+            IOSupportedDType::Object,
+            MemmapMode::ReadOnly,
+            0,
+            &[4],
+        );
+        assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn memmap_write_empty_rejected() {
+        let dir = std::env::temp_dir().join("fnp_memmap_test_empty");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("empty_test.bin");
+        let result = memmap(
+            &path,
+            IOSupportedDType::F64,
+            MemmapMode::Write,
+            0,
+            &[0],
+        );
+        assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn memmap_i32_dtype() {
+        let dir = std::env::temp_dir().join("fnp_memmap_test_i32");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("i32_test.bin");
+        let mut data = Vec::new();
+        data.extend_from_slice(&42_i32.to_le_bytes());
+        data.extend_from_slice(&(-7_i32).to_le_bytes());
+        std::fs::write(&path, &data).unwrap();
+        let arr = memmap(
+            &path,
+            IOSupportedDType::I32,
+            MemmapMode::ReadOnly,
+            0,
+            &[2],
+        )
+        .expect("memmap i32");
+        let values = arr.to_f64_values().unwrap();
+        assert_eq!(values, vec![42.0, -7.0]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn memmap_nbytes_and_element_count() {
+        let dir = std::env::temp_dir().join("fnp_memmap_test_nb");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("nb_test.bin");
+        let arr = memmap(
+            &path,
+            IOSupportedDType::F64,
+            MemmapMode::Write,
+            0,
+            &[3, 2],
+        )
+        .expect("memmap 3x2");
+        assert_eq!(arr.element_count().unwrap(), 6);
+        assert_eq!(arr.nbytes().unwrap(), 48);
+        assert_eq!(arr.shape, vec![3, 2]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn memmap_npy_roundtrip() {
+        let dir = std::env::temp_dir().join("fnp_memmap_test_npy");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("npy_test.npy");
+        let values = vec![1.25, 2.75, 3.5];
+        let npy_bytes = save(&[3], &values, IOSupportedDType::F64).unwrap();
+        std::fs::write(&path, &npy_bytes).unwrap();
+        let arr = memmap_npy(&path, MemmapMode::ReadOnly).expect("memmap_npy");
+        assert_eq!(arr.shape, vec![3]);
+        assert_eq!(arr.dtype, IOSupportedDType::F64);
+        let loaded = arr.to_f64_values().unwrap();
+        assert_eq!(loaded, vec![1.25, 2.75, 3.5]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn memmap_npy_readwrite_modify() {
+        let dir = std::env::temp_dir().join("fnp_memmap_test_npy_rw");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("npy_rw_test.npy");
+        let values = vec![10.0, 20.0];
+        let npy_bytes = save(&[2], &values, IOSupportedDType::F64).unwrap();
+        std::fs::write(&path, &npy_bytes).unwrap();
+        let mut arr = memmap_npy(&path, MemmapMode::ReadWrite).expect("memmap_npy rw");
+        assert!(arr.is_writable());
+        let bytes = arr.as_bytes_mut().unwrap();
+        bytes[..8].copy_from_slice(&42.0_f64.to_le_bytes());
+        arr.flush().expect("flush");
+        // Re-read via NPY load to verify
+        let updated = std::fs::read(&path).unwrap();
+        let (_, values, _) = load(&updated).unwrap();
+        assert_eq!(values[0], 42.0);
+        assert_eq!(values[1], 20.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn memmap_string_dtype() {
+        let dir = std::env::temp_dir().join("fnp_memmap_test_str");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("str_test.bin");
+        // |S5: "hello" "world"
+        let mut data = Vec::new();
+        data.extend_from_slice(b"hello");
+        data.extend_from_slice(b"world");
+        std::fs::write(&path, &data).unwrap();
+        let arr = memmap(
+            &path,
+            IOSupportedDType::Bytes(5),
+            MemmapMode::ReadOnly,
+            0,
+            &[2],
+        )
+        .expect("memmap bytes");
+        let strings = arr.to_strings().unwrap();
+        assert_eq!(strings, vec!["hello", "world"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn memmap_mode_parse() {
+        assert_eq!(MemmapMode::parse("r").unwrap(), MemmapMode::ReadOnly);
+        assert_eq!(MemmapMode::parse("r+").unwrap(), MemmapMode::ReadWrite);
+        assert_eq!(MemmapMode::parse("w+").unwrap(), MemmapMode::Write);
+        assert_eq!(MemmapMode::parse("c").unwrap(), MemmapMode::CopyOnWrite);
+        assert!(MemmapMode::parse("x").is_err());
     }
 }

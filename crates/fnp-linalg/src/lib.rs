@@ -3855,6 +3855,471 @@ pub fn batch_trace(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgErro
     Ok(result)
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Complex-valued linear algebra operations
+// ────────────────────────────────────────────────────────────────────────────
+//
+// Complex numbers are stored as interleaved (re, im) pairs in flat Vec<f64>.
+// A complex n×n matrix has 2·n·n f64 values.
+// Entry (i,j) real part: data[2*(i*n+j)], imaginary part: data[2*(i*n+j)+1].
+
+/// Complex number multiply: (a+bi)(c+di) = (ac-bd) + (ad+bc)i
+#[inline]
+fn cmul(ar: f64, ai: f64, br: f64, bi: f64) -> (f64, f64) {
+    (ar * br - ai * bi, ar * bi + ai * br)
+}
+
+/// Complex conjugate multiply: conj(a)*b = (ar-ai·i)(br+bi·i)
+#[inline]
+fn cmul_conj_a(ar: f64, ai: f64, br: f64, bi: f64) -> (f64, f64) {
+    (ar * br + ai * bi, ar * bi - ai * br)
+}
+
+/// Complex modulus squared: |z|² = re² + im²
+#[inline]
+fn cabs2(re: f64, im: f64) -> f64 {
+    re * re + im * im
+}
+
+/// Complex division: (a+bi)/(c+di)
+#[inline]
+fn cdiv(ar: f64, ai: f64, br: f64, bi: f64) -> (f64, f64) {
+    let denom = cabs2(br, bi);
+    ((ar * br + ai * bi) / denom, (ai * br - ar * bi) / denom)
+}
+
+/// LU decomposition with partial pivoting for complex matrices.
+/// Input: interleaved (re,im) flat array of length 2·n·n.
+/// Returns (lu_interleaved, perm, sign_re, sign_im).
+fn complex_lu_decompose(
+    a: &[f64],
+    n: usize,
+) -> Result<(Vec<f64>, Vec<usize>, f64, f64), LinAlgError> {
+    if a.len() != 2 * n * n || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "complex LU input must be 2*n*n with n > 0",
+        ));
+    }
+    for v in a {
+        if !v.is_finite() {
+            return Err(LinAlgError::NormDetRankPolicyViolation(
+                "complex matrix entries must be finite for LU",
+            ));
+        }
+    }
+
+    let matrix_max_abs = a
+        .chunks_exact(2)
+        .map(|c| cabs2(c[0], c[1]).sqrt())
+        .fold(0.0_f64, f64::max);
+    let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
+
+    let mut lu = a.to_vec();
+    let mut perm: Vec<usize> = (0..n).collect();
+    let mut sign_re = 1.0_f64;
+    let mut sign_im = 0.0_f64;
+
+    for k in 0..n {
+        // partial-pivot: find row with max |entry| in column k
+        let mut max_abs = cabs2(lu[2 * (k * n + k)], lu[2 * (k * n + k) + 1]).sqrt();
+        let mut max_row = k;
+        for i in (k + 1)..n {
+            let abs_val = cabs2(lu[2 * (i * n + k)], lu[2 * (i * n + k) + 1]).sqrt();
+            if abs_val > max_abs {
+                max_abs = abs_val;
+                max_row = i;
+            }
+        }
+
+        if max_abs <= singularity_threshold {
+            return Err(LinAlgError::SolverSingularity);
+        }
+
+        if max_row != k {
+            for j in 0..n {
+                lu.swap(2 * (k * n + j), 2 * (max_row * n + j));
+                lu.swap(2 * (k * n + j) + 1, 2 * (max_row * n + j) + 1);
+            }
+            perm.swap(k, max_row);
+            // swap negates determinant sign
+            let (sr, si) = cmul(sign_re, sign_im, -1.0, 0.0);
+            sign_re = sr;
+            sign_im = si;
+        }
+
+        let pivot_re = lu[2 * (k * n + k)];
+        let pivot_im = lu[2 * (k * n + k) + 1];
+        for i in (k + 1)..n {
+            let (fr, fi) = cdiv(lu[2 * (i * n + k)], lu[2 * (i * n + k) + 1], pivot_re, pivot_im);
+            lu[2 * (i * n + k)] = fr;
+            lu[2 * (i * n + k) + 1] = fi;
+            for j in (k + 1)..n {
+                let ur = lu[2 * (k * n + j)];
+                let ui = lu[2 * (k * n + j) + 1];
+                let (pr, pi) = cmul(fr, fi, ur, ui);
+                lu[2 * (i * n + j)] -= pr;
+                lu[2 * (i * n + j) + 1] -= pi;
+            }
+        }
+    }
+
+    Ok((lu, perm, sign_re, sign_im))
+}
+
+/// Forward-substitution then back-substitution for complex LU system.
+fn complex_lu_forward_back(lu: &[f64], perm: &[usize], b: &[f64], n: usize) -> Vec<f64> {
+    let mut x = vec![0.0; 2 * n];
+    for i in 0..n {
+        let p = perm[i];
+        x[2 * i] = b[2 * p];
+        x[2 * i + 1] = b[2 * p + 1];
+    }
+
+    // forward (L has unit diagonal)
+    for i in 1..n {
+        for j in 0..i {
+            let lr = lu[2 * (i * n + j)];
+            let li = lu[2 * (i * n + j) + 1];
+            let (pr, pi) = cmul(lr, li, x[2 * j], x[2 * j + 1]);
+            x[2 * i] -= pr;
+            x[2 * i + 1] -= pi;
+        }
+    }
+
+    // back
+    for i in (0..n).rev() {
+        for j in (i + 1)..n {
+            let ur = lu[2 * (i * n + j)];
+            let ui = lu[2 * (i * n + j) + 1];
+            let (pr, pi) = cmul(ur, ui, x[2 * j], x[2 * j + 1]);
+            x[2 * i] -= pr;
+            x[2 * i + 1] -= pi;
+        }
+        let (dr, di) = cdiv(x[2 * i], x[2 * i + 1], lu[2 * (i * n + i)], lu[2 * (i * n + i) + 1]);
+        x[2 * i] = dr;
+        x[2 * i + 1] = di;
+    }
+
+    x
+}
+
+/// Solve Ax = b for a complex NxN system via LU decomposition.
+/// `a` is 2·n·n interleaved, `b` is 2·n interleaved.
+pub fn complex_solve_nxn(a: &[f64], b: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
+    if b.len() != 2 * n {
+        return Err(LinAlgError::ShapeContractViolation(
+            "complex_solve_nxn: rhs length must equal 2*n",
+        ));
+    }
+    for v in b {
+        if !v.is_finite() {
+            return Err(LinAlgError::NormDetRankPolicyViolation(
+                "complex rhs entries must be finite",
+            ));
+        }
+    }
+
+    let (lu, perm, _, _) = complex_lu_decompose(a, n)?;
+    Ok(complex_lu_forward_back(&lu, &perm, b, n))
+}
+
+/// Determinant of a complex NxN matrix.
+/// Returns (det_re, det_im).
+pub fn complex_det_nxn(a: &[f64], n: usize) -> Result<(f64, f64), LinAlgError> {
+    if a.len() != 2 * n * n || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "complex_det_nxn: input must be 2*n*n with n > 0",
+        ));
+    }
+
+    match complex_lu_decompose(a, n) {
+        Ok((lu, _, sign_re, sign_im)) => {
+            let mut dr = sign_re;
+            let mut di = sign_im;
+            for i in 0..n {
+                let ur = lu[2 * (i * n + i)];
+                let ui = lu[2 * (i * n + i) + 1];
+                let (nr, ni) = cmul(dr, di, ur, ui);
+                dr = nr;
+                di = ni;
+            }
+            Ok((dr, di))
+        }
+        Err(LinAlgError::SolverSingularity) => Ok((0.0, 0.0)),
+        Err(e) => Err(e),
+    }
+}
+
+/// Inverse of a complex NxN matrix via LU decomposition.
+/// Returns 2·n·n interleaved flat row-major.
+pub fn complex_inv_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
+    let (lu, perm, _, _) = complex_lu_decompose(a, n)?;
+    let mut inv = vec![0.0; 2 * n * n];
+
+    for col in 0..n {
+        let mut e_col = vec![0.0; 2 * n];
+        e_col[2 * col] = 1.0;
+        let x = complex_lu_forward_back(&lu, &perm, &e_col, n);
+        for row in 0..n {
+            inv[2 * (row * n + col)] = x[2 * row];
+            inv[2 * (row * n + col) + 1] = x[2 * row + 1];
+        }
+    }
+
+    Ok(inv)
+}
+
+/// Cholesky factorization for Hermitian positive-definite complex matrix.
+/// A = L·L^H where L is lower triangular.
+/// Input: 2·n·n interleaved. Output: 2·n·n interleaved lower-triangular L.
+pub fn complex_cholesky_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
+    if a.len() != 2 * n * n || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "complex_cholesky: input must be 2*n*n with n > 0",
+        ));
+    }
+    for v in a {
+        if !v.is_finite() {
+            return Err(LinAlgError::NormDetRankPolicyViolation(
+                "complex matrix entries must be finite for Cholesky",
+            ));
+        }
+    }
+
+    let mut l = vec![0.0; 2 * n * n];
+
+    for i in 0..n {
+        // Diagonal: L[i,i] = sqrt(A[i,i] - sum_{k<i} |L[i,k]|²)
+        let mut diag_re = a[2 * (i * n + i)];
+        for k in 0..i {
+            diag_re -= cabs2(l[2 * (i * n + k)], l[2 * (i * n + k) + 1]);
+        }
+        // Diagonal of Hermitian PD matrix must be real and positive
+        if diag_re <= 0.0 {
+            return Err(LinAlgError::CholeskyContractViolation(
+                "complex_cholesky: matrix is not Hermitian positive-definite",
+            ));
+        }
+        let lii = diag_re.sqrt();
+        l[2 * (i * n + i)] = lii;
+        // imaginary part of diagonal is zero for Hermitian matrix
+        l[2 * (i * n + i) + 1] = 0.0;
+
+        // Off-diagonal: L[j,i] = (A[j,i] - sum_{k<i} L[j,k]*conj(L[i,k])) / L[i,i]
+        for j in (i + 1)..n {
+            let mut sr = a[2 * (j * n + i)];
+            let mut si = a[2 * (j * n + i) + 1];
+            for k in 0..i {
+                let (pr, pi) = cmul(
+                    l[2 * (j * n + k)],
+                    l[2 * (j * n + k) + 1],
+                    l[2 * (i * n + k)],
+                    -l[2 * (i * n + k) + 1], // conjugate
+                );
+                sr -= pr;
+                si -= pi;
+            }
+            l[2 * (j * n + i)] = sr / lii;
+            l[2 * (j * n + i) + 1] = si / lii;
+        }
+    }
+
+    Ok(l)
+}
+
+/// QR decomposition for complex m×n matrix (m ≥ 1, n ≥ 1) using Householder.
+/// Input: 2·m·n interleaved. Returns (Q: 2·m·m, R: 2·m·n).
+pub fn complex_qr_mxn(a: &[f64], m: usize, n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
+    if a.len() != 2 * m * n || m == 0 || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "complex_qr: input must be 2*m*n with m,n > 0",
+        ));
+    }
+    for v in a {
+        if !v.is_finite() {
+            return Err(LinAlgError::NormDetRankPolicyViolation(
+                "complex matrix entries must be finite for QR",
+            ));
+        }
+    }
+
+    let mut r = a.to_vec();
+    // Q starts as identity
+    let mut q = vec![0.0; 2 * m * m];
+    for i in 0..m {
+        q[2 * (i * m + i)] = 1.0;
+    }
+
+    let k = m.min(n);
+    for col in 0..k {
+        // Build Householder vector for column `col`, rows col..m
+        let sub_len = m - col;
+        let mut v = vec![0.0; 2 * sub_len];
+        for i in 0..sub_len {
+            v[2 * i] = r[2 * ((col + i) * n + col)];
+            v[2 * i + 1] = r[2 * ((col + i) * n + col) + 1];
+        }
+
+        // Compute norm of v
+        let mut norm_sq = 0.0;
+        for i in 0..sub_len {
+            norm_sq += cabs2(v[2 * i], v[2 * i + 1]);
+        }
+        let norm = norm_sq.sqrt();
+
+        if norm < 1e-300 {
+            continue;
+        }
+
+        // Phase: e^{iθ} where θ = arg(v[0])
+        let v0_abs = cabs2(v[0], v[1]).sqrt();
+        let (phase_re, phase_im) = if v0_abs > 1e-300 {
+            (v[0] / v0_abs, v[1] / v0_abs)
+        } else {
+            (1.0, 0.0)
+        };
+
+        // v[0] += phase * norm
+        let (shift_re, shift_im) = cmul(phase_re, phase_im, norm, 0.0);
+        v[0] += shift_re;
+        v[1] += shift_im;
+
+        // Normalize v
+        let mut v_norm_sq = 0.0;
+        for i in 0..sub_len {
+            v_norm_sq += cabs2(v[2 * i], v[2 * i + 1]);
+        }
+        let v_norm = v_norm_sq.sqrt();
+        if v_norm < 1e-300 {
+            continue;
+        }
+        for i in 0..sub_len {
+            v[2 * i] /= v_norm;
+            v[2 * i + 1] /= v_norm;
+        }
+
+        // Apply Householder H = I - 2*v*v^H to R columns
+        for j in col..n {
+            // dot = v^H · R[col:, j]
+            let mut dot_re = 0.0;
+            let mut dot_im = 0.0;
+            for i in 0..sub_len {
+                let (pr, pi) = cmul_conj_a(v[2 * i], v[2 * i + 1],
+                    r[2 * ((col + i) * n + j)], r[2 * ((col + i) * n + j) + 1]);
+                dot_re += pr;
+                dot_im += pi;
+            }
+            // R[col+i, j] -= 2 * v[i] * dot
+            for i in 0..sub_len {
+                let (pr, pi) = cmul(v[2 * i], v[2 * i + 1], dot_re, dot_im);
+                r[2 * ((col + i) * n + j)] -= 2.0 * pr;
+                r[2 * ((col + i) * n + j) + 1] -= 2.0 * pi;
+            }
+        }
+
+        // Apply Householder to Q: Q = Q · H = Q - 2*(Q·v)·v^H
+        for i in 0..m {
+            // dot = sum_k Q[i, col+k] * v[k]
+            let mut dot_re = 0.0;
+            let mut dot_im = 0.0;
+            for kk in 0..sub_len {
+                let (pr, pi) = cmul(
+                    q[2 * (i * m + col + kk)], q[2 * (i * m + col + kk) + 1],
+                    v[2 * kk], v[2 * kk + 1],
+                );
+                dot_re += pr;
+                dot_im += pi;
+            }
+            // Q[i, col+k] -= 2 * dot * conj(v[k])
+            for kk in 0..sub_len {
+                let (pr, pi) = cmul(dot_re, dot_im, v[2 * kk], -v[2 * kk + 1]);
+                q[2 * (i * m + col + kk)] -= 2.0 * pr;
+                q[2 * (i * m + col + kk) + 1] -= 2.0 * pi;
+            }
+        }
+    }
+
+    Ok((q, r))
+}
+
+/// Frobenius norm of a complex matrix (2·m·n interleaved).
+pub fn complex_matrix_norm_frobenius(a: &[f64]) -> f64 {
+    let mut sum = 0.0;
+    for chunk in a.chunks_exact(2) {
+        sum += cabs2(chunk[0], chunk[1]);
+    }
+    sum.sqrt()
+}
+
+/// Trace of a complex NxN matrix. Returns (re, im).
+pub fn complex_trace_nxn(a: &[f64], n: usize) -> Result<(f64, f64), LinAlgError> {
+    if a.len() != 2 * n * n || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "complex_trace: input must be 2*n*n with n > 0",
+        ));
+    }
+    let mut re = 0.0;
+    let mut im = 0.0;
+    for i in 0..n {
+        re += a[2 * (i * n + i)];
+        im += a[2 * (i * n + i) + 1];
+    }
+    Ok((re, im))
+}
+
+/// Matrix-vector multiply for complex: y = A*x.
+/// A is 2·m·n interleaved, x is 2·n interleaved, result is 2·m interleaved.
+pub fn complex_matvec(a: &[f64], x: &[f64], m: usize, n: usize) -> Vec<f64> {
+    let mut y = vec![0.0; 2 * m];
+    for i in 0..m {
+        for j in 0..n {
+            let (pr, pi) = cmul(
+                a[2 * (i * n + j)], a[2 * (i * n + j) + 1],
+                x[2 * j], x[2 * j + 1],
+            );
+            y[2 * i] += pr;
+            y[2 * i + 1] += pi;
+        }
+    }
+    y
+}
+
+/// Matrix-matrix multiply for complex: C = A*B.
+/// A is 2·m·k interleaved, B is 2·k·n interleaved, result is 2·m·n interleaved.
+pub fn complex_matmul(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
+    let mut c = vec![0.0; 2 * m * n];
+    for i in 0..m {
+        for j in 0..n {
+            let mut sr = 0.0;
+            let mut si = 0.0;
+            for p in 0..k {
+                let (pr, pi) = cmul(
+                    a[2 * (i * k + p)], a[2 * (i * k + p) + 1],
+                    b[2 * (p * n + j)], b[2 * (p * n + j) + 1],
+                );
+                sr += pr;
+                si += pi;
+            }
+            c[2 * (i * n + j)] = sr;
+            c[2 * (i * n + j) + 1] = si;
+        }
+    }
+    c
+}
+
+/// Conjugate transpose (Hermitian transpose) of a complex m×n matrix.
+/// Returns 2·n·m interleaved.
+pub fn complex_conjugate_transpose(a: &[f64], m: usize, n: usize) -> Vec<f64> {
+    let mut ah = vec![0.0; 2 * n * m];
+    for i in 0..m {
+        for j in 0..n {
+            ah[2 * (j * m + i)] = a[2 * (i * n + j)];
+            ah[2 * (j * m + i) + 1] = -a[2 * (i * n + j) + 1];
+        }
+    }
+    ah
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -3945,6 +4410,17 @@ mod tests {
         validate_square_matrix,
         validate_tolerance_policy,
         vector_norm,
+        // Complex linalg
+        complex_cholesky_nxn,
+        complex_conjugate_transpose,
+        complex_det_nxn,
+        complex_inv_nxn,
+        complex_matmul,
+        complex_matrix_norm_frobenius,
+        complex_matvec,
+        complex_qr_mxn,
+        complex_solve_nxn,
+        complex_trace_nxn,
     };
 
     fn packet008_artifacts() -> Vec<String> {
@@ -6836,5 +7312,278 @@ mod tests {
         let shape = [3]; // 1D - should fail
         assert!(batch_inv(&data, &shape).is_err());
         assert!(batch_det(&data, &shape).is_err());
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Complex linalg tests
+    // ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn complex_det_identity() {
+        // 2×2 complex identity: [[1+0i, 0+0i], [0+0i, 1+0i]]
+        let a = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let (dr, di) = complex_det_nxn(&a, 2).expect("det");
+        assert!((dr - 1.0).abs() < 1e-12);
+        assert!(di.abs() < 1e-12);
+    }
+
+    #[test]
+    fn complex_det_diagonal() {
+        // diag(2+3i, 4-1i) → det = (2+3i)(4-1i) = 11+10i
+        let a = [2.0, 3.0, 0.0, 0.0, 0.0, 0.0, 4.0, -1.0];
+        let (dr, di) = complex_det_nxn(&a, 2).expect("det");
+        assert!((dr - 11.0).abs() < 1e-12, "re={dr}");
+        assert!((di - 10.0).abs() < 1e-12, "im={di}");
+    }
+
+    #[test]
+    fn complex_solve_identity() {
+        // I·x = [1+2i, 3+4i] → x = [1+2i, 3+4i]
+        let a = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let b = [1.0, 2.0, 3.0, 4.0];
+        let x = complex_solve_nxn(&a, &b, 2).expect("solve");
+        assert!((x[0] - 1.0).abs() < 1e-12);
+        assert!((x[1] - 2.0).abs() < 1e-12);
+        assert!((x[2] - 3.0).abs() < 1e-12);
+        assert!((x[3] - 4.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn complex_solve_2x2() {
+        // A = [[1+i, 2], [0, 1-i]], b = [3+i, 1]
+        // (1-i)x₂ = 1 → x₂ = (1)/(1-i) = (1+i)/2
+        // (1+i)x₁ + 2·x₂ = 3+i → (1+i)x₁ = 3+i - (1+i) = 2 → x₁ = 2/(1+i) = 1-i
+        let a = [1.0, 1.0, 2.0, 0.0, 0.0, 0.0, 1.0, -1.0];
+        let b = [3.0, 1.0, 1.0, 0.0];
+        let x = complex_solve_nxn(&a, &b, 2).expect("solve");
+        assert!((x[0] - 1.0).abs() < 1e-12, "x1_re={}", x[0]);
+        assert!((x[1] - (-1.0)).abs() < 1e-12, "x1_im={}", x[1]);
+        assert!((x[2] - 0.5).abs() < 1e-12, "x2_re={}", x[2]);
+        assert!((x[3] - 0.5).abs() < 1e-12, "x2_im={}", x[3]);
+    }
+
+    #[test]
+    fn complex_inv_2x2() {
+        // A = [[1+i, 0], [0, 2-i]], det = (1+i)(2-i) = 3+i
+        // inv = [[2-i, 0], [0, 1+i]] / (3+i) = [[2-i, 0], [0, 1+i]] · (3-i)/10
+        let a = [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 2.0, -1.0];
+        let inv = complex_inv_nxn(&a, 2).expect("inv");
+
+        // A·A⁻¹ should be identity
+        let prod = complex_matmul(&a, &inv, 2, 2, 2);
+        assert!((prod[0] - 1.0).abs() < 1e-12); // (0,0) re
+        assert!(prod[1].abs() < 1e-12);            // (0,0) im
+        assert!(prod[2].abs() < 1e-12);            // (0,1) re
+        assert!(prod[3].abs() < 1e-12);            // (0,1) im
+        assert!(prod[4].abs() < 1e-12);            // (1,0) re
+        assert!(prod[5].abs() < 1e-12);            // (1,0) im
+        assert!((prod[6] - 1.0).abs() < 1e-12); // (1,1) re
+        assert!(prod[7].abs() < 1e-12);            // (1,1) im
+    }
+
+    #[test]
+    fn complex_inv_general_3x3() {
+        // A general complex 3×3 matrix
+        let a = [
+            1.0, 0.0, 2.0, 1.0, 0.0, -1.0,
+            0.0, 1.0, 3.0, 0.0, 1.0, 2.0,
+            2.0, -1.0, 0.0, 0.0, 4.0, 1.0,
+        ];
+        let inv = complex_inv_nxn(&a, 3).expect("inv");
+        let prod = complex_matmul(&a, &inv, 3, 3, 3);
+
+        // Check identity
+        for i in 0..3 {
+            for j in 0..3 {
+                let re = prod[2 * (i * 3 + j)];
+                let im = prod[2 * (i * 3 + j) + 1];
+                let exp_re = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (re - exp_re).abs() < 1e-10 && im.abs() < 1e-10,
+                    "prod[{i},{j}] = {re}+{im}i, expected {exp_re}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn complex_cholesky_hermitian() {
+        // Hermitian PD: A = [[4, 2+i], [2-i, 3]]
+        let a = [
+            4.0, 0.0, 2.0, 1.0,
+            2.0, -1.0, 3.0, 0.0,
+        ];
+        let l = complex_cholesky_nxn(&a, 2).expect("cholesky");
+
+        // L·L^H should equal A
+        let lh = complex_conjugate_transpose(&l, 2, 2);
+        let prod = complex_matmul(&l, &lh, 2, 2, 2);
+        for i in 0..4 {
+            assert!(
+                (prod[2 * i] - a[2 * i]).abs() < 1e-12
+                    && (prod[2 * i + 1] - a[2 * i + 1]).abs() < 1e-12,
+                "reconstruction mismatch at entry {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn complex_cholesky_3x3_hermitian() {
+        // A = [[9, 3-i, 1], [3+i, 5, 2-i], [1, 2+i, 4]]
+        let a = [
+            9.0, 0.0, 3.0, -1.0, 1.0, 0.0,
+            3.0, 1.0, 5.0, 0.0, 2.0, -1.0,
+            1.0, 0.0, 2.0, 1.0, 4.0, 0.0,
+        ];
+        let l = complex_cholesky_nxn(&a, 3).expect("cholesky");
+        let lh = complex_conjugate_transpose(&l, 3, 3);
+        let prod = complex_matmul(&l, &lh, 3, 3, 3);
+        for i in 0..9 {
+            assert!(
+                (prod[2 * i] - a[2 * i]).abs() < 1e-10
+                    && (prod[2 * i + 1] - a[2 * i + 1]).abs() < 1e-10,
+                "reconstruction mismatch at entry {i}: got {}+{}i, expected {}+{}i",
+                prod[2 * i], prod[2 * i + 1], a[2 * i], a[2 * i + 1]
+            );
+        }
+    }
+
+    #[test]
+    fn complex_cholesky_rejects_non_pd() {
+        // Not positive-definite: [[1, 2+i], [2-i, 1]]
+        let a = [1.0, 0.0, 2.0, 1.0, 2.0, -1.0, 1.0, 0.0];
+        assert!(complex_cholesky_nxn(&a, 2).is_err());
+    }
+
+    #[test]
+    fn complex_qr_2x2_reconstruction() {
+        // A = [[1+i, 2], [3, 4-i]]
+        let a = [1.0, 1.0, 2.0, 0.0, 3.0, 0.0, 4.0, -1.0];
+        let (q, r) = complex_qr_mxn(&a, 2, 2).expect("qr");
+
+        // Q·R should equal A
+        let prod = complex_matmul(&q, &r, 2, 2, 2);
+        for i in 0..4 {
+            assert!(
+                (prod[2 * i] - a[2 * i]).abs() < 1e-10
+                    && (prod[2 * i + 1] - a[2 * i + 1]).abs() < 1e-10,
+                "QR reconstruction mismatch at {i}"
+            );
+        }
+
+        // Q should be unitary: Q^H · Q = I
+        let qh = complex_conjugate_transpose(&q, 2, 2);
+        let qtq = complex_matmul(&qh, &q, 2, 2, 2);
+        for i in 0..2 {
+            for j in 0..2 {
+                let re = qtq[2 * (i * 2 + j)];
+                let im = qtq[2 * (i * 2 + j) + 1];
+                let exp = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (re - exp).abs() < 1e-10 && im.abs() < 1e-10,
+                    "Q not unitary at ({i},{j}): {re}+{im}i"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn complex_qr_3x2_tall() {
+        // Tall 3×2 complex matrix
+        let a = [
+            1.0, 0.0, 0.0, 1.0,
+            0.0, 0.0, 1.0, 0.0,
+            1.0, 1.0, 0.0, 0.0,
+        ];
+        let (q, r) = complex_qr_mxn(&a, 3, 2).expect("qr");
+
+        // Q is 3×3, R is 3×2
+        assert_eq!(q.len(), 2 * 3 * 3);
+        assert_eq!(r.len(), 2 * 3 * 2);
+
+        // Q·R should equal A
+        let prod = complex_matmul(&q, &r, 3, 3, 2);
+        for i in 0..6 {
+            assert!(
+                (prod[2 * i] - a[2 * i]).abs() < 1e-10
+                    && (prod[2 * i + 1] - a[2 * i + 1]).abs() < 1e-10,
+                "QR tall reconstruction mismatch at {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn complex_conjugate_transpose_basic() {
+        // A = [[1+2i, 3+4i], [5+6i, 7+8i]]
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let ah = complex_conjugate_transpose(&a, 2, 2);
+        // A^H = [[1-2i, 5-6i], [3-4i, 7-8i]]
+        assert!((ah[0] - 1.0).abs() < 1e-15);
+        assert!((ah[1] - (-2.0)).abs() < 1e-15);
+        assert!((ah[2] - 5.0).abs() < 1e-15);
+        assert!((ah[3] - (-6.0)).abs() < 1e-15);
+        assert!((ah[4] - 3.0).abs() < 1e-15);
+        assert!((ah[5] - (-4.0)).abs() < 1e-15);
+        assert!((ah[6] - 7.0).abs() < 1e-15);
+        assert!((ah[7] - (-8.0)).abs() < 1e-15);
+    }
+
+    #[test]
+    fn complex_matmul_identity() {
+        let a = [1.0, 1.0, 2.0, 0.0, 3.0, -1.0, 4.0, 2.0];
+        let id = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let prod = complex_matmul(&a, &id, 2, 2, 2);
+        for i in 0..8 {
+            assert!((prod[i] - a[i]).abs() < 1e-15, "mismatch at {i}");
+        }
+    }
+
+    #[test]
+    fn complex_trace_basic() {
+        // [[1+2i, 3], [0, 4-i]] → trace = (1+2i) + (4-i) = 5+i
+        let a = [1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 4.0, -1.0];
+        let (tr, ti) = complex_trace_nxn(&a, 2).expect("trace");
+        assert!((tr - 5.0).abs() < 1e-15);
+        assert!((ti - 1.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn complex_frobenius_norm() {
+        // [[1+i, 0], [0, 2-i]] → ||A||_F = sqrt(|1+i|² + |2-i|²) = sqrt(2+5) = sqrt(7)
+        let a = [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 2.0, -1.0];
+        let norm = complex_matrix_norm_frobenius(&a);
+        assert!((norm - 7.0_f64.sqrt()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn complex_det_singular() {
+        // Singular: [[1+i, 2+2i], [1, 2]]
+        let a = [1.0, 1.0, 2.0, 2.0, 1.0, 0.0, 2.0, 0.0];
+        let (dr, di) = complex_det_nxn(&a, 2).expect("det");
+        assert!(dr.abs() < 1e-10, "det_re={dr}");
+        assert!(di.abs() < 1e-10, "det_im={di}");
+    }
+
+    #[test]
+    fn complex_solve_3x3() {
+        // Build a well-conditioned 3×3 complex system, solve, then verify A·x = b
+        let a = [
+            2.0, 1.0, 0.0, -1.0, 1.0, 0.0,
+            1.0, 0.0, 3.0, 1.0, 0.0, 2.0,
+            0.0, 1.0, 1.0, -1.0, 4.0, 0.0,
+        ];
+        let b = [1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let x = complex_solve_nxn(&a, &b, 3).expect("solve");
+
+        // Verify: A·x = b
+        let ax = complex_matvec(&a, &x, 3, 3);
+        for i in 0..3 {
+            assert!(
+                (ax[2 * i] - b[2 * i]).abs() < 1e-10
+                    && (ax[2 * i + 1] - b[2 * i + 1]).abs() < 1e-10,
+                "Ax[{i}] = {}+{}i, expected {}+{}i",
+                ax[2 * i], ax[2 * i + 1], b[2 * i], b[2 * i + 1]
+            );
+        }
     }
 }

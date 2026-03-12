@@ -19,7 +19,7 @@
   {
     "id": "dtype002_adv_unknown_rhs_float16",
     "lhs": "i32",
-    "rhs": "float16",
+    "rhs": "float256",
     "expected_error_contains": "unknown rhs dtype",
     "expected_reason_code": "dtype_normalization_failed",
     "severity": "high",
