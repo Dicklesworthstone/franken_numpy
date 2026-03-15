@@ -141,7 +141,8 @@ const LOGFACT: [f64; 126] = [
 /// Compute log(k!) matching NumPy's `logfactorial()` in `logfactorial.c`.
 /// Uses a lookup table for k <= 125, Stirling series for larger k.
 fn logfactorial(k: i64) -> f64 {
-    if k < LOGFACT.len() as i64 {
+    debug_assert!(k >= 0, "logfactorial called with negative k={k}");
+    if k >= 0 && k < LOGFACT.len() as i64 {
         return LOGFACT[k as usize];
     }
     let kf = k as f64;
