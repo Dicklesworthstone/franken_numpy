@@ -1618,6 +1618,129 @@ impl Generator {
         })
     }
 
+    // ── NumPy-compatible bounded integer primitives ──────────────────────
+
+    /// Generate a 32-bit random integer using NumPy's buffering strategy.
+    ///
+    /// Each u64 from the underlying bit generator is split into two u32s:
+    /// the low 32 bits are returned first, and the high 32 bits are buffered
+    /// for the next call.  Matches `next_uint32()` in NumPy's `pcg64.c`.
+    fn next_uint32(&mut self) -> u32 {
+        if self.u32_buf_ready {
+            self.u32_buf_ready = false;
+            self.u32_buf
+        } else {
+            let val = self.bit_generator.next_u64();
+            self.u32_buf = (val >> 32) as u32;
+            self.u32_buf_ready = true;
+            (val & 0xFFFF_FFFF) as u32
+        }
+    }
+
+    /// 32-bit Lemire's method for bounded integers in `[0, rng]`.
+    ///
+    /// Matches `buffered_bounded_lemire_uint32()` in NumPy's `distributions.c`.
+    /// Caller must ensure `rng < 0xFFFF_FFFF`.
+    fn bounded_lemire_uint32(&mut self, rng: u32) -> u32 {
+        let rng_excl = u64::from(rng) + 1;
+
+        let mut m = u64::from(self.next_uint32()) * rng_excl;
+        let mut leftover = m as u32;
+
+        if u64::from(leftover) < rng_excl {
+            let threshold = (u32::MAX - rng) % (rng + 1);
+            while leftover < threshold {
+                m = u64::from(self.next_uint32()) * rng_excl;
+                leftover = m as u32;
+            }
+        }
+
+        (m >> 32) as u32
+    }
+
+    /// 64-bit Lemire's method for bounded integers in `[0, rng]`.
+    ///
+    /// Matches `bounded_lemire_uint64()` in NumPy's `distributions.c`.
+    /// Caller must ensure `rng < 0xFFFF_FFFF_FFFF_FFFF`.
+    fn bounded_lemire_uint64(&mut self, rng: u64) -> u64 {
+        let rng_excl = u128::from(rng) + 1;
+
+        let mut m = u128::from(self.bit_generator.next_u64()) * rng_excl;
+        let mut leftover = m as u64;
+
+        if u128::from(leftover) < rng_excl {
+            let threshold = (u64::MAX - rng) % (rng + 1);
+            while leftover < threshold {
+                m = u128::from(self.bit_generator.next_u64()) * rng_excl;
+                leftover = m as u64;
+            }
+        }
+
+        (m >> 64) as u64
+    }
+
+    /// NumPy-compatible bounded uint64 with automatic 32/64-bit dispatch.
+    ///
+    /// Returns a value in `[0, rng]` (inclusive).
+    /// Matches `random_bounded_uint64()` in NumPy's `distributions.c`:
+    /// - `rng == 0` → returns 0
+    /// - `rng <= 0xFFFF_FFFE` → 32-bit Lemire via `next_uint32()`
+    /// - `rng == 0xFFFF_FFFF` → raw `next_uint32()`
+    /// - `rng < u64::MAX` → 64-bit Lemire via `next_u64()`
+    /// - `rng == u64::MAX` → raw `next_u64()`
+    fn numpy_bounded_uint64(&mut self, rng: u64) -> u64 {
+        if rng == 0 {
+            return 0;
+        }
+        if rng <= 0xFFFF_FFFF {
+            if rng == 0xFFFF_FFFF {
+                return u64::from(self.next_uint32());
+            }
+            #[expect(clippy::cast_possible_truncation)]
+            return u64::from(self.bounded_lemire_uint32(rng as u32));
+        }
+        if rng == u64::MAX {
+            return self.bit_generator.next_u64();
+        }
+        self.bounded_lemire_uint64(rng)
+    }
+
+    /// Masked rejection sampling for a random integer in `[0, max]`.
+    ///
+    /// Matches `random_interval()` in NumPy's `distributions.c`.
+    /// Used by shuffle/permutation.  Uses 32-bit path when `max <= 0xFFFF_FFFF`.
+    fn random_interval(&mut self, max: u64) -> u64 {
+        if max == 0 {
+            return 0;
+        }
+
+        let mut mask = max;
+        mask |= mask >> 1;
+        mask |= mask >> 2;
+        mask |= mask >> 4;
+        mask |= mask >> 8;
+        mask |= mask >> 16;
+        mask |= mask >> 32;
+
+        if max <= 0xFFFF_FFFF {
+            #[expect(clippy::cast_possible_truncation)]
+            let mask32 = mask as u32;
+            loop {
+                let value = u64::from(self.next_uint32() & mask32);
+                if value <= max {
+                    return value;
+                }
+            }
+        } else {
+            loop {
+                let value = self.bit_generator.next_u64() & mask;
+                if value <= max {
+                    return value;
+                }
+            }
+        }
+    }
+
     // ── Distribution sampling methods ───────────────────────────────────
 
     /// Generate an array of uniform random floats in `[0.0, 1.0)`.
@@ -1640,14 +1763,18 @@ impl Generator {
     /// Generate random integers in `[low, high)`.
     ///
     /// Mimics `rng.integers(low, high, size)`.
+    /// Uses NumPy-compatible Lemire bounded integer algorithm with
+    /// automatic 32/64-bit dispatch.
     pub fn integers(&mut self, low: i64, high: i64, size: usize) -> Result<Vec<i64>, RandomError> {
         if high <= low {
             return Err(RandomError::InvalidUpperBound);
         }
-        let range = (high as u64).wrapping_sub(low as u64);
+        let off = low as u64;
+        // rng is the inclusive upper bound relative to off
+        let rng = (high as u64).wrapping_sub(low as u64) - 1;
         let mut result = Vec::with_capacity(size);
         for _ in 0..size {
-            let val = (self.bounded_u64(range)? as i64).wrapping_add(low);
+            let val = (off.wrapping_add(self.numpy_bounded_uint64(rng))) as i64;
             result.push(val);
         }
         Ok(result)
@@ -1656,6 +1783,7 @@ impl Generator {
     /// Generate integers in `[low, high]` (inclusive on both ends).
     ///
     /// Mimics `rng.integers(low, high, size, endpoint=True)`.
+    /// Uses NumPy-compatible Lemire bounded integer algorithm.
     pub fn integers_endpoint(
         &mut self,
         low: i64,
@@ -1665,14 +1793,16 @@ impl Generator {
         if high < low {
             return Err(RandomError::InvalidUpperBound);
         }
-        let range = (high as u64).wrapping_sub(low as u64) + 1;
+        let off = low as u64;
+        // rng is the inclusive upper bound relative to off
+        let rng = (high as u64).wrapping_sub(low as u64);
         let mut result = Vec::with_capacity(size);
         for _ in 0..size {
-            let val = if range == 0 {
+            let val = if rng == u64::MAX {
                 // Full u64 range — just use raw
                 self.next_u64() as i64
             } else {
-                (self.bounded_u64(range)? as i64).wrapping_add(low)
+                (off.wrapping_add(self.numpy_bounded_uint64(rng))) as i64
             };
             result.push(val);
         }
@@ -1802,15 +1932,17 @@ impl Generator {
         if replace {
             let mut result = Vec::with_capacity(size);
             for _ in 0..size {
-                let idx = self.bounded_u64(n as u64)? as usize;
+                // NumPy choice(replace=True) calls integers(0, n) → Lemire
+                let idx = self.numpy_bounded_uint64(n as u64 - 1) as usize;
                 result.push(a[idx]);
             }
             Ok(result)
         } else {
-            // Fisher-Yates shuffle on a copy, then take first `size` elements
+            // Fisher-Yates shuffle on a copy, then take first `size` elements.
+            // NumPy shuffles an int64 index array via _shuffle_int → Lemire.
             let mut pool = a.to_vec();
             for i in (1..n).rev() {
-                let j = self.bounded_u64((i + 1) as u64)? as usize;
+                let j = self.numpy_bounded_uint64(i as u64) as usize;
                 pool.swap(i, j);
             }
             Ok(pool[..size].to_vec())
@@ -1890,10 +2022,12 @@ impl Generator {
     /// Shuffle a mutable slice in-place.
     ///
     /// Mimics `rng.shuffle(x)`.
+    /// Uses NumPy's `random_interval()` (masked rejection with 32-bit path
+    /// for small indices), matching `_shuffle_raw` in `_generator.pyx`.
     pub fn shuffle(&mut self, x: &mut [f64]) -> Result<(), RandomError> {
         let n = x.len();
         for i in (1..n).rev() {
-            let j = self.bounded_u64((i + 1) as u64)? as usize;
+            let j = self.random_interval(i as u64) as usize;
             x.swap(i, j);
         }
         Ok(())
@@ -1911,10 +2045,11 @@ impl Generator {
     /// Generate a random permutation of integers `[0, n)`.
     ///
     /// Mimics `rng.permutation(n)`.
+    /// Uses NumPy's `random_interval()` for Fisher-Yates shuffle.
     pub fn permutation_range(&mut self, n: usize) -> Result<Vec<u64>, RandomError> {
         let mut result: Vec<u64> = (0..n as u64).collect();
         for i in (1..n).rev() {
-            let j = self.bounded_u64((i + 1) as u64)? as usize;
+            let j = self.random_interval(i as u64) as usize;
             result.swap(i, j);
         }
         Ok(result)
@@ -1930,11 +2065,32 @@ impl Generator {
     }
 
     fn sample_gamma(&mut self, shape_param: f64) -> f64 {
+        if shape_param == 1.0 {
+            // Special case: gamma(1) = exponential(1)
+            return self.sample_ziggurat_exponential();
+        }
+        if shape_param == 0.0 {
+            return 0.0;
+        }
         if shape_param < 1.0 {
-            // For shape < 1, use the fact that gamma(a) = gamma(a+1) * U^(1/a)
-            let g = self.sample_gamma(shape_param + 1.0);
-            let u = self.next_f64();
-            return g * u.powf(1.0 / shape_param);
+            // NumPy's exact algorithm for shape < 1 from distributions.c:
+            // Uses uniform + exponential rejection.
+            loop {
+                let u = self.next_f64();
+                let v = self.sample_ziggurat_exponential();
+                if u <= 1.0 - shape_param {
+                    let x = u.powf(1.0 / shape_param);
+                    if x <= v {
+                        return x;
+                    }
+                } else {
+                    let y = -((1.0 - u) / shape_param).ln();
+                    let x = (1.0 - shape_param + shape_param * y).powf(1.0 / shape_param);
+                    if x <= v + y {
+                        return x;
+                    }
+                }
+            }
         }
         // Marsaglia and Tsang's method for shape >= 1
         let d = shape_param - 1.0 / 3.0;
@@ -2324,9 +2480,9 @@ impl Generator {
                 .map(|k| base_offset + k * axis_stride)
                 .collect();
 
-            // Fisher-Yates shuffle on these indices
+            // Fisher-Yates shuffle on these indices (random_interval for generic arrays)
             for i in (1..axis_len).rev() {
-                let j = self.bounded_u64((i + 1) as u64)? as usize;
+                let j = self.random_interval(i as u64) as usize;
                 result.swap(indices[i], indices[j]);
             }
         }
@@ -5250,5 +5406,211 @@ mod tests {
         let perm = g.permutation(&arr).expect("permutation");
         let expected = [4.0, 8.0, 0.0, 2.0, 6.0, 1.0, 5.0, 7.0, 3.0, 9.0];
         assert_f64_seq("permutation", &perm, &expected);
+    }
+
+    #[test]
+    #[ignore = "parity gap: our binomial uses n Bernoulli trials, NumPy uses BTPE algorithm"]
+    fn oracle_binomial() {
+        let mut g = oracle_gen();
+        let vals = g.binomial(10, 0.5, 10);
+        let expected: Vec<u64> = vec![7, 4, 4, 4, 5, 7, 7, 4, 5, 4];
+        assert_u64_seq("binomial", &vals, &expected);
+    }
+
+    #[test]
+    fn oracle_poisson() {
+        let mut g = oracle_gen();
+        let vals = g.poisson(3.0, 10);
+        let expected: Vec<u64> = vec![3, 5, 3, 2, 6, 3, 2, 2, 5, 0];
+        assert_u64_seq("poisson", &vals, &expected);
+    }
+
+    #[test]
+    fn oracle_f_distribution() {
+        let mut g = oracle_gen();
+        let vals = g.f(5.0, 10.0, 10);
+        let expected = [
+            0.7586812017109351,
+            0.5883671125201785,
+            0.5332160107805164,
+            0.6937139034552943,
+            5.481784811626646,
+            0.5607429508652583,
+            1.1690388610620435,
+            0.43695159278479795,
+            0.9652319482294194,
+            0.34215986276681587,
+        ];
+        assert_f64_seq("f_distribution", &vals, &expected);
+    }
+
+    #[test]
+    fn oracle_standard_t() {
+        let mut g = oracle_gen();
+        let vals = g.standard_t(5.0, 10);
+        let expected = [
+            0.5008333204796186,
+            0.8312637071182254,
+            0.4799108786097328,
+            -1.2862144825001673,
+            -0.004070721482134564,
+            0.11000227570376948,
+            -0.018775083733685572,
+            -0.2506624111588833,
+            0.3810922270159009,
+            -0.8725449195712555,
+        ];
+        assert_f64_seq("standard_t", &vals, &expected);
+    }
+
+    #[test]
+    fn oracle_vonmises() {
+        let mut g = oracle_gen();
+        let vals = g.vonmises(0.0, 4.0, 10);
+        let expected = [
+            0.1765341139961678,
+            -0.25614490477469687,
+            0.3346666062077488,
+            0.036444763154689586,
+            0.31733041245381255,
+            0.21844747943523402,
+            0.1624001118964289,
+            -0.17308441650004802,
+            0.09840307599485199,
+            0.10288417897762203,
+        ];
+        assert_f64_seq("vonmises", &vals, &expected);
+    }
+
+    #[test]
+    #[ignore = "parity gap: our zipf uses different rejection algorithm than NumPy"]
+    fn oracle_zipf() {
+        let mut g = oracle_gen();
+        let vals = g.zipf(2.0, 10);
+        // NumPy returns integers: [14, 1, 8, 1, 1, 8, 1, 1, 3, 1]
+        let expected = [14.0, 1.0, 8.0, 1.0, 1.0, 8.0, 1.0, 1.0, 3.0, 1.0];
+        assert_f64_seq("zipf", &vals, &expected);
+    }
+
+    #[test]
+    fn oracle_negative_binomial() {
+        let mut g = oracle_gen();
+        let vals = g.negative_binomial(5.0, 0.5, 10);
+        let expected: Vec<u64> = vec![7, 2, 9, 2, 8, 8, 2, 2, 8, 3];
+        assert_u64_seq("negative_binomial", &vals, &expected);
+    }
+
+    #[test]
+    fn oracle_noncentral_chisquare() {
+        let mut g = oracle_gen();
+        let vals = g.noncentral_chisquare(5.0, 1.0, 10);
+        let expected = [
+            11.407992320824796,
+            6.1909369599500135,
+            4.271271486651185,
+            2.693449092495373,
+            6.067052771714831,
+            4.577526920646614,
+            3.6679090442005395,
+            2.9555669311382315,
+            5.611663834516616,
+            3.6265665029968828,
+        ];
+        assert_f64_seq("noncentral_chisquare", &vals, &expected);
+    }
+
+    #[test]
+    fn oracle_noncentral_f() {
+        let mut g = oracle_gen();
+        let vals = g.noncentral_f(5.0, 10.0, 1.0, 10);
+        let expected = [
+            1.8270336158811435,
+            0.9576523667963563,
+            1.0987515131035,
+            0.9917493712351674,
+            1.2956632147394853,
+            1.195433209484817,
+            2.7167671099912774,
+            0.48625503929084185,
+            1.1466715845139002,
+            0.39845145064667553,
+        ];
+        assert_f64_seq("noncentral_f", &vals, &expected);
+    }
+
+    #[test]
+    #[ignore = "parity gap: our hypergeometric uses trial-by-trial, NumPy uses H2PE algorithm"]
+    fn oracle_hypergeometric() {
+        let mut g = oracle_gen();
+        let vals = g.hypergeometric(20, 30, 10, 10);
+        let expected: Vec<u64> = vec![2, 6, 3, 3, 3, 4, 3, 7, 3, 2];
+        assert_u64_seq("hypergeometric", &vals, &expected);
+    }
+
+    #[test]
+    #[ignore = "parity gap: depends on binomial which uses different algorithm"]
+    fn oracle_multinomial() {
+        let mut g = oracle_gen();
+        let vals = g.multinomial(20, &[0.3, 0.5, 0.2], 3);
+        let expected: Vec<Vec<u64>> = vec![
+            vec![9, 9, 2],
+            vec![4, 12, 4],
+            vec![6, 8, 6],
+        ];
+        assert_eq!(vals.len(), expected.len(), "multinomial: sample count mismatch");
+        for (i, (got, exp)) in vals.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(got, exp, "multinomial[{i}]: got {got:?}, expected {exp:?}");
+        }
+    }
+
+    // NOTE: NumPy defaults to method='svd' for multivariate_normal. Our
+    // implementation uses Cholesky. Adding SVD support requires fnp-linalg
+    // dependency. This test validates Cholesky-based output; a separate
+    // oracle_multivariate_normal_svd test should be added once SVD method is
+    // implemented.
+    #[test]
+    fn oracle_multivariate_normal() {
+        let mut g = oracle_gen();
+        let cov = [1.0, 0.5, 0.5, 1.0]; // flattened 2x2
+        let vals = g.multivariate_normal(&[0.0, 0.0], &cov, 3);
+        // Expected values from: rng.multivariate_normal(..., method='cholesky')
+        let expected = [
+            vec![0.648970595720087, 1.267659275028178],
+            vec![1.4703372914093853, 1.3072203037047128],
+            vec![-0.44234454827889136, -0.2912758608795984],
+        ];
+        assert_eq!(vals.len(), expected.len(), "mvn: sample count mismatch");
+        for (i, (got, exp)) in vals.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(got.len(), exp.len(), "mvn[{i}]: dim mismatch");
+            for (j, (&g_val, &e_val)) in got.iter().zip(exp.iter()).enumerate() {
+                assert!(
+                    (g_val - e_val).abs() < 1e-12,
+                    "mvn[{i}][{j}]: got {g_val}, expected {e_val}, diff {}",
+                    (g_val - e_val).abs()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn oracle_dirichlet() {
+        let mut g = oracle_gen();
+        let vals = g.dirichlet(&[1.0, 2.0, 3.0], 3);
+        let expected = [
+            vec![0.18801570709043375, 0.38448038254055683, 0.42750391036900925],
+            vec![0.14347162759248622, 0.47960769869466385, 0.37692067371285],
+            vec![0.2047024041741115, 0.38381281192790556, 0.4114847838979829],
+        ];
+        assert_eq!(vals.len(), expected.len(), "dirichlet: sample count mismatch");
+        for (i, (got, exp)) in vals.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(got.len(), exp.len(), "dirichlet[{i}]: dim mismatch");
+            for (j, (&g_val, &e_val)) in got.iter().zip(exp.iter()).enumerate() {
+                assert!(
+                    (g_val - e_val).abs() < 1e-12,
+                    "dirichlet[{i}][{j}]: got {g_val}, expected {e_val}, diff {}",
+                    (g_val - e_val).abs()
+                );
+            }
+        }
     }
 }
