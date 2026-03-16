@@ -11181,7 +11181,11 @@ mod tests {
         // negative_binomial(n=5, p=0.3)
         let mut g = Generator::from_pcg64_dxsm(SEED).unwrap();
         let neg_bin = g.negative_binomial(5.0, 0.3, 5);
-        assert_eq!(neg_bin, vec![11, 8, 12, 14, 8], "negative_binomial mismatch");
+        assert_eq!(
+            neg_bin,
+            vec![11, 8, 12, 14, 8],
+            "negative_binomial mismatch"
+        );
 
         // hypergeometric(ngood=20, nbad=10, nsample=15)
         let mut g = Generator::from_pcg64_dxsm(SEED).unwrap();

@@ -149,6 +149,7 @@ fn logfactorial(k: i64) -> f64 {
     let halfln2pi = 0.9189385332046728;
     (kf + 0.5) * kf.ln() - kf + (halfln2pi + (1.0 / kf) * (1.0 / 12.0 - 1.0 / (360.0 * kf * kf)))
 }
+
 /// Log-gamma function matching NumPy's `random_loggam()` in `distributions.c`.
 /// Uses the algorithm from SPECFUN by Zhang and Jin (1996).
 #[allow(clippy::excessive_precision)]
@@ -2193,12 +2194,7 @@ impl Generator {
     }
 
     /// Single binomial sample matching NumPy's `random_binomial` dispatcher.
-    fn sample_binomial_single(
-        &mut self,
-        n: i64,
-        p: f64,
-        cache: &mut BinomialCache,
-    ) -> i64 {
+    fn sample_binomial_single(&mut self, n: i64, p: f64, cache: &mut BinomialCache) -> i64 {
         if n == 0 || p == 0.0 {
             return 0;
         }
@@ -2303,8 +2299,7 @@ impl Generator {
             if k > 20 && (k as f64) < nrq / 2.0 - 1.0 {
                 // Step 52: squeeze using upper and lower bounds on log(f)
                 let rho = ((k as f64) / nrq)
-                    * (((k as f64) * ((k as f64) / 3.0 + 0.625) + 0.16666666666666666) / nrq
-                        + 0.5);
+                    * (((k as f64) * ((k as f64) / 3.0 + 0.625) + 0.16666666666666666) / nrq + 0.5);
                 let t = -(k as f64) * (k as f64) / (2.0 * nrq);
                 let log_v = v.ln();
                 if log_v < t - rho {
@@ -2327,20 +2322,16 @@ impl Generator {
                     > (xm * (f1 / x1).ln()
                         + ((n - m) as f64 + 0.5) * (z / w).ln()
                         + ((y - m) as f64) * (w * r / (x1 * q)).ln()
-                        + (13680.0
-                            - (462.0 - (132.0 - (99.0 - 140.0 / f2) / f2) / f2) / f2)
+                        + (13680.0 - (462.0 - (132.0 - (99.0 - 140.0 / f2) / f2) / f2) / f2)
                             / f1
                             / 166320.0
-                        + (13680.0
-                            - (462.0 - (132.0 - (99.0 - 140.0 / z2) / z2) / z2) / z2)
+                        + (13680.0 - (462.0 - (132.0 - (99.0 - 140.0 / z2) / z2) / z2) / z2)
                             / z
                             / 166320.0
-                        + (13680.0
-                            - (462.0 - (132.0 - (99.0 - 140.0 / x2) / x2) / x2) / x2)
+                        + (13680.0 - (462.0 - (132.0 - (99.0 - 140.0 / x2) / x2) / x2) / x2)
                             / x1
                             / 166320.0
-                        + (13680.0
-                            - (462.0 - (132.0 - (99.0 - 140.0 / w2) / w2) / w2) / w2)
+                        + (13680.0 - (462.0 - (132.0 - (99.0 - 140.0 / w2) / w2) / w2) / w2)
                             / w
                             / 166320.0)
                 {
@@ -2369,12 +2360,7 @@ impl Generator {
 
     /// Inversion algorithm for binomial sampling (small n*p).
     /// Matches `random_binomial_inversion()` in NumPy's distributions.c.
-    fn binomial_inversion(
-        &mut self,
-        n: i64,
-        p: f64,
-        cache: &mut BinomialCache,
-    ) -> i64 {
+    fn binomial_inversion(&mut self, n: i64, p: f64, cache: &mut BinomialCache) -> i64 {
         if !cache.has_binomial || cache.nsave != n || cache.psave != p {
             cache.nsave = n;
             cache.psave = p;
@@ -6143,12 +6129,12 @@ mod tests {
     fn oracle_multinomial() {
         let mut g = oracle_gen();
         let vals = g.multinomial(20, &[0.3, 0.5, 0.2], 3);
-        let expected: Vec<Vec<u64>> = vec![
-            vec![9, 9, 2],
-            vec![4, 12, 4],
-            vec![6, 8, 6],
-        ];
-        assert_eq!(vals.len(), expected.len(), "multinomial: sample count mismatch");
+        let expected: Vec<Vec<u64>> = vec![vec![9, 9, 2], vec![4, 12, 4], vec![6, 8, 6]];
+        assert_eq!(
+            vals.len(),
+            expected.len(),
+            "multinomial: sample count mismatch"
+        );
         for (i, (got, exp)) in vals.iter().zip(expected.iter()).enumerate() {
             assert_eq!(got, exp, "multinomial[{i}]: got {got:?}, expected {exp:?}");
         }
@@ -6188,11 +6174,19 @@ mod tests {
         let mut g = oracle_gen();
         let vals = g.dirichlet(&[1.0, 2.0, 3.0], 3);
         let expected = [
-            vec![0.18801570709043375, 0.38448038254055683, 0.42750391036900925],
+            vec![
+                0.18801570709043375,
+                0.38448038254055683,
+                0.42750391036900925,
+            ],
             vec![0.14347162759248622, 0.47960769869466385, 0.37692067371285],
             vec![0.2047024041741115, 0.38381281192790556, 0.4114847838979829],
         ];
-        assert_eq!(vals.len(), expected.len(), "dirichlet: sample count mismatch");
+        assert_eq!(
+            vals.len(),
+            expected.len(),
+            "dirichlet: sample count mismatch"
+        );
         for (i, (got, exp)) in vals.iter().zip(expected.iter()).enumerate() {
             assert_eq!(got.len(), exp.len(), "dirichlet[{i}]: dim mismatch");
             for (j, (&g_val, &e_val)) in got.iter().zip(exp.iter()).enumerate() {

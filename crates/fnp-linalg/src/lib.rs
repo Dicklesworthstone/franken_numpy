@@ -7676,8 +7676,7 @@ mod tests {
     #[test]
     fn numpy_oracle_eig_2x2() {
         // eig_nxn_full returns (eigenvalues_interleaved_re_im, eigenvectors)
-        let (eigenvalues, _eigenvectors) =
-            eig_nxn_full(&[1.0, 2.0, 3.0, 4.0], 2).unwrap();
+        let (eigenvalues, _eigenvectors) = eig_nxn_full(&[1.0, 2.0, 3.0, 4.0], 2).unwrap();
         // eigenvalues are interleaved [re0, im0, re1, im1]
         let mut vals_re: Vec<f64> = eigenvalues.chunks(2).map(|c| c[0]).collect();
         vals_re.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -7708,7 +7707,11 @@ mod tests {
     fn numpy_oracle_cholesky_2x2() {
         let l = cholesky_2x2([[4.0, 2.0], [2.0, 3.0]], "L").unwrap();
         let flat = [l[0][0], l[0][1], l[1][0], l[1][1]];
-        assert_oracle_vec("cholesky", &flat, &[2.0, 0.0, 1.0, std::f64::consts::SQRT_2]);
+        assert_oracle_vec(
+            "cholesky",
+            &flat,
+            &[2.0, 0.0, 1.0, std::f64::consts::SQRT_2],
+        );
     }
 
     #[test]
@@ -7752,13 +7755,7 @@ mod tests {
 
     #[test]
     fn numpy_oracle_matrix_rank() {
-        assert_eq!(
-            matrix_rank_2x2([[1.0, 2.0], [3.0, 4.0]], 1e-10).unwrap(),
-            2
-        );
-        assert_eq!(
-            matrix_rank_2x2([[1.0, 2.0], [2.0, 4.0]], 1e-10).unwrap(),
-            1
-        );
+        assert_eq!(matrix_rank_2x2([[1.0, 2.0], [3.0, 4.0]], 1e-10).unwrap(), 2);
+        assert_eq!(matrix_rank_2x2([[1.0, 2.0], [2.0, 4.0]], 1e-10).unwrap(), 1);
     }
 }
