@@ -7602,4 +7602,163 @@ mod tests {
             );
         }
     }
+
+    // ── NumPy oracle parity tests ──────────────────────────────────────
+    //
+    // Verify our linalg operations produce numerically identical results
+    // to NumPy (within floating-point tolerance).  Values generated from
+    // NumPy 2.x with np.set_printoptions(precision=17).
+
+    const ORACLE_TOL: f64 = 1e-12;
+
+    fn assert_oracle(label: &str, got: f64, expected: f64) {
+        assert!(
+            (got - expected).abs() < ORACLE_TOL,
+            "{label}: got {got:.17e}, expected {expected:.17e}, diff {:.2e}",
+            (got - expected).abs()
+        );
+    }
+
+    fn assert_oracle_vec(label: &str, got: &[f64], expected: &[f64]) {
+        assert_eq!(got.len(), expected.len(), "{label}: length mismatch");
+        for (i, (&g, &e)) in got.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < ORACLE_TOL,
+                "{label}[{i}]: got {g:.17e}, expected {e:.17e}, diff {:.2e}",
+                (g - e).abs()
+            );
+        }
+    }
+
+    #[test]
+    fn numpy_oracle_det_2x2() {
+        let a = [[1.0, 2.0], [3.0, 4.0]];
+        assert_oracle("det_2x2", det_2x2(a).unwrap(), -2.0);
+    }
+
+    #[test]
+    fn numpy_oracle_det_3x3() {
+        let b = [2.0, 1.0, 0.0, 1.0, 3.0, 1.0, 0.0, 1.0, 2.0];
+        assert_oracle("det_3x3", det_nxn(&b, 3).unwrap(), 8.0);
+    }
+
+    #[test]
+    fn numpy_oracle_inv_2x2() {
+        let inv = inv_2x2([[1.0, 2.0], [3.0, 4.0]]).unwrap();
+        let flat = [inv[0][0], inv[0][1], inv[1][0], inv[1][1]];
+        assert_oracle_vec("inv_2x2", &flat, &[-2.0, 1.0, 1.5, -0.5]);
+    }
+
+    #[test]
+    fn numpy_oracle_inv_3x3() {
+        let b = [2.0, 1.0, 0.0, 1.0, 3.0, 1.0, 0.0, 1.0, 2.0];
+        let inv = inv_nxn(&b, 3).unwrap();
+        assert_oracle_vec(
+            "inv_3x3",
+            &inv,
+            &[0.625, -0.25, 0.125, -0.25, 0.5, -0.25, 0.125, -0.25, 0.625],
+        );
+    }
+
+    #[test]
+    fn numpy_oracle_solve_2x2() {
+        let x = solve_2x2([[1.0, 2.0], [3.0, 4.0]], [5.0, 6.0]).unwrap();
+        assert_oracle_vec("solve_2x2", &x, &[-4.0, 4.5]);
+    }
+
+    #[test]
+    fn numpy_oracle_solve_3x3() {
+        let a = [2.0, 1.0, 0.0, 1.0, 3.0, 1.0, 0.0, 1.0, 2.0];
+        let x = solve_nxn(&a, &[1.0, 2.0, 3.0], 3).unwrap();
+        assert_oracle_vec("solve_3x3", &x, &[0.5, 0.0, 1.5]);
+    }
+
+    #[test]
+    fn numpy_oracle_eig_2x2() {
+        // eig_nxn_full returns (eigenvalues_interleaved_re_im, eigenvectors)
+        let (eigenvalues, _eigenvectors) =
+            eig_nxn_full(&[1.0, 2.0, 3.0, 4.0], 2).unwrap();
+        // eigenvalues are interleaved [re0, im0, re1, im1]
+        let mut vals_re: Vec<f64> = eigenvalues.chunks(2).map(|c| c[0]).collect();
+        vals_re.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_oracle("eig[0]", vals_re[0], -0.3722813232690143);
+        assert_oracle("eig[1]", vals_re[1], 5.372281323269014);
+    }
+
+    #[test]
+    fn numpy_oracle_eigvalsh_3x3() {
+        let b = [2.0, 1.0, 0.0, 1.0, 3.0, 1.0, 0.0, 1.0, 2.0];
+        let mut vals = eigvalsh_nxn(&b, 3).unwrap();
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_oracle("eigvalsh[0]", vals[0], 1.0);
+        assert_oracle("eigvalsh[1]", vals[1], 2.0);
+        assert_oracle("eigvalsh[2]", vals[2], 4.0);
+    }
+
+    #[test]
+    fn numpy_oracle_svd_2x2() {
+        let result = svd_2x2([[1.0, 2.0], [3.0, 4.0]], true).unwrap();
+        let mut s = result.singular_values.to_vec();
+        s.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        assert_oracle("svd_s[0]", s[0], 5.464985704219043);
+        assert_oracle("svd_s[1]", s[1], 0.3659661906262575);
+    }
+
+    #[test]
+    fn numpy_oracle_cholesky_2x2() {
+        let l = cholesky_2x2([[4.0, 2.0], [2.0, 3.0]], "L").unwrap();
+        let flat = [l[0][0], l[0][1], l[1][0], l[1][1]];
+        assert_oracle_vec("cholesky", &flat, &[2.0, 0.0, 1.0, std::f64::consts::SQRT_2]);
+    }
+
+    #[test]
+    fn numpy_oracle_norm_frobenius() {
+        assert_oracle(
+            "norm_fro",
+            matrix_norm_frobenius(&[1.0, 2.0, 3.0, 4.0], 2).unwrap(),
+            5.477225575051661,
+        );
+    }
+
+    #[test]
+    fn numpy_oracle_cond_2x2() {
+        let c = cond_nxn(&[1.0, 2.0, 3.0, 4.0], 2).unwrap();
+        assert_oracle("cond", c, 14.933034373659265);
+    }
+
+    #[test]
+    fn numpy_oracle_slogdet_2x2() {
+        let (sign, logabsdet) = slogdet_nxn(&[1.0, 2.0, 3.0, 4.0], 2).unwrap();
+        assert_oracle("slogdet_sign", sign, -1.0);
+        assert_oracle("slogdet_logabsdet", logabsdet, 0.6931471805599455);
+    }
+
+    #[test]
+    fn numpy_oracle_lstsq() {
+        let a = [1.0, 1.0, 1.0, 2.0, 1.0, 3.0];
+        let result = lstsq_nxn(&a, &[1.0, 2.0, 2.0], 3, 2).unwrap();
+        assert_oracle_vec("lstsq_x", &result, &[0.6666666666666666, 0.5]);
+    }
+
+    #[test]
+    fn numpy_oracle_qr_2x2() {
+        let result = qr_2x2([[1.0, 2.0], [3.0, 4.0]], QrMode::Reduced).unwrap();
+        // QR decomposition sign convention may differ from NumPy (Householder).
+        // Verify |R| diagonal matches and R is upper-triangular.
+        assert_oracle("qr |R[0,0]|", result.r[0][0].abs(), 3.1622776601683795);
+        assert_oracle("qr |R[1,1]|", result.r[1][1].abs(), 0.6324555320336753);
+        assert_oracle("qr R[1,0]", result.r[1][0], 0.0); // lower triangle is zero
+    }
+
+    #[test]
+    fn numpy_oracle_matrix_rank() {
+        assert_eq!(
+            matrix_rank_2x2([[1.0, 2.0], [3.0, 4.0]], 1e-10).unwrap(),
+            2
+        );
+        assert_eq!(
+            matrix_rank_2x2([[1.0, 2.0], [2.0, 4.0]], 1e-10).unwrap(),
+            1
+        );
+    }
 }
