@@ -39,7 +39,7 @@
 | NumPy 2.0 API | parity_green | unique_all, unique_counts, unique_inverse, unique_values, permuted | — |
 | Parameter completeness | parity_green | count_nonzero(axis,keepdims), isin(invert), searchsorted(side,sorter), where(1-arg), sum/prod(initial), copyto(casting), partition/argpartition(axis), packbits/unpackbits(axis) | — |
 | Linalg | parity_green | solve, det, inv, eig, svd, qr, cholesky, lstsq, norm, matrix_rank, matrix_power, multi_dot, tensorsolve, tensorinv, pinv, cond, slogdet, funm; 147 tests | — |
-| Random (numpy.random) | parity_green | PCG64 generator; uniform, normal, standard_normal, randint, choice, shuffle, permutation, beta, binomial, chisquare, dirichlet, exponential, f, gamma, geometric, gumbel, hypergeometric, laplace, logistic, lognormal, multinomial, multivariate_normal, negative_binomial, noncentral_chisquare, noncentral_f, pareto, poisson, power, rayleigh, standard_cauchy, standard_exponential, standard_gamma, standard_t, triangular, vonmises, wald, weibull, zipf; 106 tests | — |
+| Random (numpy.random) | parity_green | PCG64DXSM generator with 39 oracle-verified distributions; Lemire bounded integers + buffered uint32; BTPE binomial + inversion; HRUA hypergeometric + direct; PTRS Poisson + multiplicative; NumPy-exact gamma (shape<1 rejection, shape=1 exponential, Marsaglia-Tsang); zipf with Umin clamping; 39/39 oracle tests passing; 178 tests | — |
 | I/O (npy/npz) | parity_green | load, save, savez, savez_compressed, loadtxt, savetxt, genfromtxt, fromfile, tofile, array2string; DEFLATE compression; 76 tests | — |
 | Conformance harness | parity_green | 83 tests: differential corpus (40 unary, 20 binary, 30 reduction combos), metamorphic suite (13 algebraic identities), adversarial fuzzing (12 edge cases), oracle validation (5 tests) | — |
 | Contract schema + artifact topology | in_progress | `phase2c-contract-v1` locked; packet readiness validator green | populate packet artifact directories in CI |
@@ -49,12 +49,16 @@
 
 | Crate | Tests | Description |
 |---|---|---|
-| fnp-ufunc | 999 | Core array operations, math, sorting, polynomials, e2e pipelines |
-| fnp-linalg | 147 | Linear algebra decompositions, solvers, norms |
-| fnp-random | 106 | RNG distributions, seeding, reproducibility |
-| fnp-io | 76 | NPY/NPZ read/write, text formats, compression |
-| fnp-conformance | 83 | Differential parity, metamorphic identities, adversarial fuzzing |
-| **Total** | **1,411** | |
+| fnp-ufunc | 1,121 | Core array operations, math, sorting, polynomials, e2e pipelines |
+| fnp-ndarray | 136 | Shape legality, stride calculus, broadcast contracts |
+| fnp-linalg | 181 | Linear algebra decompositions, solvers, norms |
+| fnp-random | 178 | RNG distributions (39 oracle-verified), seeding, reproducibility |
+| fnp-iter | 13 | Transfer semantics, overlap detection, flatiter/nditer |
+| fnp-io | 44 | NPY/NPZ read/write, text formats, compression |
+| fnp-conformance | 94 | Differential parity, metamorphic identities, adversarial fuzzing, witness stability |
+| fnp-dtype | 114 | Dtype taxonomy, promotion table, cast policy primitives |
+| fnp-runtime | 12 | Mode split, fail-closed decoding, override-audit gate |
+| **Total** | **1,893** | |
 
 ## Remaining Gaps (Python-specific, low priority)
 

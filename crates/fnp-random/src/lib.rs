@@ -149,6 +149,47 @@ fn logfactorial(k: i64) -> f64 {
     let halfln2pi = 0.9189385332046728;
     (kf + 0.5) * kf.ln() - kf + (halfln2pi + (1.0 / kf) * (1.0 / 12.0 - 1.0 / (360.0 * kf * kf)))
 }
+/// Log-gamma function matching NumPy's `random_loggam()` in `distributions.c`.
+/// Uses the algorithm from SPECFUN by Zhang and Jin (1996).
+#[allow(clippy::excessive_precision)]
+fn random_loggam(x: f64) -> f64 {
+    const A: [f64; 10] = [
+        8.333333333333333e-02,
+        -2.777777777777778e-03,
+        7.936507936507937e-04,
+        -5.952380952380952e-04,
+        8.417508417508418e-04,
+        -1.917526917526918e-03,
+        6.410256410256410e-03,
+        -2.955065359477124e-02,
+        1.796443723688307e-01,
+        -1.39243221690590e+00,
+    ];
+
+    if x == 1.0 || x == 2.0 {
+        return 0.0;
+    }
+
+    let n = if x < 7.0 { (7.0 - x) as i64 } else { 0 };
+    let mut x0 = x + (n as f64);
+    let x2 = (1.0 / x0) * (1.0 / x0);
+    let lg2pi = 1.8378770664093453;
+
+    let mut gl0 = A[9];
+    for k in (0..=8).rev() {
+        gl0 = gl0 * x2 + A[k];
+    }
+    let mut gl = gl0 / x0 + 0.5 * lg2pi + (x0 - 0.5) * x0.ln() - x0;
+
+    if x < 7.0 {
+        for _ in 0..n {
+            gl -= (x0 - 1.0).ln();
+            x0 -= 1.0;
+        }
+    }
+    gl
+}
+
 pub const DEFAULT_RNG_SEED: u64 = 0xC0DE_CAFE_F00D_BAAD;
 pub const DEFAULT_SEED_SEQUENCE_POOL_SIZE: usize = 4;
 pub const MAX_SEED_SEQUENCE_POOL_SIZE: usize = 256;
@@ -2066,28 +2107,74 @@ impl Generator {
         result
     }
 
-    /// Generate Poisson-distributed samples using the inverse transform method
-    /// for small lambda, Knuth's algorithm for moderate lambda.
+    /// Generate Poisson-distributed samples.
     ///
     /// Mimics `rng.poisson(lam, size)`.
+    /// Uses NumPy's exact algorithms: multiplicative method for lam < 10,
+    /// PTRS (Hörmann 1993) for lam >= 10.
     #[must_use]
     pub fn poisson(&mut self, lam: f64, size: usize) -> Vec<u64> {
         (0..size).map(|_| self.sample_poisson_single(lam)).collect()
     }
 
+    /// Single Poisson sample matching NumPy's `random_poisson` dispatcher.
     fn sample_poisson_single(&mut self, lam: f64) -> u64 {
-        // Knuth's algorithm
-        let l = (-lam).exp();
-        let mut k = 0u64;
-        let mut p = 1.0;
+        if lam >= 10.0 {
+            self.poisson_ptrs(lam) as u64
+        } else if lam == 0.0 {
+            0
+        } else {
+            self.poisson_mult(lam) as u64
+        }
+    }
+
+    /// Multiplicative (Knuth) method for small lambda.
+    /// Matches `random_poisson_mult()` in NumPy's distributions.c.
+    fn poisson_mult(&mut self, lam: f64) -> i64 {
+        let enlam = (-lam).exp();
+        let mut x: i64 = 0;
+        let mut prod = 1.0;
         loop {
-            k += 1;
-            p *= self.next_f64();
-            if p <= l {
-                break;
+            let u = self.next_f64();
+            prod *= u;
+            if prod > enlam {
+                x += 1;
+            } else {
+                return x;
             }
         }
-        k - 1
+    }
+
+    /// Transformed rejection method (PTRS) for large lambda.
+    /// Matches `random_poisson_ptrs()` in NumPy's distributions.c.
+    /// W. Hörmann, "The transformed rejection method for generating
+    /// Poisson random variables", Insurance: Mathematics and Economics 12, 39-45 (1993).
+    fn poisson_ptrs(&mut self, lam: f64) -> i64 {
+        let slam = lam.sqrt();
+        let loglam = lam.ln();
+        let b = 0.931 + 2.53 * slam;
+        let a = -0.059 + 0.02483 * b;
+        let invalpha = 1.1239 + 1.1328 / (b - 3.4);
+        let vr = 0.9277 - 3.6224 / (b - 2.0);
+
+        loop {
+            let u = self.next_f64() - 0.5;
+            let v = self.next_f64();
+            let us = 0.5 - u.abs();
+            let k = ((2.0 * a / us + b) * u + lam + 0.43).floor() as i64;
+
+            if us >= 0.07 && v <= vr {
+                return k;
+            }
+            if k < 0 || (us < 0.013 && v > us) {
+                continue;
+            }
+            if v.ln() + invalpha.ln() - (a / (us * us) + b).ln()
+                <= -lam + (k as f64) * loglam - random_loggam((k + 1) as f64)
+            {
+                return k;
+            }
+        }
     }
 
     /// Generate binomially distributed samples.
@@ -2786,23 +2873,14 @@ impl Generator {
 
     /// Negative binomial distribution (np.random.negative_binomial).
     /// Number of failures before `n` successes, with success probability `p`.
+    ///
+    /// Uses gamma-Poisson mixture matching NumPy's `random_negative_binomial`:
+    /// `Y = gamma(n, (1-p)/p); return poisson(Y)`.
     pub fn negative_binomial(&mut self, n: f64, p: f64, size: usize) -> Vec<u64> {
-        // Gamma-Poisson mixture
         (0..size)
             .map(|_| {
-                let gamma_val = self.sample_gamma(n) * (1.0 - p) / p;
-                // Poisson with rate gamma_val
-                let l = (-gamma_val).exp();
-                let mut k = 0u64;
-                let mut pp = 1.0;
-                loop {
-                    k += 1;
-                    pp *= self.next_f64();
-                    if pp <= l {
-                        break;
-                    }
-                }
-                k - 1
+                let y = self.sample_gamma(n) * (1.0 - p) / p;
+                self.sample_poisson_single(y)
             })
             .collect()
     }
@@ -5925,6 +6003,14 @@ mod tests {
     }
 
     #[test]
+    fn oracle_poisson_large_lambda() {
+        let mut g = oracle_gen();
+        let vals = g.poisson(20.0, 10);
+        let expected: Vec<u64> = vec![28, 16, 21, 26, 19, 18, 26, 18, 22, 16];
+        assert_u64_seq("poisson_large", &vals, &expected);
+    }
+
+    #[test]
     fn oracle_f_distribution() {
         let mut g = oracle_gen();
         let vals = g.f(5.0, 10.0, 10);
@@ -5996,6 +6082,15 @@ mod tests {
         let vals = g.negative_binomial(5.0, 0.5, 10);
         let expected: Vec<u64> = vec![7, 2, 9, 2, 8, 8, 2, 2, 8, 3];
         assert_u64_seq("negative_binomial", &vals, &expected);
+    }
+
+    #[test]
+    fn oracle_negative_binomial_large_n() {
+        // Large n produces gamma values that trigger PTRS Poisson path (lam >= 10)
+        let mut g = oracle_gen();
+        let vals = g.negative_binomial(50.0, 0.3, 5);
+        let expected: Vec<u64> = vec![117, 124, 101, 100, 191];
+        assert_u64_seq("negative_binomial_large_n", &vals, &expected);
     }
 
     #[test]
