@@ -49,16 +49,16 @@
 
 | Crate | Tests | Description |
 |---|---|---|
-| fnp-ufunc | 1,121 | Core array operations, math, sorting, polynomials, e2e pipelines |
-| fnp-ndarray | 136 | Shape legality, stride calculus, broadcast contracts |
-| fnp-linalg | 181 | Linear algebra decompositions, solvers, norms |
-| fnp-random | 178 | RNG distributions (39 oracle-verified), seeding, reproducibility |
+| fnp-ufunc | 1,141 | Core array operations, math, sorting, polynomials, NaN-correct reductions, 20 oracle edge-case tests |
+| fnp-ndarray | 44 | Shape legality, stride calculus, broadcast contracts |
+| fnp-linalg | 197 | Linear algebra decompositions, solvers, norms, 16 NumPy oracle tests |
+| fnp-random | 179 | RNG distributions (40 oracle-verified), seeding, reproducibility |
 | fnp-iter | 13 | Transfer semantics, overlap detection, flatiter/nditer |
-| fnp-io | 44 | NPY/NPZ read/write, text formats, compression |
-| fnp-conformance | 94 | Differential parity, metamorphic identities, adversarial fuzzing, witness stability |
+| fnp-io | 143 | NPY/NPZ read/write, text formats, compression, 7 format oracle tests |
+| fnp-conformance | 93 | Differential parity, metamorphic identities, adversarial fuzzing, witness stability |
 | fnp-dtype | 114 | Dtype taxonomy, promotion table, cast policy primitives |
 | fnp-runtime | 12 | Mode split, fail-closed decoding, override-audit gate |
-| **Total** | **1,893** | |
+| **Total** | **1,936** | |
 
 ## Remaining Gaps (Python-specific, low priority)
 

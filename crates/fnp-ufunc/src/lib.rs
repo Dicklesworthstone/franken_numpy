@@ -2484,11 +2484,7 @@ impl UFuncArray {
         }
         match axis {
             None => {
-                let max = self
-                    .values
-                    .iter()
-                    .copied()
-                    .fold(f64::NEG_INFINITY, nan_max);
+                let max = self.values.iter().copied().fold(f64::NEG_INFINITY, nan_max);
                 let shape = if keepdims {
                     vec![1; self.shape.len()]
                 } else {
@@ -30138,12 +30134,7 @@ mod tests {
     #[test]
     fn numpy_oracle_nan_sum_propagation() {
         // np.sum([1.0, NaN, 3.0]) == NaN
-        let arr = UFuncArray::new(
-            vec![3],
-            vec![1.0, f64::NAN, 3.0],
-            DType::F64,
-        )
-        .unwrap();
+        let arr = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
         let result = arr.reduce_sum(None, false).unwrap();
         assert!(result.values()[0].is_nan(), "sum with NaN should be NaN");
     }
@@ -30151,12 +30142,7 @@ mod tests {
     #[test]
     fn numpy_oracle_nansum_skips_nan() {
         // np.nansum([1.0, NaN, 3.0]) == 4.0
-        let arr = UFuncArray::new(
-            vec![3],
-            vec![1.0, f64::NAN, 3.0],
-            DType::F64,
-        )
-        .unwrap();
+        let arr = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
         let result = arr.nansum(None, false).unwrap();
         assert_eq!(result.values(), &[4.0]);
     }
@@ -30164,12 +30150,7 @@ mod tests {
     #[test]
     fn numpy_oracle_nan_min_propagation() {
         // np.min([1.0, NaN, 3.0]) == NaN
-        let arr = UFuncArray::new(
-            vec![3],
-            vec![1.0, f64::NAN, 3.0],
-            DType::F64,
-        )
-        .unwrap();
+        let arr = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
         let result = arr.reduce_min(None, false).unwrap();
         assert!(result.values()[0].is_nan(), "min with NaN should be NaN");
     }
@@ -30177,12 +30158,7 @@ mod tests {
     #[test]
     fn numpy_oracle_nanmin_skips_nan() {
         // np.nanmin([1.0, NaN, 3.0]) == 1.0
-        let arr = UFuncArray::new(
-            vec![3],
-            vec![1.0, f64::NAN, 3.0],
-            DType::F64,
-        )
-        .unwrap();
+        let arr = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
         let result = arr.nanmin(None, false).unwrap();
         assert_eq!(result.values(), &[1.0]);
     }
@@ -30214,12 +30190,7 @@ mod tests {
     fn numpy_oracle_all_nan_nanmin() {
         // np.nanmin([NaN, NaN]) raises ValueError in NumPy
         // (or returns NaN with a warning).  We should handle gracefully.
-        let arr = UFuncArray::new(
-            vec![2],
-            vec![f64::NAN, f64::NAN],
-            DType::F64,
-        )
-        .unwrap();
+        let arr = UFuncArray::new(vec![2], vec![f64::NAN, f64::NAN], DType::F64).unwrap();
         let result = arr.nanmin(None, false).unwrap();
         // When all values are NaN, nanmin returns NaN (with warning in NumPy)
         assert!(result.values()[0].is_nan() || result.values()[0] == f64::INFINITY);
@@ -30268,12 +30239,8 @@ mod tests {
     #[test]
     fn numpy_oracle_sort_nan_at_end() {
         // np.sort([3.0, NaN, 1.0, NaN, 2.0]) == [1.0, 2.0, 3.0, NaN, NaN]
-        let arr = UFuncArray::new(
-            vec![5],
-            vec![3.0, f64::NAN, 1.0, f64::NAN, 2.0],
-            DType::F64,
-        )
-        .unwrap();
+        let arr =
+            UFuncArray::new(vec![5], vec![3.0, f64::NAN, 1.0, f64::NAN, 2.0], DType::F64).unwrap();
         let sorted = arr.sort(None, None).unwrap();
         let v = sorted.values();
         assert_eq!(&v[..3], &[1.0, 2.0, 3.0]);
@@ -30325,9 +30292,6 @@ mod tests {
         // np.quantile([1.0, NaN, 3.0], 0.5) == NaN
         let arr = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
         let result = arr.quantile(0.5, None).unwrap();
-        assert!(
-            result.values()[0].is_nan(),
-            "quantile should propagate NaN"
-        );
+        assert!(result.values()[0].is_nan(), "quantile should propagate NaN");
     }
 }

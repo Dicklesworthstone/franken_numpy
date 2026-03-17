@@ -4895,9 +4895,15 @@ mod tests {
         let header_str = std::str::from_utf8(header_bytes).expect("utf8 header");
         // Must contain the required fields
         assert!(header_str.contains("'descr'"), "missing descr");
-        assert!(header_str.contains("'fortran_order'"), "missing fortran_order");
+        assert!(
+            header_str.contains("'fortran_order'"),
+            "missing fortran_order"
+        );
         assert!(header_str.contains("'shape'"), "missing shape");
-        assert!(header_str.contains("False"), "fortran_order should be False");
+        assert!(
+            header_str.contains("False"),
+            "fortran_order should be False"
+        );
         // Total preamble + header must be divisible by 16 (NumPy v1 alignment)
         assert_eq!((10 + header_len) % 16, 0, "header not 16-byte aligned");
     }
