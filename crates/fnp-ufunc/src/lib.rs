@@ -6232,12 +6232,16 @@ impl UFuncArray {
     pub fn median(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
         match axis {
             None => {
-                let mut sorted = self.values.clone();
-                sorted.sort_by(|a, b| a.total_cmp(b));
-                let n = sorted.len();
+                let n = self.values.len();
                 if n == 0 {
                     return Err(UFuncError::Msg("median of empty array".to_string()));
                 }
+                // NumPy propagates NaN in median
+                if self.values.iter().any(|v| v.is_nan()) {
+                    return Ok(Self::scalar(f64::NAN, DType::F64));
+                }
+                let mut sorted = self.values.clone();
+                sorted.sort_by(|a, b| a.total_cmp(b));
                 let med = if n % 2 == 1 {
                     sorted[n / 2]
                 } else {
@@ -6261,14 +6265,20 @@ impl UFuncArray {
                 let mut values = Vec::with_capacity(outer * inner);
                 for o in 0..outer {
                     for i in 0..inner {
-                        let mut lane: Vec<f64> = (0..axis_len)
+                        let lane: Vec<f64> = (0..axis_len)
                             .map(|a| self.values[o * axis_len * inner + a * inner + i])
                             .collect();
-                        lane.sort_by(|a, b| a.total_cmp(b));
+                        // NumPy propagates NaN in median
+                        if lane.iter().any(|v| v.is_nan()) {
+                            values.push(f64::NAN);
+                            continue;
+                        }
+                        let mut sorted_lane = lane;
+                        sorted_lane.sort_by(|a, b| a.total_cmp(b));
                         let med = if axis_len % 2 == 1 {
-                            lane[axis_len / 2]
+                            sorted_lane[axis_len / 2]
                         } else {
-                            (lane[axis_len / 2 - 1] + lane[axis_len / 2]) / 2.0
+                            (sorted_lane[axis_len / 2 - 1] + sorted_lane[axis_len / 2]) / 2.0
                         };
                         values.push(med);
                     }
@@ -6293,12 +6303,16 @@ impl UFuncArray {
         let fraction = q / 100.0;
         match axis {
             None => {
-                let mut sorted = self.values.clone();
-                sorted.sort_by(|a, b| a.total_cmp(b));
-                let n = sorted.len();
+                let n = self.values.len();
                 if n == 0 {
                     return Err(UFuncError::Msg("percentile of empty array".to_string()));
                 }
+                // NumPy propagates NaN in percentile
+                if self.values.iter().any(|v| v.is_nan()) {
+                    return Ok(Self::scalar(f64::NAN, DType::F64));
+                }
+                let mut sorted = self.values.clone();
+                sorted.sort_by(|a, b| a.total_cmp(b));
                 let val = interpolate_percentile(&sorted, fraction);
                 Ok(Self::scalar(val, DType::F64))
             }
@@ -6320,11 +6334,17 @@ impl UFuncArray {
                 let mut values = Vec::with_capacity(outer * inner);
                 for o in 0..outer {
                     for i in 0..inner {
-                        let mut lane: Vec<f64> = (0..axis_len)
+                        let lane: Vec<f64> = (0..axis_len)
                             .map(|a| self.values[o * axis_len * inner + a * inner + i])
                             .collect();
-                        lane.sort_by(|a, b| a.total_cmp(b));
-                        values.push(interpolate_percentile(&lane, fraction));
+                        // NumPy propagates NaN in percentile
+                        if lane.iter().any(|v| v.is_nan()) {
+                            values.push(f64::NAN);
+                            continue;
+                        }
+                        let mut sorted_lane = lane;
+                        sorted_lane.sort_by(|a, b| a.total_cmp(b));
+                        values.push(interpolate_percentile(&sorted_lane, fraction));
                     }
                 }
                 Ok(Self {
@@ -6351,12 +6371,15 @@ impl UFuncArray {
         let fraction = q / 100.0;
         match axis {
             None => {
-                let mut sorted = self.values.clone();
-                sorted.sort_by(|a, b| a.total_cmp(b));
-                let n = sorted.len();
-                if n == 0 {
+                if self.values.is_empty() {
                     return Err(UFuncError::Msg("percentile of empty array".to_string()));
                 }
+                // NumPy propagates NaN in percentile
+                if self.values.iter().any(|v| v.is_nan()) {
+                    return Ok(Self::scalar(f64::NAN, DType::F64));
+                }
+                let mut sorted = self.values.clone();
+                sorted.sort_by(|a, b| a.total_cmp(b));
                 let val = interpolate_percentile_method(&sorted, fraction, method);
                 Ok(Self::scalar(val, DType::F64))
             }
@@ -6378,11 +6401,20 @@ impl UFuncArray {
                 let mut values = Vec::with_capacity(outer * inner);
                 for o in 0..outer {
                     for i in 0..inner {
-                        let mut lane: Vec<f64> = (0..axis_len)
+                        let lane: Vec<f64> = (0..axis_len)
                             .map(|a| self.values[o * axis_len * inner + a * inner + i])
                             .collect();
-                        lane.sort_by(|a, b| a.total_cmp(b));
-                        values.push(interpolate_percentile_method(&lane, fraction, method));
+                        if lane.iter().any(|v| v.is_nan()) {
+                            values.push(f64::NAN);
+                            continue;
+                        }
+                        let mut sorted_lane = lane;
+                        sorted_lane.sort_by(|a, b| a.total_cmp(b));
+                        values.push(interpolate_percentile_method(
+                            &sorted_lane,
+                            fraction,
+                            method,
+                        ));
                     }
                 }
                 Ok(Self {
@@ -30267,5 +30299,35 @@ mod tests {
         assert_eq!(result.values()[0], 1.0);
         assert!(result.values()[1].is_nan(), "cummax should propagate NaN");
         assert!(result.values()[2].is_nan(), "cummax NaN should stick");
+    }
+
+    #[test]
+    fn numpy_oracle_median_nan_propagation() {
+        // np.median([1.0, 2.0, NaN]) == NaN
+        let arr = UFuncArray::new(vec![3], vec![1.0, 2.0, f64::NAN], DType::F64).unwrap();
+        let result = arr.median(None).unwrap();
+        assert!(result.values()[0].is_nan(), "median should propagate NaN");
+    }
+
+    #[test]
+    fn numpy_oracle_percentile_nan_propagation() {
+        // np.percentile([1.0, NaN, 3.0], 50) == NaN
+        let arr = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
+        let result = arr.percentile(50.0, None).unwrap();
+        assert!(
+            result.values()[0].is_nan(),
+            "percentile should propagate NaN"
+        );
+    }
+
+    #[test]
+    fn numpy_oracle_quantile_nan_propagation() {
+        // np.quantile([1.0, NaN, 3.0], 0.5) == NaN
+        let arr = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
+        let result = arr.quantile(0.5, None).unwrap();
+        assert!(
+            result.values()[0].is_nan(),
+            "quantile should propagate NaN"
+        );
     }
 }
