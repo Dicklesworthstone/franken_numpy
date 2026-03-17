@@ -6453,7 +6453,7 @@ impl UFuncArray {
             return Err(UFuncError::Msg("mode: empty array".to_string()));
         }
         let mut sorted = self.values.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(nan_last_cmp);
         let mut best_val = sorted[0];
         let mut best_count = 1_usize;
         let mut cur_val = sorted[0];
@@ -6502,13 +6502,31 @@ impl UFuncArray {
     }
 
     /// Cumulative minimum along the given axis (or flat if None).
+    /// NaN propagates: once a NaN is seen, all subsequent outputs are NaN.
     pub fn cummin(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
-        self.cumulative_op(axis, |running, v| if v < running { v } else { running })
+        self.cumulative_op(axis, |running, v| {
+            if running.is_nan() || v.is_nan() {
+                f64::NAN
+            } else if v < running {
+                v
+            } else {
+                running
+            }
+        })
     }
 
     /// Cumulative maximum along the given axis (or flat if None).
+    /// NaN propagates: once a NaN is seen, all subsequent outputs are NaN.
     pub fn cummax(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
-        self.cumulative_op(axis, |running, v| if v > running { v } else { running })
+        self.cumulative_op(axis, |running, v| {
+            if running.is_nan() || v.is_nan() {
+                f64::NAN
+            } else if v > running {
+                v
+            } else {
+                running
+            }
+        })
     }
 
     /// Generic cumulative operation along an axis.
@@ -12349,7 +12367,7 @@ fn heapsort_f64(data: &mut [f64]) {
     if n <= 1 {
         return;
     }
-    let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+    let cmp = |a: &f64, b: &f64| nan_last_cmp(a, b);
 
     // Build max-heap (sift down from last parent to root)
     for i in (0..n / 2).rev() {
@@ -12395,11 +12413,7 @@ fn heapsort_indices_by(indices: &mut [usize], values: &dyn Fn(usize) -> f64) {
     if n <= 1 {
         return;
     }
-    let cmp = |a: &usize, b: &usize| {
-        values(*a)
-            .partial_cmp(&values(*b))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    };
+    let cmp = |a: &usize, b: &usize| nan_last_cmp(&values(*a), &values(*b));
 
     for i in (0..n / 2).rev() {
         sift_down_idx(indices, i, n, &cmp);
@@ -12438,23 +12452,29 @@ fn sift_down_idx(
 }
 
 /// Sort a slice using the specified algorithm kind.
+/// NaN-last comparator matching NumPy's sort behavior (NaN sorts to end).
+fn nan_last_cmp(a: &f64, b: &f64) -> std::cmp::Ordering {
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        // Safety: neither is NaN, so partial_cmp always returns Some.
+        (false, false) => a.partial_cmp(b).unwrap(),
+    }
+}
+
 fn sort_slice_by_kind(data: &mut [f64], kind: &str) {
-    let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
     match kind {
-        "quicksort" => data.sort_unstable_by(cmp),
-        "stable" => data.sort_by(cmp),
+        "quicksort" => data.sort_unstable_by(nan_last_cmp),
+        "stable" => data.sort_by(nan_last_cmp),
         "heapsort" => heapsort_f64(data),
-        _ => data.sort_unstable_by(cmp),
+        _ => data.sort_unstable_by(nan_last_cmp),
     }
 }
 
 /// Sort indices using the specified algorithm kind.
 fn argsort_slice_by_kind(indices: &mut [usize], values: &dyn Fn(usize) -> f64, kind: &str) {
-    let cmp = |a: &usize, b: &usize| {
-        values(*a)
-            .partial_cmp(&values(*b))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    };
+    let cmp = |a: &usize, b: &usize| nan_last_cmp(&values(*a), &values(*b));
     match kind {
         "quicksort" => indices.sort_unstable_by(cmp),
         "stable" => indices.sort_by(cmp),
@@ -14716,7 +14736,7 @@ impl MaskedArray {
             return Err(MAError::Msg("median: no unmasked elements".into()));
         }
         let mut vals = compressed.values().to_vec();
-        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        vals.sort_by(nan_last_cmp);
         let n = vals.len();
         if n.is_multiple_of(2) {
             Ok((vals[n / 2 - 1] + vals[n / 2]) / 2.0)
@@ -30211,5 +30231,41 @@ mod tests {
         let arr = UFuncArray::new(vec![3], vec![3.0, f64::NAN, 1.0], DType::F64).unwrap();
         let result = arr.reduce_argmax(None).unwrap();
         assert_eq!(result.values(), &[1.0]);
+    }
+
+    #[test]
+    fn numpy_oracle_sort_nan_at_end() {
+        // np.sort([3.0, NaN, 1.0, NaN, 2.0]) == [1.0, 2.0, 3.0, NaN, NaN]
+        let arr = UFuncArray::new(
+            vec![5],
+            vec![3.0, f64::NAN, 1.0, f64::NAN, 2.0],
+            DType::F64,
+        )
+        .unwrap();
+        let sorted = arr.sort(None, None).unwrap();
+        let v = sorted.values();
+        assert_eq!(&v[..3], &[1.0, 2.0, 3.0]);
+        assert!(v[3].is_nan());
+        assert!(v[4].is_nan());
+    }
+
+    #[test]
+    fn numpy_oracle_cummin_nan_propagation() {
+        // np.minimum.accumulate([3.0, NaN, 1.0]) == [3.0, NaN, NaN]
+        let arr = UFuncArray::new(vec![3], vec![3.0, f64::NAN, 1.0], DType::F64).unwrap();
+        let result = arr.cummin(None).unwrap();
+        assert_eq!(result.values()[0], 3.0);
+        assert!(result.values()[1].is_nan(), "cummin should propagate NaN");
+        assert!(result.values()[2].is_nan(), "cummin NaN should stick");
+    }
+
+    #[test]
+    fn numpy_oracle_cummax_nan_propagation() {
+        // np.maximum.accumulate([1.0, NaN, 3.0]) == [1.0, NaN, NaN]
+        let arr = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
+        let result = arr.cummax(None).unwrap();
+        assert_eq!(result.values()[0], 1.0);
+        assert!(result.values()[1].is_nan(), "cummax should propagate NaN");
+        assert!(result.values()[2].is_nan(), "cummax NaN should stick");
     }
 }
