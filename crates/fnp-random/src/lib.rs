@@ -199,6 +199,7 @@ pub const MAX_SEED_SEQUENCE_WORDS: usize = 1_048_576;
 pub const MAX_RNG_JUMP_OPERATIONS: u64 = 1024;
 pub const MAX_RNG_STATE_SCHEMA_FIELDS: usize = 4096;
 pub const BIT_GENERATOR_STATE_SCHEMA_VERSION: u32 = 1;
+const MAX_BINOMIAL_DIRECT_TRIALS: u64 = i64::MAX as u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RandomRuntimeMode {
@@ -2197,16 +2198,31 @@ impl Generator {
     /// for large `min(p,q)*n`, inversion for small `min(p,q)*n <= 30`.
     #[must_use]
     pub fn binomial(&mut self, n: u64, p: f64, size: usize) -> Vec<u64> {
-        let n_i64 = n as i64;
         // Precompute cached BTPE/inversion parameters (shared across all samples)
         let mut cache = BinomialCache::new();
         (0..size)
-            .map(|_| self.sample_binomial_single(n_i64, p, &mut cache) as u64)
+            .map(|_| self.sample_binomial_single(n, p, &mut cache))
             .collect()
     }
 
     /// Single binomial sample matching NumPy's `random_binomial` dispatcher.
-    fn sample_binomial_single(&mut self, n: i64, p: f64, cache: &mut BinomialCache) -> i64 {
+    fn sample_binomial_single(&mut self, n: u64, p: f64, cache: &mut BinomialCache) -> u64 {
+        if n == 0 || p == 0.0 {
+            return 0;
+        }
+
+        let mut remaining = n;
+        let mut total = 0_u64;
+        while remaining > MAX_BINOMIAL_DIRECT_TRIALS {
+            total += self.sample_binomial_single_i64(i64::MAX, p, cache) as u64;
+            remaining -= MAX_BINOMIAL_DIRECT_TRIALS;
+        }
+        total + self.sample_binomial_single_i64(remaining as i64, p, cache) as u64
+    }
+
+    /// Single binomial sample matching NumPy's `random_binomial` dispatcher
+    /// for the direct `i64` kernel range used by BTPE and inversion.
+    fn sample_binomial_single_i64(&mut self, n: i64, p: f64, cache: &mut BinomialCache) -> i64 {
         if n == 0 || p == 0.0 {
             return 0;
         }
@@ -2828,19 +2844,19 @@ impl Generator {
         (0..size)
             .map(|_| {
                 let mut result = vec![0u64; pvals.len()];
-                let mut remaining = n as i64;
+                let mut remaining = n;
                 let mut p_remaining = 1.0;
                 for (i, &p) in pvals.iter().enumerate() {
                     if remaining <= 0 {
                         break;
                     }
                     if i == pvals.len() - 1 {
-                        result[i] = remaining as u64;
+                        result[i] = remaining;
                         break;
                     }
                     let p_cond = (p / p_remaining).clamp(0.0, 1.0);
                     let draws = self.sample_binomial_single(remaining, p_cond, &mut cache);
-                    result[i] = draws as u64;
+                    result[i] = draws;
                     remaining -= draws;
                     p_remaining -= p;
                     if p_remaining <= 0.0 {
@@ -4612,6 +4628,22 @@ mod tests {
             assert_eq!(sample.len(), 3);
             assert_eq!(sample.iter().sum::<u64>(), 10); // Must sum to n
         }
+    }
+
+    #[test]
+    fn binomial_supports_trials_above_i64_max() {
+        let mut rng = test_generator();
+        let n = i64::MAX as u64 + 17;
+        let samples = rng.binomial(n, 1.0, 3);
+        assert_eq!(samples, vec![n, n, n]);
+    }
+
+    #[test]
+    fn multinomial_supports_trials_above_i64_max() {
+        let mut rng = test_generator();
+        let n = i64::MAX as u64 + 17;
+        let samples = rng.multinomial(n, &[1.0, 0.0], 2);
+        assert_eq!(samples, vec![vec![n, 0], vec![n, 0]]);
     }
 
     #[test]
