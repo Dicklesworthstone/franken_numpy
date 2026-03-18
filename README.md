@@ -22,7 +22,7 @@ NumPy is the backbone of scientific Python, but it carries 30 years of C/C++ leg
 
 FrankenNumPy rebuilds NumPy's semantics from scratch in safe Rust with two non-negotiable goals:
 
-1. **Absolute behavioral compatibility** with legacy NumPy (not a subset, not "inspired by" -- the full API, edge cases and all).
+1. **Absolute behavioral compatibility** with legacy NumPy. Not a subset, not "inspired by." The full API, edge cases and all.
 2. **Rigorous architecture** with formal contracts, dual-mode runtime (strict/hardened), and differential conformance against a NumPy oracle.
 
 ## Why FrankenNumPy?
@@ -81,7 +81,7 @@ let perm = rng.permutation(&data)?;             // Fisher-Yates via random_inter
 
 **Parity debt, not feature cuts.** Every behavioral gap with NumPy is tracked as debt to be closed, not as an accepted scope reduction.
 
-**Stride Calculus Engine (SCE).** All shape transformations -- broadcast, reshape, transpose, view aliasing -- flow through a single deterministic engine. This is the non-negotiable compatibility kernel.
+**Stride Calculus Engine (SCE).** All shape transformations (broadcast, reshape, transpose, view aliasing) flow through a single deterministic engine. This is the non-negotiable compatibility kernel.
 
 **Dual-mode runtime.** Strict mode maximizes observable NumPy compatibility. Hardened mode adds safety guards and bounded defensive recovery. Both modes log decisions to an evidence ledger.
 
@@ -140,37 +140,38 @@ cargo test --workspace --all-features
 ## Architecture
 
 ```
-                    ┌─────────────────────────────────────────┐
-                    │              User API Layer              │
-                    │  UFuncArray · MaskedArray · StringArray  │
-                    └────────────────┬────────────────────────┘
-                                     │
-         ┌───────────────┬───────────┼───────────┬───────────────┐
-         ▼               ▼           ▼           ▼               ▼
-   ┌──────────┐   ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
-   │ fnp-ufunc│   │fnp-linalg│ │fnp-random│ │  fnp-io  │ │  fnp-fft │
-   │ 1,141    │   │  197     │ │  179     │ │  143     │ │ (in-ufunc│
-   │ tests    │   │  tests   │ │  tests   │ │  tests   │ │  module) │
-   └────┬─────┘   └──────────┘ └──────────┘ └──────────┘ └──────────┘
-        │
-   ┌────┼──────────────────────────────────────────┐
-   ▼    ▼                                          ▼
-┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐
-│ fnp-dtype│  │fnp-ndarray│  │ fnp-iter │  │ fnp-runtime  │
-│ 114 tests│  │ 44 tests │  │ 13 tests │  │  12 tests    │
-│ promotion│  │  SCE core │  │ transfer │  │ strict/      │
-│ casting  │  │  strides  │  │ semantics│  │ hardened     │
-└──────────┘  └──────────┘  └──────────┘  └──────────────┘
+           ┌──────────────────────────────────────────────┐
+           │              User API Layer                  │
+           │    UFuncArray · MaskedArray · StringArray    │
+           └───────────────────────┬──────────────────────┘
+                                  │
+      ┌───────────┬───────────────┼──────────────┬───────────┐
+      ▼           ▼               ▼              ▼           ▼
+ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
+ │ fnp-ufunc│ │fnp-linalg│ │fnp-random│ │  fnp-io  │ │ fnp-fft  │
+ │ 1141     │ │ 197      │ │ 179      │ │ 143      │ │ (in-ufunc│
+ │ tests    │ │ tests    │ │ tests    │ │ tests    │ │  module) │
+ └─────┬────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘
+       │
+ ┌─────┴────────────────────────────────────────────────────┐
+ │                                                          │
+ ▼                                                          ▼
+ ┌──────────┐ ┌────────────┐ ┌──────────┐ ┌──────────────┐
+ │ fnp-dtype│ │ fnp-ndarray│ │ fnp-iter │ │ fnp-runtime  │
+ │ 114 tests│ │ 44 tests   │ │ 13 tests │ │ 12 tests     │
+ │ promote  │ │ SCE core   │ │ transfer │ │ strict/      │
+ │ cast     │ │ strides    │ │ semantics│ │ hardened     │
+ └──────────┘ └────────────┘ └──────────┘ └──────────────┘
                     ▲
                     │
-        Stride Calculus Engine (SCE)
-        ─ shape → strides (C/F)
-        ─ broadcast legality
-        ─ reshape with -1 inference
-        ─ alias-safe view transitions
+         Stride Calculus Engine (SCE)
+         - shape -> strides (C/F)
+         - broadcast legality
+         - reshape with -1 inference
+         - alias-safe view transitions
 ```
 
-The **Stride Calculus Engine** is the non-regression kernel. Every shape transformation -- broadcast, reshape, transpose, view creation -- is validated through SCE before execution.
+The **Stride Calculus Engine** is the non-regression kernel. Every shape transformation (broadcast, reshape, transpose, view creation) is validated through SCE before execution.
 
 ---
 
@@ -269,7 +270,7 @@ Every binary operation handles broadcasting through the same code path: compute 
 
 ### Random Number Generation (`fnp-random`)
 
-The RNG crate achieves bit-exact parity with NumPy by porting every algorithm from NumPy's C source code. Here is how each layer works:
+The RNG crate achieves bit-exact parity with NumPy by porting every algorithm from NumPy's C source code.
 
 **Bit generators.** Three implementations:
 - `Pcg64DxsmRng` — the default. State is 128-bit with 128-bit increment. Uses the DXSM output function and cheap multiplier for generation. Seeding goes through `SeedSequence` which applies Melissa O'Neill's seed_seq design with SplitMix64 mixing.
@@ -339,7 +340,7 @@ The conformance crate is the quality backbone with four layers:
 
 ## Security Model
 
-FrankenNumPy's security stance goes beyond memory safety:
+FrankenNumPy's security posture covers more than memory safety:
 
 - **Zero unsafe Rust.** All 9 crates declare `#![forbid(unsafe_code)]`. The 88,000+ lines of Rust contain zero unsafe blocks.
 - **Fail-closed by default.** Unknown wire formats, unrecognized dtype descriptors, and metadata schema violations cause explicit errors, not silent fallbacks.
@@ -351,7 +352,7 @@ FrankenNumPy's security stance goes beyond memory safety:
 
 ## Algorithm Catalog
 
-Beyond the core engine described above, FrankenNumPy implements dozens of specific numerical algorithms. Here is what each subsystem uses under the hood.
+Each subsystem uses specific numerical algorithms. This section catalogs them.
 
 ### FFT
 
@@ -512,6 +513,255 @@ The G8 CI gate (`run_raptorq_gate.sh`) enforces that all required bundles have v
 
 ---
 
+## Threat Model
+
+12 threat classes are formally mapped in `security_control_checks_v1.yaml`, each with assigned conformance suites, compatibility gates, and override audit policies:
+
+| Threat Class | What Could Go Wrong | Control |
+|---|---|---|
+| `malformed_shape` | Crafted dimensions cause OOB access or allocation bomb | Shape/stride suite + runtime policy adversarial suite |
+| `unsafe_cast_path` | Silent data corruption through widening/narrowing cast | Dtype promotion suite with drift gate |
+| `malicious_stride_alias` | Overlapping views cause data races or corruption | Shape/stride suite with alias drift gate |
+| `malformed_npy_npz` | Malicious `.npy`/`.npz` file exploits parser bugs | IO adversarial suite + parser fail-closed gate |
+| `unknown_metadata_version` | Future format version silently misinterpreted | Runtime policy suite + compatibility drift hash |
+| `adversarial_fixture` | Hostile test inputs cause crash or panic | Adversarial suites across IO/RNG/linalg with reproducibility gate |
+| `rng_reproducibility_drift` | Code change silently alters RNG output sequences | RNG differential + metamorphic + adversarial suites |
+| `linalg_shape_tolerance_abuse` | Ill-conditioned matrix causes wrong result | Linalg differential + metamorphic suites |
+| `linalg_backend_bridge_tampering` | Backend produces wrong result for well-conditioned input | Linalg adversarial + crash signature suites |
+| `corrupt_durable_artifact` | Bit-rot or tampering in stored conformance artifacts | RaptorQ decode proof hash gate |
+| `policy_override_abuse` | Unauthorized bypass of compatibility gates | Runtime policy adversarial + explicit audited override |
+
+Every threat log entry must include: `fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code`.
+
+---
+
+## Shared Memory and Views
+
+`UFuncArrayView` provides NumPy-style shared-memory views with overlap detection:
+
+```
+UFuncArrayView {
+    shape: Vec<usize>,
+    buffer: Arc<RwLock<Vec<f64>>>,  // shared backing store
+    offset: isize,                   // byte offset into buffer
+    strides: Vec<isize>,            // per-dimension strides (can be negative)
+    writable: bool,
+    dtype: DType,
+}
+```
+
+**Memory overlap detection** uses a two-tier approach:
+
+1. **Fast path (`may_share_memory`):** Checks whether the byte-offset spans of two views overlap. This is O(ndim) and conservative (may report false positives for non-contiguous views).
+
+2. **Exact path (`shares_memory`):** First checks `Arc` pointer equality (different backing buffers never share). If same buffer, computes the actual set of accessed byte offsets (up to 200,000) and checks for intersection. Falls back to the fast path if offset collection exceeds the limit.
+
+This supports safe in-place operations: if two views share memory, operations that read from one and write to the other must use temporary copies to avoid data corruption.
+
+---
+
+## Float Error State Machine
+
+FrankenNumPy replicates NumPy's floating-point error handling system:
+
+```
+┌───────────────┐   seterr(divide='raise')   ┌──────────────┐
+│ Default       │ ────────────────────────── │ Custom       │
+│ divide=Warn   │                            │ divide=Raise │
+│ over=Warn     │   errstate(all='ignore')   │ over=Warn    │
+│ under=Ignore  │ ────────────────────────── │ under=Ignore │
+│ invalid=Warn  │   (RAII guard restores)    │ invalid=Warn │
+└───────────────┘                            └──────────────┘
+```
+
+Six error modes per category: `Ignore` (suppress), `Warn` (log and continue), `Raise` (return error), `Call` (invoke user callback), `Print` (stderr), `Log` (append to event buffer).
+
+Four error categories: divide-by-zero, overflow, underflow, invalid operation.
+
+`errstate()` returns an RAII guard that automatically restores the previous error configuration when dropped, matching NumPy's context manager semantics:
+
+```rust
+let _guard = errstate(Some(FloatErrorMode::Ignore), None, None, None, None);
+// all float errors ignored in this scope
+// previous state restored when _guard drops
+```
+
+---
+
+## Scimath: Complex-Domain Extensions
+
+The `scimath` module provides 8 functions that extend real-valued math to the complex domain for inputs outside the real function's natural domain:
+
+| Function | Real Domain | Extension |
+|---|---|---|
+| `scimath_sqrt(x)` | x >= 0 | Returns complex sqrt for x < 0 |
+| `scimath_log(x)` | x > 0 | Returns complex log for x <= 0 |
+| `scimath_log2(x)` | x > 0 | Complex base-2 logarithm |
+| `scimath_log10(x)` | x > 0 | Complex base-10 logarithm |
+| `scimath_power(x, p)` | x >= 0 (for non-integer p) | Complex result for negative base |
+| `scimath_arccos(x)` | -1 <= x <= 1 | Complex arccosine for \|x\| > 1 |
+| `scimath_arcsin(x)` | -1 <= x <= 1 | Complex arcsine for \|x\| > 1 |
+| `scimath_arctanh(x)` | -1 < x < 1 | Complex arctanh for \|x\| >= 1 |
+
+These match `numpy.lib.scimath` and are useful in signal processing and physics where negative square roots or out-of-range inverse trig values arise naturally.
+
+---
+
+## Complete Distribution List
+
+All 49 random distributions available on `Generator`, grouped by family:
+
+**Continuous (28):** `beta`, `chisquare`, `exponential`, `f`/`f_distribution`, `gamma`, `gumbel`, `halfnormal`, `laplace`, `levy`, `logistic`, `lognormal`, `lomax`, `maxwell`, `noncentral_chisquare`, `noncentral_f`, `normal`, `pareto`, `power`, `rayleigh`, `standard_cauchy`, `standard_exponential`, `standard_gamma`, `standard_normal`, `standard_t`, `triangular`, `vonmises`, `wald`, `weibull`
+
+**Discrete (7):** `binomial`, `geometric`, `hypergeometric`, `logseries`, `negative_binomial`, `poisson`, `zipf`
+
+**Multivariate (3):** `dirichlet`, `multinomial`, `multivariate_normal`
+
+**Uniform (3):** `random` (float [0,1)), `uniform` (float [low,high)), `integers` (int [low,high))
+
+**Permutation (3):** `shuffle` (in-place), `permutation` (copy), `permuted` (axis-aware)
+
+**Utility (2):** `bytes`, `choice`/`choice_weighted`
+
+**State (3):** `spawn`, `jumped`, `state`/`set_state`
+
+---
+
+## Array Manipulation Toolkit
+
+FrankenNumPy implements the full set of NumPy's array construction and manipulation functions.
+
+### Construction
+
+| Function | What it does |
+|---|---|
+| `zeros(shape)` | Array filled with 0.0 |
+| `ones(shape)` | Array filled with 1.0 |
+| `full(shape, val)` | Array filled with arbitrary value |
+| `empty(shape)` | Uninitialized array (filled with 0.0 in practice) |
+| `eye(n, m, k)` | Identity-like matrix with diagonal offset `k` |
+| `identity(n)` | Square identity matrix (delegates to `eye`) |
+| `diag(v, k)` | 1-D input: construct diagonal matrix. 2-D input: extract diagonal. |
+| `arange(start, stop, step)` | Evenly spaced values within interval |
+| `linspace(start, stop, num)` | `num` evenly spaced values including endpoints |
+| `logspace(start, stop, num)` | Values spaced evenly on log scale |
+| `geomspace(start, stop, num)` | Values spaced evenly on geometric scale |
+| `meshgrid(x, y, ...)` | Coordinate matrices from coordinate vectors (xy indexing) |
+| `fromfunction(shape, f)` | Apply closure `f(&[usize]) -> f64` to each multi-index |
+
+### Joining and Splitting
+
+| Function | Axis behavior |
+|---|---|
+| `concatenate(arrays, axis)` | Join along existing axis. All arrays must match on non-concat dims. |
+| `stack(arrays, axis)` | Join along new axis. All arrays must have identical shape. |
+| `vstack` / `row_stack` | Stack vertically (along axis 0). Promotes 1-D to (1, N). |
+| `hstack` | Stack horizontally. For 1-D: axis 0. For N-D: axis 1. |
+| `dstack` | Stack along axis 2. Promotes to at least 3-D first. |
+| `column_stack` | Stack 1-D arrays as columns of a 2-D array. |
+| `block(grid)` | Assemble from nested grid. Concatenates within rows, then stacks. |
+| `split(ary, n, axis)` | Split into `n` equal sub-arrays along axis |
+| `array_split(ary, n, axis)` | Split allowing unequal sub-arrays |
+
+### Rearranging
+
+| Function | What it does |
+|---|---|
+| `transpose(axes)` | Permute dimensions |
+| `moveaxis(src, dst)` | Move one axis to a new position |
+| `rollaxis(axis, start)` | Roll axis backward until before `start` |
+| `swapaxes(a1, a2)` | Swap two axes via permutation |
+| `expand_dims(axis)` | Insert size-1 dimension |
+| `squeeze(axis)` | Remove size-1 dimensions |
+| `flip(axis)` | Reverse elements along axis |
+| `fliplr` / `flipud` | Left-right / up-down reversal (requires ndim >= 2 / >= 1) |
+| `rot90(k)` | Rotate by k*90 degrees on first two axes |
+| `roll(shift, axis)` | Circular shift with wrapping |
+| `tile(reps)` | Repeat array along each axis per `reps` |
+| `repeat(n, axis)` | Repeat each element `n` times |
+| `resize(new_shape)` | Resize with cyclic repetition if new shape is larger |
+
+### Advanced Indexing
+
+| Function | What it does |
+|---|---|
+| `take(indices, axis)` | Select elements by integer indices (supports negative) |
+| `put(indices, values)` | Replace flat-indexed elements (cyclic values) |
+| `compress(condition, axis)` | Select elements where boolean condition is true |
+| `extract(condition, arr)` | Flat extraction by boolean mask |
+| `place(mask, vals)` | In-place replacement where mask is true (cyclic values) |
+| `select(condlist, choicelist, default)` | Choose from multiple arrays by first-matching condition |
+| `piecewise(condlist, funclist)` | Piecewise constant function via condition list |
+| `take_along_axis(indices, axis)` | Gather values along axis by index array |
+| `put_along_axis(indices, values, axis)` | Scatter values along axis by index array |
+| `ravel_multi_index(coords, shape)` | Convert N-D coordinates to flat indices (C-order) |
+| `unravel_index(indices, shape)` | Convert flat indices to N-D coordinates |
+
+---
+
+## Transfer Semantics (`fnp-iter`)
+
+The iterator crate models NumPy's internal data transfer system, which decides *how* to move data between arrays during operations:
+
+**Transfer classes** determine the copy strategy:
+
+| Class | When selected | Cost |
+|---|---|---|
+| `Contiguous` | Both src/dst have unit strides and matching alignment | Fastest (memcpy-like) |
+| `Strided` | Arbitrary strides but lossless cast | Medium (per-element stride arithmetic) |
+| `StridedCast` | Arbitrary strides with lossy cast | Slowest (per-element cast + stride) |
+
+**Overlap detection** decides copy direction:
+
+| Action | When | Why |
+|---|---|---|
+| `NoCopy` | Source and destination don't overlap | No precaution needed |
+| `ForwardCopy` | Overlap, but forward iteration is safe | Dst starts after src start |
+| `BackwardCopy` | Overlap, forward would corrupt | Must iterate in reverse |
+
+**FlatIter indexing** supports four modes: `Single(i)` for scalar access, `Slice{start, stop, step}` for regular ranges, `Fancy(Vec<usize>)` for arbitrary index arrays, and `BoolMask(Vec<bool>)` for boolean selection. The `count_true_mask` optimization processes boolean masks in 8-element chunks for vectorizable counting.
+
+---
+
+## Phase2C Extraction Packets
+
+The conformance system is organized around 9 extraction packets, each covering one domain of NumPy behavior:
+
+| Packet | Domain | Key Contracts |
+|---|---|---|
+| FNP-P2C-001 | **Shape/reshape** | Element-count conservation, single -1 dimension, broadcast compatibility |
+| FNP-P2C-002 | **Dtype/promotion** | Promotion matrix determinism, safe-cast policy, dtype lifecycle |
+| FNP-P2C-003 | **Strided transfer** | Transfer-loop selection, cast pipeline, overlap handling, where-mask assignment |
+| FNP-P2C-004 | **NDIter traversal** | Iterator construction, multi-index seek, C/F tracking, external-loop mode |
+| FNP-P2C-005 | **Ufunc dispatch** | Signature parsing, method selection, override precedence, gufunc reduction |
+| FNP-P2C-006 | **Stride tricks/broadcast** | as_strided views, zero-stride propagation, writeability contracts |
+| FNP-P2C-007 | **RNG contracts** | Seed normalization, child-stream derivation, deterministic state, jump-ahead |
+| FNP-P2C-008 | **Linalg bridge** | Solver contracts, factorization modes, spectral operations, backend dispatch |
+| FNP-P2C-009 | **NPY/NPZ IO** | Magic/version validation, header-length bounds, pickle policy, truncated-data detection |
+
+Each packet produces 8 artifact files: `legacy_anchor_map.md`, `contract_table.md`, `fixture_manifest.json`, `parity_gate.yaml`, `risk_note.md`, `parity_report.json`, `parity_report.raptorq.json`, `parity_report.decode_proof.json`. The packet readiness validator checks all 8 files exist and contain required fields before a packet is marked `ready`.
+
+---
+
+## RNG State Serialization
+
+The random number generator supports full state capture and restoration for reproducibility:
+
+```rust
+// Capture state
+let payload = generator.to_pickle_payload();
+
+// Restore state
+let restored = Generator::from_pickle_payload(payload)?;
+// restored produces identical sequence from this point
+```
+
+`GeneratorPicklePayload` captures the bit-generator state (seed, counter, algorithm tag, schema version) and optionally the `SeedSequence` snapshot for spawn lineage tracking. The `RandomState` wrapper provides legacy compatibility with NumPy's older `numpy.random.RandomState` API.
+
+**Seed material** accepts multiple forms: `None` (random), `U64(seed)`, `U32Words(vec)`, `SeedSequence`, or direct `State { seed, counter }` for exact state restoration. This matches NumPy's flexible seeding interface where `default_rng(12345)`, `default_rng([1, 2, 3])`, and `default_rng(SeedSequence(42))` all work.
+
+---
+
 ## Test Coverage
 
 | Crate | Tests | What it covers |
@@ -531,10 +781,10 @@ The G8 CI gate (`run_raptorq_gate.sh`) enforces that all required bundles have v
 
 83 oracle tests verify bit-exact parity against NumPy:
 
-- **40 RNG oracle tests** -- every distribution produces identical output from the same seed, verified against `numpy.random.Generator(PCG64DXSM(12345))`
-- **20 ufunc edge-case tests** -- NaN propagation, empty arrays, Inf arithmetic, boolean dtype promotion, sort ordering
-- **16 linalg oracle tests** -- det, inv, solve, eig, svd, cholesky, QR, norm, cond, slogdet, lstsq, rank
-- **7 I/O format tests** -- NPY roundtrip, magic bytes, header dict format, 16-byte alignment
+- **40 RNG oracle tests:** every distribution produces identical output from the same seed, verified against `numpy.random.Generator(PCG64DXSM(12345))`
+- **20 ufunc edge-case tests:** NaN propagation, empty arrays, Inf arithmetic, boolean dtype promotion, sort ordering
+- **16 linalg oracle tests:** det, inv, solve, eig, svd, cholesky, QR, norm, cond, slogdet, lstsq, rank
+- **7 I/O format tests:** NPY roundtrip, magic bytes, header dict format, 16-byte alignment
 
 ### RNG Algorithm Parity
 
@@ -669,7 +919,7 @@ Performance budgets are enforced by the G7 gate, which measures p50/p95/p99 late
 
 ## Limitations
 
-Honest about what is and is not done:
+What works and what doesn't:
 
 - **Not a Python package.** FrankenNumPy is a Rust library. There is no `pip install` or Python FFI bridge yet. You cannot `import frankennumpy` from Python today.
 - **No BLAS/LAPACK backend.** Linear algebra uses pure-Rust implementations (Householder QR, Golub-Kahan SVD, implicit shifted QR for eigenvalues). Competitive with BLAS for small matrices; slower for large ones. Future BLAS linkage is planned.
