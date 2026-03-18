@@ -174,7 +174,9 @@ pub fn overlap_copy_policy(
     byte_len: usize,
 ) -> Result<OverlapAction, TransferError> {
     if byte_len == 0 {
-        return Ok(OverlapAction::NoCopy);
+        return Err(TransferError::OverlapPolicyTriggered(
+            "byte_len must be > 0 for overlap policy",
+        ));
     }
 
     let src_end = src_offset
@@ -708,6 +710,8 @@ mod tests {
             overlap_copy_policy(0, 32, 8).expect("disjoint ranges"),
             OverlapAction::NoCopy
         );
+        let err = overlap_copy_policy(0, 0, 0).expect_err("zero length should fail");
+        assert_eq!(err.reason_code(), "transfer_overlap_policy_triggered");
         assert_eq!(
             overlap_copy_policy(0, 0, 8).expect("identity overlap"),
             OverlapAction::ForwardCopy

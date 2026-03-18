@@ -212,8 +212,8 @@ struct DTypeMetamorphicCase {
     lhs: String,
     #[serde(default)]
     rhs: Option<String>,
-    #[serde(default)]
-    casting: String,
+    #[serde(default, rename = "casting")]
+    _casting: String,
     #[serde(default)]
     seed: u64,
     #[serde(default)]
@@ -1702,6 +1702,8 @@ fn evaluate_shape_stride_case(case: &ShapeStrideFixtureCase) -> (bool, Vec<Strin
         shape: case.stride_shape.clone(),
         strides,
         item_size: case.stride_item_size,
+        writeable: true,
+        has_internal_overlap: false,
     });
 
     if let Some(as_strided_case) = &case.as_strided {

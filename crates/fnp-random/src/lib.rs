@@ -2839,9 +2839,9 @@ impl Generator {
                         break;
                     }
                     let p_cond = (p / p_remaining).clamp(0.0, 1.0);
-                    let draws = self.sample_binomial_single(remaining as u64, p_cond, &mut cache);
+                    let draws = self.sample_binomial_single(remaining, p_cond, &mut cache);
                     result[i] = draws as u64;
-                    remaining -= draws as i64;
+                    remaining -= draws;
                     p_remaining -= p;
                     if p_remaining <= 0.0 {
                         p_remaining = 1e-15;

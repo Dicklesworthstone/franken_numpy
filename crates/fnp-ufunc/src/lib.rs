@@ -6371,6 +6371,17 @@ impl UFuncArray {
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
                 let axis_len = self.shape[ax];
+                if axis_len == 0 {
+                    // Any-reduction over empty is false (identity)
+                    let out_shape = reduced_shape(&self.shape, ax, false);
+                    let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+                    return Ok(Self {
+                        shape: out_shape,
+                        values: vec![0.0; out_count],
+                        dtype: DType::Bool,
+                        integer_sidecar: None,
+                    });
+                }
                 let outer: usize = self.shape[..ax].iter().product();
                 let inner: usize = self.shape[ax + 1..].iter().product();
                 let mut out_shape = self.shape.clone();
@@ -6381,8 +6392,13 @@ impl UFuncArray {
                 let mut values = Vec::with_capacity(outer * inner);
                 for o in 0..outer {
                     for i in 0..inner {
-                        let found = (0..axis_len)
-                            .any(|a| self.values[o * axis_len * inner + a * inner + i] != 0.0);
+                        let mut found = false;
+                        for a in 0..axis_len {
+                            if self.values[o * axis_len * inner + a * inner + i] != 0.0 {
+                                found = true;
+                                break;
+                            }
+                        }
                         values.push(if found { 1.0 } else { 0.0 });
                     }
                 }
@@ -6411,6 +6427,17 @@ impl UFuncArray {
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
                 let axis_len = self.shape[ax];
+                if axis_len == 0 {
+                    // True-reduction over empty is true (identity)
+                    let out_shape = reduced_shape(&self.shape, ax, false);
+                    let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+                    return Ok(Self {
+                        shape: out_shape,
+                        values: vec![1.0; out_count],
+                        dtype: DType::Bool,
+                        integer_sidecar: None,
+                    });
+                }
                 let outer: usize = self.shape[..ax].iter().product();
                 let inner: usize = self.shape[ax + 1..].iter().product();
                 let mut out_shape = self.shape.clone();
@@ -6421,9 +6448,14 @@ impl UFuncArray {
                 let mut values = Vec::with_capacity(outer * inner);
                 for o in 0..outer {
                     for i in 0..inner {
-                        let ok = (0..axis_len)
-                            .all(|a| self.values[o * axis_len * inner + a * inner + i] != 0.0);
-                        values.push(if ok { 1.0 } else { 0.0 });
+                        let mut all_ok = true;
+                        for a in 0..axis_len {
+                            if self.values[o * axis_len * inner + a * inner + i] == 0.0 {
+                                all_ok = false;
+                                break;
+                            }
+                        }
+                        values.push(if all_ok { 1.0 } else { 0.0 });
                     }
                 }
                 Ok(Self {

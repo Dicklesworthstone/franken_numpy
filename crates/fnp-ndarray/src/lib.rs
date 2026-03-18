@@ -331,6 +331,8 @@ pub struct NdLayout {
     pub shape: Vec<usize>,
     pub strides: Vec<isize>,
     pub item_size: usize,
+    pub writeable: bool,
+    pub has_internal_overlap: bool,
 }
 
 impl NdLayout {
@@ -344,6 +346,8 @@ impl NdLayout {
             shape,
             strides,
             item_size,
+            writeable: true,
+            has_internal_overlap: false,
         })
     }
 
@@ -362,19 +366,26 @@ impl NdLayout {
                 available_nbytes,
             });
         }
+        let has_internal_overlap = detect_internal_overlap(&shape, &strides, self.item_size)?;
         Ok(Self {
             shape,
             strides,
             item_size: self.item_size,
+            writeable: self.writeable && !has_internal_overlap,
+            has_internal_overlap,
         })
     }
 
     pub fn broadcast_to(&self, shape: Vec<usize>) -> Result<Self, ShapeError> {
         let strides = broadcast_strides(&self.shape, &self.strides, &shape)?;
+        let has_internal_overlap = detect_internal_overlap(&shape, &strides, self.item_size)?;
         Ok(Self {
             shape,
             strides,
             item_size: self.item_size,
+            // Match NumPy's readonly broadcast views and preserve readonly ancestry.
+            writeable: false,
+            has_internal_overlap,
         })
     }
 
@@ -382,6 +393,26 @@ impl NdLayout {
     #[must_use]
     pub fn ndim(&self) -> usize {
         self.shape.len()
+    }
+
+    /// Returns `true` if multiple logical indices may alias the same element storage.
+    #[must_use]
+    pub fn has_internal_overlap(&self) -> bool {
+        self.has_internal_overlap
+    }
+
+    /// Returns `true` if writes through this layout are permitted.
+    #[must_use]
+    pub fn is_writeable(&self) -> bool {
+        self.writeable
+    }
+
+    /// Clone the layout with writes disabled.
+    #[must_use]
+    pub fn as_read_only(&self) -> Self {
+        let mut cloned = self.clone();
+        cloned.writeable = false;
+        cloned
     }
 
     /// Returns `true` if the layout represents a C-contiguous (row-major) array.
@@ -466,13 +497,64 @@ impl NdLayout {
         let mut strides = Vec::with_capacity(self.strides.len() * 2);
         strides.extend(self.strides.iter().copied());
         strides.extend(self.strides.iter().copied());
+        let has_internal_overlap = detect_internal_overlap(&shape, &strides, self.item_size)?;
 
         Ok(Self {
             shape,
             strides,
             item_size: self.item_size,
+            // NumPy sliding-window views are readonly because adjacent windows alias.
+            writeable: false,
+            has_internal_overlap,
         })
     }
+}
+
+fn detect_internal_overlap(
+    shape: &[usize],
+    strides: &[isize],
+    item_size: usize,
+) -> Result<bool, ShapeError> {
+    if item_size == 0 {
+        return Err(ShapeError::InvalidItemSize);
+    }
+    if shape.len() != strides.len() {
+        return Err(ShapeError::RankMismatch {
+            expected: shape.len(),
+            actual: strides.len(),
+        });
+    }
+    if shape.is_empty() || shape.contains(&0) {
+        return Ok(false);
+    }
+
+    let item_size = isize::try_from(item_size).map_err(|_| ShapeError::Overflow)?;
+    let mut axes = Vec::new();
+    for (&dim, &stride) in shape.iter().zip(strides) {
+        if dim <= 1 {
+            continue;
+        }
+        let abs_stride = stride.checked_abs().ok_or(ShapeError::Overflow)?;
+        if abs_stride == 0 || abs_stride < item_size {
+            return Ok(true);
+        }
+        axes.push((abs_stride, dim));
+    }
+    if axes.is_empty() {
+        return Ok(false);
+    }
+
+    axes.sort_unstable_by_key(|&(stride, _)| stride);
+    let mut required_stride = item_size;
+    for (stride, dim) in axes {
+        if stride < required_stride {
+            return Ok(true);
+        }
+        let dim = isize::try_from(dim).map_err(|_| ShapeError::Overflow)?;
+        required_stride = stride.checked_mul(dim).ok_or(ShapeError::Overflow)?;
+    }
+
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -608,6 +690,8 @@ mod tests {
             shape: vec![usize::MAX],
             strides: vec![1],
             item_size: 2,
+            writeable: true,
+            has_internal_overlap: false,
         };
         let err = layout.nbytes().expect_err("nbytes overflow should fail");
         assert!(matches!(err, ShapeError::Overflow));
@@ -665,6 +749,8 @@ mod tests {
             .expect("valid strided view");
         assert_eq!(view.shape, vec![2, 2]);
         assert_eq!(view.strides, vec![16, 8]);
+        assert!(view.is_writeable());
+        assert!(!view.has_internal_overlap());
     }
 
     #[test]
@@ -675,6 +761,8 @@ mod tests {
             .expect("zero-extent views should be in-bounds");
         assert_eq!(view.shape, vec![0]);
         assert_eq!(view.strides, vec![8]);
+        assert!(view.is_writeable());
+        assert!(!view.has_internal_overlap());
     }
 
     #[test]
@@ -695,6 +783,8 @@ mod tests {
             .expect("negative strides should be supported for reverse slicing");
         assert_eq!(view.shape, vec![4]);
         assert_eq!(view.strides, vec![-8]);
+        assert!(view.is_writeable());
+        assert!(!view.has_internal_overlap());
     }
 
     #[test]
@@ -705,6 +795,8 @@ mod tests {
             .as_strided(vec![3, 3], vec![-24, 8])
             .expect("negative row stride should be supported");
         assert_eq!(view.strides, vec![-24, 8]);
+        assert!(view.is_writeable());
+        assert!(!view.has_internal_overlap());
     }
 
     #[test]
@@ -740,6 +832,8 @@ mod tests {
             .expect("valid sliding window");
         assert_eq!(view.shape, vec![3, 3, 2, 3]);
         assert_eq!(view.strides, vec![40, 8, 40, 8]);
+        assert!(!view.is_writeable());
+        assert!(view.has_internal_overlap());
     }
 
     #[test]
@@ -935,6 +1029,39 @@ mod tests {
         // Broadcast arrays with 0-strides are not contiguous
         assert!(!broadcast.is_contiguous());
         assert!(!broadcast.is_fortran_contiguous());
+        assert!(!broadcast.is_writeable());
+        assert!(broadcast.has_internal_overlap());
+    }
+
+    #[test]
+    fn as_strided_overlapping_view_is_read_only() {
+        let base = NdLayout::contiguous(vec![8], 8, MemoryOrder::C).expect("layout");
+        let view = base
+            .as_strided(vec![2, 2], vec![8, 8])
+            .expect("overlapping span still fits in base storage");
+        assert!(view.has_internal_overlap());
+        assert!(!view.is_writeable());
+    }
+
+    #[test]
+    fn sliding_window_size_one_is_still_read_only_without_overlap() {
+        let base = NdLayout::contiguous(vec![4], 8, MemoryOrder::C).expect("layout");
+        let view = base
+            .sliding_window_view(vec![1])
+            .expect("unit window should succeed");
+        assert!(!view.has_internal_overlap());
+        assert!(!view.is_writeable());
+    }
+
+    #[test]
+    fn explicit_read_only_clone_preserves_overlap_state() {
+        let layout = NdLayout::contiguous(vec![2, 3], 8, MemoryOrder::C).expect("layout");
+        let read_only = layout.as_read_only();
+        assert!(!read_only.is_writeable());
+        assert_eq!(
+            read_only.has_internal_overlap(),
+            layout.has_internal_overlap()
+        );
     }
 
     #[test]
