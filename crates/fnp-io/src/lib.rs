@@ -1215,7 +1215,7 @@ pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
     let mut total_uncompressed_bytes = 0usize;
 
     for _ in 0..entry_count {
-        if pos + 46 > data.len() {
+        if pos.checked_add(46).is_none_or(|end| end > data.len()) {
             return Err(IOError::NpzArchiveContractViolation(
                 "npz: central directory truncated",
             ));
@@ -1262,17 +1262,29 @@ pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
             data[pos + 45],
         ]) as usize;
 
-        let fname_start = pos + 46;
-        if fname_start + fname_len > data.len() {
+        let fname_start = pos
+            .checked_add(46)
+            .ok_or(IOError::NpzArchiveContractViolation(
+                "npz: position overflow",
+            ))?;
+        let fname_end =
+            fname_start
+                .checked_add(fname_len)
+                .ok_or(IOError::NpzArchiveContractViolation(
+                    "npz: filename length overflow",
+                ))?;
+        if fname_end > data.len() {
             return Err(IOError::NpzArchiveContractViolation(
                 "npz: filename extends beyond data",
             ));
         }
-        let file_name =
-            String::from_utf8_lossy(&data[fname_start..fname_start + fname_len]).into_owned();
+        let file_name = String::from_utf8_lossy(&data[fname_start..fname_end]).into_owned();
 
         // Parse local file header to find data start
-        if local_offset + 30 > data.len() {
+        if local_offset
+            .checked_add(30)
+            .is_none_or(|end| end > data.len())
+        {
             return Err(IOError::NpzArchiveContractViolation(
                 "npz: local header offset out of bounds",
             ));
@@ -1294,8 +1306,20 @@ pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
             u16::from_le_bytes([data[local_offset + 26], data[local_offset + 27]]) as usize;
         let local_extra_len =
             u16::from_le_bytes([data[local_offset + 28], data[local_offset + 29]]) as usize;
-        let data_start = local_offset + 30 + local_fname_len + local_extra_len;
-        let data_end = data_start + compressed_size;
+
+        let data_start = local_offset
+            .checked_add(30)
+            .and_then(|s| s.checked_add(local_fname_len))
+            .and_then(|s| s.checked_add(local_extra_len))
+            .ok_or(IOError::NpzArchiveContractViolation(
+                "npz: local data start overflow",
+            ))?;
+        let data_end =
+            data_start
+                .checked_add(compressed_size)
+                .ok_or(IOError::NpzArchiveContractViolation(
+                    "npz: local data end overflow",
+                ))?;
 
         if data_end > data.len() {
             return Err(IOError::NpzArchiveContractViolation(
@@ -1355,24 +1379,43 @@ pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
             array,
         });
 
-        pos = fname_start + fname_len + extra_len + comment_len;
+        pos = fname_end
+            .checked_add(extra_len)
+            .and_then(|p| p.checked_add(comment_len))
+            .ok_or(IOError::NpzArchiveContractViolation(
+                "npz: central directory position overflow",
+            ))?;
     }
 
     Ok(entries)
 }
 
 /// IEEE 802.3 CRC-32 (used by ZIP format).
+/// Uses a table-based implementation for performance.
 fn crc32_ieee(data: &[u8]) -> u32 {
+    const TABLE: [u32; 256] = {
+        let mut table = [0u32; 256];
+        let mut i = 0;
+        while i < 256 {
+            let mut c = i as u32;
+            let mut j = 0;
+            while j < 8 {
+                if c & 1 != 0 {
+                    c = 0xEDB8_8320 ^ (c >> 1);
+                } else {
+                    c >>= 1;
+                }
+                j += 1;
+            }
+            table[i] = c;
+            i += 1;
+        }
+        table
+    };
+
     let mut crc: u32 = 0xFFFF_FFFF;
     for &byte in data {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB8_8320;
-            } else {
-                crc >>= 1;
-            }
-        }
+        crc = TABLE[(crc as u8 ^ byte) as usize] ^ (crc >> 8);
     }
     !crc
 }

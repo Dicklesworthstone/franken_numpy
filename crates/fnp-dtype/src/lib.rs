@@ -300,34 +300,60 @@ pub const fn promote_for_mean_reduction(dt: DType) -> DType {
 /// Follows NumPy's safe-cast rules.
 #[must_use]
 pub const fn can_cast_lossless(src: DType, dst: DType) -> bool {
-    use DType::*;
-
-    matches!(
+    if matches!(
         (src, dst),
-        // Bool can cast to anything numeric
-        (Bool, Bool | I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | F16 | F32 | F64 | Complex64 | Complex128)
-        // Signed integers: can cast to wider signed or to F64
-        | (I8, I8 | I16 | I32 | I64 | F16 | F32 | F64 | Complex64 | Complex128)
-        | (I16, I16 | I32 | I64 | F32 | F64 | Complex64 | Complex128)
-        | (I32, I32 | I64 | F64 | Complex128)
-        | (I64, I64 | F64 | Complex128)
-        // Unsigned integers: can cast to wider unsigned, wider signed, or F64
-        | (U8, U8 | U16 | U32 | U64 | I16 | I32 | I64 | F16 | F32 | F64 | Complex64 | Complex128)
-        | (U16, U16 | U32 | U64 | I32 | I64 | F32 | F64 | Complex64 | Complex128)
-        | (U32, U32 | U64 | I64 | F64 | Complex128)
-        | (U64, U64 | F64 | Complex128)
-        // Floats: can cast to wider float or matching complex
-        | (F16, F16 | F32 | F64 | Complex64 | Complex128)
-        | (F32, F32 | F64 | Complex64 | Complex128)
-        | (F64, F64 | Complex128)
-        // Complex: can cast to wider complex
-        | (Complex64, Complex64 | Complex128)
-        | (Complex128, Complex128)
-        // Non-numeric: only self-cast
-        | (Str, Str)
-        | (DateTime64, DateTime64)
-        | (TimeDelta64, TimeDelta64)
-    )
+        (DType::Bool, DType::Bool)
+            | (DType::I8, DType::I8)
+            | (DType::I16, DType::I16)
+            | (DType::I32, DType::I32)
+            | (DType::I64, DType::I64)
+            | (DType::U8, DType::U8)
+            | (DType::U16, DType::U16)
+            | (DType::U32, DType::U32)
+            | (DType::U64, DType::U64)
+            | (DType::F16, DType::F16)
+            | (DType::F32, DType::F32)
+            | (DType::F64, DType::F64)
+            | (DType::Complex64, DType::Complex64)
+            | (DType::Complex128, DType::Complex128)
+            | (DType::Str, DType::Str)
+            | (DType::DateTime64, DType::DateTime64)
+            | (DType::TimeDelta64, DType::TimeDelta64)
+    ) {
+        return true;
+    }
+
+    match src {
+        DType::Structured | DType::Str | DType::DateTime64 | DType::TimeDelta64 => false,
+        DType::Bool => matches!(
+            dst,
+            DType::I8
+                | DType::I16
+                | DType::I32
+                | DType::I64
+                | DType::U8
+                | DType::U16
+                | DType::U32
+                | DType::U64
+                | DType::F16
+                | DType::F32
+                | DType::F64
+                | DType::Complex64
+                | DType::Complex128
+                | DType::Str
+                | DType::TimeDelta64
+        ),
+        DType::I8
+        | DType::I16
+        | DType::I32
+        | DType::I64
+        | DType::U8
+        | DType::U16
+        | DType::U32
+        | DType::U64 => safe_integer_cast(src, dst),
+        DType::F16 | DType::F32 | DType::F64 => safe_float_cast(src, dst),
+        DType::Complex64 | DType::Complex128 => safe_complex_cast(src, dst),
+    }
 }
 
 /// Determines the result dtype from promotion across a list of dtypes
@@ -350,33 +376,119 @@ pub fn can_cast(from: DType, to: DType, casting: &str) -> bool {
     match casting {
         "no" | "equiv" => from == to,
         "safe" => can_cast_lossless(from, to),
-        "same_kind" => {
-            if from == to {
-                return true;
-            }
-            if from == DType::Bool {
-                return true;
-            }
-            if from.is_integer() && to.is_integer() {
-                return true;
-            }
-            if from.is_float() && to.is_float() {
-                return true;
-            }
-            if from.is_complex() && to.is_complex() {
-                return true;
-            }
-            if from.is_float() && to.is_complex() {
-                return true;
-            }
-            if from.is_integer() && to.is_complex() {
-                return true;
-            }
-            from.is_integer() && to.is_float()
-        }
+        "same_kind" => can_cast_same_kind(from, to),
         "unsafe" => true,
         _ => false,
     }
+}
+
+const fn integer_bits(dtype: DType) -> Option<u32> {
+    match dtype {
+        DType::I8 | DType::U8 => Some(8),
+        DType::I16 | DType::U16 => Some(16),
+        DType::I32 | DType::U32 => Some(32),
+        DType::I64 | DType::U64 => Some(64),
+        _ => None,
+    }
+}
+
+const fn is_signed_integer_dtype(dtype: DType) -> bool {
+    matches!(dtype, DType::I8 | DType::I16 | DType::I32 | DType::I64)
+}
+
+const fn is_unsigned_integer_dtype(dtype: DType) -> bool {
+    matches!(dtype, DType::U8 | DType::U16 | DType::U32 | DType::U64)
+}
+
+const fn safe_integer_cast(src: DType, dst: DType) -> bool {
+    let Some(src_bits) = integer_bits(src) else {
+        return false;
+    };
+    match dst {
+        DType::I8
+        | DType::I16
+        | DType::I32
+        | DType::I64
+        | DType::U8
+        | DType::U16
+        | DType::U32
+        | DType::U64 => {
+            let Some(dst_bits) = integer_bits(dst) else {
+                return false;
+            };
+            if (is_signed_integer_dtype(src) && is_signed_integer_dtype(dst))
+                || (is_unsigned_integer_dtype(src) && is_unsigned_integer_dtype(dst))
+            {
+                dst_bits >= src_bits
+            } else if is_unsigned_integer_dtype(src) && is_signed_integer_dtype(dst) {
+                dst_bits > src_bits
+            } else {
+                false
+            }
+        }
+        DType::F16 => src_bits <= 8,
+        DType::F32 => src_bits <= 16,
+        DType::F64 => !matches!(src, DType::U64) || matches!(dst, DType::F64),
+        DType::Complex64 => src_bits <= 16,
+        DType::Complex128 => true,
+        DType::Str => true,
+        DType::TimeDelta64 => !matches!(src, DType::U64),
+        _ => false,
+    }
+}
+
+const fn safe_float_cast(src: DType, dst: DType) -> bool {
+    match src {
+        DType::F16 => matches!(
+            dst,
+            DType::F32 | DType::F64 | DType::Complex64 | DType::Complex128 | DType::Str
+        ),
+        DType::F32 => matches!(
+            dst,
+            DType::F64 | DType::Complex64 | DType::Complex128 | DType::Str
+        ),
+        DType::F64 => matches!(dst, DType::Complex128 | DType::Str),
+        _ => false,
+    }
+}
+
+const fn safe_complex_cast(src: DType, dst: DType) -> bool {
+    match src {
+        DType::Complex64 => matches!(dst, DType::Complex128),
+        DType::Complex128 => false,
+        _ => false,
+    }
+}
+
+fn can_cast_same_kind(from: DType, to: DType) -> bool {
+    if from == to {
+        return true;
+    }
+    if from == DType::Structured || to == DType::Structured {
+        return false;
+    }
+    if to == DType::DateTime64 {
+        return false;
+    }
+    if to == DType::TimeDelta64 {
+        return from == DType::Bool || from.is_integer();
+    }
+    if to == DType::Str {
+        return from == DType::Bool || from.is_integer() || from.is_float() || from.is_complex();
+    }
+    if from == DType::Bool {
+        return to.is_integer() || to.is_float() || to.is_complex();
+    }
+    if from.is_integer() {
+        return to.is_integer() || to.is_float() || to.is_complex();
+    }
+    if from.is_float() {
+        return to.is_float() || to.is_complex();
+    }
+    if from.is_complex() {
+        return to.is_complex();
+    }
+    false
 }
 
 /// Minimum scalar dtype that can hold a given f64 value
@@ -820,7 +932,7 @@ impl ArrayStorage {
             return Err(StorageError::IndexOutOfBounds { index, len: n });
         }
         match self {
-            Self::Bool(v) => v[index] = val != 0.0 && !val.is_nan(),
+            Self::Bool(v) => v[index] = val != 0.0,
             Self::I8(v) => v[index] = val as i8,
             Self::I16(v) => v[index] = val as i16,
             Self::I32(v) => v[index] = val as i32,
@@ -869,6 +981,70 @@ impl ArrayStorage {
         }
     }
 
+    /// Read element at `index` as i128 (lossless for all integer types).
+    /// Returns 0 for non-numeric types. Floats are truncated.
+    pub fn get_i128(&self, index: usize) -> Result<i128, StorageError> {
+        let n = self.len();
+        if index >= n {
+            return Err(StorageError::IndexOutOfBounds { index, len: n });
+        }
+        Ok(match self {
+            Self::Bool(v) => {
+                if v[index] {
+                    1
+                } else {
+                    0
+                }
+            }
+            Self::I8(v) => i128::from(v[index]),
+            Self::I16(v) => i128::from(v[index]),
+            Self::I32(v) => i128::from(v[index]),
+            Self::I64(v) => i128::from(v[index]),
+            Self::U8(v) => i128::from(v[index]),
+            Self::U16(v) => i128::from(v[index]),
+            Self::U32(v) => i128::from(v[index]),
+            Self::U64(v) => i128::from(v[index]),
+            Self::F16(v) => f64::from(v[index]) as i128,
+            Self::F32(v) => v[index] as i128,
+            Self::F64(v) => v[index] as i128,
+            Self::Complex64(v) => v[index].0 as i128,
+            Self::Complex128(v) => v[index].0 as i128,
+            Self::String(_) | Self::Structured(_) => 0,
+        })
+    }
+
+    /// Write element at `index` from an i128 value (lossy cast to target type).
+    pub fn set_i128(&mut self, index: usize, val: i128) -> Result<(), StorageError> {
+        let n = self.len();
+        if index >= n {
+            return Err(StorageError::IndexOutOfBounds { index, len: n });
+        }
+        match self {
+            Self::Bool(v) => v[index] = val != 0,
+            Self::I8(v) => v[index] = val as i8,
+            Self::I16(v) => v[index] = val as i16,
+            Self::I32(v) => v[index] = val as i32,
+            Self::I64(v) => v[index] = val as i64,
+            Self::U8(v) => v[index] = val as u8,
+            Self::U16(v) => v[index] = val as u16,
+            Self::U32(v) => v[index] = val as u32,
+            Self::U64(v) => v[index] = val as u64,
+            Self::F16(v) => v[index] = f16::from_f64(val as f64),
+            Self::F32(v) => v[index] = val as f32,
+            Self::F64(v) => v[index] = val as f64,
+            Self::Complex64(v) => v[index] = (val as f32, 0.0),
+            Self::Complex128(v) => v[index] = (val as f64, 0.0),
+            Self::String(v) => v[index] = val.to_string(),
+            Self::Structured(_) => {
+                return Err(StorageError::UnsupportedCast {
+                    from: DType::I64, // using I64 as proxy for integer kind
+                    to: DType::Structured,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Cast this storage to a different dtype.
     /// Returns a new storage with elements converted to the target type.
     pub fn cast_to(&self, target: DType) -> Result<Self, StorageError> {
@@ -901,7 +1077,7 @@ impl ArrayStorage {
                     }
                     Self::String(v) => v[i].clone(),
                     _ => {
-                        // Use get_f64 for numeric types
+                        // Use get_f64 for numeric types (lossy for large ints but ok for strings)
                         let val = self.get_f64(i).unwrap_or(f64::NAN);
                         format!("{val}")
                     }
@@ -916,12 +1092,23 @@ impl ArrayStorage {
                 to: target,
             });
         }
-        // Numeric-to-numeric: go through f64 intermediary
-        // (This is lossy for large integers but mirrors current behavior)
+
         let mut result = Self::zeros(target, n);
-        for i in 0..n {
-            let val = self.get_f64(i)?;
-            result.set_f64(i, val)?;
+        let src_is_int = self.dtype().is_integer() || self.dtype() == DType::Bool;
+        let dst_is_int = target.is_integer() || target == DType::Bool;
+
+        if src_is_int && dst_is_int {
+            // Integer-to-integer: use i128 for lossless transfer
+            for i in 0..n {
+                let val = self.get_i128(i)?;
+                result.set_i128(i, val)?;
+            }
+        } else {
+            // Numeric-to-numeric: go through f64 intermediary
+            for i in 0..n {
+                let val = self.get_f64(i)?;
+                result.set_f64(i, val)?;
+            }
         }
         Ok(result)
     }
@@ -1596,6 +1783,47 @@ mod tests {
         assert!(can_cast(DType::Bool, DType::F64, "same_kind"));
         // unsafe: anything goes
         assert!(can_cast(DType::F64, DType::Bool, "unsafe"));
+    }
+
+    #[test]
+    fn can_cast_safe_matches_numpy_category_boundaries() {
+        assert!(can_cast(DType::Bool, DType::TimeDelta64, "safe"));
+        assert!(can_cast(DType::I8, DType::F16, "safe"));
+        assert!(can_cast(DType::I16, DType::F32, "safe"));
+        assert!(can_cast(DType::I32, DType::F64, "safe"));
+        assert!(can_cast(DType::U32, DType::I64, "safe"));
+        assert!(can_cast(DType::U64, DType::F64, "safe"));
+        assert!(can_cast(DType::F64, DType::Complex128, "safe"));
+        assert!(can_cast(DType::F32, DType::Str, "safe"));
+
+        assert!(!can_cast(DType::I32, DType::F32, "safe"));
+        assert!(!can_cast(DType::U64, DType::I64, "safe"));
+        assert!(!can_cast(DType::U64, DType::TimeDelta64, "safe"));
+        assert!(!can_cast(DType::F64, DType::Complex64, "safe"));
+        assert!(!can_cast(DType::Complex64, DType::Str, "safe"));
+        assert!(!can_cast(DType::DateTime64, DType::TimeDelta64, "safe"));
+    }
+
+    #[test]
+    fn can_cast_same_kind_matches_numpy_category_boundaries() {
+        assert!(can_cast(DType::Bool, DType::Complex128, "same_kind"));
+        assert!(can_cast(DType::I64, DType::I8, "same_kind"));
+        assert!(can_cast(DType::U64, DType::I8, "same_kind"));
+        assert!(can_cast(DType::I32, DType::Complex64, "same_kind"));
+        assert!(can_cast(DType::F64, DType::F16, "same_kind"));
+        assert!(can_cast(DType::F64, DType::Str, "same_kind"));
+        assert!(can_cast(DType::Complex128, DType::Str, "same_kind"));
+        assert!(can_cast(DType::U64, DType::TimeDelta64, "same_kind"));
+
+        assert!(!can_cast(DType::Bool, DType::DateTime64, "same_kind"));
+        assert!(!can_cast(DType::F16, DType::U8, "same_kind"));
+        assert!(!can_cast(DType::Complex64, DType::F64, "same_kind"));
+        assert!(!can_cast(DType::TimeDelta64, DType::Str, "same_kind"));
+        assert!(!can_cast(
+            DType::DateTime64,
+            DType::TimeDelta64,
+            "same_kind"
+        ));
     }
 
     #[test]

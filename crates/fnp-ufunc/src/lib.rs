@@ -720,6 +720,8 @@ impl BinaryOp {
                     f64::INFINITY
                 } else if max.is_nan() || min.is_nan() {
                     f64::NAN
+                } else if max.is_infinite() && max.is_sign_negative() {
+                    f64::NEG_INFINITY
                 } else {
                     max + (min - max).exp().ln_1p()
                 }
@@ -732,6 +734,8 @@ impl BinaryOp {
                     f64::INFINITY
                 } else if max.is_nan() || min.is_nan() {
                     f64::NAN
+                } else if max.is_infinite() && max.is_sign_negative() {
+                    f64::NEG_INFINITY
                 } else {
                     let diff = min - max;
                     max + diff.exp2().ln_1p() / std::f64::consts::LN_2
@@ -1142,11 +1146,31 @@ pub fn plan_binary_dispatch(
     })
 }
 
+/// Sidecar for preserving exact integer values that exceed f64 representability
+/// (i.e., |value| > 2^53). Only populated when constructing from `ArrayStorage`
+/// with large integer values. Arithmetic operations clear the sidecar since
+/// computed results go through the f64 path.
 #[derive(Debug, Clone, PartialEq)]
+pub enum IntegerSidecar {
+    I64(Vec<i64>),
+    U64(Vec<u64>),
+}
+
+#[derive(Debug, Clone)]
 pub struct UFuncArray {
     shape: Vec<usize>,
     values: Vec<f64>,
     dtype: DType,
+    integer_sidecar: Option<IntegerSidecar>,
+}
+
+impl PartialEq for UFuncArray {
+    fn eq(&self, other: &Self) -> bool {
+        self.shape == other.shape
+            && self.values == other.values
+            && self.dtype == other.dtype
+            && self.integer_sidecar == other.integer_sidecar
+    }
 }
 
 pub type SharedBuffer = Arc<RwLock<Vec<f64>>>;
@@ -1484,37 +1508,45 @@ impl UFuncArrayView {
 
     pub fn to_array(&self) -> Result<UFuncArray, UFuncError> {
         let total = element_count(&self.shape).map_err(UFuncError::Shape)?;
-        let out_strides = c_strides_elems(&self.shape);
         let data = self
             .buffer
             .read()
             .map_err(|_| UFuncError::Msg("shared view: read lock poisoned".to_string()))?;
 
         let mut values = Vec::with_capacity(total);
-        for flat in 0..total {
-            let mut rem = flat;
-            let mut offset = self.offset;
-            for (axis, &stride) in self.strides.iter().enumerate() {
-                let idx = if self.shape.is_empty() {
-                    0
-                } else {
-                    rem / out_strides[axis]
-                };
-                if !self.shape.is_empty() {
-                    rem %= out_strides[axis];
-                }
-                offset = offset
-                    .checked_add((idx as isize).checked_mul(stride).ok_or_else(|| {
-                        UFuncError::Msg("shared view: offset overflow".to_string())
-                    })?)
-                    .ok_or_else(|| UFuncError::Msg("shared view: offset overflow".to_string()))?;
-            }
-            if offset < 0 || offset >= data.len() as isize {
+        let ndim = self.shape.len();
+        let mut coords = vec![0usize; ndim];
+        let mut current_offset = self.offset;
+
+        for _ in 0..total {
+            if current_offset < 0 || current_offset >= data.len() as isize {
                 return Err(UFuncError::Msg(
                     "shared view materialization: out-of-bounds offset".to_string(),
                 ));
             }
-            values.push(data[offset as usize]);
+            values.push(data[current_offset as usize]);
+
+            // Advance odometer
+            for i in (0..ndim).rev() {
+                coords[i] += 1;
+                if coords[i] < self.shape[i] {
+                    current_offset =
+                        current_offset.checked_add(self.strides[i]).ok_or_else(|| {
+                            UFuncError::Msg("shared view: offset overflow".to_string())
+                        })?;
+                    break;
+                } else {
+                    coords[i] = 0;
+                    let reset_span = (self.shape[i] as isize - 1)
+                        .checked_mul(self.strides[i])
+                        .ok_or_else(|| {
+                            UFuncError::Msg("shared view: offset overflow".to_string())
+                        })?;
+                    current_offset = current_offset.checked_sub(reset_span).ok_or_else(|| {
+                        UFuncError::Msg("shared view: offset overflow".to_string())
+                    })?;
+                }
+            }
         }
 
         UFuncArray::new(self.shape.clone(), values, self.dtype)
@@ -1605,32 +1637,40 @@ impl UFuncArrayView {
             return Ok(None);
         }
 
-        let out_strides = c_strides_elems(&self.shape);
         let mut offsets = Vec::with_capacity(total);
-        for flat in 0..total {
-            let mut rem = flat;
-            let mut offset = self.offset;
-            for (axis, &stride) in self.strides.iter().enumerate() {
-                let idx = if self.shape.is_empty() {
-                    0
-                } else {
-                    rem / out_strides[axis]
-                };
-                if !self.shape.is_empty() {
-                    rem %= out_strides[axis];
-                }
-                offset = offset
-                    .checked_add((idx as isize).checked_mul(stride).ok_or_else(|| {
-                        UFuncError::Msg("shared view: offset overflow".to_string())
-                    })?)
-                    .ok_or_else(|| UFuncError::Msg("shared view: offset overflow".to_string()))?;
-            }
-            if offset < 0 {
+        let ndim = self.shape.len();
+        let mut coords = vec![0usize; ndim];
+        let mut current_offset = self.offset;
+
+        for _ in 0..total {
+            if current_offset < 0 {
                 return Err(UFuncError::Msg(
                     "shared view: negative computed offset during overlap check".to_string(),
                 ));
             }
-            offsets.push(offset as usize);
+            offsets.push(current_offset as usize);
+
+            // Advance odometer
+            for i in (0..ndim).rev() {
+                coords[i] += 1;
+                if coords[i] < self.shape[i] {
+                    current_offset =
+                        current_offset.checked_add(self.strides[i]).ok_or_else(|| {
+                            UFuncError::Msg("shared view: offset overflow".to_string())
+                        })?;
+                    break;
+                } else {
+                    coords[i] = 0;
+                    let reset_span = (self.shape[i] as isize - 1)
+                        .checked_mul(self.strides[i])
+                        .ok_or_else(|| {
+                            UFuncError::Msg("shared view: offset overflow".to_string())
+                        })?;
+                    current_offset = current_offset.checked_sub(reset_span).ok_or_else(|| {
+                        UFuncError::Msg("shared view: offset overflow".to_string())
+                    })?;
+                }
+            }
         }
         Ok(Some(offsets))
     }
@@ -1702,6 +1742,7 @@ impl UFuncArray {
             shape,
             values,
             dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -1715,11 +1756,25 @@ impl UFuncArray {
         if actual != expected {
             return Err(UFuncError::InvalidInputLength { expected, actual });
         }
-        ensure_storage_bridge_input_supported(&storage, "from_storage")?;
+        ensure_bridge_dtype_supported(storage.dtype(), "from_storage")?;
+
+        // For I64/U64 with values exceeding f64 exact range, preserve the
+        // originals in a sidecar so `to_storage()` can round-trip losslessly.
+        let integer_sidecar = match &storage {
+            ArrayStorage::I64(values) if values.iter().any(|v| v.abs() > MAX_EXACT_F64_I64) => {
+                Some(IntegerSidecar::I64(values.clone()))
+            }
+            ArrayStorage::U64(values) if values.iter().any(|v| *v > MAX_EXACT_F64_U64) => {
+                Some(IntegerSidecar::U64(values.clone()))
+            }
+            _ => None,
+        };
+
         Ok(Self {
             shape,
             values: storage.to_f64_vec(),
             dtype: storage.dtype(),
+            integer_sidecar,
         })
     }
 
@@ -1730,6 +1785,18 @@ impl UFuncArray {
         dtype: DType,
     ) -> Result<Self, UFuncError> {
         ensure_bridge_dtype_supported(dtype, "from_storage_with_dtype")?;
+
+        // If source and target dtype match for I64/U64, route through
+        // from_storage to preserve the integer sidecar.
+        if storage.dtype() == dtype {
+            match &storage {
+                ArrayStorage::I64(_) | ArrayStorage::U64(_) => {
+                    return Self::from_storage(shape, storage);
+                }
+                _ => {}
+            }
+        }
+
         ensure_storage_bridge_input_supported(&storage, "from_storage_with_dtype")?;
         ensure_storage_cast_target_supported(&storage, dtype, "from_storage_with_dtype")?;
         let casted = storage
@@ -1740,7 +1807,23 @@ impl UFuncArray {
     }
 
     /// Export this array into typed storage using its dtype as the cast target.
+    ///
+    /// When an integer sidecar is present (from a prior `from_storage` call with
+    /// large i64/u64 values), the sidecar values are returned directly, preserving
+    /// exact integer fidelity without f64 round-trip loss.
     pub fn to_storage(&self) -> Result<ArrayStorage, UFuncError> {
+        // If we have a sidecar with exact integer values, use it directly.
+        if let Some(ref sidecar) = self.integer_sidecar {
+            match (sidecar, self.dtype) {
+                (IntegerSidecar::I64(values), DType::I64) => {
+                    return Ok(ArrayStorage::I64(values.clone()));
+                }
+                (IntegerSidecar::U64(values), DType::U64) => {
+                    return Ok(ArrayStorage::U64(values.clone()));
+                }
+                _ => {} // dtype changed through operations, fall through to f64 path
+            }
+        }
         ensure_values_bridge_output_supported(&self.values, self.dtype, "to_storage")?;
         ArrayStorage::from_f64_vec(self.values.clone())
             .cast_to(self.dtype)
@@ -1776,6 +1859,7 @@ impl UFuncArray {
                     shape: vec![values.len()],
                     values,
                     dtype: fallback_dtype,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -2110,6 +2194,13 @@ impl UFuncArray {
         &self.values
     }
 
+    /// Returns `true` if this array has a lossless integer sidecar that
+    /// preserves exact i64/u64 values exceeding f64 representability.
+    #[must_use]
+    pub fn has_integer_sidecar(&self) -> bool {
+        self.integer_sidecar.is_some()
+    }
+
     pub fn shared_view(&self) -> Result<UFuncArrayView, UFuncError> {
         let strides = c_strides_elems(&self.shape)
             .into_iter()
@@ -2237,6 +2328,14 @@ impl UFuncArray {
     }
 
     pub fn elementwise_binary(&self, rhs: &Self, op: BinaryOp) -> Result<Self, UFuncError> {
+        if matches!(
+            op,
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div
+        ) && (self.uses_complex_interleaved_storage() || rhs.uses_complex_interleaved_storage())
+        {
+            return self.elementwise_complex_binary(rhs, op);
+        }
+
         let plan = plan_binary_dispatch(self, rhs)?;
         let out_shape = plan.out_shape;
         let out_count = plan.out_count;
@@ -2313,6 +2412,59 @@ impl UFuncArray {
         Self::from_values_with_dtype(out_shape, out_values, out_dtype)
     }
 
+    fn elementwise_complex_binary(&self, rhs: &Self, op: BinaryOp) -> Result<Self, UFuncError> {
+        let lhs_shape = self.complex_logical_shape(op.name())?;
+        let rhs_shape = rhs.complex_logical_shape(op.name())?;
+        let out_shape = broadcast_shape(&lhs_shape, &rhs_shape).map_err(UFuncError::Shape)?;
+        let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+
+        let lhs_strides = contiguous_strides_elems(&lhs_shape);
+        let rhs_strides = contiguous_strides_elems(&rhs_shape);
+        let lhs_axis_steps =
+            aligned_broadcast_axis_steps(out_shape.len(), &lhs_shape, &lhs_strides);
+        let rhs_axis_steps =
+            aligned_broadcast_axis_steps(out_shape.len(), &rhs_shape, &rhs_strides);
+
+        let mut out_multi = vec![0usize; out_shape.len()];
+        let mut lhs_flat = 0usize;
+        let mut rhs_flat = 0usize;
+        let mut out_values = Vec::with_capacity(out_count.saturating_mul(2));
+
+        for flat in 0..out_count {
+            let (lhs_re, lhs_im) = self.logical_complex_value(lhs_flat);
+            let (rhs_re, rhs_im) = rhs.logical_complex_value(rhs_flat);
+            let (out_re, out_im) = apply_complex_binary_op(op, lhs_re, lhs_im, rhs_re, rhs_im);
+            out_values.push(out_re);
+            out_values.push(out_im);
+
+            if flat + 1 == out_count || out_shape.is_empty() {
+                continue;
+            }
+
+            for axis in (0..out_shape.len()).rev() {
+                out_multi[axis] += 1;
+                lhs_flat += lhs_axis_steps[axis];
+                rhs_flat += rhs_axis_steps[axis];
+
+                if out_multi[axis] < out_shape[axis] {
+                    break;
+                }
+
+                out_multi[axis] = 0;
+                lhs_flat -= lhs_axis_steps[axis] * out_shape[axis];
+                rhs_flat -= rhs_axis_steps[axis] * out_shape[axis];
+            }
+        }
+
+        let mut physical_shape = out_shape;
+        physical_shape.push(2);
+        Self::new(
+            physical_shape,
+            out_values,
+            self.complex_output_dtype(Some(rhs)),
+        )
+    }
+
     pub fn try_elementwise_unary(&self, op: UnaryOp) -> Result<Self, UFuncError> {
         let mut float_error_flags = FloatErrorFlags::default();
         let values = self
@@ -2368,6 +2520,7 @@ impl UFuncArray {
                     shape,
                     values: vec![sum],
                     dtype: out_dtype,
+                    integer_sidecar: None,
                 })
             }
             Some(axis) => {
@@ -2381,6 +2534,7 @@ impl UFuncArray {
                     shape: out_shape,
                     values: out_values,
                     dtype: out_dtype,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -2400,6 +2554,7 @@ impl UFuncArray {
                     shape,
                     values: vec![prod],
                     dtype: out_dtype,
+                    integer_sidecar: None,
                 })
             }
             Some(axis) => {
@@ -2419,6 +2574,7 @@ impl UFuncArray {
                     shape: out_shape,
                     values: out_values,
                     dtype: out_dtype,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -2437,6 +2593,9 @@ impl UFuncArray {
         }
         match axis {
             None => {
+                if self.values.is_empty() {
+                    return Err(UFuncError::EmptyReduction { op: "min" });
+                }
                 let min = self.values.iter().copied().fold(f64::INFINITY, nan_min);
                 let shape = if keepdims {
                     vec![1; self.shape.len()]
@@ -2447,10 +2606,14 @@ impl UFuncArray {
                     shape,
                     values: vec![min],
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
             Some(axis) => {
                 let axis = normalize_axis(axis, self.shape.len())?;
+                if self.shape[axis] == 0 {
+                    return Err(UFuncError::EmptyReduction { op: "min" });
+                }
                 let out_shape = reduced_shape(&self.shape, axis, keepdims);
                 let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
                 let mut out_values = vec![f64::INFINITY; out_count];
@@ -2466,6 +2629,7 @@ impl UFuncArray {
                     shape: out_shape,
                     values: out_values,
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -2484,6 +2648,9 @@ impl UFuncArray {
         }
         match axis {
             None => {
+                if self.values.is_empty() {
+                    return Err(UFuncError::EmptyReduction { op: "max" });
+                }
                 let max = self.values.iter().copied().fold(f64::NEG_INFINITY, nan_max);
                 let shape = if keepdims {
                     vec![1; self.shape.len()]
@@ -2494,10 +2661,14 @@ impl UFuncArray {
                     shape,
                     values: vec![max],
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
             Some(axis) => {
                 let axis = normalize_axis(axis, self.shape.len())?;
+                if self.shape[axis] == 0 {
+                    return Err(UFuncError::EmptyReduction { op: "max" });
+                }
                 let out_shape = reduced_shape(&self.shape, axis, keepdims);
                 let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
                 let mut out_values = vec![f64::NEG_INFINITY; out_count];
@@ -2513,6 +2684,7 @@ impl UFuncArray {
                     shape: out_shape,
                     values: out_values,
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -2533,6 +2705,7 @@ impl UFuncArray {
                     shape,
                     values: vec![sum / n],
                     dtype: out_dtype,
+                    integer_sidecar: None,
                 })
             }
             Some(axis) => {
@@ -2550,6 +2723,7 @@ impl UFuncArray {
                     shape: out_shape,
                     values: out_values,
                     dtype: out_dtype,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -2721,6 +2895,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values: masked_values,
             dtype: self.dtype,
+            integer_sidecar: None,
         };
         masked.reduce_sum(axis, keepdims)
     }
@@ -2774,6 +2949,7 @@ impl UFuncArray {
                     shape: vec![values.len()],
                     values,
                     dtype: out_dtype,
+                    integer_sidecar: None,
                 })
             }
             Some(axis) => {
@@ -2783,6 +2959,7 @@ impl UFuncArray {
                         shape: self.shape.clone(),
                         values,
                         dtype: out_dtype,
+                        integer_sidecar: None,
                     },
                 )
             }
@@ -2806,6 +2983,7 @@ impl UFuncArray {
                     shape: vec![values.len()],
                     values,
                     dtype: out_dtype,
+                    integer_sidecar: None,
                 })
             }
             Some(axis) => {
@@ -2815,6 +2993,7 @@ impl UFuncArray {
                         shape: self.shape.clone(),
                         values,
                         dtype: out_dtype,
+                        integer_sidecar: None,
                     },
                 )
             }
@@ -2831,6 +3010,7 @@ impl UFuncArray {
                 shape: vec![0],
                 values: vec![],
                 dtype: self.dtype,
+                integer_sidecar: None,
             };
         }
         let mut acc = identity;
@@ -2846,6 +3026,7 @@ impl UFuncArray {
             shape: vec![values.len()],
             values,
             dtype: self.dtype,
+            integer_sidecar: None,
         }
     }
 
@@ -2865,6 +3046,7 @@ impl UFuncArray {
                 shape: vec![0],
                 values: vec![],
                 dtype: self.dtype,
+                integer_sidecar: None,
             });
         }
         let n = self.values.len();
@@ -2892,6 +3074,7 @@ impl UFuncArray {
             shape: vec![results.len()],
             values: results,
             dtype: self.dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -2899,12 +3082,21 @@ impl UFuncArray {
         let values = self
             .values
             .iter()
-            .map(|&v| v.clamp(min_val, max_val))
+            .map(|&v| {
+                if min_val.is_nan() || max_val.is_nan() || v.is_nan() {
+                    f64::NAN
+                } else {
+                    // Match NumPy's np.minimum(np.maximum(v, min), max)
+                    let tmp = if v < min_val { min_val } else { v };
+                    if tmp > max_val { max_val } else { tmp }
+                }
+            })
             .collect();
         Self {
             shape: self.shape.clone(),
             values,
             dtype: self.dtype,
+            integer_sidecar: None,
         }
     }
 
@@ -2936,6 +3128,7 @@ impl UFuncArray {
                     shape,
                     values: vec![var],
                     dtype: out_dtype,
+                    integer_sidecar: None,
                 })
             }
             Some(axis) => {
@@ -2969,6 +3162,7 @@ impl UFuncArray {
                     shape: out_shape,
                     values: var_values,
                     dtype: out_dtype,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -3016,6 +3210,7 @@ impl UFuncArray {
                     shape: Vec::new(),
                     values: vec![min_idx as f64],
                     dtype: DType::I64,
+                    integer_sidecar: None,
                 })
             }
             Some(axis) => {
@@ -3037,6 +3232,7 @@ impl UFuncArray {
                     shape: out_shape,
                     values: out_values,
                     dtype: DType::I64,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -3070,6 +3266,7 @@ impl UFuncArray {
                     shape: Vec::new(),
                     values: vec![max_idx as f64],
                     dtype: DType::I64,
+                    integer_sidecar: None,
                 })
             }
             Some(axis) => {
@@ -3091,6 +3288,7 @@ impl UFuncArray {
                     shape: out_shape,
                     values: out_values,
                     dtype: DType::I64,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -3105,6 +3303,7 @@ impl UFuncArray {
             shape: resolved,
             values: self.values.clone(),
             dtype: self.dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -3164,6 +3363,7 @@ impl UFuncArray {
             shape: new_shape,
             values: new_values,
             dtype: self.dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -3174,6 +3374,7 @@ impl UFuncArray {
             shape: vec![self.values.len()],
             values: self.values.clone(),
             dtype: self.dtype,
+            integer_sidecar: None,
         }
     }
 
@@ -3194,6 +3395,7 @@ impl UFuncArray {
                     shape: new_shape,
                     values: self.values.clone(),
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
             Some(axis) => {
@@ -3210,6 +3412,7 @@ impl UFuncArray {
                     shape: new_shape,
                     values: self.values.clone(),
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -3237,6 +3440,7 @@ impl UFuncArray {
             shape: new_shape,
             values: self.values.clone(),
             dtype: self.dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -3305,6 +3509,7 @@ impl UFuncArray {
                 shape: vec![1],
                 values: self.values.clone(),
                 dtype: self.dtype,
+                integer_sidecar: None,
             }
         } else {
             self.clone()
@@ -3320,11 +3525,13 @@ impl UFuncArray {
                 shape: vec![1, 1],
                 values: self.values.clone(),
                 dtype: self.dtype,
+                integer_sidecar: None,
             },
             1 => Self {
                 shape: vec![1, self.shape[0]],
                 values: self.values.clone(),
                 dtype: self.dtype,
+                integer_sidecar: None,
             },
             _ => self.clone(),
         }
@@ -3339,11 +3546,13 @@ impl UFuncArray {
                 shape: vec![1, 1, 1],
                 values: self.values.clone(),
                 dtype: self.dtype,
+                integer_sidecar: None,
             },
             1 => Self {
                 shape: vec![1, self.shape[0], 1],
                 values: self.values.clone(),
                 dtype: self.dtype,
+                integer_sidecar: None,
             },
             2 => {
                 let mut shape = self.shape.clone();
@@ -3352,6 +3561,7 @@ impl UFuncArray {
                     shape,
                     values: self.values.clone(),
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 }
             }
             _ => self.clone(),
@@ -3401,6 +3611,7 @@ impl UFuncArray {
                     shape: vec![n],
                     values,
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
             Some(ax) => {
@@ -3433,6 +3644,7 @@ impl UFuncArray {
                     shape: new_shape,
                     values,
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -3471,6 +3683,7 @@ impl UFuncArray {
                     shape: vec![n],
                     values,
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
             Some(ax) => {
@@ -3509,6 +3722,7 @@ impl UFuncArray {
                     shape: new_shape,
                     values,
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -3527,6 +3741,7 @@ impl UFuncArray {
                     shape: vec![n],
                     values,
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
             Some(ax) => Self::concatenate(&[self, other], ax),
@@ -3579,6 +3794,7 @@ impl UFuncArray {
                         shape: vec![a.shape[0], 1],
                         values: a.values.clone(),
                         dtype: a.dtype,
+                        integer_sidecar: None,
                     }
                 } else {
                     a.clone()
@@ -3647,6 +3863,7 @@ impl UFuncArray {
                 shape: shape.clone(),
                 values,
                 dtype: arr.dtype,
+                integer_sidecar: None,
             });
         }
         Ok(result)
@@ -3669,6 +3886,7 @@ impl UFuncArray {
             shape: vec![len],
             values,
             dtype: self.dtype,
+            integer_sidecar: None,
         }
     }
 
@@ -3682,6 +3900,7 @@ impl UFuncArray {
                 shape: new_shape.to_vec(),
                 values: vec![0.0; new_count],
                 dtype: self.dtype,
+                integer_sidecar: None,
             });
         }
         let values: Vec<f64> = (0..new_count)
@@ -3691,6 +3910,7 @@ impl UFuncArray {
             shape: new_shape.to_vec(),
             values,
             dtype: self.dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -3750,6 +3970,7 @@ impl UFuncArray {
             shape: out_shape,
             values,
             dtype: out_dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -3768,6 +3989,7 @@ impl UFuncArray {
                     shape: vec![values.len()],
                     values,
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
             Some(axis) => {
@@ -3799,6 +4021,7 @@ impl UFuncArray {
                     shape: self.shape.clone(),
                     values,
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -3820,6 +4043,7 @@ impl UFuncArray {
                     shape: vec![self.values.len()],
                     values: indices.iter().map(|&i| i as f64).collect(),
                     dtype: DType::I64,
+                    integer_sidecar: None,
                 })
             }
             Some(axis) => {
@@ -3850,6 +4074,7 @@ impl UFuncArray {
                     shape: self.shape.clone(),
                     values: out_values,
                     dtype: DType::I64,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -3937,6 +4162,7 @@ impl UFuncArray {
             shape: values.shape.clone(),
             values: out_values,
             dtype: DType::I64,
+            integer_sidecar: None,
         })
     }
 
@@ -3958,6 +4184,7 @@ impl UFuncArray {
                     shape: vec![n],
                     values,
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
             Some(ax) => {
@@ -3986,6 +4213,7 @@ impl UFuncArray {
                     shape: self.shape.clone(),
                     values,
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -4013,6 +4241,7 @@ impl UFuncArray {
                     shape: vec![n],
                     values,
                     dtype: DType::I64,
+                    integer_sidecar: None,
                 })
             }
             Some(ax) => {
@@ -4047,6 +4276,7 @@ impl UFuncArray {
                     shape: self.shape.clone(),
                     values: result,
                     dtype: DType::I64,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -4086,6 +4316,7 @@ impl UFuncArray {
             shape: vec![n],
             values,
             dtype: DType::I64,
+            integer_sidecar: None,
         })
     }
 
@@ -4156,6 +4387,7 @@ impl UFuncArray {
             shape: out_shape,
             values: out_values,
             dtype: out_dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -4236,6 +4468,7 @@ impl UFuncArray {
                 shape: sub_shape,
                 values,
                 dtype: self.dtype,
+                integer_sidecar: None,
             });
         }
         Ok(result)
@@ -4293,6 +4526,7 @@ impl UFuncArray {
             shape: out_shape,
             values: out_values,
             dtype: self.dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -4304,6 +4538,7 @@ impl UFuncArray {
                     shape: vec![0],
                     values: Vec::new(),
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 }),
                 Some(ax) => {
                     let ax = normalize_axis(ax, self.shape.len())?;
@@ -4313,6 +4548,7 @@ impl UFuncArray {
                         shape: out_shape,
                         values: Vec::new(),
                         dtype: self.dtype,
+                        integer_sidecar: None,
                     })
                 }
             };
@@ -4329,6 +4565,7 @@ impl UFuncArray {
                     shape: vec![n],
                     values,
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
             Some(ax) => {
@@ -4357,6 +4594,7 @@ impl UFuncArray {
                     shape: out_shape,
                     values,
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -4379,6 +4617,7 @@ impl UFuncArray {
                     shape: self.shape.clone(),
                     values,
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
             Some(ax) => {
@@ -4404,6 +4643,7 @@ impl UFuncArray {
                     shape: self.shape.clone(),
                     values,
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -4419,6 +4659,7 @@ impl UFuncArray {
                     shape: self.shape.clone(),
                     values,
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
             Some(ax) => {
@@ -4441,6 +4682,7 @@ impl UFuncArray {
                     shape: self.shape.clone(),
                     values,
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -4549,6 +4791,7 @@ impl UFuncArray {
                     shape: vec![n],
                     values,
                     dtype,
+                    integer_sidecar: None,
                 })
             }
             (2, 1) => {
@@ -4573,6 +4816,7 @@ impl UFuncArray {
                     shape: vec![m],
                     values,
                     dtype,
+                    integer_sidecar: None,
                 })
             }
             _ => Err(UFuncError::Msg(format!(
@@ -4610,6 +4854,7 @@ impl UFuncArray {
             shape: vec![m, n],
             values,
             dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -4631,6 +4876,7 @@ impl UFuncArray {
             shape: vec![m, n],
             values,
             dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -4682,6 +4928,7 @@ impl UFuncArray {
             shape: vec![out_rows, out_cols],
             values,
             dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -4726,6 +4973,7 @@ impl UFuncArray {
             shape: out_shape,
             values,
             dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -4806,6 +5054,7 @@ impl UFuncArray {
             shape: vec![x.len()],
             values: x,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -4835,6 +5084,7 @@ impl UFuncArray {
             shape: vec![n, n],
             values: result,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -4847,6 +5097,7 @@ impl UFuncArray {
             shape: vec![n],
             values: result,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -4858,6 +5109,7 @@ impl UFuncArray {
             shape: out_shape,
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -4983,6 +5235,29 @@ impl UFuncArray {
         }
     }
 
+    fn complex_logical_shape(&self, op: &str) -> Result<Vec<usize>, UFuncError> {
+        if !self.uses_complex_interleaved_storage() {
+            return Ok(self.shape.clone());
+        }
+
+        if self.shape.last().copied() != Some(2) || !self.values.len().is_multiple_of(2) {
+            return Err(UFuncError::Msg(format!(
+                "{op}: complex arrays must use interleaved trailing-dimension shape [..., 2]"
+            )));
+        }
+
+        Ok(self.shape[..self.shape.len() - 1].to_vec())
+    }
+
+    fn logical_complex_value(&self, logical_flat: usize) -> (f64, f64) {
+        if self.uses_complex_interleaved_storage() {
+            let base = logical_flat * 2;
+            (self.values[base], self.values[base + 1])
+        } else {
+            (self.values[logical_flat], 0.0)
+        }
+    }
+
     fn complex_matrix_from_interleaved(
         rows: usize,
         cols: usize,
@@ -5024,6 +5299,7 @@ impl UFuncArray {
             shape: vec![n, n],
             values: result,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -5071,6 +5347,7 @@ impl UFuncArray {
             shape: vec![n, n],
             values: result,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -5087,6 +5364,7 @@ impl UFuncArray {
             shape: vec![n, m],
             values: result,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -5118,6 +5396,7 @@ impl UFuncArray {
             shape: vec![n],
             values: x,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -5174,6 +5453,7 @@ impl UFuncArray {
             shape: vec![n, m],
             values: x,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -5194,11 +5474,13 @@ impl UFuncArray {
                 shape: vec![eigenvalues.len()],
                 values: eigenvalues,
                 dtype: DType::F64,
+                integer_sidecar: None,
             },
             Self {
                 shape: vec![n, n],
                 values: eigenvectors,
                 dtype: DType::F64,
+                integer_sidecar: None,
             },
         ))
     }
@@ -5217,6 +5499,7 @@ impl UFuncArray {
             shape: vec![vals.len()],
             values: vals,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -5236,11 +5519,13 @@ impl UFuncArray {
                 shape: vec![n],
                 values: eigenvalues,
                 dtype: DType::F64,
+                integer_sidecar: None,
             },
             Self {
                 shape: vec![n, n],
                 values: eigenvectors,
                 dtype: DType::F64,
+                integer_sidecar: None,
             },
         ))
     }
@@ -5259,6 +5544,7 @@ impl UFuncArray {
             shape: vec![n],
             values: vals,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -5277,16 +5563,19 @@ impl UFuncArray {
                 shape: vec![m, m],
                 values: u,
                 dtype: DType::F64,
+                integer_sidecar: None,
             },
             Self {
                 shape: vec![s.len()],
                 values: s,
                 dtype: DType::F64,
+                integer_sidecar: None,
             },
             Self {
                 shape: vec![n, n],
                 values: vt,
                 dtype: DType::F64,
+                integer_sidecar: None,
             },
         ))
     }
@@ -5304,6 +5593,7 @@ impl UFuncArray {
             shape: vec![s.len()],
             values: s,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -5351,11 +5641,13 @@ impl UFuncArray {
                 shape: vec![m, k],
                 values: q,
                 dtype: DType::F64,
+                integer_sidecar: None,
             },
             Self {
                 shape: vec![k, n],
                 values: r,
                 dtype: DType::F64,
+                integer_sidecar: None,
             },
         ))
     }
@@ -5387,6 +5679,7 @@ impl UFuncArray {
                 shape: vec![n, n],
                 values: lu,
                 dtype: DType::F64,
+                integer_sidecar: None,
             },
             perm,
             det_sign,
@@ -5412,6 +5705,7 @@ impl UFuncArray {
             shape: vec![n],
             values: x,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -5429,6 +5723,7 @@ impl UFuncArray {
             shape: vec![n, n],
             values: result,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -5446,6 +5741,7 @@ impl UFuncArray {
             shape: vec![n, n],
             values: result,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -5463,6 +5759,7 @@ impl UFuncArray {
             shape: vec![n, n],
             values: result,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -5482,11 +5779,13 @@ impl UFuncArray {
                 shape: vec![n, n],
                 values: t,
                 dtype: DType::F64,
+                integer_sidecar: None,
             },
             Self {
                 shape: vec![n, n],
                 values: z,
                 dtype: DType::F64,
+                integer_sidecar: None,
             },
         ))
     }
@@ -5507,11 +5806,13 @@ impl UFuncArray {
                 shape: vec![n, n],
                 values: u,
                 dtype: DType::F64,
+                integer_sidecar: None,
             },
             Self {
                 shape: vec![n, n],
                 values: p,
                 dtype: DType::F64,
+                integer_sidecar: None,
             },
         ))
     }
@@ -5539,6 +5840,7 @@ impl UFuncArray {
                     shape: vec![out.len()],
                     values: out,
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
             Some(ax) => {
@@ -5577,6 +5879,7 @@ impl UFuncArray {
                     shape: out_shape,
                     values,
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -5607,6 +5910,7 @@ impl UFuncArray {
                     shape: vec![values.len()],
                     values,
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
             Some(ax) => {
@@ -5733,6 +6037,7 @@ impl UFuncArray {
             shape: indices.shape.clone(),
             values,
             dtype: self.dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -5799,6 +6104,7 @@ impl UFuncArray {
             shape: vec![n],
             values,
             dtype: arr.dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -5866,6 +6172,7 @@ impl UFuncArray {
             shape: vec![n],
             values: idx_values,
             dtype: DType::I64,
+            integer_sidecar: None,
         };
         let arrays: Vec<Self> = (0..ndim).map(|_| idx.clone()).collect();
         (arrays, DType::I64)
@@ -5889,11 +6196,13 @@ impl UFuncArray {
                 shape: vec![len],
                 values: rows,
                 dtype: DType::I64,
+                integer_sidecar: None,
             },
             Self {
                 shape: vec![len],
                 values: cols,
                 dtype: DType::I64,
+                integer_sidecar: None,
             },
         )
     }
@@ -5916,11 +6225,13 @@ impl UFuncArray {
                 shape: vec![len],
                 values: rows,
                 dtype: DType::I64,
+                integer_sidecar: None,
             },
             Self {
                 shape: vec![len],
                 values: cols,
                 dtype: DType::I64,
+                integer_sidecar: None,
             },
         )
     }
@@ -6005,6 +6316,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype,
+            integer_sidecar: None,
         }
     }
 
@@ -6078,6 +6390,7 @@ impl UFuncArray {
                     shape: out_shape,
                     values,
                     dtype: DType::Bool,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -6117,6 +6430,7 @@ impl UFuncArray {
                     shape: out_shape,
                     values,
                     dtype: DType::Bool,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -6137,6 +6451,7 @@ impl UFuncArray {
             shape: vec![n],
             values: indices,
             dtype: DType::I64,
+            integer_sidecar: None,
         }
     }
 
@@ -6182,6 +6497,7 @@ impl UFuncArray {
                 shape: out_shape,
                 values,
                 dtype: current.dtype,
+                integer_sidecar: None,
             };
         }
         Ok(current)
@@ -6213,6 +6529,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::Bool,
+            integer_sidecar: None,
         })
     }
 
@@ -6230,7 +6547,7 @@ impl UFuncArray {
             None => {
                 let n = self.values.len();
                 if n == 0 {
-                    return Err(UFuncError::Msg("median of empty array".to_string()));
+                    return Ok(Self::scalar(f64::NAN, DType::F64));
                 }
                 // NumPy propagates NaN in median
                 if self.values.iter().any(|v| v.is_nan()) {
@@ -6249,7 +6566,14 @@ impl UFuncArray {
                 let ax = normalize_axis(ax, self.shape.len())?;
                 let axis_len = self.shape[ax];
                 if axis_len == 0 {
-                    return Err(UFuncError::Msg("median of zero-length axis".to_string()));
+                    let out_shape = reduced_shape(&self.shape, ax, false);
+                    let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+                    return Ok(Self {
+                        shape: out_shape,
+                        values: vec![f64::NAN; out_count],
+                        dtype: DType::F64,
+                        integer_sidecar: None,
+                    });
                 }
                 let outer: usize = self.shape[..ax].iter().product();
                 let inner: usize = self.shape[ax + 1..].iter().product();
@@ -6283,6 +6607,7 @@ impl UFuncArray {
                     shape: out_shape,
                     values,
                     dtype: DType::F64,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -6301,7 +6626,7 @@ impl UFuncArray {
             None => {
                 let n = self.values.len();
                 if n == 0 {
-                    return Err(UFuncError::Msg("percentile of empty array".to_string()));
+                    return Ok(Self::scalar(f64::NAN, DType::F64));
                 }
                 // NumPy propagates NaN in percentile
                 if self.values.iter().any(|v| v.is_nan()) {
@@ -6316,9 +6641,14 @@ impl UFuncArray {
                 let ax = normalize_axis(ax, self.shape.len())?;
                 let axis_len = self.shape[ax];
                 if axis_len == 0 {
-                    return Err(UFuncError::Msg(
-                        "percentile of zero-length axis".to_string(),
-                    ));
+                    let out_shape = reduced_shape(&self.shape, ax, false);
+                    let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+                    return Ok(Self {
+                        shape: out_shape,
+                        values: vec![f64::NAN; out_count],
+                        dtype: DType::F64,
+                        integer_sidecar: None,
+                    });
                 }
                 let outer: usize = self.shape[..ax].iter().product();
                 let inner: usize = self.shape[ax + 1..].iter().product();
@@ -6347,6 +6677,7 @@ impl UFuncArray {
                     shape: out_shape,
                     values,
                     dtype: DType::F64,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -6368,7 +6699,7 @@ impl UFuncArray {
         match axis {
             None => {
                 if self.values.is_empty() {
-                    return Err(UFuncError::Msg("percentile of empty array".to_string()));
+                    return Ok(Self::scalar(f64::NAN, DType::F64));
                 }
                 // NumPy propagates NaN in percentile
                 if self.values.iter().any(|v| v.is_nan()) {
@@ -6383,9 +6714,14 @@ impl UFuncArray {
                 let ax = normalize_axis(ax, self.shape.len())?;
                 let axis_len = self.shape[ax];
                 if axis_len == 0 {
-                    return Err(UFuncError::Msg(
-                        "percentile of zero-length axis".to_string(),
-                    ));
+                    let out_shape = reduced_shape(&self.shape, ax, false);
+                    let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+                    return Ok(Self {
+                        shape: out_shape,
+                        values: vec![f64::NAN; out_count],
+                        dtype: DType::F64,
+                        integer_sidecar: None,
+                    });
                 }
                 let outer: usize = self.shape[..ax].iter().product();
                 let inner: usize = self.shape[ax + 1..].iter().product();
@@ -6417,6 +6753,7 @@ impl UFuncArray {
                     shape: out_shape,
                     values,
                     dtype: DType::F64,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -6579,6 +6916,7 @@ impl UFuncArray {
                     shape: self.shape.clone(),
                     values,
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
             Some(ax) => {
@@ -6606,6 +6944,7 @@ impl UFuncArray {
                     shape: self.shape.clone(),
                     values,
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -6649,6 +6988,7 @@ impl UFuncArray {
             shape: out_shape,
             values,
             dtype: self.dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -6694,6 +7034,7 @@ impl UFuncArray {
             shape: out_shape,
             values,
             dtype: self.dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -6741,6 +7082,7 @@ impl UFuncArray {
             shape: out_shape,
             values,
             dtype: self.dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -6789,6 +7131,7 @@ impl UFuncArray {
             shape: out_shape,
             values,
             dtype: self.dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -6830,6 +7173,7 @@ impl UFuncArray {
             shape: out_shape,
             values,
             dtype: self.dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -6858,6 +7202,7 @@ impl UFuncArray {
                 shape,
                 values: arr.values.clone(),
                 dtype: arr.dtype,
+                integer_sidecar: None,
             });
         }
         Ok(result)
@@ -6912,6 +7257,7 @@ impl UFuncArray {
                 shape: out_shape.clone(),
                 values,
                 dtype,
+                integer_sidecar: None,
             });
         }
         Ok(results)
@@ -7048,6 +7394,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -7084,6 +7431,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: self.dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -7117,6 +7465,7 @@ impl UFuncArray {
             shape: vec![axis_len],
             values: first_slice_vals,
             dtype: self.dtype,
+            integer_sidecar: None,
         };
         let first_result = func(&first_slice)?;
         let result_len = first_result.values.len();
@@ -7129,6 +7478,7 @@ impl UFuncArray {
                 shape: out_shape,
                 values: Vec::new(),
                 dtype: self.dtype,
+                integer_sidecar: None,
             });
         }
 
@@ -7158,6 +7508,7 @@ impl UFuncArray {
                 shape: vec![axis_len],
                 values: slice_vals,
                 dtype: self.dtype,
+                integer_sidecar: None,
             };
             let result = func(&slice_arr)?;
             all_values.extend_from_slice(&result.values);
@@ -7166,6 +7517,7 @@ impl UFuncArray {
             shape: out_shape,
             values: all_values,
             dtype: self.dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -7186,6 +7538,7 @@ impl UFuncArray {
                 shape: vec![bins],
                 values: vec![0.0; bins],
                 dtype: DType::I64,
+                integer_sidecar: None,
             };
             let edges = Self::linspace(0.0, 1.0, bins + 1, DType::F64)?;
             return Ok((counts, edges));
@@ -7220,11 +7573,13 @@ impl UFuncArray {
             shape: vec![bins],
             values: counts,
             dtype: DType::I64,
+            integer_sidecar: None,
         };
         let edges_arr = Self {
             shape: vec![bins + 1],
             values: edges,
             dtype: DType::F64,
+            integer_sidecar: None,
         };
         Ok((counts_arr, edges_arr))
     }
@@ -7265,6 +7620,7 @@ impl UFuncArray {
                 shape: vec![n_bins],
                 values: counts,
                 dtype: DType::I64,
+                integer_sidecar: None,
             },
             bin_edges.clone(),
         ))
@@ -7312,6 +7668,7 @@ impl UFuncArray {
                 shape: vec![0],
                 values: Vec::new(),
                 dtype: DType::I64,
+                integer_sidecar: None,
             });
         }
         let mut max_val = 0usize;
@@ -7349,6 +7706,7 @@ impl UFuncArray {
             shape: vec![n],
             values: counts,
             dtype: DType::I64,
+            integer_sidecar: None,
         })
     }
 
@@ -7402,6 +7760,7 @@ impl UFuncArray {
             shape,
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -7471,6 +7830,7 @@ impl UFuncArray {
                             shape: out_shape,
                             values,
                             dtype: promote_for_mean_reduction(self.dtype),
+                            integer_sidecar: None,
                         })
                     }
                 }
@@ -7518,6 +7878,7 @@ impl UFuncArray {
             shape: vec![nvars, nvars],
             values: cov_values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -7543,6 +7904,7 @@ impl UFuncArray {
             shape: vec![nvars, nvars],
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -7570,6 +7932,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::I64,
+            integer_sidecar: None,
         })
     }
 
@@ -7630,6 +7993,7 @@ impl UFuncArray {
             shape: vec![xbins, ybins],
             values: hist,
             dtype: DType::I64,
+            integer_sidecar: None,
         };
         Ok((h, xedges, yedges))
     }
@@ -7745,6 +8109,7 @@ impl UFuncArray {
             shape: bins_per_dim.to_vec(),
             values: hist,
             dtype: DType::I64,
+            integer_sidecar: None,
         };
         Ok((h, edges_list))
     }
@@ -7765,6 +8130,7 @@ impl UFuncArray {
                 shape: vec![0],
                 values: Vec::new(),
                 dtype: promote(self.dtype, kernel.dtype),
+                integer_sidecar: None,
             });
         }
         let out_len = n + m - 1;
@@ -7778,6 +8144,7 @@ impl UFuncArray {
             shape: vec![out_len],
             values,
             dtype: promote(self.dtype, kernel.dtype),
+            integer_sidecar: None,
         })
     }
 
@@ -7793,6 +8160,7 @@ impl UFuncArray {
             shape: kernel.shape.clone(),
             values: kernel.values.iter().rev().copied().collect(),
             dtype: kernel.dtype,
+            integer_sidecar: None,
         };
         self.convolve(&reversed)
     }
@@ -7813,6 +8181,7 @@ impl UFuncArray {
                 shape: vec![0, 0],
                 values: Vec::new(),
                 dtype: promote(self.dtype, kernel.dtype),
+                integer_sidecar: None,
             });
         }
         let out_h = h1 + h2 - 1;
@@ -7832,6 +8201,7 @@ impl UFuncArray {
             shape: vec![out_h, out_w],
             values,
             dtype: promote(self.dtype, kernel.dtype),
+            integer_sidecar: None,
         })
     }
 
@@ -7849,6 +8219,7 @@ impl UFuncArray {
             shape: kernel.shape.clone(),
             values: kernel.values.iter().rev().copied().collect(),
             dtype: kernel.dtype,
+            integer_sidecar: None,
         };
         self.convolve2d(&reversed)
     }
@@ -7878,6 +8249,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values: self.values.iter().map(|&v| func(v)).collect(),
             dtype: self.dtype,
+            integer_sidecar: None,
         }
     }
 
@@ -7900,6 +8272,7 @@ impl UFuncArray {
             shape: ba.shape.clone(),
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -7935,6 +8308,7 @@ impl UFuncArray {
                 shape: vec![1],
                 values: vec![val],
                 dtype: DType::F64,
+                integer_sidecar: None,
             });
         }
 
@@ -7966,6 +8340,7 @@ impl UFuncArray {
             shape: out_shape,
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -7993,6 +8368,7 @@ impl UFuncArray {
             shape: x.shape.clone(),
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -8083,6 +8459,7 @@ impl UFuncArray {
             shape: vec![m],
             values: coeffs,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -8101,6 +8478,7 @@ impl UFuncArray {
                 shape: vec![1],
                 values: vec![0.0],
                 dtype: DType::F64,
+                integer_sidecar: None,
             });
         }
         let deg = n - 1;
@@ -8111,6 +8489,7 @@ impl UFuncArray {
             shape: vec![deg],
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -8135,6 +8514,7 @@ impl UFuncArray {
             shape: vec![n + 1],
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -8157,6 +8537,7 @@ impl UFuncArray {
                     shape: vec![0],
                     values: Vec::new(),
                     dtype: DType::F64,
+                    integer_sidecar: None,
                 });
             }
             Some(idx) => &self.values[idx..],
@@ -8180,6 +8561,7 @@ impl UFuncArray {
                 shape: vec![values.len()],
                 values,
                 dtype: DType::F64,
+                integer_sidecar: None,
             });
         }
         if degree == 1 {
@@ -8190,6 +8572,7 @@ impl UFuncArray {
                 shape: vec![values.len()],
                 values,
                 dtype: DType::F64,
+                integer_sidecar: None,
             });
         }
         if degree == 2 {
@@ -8208,6 +8591,7 @@ impl UFuncArray {
                 shape: vec![values.len()],
                 values,
                 dtype: DType::F64,
+                integer_sidecar: None,
             });
         }
 
@@ -8259,6 +8643,7 @@ impl UFuncArray {
             shape: vec![values.len()],
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -8285,6 +8670,7 @@ impl UFuncArray {
             shape: vec![n],
             values: coeffs,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -8300,6 +8686,7 @@ impl UFuncArray {
                 shape: vec![0],
                 values: Vec::new(),
                 dtype: DType::F64,
+                integer_sidecar: None,
             });
         }
         let mut result = vec![0.0; n + m - 1];
@@ -8313,6 +8700,7 @@ impl UFuncArray {
             shape: vec![len],
             values: result,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -8334,6 +8722,7 @@ impl UFuncArray {
             shape: vec![n],
             values: result,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -8354,6 +8743,7 @@ impl UFuncArray {
             shape: vec![n],
             values: result,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -8378,6 +8768,7 @@ impl UFuncArray {
                     shape: vec![1],
                     values: vec![0.0],
                     dtype: DType::F64,
+                    integer_sidecar: None,
                 },
                 self.clone(),
             ));
@@ -8399,6 +8790,7 @@ impl UFuncArray {
                 shape: vec![quotient.len()],
                 values: quotient,
                 dtype: DType::F64,
+                integer_sidecar: None,
             },
             Self {
                 shape: vec![rem_len],
@@ -8408,6 +8800,7 @@ impl UFuncArray {
                     rem_vals
                 },
                 dtype: DType::F64,
+                integer_sidecar: None,
             },
         ))
     }
@@ -8432,6 +8825,7 @@ impl UFuncArray {
             shape: vec![3],
             values,
             dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -8444,6 +8838,7 @@ impl UFuncArray {
                 shape: vec![m],
                 values: vec![1.0; m],
                 dtype: DType::F64,
+                integer_sidecar: None,
             };
         }
         let values: Vec<f64> = (0..m)
@@ -8453,6 +8848,7 @@ impl UFuncArray {
             shape: vec![m],
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         }
     }
 
@@ -8463,6 +8859,7 @@ impl UFuncArray {
                 shape: vec![m],
                 values: vec![1.0; m],
                 dtype: DType::F64,
+                integer_sidecar: None,
             };
         }
         let values: Vec<f64> = (0..m)
@@ -8472,6 +8869,7 @@ impl UFuncArray {
             shape: vec![m],
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         }
     }
 
@@ -8482,6 +8880,7 @@ impl UFuncArray {
                 shape: vec![m],
                 values: vec![1.0; m],
                 dtype: DType::F64,
+                integer_sidecar: None,
             };
         }
         let values: Vec<f64> = (0..m)
@@ -8494,6 +8893,7 @@ impl UFuncArray {
             shape: vec![m],
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         }
     }
 
@@ -8504,6 +8904,7 @@ impl UFuncArray {
                 shape: vec![m],
                 values: vec![1.0; m],
                 dtype: DType::F64,
+                integer_sidecar: None,
             };
         }
         let half = (m as f64 - 1.0) / 2.0;
@@ -8514,6 +8915,7 @@ impl UFuncArray {
             shape: vec![m],
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         }
     }
 
@@ -8525,6 +8927,7 @@ impl UFuncArray {
                 shape: vec![m],
                 values: vec![1.0; m],
                 dtype: DType::F64,
+                integer_sidecar: None,
             };
         }
         let values: Vec<f64> = (0..m)
@@ -8539,6 +8942,7 @@ impl UFuncArray {
             shape: vec![m],
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         }
     }
 
@@ -8555,6 +8959,7 @@ impl UFuncArray {
                 shape: vec![0],
                 values: vec![],
                 dtype: DType::F64,
+                integer_sidecar: None,
             });
         }
         // Build complex input (real from self.values, imag = 0)
@@ -8577,6 +8982,7 @@ impl UFuncArray {
             shape: vec![len, 2],
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -8595,6 +9001,7 @@ impl UFuncArray {
                 shape: vec![0, 2],
                 values: vec![],
                 dtype: DType::F64,
+                integer_sidecar: None,
             });
         }
         let mut re = Vec::with_capacity(len);
@@ -8613,6 +9020,7 @@ impl UFuncArray {
             shape: vec![len, 2],
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -8627,6 +9035,7 @@ impl UFuncArray {
             shape: vec![out_len, 2],
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -8647,6 +9056,7 @@ impl UFuncArray {
                 shape: vec![0],
                 values: vec![],
                 dtype: DType::F64,
+                integer_sidecar: None,
             });
         }
         // Reconstruct full spectrum from hermitian symmetry: X[k] = conj(X[n-k])
@@ -8668,6 +9078,7 @@ impl UFuncArray {
             shape: vec![n],
             values: re,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -8687,6 +9098,7 @@ impl UFuncArray {
                 shape: vec![rows, cols, 2],
                 values: vec![],
                 dtype: DType::F64,
+                integer_sidecar: None,
             });
         }
         // FFT along each row
@@ -8721,6 +9133,7 @@ impl UFuncArray {
             shape: vec![rows, cols, 2],
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -8740,6 +9153,7 @@ impl UFuncArray {
                 shape: vec![rows, cols, 2],
                 values: vec![],
                 dtype: DType::F64,
+                integer_sidecar: None,
             });
         }
         // Deinterleave
@@ -8779,6 +9193,7 @@ impl UFuncArray {
             shape: vec![rows, cols, 2],
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -8794,6 +9209,7 @@ impl UFuncArray {
                 shape: vec![2],
                 values: vec![self.values.first().copied().unwrap_or(0.0), 0.0],
                 dtype: DType::F64,
+                integer_sidecar: None,
             });
         }
         let total: usize = self.shape.iter().product();
@@ -8804,6 +9220,7 @@ impl UFuncArray {
                 shape: out_shape,
                 values: vec![],
                 dtype: DType::F64,
+                integer_sidecar: None,
             });
         }
 
@@ -8829,6 +9246,7 @@ impl UFuncArray {
             shape: out_shape,
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -8873,6 +9291,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -8889,6 +9308,7 @@ impl UFuncArray {
                 shape: vec![1, 2],
                 values: vec![self.values.first().copied().unwrap_or(0.0), 0.0],
                 dtype: DType::F64,
+                integer_sidecar: None,
             });
         }
         let total: usize = self.shape.iter().product();
@@ -8901,6 +9321,7 @@ impl UFuncArray {
                 shape: out_shape,
                 values: vec![],
                 dtype: DType::F64,
+                integer_sidecar: None,
             });
         }
 
@@ -8938,6 +9359,7 @@ impl UFuncArray {
             shape: out_shape,
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -8970,6 +9392,7 @@ impl UFuncArray {
                 shape: out_shape,
                 values: vec![],
                 dtype: DType::F64,
+                integer_sidecar: None,
             });
         }
 
@@ -9017,6 +9440,7 @@ impl UFuncArray {
             shape: full_shape,
             values: re,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -9059,6 +9483,7 @@ impl UFuncArray {
             shape: vec![n],
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         }
     }
 
@@ -9071,6 +9496,7 @@ impl UFuncArray {
             shape: vec![out_len],
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         }
     }
 
@@ -9089,6 +9515,7 @@ impl UFuncArray {
             shape: vec![n],
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -9106,6 +9533,7 @@ impl UFuncArray {
             shape: vec![n],
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -9271,6 +9699,7 @@ impl UFuncArray {
             shape: output_shape,
             values: result,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -9562,6 +9991,7 @@ impl UFuncArray {
                         shape: vec![1, a.shape[0]],
                         values: a.values.clone(),
                         dtype: a.dtype,
+                        integer_sidecar: None,
                     }
                 } else {
                     a.clone()
@@ -9591,41 +10021,16 @@ impl UFuncArray {
     // ── slice, item, ravel, copy, fill, ptp, round, choose ────────
 
     /// Slice along an axis: equivalent to a[start:stop:step] along that axis.
-    /// Supports negative indices. step must be positive.
+    /// Supports negative indices and negative steps.
     pub fn slice_axis(
         &self,
         axis: isize,
         start: Option<i64>,
         stop: Option<i64>,
-        step: usize,
+        step: isize,
     ) -> Result<Self, UFuncError> {
-        if step == 0 {
-            return Err(UFuncError::Msg("slice: step cannot be 0".to_string()));
-        }
-        let ax = normalize_axis(axis, self.shape.len())?;
-        let axis_len = self.shape[ax] as i64;
-
-        let resolve = |val: i64| -> i64 {
-            if val < 0 {
-                (val + axis_len).max(0)
-            } else {
-                val.min(axis_len)
-            }
-        };
-        let s = resolve(start.unwrap_or(0));
-        let e = resolve(stop.unwrap_or(axis_len));
-        if s >= e {
-            let mut out_shape = self.shape.clone();
-            out_shape[ax] = 0;
-            return Ok(Self {
-                shape: out_shape,
-                values: Vec::new(),
-                dtype: self.dtype,
-            });
-        }
-
-        let indices: Vec<i64> = (s..e).step_by(step).collect();
-        self.take(&indices, Some(ax as isize))
+        let view = self.shared_view()?.slice_axis(axis, start, stop, step)?;
+        view.to_array()
     }
 
     /// Get a single element by multi-dimensional index. Returns a scalar.
@@ -9682,6 +10087,7 @@ impl UFuncArray {
             shape: vec![n],
             values: self.values.clone(),
             dtype: self.dtype,
+            integer_sidecar: None,
         }
     }
 
@@ -9727,6 +10133,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values: swapped,
             dtype: self.dtype,
+            integer_sidecar: None,
         }
     }
 
@@ -9794,6 +10201,7 @@ impl UFuncArray {
             shape: out_shape,
             values: result,
             dtype: self.dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -9802,7 +10210,7 @@ impl UFuncArray {
         match axis {
             None => {
                 if self.values.is_empty() {
-                    return Err(UFuncError::Msg("ptp of empty array".to_string()));
+                    return Err(UFuncError::EmptyReduction { op: "ptp" });
                 }
                 // NaN-propagating min/max matching NumPy's ptp behavior
                 let mut min = f64::INFINITY;
@@ -9821,6 +10229,10 @@ impl UFuncArray {
                 Ok(Self::scalar(max - min, self.dtype))
             }
             Some(ax) => {
+                let ax_idx = normalize_axis(ax, self.shape.len())?;
+                if self.shape[ax_idx] == 0 {
+                    return Err(UFuncError::EmptyReduction { op: "ptp" });
+                }
                 let mx = self.reduce_max(Some(ax), false)?;
                 let mn = self.reduce_min(Some(ax), false)?;
                 mx.elementwise_binary(&mn, BinaryOp::Sub)
@@ -9840,6 +10252,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: self.dtype,
+            integer_sidecar: None,
         }
     }
 
@@ -9872,6 +10285,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -9885,6 +10299,7 @@ impl UFuncArray {
             shape: vec![n],
             values: sorted,
             dtype: self.dtype,
+            integer_sidecar: None,
         }
     }
 
@@ -9946,12 +10361,14 @@ impl UFuncArray {
             shape: vec![nu],
             values: unique_vals,
             dtype: self.dtype,
+            integer_sidecar: None,
         };
         let indices = if return_index {
             Some(Self {
                 shape: vec![nu],
                 values: first_indices,
                 dtype: DType::I64,
+                integer_sidecar: None,
             })
         } else {
             None
@@ -9961,6 +10378,7 @@ impl UFuncArray {
                 shape: vec![n],
                 values: inverse_vec,
                 dtype: DType::I64,
+                integer_sidecar: None,
             })
         } else {
             None
@@ -9970,6 +10388,7 @@ impl UFuncArray {
                 shape: vec![nu],
                 values: counts_vec,
                 dtype: DType::I64,
+                integer_sidecar: None,
             })
         } else {
             None
@@ -9999,6 +10418,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::Bool,
+            integer_sidecar: None,
         }
     }
 
@@ -10032,6 +10452,7 @@ impl UFuncArray {
             shape: vec![n],
             values: combined,
             dtype: self.dtype,
+            integer_sidecar: None,
         }
     }
 
@@ -10064,6 +10485,7 @@ impl UFuncArray {
             shape: vec![n],
             values: result,
             dtype: self.dtype,
+            integer_sidecar: None,
         }
     }
 
@@ -10088,6 +10510,7 @@ impl UFuncArray {
             shape: vec![n],
             values: result,
             dtype: self.dtype,
+            integer_sidecar: None,
         }
     }
 
@@ -10118,6 +10541,7 @@ impl UFuncArray {
             shape: vec![n],
             values: result,
             dtype: self.dtype,
+            integer_sidecar: None,
         }
     }
 
@@ -10136,6 +10560,7 @@ impl UFuncArray {
             shape: vec![n],
             values,
             dtype: self.dtype,
+            integer_sidecar: None,
         }
     }
 
@@ -10180,6 +10605,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values: filled,
             dtype: self.dtype,
+            integer_sidecar: None,
         };
         (arr, nan_counts)
     }
@@ -10198,6 +10624,7 @@ impl UFuncArray {
                     shape,
                     values: vec![sum],
                     dtype: promote_for_sum_reduction(self.dtype),
+                    integer_sidecar: None,
                 })
             }
             Some(ax) => {
@@ -10229,6 +10656,7 @@ impl UFuncArray {
                     shape,
                     values: vec![sum / n],
                     dtype: promote_for_mean_reduction(self.dtype),
+                    integer_sidecar: None,
                 })
             }
             Some(ax) => {
@@ -10274,6 +10702,7 @@ impl UFuncArray {
                     shape,
                     values: vec![var],
                     dtype: promote_for_mean_reduction(self.dtype),
+                    integer_sidecar: None,
                 })
             }
             Some(ax) => {
@@ -10320,6 +10749,7 @@ impl UFuncArray {
                     shape: out_shape,
                     values: out_values,
                     dtype: promote_for_mean_reduction(self.dtype),
+                    integer_sidecar: None,
                 })
             }
         }
@@ -10343,6 +10773,9 @@ impl UFuncArray {
     pub fn nanmin(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
         match axis {
             None => {
+                if self.values.is_empty() {
+                    return Err(UFuncError::EmptyReduction { op: "nanmin" });
+                }
                 let min = self
                     .values
                     .iter()
@@ -10358,10 +10791,14 @@ impl UFuncArray {
                     shape,
                     values: vec![min],
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
+                if self.shape[ax] == 0 {
+                    return Err(UFuncError::EmptyReduction { op: "nanmin" });
+                }
                 let (filled, _) = self.nan_fill_for_axis(ax, f64::INFINITY);
                 filled.reduce_min(Some(ax as isize), keepdims)
             }
@@ -10372,6 +10809,9 @@ impl UFuncArray {
     pub fn nanmax(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
         match axis {
             None => {
+                if self.values.is_empty() {
+                    return Err(UFuncError::EmptyReduction { op: "nanmax" });
+                }
                 let max = self
                     .values
                     .iter()
@@ -10387,10 +10827,14 @@ impl UFuncArray {
                     shape,
                     values: vec![max],
                     dtype: self.dtype,
+                    integer_sidecar: None,
                 })
             }
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
+                if self.shape[ax] == 0 {
+                    return Err(UFuncError::EmptyReduction { op: "nanmax" });
+                }
                 let (filled, _) = self.nan_fill_for_axis(ax, f64::NEG_INFINITY);
                 filled.reduce_max(Some(ax as isize), keepdims)
             }
@@ -10440,6 +10884,7 @@ impl UFuncArray {
                     shape: out_shape,
                     values: out_values,
                     dtype: promote_for_mean_reduction(self.dtype),
+                    integer_sidecar: None,
                 })
             }
         }
@@ -10459,18 +10904,14 @@ impl UFuncArray {
                 }
                 match min_idx {
                     Some(idx) => Ok(Self::scalar(idx as f64, DType::I64)),
-                    None => Err(UFuncError::Msg(
-                        "nanargmin: All-NaN slice encountered".to_string(),
-                    )),
+                    None => Err(UFuncError::EmptyReduction { op: "nanargmin" }),
                 }
             }
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
                 let axis_len = self.shape[ax];
                 if axis_len == 0 {
-                    return Err(UFuncError::Msg(
-                        "nanargmin: zero-size array to reduction operation".to_string(),
-                    ));
+                    return Err(UFuncError::EmptyReduction { op: "nanargmin" });
                 }
                 let strides = c_strides_elems(&self.shape);
                 let out_shape = reduced_shape(&self.shape, ax, false);
@@ -10505,9 +10946,7 @@ impl UFuncArray {
                     match best_k {
                         Some(k) => out_values.push(k as f64),
                         None => {
-                            return Err(UFuncError::Msg(
-                                "nanargmin: All-NaN slice encountered".to_string(),
-                            ));
+                            return Err(UFuncError::EmptyReduction { op: "nanargmin" });
                         }
                     }
                 }
@@ -10515,6 +10954,7 @@ impl UFuncArray {
                     shape: out_shape,
                     values: out_values,
                     dtype: DType::I64,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -10534,18 +10974,14 @@ impl UFuncArray {
                 }
                 match max_idx {
                     Some(idx) => Ok(Self::scalar(idx as f64, DType::I64)),
-                    None => Err(UFuncError::Msg(
-                        "nanargmax: All-NaN slice encountered".to_string(),
-                    )),
+                    None => Err(UFuncError::EmptyReduction { op: "nanargmax" }),
                 }
             }
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
                 let axis_len = self.shape[ax];
                 if axis_len == 0 {
-                    return Err(UFuncError::Msg(
-                        "nanargmax: zero-size array to reduction operation".to_string(),
-                    ));
+                    return Err(UFuncError::EmptyReduction { op: "nanargmax" });
                 }
                 let strides = c_strides_elems(&self.shape);
                 let out_shape = reduced_shape(&self.shape, ax, false);
@@ -10580,9 +11016,7 @@ impl UFuncArray {
                     match best_k {
                         Some(k) => out_values.push(k as f64),
                         None => {
-                            return Err(UFuncError::Msg(
-                                "nanargmax: All-NaN slice encountered".to_string(),
-                            ));
+                            return Err(UFuncError::EmptyReduction { op: "nanargmax" });
                         }
                     }
                 }
@@ -10590,6 +11024,7 @@ impl UFuncArray {
                     shape: out_shape,
                     values: out_values,
                     dtype: DType::I64,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -10624,6 +11059,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: self.dtype,
+            integer_sidecar: None,
         }
     }
 
@@ -10668,6 +11104,7 @@ impl UFuncArray {
             shape: vec![n],
             values,
             dtype: self.dtype,
+            integer_sidecar: None,
         }
     }
 
@@ -10716,6 +11153,7 @@ impl UFuncArray {
                 shape: real_shape,
                 values: real_values,
                 dtype: real_dtype,
+                integer_sidecar: None,
             }
         } else {
             self.clone()
@@ -10748,6 +11186,7 @@ impl UFuncArray {
             shape: vec![m, cols],
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -10759,6 +11198,7 @@ impl UFuncArray {
                 shape: vec![0],
                 values: Vec::new(),
                 dtype: self.dtype,
+                integer_sidecar: None,
             });
         }
         let values: Vec<f64> = flat.windows(2).map(|w| w[1] - w[0]).collect();
@@ -10767,6 +11207,7 @@ impl UFuncArray {
             shape: vec![n],
             values,
             dtype: self.dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -10798,6 +11239,7 @@ impl UFuncArray {
                 shape: out_shape,
                 values: vec![0.0; total],
                 dtype: DType::F64,
+                integer_sidecar: None,
             });
         }
 
@@ -10830,6 +11272,7 @@ impl UFuncArray {
                 shape: out_shape,
                 values: out_values,
                 dtype: DType::F64,
+                integer_sidecar: None,
             })
         }
     }
@@ -10852,6 +11295,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         }
     }
 
@@ -10862,6 +11306,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         }
     }
 
@@ -10873,6 +11318,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         }
     }
 
@@ -10887,6 +11333,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         }
     }
 
@@ -10898,6 +11345,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         }
     }
 
@@ -10908,6 +11356,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         }
     }
 
@@ -10919,6 +11368,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         }
     }
 
@@ -10929,6 +11379,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         }
     }
 
@@ -10939,6 +11390,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         }
     }
 
@@ -10949,6 +11401,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         }
     }
 
@@ -10959,6 +11412,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         }
     }
 
@@ -10990,6 +11444,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -11021,6 +11476,7 @@ impl UFuncArray {
                 shape: vec![n],
                 values: vals,
                 dtype: DType::I64,
+                integer_sidecar: None,
             })
             .collect())
     }
@@ -11063,6 +11519,7 @@ impl UFuncArray {
             shape: vec![n],
             values,
             dtype: DType::I64,
+            integer_sidecar: None,
         })
     }
 
@@ -11086,6 +11543,7 @@ impl UFuncArray {
                     shape,
                     values: vals,
                     dtype: DType::F64,
+                    integer_sidecar: None,
                 }
             })
             .collect()
@@ -11116,6 +11574,7 @@ impl UFuncArray {
                     shape: out_shape.clone(),
                     values,
                     dtype: DType::F64,
+                    integer_sidecar: None,
                 }
             })
             .collect()
@@ -11163,6 +11622,7 @@ impl UFuncArray {
             shape: target_shape.to_vec(),
             values,
             dtype: self.dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -11227,6 +11687,7 @@ impl UFuncArray {
             shape: shape.to_vec(),
             values,
             dtype: self.dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -11297,6 +11758,7 @@ impl UFuncArray {
             shape: out_shape,
             values,
             dtype: self.dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -11357,6 +11819,7 @@ impl UFuncArray {
                     shape,
                     values: vec![count],
                     dtype: DType::I64,
+                    integer_sidecar: None,
                 })
             }
             Some(ax) => {
@@ -11387,6 +11850,7 @@ impl UFuncArray {
                     shape: out_shape,
                     values: out_values,
                     dtype: DType::I64,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -11412,6 +11876,7 @@ impl UFuncArray {
                     shape: vec![nbytes],
                     values: packed,
                     dtype: DType::U8,
+                    integer_sidecar: None,
                 })
             }
             Some(ax) => {
@@ -11441,6 +11906,7 @@ impl UFuncArray {
                     shape: out_shape,
                     values: packed,
                     dtype: DType::U8,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -11471,6 +11937,7 @@ impl UFuncArray {
                     shape: vec![n],
                     values: bits,
                     dtype: DType::U8,
+                    integer_sidecar: None,
                 })
             }
             Some(ax) => {
@@ -11504,6 +11971,7 @@ impl UFuncArray {
                     shape: out_shape,
                     values: bits,
                     dtype: DType::U8,
+                    integer_sidecar: None,
                 })
             }
         }
@@ -11537,6 +12005,7 @@ impl UFuncArray {
             shape: out_shape,
             values: out,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -11561,6 +12030,7 @@ impl UFuncArray {
             shape: out_shape,
             values: out,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -11585,6 +12055,7 @@ impl UFuncArray {
             shape: out_shape,
             values: out,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -11605,6 +12076,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values: out,
             dtype: self.dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -11637,6 +12109,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: self.dtype,
+            integer_sidecar: None,
         }
     }
 
@@ -11660,6 +12133,7 @@ impl UFuncArray {
             shape: vec![n],
             values: indices,
             dtype: DType::I64,
+            integer_sidecar: None,
         }
     }
 
@@ -11679,6 +12153,7 @@ impl UFuncArray {
                 shape: vec![0, ndim],
                 values: vec![],
                 dtype: DType::I64,
+                integer_sidecar: None,
             };
         }
         let strides = c_strides_elems(&self.shape);
@@ -11694,6 +12169,7 @@ impl UFuncArray {
             shape: vec![n, ndim],
             values: out,
             dtype: DType::I64,
+            integer_sidecar: None,
         }
     }
 
@@ -11704,6 +12180,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: self.dtype,
+            integer_sidecar: None,
         }
     }
 
@@ -11750,6 +12227,7 @@ impl UFuncArray {
             shape: condlist[0].shape.clone(),
             values,
             dtype: choicelist[0].dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -11829,6 +12307,7 @@ impl UFuncArray {
             shape: out_shape,
             values: out,
             dtype: DType::F64,
+            integer_sidecar: None,
         })
     }
 
@@ -11913,6 +12392,7 @@ impl UFuncArray {
                 shape: sub_shape,
                 values,
                 dtype: self.dtype,
+                integer_sidecar: None,
             });
         }
         Ok(result)
@@ -12079,11 +12559,16 @@ impl UFuncArray {
     }
 
     /// Check if the array is stored in Fortran-contiguous order (np.isfortran).
-    /// Since `UFuncArray` always uses C-contiguous storage, this returns false
-    /// unless the array is 0-D or 1-D (which are both C- and F-contiguous).
+    /// Since `UFuncArray` always uses C-contiguous storage, this returns true
+    /// if the array is also Fortran-contiguous (e.g., 0-D, 1-D, or has at most
+    /// one dimension > 1).
     #[must_use]
     pub fn isfortran(&self) -> bool {
-        self.shape.len() <= 1
+        if self.shape.len() <= 1 {
+            return true;
+        }
+        let dims_gt_1 = self.shape.iter().filter(|&&d| d > 1).count();
+        dims_gt_1 <= 1
     }
 
     /// Check if the value is a scalar (0-D array) (np.isscalar).
@@ -12101,6 +12586,7 @@ impl UFuncArray {
                 shape: self.shape.clone(),
                 values: vec![1.0; self.values.len()],
                 dtype: DType::Bool,
+                integer_sidecar: None,
             };
         }
         let n = self.values.len() / 2;
@@ -12117,6 +12603,7 @@ impl UFuncArray {
             shape: self.shape[..self.shape.len() - 1].to_vec(),
             values,
             dtype: DType::Bool,
+            integer_sidecar: None,
         }
     }
 
@@ -12127,6 +12614,7 @@ impl UFuncArray {
                 shape: self.shape.clone(),
                 values: vec![0.0; self.values.len()],
                 dtype: DType::Bool,
+                integer_sidecar: None,
             };
         }
         let n = self.values.len() / 2;
@@ -12143,6 +12631,7 @@ impl UFuncArray {
             shape: self.shape[..self.shape.len() - 1].to_vec(),
             values,
             dtype: DType::Bool,
+            integer_sidecar: None,
         }
     }
 
@@ -12351,6 +12840,9 @@ fn interpolate_percentile(sorted: &[f64], fraction: f64) -> f64 {
 
 fn interpolate_percentile_method(sorted: &[f64], fraction: f64, method: QuantileInterp) -> f64 {
     let n = sorted.len();
+    if n == 0 {
+        return f64::NAN;
+    }
     if n == 1 {
         return sorted[0];
     }
@@ -13039,6 +13531,31 @@ fn aligned_broadcast_axis_steps(
     }
 
     axis_steps
+}
+
+fn apply_complex_binary_op(
+    op: BinaryOp,
+    lhs_re: f64,
+    lhs_im: f64,
+    rhs_re: f64,
+    rhs_im: f64,
+) -> (f64, f64) {
+    match op {
+        BinaryOp::Add => (lhs_re + rhs_re, lhs_im + rhs_im),
+        BinaryOp::Sub => (lhs_re - rhs_re, lhs_im - rhs_im),
+        BinaryOp::Mul => (
+            lhs_re * rhs_re - lhs_im * rhs_im,
+            lhs_re * rhs_im + lhs_im * rhs_re,
+        ),
+        BinaryOp::Div => {
+            let denom = rhs_re * rhs_re + rhs_im * rhs_im;
+            (
+                (lhs_re * rhs_re + lhs_im * rhs_im) / denom,
+                (lhs_im * rhs_re - lhs_re * rhs_im) / denom,
+            )
+        }
+        _ => unreachable!("complex binary helper is only used for add/sub/mul/div"),
+    }
 }
 
 fn reduce_sum_axis_contiguous(
@@ -13753,6 +14270,7 @@ impl UFuncArray {
             shape: result.shape,
             values: result.values,
             dtype: DType::DateTime64,
+            integer_sidecar: None,
         })
     }
 
@@ -13768,6 +14286,7 @@ impl UFuncArray {
             shape: result.shape,
             values: result.values,
             dtype: DType::TimeDelta64,
+            integer_sidecar: None,
         })
     }
 
@@ -13783,6 +14302,7 @@ impl UFuncArray {
             shape: result.shape,
             values: result.values,
             dtype: DType::TimeDelta64,
+            integer_sidecar: None,
         })
     }
 
@@ -13798,6 +14318,7 @@ impl UFuncArray {
             shape: result.shape,
             values: result.values,
             dtype: DType::TimeDelta64,
+            integer_sidecar: None,
         })
     }
 
@@ -13813,6 +14334,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::TimeDelta64,
+            integer_sidecar: None,
         })
     }
 
@@ -13833,6 +14355,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::TimeDelta64,
+            integer_sidecar: None,
         })
     }
 
@@ -13843,6 +14366,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values: self.values.iter().map(|&v| -v).collect(),
             dtype: DType::TimeDelta64,
+            integer_sidecar: None,
         }
     }
 
@@ -13853,6 +14377,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values: self.values.iter().map(|&v| v.abs()).collect(),
             dtype: DType::TimeDelta64,
+            integer_sidecar: None,
         }
     }
 }
@@ -14229,6 +14754,7 @@ impl MaskedArray {
                     shape: self.data.shape().to_vec(),
                     values: vals,
                     dtype: self.data.dtype(),
+                    integer_sidecar: None,
                 }
             }
         }
@@ -14244,6 +14770,7 @@ impl MaskedArray {
                     shape: vec![self.data.values().len()],
                     values: self.data.values().to_vec(),
                     dtype: self.data.dtype(),
+                    integer_sidecar: None,
                 }
             }
             Some(mask) => {
@@ -14259,6 +14786,7 @@ impl MaskedArray {
                     shape: vec![vals.len()],
                     values: vals,
                     dtype: self.data.dtype(),
+                    integer_sidecar: None,
                 }
             }
         }
@@ -14280,6 +14808,7 @@ impl MaskedArray {
                             shape: self.data.shape().to_vec(),
                             values: vec![1.0; self.data.values().len()],
                             dtype: DType::F64,
+                            integer_sidecar: None,
                         };
                         Ok(ones.reduce_sum(axis, false)?)
                     }
@@ -14296,6 +14825,7 @@ impl MaskedArray {
                     shape: mask.shape().to_vec(),
                     values: inverted,
                     dtype: DType::F64,
+                    integer_sidecar: None,
                 };
                 Ok(inv.reduce_sum(axis, false)?)
             }
@@ -14338,6 +14868,7 @@ impl MaskedArray {
                 shape: mask.shape().to_vec(),
                 values: inverted,
                 dtype: DType::Bool,
+                integer_sidecar: None,
             }
         })
     }
@@ -14522,11 +15053,13 @@ impl MaskedArray {
                 shape: vec![n],
                 values: self.data.values().to_vec(),
                 dtype: self.data.dtype(),
+                integer_sidecar: None,
             },
             mask: self.mask.as_ref().map(|m| UFuncArray {
                 shape: vec![n],
                 values: m.values().to_vec(),
                 dtype: DType::Bool,
+                integer_sidecar: None,
             }),
             fill_value: self.fill_value,
             hard_mask: self.hard_mask,
@@ -14602,6 +15135,7 @@ impl MaskedArray {
                         shape: a.data.shape().to_vec(),
                         values: vec![0.0; a.data.values().len()],
                         dtype: DType::Bool,
+                        integer_sidecar: None,
                     },
                 })
                 .collect();
@@ -15252,6 +15786,7 @@ pub fn where_nonzero(condition: &UFuncArray) -> Result<Vec<UFuncArray>, UFuncErr
                 shape: vec![n],
                 values: indices,
                 dtype: DType::I64,
+                integer_sidecar: None,
             }
         })
         .collect();
@@ -16748,6 +17283,7 @@ fn scimath_unary(x: &UFuncArray, f: impl Fn(f64) -> (f64, f64)) -> Result<UFuncA
         shape,
         values,
         dtype: DType::Complex128,
+        integer_sidecar: None,
     })
 }
 
@@ -16923,6 +17459,7 @@ pub fn pad_linear_ramp(
         shape: vec![total],
         values,
         dtype: arr.dtype,
+        integer_sidecar: None,
     })
 }
 
@@ -16977,6 +17514,7 @@ pub fn pad_stat(
         shape: vec![total],
         values,
         dtype: arr.dtype,
+        integer_sidecar: None,
     })
 }
 
@@ -16996,6 +17534,7 @@ pub fn pad_empty(arr: &UFuncArray, pad_width: (usize, usize)) -> Result<UFuncArr
         shape: vec![total],
         values,
         dtype: arr.dtype,
+        integer_sidecar: None,
     })
 }
 
@@ -17044,11 +17583,13 @@ pub fn frexp(x: &UFuncArray) -> Result<(UFuncArray, UFuncArray), UFuncError> {
         shape: x.shape.clone(),
         values: mantissas,
         dtype: DType::F64,
+        integer_sidecar: None,
     };
     let e_arr = UFuncArray {
         shape: x.shape.clone(),
         values: exponents,
         dtype: DType::F64,
+        integer_sidecar: None,
     };
     Ok((m_arr, e_arr))
 }
@@ -17075,11 +17616,13 @@ pub fn modf(x: &UFuncArray) -> Result<(UFuncArray, UFuncArray), UFuncError> {
         shape: x.shape.clone(),
         values: fractionals,
         dtype: DType::F64,
+        integer_sidecar: None,
     };
     let int_arr = UFuncArray {
         shape: x.shape.clone(),
         values: integrals,
         dtype: DType::F64,
+        integer_sidecar: None,
     };
     Ok((frac_arr, int_arr))
 }
@@ -17109,6 +17652,7 @@ pub fn gcd_arrays(a: &UFuncArray, b: &UFuncArray) -> Result<UFuncArray, UFuncErr
         shape: a_bc.shape.clone(),
         values,
         dtype: DType::F64,
+        integer_sidecar: None,
     })
 }
 
@@ -17142,6 +17686,7 @@ pub fn lcm_arrays(a: &UFuncArray, b: &UFuncArray) -> Result<UFuncArray, UFuncErr
         shape: a_bc.shape.clone(),
         values,
         dtype: DType::F64,
+        integer_sidecar: None,
     })
 }
 
@@ -17179,11 +17724,13 @@ pub fn divmod_arrays(
         shape: a_bc.shape.clone(),
         values: quotients,
         dtype: DType::F64,
+        integer_sidecar: None,
     };
     let r_arr = UFuncArray {
         shape: a_bc.shape.clone(),
         values: remainders,
         dtype: DType::F64,
+        integer_sidecar: None,
     };
     Ok((q_arr, r_arr))
 }
@@ -17199,6 +17746,7 @@ pub fn isposinf(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
         shape: x.shape.clone(),
         values,
         dtype: DType::Bool,
+        integer_sidecar: None,
     })
 }
 
@@ -17213,6 +17761,7 @@ pub fn isneginf(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
         shape: x.shape.clone(),
         values,
         dtype: DType::Bool,
+        integer_sidecar: None,
     })
 }
 
@@ -17232,6 +17781,7 @@ pub fn bitwise_count(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
         shape: x.shape.clone(),
         values,
         dtype: DType::F64,
+        integer_sidecar: None,
     })
 }
 
@@ -17273,6 +17823,7 @@ pub fn sort_complex(a: &UFuncArray) -> Result<UFuncArray, UFuncError> {
         shape: vec![n, 2],
         values,
         dtype: DType::Complex128,
+        integer_sidecar: None,
     })
 }
 
@@ -17550,6 +18101,7 @@ impl StringArray {
                 .map(|s| s.chars().count() as f64)
                 .collect(),
             dtype: DType::I64,
+            integer_sidecar: None,
         }
     }
 
@@ -17564,6 +18116,7 @@ impl StringArray {
                 .map(|s| s.matches(sub).count() as f64)
                 .collect(),
             dtype: DType::I64,
+            integer_sidecar: None,
         }
     }
 
@@ -17581,6 +18134,7 @@ impl StringArray {
                 })
                 .collect(),
             dtype: DType::I64,
+            integer_sidecar: None,
         }
     }
 
@@ -17598,6 +18152,7 @@ impl StringArray {
                 })
                 .collect(),
             dtype: DType::I64,
+            integer_sidecar: None,
         }
     }
 
@@ -17612,6 +18167,7 @@ impl StringArray {
                 .map(|s| if s.starts_with(prefix) { 1.0 } else { 0.0 })
                 .collect(),
             dtype: DType::Bool,
+            integer_sidecar: None,
         }
     }
 
@@ -17626,6 +18182,7 @@ impl StringArray {
                 .map(|s| if s.ends_with(suffix) { 1.0 } else { 0.0 })
                 .collect(),
             dtype: DType::Bool,
+            integer_sidecar: None,
         }
     }
 
@@ -17687,6 +18244,7 @@ impl StringArray {
                 })
                 .collect(),
             dtype: DType::Bool,
+            integer_sidecar: None,
         }
     }
 
@@ -17707,6 +18265,7 @@ impl StringArray {
                 })
                 .collect(),
             dtype: DType::Bool,
+            integer_sidecar: None,
         }
     }
 
@@ -17727,6 +18286,7 @@ impl StringArray {
                 })
                 .collect(),
             dtype: DType::Bool,
+            integer_sidecar: None,
         }
     }
 
@@ -17747,6 +18307,7 @@ impl StringArray {
                 })
                 .collect(),
             dtype: DType::Bool,
+            integer_sidecar: None,
         }
     }
 
@@ -17768,6 +18329,7 @@ impl StringArray {
                 })
                 .collect(),
             dtype: DType::Bool,
+            integer_sidecar: None,
         }
     }
 
@@ -17789,6 +18351,7 @@ impl StringArray {
                 })
                 .collect(),
             dtype: DType::Bool,
+            integer_sidecar: None,
         }
     }
 
@@ -18075,6 +18638,7 @@ impl StringArray {
                 })
                 .collect(),
             dtype: DType::Bool,
+            integer_sidecar: None,
         }
     }
 
@@ -18095,6 +18659,7 @@ impl StringArray {
                 })
                 .collect(),
             dtype: DType::Bool,
+            integer_sidecar: None,
         }
     }
 
@@ -18130,6 +18695,7 @@ impl StringArray {
                 })
                 .collect(),
             dtype: DType::Bool,
+            integer_sidecar: None,
         }
     }
 
@@ -18151,6 +18717,7 @@ impl StringArray {
             shape: self.shape.clone(),
             values: vals,
             dtype: DType::I64,
+            integer_sidecar: None,
         })
     }
 
@@ -18172,6 +18739,7 @@ impl StringArray {
             shape: self.shape.clone(),
             values: vals,
             dtype: DType::I64,
+            integer_sidecar: None,
         })
     }
 
@@ -18213,6 +18781,7 @@ impl StringArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::Bool,
+            integer_sidecar: None,
         }
     }
 
@@ -18228,6 +18797,7 @@ impl StringArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::Bool,
+            integer_sidecar: None,
         }
     }
 
@@ -18243,6 +18813,7 @@ impl StringArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::Bool,
+            integer_sidecar: None,
         }
     }
 
@@ -18258,6 +18829,7 @@ impl StringArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::Bool,
+            integer_sidecar: None,
         }
     }
 
@@ -18273,6 +18845,7 @@ impl StringArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::Bool,
+            integer_sidecar: None,
         }
     }
 
@@ -18288,6 +18861,7 @@ impl StringArray {
             shape: self.shape.clone(),
             values,
             dtype: DType::Bool,
+            integer_sidecar: None,
         }
     }
 
@@ -18409,6 +18983,53 @@ mod tests {
     }
 
     #[test]
+    fn integer_sidecar_preserves_large_i64_values() {
+        let large_val: i64 = (1_i64 << 53) + 7;
+        let arr = UFuncArray::from_storage(vec![3], ArrayStorage::I64(vec![1, 2, large_val]))
+            .expect("from_storage should accept large i64 with sidecar");
+        assert!(arr.has_integer_sidecar());
+        assert_eq!(arr.dtype(), DType::I64);
+
+        // Round-trip through to_storage preserves exact values.
+        let storage = arr.to_storage().expect("to_storage should use sidecar");
+        assert_eq!(storage, ArrayStorage::I64(vec![1, 2, large_val]));
+    }
+
+    #[test]
+    fn integer_sidecar_preserves_large_u64_values() {
+        let large_val: u64 = (1_u64 << 53) + 42;
+        let arr = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![0, large_val]))
+            .expect("from_storage should accept large u64 with sidecar");
+        assert!(arr.has_integer_sidecar());
+        assert_eq!(arr.dtype(), DType::U64);
+
+        let storage = arr.to_storage().expect("to_storage should use sidecar");
+        assert_eq!(storage, ArrayStorage::U64(vec![0, large_val]));
+    }
+
+    #[test]
+    fn no_sidecar_for_small_integers() {
+        let arr = UFuncArray::from_storage(vec![3], ArrayStorage::I64(vec![1, -2, 3]))
+            .expect("from_storage");
+        assert!(!arr.has_integer_sidecar());
+    }
+
+    #[test]
+    fn from_storage_with_same_dtype_preserves_sidecar() {
+        let large_val: i64 = (1_i64 << 53) + 100;
+        let arr = UFuncArray::from_storage_with_dtype(
+            vec![2],
+            ArrayStorage::I64(vec![1, large_val]),
+            DType::I64,
+        )
+        .expect("from_storage_with_dtype same dtype");
+        assert!(arr.has_integer_sidecar());
+
+        let storage = arr.to_storage().expect("to_storage");
+        assert_eq!(storage, ArrayStorage::I64(vec![1, large_val]));
+    }
+
+    #[test]
     fn zeros_routes_through_storage_bridge_dtype() {
         let arr = UFuncArray::zeros(vec![3], DType::Bool).expect("zeros");
         assert_eq!(arr.dtype(), DType::Bool);
@@ -18477,23 +19098,31 @@ mod tests {
     }
 
     #[test]
-    fn from_storage_rejects_large_i64_precision_loss() {
-        let err = UFuncArray::from_storage(vec![1], ArrayStorage::I64(vec![9_007_199_254_740_993]))
-            .expect_err("large i64 should fail closed");
-        assert!(matches!(
-            err,
-            UFuncError::Msg(message) if message.contains("exceeds exact f64 bridge range")
-        ));
+    fn from_storage_preserves_large_i64_via_sidecar() {
+        let val = 9_007_199_254_740_993i64;
+        let arr = UFuncArray::from_storage(vec![1], ArrayStorage::I64(vec![val]))
+            .expect("large i64 should be supported via sidecar");
+        assert!(arr.has_integer_sidecar());
+        let storage = arr.to_storage().expect("to_storage");
+        if let ArrayStorage::I64(v) = storage {
+            assert_eq!(v[0], val);
+        } else {
+            panic!("expected I64 storage");
+        }
     }
 
     #[test]
-    fn from_storage_rejects_large_u64_precision_loss() {
-        let err = UFuncArray::from_storage(vec![1], ArrayStorage::U64(vec![9_007_199_254_740_993]))
-            .expect_err("large u64 should fail closed");
-        assert!(matches!(
-            err,
-            UFuncError::Msg(message) if message.contains("exceeds exact f64 bridge range")
-        ));
+    fn from_storage_preserves_large_u64_via_sidecar() {
+        let val = 9_007_199_254_740_993u64;
+        let arr = UFuncArray::from_storage(vec![1], ArrayStorage::U64(vec![val]))
+            .expect("large u64 should be supported via sidecar");
+        assert!(arr.has_integer_sidecar());
+        let storage = arr.to_storage().expect("to_storage");
+        if let ArrayStorage::U64(v) = storage {
+            assert_eq!(v[0], val);
+        } else {
+            panic!("expected U64 storage");
+        }
     }
 
     #[test]
@@ -18948,6 +19577,65 @@ mod tests {
             &[
                 10.0, 0.0, -2.0, 0.0, 7.0, 0.0, 0.0, 10.0, 0.0, -2.0, 0.0, 7.0
             ]
+        );
+    }
+
+    #[test]
+    fn complex_elementwise_mul_uses_complex_arithmetic() {
+        let lhs =
+            UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::Complex128).expect("lhs");
+        let rhs =
+            UFuncArray::new(vec![2, 2], vec![5.0, 6.0, 7.0, 8.0], DType::Complex128).expect("rhs");
+
+        let out = lhs
+            .elementwise_binary(&rhs, BinaryOp::Mul)
+            .expect("complex multiply");
+
+        assert_eq!(out.dtype(), DType::Complex128);
+        assert_eq!(out.shape(), &[2, 2]);
+        assert_eq!(out.values(), &[-7.0, 16.0, -11.0, 52.0]);
+    }
+
+    #[test]
+    fn complex_elementwise_div_uses_complex_arithmetic() {
+        let lhs =
+            UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::Complex128).expect("lhs");
+        let rhs =
+            UFuncArray::new(vec![2, 2], vec![5.0, 6.0, 7.0, 8.0], DType::Complex128).expect("rhs");
+
+        let out = lhs
+            .elementwise_binary(&rhs, BinaryOp::Div)
+            .expect("complex divide");
+
+        assert_eq!(out.dtype(), DType::Complex128);
+        assert_eq!(out.shape(), &[2, 2]);
+        let expected = [
+            0.278_688_524_590_163_9,
+            0.065_573_770_491_803_28,
+            0.469_026_548_672_566_4,
+            0.035_398_230_088_495_575,
+        ];
+        for (got, exp) in out.values().iter().zip(expected) {
+            assert!((got - exp).abs() < 1e-12, "got {got}, expected {exp}");
+        }
+    }
+
+    #[test]
+    fn complex_elementwise_mul_broadcasts_logical_elements() {
+        let lhs = UFuncArray::new(vec![2, 1, 2], vec![1.0, 2.0, 3.0, 4.0], DType::Complex128)
+            .expect("lhs");
+        let rhs = UFuncArray::new(vec![1, 2, 2], vec![5.0, 6.0, 7.0, 8.0], DType::Complex128)
+            .expect("rhs");
+
+        let out = lhs
+            .elementwise_binary(&rhs, BinaryOp::Mul)
+            .expect("complex multiply broadcast");
+
+        assert_eq!(out.dtype(), DType::Complex128);
+        assert_eq!(out.shape(), &[2, 2, 2]);
+        assert_eq!(
+            out.values(),
+            &[-7.0, 16.0, -9.0, 22.0, -9.0, 38.0, -11.0, 52.0]
         );
     }
 
@@ -30308,8 +30996,12 @@ mod tests {
         let data = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
         let mean = data.reduce_mean(None, false).unwrap();
         let std = data.reduce_std(None, false, 0).unwrap();
-        let centered = data.elementwise_binary(&mean.broadcast_to(&[5]).unwrap(), BinaryOp::Sub).unwrap();
-        let z = centered.elementwise_binary(&std.broadcast_to(&[5]).unwrap(), BinaryOp::Div).unwrap();
+        let centered = data
+            .elementwise_binary(&mean.broadcast_to(&[5]).unwrap(), BinaryOp::Sub)
+            .unwrap();
+        let z = centered
+            .elementwise_binary(&std.broadcast_to(&[5]).unwrap(), BinaryOp::Div)
+            .unwrap();
         let s2 = std::f64::consts::SQRT_2;
         let expected = [-s2, -s2 / 2.0, 0.0, s2 / 2.0, s2];
         for (i, (&got, &exp)) in z.values().iter().zip(expected.iter()).enumerate() {
@@ -30350,5 +31042,62 @@ mod tests {
         let eye = UFuncArray::new(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0], DType::F64).unwrap();
         let result = a.matmul(&eye).unwrap();
         assert_eq!(result.values(), &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn test_logaddexp_neg_inf() {
+        let lhs = UFuncArray::from_values_with_dtype(vec![1], vec![f64::NEG_INFINITY], DType::F64)
+            .unwrap();
+        let rhs = UFuncArray::from_values_with_dtype(vec![1], vec![f64::NEG_INFINITY], DType::F64)
+            .unwrap();
+        let out = lhs.elementwise_binary(&rhs, BinaryOp::Logaddexp).unwrap();
+        assert_eq!(
+            out.values[0],
+            f64::NEG_INFINITY,
+            "logaddexp(-inf, -inf) should be -inf, got {}",
+            out.values[0]
+        );
+    }
+
+    #[test]
+    fn test_reduce_min_empty() {
+        let empty = UFuncArray::from_values_with_dtype(vec![0], vec![], DType::F64).unwrap();
+        let res = empty.reduce_min(None, false);
+        assert!(matches!(res, Err(UFuncError::EmptyReduction { op: "min" })));
+    }
+
+    #[test]
+    fn test_reduce_max_empty() {
+        let empty = UFuncArray::from_values_with_dtype(vec![0], vec![], DType::F64).unwrap();
+        let res = empty.reduce_max(None, false);
+        assert!(matches!(res, Err(UFuncError::EmptyReduction { op: "max" })));
+    }
+
+    #[test]
+    fn test_median_empty() {
+        let empty = UFuncArray::from_values_with_dtype(vec![0], vec![], DType::F64).unwrap();
+        let res = empty.median(None).unwrap();
+        assert!(res.values[0].is_nan());
+    }
+
+    #[test]
+    fn test_percentile_empty() {
+        let empty = UFuncArray::from_values_with_dtype(vec![0], vec![], DType::F64).unwrap();
+        let res = empty.percentile(50.0, None).unwrap();
+        assert!(res.values[0].is_nan());
+    }
+
+    #[test]
+    fn test_ptp_empty() {
+        let empty = UFuncArray::from_values_with_dtype(vec![0], vec![], DType::F64).unwrap();
+        let res = empty.ptp(None);
+        assert!(matches!(res, Err(UFuncError::EmptyReduction { op: "ptp" })));
+    }
+
+    #[test]
+    fn test_slice_axis_negative_step() {
+        let a = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
+        let reversed = a.slice_axis(0, None, None, -1).unwrap();
+        assert_eq!(reversed.values(), &[5.0, 4.0, 3.0, 2.0, 1.0]);
     }
 }

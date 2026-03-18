@@ -283,6 +283,7 @@ impl std::error::Error for RngConstructorError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RandomError {
     InvalidUpperBound,
+    InvalidParameter,
 }
 
 impl RandomError {
@@ -290,6 +291,7 @@ impl RandomError {
     pub const fn reason_code(self) -> &'static str {
         match self {
             Self::InvalidUpperBound => "random_upper_bound_rejected",
+            Self::InvalidParameter => "random_invalid_parameter",
         }
     }
 }
@@ -298,6 +300,10 @@ impl std::fmt::Display for RandomError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidUpperBound => write!(f, "upper_bound must be > 0"),
+            Self::InvalidParameter => write!(
+                f,
+                "parameter is out of valid bounds (e.g. negative variance or invalid probability)"
+            ),
         }
     }
 }
@@ -2086,9 +2092,15 @@ impl Generator {
     /// Generate standard gamma samples (scale=1).
     ///
     /// Mimics `rng.standard_gamma(shape, size)`.
-    #[must_use]
-    pub fn standard_gamma(&mut self, shape_param: f64, size: usize) -> Vec<f64> {
-        (0..size).map(|_| self.sample_gamma(shape_param)).collect()
+    pub fn standard_gamma(
+        &mut self,
+        shape_param: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, RandomError> {
+        if shape_param <= 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size).map(|_| self.sample_gamma(shape_param)).collect())
     }
 
     /// Generate random bytes.
@@ -2540,10 +2552,18 @@ impl Generator {
     // ── additional distributions ────────
 
     /// Gamma distribution using Marsaglia and Tsang's method.
-    pub fn gamma(&mut self, shape_param: f64, scale: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    pub fn gamma(
+        &mut self,
+        shape_param: f64,
+        scale: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, RandomError> {
+        if shape_param <= 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| self.sample_gamma(shape_param) * scale)
-            .collect()
+            .collect())
     }
 
     fn sample_gamma(&mut self, shape_param: f64) -> f64 {
@@ -2661,14 +2681,21 @@ impl Generator {
     }
 
     /// Beta distribution via gamma sampling.
-    pub fn beta(&mut self, a: f64, b: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    pub fn beta(&mut self, a: f64, b: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if a <= 0.0 || b <= 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| {
                 let x = self.sample_gamma(a);
                 let y = self.sample_gamma(b);
-                x / (x + y)
+                if x == 0.0 && y == 0.0 {
+                    0.0
+                } else {
+                    x / (x + y)
+                }
             })
-            .collect()
+            .collect())
     }
 
     /// Geometric distribution: number of trials until first success.
@@ -2714,7 +2741,7 @@ impl Generator {
     }
 
     /// Chi-squared distribution with df degrees of freedom.
-    pub fn chisquare(&mut self, df: f64, size: usize) -> Vec<f64> {
+    pub fn chisquare(&mut self, df: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         // Chi-squared is gamma(df/2, 2)
         self.gamma(df / 2.0, 2.0, size)
     }
@@ -2782,15 +2809,13 @@ impl Generator {
     }
 
     /// Weibull distribution (matching NumPy: uses standard_exponential).
-    pub fn weibull(&mut self, a: f64, size: usize) -> Vec<f64> {
-        (0..size)
-            .map(|_| {
-                if a == 0.0 {
-                    return 0.0;
-                }
-                self.sample_ziggurat_exponential().powf(1.0 / a)
-            })
-            .collect()
+    pub fn weibull(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if a <= 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| self.sample_ziggurat_exponential().powf(1.0 / a))
+            .collect())
     }
 
     // ── multivariate distributions ────────
@@ -2828,14 +2853,17 @@ impl Generator {
 
     /// Dirichlet distribution (np.random.dirichlet).
     /// Returns `size` samples, each a vector of length `alpha.len()`.
-    pub fn dirichlet(&mut self, alpha: &[f64], size: usize) -> Vec<Vec<f64>> {
-        (0..size)
+    pub fn dirichlet(&mut self, alpha: &[f64], size: usize) -> Result<Vec<Vec<f64>>, RandomError> {
+        if alpha.iter().any(|&a| a <= 0.0) {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| {
                 let gamma_samples: Vec<f64> = alpha.iter().map(|&a| self.sample_gamma(a)).collect();
                 let sum: f64 = gamma_samples.iter().sum();
                 gamma_samples.into_iter().map(|g| g / sum).collect()
             })
-            .collect()
+            .collect())
     }
 
     /// Multivariate normal distribution (np.random.multivariate_normal).
@@ -2846,15 +2874,18 @@ impl Generator {
         mean: &[f64],
         cov_diag: &[f64],
         size: usize,
-    ) -> Vec<Vec<f64>> {
-        (0..size)
+    ) -> Result<Vec<Vec<f64>>, RandomError> {
+        if cov_diag.iter().any(|&v| v < 0.0) {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| {
                 mean.iter()
                     .zip(cov_diag)
                     .map(|(&m, &v)| m + self.sample_standard_normal_single() * v.sqrt())
                     .collect()
             })
-            .collect()
+            .collect())
     }
 
     /// Negative binomial distribution (np.random.negative_binomial).
@@ -2873,18 +2904,26 @@ impl Generator {
 
     /// F-distribution (Fisher-Snedecor).  Ratio of two scaled chi-squared
     /// variates: (X1/dfnum) / (X2/dfden).
-    pub fn f_distribution(&mut self, dfnum: f64, dfden: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    pub fn f_distribution(
+        &mut self,
+        dfnum: f64,
+        dfden: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, RandomError> {
+        if dfnum <= 0.0 || dfden <= 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| {
                 let x1 = self.sample_gamma(dfnum / 2.0) * 2.0 / dfnum;
                 let x2 = self.sample_gamma(dfden / 2.0) * 2.0 / dfden;
                 x1 / x2
             })
-            .collect()
+            .collect())
     }
 
     /// Alias for `f_distribution` matching NumPy's `rng.f(dfnum, dfden, size)`.
-    pub fn f(&mut self, dfnum: f64, dfden: f64, size: usize) -> Vec<f64> {
+    pub fn f(&mut self, dfnum: f64, dfden: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         self.f_distribution(dfnum, dfden, size)
     }
 
@@ -3061,20 +3100,29 @@ impl Generator {
     }
 
     /// Pareto distribution (matching NumPy: uses expm1 of standard_exponential).
-    pub fn pareto(&mut self, a: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    pub fn pareto(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if a <= 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| (self.sample_ziggurat_exponential() / a).exp_m1())
-            .collect()
+            .collect())
     }
 
     /// Logistic distribution via inverse-CDF.
-    pub fn logistic(&mut self, loc: f64, scale: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    pub fn logistic(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if scale < 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| {
+                if scale == 0.0 {
+                    return loc;
+                }
                 let u = self.next_f64();
                 loc + scale * (u / (1.0 - u)).ln()
             })
-            .collect()
+            .collect())
     }
 
     /// Hypergeometric distribution: draws from a population of `ngood + nbad`
@@ -4462,7 +4510,7 @@ mod tests {
     #[test]
     fn gamma_basic() {
         let mut rng = test_generator();
-        let samples = rng.gamma(2.0, 1.0, 1000);
+        let samples = rng.gamma(2.0, 1.0, 1000).unwrap();
         assert_eq!(samples.len(), 1000);
         assert!(samples.iter().all(|&v| v > 0.0));
         let mean: f64 = samples.iter().sum::<f64>() / 1000.0;
@@ -4472,14 +4520,14 @@ mod tests {
     #[test]
     fn gamma_small_shape() {
         let mut rng = test_generator();
-        let samples = rng.gamma(0.5, 1.0, 100);
+        let samples = rng.gamma(0.5, 1.0, 100).unwrap();
         assert!(samples.iter().all(|&v| v > 0.0));
     }
 
     #[test]
     fn beta_basic() {
         let mut rng = test_generator();
-        let samples = rng.beta(2.0, 5.0, 1000);
+        let samples = rng.beta(2.0, 5.0, 1000).unwrap();
         assert_eq!(samples.len(), 1000);
         assert!(samples.iter().all(|&v| (0.0..=1.0).contains(&v)));
         let mean: f64 = samples.iter().sum::<f64>() / 1000.0;
@@ -4506,7 +4554,7 @@ mod tests {
     #[test]
     fn chisquare_basic() {
         let mut rng = test_generator();
-        let samples = rng.chisquare(3.0, 1000);
+        let samples = rng.chisquare(3.0, 1000).unwrap();
         assert!(samples.iter().all(|&v| v > 0.0));
         let mean: f64 = samples.iter().sum::<f64>() / 1000.0;
         assert!((mean - 3.0).abs() < 0.5); // E[chi2(df)] = df
@@ -4548,7 +4596,7 @@ mod tests {
     #[test]
     fn weibull_basic() {
         let mut rng = test_generator();
-        let samples = rng.weibull(1.5, 1000);
+        let samples = rng.weibull(1.5, 1000).unwrap();
         assert!(samples.iter().all(|&v| v >= 0.0));
     }
 
@@ -4568,7 +4616,7 @@ mod tests {
     #[test]
     fn dirichlet_basic() {
         let mut rng = test_generator();
-        let samples = rng.dirichlet(&[1.0, 2.0, 3.0], 10);
+        let samples = rng.dirichlet(&[1.0, 2.0, 3.0], 10).unwrap();
         assert_eq!(samples.len(), 10);
         for sample in &samples {
             assert_eq!(sample.len(), 3);
@@ -4581,7 +4629,9 @@ mod tests {
     #[test]
     fn multivariate_normal_diag_basic() {
         let mut rng = test_generator();
-        let samples = rng.multivariate_normal_diag(&[0.0, 5.0], &[1.0, 4.0], 1000);
+        let samples = rng
+            .multivariate_normal_diag(&[0.0, 5.0], &[1.0, 4.0], 1000)
+            .unwrap();
         assert_eq!(samples.len(), 1000);
         assert_eq!(samples[0].len(), 2);
         // Check mean is approximately right
@@ -4601,7 +4651,7 @@ mod tests {
     #[test]
     fn f_distribution_positive_and_reasonable_mean() {
         let mut rng = test_generator();
-        let samples = rng.f_distribution(5.0, 10.0, 5000);
+        let samples = rng.f_distribution(5.0, 10.0, 5000).unwrap();
         assert!(samples.iter().all(|&v| v > 0.0));
         let mean: f64 = samples.iter().sum::<f64>() / 5000.0;
         // theoretical mean = dfden / (dfden - 2) = 10/8 = 1.25
@@ -4649,7 +4699,7 @@ mod tests {
     #[test]
     fn pareto_non_negative() {
         let mut rng = test_generator();
-        let samples = rng.pareto(3.0, 1000);
+        let samples = rng.pareto(3.0, 1000).unwrap();
         assert!(samples.iter().all(|&v| v >= 0.0));
     }
 
@@ -4657,7 +4707,7 @@ mod tests {
     fn logistic_centered_on_loc() {
         let mut rng = test_generator();
         let loc = 3.0;
-        let samples = rng.logistic(loc, 1.0, 5000);
+        let samples = rng.logistic(loc, 1.0, 5000).unwrap();
         let mean: f64 = samples.iter().sum::<f64>() / 5000.0;
         assert!((mean - loc).abs() < 0.2, "logistic mean={mean}");
     }
@@ -4809,7 +4859,7 @@ mod tests {
     fn standard_gamma_mean() {
         let mut rng = test_generator();
         let shape_param = 3.0;
-        let samples = rng.standard_gamma(shape_param, 5000);
+        let samples = rng.standard_gamma(shape_param, 5000).unwrap();
         assert_eq!(samples.len(), 5000);
         assert!(samples.iter().all(|&v| v >= 0.0));
         let mean: f64 = samples.iter().sum::<f64>() / 5000.0;
@@ -5024,8 +5074,8 @@ mod tests {
     fn f_alias_matches_f_distribution() {
         let mut rng1 = test_generator();
         let mut rng2 = test_generator();
-        let a = rng1.f(2.0, 5.0, 100);
-        let b = rng2.f_distribution(2.0, 5.0, 100);
+        let a = rng1.f(2.0, 5.0, 100).unwrap();
+        let b = rng2.f_distribution(2.0, 5.0, 100).unwrap();
         assert_eq!(a, b);
     }
 
@@ -5703,7 +5753,7 @@ mod tests {
     #[test]
     fn oracle_logistic() {
         let mut g = oracle_gen();
-        let vals = g.logistic(0.0, 1.0, 10);
+        let vals = g.logistic(0.0, 1.0, 10).unwrap();
         let expected = [
             2.6191148066328793,
             -0.6744299972282881,
@@ -5741,7 +5791,7 @@ mod tests {
     #[test]
     fn oracle_weibull() {
         let mut g = oracle_gen();
-        let vals = g.weibull(2.0, 10);
+        let vals = g.weibull(2.0, 10).unwrap();
         let expected = [
             1.3092115246216756,
             0.3612280900593398,
@@ -5779,7 +5829,7 @@ mod tests {
     #[test]
     fn oracle_pareto() {
         let mut g = oracle_gen();
-        let vals = g.pareto(3.0, 10);
+        let vals = g.pareto(3.0, 10).unwrap();
         let expected = [
             0.7706468622745504,
             0.044455027236940385,
@@ -5863,7 +5913,7 @@ mod tests {
     #[test]
     fn oracle_standard_gamma() {
         let mut g = oracle_gen();
-        let vals = g.standard_gamma(3.0, 10);
+        let vals = g.standard_gamma(3.0, 10).unwrap();
         let expected = [
             3.8730178986382064,
             5.860442600894906,
@@ -5882,7 +5932,7 @@ mod tests {
     #[test]
     fn oracle_gamma() {
         let mut g = oracle_gen();
-        let vals = g.gamma(2.0, 3.0, 10);
+        let vals = g.gamma(2.0, 3.0, 10).unwrap();
         let expected = [
             7.958138981245406,
             13.130063396284479,
@@ -5901,7 +5951,7 @@ mod tests {
     #[test]
     fn oracle_chisquare() {
         let mut g = oracle_gen();
-        let vals = g.chisquare(5.0, 10);
+        let vals = g.chisquare(5.0, 10).unwrap();
         let expected = [
             6.538380773318506,
             10.26311385719701,
@@ -5920,7 +5970,7 @@ mod tests {
     #[test]
     fn oracle_beta() {
         let mut g = oracle_gen();
-        let vals = g.beta(2.0, 5.0, 10);
+        let vals = g.beta(2.0, 5.0, 10).unwrap();
         let expected = [
             0.23536154859916344,
             0.17754074164377456,
@@ -5999,7 +6049,7 @@ mod tests {
     #[test]
     fn oracle_f_distribution() {
         let mut g = oracle_gen();
-        let vals = g.f(5.0, 10.0, 10);
+        let vals = g.f(5.0, 10.0, 10).unwrap();
         let expected = [
             0.7586812017109351,
             0.5883671125201785,
@@ -6172,7 +6222,7 @@ mod tests {
     #[test]
     fn oracle_dirichlet() {
         let mut g = oracle_gen();
-        let vals = g.dirichlet(&[1.0, 2.0, 3.0], 3);
+        let vals = g.dirichlet(&[1.0, 2.0, 3.0], 3).unwrap();
         let expected = [
             vec![
                 0.18801570709043375,
