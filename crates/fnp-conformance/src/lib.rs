@@ -9100,7 +9100,9 @@ fn generate_rng_samples(
         "normal" => Ok(generator.normal(case.param_a, case.param_b, draws)),
         "standard_exponential" => Ok(generator.standard_exponential(draws)),
         "exponential" => Ok(generator.exponential(case.param_a, draws)),
-        "standard_gamma" => Ok(generator.standard_gamma(case.param_a, draws).unwrap()),
+        "standard_gamma" => {
+            map_fallible_random_values(generator.standard_gamma(case.param_a, draws))
+        }
         "integers" => {
             let low = f64_to_i64_param(case.param_a, "param_a")?;
             let high = f64_to_i64_param(case.param_b, "param_b")?;
@@ -9109,11 +9111,10 @@ fn generate_rng_samples(
                 .map(|values| values.into_iter().map(|value| value as f64).collect())
                 .map_err(map_random_error_to_rng_suite)
         }
-        "poisson" => Ok(generator
+        "poisson" => generator
             .poisson(case.param_a, draws)
-            .into_iter()
-            .map(|value| value as f64)
-            .collect()),
+            .map(|values| values.into_iter().map(|value| value as f64).collect())
+            .map_err(map_random_error_to_rng_suite),
         "binomial" => {
             let n = f64_to_u64_param(case.param_a, "param_a")?;
             Ok(generator
@@ -9122,42 +9123,47 @@ fn generate_rng_samples(
                 .map(|value| value as f64)
                 .collect())
         }
-        "gamma" => Ok(generator.gamma(case.param_a, case.param_b, draws).unwrap()),
-        "beta" => Ok(generator.beta(case.param_a, case.param_b, draws).unwrap()),
+        "gamma" => map_fallible_random_values(generator.gamma(case.param_a, case.param_b, draws)),
+        "beta" => map_fallible_random_values(generator.beta(case.param_a, case.param_b, draws)),
         "geometric" => Ok(generator
             .geometric(case.param_a, draws)
             .into_iter()
             .map(|value| value as f64)
             .collect()),
         "lognormal" => Ok(generator.lognormal(case.param_a, case.param_b, draws)),
-        "chisquare" => Ok(generator.chisquare(case.param_a, draws).unwrap()),
+        "chisquare" => map_fallible_random_values(generator.chisquare(case.param_a, draws)),
         "standard_cauchy" => Ok(generator.standard_cauchy(draws)),
         "triangular" => Ok(generator.triangular(case.param_a, case.param_b, case.param_c, draws)),
         "laplace" => Ok(generator.laplace(case.param_a, case.param_b, draws)),
         "gumbel" => Ok(generator.gumbel(case.param_a, case.param_b, draws)),
-        "weibull" => Ok(generator.weibull(case.param_a, draws).unwrap()),
+        "weibull" => map_fallible_random_values(generator.weibull(case.param_a, draws)),
         "negative_binomial" => Ok(generator
             .negative_binomial(case.param_a, case.param_b, draws)
             .into_iter()
             .map(|value| value as f64)
             .collect()),
-        "f_distribution" => Ok(generator
-            .f_distribution(case.param_a, case.param_b, draws)
-            .unwrap()),
+        "f_distribution" => {
+            map_fallible_random_values(generator.f_distribution(case.param_a, case.param_b, draws))
+        }
         "standard_t" => Ok(generator.standard_t(case.param_a, draws)),
-        "noncentral_chisquare" => {
-            Ok(generator.noncentral_chisquare(case.param_a, case.param_b, draws))
-        }
-        "noncentral_f" => {
-            Ok(generator.noncentral_f(case.param_a, case.param_b, case.param_c, draws))
-        }
+        "noncentral_chisquare" => map_fallible_random_values(generator.noncentral_chisquare(
+            case.param_a,
+            case.param_b,
+            draws,
+        )),
+        "noncentral_f" => map_fallible_random_values(generator.noncentral_f(
+            case.param_a,
+            case.param_b,
+            case.param_c,
+            draws,
+        )),
         "power" => Ok(generator.power(case.param_a, draws)),
         "vonmises" => Ok(generator.vonmises(case.param_a, case.param_b, draws)),
         "rayleigh" => Ok(generator.rayleigh(case.param_a, draws)),
-        "pareto" => Ok(generator.pareto(case.param_a, draws).unwrap()),
-        "logistic" => Ok(generator
-            .logistic(case.param_a, case.param_b, draws)
-            .unwrap()),
+        "pareto" => map_fallible_random_values(generator.pareto(case.param_a, draws)),
+        "logistic" => {
+            map_fallible_random_values(generator.logistic(case.param_a, case.param_b, draws))
+        }
         "hypergeometric" => {
             let ngood = f64_to_u64_param(case.param_a, "param_a")?;
             let nbad = f64_to_u64_param(case.param_b, "param_b")?;
@@ -9772,6 +9778,12 @@ fn map_random_error_to_rng_suite(error: RandomError) -> RngSuiteError {
     RngSuiteError::new(error.reason_code(), error.to_string())
 }
 
+fn map_fallible_random_values(
+    result: Result<Vec<f64>, RandomError>,
+) -> Result<Vec<f64>, RngSuiteError> {
+    result.map_err(map_random_error_to_rng_suite)
+}
+
 fn map_random_policy_error_to_rng_suite(error: RandomPolicyError) -> RngSuiteError {
     RngSuiteError::new(error.reason_code(), error.to_string())
 }
@@ -10218,8 +10230,10 @@ fn validate_runtime_policy_log_fields(
 #[cfg(test)]
 mod tests {
     use super::{
-        HarnessConfig, run_all_core_suites, run_crash_signature_regression_suite,
-        run_datetime_differential_suite, run_dtype_adversarial_suite, run_dtype_differential_suite,
+        HarnessConfig, RngStatisticalCase, default_rng_mean_abs_tol,
+        default_rng_variance_abs_tol, generate_rng_samples, run_all_core_suites,
+        run_crash_signature_regression_suite, run_datetime_differential_suite,
+        run_dtype_adversarial_suite, run_dtype_differential_suite,
         run_dtype_metamorphic_suite, run_dtype_promotion_suite, run_fft_differential_suite,
         run_io_adversarial_suite, run_io_differential_suite, run_io_metamorphic_suite,
         run_iter_adversarial_suite, run_iter_differential_suite, run_iter_metamorphic_suite,
@@ -11165,7 +11179,7 @@ mod tests {
         const SEED: u64 = 12345;
 
         let mut g = Generator::from_pcg64_dxsm(SEED).unwrap();
-        let pois: Vec<u64> = g.poisson(5.0, 5);
+        let pois: Vec<u64> = g.poisson(5.0, 5).unwrap();
         assert_eq!(pois, vec![7, 5, 7, 6, 4], "poisson(5) sequence mismatch");
 
         let mut g = Generator::from_pcg64_dxsm(SEED).unwrap();
@@ -11248,7 +11262,7 @@ mod tests {
 
         // noncentral_chisquare(df=3, nonc=2)
         let mut g = Generator::from_pcg64_dxsm(SEED).unwrap();
-        let nc_chi = g.noncentral_chisquare(3.0, 2.0, 5);
+        let nc_chi = g.noncentral_chisquare(3.0, 2.0, 5).unwrap();
         let expected_nc_chi = [
             9.694565810991783,
             4.82399957656241529,
@@ -11265,7 +11279,7 @@ mod tests {
 
         // noncentral_f(dfnum=5, dfden=2, nonc=1)
         let mut g = Generator::from_pcg64_dxsm(SEED).unwrap();
-        let nc_f = g.noncentral_f(5.0, 2.0, 1.0, 5);
+        let nc_f = g.noncentral_f(5.0, 2.0, 1.0, 5).unwrap();
         let expected_nc_f = [
             4.71128924818266057e1,
             4.68907563784964676e-1,
@@ -11322,6 +11336,49 @@ mod tests {
             vec![vec![4, 6, 15], vec![3, 8, 14], vec![3, 12, 10]],
             "multivariate_hypergeometric mismatch"
         );
+    }
+
+    #[test]
+    fn generate_rng_samples_reports_invalid_fallible_parameters() {
+        fn base_case(distribution: &str) -> RngStatisticalCase {
+            RngStatisticalCase {
+                id: format!("test_{distribution}"),
+                distribution: distribution.to_string(),
+                seed: 12345,
+                mode: String::new(),
+                env_fingerprint: String::new(),
+                artifact_refs: Vec::new(),
+                reason_code: String::new(),
+                draws: 4,
+                param_a: 0.0,
+                param_b: 0.0,
+                param_c: 0.0,
+                param_d: 0.0,
+                expected_mean: None,
+                expected_variance: None,
+                mean_abs_tol: default_rng_mean_abs_tol(),
+                variance_abs_tol: default_rng_variance_abs_tol(),
+                support_min: None,
+                support_max: None,
+                support_min_inclusive: true,
+                support_max_inclusive: true,
+                ks_distribution: String::new(),
+                ks_alpha: 0.0,
+            }
+        }
+
+        let mut poisson_case = base_case("poisson");
+        poisson_case.param_a = f64::NAN;
+        let poisson_err =
+            generate_rng_samples(&poisson_case, poisson_case.draws).expect_err("poisson NaN");
+        assert_eq!(poisson_err.reason_code, "random_invalid_parameter");
+
+        let mut gamma_case = base_case("gamma");
+        gamma_case.param_a = -1.0;
+        gamma_case.param_b = 1.0;
+        let gamma_err =
+            generate_rng_samples(&gamma_case, gamma_case.draws).expect_err("gamma negative shape");
+        assert_eq!(gamma_err.reason_code, "random_invalid_parameter");
     }
 
     #[test]

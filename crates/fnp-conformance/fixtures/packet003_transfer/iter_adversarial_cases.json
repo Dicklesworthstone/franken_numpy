@@ -50,7 +50,7 @@
     }
   },
   {
-    "id": "transfer_overlap_zero_length_is_no_copy",
+    "id": "transfer_overlap_overflow_rejected",
     "operation": "overlap_copy_policy",
     "seed": 5303,
     "severity": "high",
@@ -61,13 +61,13 @@
       "artifacts/phase2c/FNP-P2C-003/unit_property_evidence.json",
       "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
     ],
-    "reason_code": "nditer_overlap_policy_success",
-    "expected_reason_code": "nditer_overlap_policy_success",
-    "expected_overlap_action": "no_copy",
+    "reason_code": "transfer_overlap_policy_triggered",
+    "expected_reason_code": "nditer_overlap_policy_triggered",
+    "expected_error_contains": "overflow",
     "overlap": {
-      "src_offset": 0,
+      "src_offset": 18446744073709551615,
       "dst_offset": 8,
-      "byte_len": 0
+      "byte_len": 16
     }
   },
   {

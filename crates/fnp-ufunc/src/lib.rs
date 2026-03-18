@@ -1119,6 +1119,119 @@ pub fn validate_override_payload_class(payload_class: &str) -> Result<(), UFuncE
     }
 }
 
+/// A registered custom loop binding: maps a (ufunc_name, input_dtypes, output_dtypes)
+/// tuple to a named custom loop implementation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomLoopEntry {
+    pub loop_name: String,
+    pub ufunc_name: String,
+    pub input_dtypes: Vec<DType>,
+    pub output_dtypes: Vec<DType>,
+}
+
+/// Thread-local registry for custom ufunc loop bindings.
+///
+/// This is the P2C005-U02 loop registry model. Custom loops are checked
+/// before built-in dispatch resolution. The registry is deterministic:
+/// identical registration sequences produce identical dispatch outcomes.
+#[derive(Debug, Clone, Default)]
+pub struct UFuncLoopRegistry {
+    entries: Vec<CustomLoopEntry>,
+}
+
+impl UFuncLoopRegistry {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Register a custom loop for a specific ufunc + dtype combination.
+    ///
+    /// Returns an error if the loop name is empty, the ufunc name is empty,
+    /// or a conflicting registration already exists (same ufunc + input dtypes
+    /// but different loop name).
+    pub fn register(
+        &mut self,
+        loop_name: &str,
+        ufunc_name: &str,
+        input_dtypes: Vec<DType>,
+        output_dtypes: Vec<DType>,
+    ) -> Result<(), UFuncError> {
+        let loop_name = loop_name.trim();
+        if loop_name.is_empty() {
+            return Err(UFuncError::LoopRegistryInvalid {
+                detail: "custom loop name must not be empty".to_string(),
+            });
+        }
+
+        let ufunc_name = ufunc_name.trim();
+        if ufunc_name.is_empty() {
+            return Err(UFuncError::LoopRegistryInvalid {
+                detail: "ufunc name must not be empty for loop registration".to_string(),
+            });
+        }
+
+        if input_dtypes.is_empty() {
+            return Err(UFuncError::LoopRegistryInvalid {
+                detail: "input_dtypes must not be empty for loop registration".to_string(),
+            });
+        }
+
+        // Check for conflicting registrations.
+        if let Some(existing) = self
+            .entries
+            .iter()
+            .find(|e| e.ufunc_name == ufunc_name && e.input_dtypes == input_dtypes)
+        {
+            if existing.loop_name != loop_name {
+                return Err(UFuncError::LoopRegistryInvalid {
+                    detail: format!(
+                        "conflicting loop registration for ufunc '{}': existing='{}', new='{}'",
+                        ufunc_name, existing.loop_name, loop_name
+                    ),
+                });
+            }
+            return Ok(()); // Idempotent re-registration
+        }
+
+        self.entries.push(CustomLoopEntry {
+            loop_name: loop_name.to_string(),
+            ufunc_name: ufunc_name.to_string(),
+            input_dtypes,
+            output_dtypes,
+        });
+        Ok(())
+    }
+
+    /// Look up a custom loop for a given ufunc + input dtype combination.
+    ///
+    /// Returns `Some` if a custom loop is registered, `None` if dispatch
+    /// should fall through to built-in resolution.
+    #[must_use]
+    pub fn resolve(&self, ufunc_name: &str, input_dtypes: &[DType]) -> Option<&CustomLoopEntry> {
+        self.entries
+            .iter()
+            .find(|e| e.ufunc_name == ufunc_name && e.input_dtypes == input_dtypes)
+    }
+
+    /// Number of registered custom loops.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the registry is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// Legacy single-function entry point (fail-closed stub).
+///
+/// For the full registry model, use `UFuncLoopRegistry::register()`.
 pub fn register_custom_loop(loop_name: &str) -> Result<(), UFuncError> {
     let loop_name = loop_name.trim();
     if loop_name.is_empty() {
@@ -1128,7 +1241,9 @@ pub fn register_custom_loop(loop_name: &str) -> Result<(), UFuncError> {
     }
 
     Err(UFuncError::LoopRegistryInvalid {
-        detail: format!("custom loop registration unsupported for '{loop_name}'"),
+        detail: format!(
+            "standalone loop registration unsupported; use UFuncLoopRegistry::register() for '{loop_name}'"
+        ),
     })
 }
 
@@ -18919,21 +19034,21 @@ mod tests {
     use super::{
         AxisSlice, BinaryOp, FloatErrorKind, FloatErrorMode, MAError, MaskedArray, PrintOptions,
         QuantileInterp, StringArray, UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncArrayView,
-        UFuncError, UFuncLogRecord, UFuncRuntimeMode, UnaryOp, bitwise_count, busday_count,
-        busday_offset, cheb2poly, chebadd, chebder, chebfit, chebint, chebmul, chebsub, chebval,
-        divmod_arrays, errstate, financial_fv, financial_ipmt, financial_irr, financial_mirr,
-        financial_nper, financial_npv, financial_pmt, financial_ppmt, financial_pv, financial_rate,
-        frexp, gcd_arrays, geterr, herm2poly, hermadd, hermder, herme2poly, hermeadd, hermemul,
-        hermeroots, hermeval, hermfromroots, hermint, hermmul, hermroots, hermsub, hermval,
-        is_busday, isneginf, isposinf, lag2poly, lagadd, lagder, lagfromroots, lagmul, lagroots,
-        lagsub, lagval, lcm_arrays, leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint,
-        legmul, legroots, legsub, legval, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or, modf,
-        normalize_signature_keywords, pad_empty, pad_linear_ramp, pad_stat, parse_gufunc_signature,
-        plan_binary_dispatch, poly2cheb, poly2herm, poly2lag, poly2leg, register_custom_loop,
-        scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log, scimath_log2, scimath_log10,
-        scimath_power, scimath_sqrt, seterr, seterr_state, seterrcall, sort_complex,
-        take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
-        validate_override_payload_class, where_nonzero,
+        UFuncError, UFuncLogRecord, UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp, bitwise_count,
+        busday_count, busday_offset, cheb2poly, chebadd, chebder, chebfit, chebint, chebmul,
+        chebsub, chebval, divmod_arrays, errstate, financial_fv, financial_ipmt, financial_irr,
+        financial_mirr, financial_nper, financial_npv, financial_pmt, financial_ppmt, financial_pv,
+        financial_rate, frexp, gcd_arrays, geterr, herm2poly, hermadd, hermder, herme2poly,
+        hermeadd, hermemul, hermeroots, hermeval, hermfromroots, hermint, hermmul, hermroots,
+        hermsub, hermval, is_busday, isneginf, isposinf, lag2poly, lagadd, lagder, lagfromroots,
+        lagmul, lagroots, lagsub, lagval, lcm_arrays, leg2poly, legadd, legder, legdiv, legfit,
+        legfromroots, legint, legmul, legroots, legsub, legval, ma_is_mask, ma_is_masked,
+        ma_make_mask, ma_mask_or, modf, normalize_signature_keywords, pad_empty, pad_linear_ramp,
+        pad_stat, parse_gufunc_signature, plan_binary_dispatch, poly2cheb, poly2herm, poly2lag,
+        poly2leg, register_custom_loop, scimath_arccos, scimath_arcsin, scimath_arctanh,
+        scimath_log, scimath_log2, scimath_log10, scimath_power, scimath_sqrt, seterr,
+        seterr_state, seterrcall, sort_complex, take_float_error_events, unique_all, unique_counts,
+        unique_inverse, unique_values, validate_override_payload_class, where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
@@ -19825,9 +19940,163 @@ mod tests {
     #[test]
     fn custom_loop_registration_is_fail_closed() {
         let err = register_custom_loop("fused_add_loop")
-            .expect_err("loop registration is unsupported in packet-D boundary");
+            .expect_err("standalone registration is unsupported");
         assert!(matches!(err, UFuncError::LoopRegistryInvalid { .. }));
         assert_eq!(err.reason_code(), "ufunc_loop_registry_invalid");
+    }
+
+    // -----------------------------------------------------------------------
+    // UFuncLoopRegistry model tests (P2C005-U02)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn loop_registry_register_and_resolve() {
+        let mut reg = UFuncLoopRegistry::new();
+        assert!(reg.is_empty());
+
+        reg.register(
+            "custom_add_i64",
+            "add",
+            vec![DType::I64, DType::I64],
+            vec![DType::I64],
+        )
+        .expect("registration should succeed");
+
+        assert_eq!(reg.len(), 1);
+
+        let entry = reg
+            .resolve("add", &[DType::I64, DType::I64])
+            .expect("should find registered loop");
+        assert_eq!(entry.loop_name, "custom_add_i64");
+        assert_eq!(entry.output_dtypes, vec![DType::I64]);
+    }
+
+    #[test]
+    fn loop_registry_resolve_returns_none_for_unregistered() {
+        let reg = UFuncLoopRegistry::new();
+        assert!(reg.resolve("add", &[DType::F64, DType::F64]).is_none());
+    }
+
+    #[test]
+    fn loop_registry_idempotent_reregistration() {
+        let mut reg = UFuncLoopRegistry::new();
+        reg.register("my_loop", "mul", vec![DType::F32], vec![DType::F32])
+            .expect("first registration");
+        reg.register("my_loop", "mul", vec![DType::F32], vec![DType::F32])
+            .expect("idempotent re-registration should succeed");
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn loop_registry_rejects_conflicting_registration() {
+        let mut reg = UFuncLoopRegistry::new();
+        reg.register("loop_a", "add", vec![DType::I64], vec![DType::I64])
+            .expect("first registration");
+
+        let err = reg
+            .register("loop_b", "add", vec![DType::I64], vec![DType::I64])
+            .expect_err("conflicting registration should fail");
+        assert!(matches!(err, UFuncError::LoopRegistryInvalid { .. }));
+    }
+
+    #[test]
+    fn loop_registry_rejects_empty_loop_name() {
+        let mut reg = UFuncLoopRegistry::new();
+        let err = reg
+            .register("", "add", vec![DType::F64], vec![DType::F64])
+            .expect_err("empty loop name should fail");
+        assert!(matches!(err, UFuncError::LoopRegistryInvalid { .. }));
+    }
+
+    #[test]
+    fn loop_registry_rejects_empty_ufunc_name() {
+        let mut reg = UFuncLoopRegistry::new();
+        let err = reg
+            .register("my_loop", "", vec![DType::F64], vec![DType::F64])
+            .expect_err("empty ufunc name should fail");
+        assert!(matches!(err, UFuncError::LoopRegistryInvalid { .. }));
+    }
+
+    #[test]
+    fn loop_registry_rejects_empty_input_dtypes() {
+        let mut reg = UFuncLoopRegistry::new();
+        let err = reg
+            .register("my_loop", "add", vec![], vec![DType::F64])
+            .expect_err("empty input_dtypes should fail");
+        assert!(matches!(err, UFuncError::LoopRegistryInvalid { .. }));
+    }
+
+    #[test]
+    fn loop_registry_multiple_ufuncs_independent() {
+        let mut reg = UFuncLoopRegistry::new();
+        reg.register("add_loop", "add", vec![DType::I64], vec![DType::I64])
+            .expect("add registration");
+        reg.register("mul_loop", "multiply", vec![DType::I64], vec![DType::I64])
+            .expect("mul registration");
+        assert_eq!(reg.len(), 2);
+
+        assert_eq!(
+            reg.resolve("add", &[DType::I64]).unwrap().loop_name,
+            "add_loop"
+        );
+        assert_eq!(
+            reg.resolve("multiply", &[DType::I64]).unwrap().loop_name,
+            "mul_loop"
+        );
+        assert!(reg.resolve("subtract", &[DType::I64]).is_none());
+    }
+
+    #[test]
+    fn loop_registry_same_ufunc_different_dtypes() {
+        let mut reg = UFuncLoopRegistry::new();
+        reg.register(
+            "add_i64",
+            "add",
+            vec![DType::I64, DType::I64],
+            vec![DType::I64],
+        )
+        .expect("i64 registration");
+        reg.register(
+            "add_f64",
+            "add",
+            vec![DType::F64, DType::F64],
+            vec![DType::F64],
+        )
+        .expect("f64 registration");
+        assert_eq!(reg.len(), 2);
+
+        assert_eq!(
+            reg.resolve("add", &[DType::I64, DType::I64])
+                .unwrap()
+                .loop_name,
+            "add_i64"
+        );
+        assert_eq!(
+            reg.resolve("add", &[DType::F64, DType::F64])
+                .unwrap()
+                .loop_name,
+            "add_f64"
+        );
+    }
+
+    #[test]
+    fn loop_registry_deterministic_resolution() {
+        let mut reg = UFuncLoopRegistry::new();
+        reg.register(
+            "my_loop",
+            "add",
+            vec![DType::I32, DType::I32],
+            vec![DType::I32],
+        )
+        .expect("registration");
+
+        let first = reg.resolve("add", &[DType::I32, DType::I32]);
+        let second = reg.resolve("add", &[DType::I32, DType::I32]);
+        assert_eq!(
+            first.map(|e| &e.loop_name),
+            second.map(|e| &e.loop_name),
+            "registry resolution must be deterministic"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -19836,8 +20105,9 @@ mod tests {
 
     #[test]
     fn gufunc_signature_scalar_input_output() {
-        let sig =
-            parse_gufunc_signature(Some("(),()->()"), None).expect("parse").expect("present");
+        let sig = parse_gufunc_signature(Some("(),()->()"), None)
+            .expect("parse")
+            .expect("present");
         assert_eq!(sig.inputs.len(), 2);
         assert_eq!(sig.outputs.len(), 1);
         assert!(sig.inputs[0].is_empty()); // scalar = empty dims
@@ -19915,10 +20185,9 @@ mod tests {
 
     #[test]
     fn gufunc_signature_whitespace_tolerance() {
-        let sig =
-            parse_gufunc_signature(Some("  ( m , n ) , ( n , p )  ->  ( m , p )  "), None)
-                .expect("parse")
-                .expect("present");
+        let sig = parse_gufunc_signature(Some("  ( m , n ) , ( n , p )  ->  ( m , p )  "), None)
+            .expect("parse")
+            .expect("present");
         assert_eq!(sig.inputs.len(), 2);
         assert_eq!(sig.outputs.len(), 1);
         assert_eq!(sig.canonical(), "(m,n),(n,p)->(m,p)");
@@ -19932,22 +20201,19 @@ mod tests {
 
     #[test]
     fn gufunc_signature_empty_sig_rejected() {
-        let err =
-            parse_gufunc_signature(Some(""), None).expect_err("empty sig should fail");
+        let err = parse_gufunc_signature(Some(""), None).expect_err("empty sig should fail");
         assert!(matches!(err, UFuncError::FixedSignatureInvalid { .. }));
     }
 
     #[test]
     fn gufunc_signature_whitespace_only_rejected() {
-        let err =
-            parse_gufunc_signature(Some("   "), None).expect_err("whitespace should fail");
+        let err = parse_gufunc_signature(Some("   "), None).expect_err("whitespace should fail");
         assert!(matches!(err, UFuncError::FixedSignatureInvalid { .. }));
     }
 
     #[test]
     fn gufunc_signature_no_arrow_rejected() {
-        let err =
-            parse_gufunc_signature(Some("(i)(j)"), None).expect_err("no arrow should fail");
+        let err = parse_gufunc_signature(Some("(i)(j)"), None).expect_err("no arrow should fail");
         assert!(matches!(err, UFuncError::SignatureParse { .. }));
     }
 
@@ -19974,8 +20240,8 @@ mod tests {
 
     #[test]
     fn gufunc_signature_invalid_dim_start_char_rejected() {
-        let err = parse_gufunc_signature(Some("(1dim)->(x)"), None)
-            .expect_err("digit start should fail");
+        let err =
+            parse_gufunc_signature(Some("(1dim)->(x)"), None).expect_err("digit start should fail");
         assert!(matches!(err, UFuncError::SignatureParse { .. }));
     }
 
@@ -19995,8 +20261,8 @@ mod tests {
 
     #[test]
     fn gufunc_signature_missing_output_group_rejected() {
-        let err = parse_gufunc_signature(Some("(i)->"), None)
-            .expect_err("missing output should fail");
+        let err =
+            parse_gufunc_signature(Some("(i)->"), None).expect_err("missing output should fail");
         assert!(matches!(err, UFuncError::SignatureParse { .. }));
     }
 
@@ -20013,8 +20279,12 @@ mod tests {
             let first = parse_gufunc_signature(Some(sig_str), None);
             let second = parse_gufunc_signature(Some(sig_str), None);
             assert_eq!(
-                first.as_ref().map(|r| r.as_ref().map(|s| s.canonical().to_string())),
-                second.as_ref().map(|r| r.as_ref().map(|s| s.canonical().to_string())),
+                first
+                    .as_ref()
+                    .map(|r| r.as_ref().map(|s| s.canonical().to_string())),
+                second
+                    .as_ref()
+                    .map(|r| r.as_ref().map(|s| s.canonical().to_string())),
                 "signature parsing must be deterministic for '{sig_str}'"
             );
         }
@@ -20042,7 +20312,12 @@ mod tests {
 
     #[test]
     fn override_payload_class_accepts_all_valid_classes() {
-        for class in ["ndarray", "NotImplemented", "not_implemented", "override_result"] {
+        for class in [
+            "ndarray",
+            "NotImplemented",
+            "not_implemented",
+            "override_result",
+        ] {
             validate_override_payload_class(class)
                 .unwrap_or_else(|_| panic!("'{class}' should be accepted"));
         }
@@ -20056,34 +20331,183 @@ mod tests {
 
     #[test]
     fn override_payload_class_rejects_empty() {
-        let err = validate_override_payload_class("")
-            .expect_err("empty should fail");
-        assert!(matches!(err, UFuncError::OverridePrecedenceViolation { .. }));
+        let err = validate_override_payload_class("").expect_err("empty should fail");
+        assert!(matches!(
+            err,
+            UFuncError::OverridePrecedenceViolation { .. }
+        ));
     }
 
     #[test]
     fn override_payload_class_rejects_whitespace_only() {
-        let err = validate_override_payload_class("   ")
-            .expect_err("whitespace should fail");
-        assert!(matches!(err, UFuncError::OverridePrecedenceViolation { .. }));
+        let err = validate_override_payload_class("   ").expect_err("whitespace should fail");
+        assert!(matches!(
+            err,
+            UFuncError::OverridePrecedenceViolation { .. }
+        ));
     }
 
     #[test]
     fn custom_loop_registration_rejects_empty_name() {
-        let err =
-            register_custom_loop("").expect_err("empty loop name should fail");
+        let err = register_custom_loop("").expect_err("empty loop name should fail");
         assert!(matches!(err, UFuncError::LoopRegistryInvalid { .. }));
     }
 
     #[test]
     fn custom_loop_registration_rejects_whitespace_only() {
-        let err =
-            register_custom_loop("   ").expect_err("whitespace loop name should fail");
+        let err = register_custom_loop("   ").expect_err("whitespace loop name should fail");
         assert!(matches!(err, UFuncError::LoopRegistryInvalid { .. }));
     }
 
     // -----------------------------------------------------------------------
     // End gufunc signature edge cases
+    // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Reduction payload validation contract tests (P2C005)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reduce_sum_all_axes_flattens_to_scalar() {
+        let arr = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
+            .expect("arr");
+        let result = arr.reduce_sum(None, false).expect("reduce_sum all");
+        assert_eq!(result.shape(), &[] as &[usize]);
+        assert_eq!(result.values(), &[21.0]);
+    }
+
+    #[test]
+    fn reduce_sum_keepdims_preserves_rank() {
+        let arr = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
+            .expect("arr");
+        let result = arr
+            .reduce_sum(Some(0), true)
+            .expect("reduce_sum axis=0 keepdims");
+        assert_eq!(result.shape(), &[1, 3]);
+        assert_eq!(result.values(), &[5.0, 7.0, 9.0]);
+    }
+
+    #[test]
+    fn reduce_sum_keepdims_false_drops_axis() {
+        let arr = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
+            .expect("arr");
+        let result = arr.reduce_sum(Some(0), false).expect("reduce_sum axis=0");
+        assert_eq!(result.shape(), &[3]);
+        assert_eq!(result.values(), &[5.0, 7.0, 9.0]);
+    }
+
+    #[test]
+    fn reduce_sum_negative_axis_wraps() {
+        let arr = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
+            .expect("arr");
+        let result = arr.reduce_sum(Some(-1), false).expect("reduce_sum axis=-1");
+        assert_eq!(result.shape(), &[2]);
+        assert_eq!(result.values(), &[6.0, 15.0]);
+    }
+
+    #[test]
+    fn reduce_sum_negative_axis_out_of_bounds() {
+        let arr = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
+            .expect("arr");
+        let err = arr
+            .reduce_sum(Some(-3), false)
+            .expect_err("axis=-3 should be out of bounds for ndim=2");
+        assert!(matches!(err, UFuncError::AxisOutOfBounds { .. }));
+    }
+
+    #[test]
+    fn reduce_prod_axis0_keepdims() {
+        let arr = UFuncArray::new(vec![2, 2], vec![2.0, 3.0, 4.0, 5.0], DType::F64).expect("arr");
+        let result = arr
+            .reduce_prod(Some(0), true)
+            .expect("reduce_prod axis=0 keepdims");
+        assert_eq!(result.shape(), &[1, 2]);
+        assert_eq!(result.values(), &[8.0, 15.0]);
+    }
+
+    #[test]
+    fn reduce_mean_all_axes() {
+        let arr = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).expect("arr");
+        let result = arr.reduce_mean(None, false).expect("reduce_mean all");
+        assert_eq!(result.shape(), &[] as &[usize]);
+        assert_eq!(result.values(), &[2.5]);
+    }
+
+    #[test]
+    fn reduce_min_max_axis1() {
+        let arr = UFuncArray::new(vec![2, 3], vec![3.0, 1.0, 2.0, 6.0, 4.0, 5.0], DType::F64)
+            .expect("arr");
+        let min_result = arr.reduce_min(Some(1), false).expect("reduce_min");
+        assert_eq!(min_result.values(), &[1.0, 4.0]);
+
+        let max_result = arr.reduce_max(Some(1), false).expect("reduce_max");
+        assert_eq!(max_result.values(), &[3.0, 6.0]);
+    }
+
+    #[test]
+    fn reduce_on_1d_array_with_axis0() {
+        let arr = UFuncArray::new(vec![4], vec![10.0, 20.0, 30.0, 40.0], DType::F64).expect("arr");
+        let result = arr.reduce_sum(Some(0), false).expect("1d reduce axis=0");
+        assert_eq!(result.shape(), &[] as &[usize]);
+        assert_eq!(result.values(), &[100.0]);
+    }
+
+    #[test]
+    fn reduce_on_1d_keepdims() {
+        let arr = UFuncArray::new(vec![4], vec![10.0, 20.0, 30.0, 40.0], DType::F64).expect("arr");
+        let result = arr.reduce_sum(Some(0), true).expect("1d reduce keepdims");
+        assert_eq!(result.shape(), &[1]);
+        assert_eq!(result.values(), &[100.0]);
+    }
+
+    #[test]
+    fn reduce_on_3d_array_middle_axis() {
+        let arr = UFuncArray::new(
+            vec![2, 3, 2],
+            (1..=12).map(|x| x as f64).collect(),
+            DType::F64,
+        )
+        .expect("arr");
+        let result = arr.reduce_sum(Some(1), false).expect("3d reduce axis=1");
+        assert_eq!(result.shape(), &[2, 2]);
+        // Sum across axis 1: [1+3+5, 2+4+6, 7+9+11, 8+10+12] = [9, 12, 27, 30]
+        assert_eq!(result.values(), &[9.0, 12.0, 27.0, 30.0]);
+    }
+
+    #[test]
+    fn reduce_on_3d_keepdims_middle_axis() {
+        let arr = UFuncArray::new(
+            vec![2, 3, 2],
+            (1..=12).map(|x| x as f64).collect(),
+            DType::F64,
+        )
+        .expect("arr");
+        let result = arr
+            .reduce_sum(Some(1), true)
+            .expect("3d reduce axis=1 keepdims");
+        assert_eq!(result.shape(), &[2, 1, 2]);
+    }
+
+    #[test]
+    fn reduce_determinism_for_all_operations() {
+        let arr = UFuncArray::new(vec![3, 4], (1..=12).map(|x| x as f64).collect(), DType::F64)
+            .expect("arr");
+
+        for axis in [None, Some(0isize), Some(1), Some(-1)] {
+            for keepdims in [true, false] {
+                let s1 = arr.reduce_sum(axis, keepdims);
+                let s2 = arr.reduce_sum(axis, keepdims);
+                assert_eq!(s1.is_ok(), s2.is_ok());
+                if let (Ok(r1), Ok(r2)) = (&s1, &s2) {
+                    assert_eq!(r1.shape(), r2.shape());
+                    assert_eq!(r1.values(), r2.values());
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // End reduction payload validation
     // -----------------------------------------------------------------------
 
     #[test]

@@ -1246,7 +1246,9 @@ mod tests {
             ..base_transfer_ctx()
         };
         assert_eq!(
-            select_transfer_loop(ctx).expect("non-unit lossless").loop_class,
+            select_transfer_loop(ctx)
+                .expect("non-unit lossless")
+                .loop_class,
             TransferLoopClass::StridedWithCast
         );
     }

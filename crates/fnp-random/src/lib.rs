@@ -2126,9 +2126,11 @@ impl Generator {
     /// Mimics `rng.poisson(lam, size)`.
     /// Uses NumPy's exact algorithms: multiplicative method for lam < 10,
     /// PTRS (Hörmann 1993) for lam >= 10.
-    #[must_use]
-    pub fn poisson(&mut self, lam: f64, size: usize) -> Vec<u64> {
-        (0..size).map(|_| self.sample_poisson_single(lam)).collect()
+    pub fn poisson(&mut self, lam: f64, size: usize) -> Result<Vec<u64>, RandomError> {
+        if !lam.is_finite() || lam < 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size).map(|_| self.sample_poisson_single(lam)).collect())
     }
 
     /// Single Poisson sample matching NumPy's `random_poisson` dispatcher.
@@ -2847,7 +2849,7 @@ impl Generator {
                 let mut remaining = n;
                 let mut p_remaining = 1.0;
                 for (i, &p) in pvals.iter().enumerate() {
-                    if remaining <= 0 {
+                    if remaining == 0 {
                         break;
                     }
                     if i == pvals.len() - 1 {
@@ -3028,8 +3030,16 @@ impl Generator {
     /// Generated as the sum of `df` independent standard normals shifted by `nonc/df`,
     /// or equivalently: Poisson(nonc/2) mixture of chi-squared variates.
     /// Uses the simpler additive method: sum of (Z + sqrt(nonc/df))² for each df.
-    pub fn noncentral_chisquare(&mut self, df: f64, nonc: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    pub fn noncentral_chisquare(
+        &mut self,
+        df: f64,
+        nonc: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, RandomError> {
+        if df <= 0.0 || nonc < 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| {
                 if df >= 1.0 {
                     // X ~ chi²(df-1) + (Z + sqrt(nonc))²
@@ -3046,15 +3056,24 @@ impl Generator {
                     self.sample_gamma(df / 2.0 + i as f64) * 2.0
                 }
             })
-            .collect()
+            .collect())
     }
 
     /// Non-central F-distribution (scipy.stats.ncf).
     ///
     /// Ratio of non-central chi-squared to central chi-squared:
     /// `(X1/dfnum) / (X2/dfden)` where X1 ~ ncχ²(dfnum, nonc), X2 ~ χ²(dfden).
-    pub fn noncentral_f(&mut self, dfnum: f64, dfden: f64, nonc: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    pub fn noncentral_f(
+        &mut self,
+        dfnum: f64,
+        dfden: f64,
+        nonc: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, RandomError> {
+        if dfnum <= 0.0 || dfden <= 0.0 || nonc < 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| {
                 let nc_chi2 = {
                     if dfnum >= 1.0 {
@@ -3073,7 +3092,7 @@ impl Generator {
                 let chi2 = self.sample_gamma(dfden / 2.0) * 2.0;
                 (nc_chi2 / dfnum) / (chi2 / dfden)
             })
-            .collect()
+            .collect())
     }
 
     /// Power distribution (matching NumPy: uses standard_exponential).
@@ -4437,11 +4456,25 @@ mod tests {
     #[test]
     fn poisson_nonnegative() {
         let mut rng = test_generator();
-        let vals = rng.poisson(3.0, 100);
+        let vals = rng.poisson(3.0, 100).unwrap();
         assert_eq!(vals.len(), 100);
         // Mean should be approximately lambda=3
         let mean: f64 = vals.iter().map(|&v| v as f64).sum::<f64>() / 100.0;
         assert!((mean - 3.0).abs() < 1.0, "mean was {mean}");
+    }
+
+    #[test]
+    fn poisson_rejects_non_finite_lambda() {
+        let mut rng = test_generator();
+        assert_eq!(rng.poisson(f64::NAN, 1), Err(RandomError::InvalidParameter));
+        assert_eq!(
+            rng.poisson(f64::INFINITY, 1),
+            Err(RandomError::InvalidParameter)
+        );
+        assert_eq!(
+            rng.poisson(f64::NEG_INFINITY, 1),
+            Err(RandomError::InvalidParameter)
+        );
     }
 
     #[test]
@@ -4832,7 +4865,7 @@ mod tests {
     #[test]
     fn noncentral_chisquare_positive_values() {
         let mut rng = test_generator();
-        let samples = rng.noncentral_chisquare(4.0, 1.0, 1000);
+        let samples = rng.noncentral_chisquare(4.0, 1.0, 1000).unwrap();
         assert_eq!(samples.len(), 1000);
         // All values should be positive
         assert!(samples.iter().all(|&v| v > 0.0));
@@ -4845,7 +4878,7 @@ mod tests {
     fn noncentral_chisquare_reduces_to_central() {
         // With nonc=0, should behave like regular chi-squared
         let mut rng = test_generator();
-        let samples = rng.noncentral_chisquare(5.0, 0.0, 2000);
+        let samples = rng.noncentral_chisquare(5.0, 0.0, 2000).unwrap();
         let mean: f64 = samples.iter().sum::<f64>() / 2000.0;
         // Mean of chi²(5) = 5
         assert!((mean - 5.0).abs() < 0.5, "chi2 mean={mean}, expected ~5.0");
@@ -4854,7 +4887,7 @@ mod tests {
     #[test]
     fn noncentral_f_positive_values() {
         let mut rng = test_generator();
-        let samples = rng.noncentral_f(5.0, 10.0, 1.0, 1000);
+        let samples = rng.noncentral_f(5.0, 10.0, 1.0, 1000).unwrap();
         assert_eq!(samples.len(), 1000);
         assert!(samples.iter().all(|&v| v > 0.0));
     }
@@ -4866,7 +4899,7 @@ mod tests {
         let d1 = 5.0;
         let d2 = 20.0;
         let lam = 2.0;
-        let samples = rng.noncentral_f(d1, d2, lam, 5000);
+        let samples = rng.noncentral_f(d1, d2, lam, 5000).unwrap();
         let mean: f64 = samples.iter().sum::<f64>() / 5000.0;
         let expected_mean = d2 * (d1 + lam) / (d1 * (d2 - 2.0));
         assert!(
@@ -6066,7 +6099,7 @@ mod tests {
     #[test]
     fn oracle_poisson() {
         let mut g = oracle_gen();
-        let vals = g.poisson(3.0, 10);
+        let vals = g.poisson(3.0, 10).unwrap();
         let expected: Vec<u64> = vec![3, 5, 3, 2, 6, 3, 2, 2, 5, 0];
         assert_u64_seq("poisson", &vals, &expected);
     }
@@ -6074,7 +6107,7 @@ mod tests {
     #[test]
     fn oracle_poisson_large_lambda() {
         let mut g = oracle_gen();
-        let vals = g.poisson(20.0, 10);
+        let vals = g.poisson(20.0, 10).unwrap();
         let expected: Vec<u64> = vec![28, 16, 21, 26, 19, 18, 26, 18, 22, 16];
         assert_u64_seq("poisson_large", &vals, &expected);
     }
@@ -6165,7 +6198,7 @@ mod tests {
     #[test]
     fn oracle_noncentral_chisquare() {
         let mut g = oracle_gen();
-        let vals = g.noncentral_chisquare(5.0, 1.0, 10);
+        let vals = g.noncentral_chisquare(5.0, 1.0, 10).unwrap();
         let expected = [
             11.407992320824796,
             6.1909369599500135,
@@ -6184,7 +6217,7 @@ mod tests {
     #[test]
     fn oracle_noncentral_f() {
         let mut g = oracle_gen();
-        let vals = g.noncentral_f(5.0, 10.0, 1.0, 10);
+        let vals = g.noncentral_f(5.0, 10.0, 1.0, 10).unwrap();
         let expected = [
             1.8270336158811435,
             0.9576523667963563,
