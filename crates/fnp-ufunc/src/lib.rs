@@ -1797,7 +1797,7 @@ impl UFuncArrayView {
     }
 
     /// Detect internal overlap: any two distinct logical indices mapping to the
-    /// same buffer position.  Zero-stride or sub-element-stride axes overlap.
+    /// same buffer position.  A zero-stride axis (broadcast) always overlaps.
     fn detect_overlap(shape: &[usize], strides: &[isize]) -> Result<bool, UFuncError> {
         for (&dim, &stride) in shape.iter().zip(strides) {
             if dim <= 1 {
@@ -1806,8 +1806,8 @@ impl UFuncArrayView {
             let abs_stride = stride
                 .checked_abs()
                 .ok_or_else(|| UFuncError::Msg("as_strided: abs stride overflow".to_string()))?;
-            // Stride of 0 or less than 1 element means overlap.
-            if abs_stride == 0 || abs_stride < 1 {
+            // Stride of 0 means broadcast (same element repeated) → overlap.
+            if abs_stride == 0 {
                 return Ok(true);
             }
         }
