@@ -712,4 +712,480 @@ mod tests {
             expected_loss_for_action(DecisionAction::FullValidate, high_risk, model);
         assert!(validate_high < allow_high);
     }
+
+    // -----------------------------------------------------------------------
+    // Decision matrix exhaustive coverage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hardened_mode_allows_low_risk_known_compatible() {
+        assert_eq!(
+            decide_compatibility(
+                RuntimeMode::Hardened,
+                CompatibilityClass::KnownCompatible,
+                0.1,
+                0.7,
+            ),
+            DecisionAction::Allow
+        );
+    }
+
+    #[test]
+    fn known_incompatible_always_fails_closed_strict() {
+        assert_eq!(
+            decide_compatibility(
+                RuntimeMode::Strict,
+                CompatibilityClass::KnownIncompatible,
+                0.0,
+                0.0,
+            ),
+            DecisionAction::FailClosed
+        );
+    }
+
+    #[test]
+    fn known_incompatible_always_fails_closed_hardened() {
+        assert_eq!(
+            decide_compatibility(
+                RuntimeMode::Hardened,
+                CompatibilityClass::KnownIncompatible,
+                0.0,
+                0.0,
+            ),
+            DecisionAction::FailClosed
+        );
+    }
+
+    #[test]
+    fn unknown_class_always_fails_closed_strict() {
+        assert_eq!(
+            decide_compatibility(RuntimeMode::Strict, CompatibilityClass::Unknown, 0.0, 0.0),
+            DecisionAction::FailClosed
+        );
+    }
+
+    #[test]
+    fn unknown_class_always_fails_closed_hardened() {
+        assert_eq!(
+            decide_compatibility(RuntimeMode::Hardened, CompatibilityClass::Unknown, 0.0, 0.0),
+            DecisionAction::FailClosed
+        );
+    }
+
+    #[test]
+    fn hardened_exact_threshold_triggers_full_validate() {
+        // risk == threshold should trigger full_validate (>= comparison)
+        assert_eq!(
+            decide_compatibility(
+                RuntimeMode::Hardened,
+                CompatibilityClass::KnownCompatible,
+                0.5,
+                0.5,
+            ),
+            DecisionAction::FullValidate
+        );
+    }
+
+    #[test]
+    fn hardened_just_below_threshold_allows() {
+        assert_eq!(
+            decide_compatibility(
+                RuntimeMode::Hardened,
+                CompatibilityClass::KnownCompatible,
+                0.49,
+                0.5,
+            ),
+            DecisionAction::Allow
+        );
+    }
+
+    #[test]
+    fn hardened_infinity_risk_full_validates() {
+        assert_eq!(
+            decide_compatibility(
+                RuntimeMode::Hardened,
+                CompatibilityClass::KnownCompatible,
+                f64::INFINITY,
+                0.5,
+            ),
+            DecisionAction::FullValidate
+        );
+    }
+
+    #[test]
+    fn hardened_neg_infinity_threshold_full_validates() {
+        assert_eq!(
+            decide_compatibility(
+                RuntimeMode::Hardened,
+                CompatibilityClass::KnownCompatible,
+                0.5,
+                f64::NEG_INFINITY,
+            ),
+            DecisionAction::FullValidate
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Wire decoding edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn runtime_mode_from_wire_roundtrip() {
+        assert_eq!(
+            RuntimeMode::from_wire("strict"),
+            Some(RuntimeMode::Strict)
+        );
+        assert_eq!(
+            RuntimeMode::from_wire("hardened"),
+            Some(RuntimeMode::Hardened)
+        );
+        assert_eq!(RuntimeMode::from_wire("unknown"), None);
+        assert_eq!(RuntimeMode::from_wire(""), None);
+        assert_eq!(RuntimeMode::from_wire("STRICT"), None); // case-sensitive
+    }
+
+    #[test]
+    fn compatibility_class_from_wire_defaults_to_unknown() {
+        assert_eq!(
+            CompatibilityClass::from_wire("known_compatible"),
+            CompatibilityClass::KnownCompatible
+        );
+        assert_eq!(
+            CompatibilityClass::from_wire("known_incompatible"),
+            CompatibilityClass::KnownIncompatible
+        );
+        assert_eq!(
+            CompatibilityClass::from_wire("anything_else"),
+            CompatibilityClass::Unknown
+        );
+        assert_eq!(
+            CompatibilityClass::from_wire(""),
+            CompatibilityClass::Unknown
+        );
+    }
+
+    #[test]
+    fn wire_decoding_valid_combinations() {
+        assert_eq!(
+            decide_compatibility_from_wire("strict", "known_compatible", 0.1, 0.5),
+            DecisionAction::Allow
+        );
+        assert_eq!(
+            decide_compatibility_from_wire("hardened", "known_compatible", 0.1, 0.5),
+            DecisionAction::Allow
+        );
+        assert_eq!(
+            decide_compatibility_from_wire("hardened", "known_compatible", 0.9, 0.5),
+            DecisionAction::FullValidate
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Posterior incompatibility edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn posterior_is_finite_for_nan_inputs() {
+        let (p, terms) = posterior_incompatibility(CompatibilityClass::KnownCompatible, f64::NAN, 0.5);
+        assert!(p.is_finite(), "posterior must be finite even with NaN risk");
+        assert_eq!(terms.len(), 2);
+    }
+
+    #[test]
+    fn posterior_is_finite_for_extreme_inputs() {
+        let (p1, _) = posterior_incompatibility(CompatibilityClass::KnownCompatible, 0.0, 0.0);
+        assert!(p1.is_finite());
+        let (p2, _) = posterior_incompatibility(CompatibilityClass::KnownCompatible, 1.0, 1.0);
+        assert!(p2.is_finite());
+    }
+
+    #[test]
+    fn posterior_known_incompatible_is_high() {
+        let (p, _) = posterior_incompatibility(CompatibilityClass::KnownIncompatible, 0.5, 0.5);
+        assert!(p > 0.9, "known_incompatible prior should yield high posterior, got {p}");
+    }
+
+    #[test]
+    fn posterior_unknown_class_is_moderate() {
+        let (p, _) = posterior_incompatibility(CompatibilityClass::Unknown, 0.5, 0.5);
+        assert!(
+            (0.3..=0.7).contains(&p),
+            "unknown class with 50/50 risk/threshold should yield moderate posterior, got {p}"
+        );
+    }
+
+    #[test]
+    fn posterior_determinism() {
+        for class in [
+            CompatibilityClass::KnownCompatible,
+            CompatibilityClass::KnownIncompatible,
+            CompatibilityClass::Unknown,
+        ] {
+            let (p1, t1) = posterior_incompatibility(class, 0.3, 0.7);
+            let (p2, t2) = posterior_incompatibility(class, 0.3, 0.7);
+            assert_eq!(p1, p2, "posterior must be deterministic for {class:?}");
+            assert_eq!(t1.len(), t2.len());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Expected loss with custom model
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn expected_loss_with_custom_model() {
+        let model = DecisionLossModel {
+            allow_if_compatible: 0.0,
+            allow_if_incompatible: 10.0,
+            full_validate_if_compatible: 1.0,
+            full_validate_if_incompatible: 1.0,
+            fail_closed_if_compatible: 5.0,
+            fail_closed_if_incompatible: 0.0,
+        };
+
+        // At 50% posterior: allow = 0*0.5 + 10*0.5 = 5.0
+        let allow = expected_loss_for_action(DecisionAction::Allow, 0.5, model);
+        assert!((allow - 5.0).abs() < 0.1, "allow loss at 50%: {allow}");
+
+        // At 50% posterior: full_validate = 1*0.5 + 1*0.5 = 1.0
+        let fv = expected_loss_for_action(DecisionAction::FullValidate, 0.5, model);
+        assert!((fv - 1.0).abs() < 0.1, "full_validate loss at 50%: {fv}");
+
+        // At 50% posterior: fail_closed = 5*0.5 + 0*0.5 = 2.5
+        let fc = expected_loss_for_action(DecisionAction::FailClosed, 0.5, model);
+        assert!((fc - 2.5).abs() < 0.1, "fail_closed loss at 50%: {fc}");
+    }
+
+    #[test]
+    fn expected_loss_is_finite_for_extreme_posteriors() {
+        let model = DecisionLossModel::default();
+        for p in [0.0, 1.0, f64::NAN, f64::INFINITY] {
+            let loss = expected_loss_for_action(DecisionAction::Allow, p, model);
+            assert!(loss.is_finite(), "loss must be finite for posterior={p}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Override policy edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn override_denied_for_incompatible_even_if_allowlisted() {
+        let allowlisted = ["special_override"];
+        let event = evaluate_policy_override(
+            RuntimeMode::Hardened,
+            CompatibilityClass::KnownIncompatible,
+            "special_override",
+            &allowlisted,
+            "FNP-P2C-001",
+            "admin",
+            "emergency",
+        );
+        assert!(!event.approved);
+        assert_eq!(event.action, DecisionAction::FailClosed);
+    }
+
+    #[test]
+    fn override_denied_for_unknown_class_even_if_allowlisted() {
+        let allowlisted = ["special_override"];
+        let event = evaluate_policy_override(
+            RuntimeMode::Hardened,
+            CompatibilityClass::Unknown,
+            "special_override",
+            &allowlisted,
+            "FNP-P2C-001",
+            "admin",
+            "emergency",
+        );
+        assert!(!event.approved);
+    }
+
+    #[test]
+    fn override_empty_deviation_class_is_denied() {
+        let allowlisted = [""];
+        let event = evaluate_policy_override(
+            RuntimeMode::Hardened,
+            CompatibilityClass::KnownCompatible,
+            "",
+            &allowlisted,
+            "FNP-P2C-001",
+            "admin",
+            "test",
+        );
+        assert!(!event.approved);
+    }
+
+    #[test]
+    fn override_whitespace_deviation_class_is_denied() {
+        let allowlisted = ["   "];
+        let event = evaluate_policy_override(
+            RuntimeMode::Hardened,
+            CompatibilityClass::KnownCompatible,
+            "   ",
+            &allowlisted,
+            "FNP-P2C-001",
+            "admin",
+            "test",
+        );
+        assert!(!event.approved);
+    }
+
+    #[test]
+    fn override_normalizes_empty_metadata_fields() {
+        let event = evaluate_policy_override(
+            RuntimeMode::Hardened,
+            CompatibilityClass::KnownCompatible,
+            "some_override",
+            &[],
+            "",
+            "",
+            "",
+        );
+        assert_eq!(event.packet_id, "unknown_packet");
+        assert_eq!(event.requested_by, "unknown_requester");
+        assert_eq!(event.reason_code, "unspecified");
+    }
+
+    #[test]
+    fn override_audit_ref_format_is_stable() {
+        let allowlisted = ["cap_override"];
+        let event = evaluate_policy_override(
+            RuntimeMode::Hardened,
+            CompatibilityClass::KnownCompatible,
+            "cap_override",
+            &allowlisted,
+            "FNP-P2C-003",
+            "ci-bot",
+            "transfer_cap",
+        );
+        assert!(event.approved);
+        assert_eq!(
+            event.audit_ref,
+            "override:FNP-P2C-003:cap_override:hardened:transfer_cap"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Evidence ledger multi-event
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn evidence_ledger_records_multiple_events_in_order() {
+        let mut ledger = EvidenceLedger::new();
+        assert!(ledger.events().is_empty());
+
+        decide_and_record(
+            &mut ledger,
+            RuntimeMode::Strict,
+            CompatibilityClass::KnownCompatible,
+            0.1,
+            0.5,
+            "first",
+        );
+        decide_and_record(
+            &mut ledger,
+            RuntimeMode::Hardened,
+            CompatibilityClass::Unknown,
+            0.9,
+            0.5,
+            "second",
+        );
+        decide_and_record(
+            &mut ledger,
+            RuntimeMode::Hardened,
+            CompatibilityClass::KnownCompatible,
+            0.3,
+            0.5,
+            "third",
+        );
+
+        assert_eq!(ledger.events().len(), 3);
+        assert_eq!(ledger.events()[0].note, "first");
+        assert_eq!(ledger.events()[0].action, DecisionAction::Allow);
+        assert_eq!(ledger.events()[1].note, "second");
+        assert_eq!(ledger.events()[1].action, DecisionAction::FailClosed);
+        assert_eq!(ledger.events()[2].note, "third");
+        assert_eq!(ledger.events()[2].action, DecisionAction::Allow);
+        assert_eq!(ledger.last().unwrap().note, "third");
+    }
+
+    // -----------------------------------------------------------------------
+    // Context normalization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn context_normalization_fills_empty_fields() {
+        let mut ledger = EvidenceLedger::new();
+        let context = DecisionAuditContext {
+            fixture_id: "  ".to_string(),
+            seed: 0,
+            env_fingerprint: String::new(),
+            artifact_refs: Vec::new(),
+            reason_code: "   ".to_string(),
+        };
+        decide_and_record_with_context(
+            &mut ledger,
+            RuntimeMode::Strict,
+            CompatibilityClass::KnownCompatible,
+            0.1,
+            0.5,
+            context,
+            "normalization test",
+        );
+        let event = ledger.last().unwrap();
+        assert_eq!(event.fixture_id, "unknown_fixture");
+        assert_eq!(event.env_fingerprint, "unknown_env");
+        assert_eq!(event.reason_code, "unspecified");
+    }
+
+    #[test]
+    fn context_preserves_non_empty_fields() {
+        let mut ledger = EvidenceLedger::new();
+        let context = DecisionAuditContext {
+            fixture_id: "test-42".to_string(),
+            seed: 42,
+            env_fingerprint: "linux-test".to_string(),
+            artifact_refs: vec!["ref1".to_string()],
+            reason_code: "test_reason".to_string(),
+        };
+        decide_and_record_with_context(
+            &mut ledger,
+            RuntimeMode::Strict,
+            CompatibilityClass::KnownCompatible,
+            0.1,
+            0.5,
+            context,
+            "preserve test",
+        );
+        let event = ledger.last().unwrap();
+        assert_eq!(event.fixture_id, "test-42");
+        assert_eq!(event.seed, 42);
+        assert_eq!(event.env_fingerprint, "linux-test");
+        assert_eq!(event.artifact_refs, vec!["ref1"]);
+        assert_eq!(event.reason_code, "test_reason");
+    }
+
+    // -----------------------------------------------------------------------
+    // Decision action string representations
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn decision_action_as_str_is_stable() {
+        assert_eq!(DecisionAction::Allow.as_str(), "allow");
+        assert_eq!(DecisionAction::FullValidate.as_str(), "full_validate");
+        assert_eq!(DecisionAction::FailClosed.as_str(), "fail_closed");
+    }
+
+    #[test]
+    fn runtime_mode_as_str_is_stable() {
+        assert_eq!(RuntimeMode::Strict.as_str(), "strict");
+        assert_eq!(RuntimeMode::Hardened.as_str(), "hardened");
+    }
+
+    #[test]
+    fn compatibility_class_as_str_is_stable() {
+        assert_eq!(CompatibilityClass::KnownCompatible.as_str(), "known_compatible");
+        assert_eq!(CompatibilityClass::KnownIncompatible.as_str(), "known_incompatible");
+        assert_eq!(CompatibilityClass::Unknown.as_str(), "unknown");
+    }
 }

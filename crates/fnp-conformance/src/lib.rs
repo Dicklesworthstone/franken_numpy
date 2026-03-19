@@ -138,6 +138,10 @@ struct AsStridedFixtureCase {
     #[serde(default)]
     expected_strides: Option<Vec<isize>>,
     #[serde(default)]
+    expected_writeable: Option<bool>,
+    #[serde(default)]
+    expected_has_internal_overlap: Option<bool>,
+    #[serde(default)]
     expected_error_contains: Option<String>,
 }
 
@@ -149,6 +153,10 @@ struct BroadcastToFixtureCase {
     #[serde(default)]
     expected_strides: Option<Vec<isize>>,
     #[serde(default)]
+    expected_writeable: Option<bool>,
+    #[serde(default)]
+    expected_has_internal_overlap: Option<bool>,
+    #[serde(default)]
     expected_error_contains: Option<String>,
 }
 
@@ -159,6 +167,10 @@ struct SlidingWindowFixtureCase {
     expected_shape: Option<Vec<usize>>,
     #[serde(default)]
     expected_strides: Option<Vec<isize>>,
+    #[serde(default)]
+    expected_writeable: Option<bool>,
+    #[serde(default)]
+    expected_has_internal_overlap: Option<bool>,
     #[serde(default)]
     expected_error_contains: Option<String>,
 }
@@ -1739,6 +1751,31 @@ fn evaluate_shape_stride_case(case: &ShapeStrideFixtureCase) -> (bool, Vec<Strin
                                 case.id, view.strides
                             ));
                         }
+
+                        if let Some(expected_writeable) = as_strided_case.expected_writeable
+                            && view.is_writeable() != expected_writeable
+                        {
+                            ok = false;
+                            failures.push(format!(
+                                "{}: as_strided writeable mismatch expected={} actual={}",
+                                case.id,
+                                expected_writeable,
+                                view.is_writeable()
+                            ));
+                        }
+
+                        if let Some(expected_overlap) =
+                            as_strided_case.expected_has_internal_overlap
+                            && view.has_internal_overlap() != expected_overlap
+                        {
+                            ok = false;
+                            failures.push(format!(
+                                "{}: as_strided overlap mismatch expected={} actual={}",
+                                case.id,
+                                expected_overlap,
+                                view.has_internal_overlap()
+                            ));
+                        }
                     }
                 }
                 Err(err) => {
@@ -1799,6 +1836,31 @@ fn evaluate_shape_stride_case(case: &ShapeStrideFixtureCase) -> (bool, Vec<Strin
                                 case.id, view.strides
                             ));
                         }
+
+                        if let Some(expected_writeable) = broadcast_to_case.expected_writeable
+                            && view.is_writeable() != expected_writeable
+                        {
+                            ok = false;
+                            failures.push(format!(
+                                "{}: broadcast_to writeable mismatch expected={} actual={}",
+                                case.id,
+                                expected_writeable,
+                                view.is_writeable()
+                            ));
+                        }
+
+                        if let Some(expected_overlap) =
+                            broadcast_to_case.expected_has_internal_overlap
+                            && view.has_internal_overlap() != expected_overlap
+                        {
+                            ok = false;
+                            failures.push(format!(
+                                "{}: broadcast_to overlap mismatch expected={} actual={}",
+                                case.id,
+                                expected_overlap,
+                                view.has_internal_overlap()
+                            ));
+                        }
                     }
                 }
                 Err(err) => {
@@ -1857,6 +1919,31 @@ fn evaluate_shape_stride_case(case: &ShapeStrideFixtureCase) -> (bool, Vec<Strin
                             failures.push(format!(
                                 "{}: sliding_window_view strides mismatch expected={expected_strides:?} actual={:?}",
                                 case.id, view.strides
+                            ));
+                        }
+
+                        if let Some(expected_writeable) = sliding_window_case.expected_writeable
+                            && view.is_writeable() != expected_writeable
+                        {
+                            ok = false;
+                            failures.push(format!(
+                                "{}: sliding_window_view writeable mismatch expected={} actual={}",
+                                case.id,
+                                expected_writeable,
+                                view.is_writeable()
+                            ));
+                        }
+
+                        if let Some(expected_overlap) =
+                            sliding_window_case.expected_has_internal_overlap
+                            && view.has_internal_overlap() != expected_overlap
+                        {
+                            ok = false;
+                            failures.push(format!(
+                                "{}: sliding_window_view overlap mismatch expected={} actual={}",
+                                case.id,
+                                expected_overlap,
+                                view.has_internal_overlap()
                             ));
                         }
                     }
@@ -10230,14 +10317,15 @@ fn validate_runtime_policy_log_fields(
 #[cfg(test)]
 mod tests {
     use super::{
-        HarnessConfig, RngStatisticalCase, default_rng_mean_abs_tol,
-        default_rng_variance_abs_tol, generate_rng_samples, run_all_core_suites,
-        run_crash_signature_regression_suite, run_datetime_differential_suite,
-        run_dtype_adversarial_suite, run_dtype_differential_suite,
-        run_dtype_metamorphic_suite, run_dtype_promotion_suite, run_fft_differential_suite,
-        run_io_adversarial_suite, run_io_differential_suite, run_io_metamorphic_suite,
-        run_iter_adversarial_suite, run_iter_differential_suite, run_iter_metamorphic_suite,
-        run_linalg_adversarial_suite, run_linalg_differential_suite, run_linalg_metamorphic_suite,
+        AsStridedFixtureCase, HarnessConfig, RngStatisticalCase, ShapeStrideFixtureCase,
+        default_rng_mean_abs_tol, default_rng_variance_abs_tol, evaluate_shape_stride_case,
+        generate_rng_samples, run_all_core_suites, run_crash_signature_regression_suite,
+        run_datetime_differential_suite, run_dtype_adversarial_suite,
+        run_dtype_differential_suite, run_dtype_metamorphic_suite,
+        run_dtype_promotion_suite, run_fft_differential_suite, run_io_adversarial_suite,
+        run_io_differential_suite, run_io_metamorphic_suite, run_iter_adversarial_suite,
+        run_iter_differential_suite, run_iter_metamorphic_suite, run_linalg_adversarial_suite,
+        run_linalg_differential_suite, run_linalg_metamorphic_suite,
         run_masked_differential_suite, run_polynomial_differential_suite,
         run_rng_adversarial_suite, run_rng_differential_suite, run_rng_metamorphic_suite,
         run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
@@ -10639,6 +10727,50 @@ mod tests {
         );
         set_shape_stride_log_path(None);
         let _ = fs::remove_file(log_path);
+    }
+
+    #[test]
+    fn shape_stride_case_detects_overlap_writeability_mismatches() {
+        let case = ShapeStrideFixtureCase {
+            id: "stride_contract_mismatch".to_string(),
+            lhs: vec![1],
+            rhs: vec![1],
+            expected_broadcast: Some(vec![1]),
+            stride_shape: vec![8],
+            stride_item_size: 8,
+            stride_order: "C".to_string(),
+            expected_strides: vec![8],
+            seed: 0,
+            env_fingerprint: String::new(),
+            artifact_refs: Vec::new(),
+            reason_code: "stride_tricks_contract".to_string(),
+            as_strided: Some(AsStridedFixtureCase {
+                shape: vec![2, 2],
+                strides: vec![8, 8],
+                expected_shape: Some(vec![2, 2]),
+                expected_strides: Some(vec![8, 8]),
+                expected_writeable: Some(true),
+                expected_has_internal_overlap: Some(false),
+                expected_error_contains: None,
+            }),
+            broadcast_to: None,
+            sliding_window: None,
+        };
+
+        let (ok, failures) = evaluate_shape_stride_case(&case);
+        assert!(!ok, "mismatched overlap/writeability should fail");
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("as_strided writeable mismatch")),
+            "failures={failures:?}"
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("as_strided overlap mismatch")),
+            "failures={failures:?}"
+        );
     }
 
     #[test]

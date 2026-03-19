@@ -63,17 +63,23 @@
       "shape": [2, 2],
       "strides": [16, 8],
       "expected_shape": [2, 2],
-      "expected_strides": [16, 8]
+      "expected_strides": [16, 8],
+      "expected_writeable": true,
+      "expected_has_internal_overlap": false
     },
     "broadcast_to": {
       "shape": [4, 4],
       "expected_shape": [4, 4],
-      "expected_strides": [32, 8]
+      "expected_strides": [32, 8],
+      "expected_writeable": false,
+      "expected_has_internal_overlap": false
     },
     "sliding_window": {
       "window_shape": [2, 3],
       "expected_shape": [3, 2, 2, 3],
-      "expected_strides": [32, 8, 32, 8]
+      "expected_strides": [32, 8, 32, 8],
+      "expected_writeable": false,
+      "expected_has_internal_overlap": true
     },
     "seed": 104,
     "env_fingerprint": "fnp-conformance-default-paths",
@@ -95,7 +101,9 @@
     "broadcast_to": {
       "shape": [2, 4, 3],
       "expected_shape": [2, 4, 3],
-      "expected_strides": [24, 0, 8]
+      "expected_strides": [24, 0, 8],
+      "expected_writeable": false,
+      "expected_has_internal_overlap": true
     },
     "seed": 105,
     "env_fingerprint": "fnp-conformance-default-paths",
@@ -148,7 +156,9 @@
       "shape": [4],
       "strides": [-8],
       "expected_shape": [4],
-      "expected_strides": [-8]
+      "expected_strides": [-8],
+      "expected_writeable": true,
+      "expected_has_internal_overlap": false
     },
     "seed": 107,
     "env_fingerprint": "fnp-conformance-default-paths",
@@ -197,7 +207,9 @@
       "shape": [0],
       "strides": [8],
       "expected_shape": [0],
-      "expected_strides": [8]
+      "expected_strides": [8],
+      "expected_writeable": true,
+      "expected_has_internal_overlap": false
     },
     "seed": 109,
     "env_fingerprint": "fnp-conformance-default-paths",
@@ -219,7 +231,9 @@
     "broadcast_to": {
       "shape": [4, 3, 7, 5],
       "expected_shape": [4, 3, 7, 5],
-      "expected_strides": [0, 40, 0, 8]
+      "expected_strides": [0, 40, 0, 8],
+      "expected_writeable": false,
+      "expected_has_internal_overlap": true
     },
     "seed": 110,
     "env_fingerprint": "fnp-conformance-default-paths",
@@ -241,7 +255,9 @@
     "broadcast_to": {
       "shape": [2, 3, 4, 5],
       "expected_shape": [2, 3, 4, 5],
-      "expected_strides": [0, 0, 0, 0]
+      "expected_strides": [0, 0, 0, 0],
+      "expected_writeable": false,
+      "expected_has_internal_overlap": true
     },
     "seed": 111,
     "env_fingerprint": "fnp-conformance-default-paths",
@@ -250,6 +266,55 @@
       "artifacts/phase2c/FNP-P2C-001/parity_gate.yaml"
     ],
     "reason_code": "broadcast_scalar_rank_extension"
+  },
+  {
+    "id": "stride_tricks_overlap_readonly",
+    "lhs": [1],
+    "rhs": [1],
+    "expected_broadcast": [1],
+    "stride_shape": [8],
+    "stride_item_size": 8,
+    "stride_order": "C",
+    "expected_strides": [8],
+    "as_strided": {
+      "shape": [2, 2],
+      "strides": [8, 8],
+      "expected_shape": [2, 2],
+      "expected_strides": [8, 8],
+      "expected_writeable": false,
+      "expected_has_internal_overlap": true
+    },
+    "seed": 112,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-006/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-006/parity_gate.yaml"
+    ],
+    "reason_code": "stride_tricks_overlap_readonly"
+  },
+  {
+    "id": "stride_tricks_unit_window_readonly",
+    "lhs": [1],
+    "rhs": [1],
+    "expected_broadcast": [1],
+    "stride_shape": [4],
+    "stride_item_size": 8,
+    "stride_order": "C",
+    "expected_strides": [8],
+    "sliding_window": {
+      "window_shape": [1],
+      "expected_shape": [4, 1],
+      "expected_strides": [8, 8],
+      "expected_writeable": false,
+      "expected_has_internal_overlap": false
+    },
+    "seed": 113,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-006/fixture_manifest.json",
+      "artifacts/phase2c/FNP-P2C-006/parity_gate.yaml"
+    ],
+    "reason_code": "stride_tricks_unit_window_readonly"
   },
   {
     "id": "broadcast_multi_axis_unit_expansion",
