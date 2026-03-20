@@ -244,10 +244,13 @@ pub const fn promote(lhs: DType, rhs: DType) -> DType {
         (TimeDelta64, TimeDelta64) => TimeDelta64,
         (DateTime64, TimeDelta64) | (TimeDelta64, DateTime64) => DateTime64,
 
-        // Str: stays Str
-        (Str, Str) => Str,
+        // Str: always wins against numeric and temporal types
+        (Str, _) | (_, Str) => match (lhs, rhs) {
+            (Structured, _) | (_, Structured) => F64, // Structured is incompatible
+            _ => Str,
+        },
 
-        // Any remaining combinations with non-numeric types: F64 as fallback
+        // Any remaining combinations: F64 as fallback
         _ => F64,
     }
 }
@@ -426,11 +429,18 @@ const fn safe_integer_cast(src: DType, dst: DType) -> bool {
                 false
             }
         }
-        DType::F16 => src_bits <= 8,
-        DType::F32 => src_bits <= 16,
-        DType::F64 => !matches!(src, DType::U64) || matches!(dst, DType::F64),
-        DType::Complex64 => src_bits <= 16,
-        DType::Complex128 => true,
+        DType::F16 | DType::F32 | DType::F64 | DType::Complex64 | DType::Complex128 => {
+            let Some(dst_bits) = (match dst {
+                DType::F16 => Some(8),
+                DType::F32 | DType::Complex64 => Some(16),
+                // NumPy treats float64/complex128 as safely holding any 64-bit integer dtype.
+                DType::F64 | DType::Complex128 => Some(64),
+                _ => None,
+            }) else {
+                return false;
+            };
+            src_bits <= dst_bits
+        }
         DType::Str => true,
         DType::TimeDelta64 => !matches!(src, DType::U64),
         _ => false,
@@ -454,8 +464,8 @@ const fn safe_float_cast(src: DType, dst: DType) -> bool {
 
 const fn safe_complex_cast(src: DType, dst: DType) -> bool {
     match src {
-        DType::Complex64 => matches!(dst, DType::Complex128),
-        DType::Complex128 => false,
+        DType::Complex64 => matches!(dst, DType::Complex128 | DType::Str),
+        DType::Complex128 => matches!(dst, DType::Str),
         _ => false,
     }
 }
@@ -1794,16 +1804,19 @@ mod tests {
         assert!(can_cast(DType::I8, DType::F16, "safe"));
         assert!(can_cast(DType::I16, DType::F32, "safe"));
         assert!(can_cast(DType::I32, DType::F64, "safe"));
+        assert!(can_cast(DType::I64, DType::F64, "safe"));
         assert!(can_cast(DType::U32, DType::I64, "safe"));
         assert!(can_cast(DType::U64, DType::F64, "safe"));
         assert!(can_cast(DType::F64, DType::Complex128, "safe"));
+        assert!(can_cast(DType::I64, DType::Complex128, "safe"));
+        assert!(can_cast(DType::U64, DType::Complex128, "safe"));
         assert!(can_cast(DType::F32, DType::Str, "safe"));
 
         assert!(!can_cast(DType::I32, DType::F32, "safe"));
         assert!(!can_cast(DType::U64, DType::I64, "safe"));
         assert!(!can_cast(DType::U64, DType::TimeDelta64, "safe"));
         assert!(!can_cast(DType::F64, DType::Complex64, "safe"));
-        assert!(!can_cast(DType::Complex64, DType::Str, "safe"));
+        assert!(can_cast(DType::Complex64, DType::Str, "safe"));
         assert!(!can_cast(DType::DateTime64, DType::TimeDelta64, "safe"));
     }
 
@@ -1812,6 +1825,7 @@ mod tests {
         assert!(can_cast(DType::Bool, DType::Complex128, "same_kind"));
         assert!(can_cast(DType::I64, DType::I8, "same_kind"));
         assert!(can_cast(DType::U64, DType::I8, "same_kind"));
+        assert!(!can_cast(DType::I32, DType::U8, "same_kind"));
         assert!(can_cast(DType::I32, DType::Complex64, "same_kind"));
         assert!(can_cast(DType::F64, DType::F16, "same_kind"));
         assert!(can_cast(DType::F64, DType::Str, "same_kind"));
@@ -1819,7 +1833,6 @@ mod tests {
         assert!(can_cast(DType::U64, DType::TimeDelta64, "same_kind"));
 
         assert!(!can_cast(DType::Bool, DType::DateTime64, "same_kind"));
-        assert!(!can_cast(DType::I32, DType::U8, "same_kind"));
         assert!(!can_cast(DType::F16, DType::U8, "same_kind"));
         assert!(!can_cast(DType::Complex64, DType::F64, "same_kind"));
         assert!(!can_cast(DType::TimeDelta64, DType::Str, "same_kind"));
