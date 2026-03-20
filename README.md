@@ -4,10 +4,10 @@
   <img src="franken_numpy_illustration.webp" alt="FrankenNumPy - memory-safe clean-room NumPy reimplementation in Rust" width="400">
 
   **Memory-safe, clean-room NumPy reimplementation in Rust.**<br>
-  Zero unsafe code. 2,196 tests. Bit-exact RNG parity. Every feature family green.
+  Zero unsafe code. 2,224 tests. Bit-exact RNG parity. Every feature family green.
 
   ![Rust](https://img.shields.io/badge/Rust-nightly%202024-orange)
-  ![Tests](https://img.shields.io/badge/tests-2%2C196%20passing-brightgreen)
+  ![Tests](https://img.shields.io/badge/tests-2%2C224%20passing-brightgreen)
   ![Unsafe](https://img.shields.io/badge/unsafe-0%20blocks-blue)
   ![License](https://img.shields.io/badge/license-MIT-green)
 </div>
@@ -35,7 +35,7 @@ FrankenNumPy rebuilds NumPy's semantics from scratch in safe Rust with two non-n
 | Stride calculus | Evolved over decades | Clean-room deterministic engine (SCE) |
 | Runtime modes | Single mode | Strict (max compat) + Hardened (safety guards) |
 | Conformance | Self-referential | Differential oracle against real NumPy |
-| Test coverage | pytest suite | 2,196 Rust tests + 8-gate CI topology |
+| Test coverage | pytest suite | 2,224 Rust tests + 8-gate CI topology |
 
 ---
 
@@ -105,7 +105,7 @@ Over 1,000 public functions across 9 crates covering the full NumPy API:
 | **Sorting** | `sort`, `argsort`, `searchsorted`, `partition`, `argpartition`, `unique`, `unique_all/counts/inverse/values` |
 | **Set operations** | `union1d`, `intersect1d`, `setdiff1d`, `setxor1d`, `in1d`, `isin` |
 | **Linear algebra** | `solve`, `det`, `inv`, `eig`, `svd`, `qr`, `cholesky`, `lstsq`, `norm`, `matrix_rank`, `matrix_power`, `multi_dot`, `pinv`, `cond`, `slogdet`, `funm` |
-| **Random** | 39 distributions via PCG64DXSM: `normal`, `uniform`, `binomial`, `poisson`, `gamma`, `beta`, `hypergeometric`, `multinomial`, `dirichlet`, `vonmises`, `zipf`, etc. |
+| **Random** | 39 statistical distributions plus permutation/state helpers via PCG64DXSM: `normal`, `uniform`, `binomial`, `poisson`, `gamma`, `beta`, `hypergeometric`, `multinomial`, `dirichlet`, `vonmises`, `zipf`, etc. |
 | **FFT** | `fft`, `ifft`, `fft2`, `ifft2`, `fftn`, `ifftn`, `rfft`, `irfft`, `fftfreq`, `rfftfreq`, `fftshift` |
 | **Statistics** | `histogram`, `percentile`, `quantile`, `median`, `average`, `corrcoef`, `cov`, `bincount`, `digitize` |
 | **Polynomials** | Chebyshev, Legendre, Hermite, Laguerre families + power series (33 functions) |
@@ -149,7 +149,7 @@ cargo test --workspace --all-features
       ▼           ▼               ▼              ▼           ▼
  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
  │ fnp-ufunc│ │fnp-linalg│ │fnp-random│ │  fnp-io  │ │ fnp-fft  │
- │ 1237     │ │ 199      │ │ 182      │ │ 143      │ │ (in-ufunc│
+ │ 1249     │ │ 199      │ │ 182      │ │ 143      │ │ (in-ufunc│
  │ tests    │ │ tests    │ │ tests    │ │ tests    │ │  module) │
  └─────┬────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘
        │
@@ -609,7 +609,7 @@ These match `numpy.lib.scimath` and are useful in signal processing and physics 
 
 ## Complete Distribution List
 
-All 49 random distributions available on `Generator`, grouped by family:
+All 49 random-generation methods available on `Generator`, grouped by family:
 
 **Continuous (28):** `beta`, `chisquare`, `exponential`, `f`/`f_distribution`, `gamma`, `gumbel`, `halfnormal`, `laplace`, `levy`, `logistic`, `lognormal`, `lomax`, `maxwell`, `noncentral_chisquare`, `noncentral_f`, `normal`, `pareto`, `power`, `rayleigh`, `standard_cauchy`, `standard_exponential`, `standard_gamma`, `standard_normal`, `standard_t`, `triangular`, `vonmises`, `wald`, `weibull`
 
@@ -766,7 +766,7 @@ let restored = Generator::from_pickle_payload(payload)?;
 
 | Crate | Tests | What it covers |
 |---|---|---|
-| `fnp-ufunc` | 1,249 | Array ops, math, sorting, polynomials, NaN-correct reductions, 20 oracle tests, 4 workflow tests |
+| `fnp-ufunc` | 1,274 | Array ops, math, sorting, polynomials, NaN-correct reductions, 20 oracle tests, 4 workflow tests, 25 linalg bridge tests |
 | `fnp-linalg` | 199 | Decompositions, solvers, norms, 16 NumPy oracle tests |
 | `fnp-random` | 182 | 40 oracle-verified distributions, seeding, reproducibility |
 | `fnp-io` | 143 | NPY/NPZ read/write, text formats, compression, 7 format oracle tests |
@@ -775,7 +775,7 @@ let restored = Generator::from_pickle_payload(payload)?;
 | `fnp-ndarray` | 54 | Shape legality, stride calculus, broadcast contracts, multi-axis negative strides |
 | `fnp-iter` | 79 | Transfer semantics, overlap detection, stride tricks, FPE handling |
 | `fnp-runtime` | 52 | Mode split, fail-closed decoding, override-audit gate, Bayesian decision engine, evidence ledger |
-| **Total** | **2,196** | **All passing in workspace** |
+| **Total** | **2,224** | **All passing in workspace** |
 
 ### Oracle Test Strategy
 
@@ -823,7 +823,7 @@ Every feature family is `parity_green`:
 | Masked arrays | parity_green |
 | Datetime/timedelta | parity_green |
 | Linear algebra | parity_green |
-| Random (39 distributions) | parity_green |
+| Random (39 statistical distributions) | parity_green |
 | I/O (npy/npz) | parity_green |
 | Financial | parity_green |
 | Scimath | parity_green |
@@ -890,7 +890,7 @@ franken_numpy/
 │   ├── fnp-iter/                      # Transfer semantics, overlap-safe iteration
 │   ├── fnp-ufunc/                     # 1,000+ array operations, reductions, einsum
 │   ├── fnp-linalg/                    # solve, eig, svd, qr, cholesky, lstsq, etc.
-│   ├── fnp-random/                    # 39 distributions, PCG64DXSM, bit-exact parity
+│   ├── fnp-random/                    # 39 statistical distributions + generator helpers, PCG64DXSM, bit-exact parity
 │   ├── fnp-io/                        # NPY/NPZ read/write, text I/O, DEFLATE
 │   ├── fnp-conformance/               # Oracle capture, differential harness, benchmarks
 │   └── fnp-runtime/                   # Strict/hardened mode, evidence ledger
