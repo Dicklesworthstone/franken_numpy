@@ -3,6 +3,7 @@
 use core::fmt;
 use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::sync::Arc;
 
 use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
 
@@ -293,7 +294,7 @@ pub struct NpyHeader {
 pub struct NpyArrayBytes {
     pub version: (u8, u8),
     pub header: NpyHeader,
-    pub payload: Vec<u8>,
+    pub payload: Arc<[u8]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -873,7 +874,7 @@ pub fn read_npy_bytes(payload: &[u8], allow_pickle: bool) -> Result<NpyArrayByte
     Ok(NpyArrayBytes {
         version,
         header,
-        payload: body.to_vec(),
+        payload: Arc::from(body),
     })
 }
 
@@ -1296,6 +1297,8 @@ pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
     let mut entries = Vec::with_capacity(entry_count);
     let mut pos = cd_offset;
     let mut total_uncompressed_bytes = 0usize;
+    // Track covered ranges to prevent overlapping entries
+    let mut covered_ranges: Vec<(usize, usize)> = Vec::with_capacity(entry_count);
 
     for _ in 0..entry_count {
         if pos.checked_add(46).is_none_or(|end| end > data.len()) {
@@ -1362,6 +1365,12 @@ pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
             ));
         }
         let file_name = String::from_utf8_lossy(&data[fname_start..fname_end]).into_owned();
+        // Prevent directory traversal
+        if file_name.contains("..") || file_name.starts_with('/') {
+            return Err(IOError::NpzArchiveContractViolation(
+                "npz: malicious filename detected (directory traversal)",
+            ));
+        }
 
         // Parse local file header to find data start
         if local_offset
@@ -1410,6 +1419,20 @@ pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
             ));
         }
 
+        // Check for overlapping entries
+        let current_range = (local_offset, data_end);
+        for &(start, end) in &covered_ranges {
+            if (current_range.0 >= start && current_range.0 < end)
+                || (current_range.1 > start && current_range.1 <= end)
+                || (start >= current_range.0 && start < current_range.1)
+            {
+                return Err(IOError::NpzArchiveContractViolation(
+                    "npz: overlapping zip entries detected",
+                ));
+            }
+        }
+        covered_ranges.push(current_range);
+
         let stored_entry_bytes = &data[data_start..data_end];
         let npy_bytes = match compression {
             0 => {
@@ -1421,8 +1444,9 @@ pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
                 stored_entry_bytes.to_vec()
             }
             8 => {
-                let mut decoder = DeflateDecoder::new(stored_entry_bytes);
-                let mut decoded = Vec::new();
+                // Limit the amount of data we read to uncompressed_size to prevent zip bombs
+                let mut decoder = DeflateDecoder::new(stored_entry_bytes).take(uncompressed_size as u64);
+                let mut decoded = Vec::with_capacity(uncompressed_size);
                 decoder.read_to_end(&mut decoded).map_err(|_| {
                     IOError::NpzArchiveContractViolation(
                         "npz: failed to inflate DEFLATE entry payload",

@@ -16313,47 +16313,307 @@ impl MaskedArray {
 
     /// Sort unmasked elements, pushing masked to end (np.ma.sort).
     pub fn sort(&self, axis: Option<isize>) -> Result<Self, MAError> {
-        let filled = self.filled(f64::MAX);
-        let sorted = filled.sort(axis, None)?;
-        // Reconstruct mask: masked elements are those equal to f64::MAX after sort
-        let mask_vals: Vec<f64> = sorted
-            .values()
-            .iter()
-            .map(|&v| if v == f64::MAX { 1.0 } else { 0.0 })
-            .collect();
-        let mask = if mask_vals.contains(&1.0) {
-            Some(UFuncArray::new(
-                sorted.shape().to_vec(),
-                mask_vals,
-                DType::Bool,
-            )?)
-        } else {
-            None
+        let Some(mask) = &self.mask else {
+            return Ok(Self {
+                data: self.data.sort(axis, None)?,
+                mask: None,
+                fill_value: self.fill_value,
+                hard_mask: self.hard_mask,
+            });
         };
-        Ok(Self {
-            data: sorted,
-            mask,
-            fill_value: self.fill_value,
-            hard_mask: self.hard_mask,
-        })
+
+        match axis {
+            None => {
+                let mut indices: Vec<usize> = (0..self.data.values().len()).collect();
+                indices.sort_by(|&lhs, &rhs| {
+                    masked_sort_order(
+                        mask.values()[lhs] != 0.0,
+                        self.data.values()[lhs],
+                        lhs,
+                        mask.values()[rhs] != 0.0,
+                        self.data.values()[rhs],
+                        rhs,
+                    )
+                });
+                let values: Vec<f64> = indices.iter().map(|&idx| self.data.values()[idx]).collect();
+                let mask_vals: Vec<f64> = indices.iter().map(|&idx| mask.values()[idx]).collect();
+                Ok(Self {
+                    data: UFuncArray {
+                        shape: vec![values.len()],
+                        values,
+                        dtype: self.data.dtype(),
+                        integer_sidecar: self.data.reindexed_integer_sidecar(&indices),
+                    },
+                    mask: Some(UFuncArray {
+                        shape: vec![mask_vals.len()],
+                        values: mask_vals,
+                        dtype: DType::Bool,
+                        integer_sidecar: None,
+                    }),
+                    fill_value: self.fill_value,
+                    hard_mask: self.hard_mask,
+                })
+            }
+            Some(axis) => {
+                let axis = normalize_axis(axis, self.data.shape().len())?;
+                let axis_len = self.data.shape()[axis];
+                if axis_len <= 1 {
+                    return Ok(self.clone());
+                }
+
+                let inner: usize = self.data.shape()[axis + 1..].iter().copied().product();
+                let outer: usize = self.data.shape()[..axis].iter().copied().product();
+                let mut out_values = self.data.values().to_vec();
+                let mut out_mask_vals = mask.values().to_vec();
+                let mut source_indices = vec![0usize; self.data.values().len()];
+                let mut idx_lane: Vec<usize> = (0..axis_len).collect();
+
+                for outer_idx in 0..outer {
+                    let base = outer_idx * axis_len * inner;
+                    for inner_idx in 0..inner {
+                        for (slot, value) in idx_lane.iter_mut().zip(0..axis_len) {
+                            *slot = value;
+                        }
+                        idx_lane.sort_by(|&lhs, &rhs| {
+                            let lhs_idx = base + lhs * inner + inner_idx;
+                            let rhs_idx = base + rhs * inner + inner_idx;
+                            masked_sort_order(
+                                mask.values()[lhs_idx] != 0.0,
+                                self.data.values()[lhs_idx],
+                                lhs,
+                                mask.values()[rhs_idx] != 0.0,
+                                self.data.values()[rhs_idx],
+                                rhs,
+                            )
+                        });
+                        for (out_pos, &lane_idx) in idx_lane.iter().enumerate() {
+                            let src_idx = base + lane_idx * inner + inner_idx;
+                            let dst_idx = base + out_pos * inner + inner_idx;
+                            out_values[dst_idx] = self.data.values()[src_idx];
+                            out_mask_vals[dst_idx] = mask.values()[src_idx];
+                            source_indices[dst_idx] = src_idx;
+                        }
+                    }
+                }
+
+                Ok(Self {
+                    data: UFuncArray {
+                        shape: self.data.shape().to_vec(),
+                        values: out_values,
+                        dtype: self.data.dtype(),
+                        integer_sidecar: self.data.reindexed_integer_sidecar(&source_indices),
+                    },
+                    mask: Some(UFuncArray {
+                        shape: self.data.shape().to_vec(),
+                        values: out_mask_vals,
+                        dtype: DType::Bool,
+                        integer_sidecar: None,
+                    }),
+                    fill_value: self.fill_value,
+                    hard_mask: self.hard_mask,
+                })
+            }
+        }
     }
 
     /// Argsort unmasked elements, masked indices appear at the end (np.ma.argsort).
     pub fn argsort(&self, axis: Option<isize>) -> Result<UFuncArray, MAError> {
-        let filled = self.filled(f64::MAX);
-        Ok(filled.argsort(axis, None)?)
+        let Some(mask) = &self.mask else {
+            return Ok(self.data.argsort(axis, None)?);
+        };
+
+        match axis {
+            None => {
+                let mut indices: Vec<usize> = (0..self.data.values().len()).collect();
+                indices.sort_by(|&lhs, &rhs| {
+                    masked_sort_order(
+                        mask.values()[lhs] != 0.0,
+                        self.data.values()[lhs],
+                        lhs,
+                        mask.values()[rhs] != 0.0,
+                        self.data.values()[rhs],
+                        rhs,
+                    )
+                });
+                Ok(UFuncArray {
+                    shape: vec![indices.len()],
+                    values: indices.iter().map(|&idx| idx as f64).collect(),
+                    dtype: DType::I64,
+                    integer_sidecar: None,
+                })
+            }
+            Some(axis) => {
+                let axis = normalize_axis(axis, self.data.shape().len())?;
+                let axis_len = self.data.shape()[axis];
+                let inner: usize = self.data.shape()[axis + 1..].iter().copied().product();
+                let outer: usize = self.data.shape()[..axis].iter().copied().product();
+                let mut out_values = vec![0.0; self.data.values().len()];
+                let mut idx_lane: Vec<usize> = (0..axis_len).collect();
+
+                for outer_idx in 0..outer {
+                    let base = outer_idx * axis_len * inner;
+                    for inner_idx in 0..inner {
+                        for (slot, value) in idx_lane.iter_mut().zip(0..axis_len) {
+                            *slot = value;
+                        }
+                        idx_lane.sort_by(|&lhs, &rhs| {
+                            let lhs_idx = base + lhs * inner + inner_idx;
+                            let rhs_idx = base + rhs * inner + inner_idx;
+                            masked_sort_order(
+                                mask.values()[lhs_idx] != 0.0,
+                                self.data.values()[lhs_idx],
+                                lhs,
+                                mask.values()[rhs_idx] != 0.0,
+                                self.data.values()[rhs_idx],
+                                rhs,
+                            )
+                        });
+                        for (out_pos, &lane_idx) in idx_lane.iter().enumerate() {
+                            out_values[base + out_pos * inner + inner_idx] = lane_idx as f64;
+                        }
+                    }
+                }
+
+                Ok(UFuncArray {
+                    shape: self.data.shape().to_vec(),
+                    values: out_values,
+                    dtype: DType::I64,
+                    integer_sidecar: None,
+                })
+            }
+        }
     }
 
     /// Index of minimum value among unmasked elements (np.ma.argmin).
     pub fn argmin(&self, axis: Option<isize>) -> Result<UFuncArray, MAError> {
-        let filled = self.filled(f64::MAX);
-        Ok(filled.reduce_argmin(axis)?)
+        let Some(mask) = &self.mask else {
+            return Ok(self.data.reduce_argmin(axis)?);
+        };
+
+        match axis {
+            None => {
+                let mut best_idx = None;
+                let mut best_val = f64::INFINITY;
+                for (idx, (&value, &masked)) in self
+                    .data
+                    .values()
+                    .iter()
+                    .zip(mask.values().iter())
+                    .enumerate()
+                {
+                    if masked != 0.0 {
+                        continue;
+                    }
+                    if best_idx.is_none() || value < best_val {
+                        best_idx = Some(idx);
+                        best_val = value;
+                    }
+                }
+                Ok(UFuncArray::scalar(best_idx.unwrap_or(0) as f64, DType::I64))
+            }
+            Some(axis) => {
+                let axis = normalize_axis(axis, self.data.shape().len())?;
+                let axis_len = self.data.shape()[axis];
+                let inner: usize = self.data.shape()[axis + 1..].iter().copied().product();
+                let outer: usize = self.data.shape()[..axis].iter().copied().product();
+                let out_shape = reduced_shape(self.data.shape(), axis, false);
+                let mut out_values = vec![0.0; outer * inner];
+
+                for outer_idx in 0..outer {
+                    let base = outer_idx * axis_len * inner;
+                    for inner_idx in 0..inner {
+                        let mut best_lane_idx = None;
+                        let mut best_val = f64::INFINITY;
+                        for lane_idx in 0..axis_len {
+                            let src_idx = base + lane_idx * inner + inner_idx;
+                            if mask.values()[src_idx] != 0.0 {
+                                continue;
+                            }
+                            let value = self.data.values()[src_idx];
+                            if best_lane_idx.is_none() || value < best_val {
+                                best_lane_idx = Some(lane_idx);
+                                best_val = value;
+                            }
+                        }
+                        out_values[outer_idx * inner + inner_idx] =
+                            best_lane_idx.unwrap_or(0) as f64;
+                    }
+                }
+
+                Ok(UFuncArray {
+                    shape: out_shape,
+                    values: out_values,
+                    dtype: DType::I64,
+                    integer_sidecar: None,
+                })
+            }
+        }
     }
 
     /// Index of maximum value among unmasked elements (np.ma.argmax).
     pub fn argmax(&self, axis: Option<isize>) -> Result<UFuncArray, MAError> {
-        let filled = self.filled(f64::MIN);
-        Ok(filled.reduce_argmax(axis)?)
+        let Some(mask) = &self.mask else {
+            return Ok(self.data.reduce_argmax(axis)?);
+        };
+
+        match axis {
+            None => {
+                let mut best_idx = None;
+                let mut best_val = f64::NEG_INFINITY;
+                for (idx, (&value, &masked)) in self
+                    .data
+                    .values()
+                    .iter()
+                    .zip(mask.values().iter())
+                    .enumerate()
+                {
+                    if masked != 0.0 {
+                        continue;
+                    }
+                    if best_idx.is_none() || value > best_val {
+                        best_idx = Some(idx);
+                        best_val = value;
+                    }
+                }
+                Ok(UFuncArray::scalar(best_idx.unwrap_or(0) as f64, DType::I64))
+            }
+            Some(axis) => {
+                let axis = normalize_axis(axis, self.data.shape().len())?;
+                let axis_len = self.data.shape()[axis];
+                let inner: usize = self.data.shape()[axis + 1..].iter().copied().product();
+                let outer: usize = self.data.shape()[..axis].iter().copied().product();
+                let out_shape = reduced_shape(self.data.shape(), axis, false);
+                let mut out_values = vec![0.0; outer * inner];
+
+                for outer_idx in 0..outer {
+                    let base = outer_idx * axis_len * inner;
+                    for inner_idx in 0..inner {
+                        let mut best_lane_idx = None;
+                        let mut best_val = f64::NEG_INFINITY;
+                        for lane_idx in 0..axis_len {
+                            let src_idx = base + lane_idx * inner + inner_idx;
+                            if mask.values()[src_idx] != 0.0 {
+                                continue;
+                            }
+                            let value = self.data.values()[src_idx];
+                            if best_lane_idx.is_none() || value > best_val {
+                                best_lane_idx = Some(lane_idx);
+                                best_val = value;
+                            }
+                        }
+                        out_values[outer_idx * inner + inner_idx] =
+                            best_lane_idx.unwrap_or(0) as f64;
+                    }
+                }
+
+                Ok(UFuncArray {
+                    shape: out_shape,
+                    values: out_values,
+                    dtype: DType::I64,
+                    integer_sidecar: None,
+                })
+            }
+        }
     }
 
     /// Cumulative sum over unmasked elements (np.ma.cumsum).
@@ -19032,6 +19292,24 @@ fn rsplit_whitespace_python(s: &str, maxsplit: usize) -> Vec<String> {
     parts.push(s[..end].to_string());
     parts.reverse();
     parts
+}
+
+fn masked_sort_order(
+    lhs_masked: bool,
+    lhs_value: f64,
+    lhs_index: usize,
+    rhs_masked: bool,
+    rhs_value: f64,
+    rhs_index: usize,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering::{Greater, Less};
+
+    match (lhs_masked, rhs_masked) {
+        (false, true) => Less,
+        (true, false) => Greater,
+        (false, false) => lhs_value.total_cmp(&rhs_value),
+        (true, true) => lhs_index.cmp(&rhs_index),
+    }
 }
 
 impl StringArray {
@@ -29409,11 +29687,30 @@ mod tests {
     }
 
     #[test]
+    fn masked_sort_preserves_valid_f64_max_values() {
+        let data = UFuncArray::new(vec![2], vec![f64::MAX, 1.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        let sorted = ma.sort(None).unwrap();
+        assert_eq!(sorted.data().values()[0], f64::MAX);
+        assert_eq!(sorted.mask().unwrap().values(), &[0.0, 1.0]);
+    }
+
+    #[test]
     fn masked_argsort() {
         let data = UFuncArray::new(vec![3], vec![3.0, 1.0, 2.0], DType::F64).unwrap();
         let ma = MaskedArray::new(data, None, None).unwrap();
         let indices = ma.argsort(None).unwrap();
         assert_eq!(indices.values(), &[1.0, 2.0, 0.0]);
+    }
+
+    #[test]
+    fn masked_argsort_preserves_valid_f64_max_values() {
+        let data = UFuncArray::new(vec![2], vec![f64::MAX, 1.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        let indices = ma.argsort(None).unwrap();
+        assert_eq!(indices.values(), &[0.0, 1.0]);
     }
 
     #[test]
@@ -29425,6 +29722,15 @@ mod tests {
         assert_eq!(amin.values()[0], 1.0); // index 1 (value=1.0)
         let amax = ma.argmax(None).unwrap();
         assert_eq!(amax.values()[0], 0.0); // index 0 (value=5.0, 9.0 is masked)
+    }
+
+    #[test]
+    fn masked_argmin_argmax_ignore_masked_extreme_collisions() {
+        let data = UFuncArray::new(vec![2], vec![f64::MAX, f64::MIN], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        assert_eq!(ma.argmin(None).unwrap().values(), &[0.0]);
+        assert_eq!(ma.argmax(None).unwrap().values(), &[0.0]);
     }
 
     #[test]
