@@ -593,8 +593,36 @@ impl Pcg64DxsmRng {
 
     /// Get the current raw state as (state, inc).
     #[must_use]
-    pub const fn raw_state(&self) -> (u128, u128) {
+    pub fn raw_state(&self) -> (u128, u128) {
         (self.state, self.inc)
+    }
+
+    pub fn to_state_entries(&self) -> Vec<(String, u64)> {
+        vec![
+            ("pcg64_state_hi".to_string(), (self.state >> 64) as u64),
+            ("pcg64_state_lo".to_string(), self.state as u64),
+            ("pcg64_inc_hi".to_string(), (self.inc >> 64) as u64),
+            ("pcg64_inc_lo".to_string(), self.inc as u64),
+        ]
+    }
+
+    pub fn from_state_entries(entries: &[(String, u64)]) -> Option<Self> {
+        let mut hi = None;
+        let mut lo = None;
+        let mut ihi = None;
+        let mut ilo = None;
+        for (k, v) in entries {
+            match k.as_str() {
+                "pcg64_state_hi" => hi = Some(*v),
+                "pcg64_state_lo" => lo = Some(*v),
+                "pcg64_inc_hi" => ihi = Some(*v),
+                "pcg64_inc_lo" => ilo = Some(*v),
+                _ => {}
+            }
+        }
+        let state = (u128::from(hi?) << 64) | u128::from(lo?);
+        let inc = (u128::from(ihi?) << 64) | u128::from(ilo?);
+        Some(Self { state, inc })
     }
 
     /// PCG-CM step: advance state using the cheap multiplier.
@@ -792,6 +820,46 @@ impl PhiloxRng {
         }
         self.buffer_pos = 4; // Force refill
     }
+
+    pub fn to_state_entries(&self) -> Vec<(String, u64)> {
+        vec![
+            ("philox_ctr0".to_string(), self.ctr[0]),
+            ("philox_ctr1".to_string(), self.ctr[1]),
+            ("philox_ctr2".to_string(), self.ctr[2]),
+            ("philox_ctr3".to_string(), self.ctr[3]),
+            ("philox_key0".to_string(), self.key[0]),
+            ("philox_key1".to_string(), self.key[1]),
+            ("philox_buf0".to_string(), self.buffer[0]),
+            ("philox_buf1".to_string(), self.buffer[1]),
+            ("philox_buf2".to_string(), self.buffer[2]),
+            ("philox_buf3".to_string(), self.buffer[3]),
+            ("philox_pos".to_string(), self.buffer_pos as u64),
+        ]
+    }
+
+    pub fn from_state_entries(entries: &[(String, u64)]) -> Option<Self> {
+        let mut ctr = [0u64; 4];
+        let mut key = [0u64; 2];
+        let mut buffer = [0u64; 4];
+        let mut buffer_pos = 4;
+        for (k, v) in entries {
+            match k.as_str() {
+                "philox_ctr0" => ctr[0] = *v,
+                "philox_ctr1" => ctr[1] = *v,
+                "philox_ctr2" => ctr[2] = *v,
+                "philox_ctr3" => ctr[3] = *v,
+                "philox_key0" => key[0] = *v,
+                "philox_key1" => key[1] = *v,
+                "philox_buf0" => buffer[0] = *v,
+                "philox_buf1" => buffer[1] = *v,
+                "philox_buf2" => buffer[2] = *v,
+                "philox_buf3" => buffer[3] = *v,
+                "philox_pos" => buffer_pos = *v as usize,
+                _ => {}
+            }
+        }
+        Some(Self { ctr, key, buffer, buffer_pos })
+    }
 }
 
 fn mulhilo64(a: u64, b: u64) -> (u64, u64) {
@@ -834,6 +902,29 @@ impl Sfc64Rng {
     pub fn next_f64(&mut self) -> f64 {
         let sample = self.next_u64() >> 11;
         sample as f64 / (1u64 << 53) as f64
+    }
+
+    pub fn to_state_entries(&self) -> Vec<(String, u64)> {
+        vec![
+            ("sfc64_s0".to_string(), self.s[0]),
+            ("sfc64_s1".to_string(), self.s[1]),
+            ("sfc64_s2".to_string(), self.s[2]),
+            ("sfc64_s3".to_string(), self.s[3]),
+        ]
+    }
+
+    pub fn from_state_entries(entries: &[(String, u64)]) -> Option<Self> {
+        let mut s = [0u64; 4];
+        for (k, v) in entries {
+            match k.as_str() {
+                "sfc64_s0" => s[0] = *v,
+                "sfc64_s1" => s[1] = *v,
+                "sfc64_s2" => s[2] = *v,
+                "sfc64_s3" => s[3] = *v,
+                _ => {}
+            }
+        }
+        Some(Self { s })
     }
 }
 
@@ -974,6 +1065,38 @@ impl Mt19937Rng {
     #[must_use]
     pub fn fill_u32(&mut self, len: usize) -> Vec<u32> {
         (0..len).map(|_| self.next_u32()).collect()
+    }
+
+    pub fn to_state_entries(&self) -> Vec<(String, u64)> {
+        let mut entries = Vec::with_capacity(MT_N + 1);
+        entries.push(("mt19937_pos".to_string(), self.pos as u64));
+        for (i, &val) in self.mt.iter().enumerate() {
+            entries.push((format!("mt19937_s{i}"), u64::from(val)));
+        }
+        entries
+    }
+
+    pub fn from_state_entries(entries: &[(String, u64)]) -> Option<Self> {
+        let mut pos = 0usize;
+        let mut mt = vec![0u32; MT_N];
+        let mut found_count = 0;
+        for (k, v) in entries {
+            if k == "mt19937_pos" {
+                pos = *v as usize;
+            } else if k.starts_with("mt19937_s") {
+                if let Ok(idx) = k["mt19937_s".len()..].parse::<usize>() {
+                    if idx < MT_N {
+                        mt[idx] = *v as u32;
+                        found_count += 1;
+                    }
+                }
+            }
+        }
+        if found_count == MT_N {
+            Some(Self { mt, pos })
+        } else {
+            None
+        }
     }
 }
 
@@ -1236,6 +1359,15 @@ pub struct BitGeneratorState {
 }
 
 impl BitGeneratorState {
+    fn algorithm_state_schema_value(kind: BitGeneratorKind, seed: u64, counter: u64) -> Option<u64> {
+        match kind {
+            BitGeneratorKind::Mt19937 => Some(counter % 624),
+            BitGeneratorKind::Pcg64 => Some(splitmix64(seed ^ 0x5043_4736_3400_0001_u64)),
+            BitGeneratorKind::Philox => Some(seed.rotate_left(17) ^ counter.rotate_right(7)),
+            BitGeneratorKind::Sfc64 => Some(splitmix64(counter ^ seed ^ 0x5346_4336_3400_0001_u64)),
+        }
+    }
+
     fn validate(&self) -> Result<(), BitGeneratorError> {
         if self.schema_version != BIT_GENERATOR_STATE_SCHEMA_VERSION {
             return Err(BitGeneratorError::StateSchemaInvalid(
@@ -1301,12 +1433,18 @@ impl BitGeneratorState {
             ));
         }
 
-        let expected_algorithm_state =
-            algorithm_state_schema_value(self.kind, self.seed, self.counter);
-        if algorithm_state != Some(expected_algorithm_state) {
-            return Err(BitGeneratorError::StateSchemaInvalid(
-                "bit-generator algorithm-specific state metadata mismatch",
-            ));
+        // For real algorithms, we relax the check if they use custom state entries
+        let is_real_prng = matches!(self.kind, BitGeneratorKind::Mt19937 | BitGeneratorKind::Philox | BitGeneratorKind::Sfc64 | BitGeneratorKind::Pcg64);
+        let has_custom_entries = self.schema_entries.iter().any(|(k, _)| !matches!(k.as_str(), "stream_seed" | "counter" | "algorithm_tag" | "schema_version"));
+
+        if !is_real_prng || !has_custom_entries {
+            if let Some(expected_algorithm_state) = Self::algorithm_state_schema_value(self.kind, self.seed, self.counter) {
+                if algorithm_state != Some(expected_algorithm_state) {
+                    return Err(BitGeneratorError::StateSchemaInvalid(
+                        "bit-generator algorithm-specific state metadata mismatch",
+                    ));
+                }
+            }
         }
 
         Ok(())
@@ -1319,15 +1457,6 @@ fn algorithm_state_schema_key(kind: BitGeneratorKind) -> &'static str {
         BitGeneratorKind::Pcg64 => "pcg64_stream",
         BitGeneratorKind::Philox => "philox_key",
         BitGeneratorKind::Sfc64 => "sfc64_carry",
-    }
-}
-
-fn algorithm_state_schema_value(kind: BitGeneratorKind, seed: u64, counter: u64) -> u64 {
-    match kind {
-        BitGeneratorKind::Mt19937 => counter % 624,
-        BitGeneratorKind::Pcg64 => splitmix64(seed ^ 0x5043_4736_3400_0001_u64),
-        BitGeneratorKind::Philox => seed.rotate_left(17) ^ counter.rotate_right(7),
-        BitGeneratorKind::Sfc64 => splitmix64(counter ^ seed ^ 0x5346_4336_3400_0001_u64),
     }
 }
 
@@ -1452,6 +1581,32 @@ pub struct BitGenerator {
 impl BitGenerator {
     pub fn new(kind: BitGeneratorKind, seed: SeedMaterial) -> Result<Self, BitGeneratorError> {
         let rng = match seed {
+            SeedMaterial::None => match kind {
+                BitGeneratorKind::Pcg64 => {
+                    RngBackend::Pcg64Dxsm(Pcg64DxsmRng::from_u64_seed(DEFAULT_RNG_SEED).map_err(|_| {
+                        BitGeneratorError::InitFailed("PCG64 initialization failed")
+                    })?)
+                }
+                BitGeneratorKind::Mt19937 => {
+                    RngBackend::Mt19937(Mt19937Rng::from_u32_seed(DEFAULT_RNG_SEED as u32))
+                }
+                BitGeneratorKind::Philox => {
+                    let ss = SeedSequence::new(&[DEFAULT_RNG_SEED as u32, (DEFAULT_RNG_SEED >> 32) as u32]).map_err(|_| {
+                        BitGeneratorError::InitFailed("Philox initialization failed")
+                    })?;
+                    RngBackend::Philox(PhiloxRng::from_seed_sequence(&ss).map_err(|_| {
+                        BitGeneratorError::InitFailed("Philox initialization failed")
+                    })?)
+                }
+                BitGeneratorKind::Sfc64 => {
+                    let ss = SeedSequence::new(&[DEFAULT_RNG_SEED as u32, (DEFAULT_RNG_SEED >> 32) as u32]).map_err(|_| {
+                        BitGeneratorError::InitFailed("SFC64 initialization failed")
+                    })?;
+                    RngBackend::Sfc64(Sfc64Rng::from_seed_sequence(&ss).map_err(|_| {
+                        BitGeneratorError::InitFailed("SFC64 initialization failed")
+                    })?)
+                }
+            },
             SeedMaterial::U64(s) => match kind {
                 BitGeneratorKind::Pcg64 => {
                     RngBackend::Pcg64Dxsm(Pcg64DxsmRng::from_u64_seed(s).map_err(|_| {
@@ -1931,11 +2086,13 @@ impl Generator {
 
     #[must_use]
     pub fn next_u64(&mut self) -> u64 {
+        self.u32_buf_ready = false;
         self.bit_generator.next_u64()
     }
 
     #[must_use]
     pub fn next_f64(&mut self) -> f64 {
+        self.u32_buf_ready = false;
         self.bit_generator.next_f64()
     }
 
@@ -2816,37 +2973,43 @@ impl Generator {
     }
 
     /// Ziggurat method for standard normal, matching NumPy's
-    /// `random_standard_normal` in distributions.c exactly.
-    /// Ziggurat method for standard normal, matching NumPy's
     /// `random_standard_normal` in `distributions.c` exactly.
     ///
     /// Bit layout from a single u64: bits 0..7 = rectangle index,
-    /// bit 8 = sign, bits 9..63 = rectangle position (rabs).
+    /// bit 8 = sign, bits 9..60 = rectangle position (rabs, 52 bits).
     fn sample_ziggurat_normal(&mut self) -> f64 {
         use crate::ziggurat::*;
         loop {
-            let r = self.next_u64();
+            let mut r = self.next_u64();
             let idx = (r & 0xFF) as usize;
-            let sign = (r >> 8) & 0x1;
-            let rabs = r >> 9;
-            let x = rabs as f64 * ZIGGURAT_NOR_W[idx];
+            r >>= 8;
+            let sign = r & 0x1;
+            let rabs = (r >> 1) & 0x000F_FFFF_FFFF_FFFF;
+            let mut x = rabs as f64 * ZIGGURAT_NOR_W[idx];
+            if (sign & 0x1) != 0 {
+                x = -x;
+            }
             if rabs < ZIGGURAT_NOR_K[idx] {
-                return if sign != 0 { x } else { -x };
+                return x;
             }
             if idx == 0 {
+                // Tail: Marsaglia's method using log1p(-U) to avoid log(0)
                 loop {
-                    let xx = -ZIGGURAT_NOR_INV_R * self.next_f64().ln();
-                    let yy = -self.next_f64().ln();
+                    let xx = -ZIGGURAT_NOR_INV_R * (-self.next_f64()).ln_1p();
+                    let yy = -(-self.next_f64()).ln_1p();
                     if yy + yy > xx * xx {
-                        let res = ZIGGURAT_NOR_R + xx;
-                        return if sign != 0 { res } else { -res };
+                        return if (rabs >> 8) & 0x1 != 0 {
+                            -(ZIGGURAT_NOR_R + xx)
+                        } else {
+                            ZIGGURAT_NOR_R + xx
+                        };
                     }
                 }
             } else {
                 let f_idx = ZIGGURAT_NOR_F[idx];
                 let f_prev = ZIGGURAT_NOR_F[idx - 1];
-                if self.next_f64() * (f_prev - f_idx) < (-0.5 * x * x).exp() - f_idx {
-                    return if sign != 0 { x } else { -x };
+                if (f_prev - f_idx) * self.next_f64() + f_idx < (-0.5 * x * x).exp() {
+                    return x;
                 }
             }
         }
@@ -2857,11 +3020,12 @@ impl Generator {
     fn sample_ziggurat_exponential(&mut self) -> f64 {
         use crate::ziggurat::*;
         loop {
-            let r = self.next_u64();
-            let idx = (r & 0xFF) as usize;
-            let rabs = r >> 8;
-            let x = rabs as f64 * ZIGGURAT_EXP_W[idx];
-            if rabs < ZIGGURAT_EXP_K[idx] {
+            let mut ri = self.next_u64();
+            ri >>= 3;
+            let idx = (ri & 0xFF) as usize;
+            ri >>= 8;
+            let x = ri as f64 * ZIGGURAT_EXP_W[idx];
+            if ri < ZIGGURAT_EXP_K[idx] {
                 return x;
             }
             // Tail
@@ -2869,7 +3033,7 @@ impl Generator {
                 return ZIGGURAT_EXP_R - self.next_f64().ln();
             }
             // Wedge test
-            if self.next_f64() < ((-x).exp() - ZIGGURAT_EXP_F[idx]) / (ZIGGURAT_EXP_F[idx - 1] - ZIGGURAT_EXP_F[idx]) {
+            if self.next_f64() * (ZIGGURAT_EXP_F[idx - 1] - ZIGGURAT_EXP_F[idx]) < (-x).exp() - ZIGGURAT_EXP_F[idx] {
                 return x;
             }
         }

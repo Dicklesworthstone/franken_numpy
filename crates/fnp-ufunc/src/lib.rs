@@ -2162,6 +2162,39 @@ impl UFuncArray {
         }
     }
 
+    fn exact_integer_sidecar(&self, context: &str) -> Option<IntegerSidecar> {
+        if let Some(s) = &self.integer_sidecar {
+            return Some(s.clone());
+        }
+        match self.dtype {
+            DType::I64 => self
+                .values
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(index, value)| {
+                    ensure_exact_integer_bridge_value_supported(value, DType::I64, context, index)
+                        .ok()?;
+                    Some(value as i64)
+                })
+                .collect::<Option<Vec<_>>>()
+                .map(IntegerSidecar::I64),
+            DType::U64 => self
+                .values
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(index, value)| {
+                    ensure_exact_integer_bridge_value_supported(value, DType::U64, context, index)
+                        .ok()?;
+                    Some(value as u64)
+                })
+                .collect::<Option<Vec<_>>>()
+                .map(IntegerSidecar::U64),
+            _ => None,
+        }
+    }
+
     fn constant_integer_sidecar(&self, value: f64, len: usize) -> Option<IntegerSidecar> {
         match &self.integer_sidecar {
             Some(IntegerSidecar::I64(_)) => {
@@ -4221,17 +4254,17 @@ impl UFuncArray {
                         if k < axis_len {
                             let src_base = o * axis_len * inner + k * inner;
                             values.extend_from_slice(&self.values[src_base..src_base + inner]);
-                            if let Some(ref mut s) = sidecar_vals {
-                                if let Some(ref self_s) = self.integer_sidecar {
-                                    match (s, self_s) {
-                                        (IntegerSidecar::I64(v_out), IntegerSidecar::I64(v_in)) => {
-                                            v_out.extend_from_slice(&v_in[src_base..src_base + inner]);
-                                        }
-                                        (IntegerSidecar::U64(v_out), IntegerSidecar::U64(v_in)) => {
-                                            v_out.extend_from_slice(&v_in[src_base..src_base + inner]);
-                                        }
-                                        _ => {}
+                            if let Some(ref mut s) = sidecar_vals
+                                && let Some(ref self_s) = self.integer_sidecar
+                            {
+                                match (s, self_s) {
+                                    (IntegerSidecar::I64(v_out), IntegerSidecar::I64(v_in)) => {
+                                        v_out.extend_from_slice(&v_in[src_base..src_base + inner]);
                                     }
+                                    (IntegerSidecar::U64(v_out), IntegerSidecar::U64(v_in)) => {
+                                        v_out.extend_from_slice(&v_in[src_base..src_base + inner]);
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -5424,12 +5457,12 @@ impl UFuncArray {
             let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
             let mut out_values = vec![0.0f64; out_count];
 
-            for i in 0..out_count {
+            for (i, out_value) in out_values.iter_mut().enumerate() {
                 let mut acc = 0.0;
                 for p in 0..k {
                     acc += self.values[i * k + p] * rhs.values[p];
                 }
-                out_values[i] = acc;
+                *out_value = acc;
             }
             let dtype = promote(self.dtype, rhs.dtype);
             return Ok(Self {

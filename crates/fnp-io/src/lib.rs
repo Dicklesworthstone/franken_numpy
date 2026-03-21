@@ -743,9 +743,18 @@ fn parse_header_dictionary(header_bytes: &[u8], header_len: usize) -> Result<Npy
 
     validate_required_header_keys(&map)?;
 
-    let descr_literal = parse_quoted_value(map.get("descr").unwrap())?;
-    let fortran_order = parse_fortran_order_value(map.get("fortran_order").unwrap())?;
-    let shape = parse_shape_field(map.get("shape").unwrap())?;
+    let descr_literal = parse_quoted_value(
+        map.get("descr")
+            .ok_or(IOError::HeaderSchemaInvalid("descr missing"))?,
+    )?;
+    let fortran_order = parse_fortran_order_value(
+        map.get("fortran_order")
+            .ok_or(IOError::HeaderSchemaInvalid("fortran_order missing"))?,
+    )?;
+    let shape = parse_shape_field(
+        map.get("shape")
+            .ok_or(IOError::HeaderSchemaInvalid("shape missing"))?,
+    )?;
 
     validate_header_schema(&shape, fortran_order, &descr_literal, header_len)
 }
@@ -2812,7 +2821,13 @@ pub fn save_structured(
         ));
     }
 
-    let total_size = prefix_len + header_len + expected_records * record_size;
+    let payload_len = expected_records
+        .checked_mul(record_size)
+        .ok_or(IOError::WriteContractViolation("payload size overflow"))?;
+    let total_size = prefix_len
+        .checked_add(header_len)
+        .and_then(|h| h.checked_add(payload_len))
+        .ok_or(IOError::WriteContractViolation("total size overflow"))?;
     let mut out = Vec::with_capacity(total_size);
     write_npy_preamble(&mut out, version, header_len)?;
     out.extend_from_slice(dict_bytes);
@@ -2840,11 +2855,17 @@ pub fn load_structured(data: &[u8]) -> Result<StructuredNpyData, IOError> {
     validate_required_header_keys(&map)?;
 
     // Parse shape
-    let shape = parse_shape_field(map.get("shape").unwrap())?;
-    let _fortran_order = parse_fortran_order_value(map.get("fortran_order").unwrap())?;
+    let shape = parse_shape_field(
+        map.get("shape")
+            .ok_or(IOError::HeaderSchemaInvalid("shape missing"))?,
+    )?;
+    let _fortran_order = parse_fortran_order_value(
+        map.get("fortran_order")
+            .ok_or(IOError::HeaderSchemaInvalid("fortran_order missing"))?,
+    )?;
 
     // Parse structured descriptor
-    let descr_tail = map.get("descr").unwrap();
+    let descr_tail = map.get("descr").ok_or(IOError::HeaderSchemaInvalid("descr missing"))?;
     if !descr_tail.starts_with('[') {
         return Err(IOError::DTypeDescriptorInvalid);
     }
