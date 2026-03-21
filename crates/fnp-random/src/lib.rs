@@ -704,6 +704,141 @@ const MT_INIT_MULT: u32 = 1_812_433_253;
 ///
 /// Produces the same u32 stream as NumPy for both modes.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhiloxRng {
+    ctr: [u64; 4],
+    key: [u64; 2],
+    buffer: [u64; 4],
+    buffer_pos: usize,
+}
+
+impl PhiloxRng {
+    pub fn from_seed_sequence(ss: &SeedSequence) -> Result<Self, SeedSequenceError> {
+        let words = ss.generate_state_u64(2)?;
+        let key = [words[0], words[1]];
+        Ok(Self::new(key, [0; 4]))
+    }
+
+    #[must_use]
+    pub fn new(key: [u64; 2], ctr: [u64; 4]) -> Self {
+        let mut rng = Self {
+            ctr,
+            key,
+            buffer: [0; 4],
+            buffer_pos: 4,
+        };
+        rng.fill_buffer();
+        rng
+    }
+
+    fn fill_buffer(&mut self) {
+        let mut ctr = self.ctr;
+        let mut key = self.key;
+
+        for _ in 0..10 {
+            let (hi0, lo0) = mulhilo64(0xD2E7_470E_E14C_6C93, ctr[0]);
+            let (hi1, lo1) = mulhilo64(0xCA5A_8263_9512_1157, ctr[2]);
+            let next_ctr = [
+                hi1 ^ ctr[1] ^ key[0],
+                lo1,
+                hi0 ^ ctr[3] ^ key[1],
+                lo0,
+            ];
+            ctr = next_ctr;
+            key[0] = key[0].wrapping_add(0x9E37_79B9_7F4A_7C15);
+            key[1] = key[1].wrapping_add(0xBB67_AE85_84CA_A73B);
+        }
+        self.buffer = ctr;
+        self.buffer_pos = 0;
+    }
+
+    #[must_use]
+    pub fn next_u64(&mut self) -> u64 {
+        if self.buffer_pos >= 4 {
+            self.ctr[0] = self.ctr[0].wrapping_add(1);
+            if self.ctr[0] == 0 {
+                self.ctr[1] = self.ctr[1].wrapping_add(1);
+                if self.ctr[1] == 0 {
+                    self.ctr[2] = self.ctr[2].wrapping_add(1);
+                    if self.ctr[2] == 0 {
+                        self.ctr[3] = self.ctr[3].wrapping_add(1);
+                    }
+                }
+            }
+            self.fill_buffer();
+        }
+        let out = self.buffer[self.buffer_pos];
+        self.buffer_pos += 1;
+        out
+    }
+
+    #[must_use]
+    pub fn next_f64(&mut self) -> f64 {
+        let sample = self.next_u64() >> 11;
+        sample as f64 / (1u64 << 53) as f64
+    }
+
+    pub fn jump_ahead(&mut self, steps: u64) {
+        // Philox jump-ahead simply increments the counter
+        let (sum, overflow) = self.ctr[0].overflowing_add(steps);
+        self.ctr[0] = sum;
+        if overflow {
+            self.ctr[1] = self.ctr[1].wrapping_add(1);
+            if self.ctr[1] == 0 {
+                self.ctr[2] = self.ctr[2].wrapping_add(1);
+                if self.ctr[2] == 0 {
+                    self.ctr[3] = self.ctr[3].wrapping_add(1);
+                }
+            }
+        }
+        self.buffer_pos = 4; // Force refill
+    }
+}
+
+fn mulhilo64(a: u64, b: u64) -> (u64, u64) {
+    let product = u128::from(a) * u128::from(b);
+    ((product >> 64) as u64, product as u64)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sfc64Rng {
+    s: [u64; 4],
+}
+
+impl Sfc64Rng {
+    pub fn from_seed_sequence(ss: &SeedSequence) -> Result<Self, SeedSequenceError> {
+        let words = ss.generate_state_u64(3)?;
+        Ok(Self::seed([words[0], words[1], words[2]]))
+    }
+
+    #[must_use]
+    pub fn seed(seed: [u64; 3]) -> Self {
+        let s = [seed[0], seed[1], seed[2], 1];
+        let mut rng = Self { s };
+        for _ in 0..12 {
+            rng.next_u64();
+        }
+        rng
+    }
+
+    #[must_use]
+    pub fn next_u64(&mut self) -> u64 {
+        let tmp = self.s[0].wrapping_add(self.s[1]).wrapping_add(self.s[3]);
+        self.s[3] = self.s[3].wrapping_add(1);
+        self.s[0] = self.s[1] ^ (self.s[1] >> 11);
+        self.s[1] = self.s[2].wrapping_add(self.s[2] << 3);
+        self.s[2] = self.s[2].rotate_left(24).wrapping_add(tmp);
+        tmp
+    }
+
+    #[must_use]
+    pub fn next_f64(&mut self) -> f64 {
+        let sample = self.next_u64() >> 11;
+        sample as f64 / (1u64 << 53) as f64
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mt19937Rng {
     mt: Vec<u32>,
     pos: usize,
@@ -1222,12 +1357,13 @@ pub struct GeneratorPicklePayload {
     pub seed_sequence: Option<SeedSequenceSnapshot>,
 }
 
-/// RNG backend enum: dispatches to either the built-in DeterministicRng
-/// or a real PCG64-DXSM for NumPy-compatible distribution output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RngBackend {
     Deterministic(DeterministicRng),
     Pcg64Dxsm(Pcg64DxsmRng),
+    Mt19937(Mt19937Rng),
+    Philox(PhiloxRng),
+    Sfc64(Sfc64Rng),
 }
 
 impl RngBackend {
@@ -1235,6 +1371,9 @@ impl RngBackend {
         match self {
             Self::Deterministic(rng) => rng.next_u64(),
             Self::Pcg64Dxsm(rng) => rng.next_u64(),
+            Self::Mt19937(rng) => rng.next_u64(),
+            Self::Philox(rng) => rng.next_u64(),
+            Self::Sfc64(rng) => rng.next_u64(),
         }
     }
 
@@ -1242,6 +1381,9 @@ impl RngBackend {
         match self {
             Self::Deterministic(rng) => rng.next_f64(),
             Self::Pcg64Dxsm(rng) => rng.next_f64(),
+            Self::Mt19937(rng) => rng.next_f64(),
+            Self::Philox(rng) => rng.next_f64(),
+            Self::Sfc64(rng) => rng.next_f64(),
         }
     }
 
@@ -1249,13 +1391,35 @@ impl RngBackend {
         match self {
             Self::Deterministic(rng) => rng.bounded_u64(upper_bound),
             Self::Pcg64Dxsm(rng) => rng.bounded_u64(upper_bound),
+            Self::Mt19937(rng) => Ok(u64::from(rng.bounded_u32(upper_bound as u32)?)),
+            Self::Philox(rng) => {
+                let threshold = u64::MAX - u64::MAX % upper_bound;
+                loop {
+                    let candidate = rng.next_u64();
+                    if candidate < threshold {
+                        return Ok(candidate % upper_bound);
+                    }
+                }
+            }
+            Self::Sfc64(rng) => {
+                let threshold = u64::MAX - u64::MAX % upper_bound;
+                loop {
+                    let candidate = rng.next_u64();
+                    if candidate < threshold {
+                        return Ok(candidate % upper_bound);
+                    }
+                }
+            }
         }
     }
 
     fn fill_u64(&mut self, len: usize) -> Vec<u64> {
         match self {
             Self::Deterministic(rng) => rng.fill_u64(len),
-            Self::Pcg64Dxsm(rng) => rng.fill_u64(len),
+            Self::Pcg64Dxsm(rng) => (0..len).map(|_| rng.next_u64()).collect(),
+            Self::Mt19937(rng) => (0..len).map(|_| rng.next_u64()).collect(),
+            Self::Philox(rng) => (0..len).map(|_| rng.next_u64()).collect(),
+            Self::Sfc64(rng) => (0..len).map(|_| rng.next_u64()).collect(),
         }
     }
 
@@ -1263,6 +1427,8 @@ impl RngBackend {
         match self {
             Self::Deterministic(rng) => rng.jump_ahead(steps),
             Self::Pcg64Dxsm(rng) => rng.advance(u128::from(steps)),
+            Self::Philox(rng) => rng.jump_ahead(steps),
+            _ => {} // Mt19937 and Sfc64 don't have built-in jump-ahead in standard NumPy
         }
     }
 
@@ -1273,6 +1439,7 @@ impl RngBackend {
                 let (state, inc) = rng.raw_state();
                 (state as u64, inc as u64)
             }
+            _ => (0, 0), // Other algorithms have larger states not representable as (u64, u64)
         }
     }
 }
@@ -1285,39 +1452,78 @@ pub struct BitGenerator {
 
 impl BitGenerator {
     pub fn new(kind: BitGeneratorKind, seed: SeedMaterial) -> Result<Self, BitGeneratorError> {
-        let (stream_seed, counter) = match seed {
-            SeedMaterial::State { seed, counter } => (seed, counter),
+        let rng = match seed {
+            SeedMaterial::U64(s) => match kind {
+                BitGeneratorKind::Pcg64 => {
+                    RngBackend::Pcg64Dxsm(Pcg64DxsmRng::from_u64_seed(s).map_err(|_| {
+                        BitGeneratorError::InitFailed("PCG64 initialization failed")
+                    })?)
+                }
+                BitGeneratorKind::Mt19937 => {
+                    RngBackend::Mt19937(Mt19937Rng::from_u32_seed(s as u32))
+                }
+                BitGeneratorKind::Philox => {
+                    let ss = SeedSequence::new(&[s as u32, (s >> 32) as u32]).map_err(|_| {
+                        BitGeneratorError::InitFailed("Philox initialization failed")
+                    })?;
+                    RngBackend::Philox(PhiloxRng::from_seed_sequence(&ss).map_err(|_| {
+                        BitGeneratorError::InitFailed("Philox initialization failed")
+                    })?)
+                }
+                BitGeneratorKind::Sfc64 => {
+                    let ss = SeedSequence::new(&[s as u32, (s >> 32) as u32]).map_err(|_| {
+                        BitGeneratorError::InitFailed("SFC64 initialization failed")
+                    })?;
+                    RngBackend::Sfc64(Sfc64Rng::from_seed_sequence(&ss).map_err(|_| {
+                        BitGeneratorError::InitFailed("SFC64 initialization failed")
+                    })?)
+                }
+            },
+            SeedMaterial::State { seed, counter } => match kind {
+                BitGeneratorKind::Pcg64 => {
+                    RngBackend::Pcg64Dxsm(Pcg64DxsmRng::from_raw_state(u128::from(seed), u128::from(counter)))
+                }
+                _ => RngBackend::Deterministic(DeterministicRng::from_state(seed, counter)),
+            }
             material => {
                 let rng = deterministic_rng_from_seed_material(material).map_err(|_| {
                     BitGeneratorError::InitFailed(
                         "bit-generator constructor rejected seed material",
                     )
                 })?;
-                let (base_seed, base_counter) = rng.state();
-                (splitmix64(base_seed ^ kind.stream_tag()), base_counter)
+                RngBackend::Deterministic(rng)
             }
         };
-        Ok(Self {
-            kind,
-            rng: RngBackend::Deterministic(DeterministicRng::from_state(stream_seed, counter)),
-        })
+        Ok(Self { kind, rng })
     }
 
     pub fn from_seed_sequence(
         kind: BitGeneratorKind,
         seed_sequence: &SeedSequence,
     ) -> Result<Self, BitGeneratorError> {
-        let rng = rng_from_seed_sequence(seed_sequence).map_err(|_| {
-            BitGeneratorError::InitFailed("bit-generator constructor rejected SeedSequence state")
-        })?;
-        let (seed, counter) = rng.state();
-        Ok(Self {
-            kind,
-            rng: RngBackend::Deterministic(DeterministicRng::from_state(
-                splitmix64(seed ^ kind.stream_tag()),
-                counter,
-            )),
-        })
+        let backend = match kind {
+            BitGeneratorKind::Pcg64 => {
+                RngBackend::Pcg64Dxsm(Pcg64DxsmRng::from_seed_sequence(seed_sequence).map_err(
+                    |_| BitGeneratorError::InitFailed("PCG64 SeedSequence init failed"),
+                )?)
+            }
+            BitGeneratorKind::Mt19937 => {
+                RngBackend::Mt19937(Mt19937Rng::from_seed_sequence(seed_sequence).map_err(|_| {
+                    BitGeneratorError::InitFailed("MT19937 SeedSequence init failed")
+                })?)
+            }
+            BitGeneratorKind::Philox => {
+                RngBackend::Philox(PhiloxRng::from_seed_sequence(seed_sequence).map_err(|_| {
+                    BitGeneratorError::InitFailed("Philox SeedSequence init failed")
+                })?)
+            }
+            BitGeneratorKind::Sfc64 => {
+                RngBackend::Sfc64(Sfc64Rng::from_seed_sequence(seed_sequence).map_err(|_| {
+                    BitGeneratorError::InitFailed("SFC64 SeedSequence init failed")
+                })?)
+            }
+        };
+        Ok(Self { kind, rng: backend })
     }
 
     /// Create a BitGenerator backed by a real PCG64-DXSM PRNG.
@@ -2612,30 +2818,36 @@ impl Generator {
 
     /// Ziggurat method for standard normal, matching NumPy's
     /// `random_standard_normal` in distributions.c exactly.
+    /// Ziggurat method for standard normal, matching NumPy's
+    /// `random_standard_normal` in `distributions.c` exactly.
+    ///
+    /// Bit layout from a single u64: bits 0..7 = rectangle index,
+    /// bit 8 = sign, bits 9..63 = rectangle position (rabs).
     fn sample_ziggurat_normal(&mut self) -> f64 {
         use crate::ziggurat::*;
         loop {
             let r = self.next_u64();
             let idx = (r & 0xFF) as usize;
-            let rabs = r >> 8;
+            let sign = (r >> 8) & 0x1;
+            let rabs = r >> 9;
             let x = rabs as f64 * ZIGGURAT_NOR_W[idx];
             if rabs < ZIGGURAT_NOR_K[idx] {
-                return if (self.next_u64() & 0x1) == 0 { -x } else { x };
+                return if sign != 0 { x } else { -x };
             }
             if idx == 0 {
-                // Tail: Marsaglia's method
                 loop {
                     let xx = -ZIGGURAT_NOR_INV_R * self.next_f64().ln();
                     let yy = -self.next_f64().ln();
                     if yy + yy > xx * xx {
                         let res = ZIGGURAT_NOR_R + xx;
-                        return if (self.next_u64() & 0x1) == 0 { -res } else { res };
+                        return if sign != 0 { res } else { -res };
                     }
                 }
             } else {
-                // Wedge test
-                if self.next_f64() < ((-0.5 * x * x).exp() - ZIGGURAT_NOR_F[idx]) / (ZIGGURAT_NOR_F[idx - 1] - ZIGGURAT_NOR_F[idx]) {
-                    return if (self.next_u64() & 0x1) == 0 { -x } else { x };
+                let f_idx = ZIGGURAT_NOR_F[idx];
+                let f_prev = ZIGGURAT_NOR_F[idx - 1];
+                if self.next_f64() * (f_prev - f_idx) < (-0.5 * x * x).exp() - f_idx {
+                    return if sign != 0 { x } else { -x };
                 }
             }
         }
@@ -3681,6 +3893,25 @@ mod tests {
                 "rng_reproducibility_witness_failed",
             ]
         );
+    }
+
+    #[test]
+    fn bit_generator_algorithms_diverge() {
+        let seed = SeedMaterial::U64(42);
+        let mut mt = BitGenerator::new(BitGeneratorKind::Mt19937, seed.clone()).unwrap();
+        let mut pcg = BitGenerator::new(BitGeneratorKind::Pcg64, seed.clone()).unwrap();
+        let mut philox = BitGenerator::new(BitGeneratorKind::Philox, seed.clone()).unwrap();
+        let mut sfc64 = BitGenerator::new(BitGeneratorKind::Sfc64, seed.clone()).unwrap();
+
+        let mt_val = mt.next_u64();
+        let pcg_val = pcg.next_u64();
+        let philox_val = philox.next_u64();
+        let sfc64_val = sfc64.next_u64();
+
+        // They should all be different if they use different algorithms
+        assert_ne!(mt_val, pcg_val, "MT19937 and PCG64 should differ");
+        assert_ne!(pcg_val, philox_val, "PCG64 and Philox should differ");
+        assert_ne!(philox_val, sfc64_val, "Philox and SFC64 should differ");
     }
 
     #[test]

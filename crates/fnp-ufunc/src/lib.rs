@@ -2162,6 +2162,22 @@ impl UFuncArray {
         }
     }
 
+    fn constant_integer_sidecar(&self, value: f64, len: usize) -> Option<IntegerSidecar> {
+        match &self.integer_sidecar {
+            Some(IntegerSidecar::I64(_)) => {
+                ensure_exact_integer_bridge_value_supported(value, DType::I64, "integer sidecar", 0)
+                    .ok()?;
+                Some(IntegerSidecar::I64(vec![value as i64; len]))
+            }
+            Some(IntegerSidecar::U64(_)) => {
+                ensure_exact_integer_bridge_value_supported(value, DType::U64, "integer sidecar", 0)
+                    .ok()?;
+                Some(IntegerSidecar::U64(vec![value as u64; len]))
+            }
+            None => None,
+        }
+    }
+
     /// Build an array from f64 values by routing through typed storage casting.
     fn from_values_with_dtype(
         shape: Vec<usize>,
@@ -15803,11 +15819,7 @@ impl MaskedArray {
             Some(mask) => {
                 let n = self.data.values().len();
                 let mut vals = Vec::with_capacity(n);
-                let mut sidecar_vals = match &self.data.integer_sidecar {
-                    Some(IntegerSidecar::I64(_)) => Some(IntegerSidecar::I64(vec![fill_value as i64; n])),
-                    Some(IntegerSidecar::U64(_)) => Some(IntegerSidecar::U64(vec![fill_value as u64; n])),
-                    None => None,
-                };
+                let mut sidecar_vals = self.data.constant_integer_sidecar(fill_value, n);
 
                 for i in 0..n {
                     let is_masked = mask.values()[i] != 0.0;
@@ -28866,6 +28878,45 @@ mod tests {
         let ma = MaskedArray::new(data, Some(mask), None).unwrap();
         let filled = ma.filled(-999.0);
         assert_eq!(filled.values(), &[1.0, -999.0, 3.0, -999.0]);
+    }
+
+    #[test]
+    fn masked_array_filled_preserves_large_i64_sidecar_for_exact_fill() {
+        let large_val = (1_i64 << 53) + 7;
+        let data = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![large_val, 3]))
+            .expect("from_storage");
+        let mask = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        let filled = ma.filled(-9.0);
+        assert!(filled.has_integer_sidecar());
+        assert_eq!(
+            filled.to_storage().expect("to_storage"),
+            ArrayStorage::I64(vec![large_val, -9])
+        );
+    }
+
+    #[test]
+    fn masked_array_filled_drops_sidecar_for_fractional_i64_fill() {
+        let large_val = (1_i64 << 53) + 7;
+        let data = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![large_val, 3]))
+            .expect("from_storage");
+        let mask = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        let filled = ma.filled(1.5);
+        assert!(!filled.has_integer_sidecar());
+        assert!(filled.to_storage().is_err());
+    }
+
+    #[test]
+    fn masked_array_filled_drops_sidecar_for_negative_u64_fill() {
+        let large_val = (1_u64 << 53) + 42;
+        let data = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![large_val, 3]))
+            .expect("from_storage");
+        let mask = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        let filled = ma.filled(-1.0);
+        assert!(!filled.has_integer_sidecar());
+        assert!(filled.to_storage().is_err());
     }
 
     #[test]
