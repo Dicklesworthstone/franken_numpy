@@ -4167,7 +4167,7 @@ impl UFuncArray {
                     )));
                 }
                 let mut sidecar_vals = self.synthesized_integer_sidecar();
-                let insert_sidecar = insert_values.synthesized_integer_sidecar();
+                let insert_sidecar = insert_values.exact_integer_sidecar("insert");
 
                 let idx = index;
                 for (i, &v) in insert_values.values.iter().enumerate() {
@@ -4220,7 +4220,7 @@ impl UFuncArray {
                     Some(IntegerSidecar::U64(_)) => Some(IntegerSidecar::U64(Vec::with_capacity(values.capacity()))),
                     None => None,
                 };
-                let insert_sidecar = insert_values.synthesized_integer_sidecar();
+                let insert_sidecar = insert_values.exact_integer_sidecar("insert");
 
                 for o in 0..outer {
                     for k in 0..=axis_len {
@@ -8039,11 +8039,7 @@ impl UFuncArray {
         let src_strides = c_strides_elems(&self.shape);
         let out_strides = c_strides_elems(&out_shape);
         let mut values = vec![constant; out_count];
-        let mut sidecar_vals = match &self.integer_sidecar {
-            Some(IntegerSidecar::I64(_)) => Some(IntegerSidecar::I64(vec![constant as i64; out_count])),
-            Some(IntegerSidecar::U64(_)) => Some(IntegerSidecar::U64(vec![constant as u64; out_count])),
-            None => None,
-        };
+        let mut sidecar_vals = self.constant_integer_sidecar(constant, out_count);
 
         // Copy source values into the padded region
         let src_count: usize = self.shape.iter().product();
@@ -23119,6 +23115,50 @@ mod tests {
             out.to_storage().expect("to_storage"),
             ArrayStorage::I64(vec![large_val])
         );
+    }
+
+    #[test]
+    fn pad_drops_sidecar_for_fractional_i64_constant() {
+        let large_val = (1_i64 << 53) + 7;
+        let arr = UFuncArray::from_storage(vec![1], ArrayStorage::I64(vec![large_val]))
+            .expect("from_storage");
+        let out = arr.pad(&[(1, 1)], 1.5).expect("pad");
+        assert!(!out.has_integer_sidecar());
+        assert!(out.to_storage().is_err());
+    }
+
+    #[test]
+    fn pad_drops_sidecar_for_negative_u64_constant() {
+        let large_val = (1_u64 << 53) + 42;
+        let arr = UFuncArray::from_storage(vec![1], ArrayStorage::U64(vec![large_val]))
+            .expect("from_storage");
+        let out = arr.pad(&[(1, 1)], -1.0).expect("pad");
+        assert!(!out.has_integer_sidecar());
+        assert!(out.to_storage().is_err());
+    }
+
+    #[test]
+    fn insert_drops_sidecar_for_fractional_i64_values() {
+        let large_val = (1_i64 << 53) + 7;
+        let arr = UFuncArray::from_storage(vec![1], ArrayStorage::I64(vec![large_val]))
+            .expect("from_storage");
+        let insert_values =
+            UFuncArray::new(vec![1], vec![1.5], DType::I64).expect("insert_values");
+        let out = arr.insert(1, &insert_values, None).expect("insert");
+        assert!(!out.has_integer_sidecar());
+        assert!(out.to_storage().is_err());
+    }
+
+    #[test]
+    fn insert_drops_sidecar_for_negative_u64_values() {
+        let large_val = (1_u64 << 53) + 42;
+        let arr = UFuncArray::from_storage(vec![1], ArrayStorage::U64(vec![large_val]))
+            .expect("from_storage");
+        let insert_values =
+            UFuncArray::new(vec![1], vec![-1.0], DType::U64).expect("insert_values");
+        let out = arr.insert(1, &insert_values, None).expect("insert");
+        assert!(!out.has_integer_sidecar());
+        assert!(out.to_storage().is_err());
     }
 
     #[test]
