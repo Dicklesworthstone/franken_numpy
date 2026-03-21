@@ -692,9 +692,9 @@ fn parse_header_dictionary_map(
 fn validate_required_header_keys(
     map: &std::collections::HashMap<String, String>,
 ) -> Result<(), IOError> {
-    if map.len() != NPY_HEADER_REQUIRED_KEYS.len() {
+    if map.len() < NPY_HEADER_REQUIRED_KEYS.len() {
         return Err(IOError::HeaderSchemaInvalid(
-            "header dictionary must contain exactly descr/fortran_order/shape keys",
+            "header dictionary must contain at least descr/fortran_order/shape keys",
         ));
     }
 
@@ -3320,7 +3320,7 @@ mod tests {
     }
 
     #[test]
-    fn npy_header_parser_rejects_extra_keys_and_singleton_without_comma() {
+    fn npy_header_parser_accepts_extra_keys() {
         let payload = [10_i32, 20_i32]
             .into_iter()
             .flat_map(i32::to_le_bytes)
@@ -3329,9 +3329,17 @@ mod tests {
         let extra_key_header =
             "{'descr': '<i4', 'fortran_order': False, 'shape': (2,), 'extra': 1, }";
         let extra_key_bytes = make_manual_npy_payload(extra_key_header, &payload);
-        let extra_key_err =
-            read_npy_bytes(&extra_key_bytes, false).expect_err("extra key must be rejected");
-        assert_eq!(extra_key_err.reason_code(), "io_header_schema_invalid");
+        let npy = read_npy_bytes(&extra_key_bytes, false).expect("extra key must be allowed");
+        assert_eq!(npy.header.descr, IOSupportedDType::I32);
+        assert_eq!(npy.header.shape, vec![2]);
+    }
+
+    #[test]
+    fn npy_header_parser_rejects_singleton_without_comma() {
+        let payload = [10_i32, 20_i32]
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect::<Vec<_>>();
 
         let singleton_without_comma = "{'descr': '<i4', 'fortran_order': False, 'shape': (2), }";
         let singleton_without_comma_bytes =
@@ -4704,7 +4712,7 @@ mod tests {
     }
 
     #[test]
-    fn load_structured_rejects_extra_header_keys() {
+    fn load_structured_accepts_extra_header_keys() {
         let desc = make_test_descriptor();
         let body = tofile_structured(
             &desc,
@@ -4716,8 +4724,8 @@ mod tests {
         .unwrap();
         let header_literal = "{'descr': [('x', '<f8'), ('y', '<i4')], 'fortran_order': False, 'shape': (1,), 'extra': 1, }";
         let payload = make_manual_npy_payload(header_literal, &body);
-        let err = load_structured(&payload).expect_err("extra keys must be rejected");
-        assert_eq!(err.reason_code(), "io_header_schema_invalid");
+        let data = load_structured(&payload).expect("extra keys must be allowed");
+        assert_eq!(data.shape, vec![1]);
     }
 
     // ── Memmap (file-backed array) tests ──

@@ -1358,6 +1358,7 @@ fn svd_bidiag_full(a: &[f64], m: usize, n: usize) -> Result<SvdFullResult, LinAl
     let eps_mach = f64::EPSILON;
     let max_iter = 100 * n * n;
 
+    let mut converged = false;
     for _iter in 0..max_iter {
         // Deflation: set small superdiagonal elements to zero
         for i in 0..e.len() {
@@ -1372,6 +1373,7 @@ fn svd_bidiag_full(a: &[f64], m: usize, n: usize) -> Result<SvdFullResult, LinAl
             hi -= 1;
         }
         if hi == 0 {
+            converged = true;
             break; // Fully converged
         }
         let mut lo = hi - 1;
@@ -1436,6 +1438,10 @@ fn svd_bidiag_full(a: &[f64], m: usize, n: usize) -> Result<SvdFullResult, LinAl
             }
         }
         e[hi - 1] = f;
+    }
+
+    if !converged {
+        return Err(LinAlgError::SvdNonConvergence);
     }
 
     // Make all singular values non-negative

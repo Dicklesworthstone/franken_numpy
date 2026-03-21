@@ -7387,9 +7387,6 @@ impl UFuncArray {
                 let inner: usize = self.shape[ax + 1..].iter().product();
                 let mut out_shape = self.shape.clone();
                 out_shape.remove(ax);
-                if out_shape.is_empty() {
-                    out_shape.push(1);
-                }
                 let mut values = Vec::with_capacity(outer * inner);
                 for o in 0..outer {
                     for i in 0..inner {
@@ -7443,9 +7440,6 @@ impl UFuncArray {
                 let inner: usize = self.shape[ax + 1..].iter().product();
                 let mut out_shape = self.shape.clone();
                 out_shape.remove(ax);
-                if out_shape.is_empty() {
-                    out_shape.push(1);
-                }
                 let mut values = Vec::with_capacity(outer * inner);
                 for o in 0..outer {
                     for i in 0..inner {
@@ -7645,9 +7639,6 @@ impl UFuncArray {
                 let inner: usize = self.shape[ax + 1..].iter().product();
                 let mut out_shape = self.shape.clone();
                 out_shape.remove(ax);
-                if out_shape.is_empty() {
-                    out_shape.push(1);
-                }
                 let mut values = Vec::with_capacity(outer * inner);
                 for o in 0..outer {
                     for i in 0..inner {
@@ -7720,9 +7711,6 @@ impl UFuncArray {
                 let inner: usize = self.shape[ax + 1..].iter().product();
                 let mut out_shape = self.shape.clone();
                 out_shape.remove(ax);
-                if out_shape.is_empty() {
-                    out_shape.push(1);
-                }
                 let mut values = Vec::with_capacity(outer * inner);
                 for o in 0..outer {
                     for i in 0..inner {
@@ -7793,9 +7781,6 @@ impl UFuncArray {
                 let inner: usize = self.shape[ax + 1..].iter().product();
                 let mut out_shape = self.shape.clone();
                 out_shape.remove(ax);
-                if out_shape.is_empty() {
-                    out_shape.push(1);
-                }
                 let mut values = Vec::with_capacity(outer * inner);
                 for o in 0..outer {
                     for i in 0..inner {
@@ -16875,21 +16860,21 @@ pub fn financial_rate(nper: f64, pmt: f64, pv: f64, fv: f64, when: u8, guess: f6
 /// along that dimension where the condition is nonzero.
 pub fn where_nonzero(condition: &UFuncArray) -> Result<Vec<UFuncArray>, UFuncError> {
     let ndim = condition.shape.len();
+    if ndim == 0 {
+        return Err(UFuncError::Msg(
+            "Calling nonzero on 0d arrays is not allowed. Use np.atleast_1d(scalar).nonzero() instead.".into(),
+        ));
+    }
     let strides = contiguous_strides_elems(&condition.shape);
-    let mut nd_indices: Vec<Vec<f64>> = vec![Vec::new(); ndim.max(1)];
+    let mut nd_indices: Vec<Vec<f64>> = vec![Vec::new(); ndim];
 
     for (flat, &v) in condition.values.iter().enumerate() {
         if v != 0.0 {
-            if ndim == 0 {
-                // scalar
-                nd_indices[0].push(0.0);
-            } else {
-                let mut remaining = flat;
-                for d in 0..ndim {
-                    let idx = remaining / strides[d];
-                    remaining %= strides[d];
-                    nd_indices[d].push(idx as f64);
-                }
+            let mut remaining = flat;
+            for d in 0..ndim {
+                let idx = remaining / strides[d];
+                remaining %= strides[d];
+                nd_indices[d].push(idx as f64);
             }
         }
     }

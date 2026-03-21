@@ -403,3 +403,23 @@ Status key:
 - [x] Mark `bd-23m.16.2` as `in_progress`
 - [ ] Draft strict/hardened contract table artifact for packet boundary
 - [ ] Attach unit/property + e2e scenario mapping and reason-code requirements
+
+## 16. Systematic Critical Check and Bug Fix Pass (2026-03-21)
+
+### 16.1 Exploration and Tracing
+- [x] Trace QR and SVD algorithms in `fnp-linalg`
+- [x] Trace NPY/NPZ header parsing and serialization in `fnp-io`
+- [x] Trace UFunc reduction and broadcasting logic in `fnp-ufunc`
+- [x] Trace Ziggurat sampling in `fnp-random`
+
+### 16.2 Implementation of Fixes
+- [x] Fix `fnp-io`: Relax `validate_required_header_keys` to allow extra metadata
+- [x] Fix `fnp-linalg`: Add convergence check to `svd_bidiag_full`
+- [x] Fix `fnp-ufunc`: Correct reduction shapes (1D -> 0D scalar)
+- [x] Fix `fnp-ufunc`: Reject 0D arrays in `where_nonzero` (parity with NumPy)
+- [x] Fix `fnp-random`: Squashed `bounded_u64` panic and improved state restoration (from previous turn)
+
+### 16.3 Verification
+- [x] Update `fnp-io` tests to match relaxed header policy
+- [x] Verify entire workspace with `cargo test --workspace`
+- [x] Record fixes in `UPGRADE_LOG.md`

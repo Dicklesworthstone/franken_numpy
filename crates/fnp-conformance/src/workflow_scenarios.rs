@@ -1637,7 +1637,7 @@ fn execute_rng_differential_operation(
                 let _ = source.next_u64();
             }
             let (seed, counter) = source.state();
-            let mut restored = DeterministicRng::from_state(seed, counter);
+            let mut restored = DeterministicRng::from_state(u128::from(seed), u128::from(counter));
             for index in 0..replay_draws {
                 if source.next_u64() != restored.next_u64() {
                     return Err((

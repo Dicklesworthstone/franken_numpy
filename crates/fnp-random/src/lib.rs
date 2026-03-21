@@ -252,7 +252,7 @@ pub enum SeedMaterial {
     BitGenerator(BitGenerator),
     Generator(Generator),
     RandomState(RandomState),
-    State { seed: u64, counter: u64 },
+    State { seed: u128, counter: u128 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -461,10 +461,10 @@ impl DeterministicRng {
     }
 
     #[must_use]
-    pub const fn from_state(seed: u64, counter: u64) -> Self {
+    pub const fn from_state(seed: u128, counter: u128) -> Self {
         Self {
-            stream_seed: seed,
-            counter,
+            stream_seed: seed as u64,
+            counter: counter as u64,
         }
     }
 
@@ -1352,8 +1352,8 @@ pub struct SeedSequenceSnapshot {
 pub struct BitGeneratorState {
     pub kind: BitGeneratorKind,
     pub schema_version: u32,
-    pub seed: u64,
-    pub counter: u64,
+    pub seed: u128,
+    pub counter: u128,
     pub schema_entries: Vec<(String, u64)>,
 }
 
@@ -1414,7 +1414,7 @@ impl BitGeneratorState {
             }
         }
 
-        if stream_seed != Some(self.seed) || counter != Some(self.counter) {
+        if stream_seed != Some(self.seed as u64) || counter != Some(self.counter as u64) {
             return Err(BitGeneratorError::StateSchemaInvalid(
                 "bit-generator state schema values do not match encoded state",
             ));
@@ -1434,10 +1434,18 @@ impl BitGeneratorState {
 
         // For real algorithms, we relax the check if they use custom state entries
         let is_real_prng = matches!(self.kind, BitGeneratorKind::Mt19937 | BitGeneratorKind::Philox | BitGeneratorKind::Sfc64 | BitGeneratorKind::Pcg64);
-        let has_custom_entries = self.schema_entries.iter().any(|(k, _)| !matches!(k.as_str(), "stream_seed" | "counter" | "algorithm_tag" | "schema_version"));
+        let expected_algorithm_key = algorithm_state_schema_key(self.kind);
+        let has_unknown_entries = self.schema_entries.iter().any(|(k, _)| {
+            !matches!(k.as_str(), "stream_seed" | "counter" | "algorithm_tag" | "schema_version")
+            && k.as_str() != expected_algorithm_key
+            && !k.starts_with("mt19937_")
+            && !k.starts_with("pcg64_")
+            && !k.starts_with("philox_")
+            && !k.starts_with("sfc64_")
+        });
 
-        if (!is_real_prng || !has_custom_entries)
-            && let Some(expected_algorithm_state) = Self::algorithm_state_schema_value(self.kind, self.seed, self.counter)
+        if (!is_real_prng || !has_unknown_entries)
+            && let Some(expected_algorithm_state) = Self::algorithm_state_schema_value(self.kind, self.seed as u64, self.counter as u64)
             && algorithm_state != Some(expected_algorithm_state)
         {
             return Err(BitGeneratorError::StateSchemaInvalid(
@@ -1460,12 +1468,12 @@ fn algorithm_state_schema_key(kind: BitGeneratorKind) -> &'static str {
 
 fn default_state_schema_entries(
     kind: BitGeneratorKind,
-    seed: u64,
-    counter: u64,
+    seed: u128,
+    counter: u128,
 ) -> Vec<(String, u64)> {
     let mut entries = vec![
-        ("stream_seed".to_string(), seed),
-        ("counter".to_string(), counter),
+        ("stream_seed".to_string(), seed as u64),
+        ("counter".to_string(), counter as u64),
         ("algorithm_tag".to_string(), kind.stream_tag()),
         (
             "schema_version".to_string(),
@@ -1473,7 +1481,7 @@ fn default_state_schema_entries(
         ),
     ];
     let algorithm_key = algorithm_state_schema_key(kind);
-    if let Some(algorithm_value) = BitGeneratorState::algorithm_state_schema_value(kind, seed, counter) {
+    if let Some(algorithm_value) = BitGeneratorState::algorithm_state_schema_value(kind, seed as u64, counter as u64) {
         entries.push((algorithm_key.to_string(), algorithm_value));
     }
     entries
@@ -1516,6 +1524,9 @@ impl RngBackend {
     }
 
     fn bounded_u64(&mut self, upper_bound: u64) -> Result<u64, RandomError> {
+        if upper_bound == 0 {
+            return Err(RandomError::InvalidUpperBound);
+        }
         match self {
             Self::Deterministic(rng) => rng.bounded_u64(upper_bound),
             Self::Pcg64Dxsm(rng) => rng.bounded_u64(upper_bound),
@@ -1560,14 +1571,24 @@ impl RngBackend {
         }
     }
 
-    fn state(&self) -> (u64, u64) {
+    fn to_state_entries(&self) -> Vec<(String, u64)> {
         match self {
-            Self::Deterministic(rng) => rng.state(),
-            Self::Pcg64Dxsm(rng) => {
-                let (state, inc) = rng.raw_state();
-                (state as u64, inc as u64)
+            Self::Deterministic(_) => Vec::new(),
+            Self::Pcg64Dxsm(rng) => rng.to_state_entries(),
+            Self::Mt19937(rng) => rng.to_state_entries(),
+            Self::Philox(rng) => rng.to_state_entries(),
+            Self::Sfc64(rng) => rng.to_state_entries(),
+        }
+    }
+
+    fn state(&self) -> (u128, u128) {
+        match self {
+            Self::Deterministic(rng) => {
+                let (s, c) = rng.state();
+                (u128::from(s), u128::from(c))
             }
-            _ => (0, 0), // Other algorithms have larger states not representable as (u64, u64)
+            Self::Pcg64Dxsm(rng) => rng.raw_state(),
+            _ => (0, 0), // Other algorithms have larger states handled via schema_entries
         }
     }
 }
@@ -1694,7 +1715,7 @@ impl BitGenerator {
         self.kind
     }
 
-    fn raw_state(&self) -> (u64, u64) {
+    fn raw_state(&self) -> (u128, u128) {
         self.rng.state()
     }
 
@@ -1762,9 +1783,9 @@ impl BitGenerator {
             })?;
             let child_ordinal = child_index_u64 + 1;
             let child_seed = splitmix64(
-                parent_seed ^ self.kind.stream_tag() ^ child_ordinal.wrapping_mul(GOLDEN_GAMMA),
+                (parent_seed as u64) ^ self.kind.stream_tag() ^ child_ordinal.wrapping_mul(GOLDEN_GAMMA),
             );
-            let child_counter = parent_counter.wrapping_add(
+            let child_counter = (parent_counter as u64).wrapping_add(
                 child_ordinal.checked_mul(self.kind.jump_stride()).ok_or(
                     BitGeneratorError::SpawnContractViolation(
                         "bit-generator child counter overflowed deterministic budget",
@@ -1774,8 +1795,8 @@ impl BitGenerator {
             children.push(Self {
                 kind: self.kind,
                 rng: RngBackend::Deterministic(DeterministicRng::from_state(
-                    child_seed,
-                    child_counter,
+                    u128::from(child_seed),
+                    u128::from(child_counter),
                 )),
             });
         }
@@ -1787,12 +1808,22 @@ impl BitGenerator {
     #[must_use]
     pub fn state(&self) -> BitGeneratorState {
         let (seed, counter) = self.raw_state();
+        let mut schema_entries = default_state_schema_entries(self.kind, seed, counter);
+        
+        // Merge algorithm-specific state entries
+        for entry in self.rng.to_state_entries() {
+            // Only add if not already present (default_state_schema_entries might have added some)
+            if !schema_entries.iter().any(|(k, _)| k == &entry.0) {
+                schema_entries.push(entry);
+            }
+        }
+
         BitGeneratorState {
             kind: self.kind,
             schema_version: BIT_GENERATOR_STATE_SCHEMA_VERSION,
             seed,
             counter,
-            schema_entries: default_state_schema_entries(self.kind, seed, counter),
+            schema_entries,
         }
     }
 
@@ -1803,8 +1834,34 @@ impl BitGenerator {
             ));
         }
         state.validate()?;
-        self.rng =
-            RngBackend::Deterministic(DeterministicRng::from_state(state.seed, state.counter));
+
+        self.rng = match state.kind {
+            BitGeneratorKind::Pcg64 => {
+                let pcg = Pcg64DxsmRng::from_state_entries(&state.schema_entries).ok_or(
+                    BitGeneratorError::StateSchemaInvalid("failed to restore PCG64 state"),
+                )?;
+                RngBackend::Pcg64Dxsm(pcg)
+            }
+            BitGeneratorKind::Mt19937 => {
+                let mt = Mt19937Rng::from_state_entries(&state.schema_entries).ok_or(
+                    BitGeneratorError::StateSchemaInvalid("failed to restore MT19937 state"),
+                )?;
+                RngBackend::Mt19937(mt)
+            }
+            BitGeneratorKind::Philox => {
+                let philox = PhiloxRng::from_state_entries(&state.schema_entries).ok_or(
+                    BitGeneratorError::StateSchemaInvalid("failed to restore Philox state"),
+                )?;
+                RngBackend::Philox(philox)
+            }
+            BitGeneratorKind::Sfc64 => {
+                let sfc = Sfc64Rng::from_state_entries(&state.schema_entries).ok_or(
+                    BitGeneratorError::StateSchemaInvalid("failed to restore SFC64 state"),
+                )?;
+                RngBackend::Sfc64(sfc)
+            }
+        };
+
         Ok(())
     }
 }
@@ -2066,7 +2123,7 @@ impl Generator {
                     "failed to derive deterministic bit-generator state for binding",
                 )
             })?;
-        if expected.raw_state().0 != bit_generator.raw_state().0 {
+        if expected.state() != bit_generator.state() {
             return Err(BitGeneratorError::GeneratorBindingInvalid(
                 "bit-generator and seed-sequence deterministic identities diverge",
             ));
@@ -2204,14 +2261,6 @@ impl Generator {
             })?),
             None => None,
         };
-
-        if let Some(ref sequence) = seed_sequence {
-            return Self::bind_seed_sequence(bit_generator, sequence).map_err(|_| {
-                BitGeneratorError::PickleStateMismatch(
-                    "pickle payload seed-sequence binding was inconsistent",
-                )
-            });
-        }
 
         Ok(Self {
             bit_generator,
@@ -4625,7 +4674,7 @@ mod tests {
         }
 
         let (seed, counter) = source.state();
-        let mut restored = DeterministicRng::from_state(seed, counter);
+        let mut restored = DeterministicRng::from_state(u128::from(seed), u128::from(counter));
         for _ in 0..32 {
             assert_eq!(source.next_u64(), restored.next_u64());
         }

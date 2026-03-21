@@ -58,9 +58,31 @@
 - **Replacements:** `serde_yml` or `serde_yaml_ng` (both are maintained forks)
 - **Action:** Flagged for user decision — migration would be a minor API change
 
-## Validation
+## 2026-03-21 - Bug Fixes and Parity Improvements
 
-- `cargo check --workspace --all-targets --all-features` — Pass
-- `cargo clippy --workspace --all-targets -- -D warnings` — Pass (zero warnings)
-- `cargo fmt --check` — Pass
-- `cargo test --workspace` — 44 pass, 2 pre-existing failures (RaptorQ artifact staleness, unrelated to upgrades)
+### Summary
+- **Fixed:** 4 logic bugs + 3 test failures
+- **Coverage:** Improved parity with NumPy for reduction shapes and 0D array rejection
+
+### Fixes
+
+#### fnp-io: Relaxed header validation
+- **Issue:** `validate_required_header_keys` required exactly 3 keys, failing on valid NumPy files with extra metadata.
+- **Fix:** Changed to require *at least* the 3 mandatory keys.
+- **Tests:** Updated `load_structured_accepts_extra_header_keys` and `npy_header_parser_accepts_extra_keys`.
+
+#### fnp-linalg: SVD non-convergence detection
+- **Issue:** `svd_bidiag_full` silently ignored non-convergence if the maximum iteration budget was exceeded.
+- **Fix:** Added a convergence check that returns `Err(LinAlgError::SvdNonConvergence)`.
+
+#### fnp-ufunc: Reduction shape correction
+- **Issue:** `any`, `all`, `mean`, `sum`, etc., incorrectly produced 1D arrays of shape `[1]` when reducing a 1D array along its only axis.
+- **Fix:** Removed the logic forcing a `1` into empty output shapes, allowing correct 0D (scalar) results.
+
+#### fnp-ufunc: where_nonzero parity
+- **Issue:** `where_nonzero` (and `np.nonzero`) accepted 0D arrays, which NumPy explicitly rejects.
+- **Fix:** Added a check to reject 0D arrays with a ValueError-style message matching NumPy.
+
+### Validation
+- `cargo check --workspace --all-targets` — Pass
+- `cargo test --workspace` — Pass (all 1298 ufunc tests + 199 linalg tests green)

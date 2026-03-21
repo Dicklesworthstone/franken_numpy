@@ -1,4 +1,4 @@
-use fnp_random::{Generator, BitGeneratorKind};
+use fnp_random::Generator;
 
 fn main() {
     let seed = 12345;
