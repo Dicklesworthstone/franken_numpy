@@ -2036,13 +2036,13 @@ pub fn eigvalsh_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
     let (mut d, mut e, _q) = tridiag_reduce(a, n);
     tridiag_eig_qr(&mut d, &mut e, None, n);
 
-    d.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    d.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     Ok(d)
 }
 
 /// Compute eigenvalues and eigenvectors of a symmetric NxN matrix via QR iteration.
 /// Returns (eigenvalues, eigenvectors_flat) where eigenvectors are stored column-major
-/// in a flat n*n array. Eigenvalues are in descending order.
+/// in a flat n*n array. Eigenvalues are in ascending order (NumPy convention).
 pub fn eigh_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
     if a.len() != n * n || n == 0 {
         return Err(LinAlgError::ShapeContractViolation(
@@ -2056,9 +2056,9 @@ pub fn eigh_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError
     let (mut d, mut e, mut q) = tridiag_reduce(a, n);
     tridiag_eig_qr(&mut d, &mut e, Some(&mut q), n);
 
-    // Sort eigenvalues descending and permute eigenvectors accordingly
+    // Sort eigenvalues ascending (NumPy convention) and permute eigenvectors accordingly
     let mut indices: Vec<usize> = (0..n).collect();
-    indices.sort_by(|&a, &b| d[b].partial_cmp(&d[a]).unwrap_or(std::cmp::Ordering::Equal));
+    indices.sort_by(|&a, &b| d[a].partial_cmp(&d[b]).unwrap_or(std::cmp::Ordering::Equal));
 
     let sorted_eigenvalues: Vec<f64> = indices.iter().map(|&i| d[i]).collect();
     let mut sorted_v = vec![0.0; n * n];
@@ -5631,11 +5631,11 @@ mod tests {
         let a = [2.0, 1.0, 0.0, 1.0, 3.0, 1.0, 0.0, 1.0, 2.0];
         let eigvals = eigvalsh_nxn(&a, 3).expect("eigvalsh");
         assert_eq!(eigvals.len(), 3);
-        // Eigenvalues of this matrix: 1, 2, 4 (compute via characteristic polynomial)
+        // Eigenvalues of this matrix: 1, 2, 4 (ascending, NumPy convention)
         // x^3 - 7x^2 + 14x - 8 = (x-1)(x-2)(x-4)
-        assert!((eigvals[0] - 4.0).abs() < 1e-6, "eig0={}", eigvals[0]);
+        assert!((eigvals[0] - 1.0).abs() < 1e-6, "eig0={}", eigvals[0]);
         assert!((eigvals[1] - 2.0).abs() < 1e-6, "eig1={}", eigvals[1]);
-        assert!((eigvals[2] - 1.0).abs() < 1e-6, "eig2={}", eigvals[2]);
+        assert!((eigvals[2] - 4.0).abs() < 1e-6, "eig2={}", eigvals[2]);
     }
 
     #[test]
