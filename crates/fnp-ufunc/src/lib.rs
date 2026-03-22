@@ -1098,6 +1098,20 @@ pub struct BinaryDispatchPlan {
     pub out_dtype: DType,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FixedSignature {
+    pub inputs: Vec<DType>,
+    pub outputs: Vec<DType>,
+    canonical: String,
+}
+
+impl FixedSignature {
+    #[must_use]
+    pub fn canonical(&self) -> &str {
+        &self.canonical
+    }
+}
+
 pub fn normalize_signature_keywords(
     sig: Option<&str>,
     signature: Option<&str>,
@@ -1118,15 +1132,10 @@ pub fn normalize_signature_keywords(
     }
 
     match (sig_trimmed, signature_trimmed) {
-        (Some(sig_raw), Some(signature_raw)) => {
-            if sig_raw != signature_raw {
-                return Err(UFuncError::SignatureConflict {
-                    sig: sig_raw.to_string(),
-                    signature: signature_raw.to_string(),
-                });
-            }
-            Ok(Some(sig_raw.to_string()))
-        }
+        (Some(sig_raw), Some(signature_raw)) => Err(UFuncError::SignatureConflict {
+            sig: sig_raw.to_string(),
+            signature: signature_raw.to_string(),
+        }),
         (Some(sig_raw), None) => Ok(Some(sig_raw.to_string())),
         (None, Some(signature_raw)) => Ok(Some(signature_raw.to_string())),
         (None, None) => Ok(None),
@@ -1172,6 +1181,59 @@ pub fn parse_gufunc_signature(
         outputs,
         canonical,
     }))
+}
+
+pub fn parse_fixed_signature_string(
+    signature: &str,
+    nin: usize,
+    nout: usize,
+) -> Result<FixedSignature, UFuncError> {
+    let normalized = signature.trim();
+    if normalized.is_empty() {
+        return Err(UFuncError::FixedSignatureInvalid {
+            detail: "signature keyword must not be empty".to_string(),
+        });
+    }
+
+    let (inputs_raw, outputs_raw) =
+        normalized
+            .split_once("->")
+            .ok_or_else(|| UFuncError::SignatureParse {
+                detail: format!(
+                    "signature '{}' must contain exactly one '->' separator",
+                    normalized
+                ),
+            })?;
+
+    if outputs_raw.contains("->") {
+        return Err(UFuncError::SignatureParse {
+            detail: format!(
+                "signature '{}' must contain exactly one '->' separator",
+                normalized
+            ),
+        });
+    }
+
+    let input_tokens = parse_fixed_signature_side(inputs_raw, nin, "input")?;
+    let output_tokens = parse_fixed_signature_side(outputs_raw, nout, "output")?;
+    let inputs = input_tokens
+        .iter()
+        .map(|token| parse_fixed_signature_dtype(token))
+        .collect::<Result<Vec<_>, _>>()?;
+    let outputs = output_tokens
+        .iter()
+        .map(|token| parse_fixed_signature_dtype(token))
+        .collect::<Result<Vec<_>, _>>()?;
+    let canonical = format!(
+        "{}->{}",
+        canonicalize_fixed_signature_side(&input_tokens),
+        canonicalize_fixed_signature_side(&output_tokens)
+    );
+    Ok(FixedSignature {
+        inputs,
+        outputs,
+        canonical,
+    })
 }
 
 pub fn validate_override_payload_class(payload_class: &str) -> Result<(), UFuncError> {
@@ -1395,6 +1457,7 @@ impl PartialEq for UFuncArray {
 }
 
 pub type SharedBuffer = Arc<RwLock<Vec<f64>>>;
+pub type SharedSidecar = Arc<RwLock<IntegerSidecar>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AxisSlice {
@@ -1425,6 +1488,7 @@ impl AxisSlice {
 pub struct UFuncArrayView {
     shape: Vec<usize>,
     buffer: SharedBuffer,
+    integer_sidecar: Option<SharedSidecar>,
     offset: isize,
     strides: Vec<isize>,
     writable: bool,
@@ -1435,16 +1499,18 @@ impl UFuncArrayView {
     pub fn new(
         shape: Vec<usize>,
         buffer: SharedBuffer,
+        integer_sidecar: Option<SharedSidecar>,
         offset: isize,
         strides: Vec<isize>,
         dtype: DType,
     ) -> Result<Self, UFuncError> {
-        Self::new_with_writable(shape, buffer, offset, strides, dtype, true)
+        Self::new_with_writable(shape, buffer, integer_sidecar, offset, strides, dtype, true)
     }
 
     pub fn new_with_writable(
         shape: Vec<usize>,
         buffer: SharedBuffer,
+        integer_sidecar: Option<SharedSidecar>,
         offset: isize,
         strides: Vec<isize>,
         dtype: DType,
@@ -1467,6 +1533,7 @@ impl UFuncArrayView {
         Ok(Self {
             shape,
             buffer,
+            integer_sidecar,
             offset,
             strides,
             writable,
@@ -1614,6 +1681,15 @@ impl UFuncArrayView {
             .map_err(|_| UFuncError::Msg("shared view: write lock poisoned".to_string()))?;
         let offset = self.compute_offset(index, data.len())?;
         data[offset] = value;
+        if let Some(ref sidecar) = self.integer_sidecar {
+            let mut s = sidecar
+                .write()
+                .map_err(|_| UFuncError::Msg("shared view: sidecar lock poisoned".to_string()))?;
+            match &mut *s {
+                IntegerSidecar::I64(v) => v[offset] = value as i64,
+                IntegerSidecar::U64(v) => v[offset] = value as u64,
+            }
+        }
         Ok(())
     }
 
@@ -1717,6 +1793,7 @@ impl UFuncArrayView {
         Self::new(
             new_shape,
             Arc::clone(&self.buffer),
+            self.integer_sidecar.as_ref().map(Arc::clone),
             new_offset,
             new_strides,
             self.dtype,
@@ -1728,8 +1805,22 @@ impl UFuncArrayView {
     }
 
     pub fn to_array(&self) -> Result<UFuncArray, UFuncError> {
-        let (values, _) = self.materialize_with_indices()?;
-        UFuncArray::new(self.shape.clone(), values, self.dtype)
+        let (values, indices) = self.materialize_with_indices()?;
+        let mut arr = UFuncArray::new(self.shape.clone(), values, self.dtype)?;
+        if let Some(ref sidecar) = self.integer_sidecar {
+            let s = sidecar
+                .read()
+                .map_err(|_| UFuncError::Msg("shared view: sidecar lock poisoned".to_string()))?;
+            arr.integer_sidecar = match &*s {
+                IntegerSidecar::I64(v) => {
+                    Some(IntegerSidecar::I64(indices.iter().map(|&i| v[i]).collect()))
+                }
+                IntegerSidecar::U64(v) => {
+                    Some(IntegerSidecar::U64(indices.iter().map(|&i| v[i]).collect()))
+                }
+            };
+        }
+        Ok(arr)
     }
 
     pub fn materialize_with_indices(&self) -> Result<(Vec<f64>, Vec<usize>), UFuncError> {
@@ -1818,6 +1909,7 @@ impl UFuncArrayView {
         Self::new_with_writable(
             shape,
             Arc::clone(&self.buffer),
+            self.integer_sidecar.as_ref().map(Arc::clone),
             self.offset,
             strides,
             self.dtype,
@@ -1857,10 +1949,11 @@ impl UFuncArrayView {
         Self::new_with_writable(
             out_shape,
             Arc::clone(&self.buffer),
+            self.integer_sidecar.as_ref().map(Arc::clone),
             self.offset,
             out_strides,
             self.dtype,
-            false, // sliding windows alias → readonly
+            false,
         )
     }
 
@@ -2782,6 +2875,9 @@ impl UFuncArray {
         UFuncArrayView::new(
             self.shape.clone(),
             Arc::new(RwLock::new(self.values.clone())),
+            self.integer_sidecar
+                .as_ref()
+                .map(|s| Arc::new(RwLock::new(s.clone()))),
             0,
             strides,
             self.dtype,
@@ -2841,6 +2937,7 @@ impl UFuncArray {
         UFuncArrayView::new_with_writable(
             target_shape.to_vec(),
             Arc::clone(&base.buffer),
+            base.integer_sidecar.as_ref().map(Arc::clone),
             base.offset,
             out_strides,
             self.dtype,
@@ -2965,17 +3062,14 @@ impl UFuncArray {
                 .collect::<Vec<_>>();
             dispatch_float_error_flags(float_error_flags, op.name())?;
             let mut out = Self::from_values_with_dtype(out_shape, values, out_dtype)?;
-            if let (Some(l_sidecar), Some(r_sidecar)) =
-                (&self.integer_sidecar, &rhs.integer_sidecar)
+            if (self.integer_sidecar.is_some() || rhs.integer_sidecar.is_some())
+                && let (Some(l), Some(r)) = (
+                    self.synthesized_integer_sidecar(),
+                    rhs.synthesized_integer_sidecar(),
+                )
             {
-                out.integer_sidecar = binary_op_sidecar(
-                    l_sidecar,
-                    r_sidecar,
-                    op,
-                    &out.shape,
-                    &self.shape,
-                    &rhs.shape,
-                );
+                out.integer_sidecar =
+                    binary_op_sidecar(&l, &r, op, &out.shape, &self.shape, &rhs.shape);
             }
             return Ok(out);
         }
@@ -3023,15 +3117,14 @@ impl UFuncArray {
 
         dispatch_float_error_flags(float_error_flags, op.name())?;
         let mut out = Self::from_values_with_dtype(out_shape, out_values, out_dtype)?;
-        if let (Some(l_sidecar), Some(r_sidecar)) = (&self.integer_sidecar, &rhs.integer_sidecar) {
-            out.integer_sidecar = binary_op_sidecar(
-                l_sidecar,
-                r_sidecar,
-                op,
-                &out.shape,
-                &self.shape,
-                &rhs.shape,
-            );
+        if (self.integer_sidecar.is_some() || rhs.integer_sidecar.is_some())
+            && let (Some(l), Some(r)) = (
+                self.synthesized_integer_sidecar(),
+                rhs.synthesized_integer_sidecar(),
+            )
+        {
+            out.integer_sidecar =
+                binary_op_sidecar(&l, &r, op, &out.shape, &self.shape, &rhs.shape);
         }
         Ok(out)
     }
@@ -7469,6 +7562,10 @@ impl UFuncArray {
     /// Values are reinterpreted: for integer dtypes, values are truncated;
     /// for bool, non-zero becomes 1.0.
     pub fn astype(&self, dtype: DType) -> Self {
+        if self.dtype == dtype {
+            return self.clone();
+        }
+
         let values: Vec<f64> = match dtype {
             DType::Bool => self
                 .values
@@ -7494,11 +7591,33 @@ impl UFuncArray {
                 self.values.clone()
             }
         };
+
+        let mut integer_sidecar = None;
+        if let Some(ref sidecar) = self.integer_sidecar {
+            match (sidecar, dtype) {
+                (IntegerSidecar::I64(v), DType::I64) => {
+                    integer_sidecar = Some(IntegerSidecar::I64(v.clone()));
+                }
+                (IntegerSidecar::U64(v), DType::U64) => {
+                    integer_sidecar = Some(IntegerSidecar::U64(v.clone()));
+                }
+                (IntegerSidecar::I64(v), DType::U64) => {
+                    integer_sidecar =
+                        Some(IntegerSidecar::U64(v.iter().map(|&x| x as u64).collect()));
+                }
+                (IntegerSidecar::U64(v), DType::I64) => {
+                    integer_sidecar =
+                        Some(IntegerSidecar::I64(v.iter().map(|&x| x as i64).collect()));
+                }
+                _ => {}
+            }
+        }
+
         Self {
             shape: self.shape.clone(),
             values,
             dtype,
-            integer_sidecar: None,
+            integer_sidecar,
         }
     }
 
@@ -11399,6 +11518,12 @@ impl UFuncArray {
             flat += resolved as usize * strides[i];
         }
         self.values[flat] = value;
+        if let Some(ref mut sidecar) = self.integer_sidecar {
+            match sidecar {
+                IntegerSidecar::I64(v) => v[flat] = value as i64,
+                IntegerSidecar::U64(v) => v[flat] = value as u64,
+            }
+        }
         Ok(())
     }
 
@@ -13014,6 +13139,7 @@ impl UFuncArray {
         let src_len = i128::try_from(self.values.len())
             .map_err(|_| UFuncError::Msg("as_strided: source length overflow".to_string()))?;
         let mut values = Vec::with_capacity(out_count);
+        let mut source_indices = Vec::with_capacity(out_count);
         for flat_idx in 0..out_count {
             let mut src_offset = base_shift;
             let mut rem = flat_idx;
@@ -13033,12 +13159,13 @@ impl UFuncArray {
                 ));
             }
             values.push(self.values[src_offset as usize]);
+            source_indices.push(src_offset as usize);
         }
         Ok(Self {
             shape: shape.to_vec(),
             values,
             dtype: self.dtype,
-            integer_sidecar: None,
+            integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
         })
     }
 
@@ -13084,6 +13211,7 @@ impl UFuncArray {
         let win_strides = c_strides_elems(window_shape);
 
         let mut values = Vec::with_capacity(total);
+        let mut source_indices = Vec::with_capacity(total);
         for view_flat in 0..view_total {
             // Compute the N-D view index
             let mut view_idx = vec![0usize; ndim];
@@ -13102,6 +13230,7 @@ impl UFuncArray {
                     src_flat += (view_idx[d] + wi) * src_strides[d];
                 }
                 values.push(self.values[src_flat]);
+                source_indices.push(src_flat);
             }
         }
 
@@ -13109,7 +13238,7 @@ impl UFuncArray {
             shape: out_shape,
             values,
             dtype: self.dtype,
-            integer_sidecar: None,
+            integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
         })
     }
 
@@ -14020,7 +14149,7 @@ impl UFuncArray {
     #[must_use]
     pub fn base_repr(number: i64, base: u32, padding: usize) -> String {
         const DIGITS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        if base < 2 || base > 36 {
+        if !(2..=36).contains(&base) {
             return String::new();
         }
         let negative = number < 0;
@@ -14855,6 +14984,83 @@ fn canonicalize_signature_groups(groups: &[Vec<String>]) -> String {
         .join(",")
 }
 
+fn canonicalize_fixed_signature_side(tokens: &[String]) -> String {
+    if tokens.iter().all(|token| token.len() == 1) {
+        tokens.concat()
+    } else {
+        tokens.join(",")
+    }
+}
+
+fn parse_fixed_signature_side(
+    raw: &str,
+    expected_arity: usize,
+    side: &str,
+) -> Result<Vec<String>, UFuncError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(UFuncError::SignatureParse {
+            detail: format!("{side} signature must not be empty"),
+        });
+    }
+
+    let tokens = if trimmed.contains(',') {
+        trimmed
+            .split(',')
+            .map(str::trim)
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    } else if expected_arity <= 1 {
+        vec![trimmed.to_string()]
+    } else {
+        trimmed.chars().map(|ch| ch.to_string()).collect::<Vec<_>>()
+    };
+
+    if tokens.iter().any(|token| token.is_empty()) {
+        return Err(UFuncError::SignatureParse {
+            detail: format!("{side} signature contains an empty dtype token"),
+        });
+    }
+
+    if tokens.len() != expected_arity {
+        return Err(UFuncError::FixedSignatureInvalid {
+            detail: format!(
+                "{side} signature arity mismatch: expected {expected_arity} token(s) but got {}",
+                tokens.len()
+            ),
+        });
+    }
+
+    Ok(tokens)
+}
+
+fn parse_fixed_signature_dtype(token: &str) -> Result<DType, UFuncError> {
+    let normalized = token.trim();
+    let alias = match normalized {
+        "?" => "bool",
+        "b" => "i8",
+        "B" => "u8",
+        "h" => "i16",
+        "H" => "u16",
+        "i" => "i32",
+        "I" => "u32",
+        "l" | "q" | "p" => "i64",
+        "L" | "Q" | "P" => "u64",
+        "e" => "f16",
+        "f" => "f32",
+        "d" | "g" => "f64",
+        "F" => "complex64",
+        "D" | "G" => "complex128",
+        "M" => "datetime64",
+        "m" => "timedelta64",
+        other => other,
+    };
+
+    DType::parse(alias).ok_or_else(|| UFuncError::SignatureParse {
+        detail: format!("unsupported fixed signature dtype token '{token}'"),
+    })
+}
+
 fn validate_core_dim_identifier(token: &str) -> Result<(), UFuncError> {
     let mut chars = token.chars();
     let Some(first) = chars.next() else {
@@ -15135,111 +15341,146 @@ fn binary_op_sidecar(
     }
 
     let out_count = element_count(out_shape).ok()?;
-    let lhs_v = match lhs {
-        IntegerSidecar::I64(v) => v,
-        _ => return None, // Only supporting same-type I64 for now
-    };
-    let rhs_v = match rhs {
-        IntegerSidecar::I64(v) => v,
-        _ => return None,
-    };
 
-    let mut out_v = vec![0i64; out_count];
+    match (lhs, rhs) {
+        (IntegerSidecar::I64(lhs_v), IntegerSidecar::I64(rhs_v)) => {
+            let mut out_v = vec![0i64; out_count];
+            if lhs_orig_shape == out_shape && rhs_orig_shape == out_shape {
+                for i in 0..out_count {
+                    let a = lhs_v[i];
+                    let b = rhs_v[i];
+                    out_v[i] = apply_binary_op_i64(op, a, b);
+                }
+            } else {
+                let lhs_strides = contiguous_strides_elems(lhs_orig_shape);
+                let rhs_strides = contiguous_strides_elems(rhs_orig_shape);
+                let lhs_axis_steps =
+                    aligned_broadcast_axis_steps(out_shape.len(), lhs_orig_shape, &lhs_strides);
+                let rhs_axis_steps =
+                    aligned_broadcast_axis_steps(out_shape.len(), rhs_orig_shape, &rhs_strides);
 
-    if lhs_orig_shape == out_shape && rhs_orig_shape == out_shape {
-        for i in 0..out_count {
-            let a = lhs_v[i];
-            let b = rhs_v[i];
-            out_v[i] = match op {
-                BinaryOp::Add => a.wrapping_add(b),
-                BinaryOp::Sub => a.wrapping_sub(b),
-                BinaryOp::Mul => a.wrapping_mul(b),
-                BinaryOp::FloorDivide => {
-                    if b != 0 {
-                        a.div_euclid(b)
-                    } else {
-                        0
+                let mut out_multi = vec![0usize; out_shape.len()];
+                let mut lhs_flat = 0usize;
+                let mut rhs_flat = 0usize;
+
+                for (flat, slot) in out_v.iter_mut().enumerate().take(out_count) {
+                    let a = lhs_v[lhs_flat];
+                    let b = rhs_v[rhs_flat];
+                    *slot = apply_binary_op_i64(op, a, b);
+
+                    if flat + 1 == out_count || out_shape.is_empty() {
+                        continue;
+                    }
+                    for axis in (0..out_shape.len()).rev() {
+                        out_multi[axis] += 1;
+                        lhs_flat += lhs_axis_steps[axis];
+                        rhs_flat += rhs_axis_steps[axis];
+                        if out_multi[axis] < out_shape[axis] {
+                            break;
+                        }
+                        out_multi[axis] = 0;
+                        lhs_flat -= lhs_axis_steps[axis] * out_shape[axis];
+                        rhs_flat -= rhs_axis_steps[axis] * out_shape[axis];
                     }
                 }
-                BinaryOp::Remainder => {
-                    if b != 0 {
-                        a.rem_euclid(b)
-                    } else {
-                        0
+            }
+            Some(IntegerSidecar::I64(out_v))
+        }
+        (IntegerSidecar::U64(lhs_v), IntegerSidecar::U64(rhs_v)) => {
+            let mut out_v = vec![0u64; out_count];
+            if lhs_orig_shape == out_shape && rhs_orig_shape == out_shape {
+                for i in 0..out_count {
+                    let a = lhs_v[i];
+                    let b = rhs_v[i];
+                    out_v[i] = apply_binary_op_u64(op, a, b);
+                }
+            } else {
+                let lhs_strides = contiguous_strides_elems(lhs_orig_shape);
+                let rhs_strides = contiguous_strides_elems(rhs_orig_shape);
+                let lhs_axis_steps =
+                    aligned_broadcast_axis_steps(out_shape.len(), lhs_orig_shape, &lhs_strides);
+                let rhs_axis_steps =
+                    aligned_broadcast_axis_steps(out_shape.len(), rhs_orig_shape, &rhs_strides);
+
+                let mut out_multi = vec![0usize; out_shape.len()];
+                let mut lhs_flat = 0usize;
+                let mut rhs_flat = 0usize;
+
+                for (flat, slot) in out_v.iter_mut().enumerate().take(out_count) {
+                    let a = lhs_v[lhs_flat];
+                    let b = rhs_v[rhs_flat];
+                    *slot = apply_binary_op_u64(op, a, b);
+
+                    if flat + 1 == out_count || out_shape.is_empty() {
+                        continue;
+                    }
+                    for axis in (0..out_shape.len()).rev() {
+                        out_multi[axis] += 1;
+                        lhs_flat += lhs_axis_steps[axis];
+                        rhs_flat += rhs_axis_steps[axis];
+                        if out_multi[axis] < out_shape[axis] {
+                            break;
+                        }
+                        out_multi[axis] = 0;
+                        lhs_flat -= lhs_axis_steps[axis] * out_shape[axis];
+                        rhs_flat -= rhs_axis_steps[axis] * out_shape[axis];
                     }
                 }
-                BinaryOp::BitwiseAnd => a & b,
-                BinaryOp::BitwiseOr => a | b,
-                BinaryOp::BitwiseXor => a ^ b,
-                BinaryOp::LeftShift => a.wrapping_shl(b as u32),
-                BinaryOp::RightShift => a.wrapping_shr(b as u32),
-                _ => unreachable!(),
-            };
+            }
+            Some(IntegerSidecar::U64(out_v))
         }
-        return Some(IntegerSidecar::I64(out_v));
+        _ => None,
     }
+}
 
-    // Broadcasting implementation
-    let lhs_strides = contiguous_strides_elems(lhs_orig_shape);
-    let rhs_strides = contiguous_strides_elems(rhs_orig_shape);
-    let lhs_axis_steps =
-        aligned_broadcast_axis_steps(out_shape.len(), lhs_orig_shape, &lhs_strides);
-    let rhs_axis_steps =
-        aligned_broadcast_axis_steps(out_shape.len(), rhs_orig_shape, &rhs_strides);
-
-    let mut out_multi = vec![0usize; out_shape.len()];
-    let mut lhs_flat = 0usize;
-    let mut rhs_flat = 0usize;
-
-    for (flat, slot) in out_v.iter_mut().enumerate().take(out_count) {
-        let a = lhs_v[lhs_flat];
-        let b = rhs_v[rhs_flat];
-        *slot = match op {
-            BinaryOp::Add => a.wrapping_add(b),
-            BinaryOp::Sub => a.wrapping_sub(b),
-            BinaryOp::Mul => a.wrapping_mul(b),
-            BinaryOp::FloorDivide => {
-                if b != 0 {
-                    a.div_euclid(b)
-                } else {
-                    0
-                }
+fn apply_binary_op_i64(op: BinaryOp, a: i64, b: i64) -> i64 {
+    match op {
+        BinaryOp::Add => a.wrapping_add(b),
+        BinaryOp::Sub => a.wrapping_sub(b),
+        BinaryOp::Mul => a.wrapping_mul(b),
+        BinaryOp::FloorDivide => {
+            if b != 0 {
+                a.div_euclid(b)
+            } else {
+                0
             }
-            BinaryOp::Remainder => {
-                if b != 0 {
-                    a.rem_euclid(b)
-                } else {
-                    0
-                }
-            }
-            BinaryOp::BitwiseAnd => a & b,
-            BinaryOp::BitwiseOr => a | b,
-            BinaryOp::BitwiseXor => a ^ b,
-            BinaryOp::LeftShift => a.wrapping_shl(b as u32),
-            BinaryOp::RightShift => a.wrapping_shr(b as u32),
-            _ => unreachable!(),
-        };
-
-        if flat + 1 == out_count || out_shape.is_empty() {
-            continue;
         }
-
-        for axis in (0..out_shape.len()).rev() {
-            out_multi[axis] += 1;
-            lhs_flat += lhs_axis_steps[axis];
-            rhs_flat += rhs_axis_steps[axis];
-
-            if out_multi[axis] < out_shape[axis] {
-                break;
+        BinaryOp::Remainder => {
+            if b != 0 {
+                a.rem_euclid(b)
+            } else {
+                0
             }
-
-            out_multi[axis] = 0;
-            lhs_flat -= lhs_axis_steps[axis] * out_shape[axis];
-            rhs_flat -= rhs_axis_steps[axis] * out_shape[axis];
         }
+        BinaryOp::BitwiseAnd => a & b,
+        BinaryOp::BitwiseOr => a | b,
+        BinaryOp::BitwiseXor => a ^ b,
+        BinaryOp::LeftShift => a.wrapping_shl(b as u32),
+        BinaryOp::RightShift => a.wrapping_shr(b as u32),
+        _ => 0,
     }
+}
 
-    Some(IntegerSidecar::I64(out_v))
+fn apply_binary_op_u64(op: BinaryOp, a: u64, b: u64) -> u64 {
+    match op {
+        BinaryOp::Add => a.wrapping_add(b),
+        BinaryOp::Sub => a.wrapping_sub(b),
+        BinaryOp::Mul => a.wrapping_mul(b),
+        BinaryOp::FloorDivide => a.checked_div(b).unwrap_or(0),
+        BinaryOp::Remainder => {
+            if b != 0 {
+                a % b
+            } else {
+                0
+            }
+        }
+        BinaryOp::BitwiseAnd => a & b,
+        BinaryOp::BitwiseOr => a | b,
+        BinaryOp::BitwiseXor => a ^ b,
+        BinaryOp::LeftShift => a.wrapping_shl(b as u32),
+        BinaryOp::RightShift => a.wrapping_shr(b as u32),
+        _ => 0,
+    }
 }
 
 fn reduce_fold_axis_contiguous(
@@ -21382,12 +21623,12 @@ mod tests {
         lagfit, lagfromroots, lagmul, lagroots, lagsub, lagval, lcm_arrays, leg2poly, legadd,
         legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub, legval, ma_is_mask,
         ma_is_masked, ma_make_mask, ma_mask_or, modf, normalize_signature_keywords, pad_empty,
-        pad_linear_ramp, pad_stat, parse_gufunc_signature, plan_binary_dispatch, poly2cheb,
-        poly2herm, poly2lag, poly2leg, register_custom_loop, scimath_arccos, scimath_arcsin,
-        scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_power, scimath_sqrt,
-        seterr, seterr_state, seterrcall, sort_complex, take_float_error_events, unique_all,
-        unique_counts, unique_inverse, unique_values, validate_override_payload_class,
-        where_nonzero,
+        pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
+        plan_binary_dispatch, poly2cheb, poly2herm, poly2lag, poly2leg, register_custom_loop,
+        scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log, scimath_log2, scimath_log10,
+        scimath_power, scimath_sqrt, seterr, seterr_state, seterrcall, sort_complex,
+        take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
+        validate_override_payload_class, where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
@@ -22208,13 +22449,13 @@ mod tests {
     }
 
     #[test]
-    fn normalize_signature_keywords_accepts_matching_sig_and_signature() {
-        let normalized = normalize_signature_keywords(
+    fn normalize_signature_keywords_rejects_dual_sig_and_signature() {
+        let err = normalize_signature_keywords(
             Some(" (batch,m),(m,n)->(batch,n) "),
             Some("(batch,m),(m,n)->(batch,n)"),
         )
-        .expect("matching signature keywords should normalize");
-        assert_eq!(normalized.as_deref(), Some("(batch,m),(m,n)->(batch,n)"));
+        .expect_err("sig and signature should be mutually exclusive");
+        assert!(matches!(err, UFuncError::SignatureConflict { .. }));
     }
 
     #[test]
@@ -22244,6 +22485,44 @@ mod tests {
             .expect_err("invalid grammar must fail");
         assert!(matches!(err, UFuncError::SignatureParse { .. }));
         assert_eq!(err.reason_code(), "ufunc_signature_parse_failed");
+    }
+
+    #[test]
+    fn parse_fixed_signature_string_accepts_numpy_shorthand() {
+        let signature =
+            parse_fixed_signature_string("ii->i", 2, 1).expect("fixed signature should parse");
+        assert_eq!(signature.inputs, vec![DType::I32, DType::I32]);
+        assert_eq!(signature.outputs, vec![DType::I32]);
+        assert_eq!(signature.canonical(), "ii->i");
+    }
+
+    #[test]
+    fn parse_fixed_signature_string_accepts_datetime_tokens() {
+        let signature = parse_fixed_signature_string("m8,m8->m8", 2, 1)
+            .expect("datetime shorthand should parse");
+        assert_eq!(
+            signature.inputs,
+            vec![DType::TimeDelta64, DType::TimeDelta64]
+        );
+        assert_eq!(signature.outputs, vec![DType::TimeDelta64]);
+        assert_eq!(signature.canonical(), "m8,m8->m8");
+    }
+
+    #[test]
+    fn parse_fixed_signature_string_rejects_bad_arity() {
+        let err =
+            parse_fixed_signature_string("ii->i", 1, 1).expect_err("arity mismatch should fail");
+        assert!(matches!(
+            err,
+            UFuncError::FixedSignatureInvalid { .. } | UFuncError::SignatureParse { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_fixed_signature_string_rejects_unknown_token() {
+        let err = parse_fixed_signature_string("%^->#", 2, 1)
+            .expect_err("unknown dtype token should fail");
+        assert!(matches!(err, UFuncError::SignatureParse { .. }));
     }
 
     #[test]
@@ -26571,13 +26850,20 @@ mod tests {
     fn shared_view_contiguity_flags_for_c_and_fortran_layouts() {
         let buffer = Arc::new(RwLock::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]));
 
-        let c_view =
-            UFuncArrayView::new(vec![2, 3], Arc::clone(&buffer), 0, vec![3, 1], DType::F64)
-                .unwrap();
+        let c_view = UFuncArrayView::new(
+            vec![2, 3],
+            Arc::clone(&buffer),
+            None,
+            0,
+            vec![3, 1],
+            DType::F64,
+        )
+        .unwrap();
         assert!(c_view.is_contiguous());
         assert!(!c_view.is_fortran_contiguous());
 
-        let f_view = UFuncArrayView::new(vec![2, 3], buffer, 0, vec![1, 2], DType::F64).unwrap();
+        let f_view =
+            UFuncArrayView::new(vec![2, 3], buffer, None, 0, vec![1, 2], DType::F64).unwrap();
         assert!(!f_view.is_contiguous());
         assert!(f_view.is_fortran_contiguous());
     }
@@ -35026,6 +35312,7 @@ mod tests {
         let reversed = UFuncArrayView::new(
             vec![5],
             Arc::clone(&base.buffer),
+            None,
             4, // last element index
             vec![-1],
             DType::F64,
@@ -35045,6 +35332,7 @@ mod tests {
         let view = UFuncArrayView::new(
             vec![3, 3],
             Arc::clone(&base.buffer),
+            None,
             6, // row 2, col 0
             vec![-3, 1],
             DType::F64,
@@ -35845,24 +36133,62 @@ mod tests {
     #[test]
     fn test_elementwise_binary_preserves_sidecar_when_one_missing() {
         let large_val = 9_007_199_254_740_993i64; // 2^53 + 1
-        let a = UFuncArray::from_storage(
-            vec![1],
-            ArrayStorage::I64(vec![large_val])
-        ).expect("a");
-        let b = UFuncArray::from_storage(
-            vec![1],
-            ArrayStorage::I64(vec![10])
-        ).expect("b");
+        let a = UFuncArray::from_storage(vec![1], ArrayStorage::I64(vec![large_val])).expect("a");
+        let b = UFuncArray::from_storage(vec![1], ArrayStorage::I64(vec![10])).expect("b");
         // b has no sidecar because 10 is small.
         assert!(!b.has_integer_sidecar());
         assert!(a.has_integer_sidecar());
 
         let res = a.elementwise_binary(&b, BinaryOp::Add).expect("res");
         // res SHOULD have a sidecar with large_val + 10
-        assert!(res.has_integer_sidecar(), "Result should have integer sidecar");
+        assert!(
+            res.has_integer_sidecar(),
+            "Result should have integer sidecar"
+        );
         let storage = res.to_storage().expect("storage");
         if let ArrayStorage::I64(v) = storage {
             assert_eq!(v[0], large_val + 10);
+        } else {
+            panic!("Expected I64 storage");
+        }
+    }
+
+    #[test]
+    fn test_astype_preserves_sidecar_on_identity_cast() {
+        let large_val = 9_007_199_254_740_993i64;
+        let a = UFuncArray::from_storage(vec![1], ArrayStorage::I64(vec![large_val])).expect("a");
+        assert!(a.has_integer_sidecar());
+
+        let b = a.astype(DType::I64);
+        assert!(
+            b.has_integer_sidecar(),
+            "astype(I64) should preserve I64 sidecar"
+        );
+        let storage = b.to_storage().expect("storage");
+        if let ArrayStorage::I64(v) = storage {
+            assert_eq!(v[0], large_val);
+        } else {
+            panic!("Expected I64 storage");
+        }
+    }
+
+    #[test]
+    fn test_itemset_updates_sidecar() {
+        let large_val = 9_007_199_254_740_993i64;
+        let mut a =
+            UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![large_val, large_val]))
+                .expect("a");
+
+        a.itemset(&[0], 42.0).expect("itemset");
+        assert_eq!(a.values()[0], 42.0);
+
+        let storage = a.to_storage().expect("storage");
+        if let ArrayStorage::I64(v) = storage {
+            assert_eq!(v[0], 42, "Sidecar should have been updated to 42");
+            assert_eq!(
+                v[1], large_val,
+                "Other sidecar elements should remain unchanged"
+            );
         } else {
             panic!("Expected I64 storage");
         }

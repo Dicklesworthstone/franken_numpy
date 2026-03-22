@@ -2,7 +2,7 @@
   "schema_version": 1,
   "oracle_source": "system",
   "oracle_diagnostics": "legacy import failed: ImportError(\"cannot import name 'version' from partially initialized module 'numpy' (most likely due to a circular import) (/data/projects/franken_numpy/crates/fnp-conformance/../../legacy_numpy_code/numpy/numpy/__init__.py)\")",
-  "generated_at_unix_ms": 1774195562735,
+  "generated_at_unix_ms": 1774204892967,
   "cases": [
     {
       "id": "add_broadcast_2x3_plus_3",
@@ -67,6 +67,59 @@
         6.0
       ],
       "dtype": "float64"
+    },
+    {
+      "id": "add_fixed_signature_string_i32",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2
+      ],
+      "values": [
+        4.0,
+        6.0
+      ],
+      "dtype": "int32"
+    },
+    {
+      "id": "add_sig_signature_conflict",
+      "status": "error",
+      "error": "cannot specify both 'sig' and 'signature'",
+      "shape": [],
+      "values": [],
+      "dtype": "unknown"
+    },
+    {
+      "id": "add_signature_dtype_conflict",
+      "status": "error",
+      "error": "cannot specify 'dtype' together with 'sig' or 'signature'",
+      "shape": [],
+      "values": [],
+      "dtype": "unknown"
+    },
+    {
+      "id": "add_invalid_fixed_signature_string",
+      "status": "error",
+      "error": "a type-string for add, 2 typecode(s) before and 1 after the -> sign",
+      "shape": [],
+      "values": [],
+      "dtype": "unknown"
+    },
+    {
+      "id": "add_gufunc_signature_vector_ok",
+      "status": "error",
+      "error": "a type-string for add, 2 typecode(s) before and 1 after the -> sign",
+      "shape": [],
+      "values": [],
+      "dtype": "unknown"
+    },
+    {
+      "id": "add_gufunc_signature_core_dim_mismatch",
+      "status": "error",
+      "error": "a type-string for add, 2 typecode(s) before and 1 after the -> sign",
+      "shape": [],
+      "values": [],
+      "dtype": "unknown"
     },
     {
       "id": "sum_all_no_keepdims",

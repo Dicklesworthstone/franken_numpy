@@ -881,7 +881,7 @@ FNP_ORACLE_PYTHON="$(pwd)/.venv-numpy314/bin/python3" \
 | Environment Variable | Effect |
 |---|---|
 | `FNP_ORACLE_PYTHON` | Path to Python interpreter with NumPy. Explicit non-default paths win over repo-local bootstrap. |
-| `FNP_REQUIRE_REAL_NUMPY_ORACLE=1` | Require a real NumPy oracle. If `FNP_ORACLE_PYTHON` is unset (or left at `python3`) and `uv` is available, `capture_numpy_oracle` bootstraps and reuses `.venv-numpy314` automatically. |
+| `FNP_REQUIRE_REAL_NUMPY_ORACLE=1` | Require a real NumPy oracle. If `FNP_ORACLE_PYTHON` is unset (or left at `python3`), `capture_numpy_oracle` bootstraps and reuses `.venv-numpy314` automatically, preferring `uv`, then standard `venv` + `pip`, and finally a user-site `pip install numpy` fallback when the worker lacks venv tooling. |
 
 ---
 

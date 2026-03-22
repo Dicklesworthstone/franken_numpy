@@ -4318,6 +4318,9 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     third_shape: None,
                     third_values: None,
                     third_dtype: None,
+                    sig: None,
+                    signature: None,
+                    dtype: None,
                     seed: case.seed,
                     mode: mode.clone(),
                     env_fingerprint: env_fingerprint.clone(),
@@ -4343,6 +4346,9 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     third_shape: None,
                     third_values: None,
                     third_dtype: None,
+                    sig: None,
+                    signature: None,
+                    dtype: None,
                     seed: case.seed,
                     mode: mode.clone(),
                     env_fingerprint: env_fingerprint.clone(),
@@ -4410,6 +4416,9 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     third_shape: None,
                     third_values: None,
                     third_dtype: None,
+                    sig: None,
+                    signature: None,
+                    dtype: None,
                     seed: case.seed,
                     mode: mode.clone(),
                     env_fingerprint: env_fingerprint.clone(),
@@ -4435,6 +4444,9 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     third_shape: None,
                     third_values: None,
                     third_dtype: None,
+                    sig: None,
+                    signature: None,
+                    dtype: None,
                     seed: case.seed,
                     mode: mode.clone(),
                     env_fingerprint: env_fingerprint.clone(),
@@ -4474,6 +4486,9 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     third_shape: None,
                     third_values: None,
                     third_dtype: None,
+                    sig: None,
+                    signature: None,
+                    dtype: None,
                     seed: case.seed,
                     mode: mode.clone(),
                     env_fingerprint: env_fingerprint.clone(),
@@ -4499,6 +4514,9 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     third_shape: None,
                     third_values: None,
                     third_dtype: None,
+                    sig: None,
+                    signature: None,
+                    dtype: None,
                     seed: case.seed,
                     mode: mode.clone(),
                     env_fingerprint: env_fingerprint.clone(),
@@ -4553,6 +4571,9 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     third_shape: None,
                     third_values: None,
                     third_dtype: None,
+                    sig: None,
+                    signature: None,
+                    dtype: None,
                     seed: case.seed,
                     mode: mode.clone(),
                     env_fingerprint: env_fingerprint.clone(),
@@ -4701,6 +4722,9 @@ pub fn run_ufunc_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport
             third_shape: None,
             third_values: None,
             third_dtype: None,
+            sig: None,
+            signature: None,
+            dtype: None,
             seed: case.seed,
             mode: mode.clone(),
             env_fingerprint: env_fingerprint.clone(),
@@ -10649,6 +10673,9 @@ mod tests {
                     .and_then(Value::as_str)
                     .is_some_and(|s| !s.trim().is_empty())
             );
+            if obj.get("rhs").is_none() {
+                eprintln!("DEBUG: log line missing rhs: {}", line);
+            }
             assert!(
                 obj.get("rhs")
                     .and_then(Value::as_str)

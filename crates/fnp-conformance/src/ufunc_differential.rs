@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use fnp_dtype::DType;
-use fnp_ufunc::{BinaryOp, UFuncArray, UnaryOp};
+use fnp_ufunc::{BinaryOp, UFuncArray, UnaryOp, parse_fixed_signature_string};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -707,6 +707,25 @@ def fallback_mean_dtype(dtype):
         return 'f64'
     return dt
 
+def build_ufunc_kwargs(case):
+    sig = case.get('sig')
+    signature = case.get('signature')
+    dtype = case.get('dtype')
+
+    if sig is not None and signature is not None:
+        raise TypeError("cannot specify both 'sig' and 'signature'")
+    if (sig is not None or signature is not None) and dtype is not None:
+        raise TypeError("cannot specify 'dtype' together with 'sig' or 'signature'")
+
+    kwargs = {}
+    if sig is not None:
+        kwargs['sig'] = sig
+    if signature is not None:
+        kwargs['signature'] = signature
+    if dtype is not None:
+        kwargs['dtype'] = normalize_dtype_name(dtype)
+    return kwargs
+
 results = []
 
 for case in cases:
@@ -720,72 +739,73 @@ for case in cases:
             if op in ('add', 'sub', 'mul', 'div', 'power', 'remainder', 'minimum', 'maximum', 'arctan2', 'fmod', 'copysign', 'fmax', 'fmin', 'heaviside', 'nextafter', 'logical_and', 'logical_or', 'logical_xor', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'hypot', 'logaddexp', 'logaddexp2', 'ldexp', 'floor_divide', 'float_power', 'bitwise_and', 'bitwise_or', 'bitwise_xor'):
                 rhs_dtype = normalize_dtype_name(case.get('rhs_dtype', 'float64'))
                 rhs = np.array(case['rhs_values'], dtype=rhs_dtype).reshape(tuple(case['rhs_shape']))
+                kwargs = build_ufunc_kwargs(case)
                 if op == 'add':
-                    out = lhs + rhs
+                    out = np.add(lhs, rhs, **kwargs)
                 elif op == 'sub':
-                    out = lhs - rhs
+                    out = np.subtract(lhs, rhs, **kwargs)
                 elif op == 'mul':
-                    out = lhs * rhs
+                    out = np.multiply(lhs, rhs, **kwargs)
                 elif op == 'div':
-                    out = lhs / rhs
+                    out = np.divide(lhs, rhs, **kwargs)
                 elif op == 'power':
-                    out = np.power(lhs, rhs)
+                    out = np.power(lhs, rhs, **kwargs)
                 elif op == 'remainder':
-                    out = np.remainder(lhs, rhs)
+                    out = np.remainder(lhs, rhs, **kwargs)
                 elif op == 'minimum':
-                    out = np.minimum(lhs, rhs)
+                    out = np.minimum(lhs, rhs, **kwargs)
                 elif op == 'maximum':
-                    out = np.maximum(lhs, rhs)
+                    out = np.maximum(lhs, rhs, **kwargs)
                 elif op == 'arctan2':
-                    out = np.arctan2(lhs, rhs)
+                    out = np.arctan2(lhs, rhs, **kwargs)
                 elif op == 'fmod':
-                    out = np.fmod(lhs, rhs)
+                    out = np.fmod(lhs, rhs, **kwargs)
                 elif op == 'copysign':
-                    out = np.copysign(lhs, rhs)
+                    out = np.copysign(lhs, rhs, **kwargs)
                 elif op == 'fmax':
-                    out = np.fmax(lhs, rhs)
+                    out = np.fmax(lhs, rhs, **kwargs)
                 elif op == 'fmin':
-                    out = np.fmin(lhs, rhs)
+                    out = np.fmin(lhs, rhs, **kwargs)
                 elif op == 'heaviside':
-                    out = np.heaviside(lhs, rhs)
+                    out = np.heaviside(lhs, rhs, **kwargs)
                 elif op == 'nextafter':
-                    out = np.nextafter(lhs, rhs)
+                    out = np.nextafter(lhs, rhs, **kwargs)
                 elif op == 'logical_and':
-                    out = np.logical_and(lhs, rhs)
+                    out = np.logical_and(lhs, rhs, **kwargs)
                 elif op == 'logical_or':
-                    out = np.logical_or(lhs, rhs)
+                    out = np.logical_or(lhs, rhs, **kwargs)
                 elif op == 'logical_xor':
-                    out = np.logical_xor(lhs, rhs)
+                    out = np.logical_xor(lhs, rhs, **kwargs)
                 elif op == 'equal':
-                    out = np.equal(lhs, rhs)
+                    out = np.equal(lhs, rhs, **kwargs)
                 elif op == 'not_equal':
-                    out = np.not_equal(lhs, rhs)
+                    out = np.not_equal(lhs, rhs, **kwargs)
                 elif op == 'less':
-                    out = np.less(lhs, rhs)
+                    out = np.less(lhs, rhs, **kwargs)
                 elif op == 'less_equal':
-                    out = np.less_equal(lhs, rhs)
+                    out = np.less_equal(lhs, rhs, **kwargs)
                 elif op == 'greater':
-                    out = np.greater(lhs, rhs)
+                    out = np.greater(lhs, rhs, **kwargs)
                 elif op == 'greater_equal':
-                    out = np.greater_equal(lhs, rhs)
+                    out = np.greater_equal(lhs, rhs, **kwargs)
                 elif op == 'hypot':
-                    out = np.hypot(lhs, rhs)
+                    out = np.hypot(lhs, rhs, **kwargs)
                 elif op == 'logaddexp':
-                    out = np.logaddexp(lhs, rhs)
+                    out = np.logaddexp(lhs, rhs, **kwargs)
                 elif op == 'logaddexp2':
-                    out = np.logaddexp2(lhs, rhs)
+                    out = np.logaddexp2(lhs, rhs, **kwargs)
                 elif op == 'ldexp':
-                    out = np.ldexp(lhs, rhs.astype(np.int32))
+                    out = np.ldexp(lhs, rhs.astype(np.int32), **kwargs)
                 elif op == 'floor_divide':
-                    out = np.floor_divide(lhs, rhs)
+                    out = np.floor_divide(lhs, rhs, **kwargs)
                 elif op == 'float_power':
-                    out = np.float_power(lhs, rhs)
+                    out = np.float_power(lhs, rhs, **kwargs)
                 elif op == 'bitwise_and':
-                    out = np.bitwise_and(lhs, rhs)
+                    out = np.bitwise_and(lhs, rhs, **kwargs)
                 elif op == 'bitwise_or':
-                    out = np.bitwise_or(lhs, rhs)
+                    out = np.bitwise_or(lhs, rhs, **kwargs)
                 elif op == 'bitwise_xor':
-                    out = np.bitwise_xor(lhs, rhs)
+                    out = np.bitwise_xor(lhs, rhs, **kwargs)
             elif op == 'sum':
                 axis = case.get('axis')
                 keepdims = bool(case.get('keepdims', False))
@@ -1368,6 +1388,12 @@ pub struct UFuncInputCase {
     pub third_values: Option<Vec<f64>>,
     pub third_dtype: Option<String>,
     #[serde(default)]
+    pub sig: Option<String>,
+    #[serde(default)]
+    pub signature: Option<String>,
+    #[serde(default)]
+    pub dtype: Option<String>,
+    #[serde(default)]
     pub seed: u64,
     #[serde(default)]
     pub mode: String,
@@ -1470,6 +1496,11 @@ fn classify_reason_code(op: UFuncOperation, detail: &str) -> String {
         || lowered.contains("unknown metadata")
     {
         "ufunc_policy_unknown_metadata".to_string()
+    } else if lowered.contains("signature conflict")
+        || lowered.contains("cannot specify both 'sig' and 'signature'")
+        || lowered.contains("cannot specify 'dtype' together with 'sig' or 'signature'")
+    {
+        "ufunc_signature_conflict".to_string()
     } else if lowered.contains("signature")
         || lowered.contains("rhs_shape")
         || lowered.contains("rhs_values")
@@ -1517,6 +1548,139 @@ fn resolve_expected_reason_code(input: &UFuncInputCase, fallback: &str) -> Strin
     }
 }
 
+fn operation_arity(op: UFuncOperation) -> Option<(usize, usize)> {
+    match op {
+        UFuncOperation::Add
+        | UFuncOperation::Sub
+        | UFuncOperation::Mul
+        | UFuncOperation::Div
+        | UFuncOperation::Power
+        | UFuncOperation::Remainder
+        | UFuncOperation::Minimum
+        | UFuncOperation::Maximum
+        | UFuncOperation::Arctan2
+        | UFuncOperation::Fmod
+        | UFuncOperation::Copysign
+        | UFuncOperation::Fmax
+        | UFuncOperation::Fmin
+        | UFuncOperation::Heaviside
+        | UFuncOperation::Nextafter
+        | UFuncOperation::LogicalAnd
+        | UFuncOperation::LogicalOr
+        | UFuncOperation::LogicalXor
+        | UFuncOperation::Equal
+        | UFuncOperation::NotEqual
+        | UFuncOperation::Less
+        | UFuncOperation::LessEqual
+        | UFuncOperation::Greater
+        | UFuncOperation::GreaterEqual
+        | UFuncOperation::Hypot
+        | UFuncOperation::Logaddexp
+        | UFuncOperation::Logaddexp2
+        | UFuncOperation::Ldexp
+        | UFuncOperation::FloorDivide
+        | UFuncOperation::FloatPower
+        | UFuncOperation::BitwiseAnd
+        | UFuncOperation::BitwiseOr
+        | UFuncOperation::BitwiseXor => Some((2, 1)),
+        UFuncOperation::Abs
+        | UFuncOperation::Negative
+        | UFuncOperation::Sign
+        | UFuncOperation::Sqrt
+        | UFuncOperation::Square
+        | UFuncOperation::Exp
+        | UFuncOperation::Log
+        | UFuncOperation::Log2
+        | UFuncOperation::Log10
+        | UFuncOperation::Sin
+        | UFuncOperation::Cos
+        | UFuncOperation::Tan
+        | UFuncOperation::Floor
+        | UFuncOperation::Ceil
+        | UFuncOperation::Round
+        | UFuncOperation::Reciprocal
+        | UFuncOperation::Sinh
+        | UFuncOperation::Cosh
+        | UFuncOperation::Tanh
+        | UFuncOperation::Arcsin
+        | UFuncOperation::Arccos
+        | UFuncOperation::Arctan
+        | UFuncOperation::Cbrt
+        | UFuncOperation::Expm1
+        | UFuncOperation::Log1p
+        | UFuncOperation::Degrees
+        | UFuncOperation::Radians
+        | UFuncOperation::Rint
+        | UFuncOperation::Trunc
+        | UFuncOperation::Positive
+        | UFuncOperation::Spacing
+        | UFuncOperation::LogicalNot
+        | UFuncOperation::Isnan
+        | UFuncOperation::Isinf
+        | UFuncOperation::Isfinite
+        | UFuncOperation::Signbit
+        | UFuncOperation::Exp2
+        | UFuncOperation::Fabs
+        | UFuncOperation::Arccosh
+        | UFuncOperation::Arcsinh
+        | UFuncOperation::Arctanh => Some((1, 1)),
+        _ => None,
+    }
+}
+
+fn validate_fixed_signature_inputs(case: &UFuncInputCase, signature: &str) -> Result<(), String> {
+    let (nin, nout) = operation_arity(case.op)
+        .ok_or_else(|| format!("signature keywords unsupported for operation {:?}", case.op))?;
+    let fixed = parse_fixed_signature_string(signature, nin, nout)
+        .map_err(|err| format!("signature parse failed: {err}"))?;
+
+    let mut actual_dtypes = vec![parse_dtype(&case.lhs_dtype)?];
+    if nin > 1 {
+        let rhs_dtype_name = case.rhs_dtype.as_deref().unwrap_or("f64");
+        actual_dtypes.push(parse_dtype(rhs_dtype_name)?);
+    }
+
+    for (index, (expected, actual)) in fixed.inputs.iter().zip(actual_dtypes.iter()).enumerate() {
+        if expected != actual {
+            return Err(format!(
+                "signature input dtype mismatch at operand {index}: expected {:?}, got {:?}",
+                expected, actual
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_signature_keywords(case: &UFuncInputCase) -> Result<(), String> {
+    if case.sig.is_some() && case.signature.is_some() {
+        return Err("signature conflict: cannot specify both 'sig' and 'signature'".to_string());
+    }
+
+    let normalized = case
+        .sig
+        .as_deref()
+        .or(case.signature.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let has_dtype = case
+        .dtype
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+
+    if normalized.is_some() && has_dtype {
+        return Err(
+            "signature conflict: signature keywords cannot be combined with dtype".to_string(),
+        );
+    }
+
+    let Some(signature) = normalized else {
+        return Ok(());
+    };
+
+    validate_fixed_signature_inputs(case, signature)
+}
+
 fn now_unix_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1550,61 +1714,115 @@ fn is_default_python_selector(value: &str) -> bool {
     matches!(value.trim(), "python3" | "python")
 }
 
-fn bootstrap_repo_numpy_venv(python_path: &Path) -> Result<String, String> {
+fn install_numpy_into_user_interpreter(python: &str) -> Result<String, String> {
+    let install = Command::new(python)
+        .arg("-m")
+        .arg("pip")
+        .arg("install")
+        .arg("--user")
+        .arg("--break-system-packages")
+        .arg("numpy")
+        .output()
+        .map_err(|err| format!("failed to install numpy into user interpreter via pip: {err}"))?;
+    if !install.status.success() {
+        let stderr = String::from_utf8_lossy(&install.stderr);
+        let stdout = String::from_utf8_lossy(&install.stdout);
+        return Err(format!(
+            "failed to install numpy into user interpreter via pip (stdout={} stderr={})",
+            stdout.trim(),
+            stderr.trim()
+        ));
+    }
+
+    Ok(python.to_string())
+}
+
+fn bootstrap_repo_numpy_venv(python_path: &Path, bootstrap_python: &str) -> Result<String, String> {
     let venv_dir = python_path
         .parent()
         .and_then(Path::parent)
         .ok_or_else(|| format!("invalid oracle venv path {}", python_path.display()))?;
 
-    let uv_check = Command::new("uv")
-        .arg("--version")
-        .output()
-        .map_err(|err| {
-            format!(
-                "FNP_REQUIRE_REAL_NUMPY_ORACLE=1 requires a NumPy-backed interpreter, but `uv` is unavailable for bootstrap: {err}"
-            )
-        })?;
-    if !uv_check.status.success() {
-        let stderr = String::from_utf8_lossy(&uv_check.stderr);
-        return Err(format!(
-            "FNP_REQUIRE_REAL_NUMPY_ORACLE=1 requires a NumPy-backed interpreter, but `uv --version` failed: {}",
-            stderr.trim()
-        ));
+    if let Ok(uv_check) = Command::new("uv").arg("--version").output()
+        && uv_check.status.success()
+    {
+        let create = Command::new("uv")
+            .arg("venv")
+            .arg("--python")
+            .arg("3.14")
+            .arg(venv_dir)
+            .output()
+            .map_err(|err| format!("failed to bootstrap oracle venv via uv venv: {err}"))?;
+        if !create.status.success() {
+            let stderr = String::from_utf8_lossy(&create.stderr);
+            let stdout = String::from_utf8_lossy(&create.stdout);
+            return Err(format!(
+                "failed to bootstrap oracle venv via uv venv (stdout={} stderr={})",
+                stdout.trim(),
+                stderr.trim()
+            ));
+        }
+
+        let install = Command::new("uv")
+            .arg("pip")
+            .arg("install")
+            .arg("--python")
+            .arg(python_path)
+            .arg("numpy")
+            .output()
+            .map_err(|err| format!("failed to install numpy into oracle venv via uv pip: {err}"))?;
+        if !install.status.success() {
+            let stderr = String::from_utf8_lossy(&install.stderr);
+            let stdout = String::from_utf8_lossy(&install.stdout);
+            return Err(format!(
+                "failed to install numpy into oracle venv via uv pip (stdout={} stderr={})",
+                stdout.trim(),
+                stderr.trim()
+            ));
+        }
+
+        return Ok(python_path.display().to_string());
     }
 
-    let create = Command::new("uv")
+    let create = Command::new(bootstrap_python)
+        .arg("-m")
         .arg("venv")
-        .arg("--python")
-        .arg("3.14")
         .arg(venv_dir)
         .output()
-        .map_err(|err| format!("failed to bootstrap oracle venv via uv venv: {err}"))?;
+        .map_err(|err| {
+            format!("failed to bootstrap oracle venv via `{bootstrap_python} -m venv`: {err}")
+        })?;
     if !create.status.success() {
         let stderr = String::from_utf8_lossy(&create.stderr);
         let stdout = String::from_utf8_lossy(&create.stdout);
-        return Err(format!(
-            "failed to bootstrap oracle venv via uv venv (stdout={} stderr={})",
-            stdout.trim(),
-            stderr.trim()
-        ));
+        return install_numpy_into_user_interpreter(bootstrap_python).map_err(|pip_err| {
+            format!(
+                "failed to bootstrap oracle venv via `{bootstrap_python} -m venv` (stdout={} stderr={}); fallback user-site install also failed: {}",
+                stdout.trim(),
+                stderr.trim(),
+                pip_err
+            )
+        });
     }
 
-    let install = Command::new("uv")
+    let install = Command::new(python_path)
+        .arg("-m")
         .arg("pip")
         .arg("install")
-        .arg("--python")
-        .arg(python_path)
         .arg("numpy")
         .output()
-        .map_err(|err| format!("failed to install numpy into oracle venv: {err}"))?;
+        .map_err(|err| format!("failed to install numpy into oracle venv via pip: {err}"))?;
     if !install.status.success() {
         let stderr = String::from_utf8_lossy(&install.stderr);
         let stdout = String::from_utf8_lossy(&install.stdout);
-        return Err(format!(
-            "failed to install numpy into oracle venv (stdout={} stderr={})",
-            stdout.trim(),
-            stderr.trim()
-        ));
+        return install_numpy_into_user_interpreter(bootstrap_python).map_err(|pip_err| {
+            format!(
+                "failed to install numpy into oracle venv via pip (stdout={} stderr={}); fallback user-site install also failed: {}",
+                stdout.trim(),
+                stderr.trim(),
+                pip_err
+            )
+        });
     }
 
     Ok(python_path.display().to_string())
@@ -1615,10 +1833,10 @@ fn resolve_oracle_python() -> Result<String, String> {
     let require_real = require_real_numpy_oracle();
     let repo_python = repo_numpy_venv_python();
 
-    if let Some(configured_value) = configured.as_deref() {
-        if !(require_real && is_default_python_selector(configured_value)) {
-            return Ok(configured_value.to_string());
-        }
+    if let Some(configured_value) = configured.as_deref()
+        && !(require_real && is_default_python_selector(configured_value))
+    {
+        return Ok(configured_value.to_string());
     }
 
     if repo_python.is_file() {
@@ -1626,7 +1844,8 @@ fn resolve_oracle_python() -> Result<String, String> {
     }
 
     if require_real {
-        return bootstrap_repo_numpy_venv(&repo_python);
+        let bootstrap_python = configured.as_deref().unwrap_or("python3");
+        return bootstrap_repo_numpy_venv(&repo_python, bootstrap_python);
     }
 
     Ok(configured.unwrap_or_else(|| "python3".to_string()))
@@ -1970,6 +2189,7 @@ pub fn compare_against_oracle(
 }
 
 pub fn execute_input_case(case: &UFuncInputCase) -> Result<(Vec<usize>, Vec<f64>, String), String> {
+    validate_signature_keywords(case)?;
     let lhs_dtype = parse_dtype(&case.lhs_dtype)?;
     let lhs = UFuncArray::new(case.lhs_shape.clone(), case.lhs_values.clone(), lhs_dtype)
         .map_err(|err| format!("lhs array error: {err}"))?;
@@ -2414,6 +2634,9 @@ mod tests {
             third_shape: None,
             third_values: None,
             third_dtype: None,
+            sig: None,
+            signature: None,
+            dtype: None,
             seed: 0,
             mode: "strict".to_string(),
             env_fingerprint: "tests".to_string(),
@@ -2448,6 +2671,9 @@ mod tests {
             third_shape: None,
             third_values: None,
             third_dtype: None,
+            sig: None,
+            signature: None,
+            dtype: None,
             seed: 0,
             mode: "strict".to_string(),
             env_fingerprint: "tests".to_string(),
@@ -2461,6 +2687,69 @@ mod tests {
         assert!(
             err.contains("axis"),
             "expected axis error substring, got: {err}"
+        );
+    }
+
+    #[test]
+    fn execute_input_case_accepts_fixed_signature_string() {
+        let case = make_binary_case(
+            "fixed_sig_ok",
+            UFuncOperation::Add,
+            &[2],
+            &[1.0, 2.0],
+            &[2],
+            &[3.0, 4.0],
+        );
+        let mut case = case;
+        case.lhs_dtype = "i32".to_string();
+        case.rhs_dtype = Some("i32".to_string());
+        case.sig = Some("ii->i".to_string());
+
+        let (shape, values, dtype) =
+            execute_input_case(&case).expect("fixed signature should pass");
+        assert_eq!(shape, vec![2]);
+        assert_eq!(values, vec![4.0, 6.0]);
+        assert_eq!(dtype, "i32");
+    }
+
+    #[test]
+    fn execute_input_case_rejects_signature_keyword_conflict() {
+        let mut case = make_binary_case(
+            "sig_conflict",
+            UFuncOperation::Add,
+            &[1],
+            &[1.0],
+            &[1],
+            &[2.0],
+        );
+        case.lhs_dtype = "i32".to_string();
+        case.rhs_dtype = Some("i32".to_string());
+        case.sig = Some("ii->i".to_string());
+        case.signature = Some("ii->i".to_string());
+
+        let err = execute_input_case(&case).expect_err("conflicting keywords should fail");
+        assert!(
+            err.contains("signature conflict"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn execute_input_case_rejects_gufunc_style_signature_string() {
+        let mut case = make_binary_case(
+            "gufunc_style_signature",
+            UFuncOperation::Add,
+            &[2, 3],
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            &[1, 3],
+            &[10.0, 20.0, 30.0],
+        );
+        case.signature = Some("(n),(n)->(n)".to_string());
+
+        let err = execute_input_case(&case).expect_err("gufunc-style signature should fail");
+        assert!(
+            err.contains("signature parse failed"),
+            "unexpected error: {err}"
         );
     }
 
@@ -2635,6 +2924,47 @@ mod tests {
             third_shape: None,
             third_values: None,
             third_dtype: None,
+            sig: None,
+            signature: None,
+            dtype: None,
+            seed: 0,
+            mode: "strict".to_string(),
+            env_fingerprint: "tests".to_string(),
+            artifact_refs: Vec::new(),
+            reason_code: "ufunc_dispatch_resolution_failed".to_string(),
+            expected_reason_code: "ufunc_dispatch_resolution_failed".to_string(),
+            expected_error_contains: String::new(),
+        }
+    }
+
+    fn make_binary_case(
+        id: &str,
+        op: UFuncOperation,
+        lhs_shape: &[usize],
+        lhs_values: &[f64],
+        rhs_shape: &[usize],
+        rhs_values: &[f64],
+    ) -> UFuncInputCase {
+        UFuncInputCase {
+            id: id.to_string(),
+            op,
+            lhs_shape: lhs_shape.to_vec(),
+            lhs_values: lhs_values.to_vec(),
+            lhs_dtype: "f64".to_string(),
+            rhs_shape: Some(rhs_shape.to_vec()),
+            rhs_values: Some(rhs_values.to_vec()),
+            rhs_dtype: Some("f64".to_string()),
+            axis: None,
+            keepdims: None,
+            ddof: None,
+            clip_min: None,
+            clip_max: None,
+            third_shape: None,
+            third_values: None,
+            third_dtype: None,
+            sig: None,
+            signature: None,
+            dtype: None,
             seed: 0,
             mode: "strict".to_string(),
             env_fingerprint: "tests".to_string(),
@@ -3052,6 +3382,9 @@ mod tests {
                 third_shape: None,
                 third_values: None,
                 third_dtype: None,
+                sig: None,
+                signature: None,
+                dtype: None,
                 seed: 0,
                 mode: "strict".to_string(),
                 env_fingerprint: "tests".to_string(),
@@ -3130,6 +3463,9 @@ mod tests {
                 third_shape: None,
                 third_values: None,
                 third_dtype: None,
+                sig: None,
+                signature: None,
+                dtype: None,
                 seed: 0,
                 mode: "strict".to_string(),
                 env_fingerprint: "tests".to_string(),
@@ -3177,6 +3513,9 @@ mod tests {
                         third_shape: None,
                         third_values: None,
                         third_dtype: None,
+                        sig: None,
+                        signature: None,
+                        dtype: None,
                         seed: 0,
                         mode: "strict".to_string(),
                         env_fingerprint: "tests".to_string(),
@@ -3216,6 +3555,9 @@ mod tests {
             third_shape: None,
             third_values: None,
             third_dtype: None,
+            sig: None,
+            signature: None,
+            dtype: None,
             seed: 0,
             mode: "strict".to_string(),
             env_fingerprint: "tests".to_string(),
@@ -3246,6 +3588,9 @@ mod tests {
             third_shape: None,
             third_values: None,
             third_dtype: None,
+            sig: None,
+            signature: None,
+            dtype: None,
             seed: 0,
             mode: "strict".to_string(),
             env_fingerprint: "tests".to_string(),
@@ -3289,6 +3634,9 @@ mod tests {
             third_shape: None,
             third_values: None,
             third_dtype: None,
+            sig: None,
+            signature: None,
+            dtype: None,
             seed: 0,
             mode: "strict".to_string(),
             env_fingerprint: "tests".to_string(),

@@ -136,6 +136,215 @@
     "expected_reason_code": "ufunc_dispatch_resolution_failed"
   },
   {
+    "id": "add_fixed_signature_string_i32",
+    "op": "add",
+    "lhs_shape": [
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      2.0
+    ],
+    "lhs_dtype": "i32",
+    "rhs_shape": [
+      2
+    ],
+    "rhs_values": [
+      3.0,
+      4.0
+    ],
+    "rhs_dtype": "i32",
+    "axis": null,
+    "keepdims": false,
+    "sig": "ii->i",
+    "seed": 5004,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "legacy_numpy_code/numpy/numpy/_core/tests/test_ufunc.py",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "add_sig_signature_conflict",
+    "op": "add",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "i32",
+    "rhs_shape": [
+      1
+    ],
+    "rhs_values": [
+      2.0
+    ],
+    "rhs_dtype": "i32",
+    "axis": null,
+    "keepdims": false,
+    "sig": "ii->i",
+    "signature": "ii->i",
+    "seed": 5004,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "legacy_numpy_code/numpy/numpy/_core/tests/test_ufunc.py",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_signature_conflict",
+    "expected_reason_code": "ufunc_signature_conflict"
+  },
+  {
+    "id": "add_signature_dtype_conflict",
+    "op": "add",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "i32",
+    "rhs_shape": [
+      1
+    ],
+    "rhs_values": [
+      2.0
+    ],
+    "rhs_dtype": "i32",
+    "axis": null,
+    "keepdims": false,
+    "signature": "ii->i",
+    "dtype": "i32",
+    "seed": 5004,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "legacy_numpy_code/numpy/numpy/_core/tests/test_ufunc.py",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_signature_conflict",
+    "expected_reason_code": "ufunc_signature_conflict"
+  },
+  {
+    "id": "add_invalid_fixed_signature_string",
+    "op": "add",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "i32",
+    "rhs_shape": [
+      1
+    ],
+    "rhs_values": [
+      2.0
+    ],
+    "rhs_dtype": "i32",
+    "axis": null,
+    "keepdims": false,
+    "signature": "ii>i",
+    "seed": 5004,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "legacy_numpy_code/numpy/numpy/_core/tests/test_ufunc.py",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_signature_parse_failed",
+    "expected_reason_code": "ufunc_signature_parse_failed"
+  },
+  {
+    "id": "add_gufunc_signature_vector_ok",
+    "op": "add",
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [
+      1,
+      3
+    ],
+    "rhs_values": [
+      10.0,
+      20.0,
+      30.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "signature": "(n),(n)->(n)",
+    "seed": 5004,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "legacy_numpy_code/numpy/numpy/_core/tests/test_ufunc.py",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_signature_parse_failed",
+    "expected_reason_code": "ufunc_signature_parse_failed",
+    "expected_error_contains": "signature parse failed"
+  },
+  {
+    "id": "add_gufunc_signature_core_dim_mismatch",
+    "op": "add",
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [
+      2,
+      1
+    ],
+    "rhs_values": [
+      10.0,
+      20.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "signature": "(n),(n)->(n)",
+    "seed": 5004,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "legacy_numpy_code/numpy/numpy/_core/tests/test_ufunc.py",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_signature_parse_failed",
+    "expected_reason_code": "ufunc_signature_parse_failed",
+    "expected_error_contains": "signature parse failed"
+  },
+  {
     "id": "sum_all_no_keepdims",
     "op": "sum",
     "lhs_shape": [

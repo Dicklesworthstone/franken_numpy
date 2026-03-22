@@ -9,4 +9,4 @@ cargo run -p fnp-conformance --bin run_ufunc_differential
 
 Files in this folder are deterministic JSON artifacts used by `run_ufunc_differential_suite`.
 
-`scripts/e2e/run_ci_gate_topology.sh` captures oracle output before G3 differential and, in CI contexts, fails when `oracle_source` is `pure_python_fallback`. With `FNP_REQUIRE_REAL_NUMPY_ORACLE=1`, `capture_numpy_oracle` now prefers a repo-local `.venv-numpy314` and bootstraps it with `uv` when `FNP_ORACLE_PYTHON` is unset or left at `python3`.
+`scripts/e2e/run_ci_gate_topology.sh` captures oracle output before G3 differential and, in CI contexts, fails when `oracle_source` is `pure_python_fallback`. With `FNP_REQUIRE_REAL_NUMPY_ORACLE=1`, `capture_numpy_oracle` now prefers a repo-local `.venv-numpy314` and bootstraps it automatically when `FNP_ORACLE_PYTHON` is unset or left at `python3`, preferring `uv`, then standard `venv` + `pip`, and finally a user-site `pip install numpy` fallback.
