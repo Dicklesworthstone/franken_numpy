@@ -1,5 +1,7 @@
 # TODO_GRANULAR_EXECUTION
 
+Historical tracker from earlier execution passes. Active work selection now lives in `br`/`bv`; this file is retained as session archaeology and should not be treated as the live source of open work.
+
 Status key:
 - [ ] not started
 - [~] in progress
@@ -365,7 +367,8 @@ Status key:
 ### 13.4 Contradictions and unknowns
 - [x] Add contradiction register with owner, risk, and closure criteria in both target docs
 - [x] Flag reduced-scope V1 language as deprecated and closure-required (`DOC-C001`)
-- [ ] Reconcile remaining doc contradictions in downstream passes (`bd-23m.24.2`, `.24.3`, `.24.4`, `.24.10`)
+- [!] Reconcile remaining doc contradictions in downstream passes (`bd-23m.24.2`, `.24.3`, `.24.4`, `.24.10`)
+  Deferred: the referenced downstream `bd-*` beads are no longer present in the current `br` database, so this remains historical follow-on context rather than actionable live work.
 
 ### 13.5 Bead closure steps
 - [x] Add `br comments add` completion note with matrix/evidence links
@@ -401,8 +404,10 @@ Status key:
 ### 15.1 Claim and handoff
 - [x] Confirm `bd-23m.16.2` is ready after closing `bd-23m.16.1`
 - [x] Mark `bd-23m.16.2` as `in_progress`
-- [ ] Draft strict/hardened contract table artifact for packet boundary
-- [ ] Attach unit/property + e2e scenario mapping and reason-code requirements
+- [!] Draft strict/hardened contract table artifact for packet boundary
+  Deferred: `bd-23m.16.2` is stale historical context; any remaining packet-contract work should be re-opened as a fresh `franken_numpy-*` bead before implementation.
+- [!] Attach unit/property + e2e scenario mapping and reason-code requirements
+  Deferred: same stale-ownership issue as above; this file is no longer the authoritative tracker for active packet work.
 
 ## 16. Systematic Critical Check and Bug Fix Pass (2026-03-21)
 
