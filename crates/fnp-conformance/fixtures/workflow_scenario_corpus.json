@@ -601,6 +601,22 @@
         "expect_error_contains": "axis"
       },
       {
+        "id": "step_matmul_basic_contract",
+        "kind": "ufunc_input",
+        "case_id": "matmul_basic_2d"
+      },
+      {
+        "id": "step_matmul_batched_contract",
+        "kind": "ufunc_input",
+        "case_id": "matmul_batched_2x2x3_by_2x3x2"
+      },
+      {
+        "id": "step_matmul_core_dim_mismatch_rejected",
+        "kind": "ufunc_input",
+        "case_id": "matmul_core_dim_mismatch",
+        "expect_error_contains": "matmul"
+      },
+      {
         "id": "step_override_wire_unknown_mode_fail_closed",
         "kind": "runtime_policy_wire",
         "case_id": "wire_unknown_mode_fail_closed",
@@ -619,7 +635,10 @@
       "differential_fixture_ids": [
         "mul_missing_rhs_shape",
         "mul_missing_rhs_values_2x1x3_by_1x3x1",
-        "sum_axis_out_of_bounds_5d"
+        "sum_axis_out_of_bounds_5d",
+        "matmul_basic_2d",
+        "matmul_batched_2x2x3_by_2x3x2",
+        "matmul_core_dim_mismatch"
       ],
       "e2e_script_paths": [
         "scripts/e2e/run_workflow_scenario_gate.sh",
@@ -632,12 +651,6 @@
         "owner": "bd-23m.16.10",
         "priority": "p1",
         "description": "Add explicit override-precedence fixture lanes once override-bridge semantics are wired into packet-005 differential harness inputs."
-      },
-      {
-        "bead_id": "bd-23m.16.11",
-        "owner": "bd-23m.16.11",
-        "priority": "p1",
-        "description": "Extend this scenario family with true gufunc signature-shape contracts after packet-005 gufunc parser support lands."
       }
     ]
   },
