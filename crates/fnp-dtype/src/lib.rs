@@ -64,7 +64,7 @@ impl DType {
             | Self::DateTime64
             | Self::TimeDelta64 => 8,
             Self::Complex128 => 16,
-            Self::Str | Self::Structured => 0, // variable-length
+            Self::Str | Self::Structured => 1, // variable-length/void minimum
         }
     }
 
@@ -72,17 +72,17 @@ impl DType {
     pub fn parse(name: &str) -> Option<Self> {
         match name {
             "bool" => Some(Self::Bool),
-            "i8" | "int8" => Some(Self::I8),
-            "i16" | "int16" => Some(Self::I16),
-            "i32" | "int32" => Some(Self::I32),
-            "i64" | "int64" => Some(Self::I64),
-            "u8" | "uint8" => Some(Self::U8),
-            "u16" | "uint16" => Some(Self::U16),
-            "u32" | "uint32" => Some(Self::U32),
-            "u64" | "uint64" => Some(Self::U64),
-            "f16" | "float16" | "half" => Some(Self::F16),
-            "f32" | "float32" => Some(Self::F32),
-            "f64" | "float64" => Some(Self::F64),
+            "i1" | "i8" | "int8" => Some(Self::I8),
+            "i2" | "i16" | "int16" => Some(Self::I16),
+            "i4" | "i32" | "int32" => Some(Self::I32),
+            "i8_" | "i64" | "int64" => Some(Self::I64),
+            "u1" | "u8" | "uint8" => Some(Self::U8),
+            "u2" | "u16" | "uint16" => Some(Self::U16),
+            "u4" | "u32" | "uint32" => Some(Self::U32),
+            "u8_" | "u64" | "uint64" => Some(Self::U64),
+            "f2" | "f16" | "float16" | "half" => Some(Self::F16),
+            "f4" | "f32" | "float32" => Some(Self::F32),
+            "f8" | "f64" | "float64" => Some(Self::F64),
             "c8" | "complex64" => Some(Self::Complex64),
             "c16" | "complex128" => Some(Self::Complex128),
             "str" | "U" => Some(Self::Str),
@@ -125,10 +125,13 @@ impl DType {
         )
     }
 
-    /// Returns `true` if this is a floating-point type.
+    /// Returns `true` if this is a floating-point type (including complex).
     #[must_use]
     pub const fn is_float(self) -> bool {
-        matches!(self, Self::F16 | Self::F32 | Self::F64)
+        matches!(
+            self,
+            Self::F16 | Self::F32 | Self::F64 | Self::Complex64 | Self::Complex128
+        )
     }
 
     /// Returns `true` if this is a complex floating-point type.
@@ -140,7 +143,7 @@ impl DType {
     /// Returns `true` if this is a numeric type (integer, float, or complex).
     #[must_use]
     pub const fn is_numeric(self) -> bool {
-        self.is_integer() || self.is_float() || self.is_complex()
+        self.is_integer() || self.is_float()
     }
 }
 
@@ -245,10 +248,13 @@ pub const fn promote(lhs: DType, rhs: DType) -> DType {
         (DateTime64, TimeDelta64) | (TimeDelta64, DateTime64) => DateTime64,
 
         // Str: always wins against numeric and temporal types
-        (Str, _) | (_, Str) => match (lhs, rhs) {
-            (Structured, _) | (_, Structured) => F64, // Structured is incompatible
+        (Str, x) | (x, Str) => match x {
+            Structured => F64, // Structured is incompatible
             _ => Str,
         },
+
+        // Structured: incompatible with everything else (even itself, if different fields)
+        (Structured, _) | (_, Structured) => F64,
 
         // Any remaining combinations: F64 as fallback
         _ => F64,
@@ -477,29 +483,39 @@ fn can_cast_same_kind(from: DType, to: DType) -> bool {
     if from == DType::Structured || to == DType::Structured {
         return false;
     }
+    // Str is a sink for numeric kinds
+    if to == DType::Str {
+        return from.is_numeric() || from == DType::Bool;
+    }
+    // Temporal types are isolated kinds, BUT TimeDelta64 allows integer->m8
     if to == DType::DateTime64 {
-        return false;
+        return from == DType::DateTime64;
     }
     if to == DType::TimeDelta64 {
-        return from == DType::Bool || from.is_integer();
+        return from == DType::TimeDelta64 || from.is_integer() || from == DType::Bool;
     }
-    if to == DType::Str {
-        return from == DType::Bool || from.is_integer() || from.is_float() || from.is_complex();
+    if from == DType::DateTime64 || from == DType::TimeDelta64 {
+        return false;
     }
+
+    // Kind Hierarchy: Bool < Integer < Float < Complex
     if from == DType::Bool {
-        return to.is_integer() || to.is_float() || to.is_complex();
+        return to.is_integer() || to.is_float(); // is_float includes complex
     }
     if from.is_integer() {
         if is_signed_integer_dtype(from) {
-            return is_signed_integer_dtype(to) || to.is_float() || to.is_complex();
+            // Signed int can cast to other signed ints, floats, or complex
+            return is_signed_integer_dtype(to) || to.is_float();
         }
-        return to.is_integer() || to.is_float() || to.is_complex();
+        // Unsigned int can cast to any int, float, or complex
+        return to.is_integer() || to.is_float();
     }
     if from.is_float() {
-        return to.is_float() || to.is_complex();
-    }
-    if from.is_complex() {
-        return to.is_complex();
+        // Float can cast to complex, but NOT back to standard integer kinds
+        if from.is_complex() {
+            return to.is_complex();
+        }
+        return to.is_float(); // includes complex
     }
     false
 }
@@ -2812,7 +2828,7 @@ mod tests {
 
     #[test]
     fn structured_dtype_item_size() {
-        assert_eq!(DType::Structured.item_size(), 0);
+        assert_eq!(DType::Structured.item_size(), 1);
     }
 
     #[test]

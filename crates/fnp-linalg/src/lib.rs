@@ -1635,7 +1635,7 @@ pub fn matrix_rank_mxn(a: &[f64], m: usize, n: usize, rcond: f64) -> Result<usiz
         return Ok(0);
     }
     let threshold = sigma_max * rcond;
-    Ok(sigmas.iter().filter(|&&s| s > threshold).count())
+    Ok(sigmas.iter().filter(|&&s| s >= threshold).count())
 }
 
 pub fn matrix_rank_nxn(a: &[f64], n: usize, rcond: f64) -> Result<usize, LinAlgError> {
@@ -2714,22 +2714,19 @@ pub fn funm_nxn(a: &[f64], n: usize, f: impl Fn(f64) -> f64) -> Result<Vec<f64>,
     // Schur decomposition: A = Z * T * Z^T, Z orthogonal
     let (t, z) = schur_nxn(a, n)?;
 
-    // Check that T has real eigenvalues (sub-diagonal entries negligible)
-    for i in 1..n {
-        if t[i * n + (i - 1)].abs() > 1e-8 {
-            return Err(LinAlgError::SpectralConvergenceFailed);
+    // Check that T is diagonal (off-diagonal entries negligible)
+    for i in 0..n {
+        for j in 0..n {
+            if i != j && t[i * n + j].abs() > 1e-10 {
+                return Err(LinAlgError::SpectralConvergenceFailed);
+            }
         }
     }
 
     // Apply f to diagonal of T (the eigenvalues)
-    let mut ft = t.clone();
+    let mut ft = vec![0.0; n * n];
     for i in 0..n {
         ft[i * n + i] = f(t[i * n + i]);
-    }
-
-    // Zero out sub-diagonal to keep upper triangular form
-    for i in 1..n {
-        ft[i * n + (i - 1)] = 0.0;
     }
 
     // Reconstruct: f(A) = Z * f(T) * Z^T

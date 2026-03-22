@@ -3255,7 +3255,7 @@ mod tests {
         let decoded = read_npy_bytes(&encoded, false).expect("decode npy bytes");
         assert_eq!(decoded.version, (1, 0));
         assert_eq!(decoded.header, header);
-        assert_eq!(decoded.payload, payload);
+        assert_eq!(decoded.payload, payload.into());
     }
 
     #[test]
@@ -3320,7 +3320,7 @@ mod tests {
 
         let decoded = read_npy_bytes(&encoded, true).expect("allow_pickle read");
         assert_eq!(decoded.header.descr, IOSupportedDType::Object);
-        assert_eq!(decoded.payload, vec![0x80, 0x05, 0x4B, 0x01, 0x2E]);
+        assert_eq!(decoded.payload, vec![0x80, 0x05, 0x4B, 0x01, 0x2E].into());
     }
 
     #[test]
@@ -3340,7 +3340,7 @@ mod tests {
         let decoded = read_npy_bytes(&encoded, false).expect("read v2");
         assert_eq!(decoded.version, (2, 0));
         assert_eq!(decoded.header, header);
-        assert_eq!(decoded.payload, payload);
+        assert_eq!(decoded.payload, payload.into());
     }
 
     #[test]
@@ -3716,7 +3716,7 @@ mod tests {
         let encoded = write_npy_bytes(&header, &payload, false).expect("write i8");
         let decoded = read_npy_bytes(&encoded, false).expect("read i8");
         assert_eq!(decoded.header.descr, IOSupportedDType::I8);
-        assert_eq!(decoded.payload, payload);
+        assert_eq!(decoded.payload, payload.into());
 
         let header_u8 = NpyHeader {
             shape: vec![4],
@@ -3727,7 +3727,7 @@ mod tests {
         let encoded_u8 = write_npy_bytes(&header_u8, &payload_u8, false).expect("write u8");
         let decoded_u8 = read_npy_bytes(&encoded_u8, false).expect("read u8");
         assert_eq!(decoded_u8.header.descr, IOSupportedDType::U8);
-        assert_eq!(decoded_u8.payload, payload_u8);
+        assert_eq!(decoded_u8.payload, payload_u8.into());
     }
 
     #[test]
@@ -3744,7 +3744,7 @@ mod tests {
         let encoded = write_npy_bytes(&header, &payload, false).expect("write i16");
         let decoded = read_npy_bytes(&encoded, false).expect("read i16");
         assert_eq!(decoded.header.descr, IOSupportedDType::I16);
-        assert_eq!(decoded.payload, payload);
+        assert_eq!(decoded.payload, payload.into());
     }
 
     #[test]
@@ -3761,7 +3761,7 @@ mod tests {
         let encoded = write_npy_bytes(&header, &payload, false).expect("write u32");
         let decoded = read_npy_bytes(&encoded, false).expect("read u32");
         assert_eq!(decoded.header.descr, IOSupportedDType::U32);
-        assert_eq!(decoded.payload, payload);
+        assert_eq!(decoded.payload, payload.into());
 
         let header_u64 = NpyHeader {
             shape: vec![1],
@@ -3788,7 +3788,7 @@ mod tests {
         let encoded = write_npy_bytes(&header, &payload, false).expect("write big-endian f64");
         let decoded = read_npy_bytes(&encoded, false).expect("read big-endian f64");
         assert_eq!(decoded.header.descr, IOSupportedDType::F64Be);
-        assert_eq!(decoded.payload, payload);
+        assert_eq!(decoded.payload, payload.into());
     }
 
     #[test]
@@ -3841,7 +3841,7 @@ mod tests {
         assert_eq!(entries[0].name, "arr0");
         assert_eq!(entries[0].array.header.shape, vec![3]);
         assert_eq!(entries[0].array.header.descr, IOSupportedDType::F64);
-        assert_eq!(entries[0].array.payload, payload);
+        assert_eq!(entries[0].array.payload, payload.into());
     }
 
     #[test]
@@ -3871,12 +3871,12 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name, "x");
         assert_eq!(entries[0].array.header.descr, IOSupportedDType::F64);
-        assert_eq!(entries[0].array.payload, p1);
+        assert_eq!(entries[0].array.payload, p1.into());
 
         assert_eq!(entries[1].name, "matrix");
         assert_eq!(entries[1].array.header.shape, vec![2, 2]);
         assert_eq!(entries[1].array.header.descr, IOSupportedDType::I32);
-        assert_eq!(entries[1].array.payload, p2);
+        assert_eq!(entries[1].array.payload, p2.into());
     }
 
     #[test]
@@ -3900,7 +3900,7 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "arr0");
         assert_eq!(entries[0].array.header.descr, IOSupportedDType::F64);
-        assert_eq!(entries[0].array.payload, payload);
+        assert_eq!(entries[0].array.payload, payload.into());
     }
 
     #[test]
@@ -3985,7 +3985,7 @@ mod tests {
         let entries = read_npz_bytes(&npz).expect("read");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].array.header.descr, IOSupportedDType::Bool);
-        assert_eq!(entries[0].array.payload, vec![1, 0, 1]);
+        assert_eq!(entries[0].array.payload, vec![1, 0, 1].into());
     }
 
     #[test]
@@ -5068,7 +5068,7 @@ mod tests {
         let arr = read_npy_bytes(&npy_bytes, false).expect("read");
         assert_eq!(arr.header.shape, vec![4]);
         assert_eq!(arr.header.descr, IOSupportedDType::Bool);
-        assert_eq!(arr.payload, vec![1, 0, 1, 0]);
+        assert_eq!(arr.payload, vec![1, 0, 1, 0].into());
     }
 
     #[test]
@@ -5105,7 +5105,7 @@ mod tests {
         let arr = read_npy_bytes(&npy_bytes, false).expect("read");
         assert_eq!(arr.header.shape, vec![5]);
         assert_eq!(arr.header.descr, IOSupportedDType::U8);
-        assert_eq!(arr.payload, payload);
+        assert_eq!(arr.payload, payload.into());
     }
 
     #[test]

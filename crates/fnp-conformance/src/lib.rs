@@ -1483,6 +1483,7 @@ struct DTypeDifferentialReportArtifact {
 static RUNTIME_POLICY_LOG_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 static SHAPE_STRIDE_LOG_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 static DTYPE_PROMOTION_LOG_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+static FILE_LOG_MUTEX: Mutex<()> = Mutex::new(());
 
 fn default_f64_dtype_name() -> String {
     "f64".to_string()
@@ -10193,6 +10194,7 @@ fn maybe_append_runtime_policy_log(entry: &RuntimePolicyLogEntry) -> Result<(), 
             .map_err(|err| format!("failed creating {}: {err}", parent.display()))?;
     }
 
+    let _guard = FILE_LOG_MUTEX.lock().map_err(|_| "failed acquiring log lock")?;
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -10225,6 +10227,7 @@ fn maybe_append_shape_stride_log(entry: &ShapeStrideLogEntry) -> Result<(), Stri
             .map_err(|err| format!("failed creating {}: {err}", parent.display()))?;
     }
 
+    let _guard = FILE_LOG_MUTEX.lock().map_err(|_| "failed acquiring log lock")?;
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -10257,6 +10260,7 @@ fn maybe_append_dtype_promotion_log(entry: &DTypePromotionLogEntry) -> Result<()
             .map_err(|err| format!("failed creating {}: {err}", parent.display()))?;
     }
 
+    let _guard = FILE_LOG_MUTEX.lock().map_err(|_| "failed acquiring log lock")?;
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)

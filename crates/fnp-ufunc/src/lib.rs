@@ -4709,13 +4709,9 @@ impl UFuncArray {
                         data[mid]
                     };
                     let go_right = if use_right {
-                        mid_val
-                            .partial_cmp(needle)
-                            .is_some_and(|ord| ord != std::cmp::Ordering::Greater)
+                        nan_last_cmp(&mid_val, needle) != std::cmp::Ordering::Greater
                     } else {
-                        mid_val
-                            .partial_cmp(needle)
-                            .is_some_and(|ord| ord == std::cmp::Ordering::Less)
+                        nan_last_cmp(&mid_val, needle) == std::cmp::Ordering::Less
                     };
                     if go_right {
                         lo = mid + 1;
@@ -13290,17 +13286,32 @@ impl UFuncArray {
                 "select: condlist must be non-empty".to_string(),
             ));
         }
-        let n = condlist[0].values.len();
-        for (cond, choice) in condlist.iter().zip(choicelist.iter()) {
-            if cond.values.len() != n || choice.values.len() != n {
-                return Err(UFuncError::Msg(
-                    "select: all condition and choice arrays must have the same size".to_string(),
-                ));
-            }
+        let mut shapes: Vec<&[usize]> = Vec::with_capacity(condlist.len() + choicelist.len());
+        for cond in condlist {
+            shapes.push(&cond.shape);
         }
-        let mut values = vec![default; n];
+        for choice in choicelist {
+            shapes.push(&choice.shape);
+        }
+        let out_shape = Self::broadcast_shapes(&shapes)?;
+        let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+        let broadcast_conds: Vec<Self> = condlist
+            .iter()
+            .map(|cond| cond.broadcast_to(&out_shape))
+            .collect::<Result<_, _>>()?;
+        let broadcast_choices: Vec<Self> = choicelist
+            .iter()
+            .map(|choice| choice.broadcast_to(&out_shape))
+            .collect::<Result<_, _>>()?;
+
+        let mut out_dtype = fnp_dtype::min_scalar_type(default);
+        for choice in choicelist {
+            out_dtype = promote(out_dtype, choice.dtype);
+        }
+
+        let mut values = vec![default; out_count];
         // Iterate in reverse so first matching condition wins
-        for (cond, choice) in condlist.iter().zip(choicelist.iter()).rev() {
+        for (cond, choice) in broadcast_conds.iter().zip(broadcast_choices.iter()).rev() {
             for (v, (c, ch)) in values
                 .iter_mut()
                 .zip(cond.values.iter().zip(choice.values.iter()))
@@ -13311,9 +13322,9 @@ impl UFuncArray {
             }
         }
         Ok(Self {
-            shape: condlist[0].shape.clone(),
+            shape: out_shape,
             values,
-            dtype: choicelist[0].dtype,
+            dtype: out_dtype,
             integer_sidecar: None,
         })
     }
@@ -15473,6 +15484,11 @@ impl UFuncArray {
 ///
 /// `np.is_busday(dates)`
 pub fn is_busday(dates: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    if dates.dtype() != DType::DateTime64 {
+        return Err(UFuncError::Msg(
+            "is_busday requires DateTime64 array".to_string(),
+        ));
+    }
     let values: Vec<f64> = dates
         .values()
         .iter()
@@ -15489,16 +15505,26 @@ pub fn is_busday(dates: &UFuncArray) -> Result<UFuncArray, UFuncError> {
 ///
 /// `np.busday_count(start, end)`
 pub fn busday_count(start: &UFuncArray, end: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    if start.dtype() != DType::DateTime64 || end.dtype() != DType::DateTime64 {
+        return Err(UFuncError::Msg(
+            "busday_count requires DateTime64 start and end arrays".to_string(),
+        ));
+    }
     if start.values().len() != end.values().len() {
         return Err(UFuncError::InvalidInputLength {
             expected: start.values().len(),
             actual: end.values().len(),
         });
     }
-    let values: Vec<f64> = start
+    let broadcast_shape = fnp_ndarray::broadcast_shapes(&[start.shape(), end.shape()])
+        .map_err(UFuncError::Shape)?;
+    let start_bc = start.broadcast_to(&broadcast_shape)?;
+    let end_bc = end.broadcast_to(&broadcast_shape)?;
+    
+    let values: Vec<f64> = start_bc
         .values()
         .iter()
-        .zip(end.values().iter())
+        .zip(end_bc.values().iter())
         .map(|(&s, &e)| {
             let s_day = s as i64;
             let e_day = e as i64;
@@ -15526,7 +15552,7 @@ pub fn busday_count(start: &UFuncArray, end: &UFuncArray) -> Result<UFuncArray, 
             count as f64 * sign
         })
         .collect();
-    UFuncArray::new(start.shape().to_vec(), values, DType::I64)
+    UFuncArray::new(broadcast_shape, values, DType::I64)
 }
 
 /// Offset dates by a number of business days.
@@ -15535,42 +15561,59 @@ pub fn busday_count(start: &UFuncArray, end: &UFuncArray) -> Result<UFuncArray, 
 ///
 /// `np.busday_offset(dates, offsets)`
 pub fn busday_offset(dates: &UFuncArray, offsets: &UFuncArray) -> Result<UFuncArray, UFuncError> {
-    if dates.values().len() != offsets.values().len() {
-        return Err(UFuncError::InvalidInputLength {
-            expected: dates.values().len(),
-            actual: offsets.values().len(),
-        });
+    if dates.dtype() != DType::DateTime64 {
+        return Err(UFuncError::Msg(
+            "busday_offset requires DateTime64 dates array".to_string(),
+        ));
     }
-    let values: Vec<f64> = dates
+    if offsets.dtype() != DType::I64 {
+        return Err(UFuncError::Msg(
+            "busday_offset requires I64 offsets array".to_string(),
+        ));
+    }
+    let broadcast_shape = fnp_ndarray::broadcast_shapes(&[dates.shape(), offsets.shape()])
+        .map_err(UFuncError::Shape)?;
+    let dates_bc = dates.broadcast_to(&broadcast_shape)?;
+    let offsets_bc = offsets.broadcast_to(&broadcast_shape)?;
+    let values: Vec<f64> = dates_bc
         .values()
         .iter()
-        .zip(offsets.values().iter())
+        .zip(offsets_bc.values().iter())
         .map(|(&d, &off)| {
             let mut current = d as i64;
             let off_i = off as i64;
-            // First, if current day is not a business day, snap forward/backward
-            let wd = epoch_day_to_weekday(current);
-            if wd >= 5 {
-                // Weekend: snap to next Monday if offset >= 0, else previous Friday
-                if off_i >= 0 {
-                    current += i64::from(7 - wd); // next Monday
-                } else {
-                    current -= i64::from(wd - 4); // previous Friday
-                }
+            
+            // Roll forward if starting on a weekend
+            while epoch_day_to_weekday(current) >= 5 {
+                current += 1;
             }
-            let abs_off = off_i.unsigned_abs();
-            let step: i64 = if off_i >= 0 { 1 } else { -1 };
-            let mut remaining = abs_off;
-            while remaining > 0 {
-                current += step;
-                if epoch_day_to_weekday(current) < 5 {
-                    remaining -= 1;
+
+            if off_i > 0 {
+                let mut remaining = off_i;
+                while remaining > 0 {
+                    current += 1;
+                    if epoch_day_to_weekday(current) < 5 {
+                        remaining -= 1;
+                    }
+                }
+            } else if off_i < 0 {
+                let mut remaining = off_i.abs();
+                while remaining > 0 {
+                    current -= 1;
+                    if epoch_day_to_weekday(current) < 5 {
+                        remaining -= 1;
+                    }
                 }
             }
             current as f64
         })
         .collect();
-    UFuncArray::new(dates.shape().to_vec(), values, DType::DateTime64)
+    if values.iter().any(|v| v.is_nan()) {
+        return Err(UFuncError::Msg(
+            "busday_offset: non-business day date in input".to_string(),
+        ));
+    }
+    UFuncArray::new(broadcast_shape, values, DType::DateTime64)
 }
 
 // ── numpy.ma — Masked Array Module ──────────────────────────────────────
@@ -28691,6 +28734,30 @@ mod tests {
     }
 
     #[test]
+    fn select_broadcasts_conditions_and_choices() {
+        let cond1 = UFuncArray::new(vec![2], vec![1.0, 0.0], DType::Bool).unwrap();
+        let cond2 = UFuncArray::new(vec![2, 1], vec![0.0, 1.0], DType::Bool).unwrap();
+        let choice1 = UFuncArray::new(vec![2], vec![10.0, 20.0], DType::I64).unwrap();
+        let choice2 = UFuncArray::new(vec![2, 1], vec![30.0, 40.0], DType::I64).unwrap();
+
+        let r = UFuncArray::select(&[&cond1, &cond2], &[&choice1, &choice2], -1.0).unwrap();
+
+        assert_eq!(r.shape(), &[2, 2]);
+        assert_eq!(r.values(), &[10.0, -1.0, 10.0, 40.0]);
+    }
+
+    #[test]
+    fn select_promotes_result_dtype_with_default_scalar() {
+        let cond = UFuncArray::new(vec![2], vec![1.0, 0.0], DType::Bool).unwrap();
+        let choice = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::I64).unwrap();
+
+        let r = UFuncArray::select(&[&cond], &[&choice], 0.5).unwrap();
+
+        assert_eq!(r.dtype(), DType::F64);
+        assert_eq!(r.values(), &[1.0, 0.5]);
+    }
+
+    #[test]
     fn select_empty_condlist() {
         assert!(UFuncArray::select(&[], &[], 0.0).is_err());
     }
@@ -30066,6 +30133,15 @@ mod tests {
     }
 
     #[test]
+    fn busday_count_broadcasts_like_numpy() {
+        let start = UFuncArray::new(vec![1], vec![0.0], DType::DateTime64).unwrap();
+        let end = UFuncArray::new(vec![2], vec![5.0, 7.0], DType::DateTime64).unwrap();
+        let result = busday_count(&start, &end).unwrap();
+        assert_eq!(result.shape(), &[2]);
+        assert_eq!(result.values(), &[3.0, 5.0]);
+    }
+
+    #[test]
     fn busday_offset_basic() {
         // From Monday (day 4), offset +1 business day = Tuesday (day 5)
         let dates = UFuncArray::new(vec![1], vec![4.0], DType::DateTime64).unwrap();
@@ -30094,11 +30170,9 @@ mod tests {
 
     #[test]
     fn busday_offset_from_weekend() {
-        // From Saturday (day 2), offset +1 should snap to Monday then +1 = Tuesday (day 5)
         let dates = UFuncArray::new(vec![1], vec![2.0], DType::DateTime64).unwrap();
         let offsets = UFuncArray::new(vec![1], vec![1.0], DType::I64).unwrap();
-        let result = busday_offset(&dates, &offsets).unwrap();
-        assert_eq!(result.values(), &[5.0]);
+        assert!(busday_offset(&dates, &offsets).is_err());
     }
 
     #[test]
@@ -30108,6 +30182,22 @@ mod tests {
         let offsets = UFuncArray::new(vec![1], vec![0.0], DType::I64).unwrap();
         let result = busday_offset(&dates, &offsets).unwrap();
         assert_eq!(result.values(), &[4.0]);
+    }
+
+    #[test]
+    fn busday_offset_broadcasts_offsets() {
+        let dates = UFuncArray::new(vec![2], vec![4.0, 5.0], DType::DateTime64).unwrap();
+        let offsets = UFuncArray::new(vec![1], vec![1.0], DType::I64).unwrap();
+        let result = busday_offset(&dates, &offsets).unwrap();
+        assert_eq!(result.shape(), &[2]);
+        assert_eq!(result.values(), &[5.0, 6.0]);
+    }
+
+    #[test]
+    fn busday_offset_rejects_weekend_even_for_zero_offset() {
+        let dates = UFuncArray::new(vec![1], vec![2.0], DType::DateTime64).unwrap();
+        let offsets = UFuncArray::new(vec![1], vec![0.0], DType::I64).unwrap();
+        assert!(busday_offset(&dates, &offsets).is_err());
     }
 
     // ── Financial function tests ─────────────────────────────────────
@@ -32169,6 +32259,18 @@ mod tests {
             .searchsorted(&probe, None, Some(&[1, 2, 0]))
             .unwrap();
         assert_eq!(out.values(), &[1.0]); // 2 goes after 1 in sorted order
+    }
+
+    #[test]
+    fn searchsorted_nan_values_follow_numpy_boundaries() {
+        let sorted = UFuncArray::new(vec![3], vec![1.0, 2.0, f64::NAN], DType::F64).unwrap();
+        let probe = UFuncArray::new(vec![3], vec![0.0, 1.5, f64::NAN], DType::F64).unwrap();
+
+        let left = sorted.searchsorted(&probe, Some("left"), None).unwrap();
+        let right = sorted.searchsorted(&probe, Some("right"), None).unwrap();
+
+        assert_eq!(left.values(), &[0.0, 1.0, 2.0]);
+        assert_eq!(right.values(), &[0.0, 1.0, 3.0]);
     }
 
     #[test]

@@ -1,7 +1,21 @@
 {
   "suite": "datetime_differential",
   "total_cases": 29,
-  "passed_cases": 29,
-  "failed_cases": 0,
-  "mismatches": []
+  "passed_cases": 28,
+  "failed_cases": 1,
+  "mismatches": [
+    {
+      "fixture_id": "busday_offset_weekend_negative_golden",
+      "seed": 12014,
+      "mode": "hardened",
+      "operation": "busday_offset",
+      "expected_reason_code": "datetime_differential_expected_success",
+      "actual_reason_code": "datetime_differential_mismatch",
+      "message": "busday_offset_weekend_negative_golden: seed=12014 mode=hardened reason_code=datetime_differential_expected_success env_fingerprint=fnp-ufunc-datetime-packet-h artifact_refs=crates/fnp-conformance/fixtures/datetime_differential_cases.json,crates/fnp-ufunc/src/lib.rs value mismatch expected=[0.0] actual=[1.0] abs_tol=0.000000000001 rel_tol=0.000000000001",
+      "artifact_refs": [
+        "crates/fnp-conformance/fixtures/datetime_differential_cases.json",
+        "crates/fnp-ufunc/src/lib.rs"
+      ]
+    }
+  ]
 }
