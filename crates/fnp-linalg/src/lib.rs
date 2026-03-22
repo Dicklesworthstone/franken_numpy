@@ -3247,7 +3247,7 @@ pub fn cholesky_2x2(matrix: [[f64; 2]; 2], uplo: &str) -> Result<[[f64; 2]; 2], 
     let (a, b, d) = match uplo {
         "L" => (matrix[0][0], matrix[1][0], matrix[1][1]),
         "U" => (matrix[0][0], matrix[0][1], matrix[1][1]),
-        _ => unreachable!(),
+        _ => return Err(LinAlgError::CholeskyContractViolation("invalid uplo")),
     };
 
     if !a.is_finite() || !b.is_finite() || !d.is_finite() {
@@ -3274,7 +3274,7 @@ pub fn cholesky_2x2(matrix: [[f64; 2]; 2], uplo: &str) -> Result<[[f64; 2]; 2], 
     let result = match uplo {
         "L" => [[l11, 0.0], [l21, l22]],
         "U" => [[l11, l21], [0.0, l22]],
-        _ => unreachable!(),
+        _ => return Err(LinAlgError::CholeskyContractViolation("invalid uplo")),
     };
     Ok(result)
 }
@@ -3360,7 +3360,7 @@ pub fn qr_2x2(matrix: [[f64; 2]; 2], mode: QrMode) -> Result<Qr2x2Result, LinAlg
     let q_out = match mode {
         QrMode::Reduced | QrMode::Complete => Some(q),
         QrMode::R => None,
-        QrMode::Raw => unreachable!(),
+        QrMode::Raw => return Err(LinAlgError::QrModeInvalid),
     };
     Ok(Qr2x2Result { q: q_out, r })
 }

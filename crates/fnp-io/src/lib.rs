@@ -1447,7 +1447,11 @@ pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
                 })?;
                 decoded
             }
-            _ => unreachable!("compression validated before branch"),
+            _ => {
+                return Err(IOError::NpzArchiveContractViolation(
+                    "npz: unexpected compression method",
+                ));
+            }
         };
         if npy_bytes.len() != uncompressed_size {
             return Err(IOError::NpzArchiveContractViolation(

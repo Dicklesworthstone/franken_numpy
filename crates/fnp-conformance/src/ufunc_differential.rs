@@ -806,6 +806,10 @@ for case in cases:
                     out = np.bitwise_or(lhs, rhs, **kwargs)
                 elif op == 'bitwise_xor':
                     out = np.bitwise_xor(lhs, rhs, **kwargs)
+            elif op == 'matmul':
+                rhs_dtype = normalize_dtype_name(case.get('rhs_dtype', 'float64'))
+                rhs = np.array(case['rhs_values'], dtype=rhs_dtype).reshape(tuple(case['rhs_shape']))
+                out = np.matmul(lhs, rhs)
             elif op == 'sum':
                 axis = case.get('axis')
                 keepdims = bool(case.get('keepdims', False))
@@ -1366,6 +1370,7 @@ pub enum UFuncOperation {
     Cumsum,
     Cumprod,
     Clip,
+    Matmul,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2335,6 +2340,21 @@ pub fn execute_input_case(case: &UFuncInputCase) -> Result<(Vec<usize>, Vec<f64>
             let max_val = case.clip_max.unwrap_or(f64::INFINITY);
             lhs.clip(min_val, max_val)
         }
+        UFuncOperation::Matmul => {
+            let rhs_shape = case
+                .rhs_shape
+                .clone()
+                .ok_or_else(|| "matmul requires rhs_shape".to_string())?;
+            let rhs_values = case
+                .rhs_values
+                .clone()
+                .ok_or_else(|| "matmul requires rhs_values".to_string())?;
+            let rhs_dtype = parse_dtype(case.rhs_dtype.as_deref().unwrap_or("f64"))?;
+            let rhs = UFuncArray::new(rhs_shape, rhs_values, rhs_dtype)
+                .map_err(|err| format!("matmul rhs error: {err}"))?;
+            lhs.matmul(&rhs)
+                .map_err(|err| format!("matmul error: {err}"))?
+        }
         UFuncOperation::Where => {
             let x_shape = case
                 .rhs_shape
@@ -2751,6 +2771,58 @@ mod tests {
             err.contains("signature parse failed"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn execute_input_case_supports_matmul_2d() {
+        let case = make_binary_case(
+            "matmul_2d",
+            UFuncOperation::Matmul,
+            &[2, 3],
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            &[3, 2],
+            &[7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+        );
+
+        let (shape, values, dtype) = execute_input_case(&case).expect("matmul should pass");
+        assert_eq!(shape, vec![2, 2]);
+        assert_eq!(values, vec![58.0, 64.0, 139.0, 154.0]);
+        assert_eq!(dtype, "f64");
+    }
+
+    #[test]
+    fn execute_input_case_supports_batched_matmul() {
+        let case = make_binary_case(
+            "matmul_batched",
+            UFuncOperation::Matmul,
+            &[2, 2, 3],
+            &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
+            &[2, 3, 2],
+            &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
+        );
+
+        let (shape, values, dtype) = execute_input_case(&case).expect("batched matmul should pass");
+        assert_eq!(shape, vec![2, 2, 2]);
+        assert_eq!(
+            values,
+            vec![10.0, 13.0, 28.0, 40.0, 172.0, 193.0, 244.0, 274.0]
+        );
+        assert_eq!(dtype, "f64");
+    }
+
+    #[test]
+    fn execute_input_case_rejects_matmul_core_dim_mismatch() {
+        let case = make_binary_case(
+            "matmul_core_dim_mismatch",
+            UFuncOperation::Matmul,
+            &[2, 3],
+            &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+            &[2, 5],
+            &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+        );
+
+        let err = execute_input_case(&case).expect_err("mismatched matmul should fail");
+        assert!(err.contains("matmul"), "unexpected error: {err}");
     }
 
     // ── Oracle validation tests (bd-uk6w.1) ─────────────────────────────

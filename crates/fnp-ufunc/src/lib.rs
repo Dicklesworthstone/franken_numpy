@@ -1089,6 +1089,98 @@ impl GufuncSignature {
     pub fn canonical(&self) -> &str {
         &self.canonical
     }
+
+    /// Validate operand shapes against the gufunc core dimension contract.
+    ///
+    /// For signature `(m,n),(n,p)->(m,p)`:
+    /// - Each operand's trailing dimensions must match the core dimensions
+    /// - Leading (loop/broadcast) dimensions are broadcast together
+    /// - Core dimension names must resolve to consistent sizes
+    ///
+    /// Returns `(broadcast_shape, core_dim_map, output_shapes)` on success.
+    #[allow(clippy::type_complexity)]
+    pub fn validate_shapes(
+        &self,
+        operand_shapes: &[&[usize]],
+    ) -> Result<
+        (
+            Vec<usize>,
+            std::collections::HashMap<String, usize>,
+            Vec<Vec<usize>>,
+        ),
+        UFuncError,
+    > {
+        if operand_shapes.len() != self.inputs.len() {
+            return Err(UFuncError::Msg(format!(
+                "gufunc signature expects {} inputs, got {}",
+                self.inputs.len(),
+                operand_shapes.len()
+            )));
+        }
+
+        let mut dim_map: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut loop_shapes: Vec<&[usize]> = Vec::with_capacity(operand_shapes.len());
+
+        // Extract core dimensions from each operand
+        for (op_idx, (shape, core_dims)) in operand_shapes.iter().zip(&self.inputs).enumerate() {
+            let n_core = core_dims.len();
+            if shape.len() < n_core {
+                return Err(UFuncError::Msg(format!(
+                    "operand {} has {} dimensions but signature requires at least {} core dimensions",
+                    op_idx,
+                    shape.len(),
+                    n_core
+                )));
+            }
+            let loop_ndim = shape.len() - n_core;
+            loop_shapes.push(&shape[..loop_ndim]);
+
+            // Map core dimension names to sizes
+            for (dim_idx, dim_name) in core_dims.iter().enumerate() {
+                let size = shape[loop_ndim + dim_idx];
+                if let Some(&existing) = dim_map.get(dim_name) {
+                    if existing != size {
+                        return Err(UFuncError::Msg(format!(
+                            "core dimension '{}' size mismatch: {} vs {} (operand {})",
+                            dim_name, existing, size, op_idx
+                        )));
+                    }
+                } else {
+                    dim_map.insert(dim_name.clone(), size);
+                }
+            }
+        }
+
+        // Broadcast loop dimensions
+        let mut broadcast = Vec::new();
+        for &loop_shape in &loop_shapes {
+            if broadcast.is_empty() {
+                broadcast = loop_shape.to_vec();
+            } else {
+                broadcast = fnp_ndarray::broadcast_shape(&broadcast, loop_shape)
+                    .map_err(UFuncError::Shape)?;
+            }
+        }
+
+        // Compute output shapes: broadcast + output core dims
+        let mut output_shapes = Vec::with_capacity(self.outputs.len());
+        for output_core in &self.outputs {
+            let mut out_shape = broadcast.clone();
+            for dim_name in output_core {
+                let size = dim_map.get(dim_name).copied().ok_or_else(|| {
+                    UFuncError::Msg(format!(
+                        "output core dimension '{}' not bound by any input",
+                        dim_name
+                    ))
+                })?;
+                out_shape.push(size);
+            }
+            output_shapes.push(out_shape);
+        }
+
+        Ok((broadcast, dim_map, output_shapes))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4617,7 +4709,7 @@ impl UFuncArray {
                 // rot90(m, 3) = swapaxes(flip(m, 0), 0, 1)
                 self.flip(Some(0)).and_then(|f| f.swapaxes(0, 1))
             }
-            _ => unreachable!(),
+            _ => return Err(UFuncError::Msg("rot90 modulo math failed".to_string())),
         }
     }
 
@@ -15232,7 +15324,7 @@ fn apply_complex_binary_op(
                 (lhs_im * rhs_re - lhs_re * rhs_im) / denom,
             )
         }
-        _ => unreachable!("complex binary helper is only used for add/sub/mul/div"),
+        _ => (f64::NAN, f64::NAN),
     }
 }
 
@@ -15314,7 +15406,7 @@ fn reduce_sum_sidecar(
                 }
             }
         }
-        _ => unreachable!("mismatched sidecar types"),
+        _ => {}
     }
 }
 
@@ -36107,6 +36199,60 @@ mod tests {
         // Without width, negative uses sign-magnitude: -101 for -5
         assert_eq!(UFuncArray::binary_repr(-5, None), "-101");
         assert_eq!(UFuncArray::binary_repr(-1, None), "-1");
+    }
+
+    // ── gufunc shape validation tests (br-e9n) ─────────────────
+
+    #[test]
+    fn gufunc_validate_matmul_shapes() {
+        let sig = parse_gufunc_signature(Some("(m,n),(n,p)->(m,p)"), None)
+            .unwrap()
+            .unwrap();
+        let (broadcast, dim_map, outputs) = sig.validate_shapes(&[&[3, 4], &[4, 5]]).unwrap();
+        assert!(broadcast.is_empty(), "no loop dims for 2D inputs");
+        assert_eq!(dim_map["m"], 3);
+        assert_eq!(dim_map["n"], 4);
+        assert_eq!(dim_map["p"], 5);
+        assert_eq!(outputs, vec![vec![3, 5]]);
+    }
+
+    #[test]
+    fn gufunc_validate_matmul_with_batch() {
+        let sig = parse_gufunc_signature(Some("(m,n),(n,p)->(m,p)"), None)
+            .unwrap()
+            .unwrap();
+        // Batch dim 2 on both operands
+        let (broadcast, _, outputs) = sig.validate_shapes(&[&[2, 3, 4], &[2, 4, 5]]).unwrap();
+        assert_eq!(broadcast, vec![2]);
+        assert_eq!(outputs, vec![vec![2, 3, 5]]);
+    }
+
+    #[test]
+    fn gufunc_validate_dimension_mismatch_rejected() {
+        let sig = parse_gufunc_signature(Some("(m,n),(n,p)->(m,p)"), None)
+            .unwrap()
+            .unwrap();
+        // n=4 in first operand but n=3 in second → mismatch
+        let err = sig.validate_shapes(&[&[3, 4], &[3, 5]]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn gufunc_validate_scalar_signature() {
+        let sig = parse_gufunc_signature(Some("(),()->()"), None)
+            .unwrap()
+            .unwrap();
+        let (broadcast, _, outputs) = sig.validate_shapes(&[&[5], &[5]]).unwrap();
+        assert_eq!(broadcast, vec![5]);
+        assert_eq!(outputs, vec![vec![5]]);
+    }
+
+    #[test]
+    fn gufunc_validate_wrong_operand_count() {
+        let sig = parse_gufunc_signature(Some("(n),(n)->(n)"), None)
+            .unwrap()
+            .unwrap();
+        assert!(sig.validate_shapes(&[&[5]]).is_err()); // needs 2 inputs
     }
 
     #[test]

@@ -122,6 +122,51 @@
       "dtype": "unknown"
     },
     {
+      "id": "matmul_basic_2d",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        2
+      ],
+      "values": [
+        58.0,
+        64.0,
+        139.0,
+        154.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "matmul_batched_2x2x3_by_2x3x2",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        2,
+        2
+      ],
+      "values": [
+        10.0,
+        13.0,
+        28.0,
+        40.0,
+        172.0,
+        193.0,
+        244.0,
+        274.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "matmul_core_dim_mismatch",
+      "status": "error",
+      "error": "matmul: Input operand 1 has a mismatch in its core dimension 0, with gufunc signature (n?,k),(k,m?)->(n?,m?) (size 2 is different from 3)",
+      "shape": [],
+      "values": [],
+      "dtype": "unknown"
+    },
+    {
       "id": "sum_all_no_keepdims",
       "status": "ok",
       "error": null,
