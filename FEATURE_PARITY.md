@@ -49,16 +49,16 @@
 
 | Crate | Tests | Description |
 |---|---|---|
-| fnp-ufunc | 1,274 | Core array operations, math, sorting, polynomials, NaN-correct reductions, 20 oracle edge-case tests, integer sidecar lossless storage, gufunc signature edge cases, custom loop registry, reduction payload validation, as_strided/sliding_window views, optimal multi_dot chain ordering, 25 linalg bridge tests |
+| fnp-ufunc | 1,325 | Core array operations, math, sorting, polynomials, NaN-correct reductions, oracle tests, linalg bridge, FFT (incl hfft/ihfft), hermfit/lagfit, masked cov/corrcoef, datetime string parsing, astype_with_casting |
 | fnp-ndarray | 54 | Shape legality, stride calculus, broadcast contracts, overlap detection, multi-axis negative strides |
 | fnp-linalg | 199 | Linear algebra decompositions, solvers, norms, 16 NumPy oracle tests |
-| fnp-random | 182 | RNG distributions (40 oracle-verified), seeding, reproducibility, large-n binomial/multinomial |
-| fnp-iter | 79 | Transfer-loop selector state machine, overlap detection, where-mask validation, subarray transfer, FPE cast error handling, strided transfer properties, flatiter edge cases, nditer flag validation, zero-element boundary tests |
-| fnp-io | 143 | NPY/NPZ read/write, text formats, compression, 7 format oracle tests |
+| fnp-random | 183 | RNG distributions (40 oracle-verified), seeding, reproducibility, large-n binomial/multinomial |
+| fnp-iter | 81 | Transfer-loop selector state machine, overlap detection, where-mask validation, subarray transfer, FPE handling, zero-element boundary |
+| fnp-io | 146 | NPY/NPZ read/write, text formats, compression, 7 format oracle tests |
 | fnp-conformance | 122 | Differential parity, metamorphic identities, adversarial fuzzing, witness stability, P2C evidence packets |
 | fnp-dtype | 116 | Dtype taxonomy, promotion table, cast policy primitives |
-| fnp-runtime | 52 | Mode split, fail-closed decoding, override-audit gate, Bayesian decision engine edge cases, posterior monotonicity, evidence ledger, context normalization |
-| **Total** | **2,224** | |
+| fnp-runtime | 53 | Mode split, fail-closed decoding, override-audit gate, Bayesian decision engine, evidence ledger |
+| **Total** | **2,282** | |
 
 ## Remaining Gaps (Python-specific, low priority)
 
