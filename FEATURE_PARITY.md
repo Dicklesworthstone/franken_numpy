@@ -49,16 +49,16 @@
 
 | Crate | Tests | Description |
 |---|---|---|
-| fnp-ufunc | 1,325 | Core array operations, math, sorting, polynomials, NaN-correct reductions, oracle tests, linalg bridge, FFT (incl hfft/ihfft), hermfit/lagfit, masked cov/corrcoef, datetime string parsing, astype_with_casting |
-| fnp-ndarray | 54 | Shape legality, stride calculus, broadcast contracts, overlap detection, multi-axis negative strides |
+| fnp-ufunc | 1,372 | Core array operations, math, sorting, polynomials, reductions, oracle tests, linalg bridge, FFT (hfft/ihfft), hermfit/lagfit, masked cov/corrcoef, datetime parsing, gufunc validation, parameter parity (clip_optional, reshape_order, histogram_full, unique_axis, concatenate_with_dtype) |
+| fnp-ndarray | 55 | Shape legality, stride calculus, broadcast contracts, overlap detection, multi-axis negative strides |
 | fnp-linalg | 199 | Linear algebra decompositions, solvers, norms, 16 NumPy oracle tests |
 | fnp-random | 183 | RNG distributions (40 oracle-verified), seeding, reproducibility, large-n binomial/multinomial |
-| fnp-iter | 81 | Transfer-loop selector state machine, overlap detection, where-mask validation, subarray transfer, FPE handling, zero-element boundary |
+| fnp-iter | 102 | Transfer-loop selector, NDIter traversal/broadcast/overlap contracts, flatiter indexing/assignment, ndindex/ndenumerate iterators |
 | fnp-io | 146 | NPY/NPZ read/write, text formats, compression, 7 format oracle tests |
-| fnp-conformance | 122 | Differential parity, metamorphic identities, adversarial fuzzing, witness stability, P2C evidence packets |
+| fnp-conformance | 114 | Differential parity, metamorphic identities, adversarial fuzzing, witness stability, matmul conformance |
 | fnp-dtype | 116 | Dtype taxonomy, promotion table, cast policy primitives |
 | fnp-runtime | 53 | Mode split, fail-closed decoding, override-audit gate, Bayesian decision engine, evidence ledger |
-| **Total** | **2,282** | |
+| **Total** | **2,358** | |
 
 ## Remaining Gaps (Python-specific, low priority)
 

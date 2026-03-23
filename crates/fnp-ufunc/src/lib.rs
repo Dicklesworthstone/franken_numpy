@@ -1414,6 +1414,26 @@ pub fn parse_fixed_signature_string(
     })
 }
 
+pub fn normalize_fixed_signature_keywords(
+    sig: Option<&str>,
+    signature: Option<&str>,
+    nin: usize,
+    nout: usize,
+) -> Result<Option<FixedSignature>, UFuncError> {
+    let Some(normalized) = normalize_signature_keywords(sig, signature)? else {
+        return Ok(None);
+    };
+
+    if normalized.contains('(') || normalized.contains(')') {
+        return Err(UFuncError::FixedSignatureInvalid {
+            detail: "fixed signature keywords must not use gufunc core-dimension grammar"
+                .to_string(),
+        });
+    }
+
+    Ok(Some(parse_fixed_signature_string(&normalized, nin, nout)?))
+}
+
 pub fn validate_override_payload_class(payload_class: &str) -> Result<(), UFuncError> {
     let normalized = payload_class.trim().to_ascii_lowercase();
     if normalized.is_empty() {
@@ -22158,13 +22178,14 @@ mod tests {
         hermroots, hermsub, hermval, is_busday, isneginf, isposinf, lag2poly, lagadd, lagder,
         lagfit, lagfromroots, lagmul, lagroots, lagsub, lagval, lcm_arrays, leg2poly, legadd,
         legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub, legval, ma_is_mask,
-        ma_is_masked, ma_make_mask, ma_mask_or, modf, normalize_signature_keywords, pad_empty,
-        pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
-        plan_binary_dispatch, poly2cheb, poly2herm, poly2lag, poly2leg, register_custom_loop,
-        scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log, scimath_log2, scimath_log10,
-        scimath_power, scimath_sqrt, seterr, seterr_state, seterrcall, sort_complex,
-        take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
-        validate_override_payload_class, where_nonzero,
+        ma_is_masked, ma_make_mask, ma_mask_or, modf, normalize_fixed_signature_keywords,
+        normalize_signature_keywords, pad_empty, pad_linear_ramp, pad_stat,
+        parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch, poly2cheb,
+        poly2herm, poly2lag, poly2leg, register_custom_loop, scimath_arccos, scimath_arcsin,
+        scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_power, scimath_sqrt,
+        seterr, seterr_state, seterrcall, sort_complex, take_float_error_events, unique_all,
+        unique_counts, unique_inverse, unique_values, validate_override_payload_class,
+        where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
@@ -23059,6 +23080,24 @@ mod tests {
         let err = parse_fixed_signature_string("%^->#", 2, 1)
             .expect_err("unknown dtype token should fail");
         assert!(matches!(err, UFuncError::SignatureParse { .. }));
+    }
+
+    #[test]
+    fn normalize_fixed_signature_keywords_canonicalizes_valid_dtype_signature() {
+        let signature = normalize_fixed_signature_keywords(Some(" ii -> i "), None, 2, 1)
+            .expect("normalization should succeed")
+            .expect("signature should be present");
+        assert_eq!(signature.inputs, vec![DType::I32, DType::I32]);
+        assert_eq!(signature.outputs, vec![DType::I32]);
+        assert_eq!(signature.canonical(), "ii->i");
+    }
+
+    #[test]
+    fn normalize_fixed_signature_keywords_rejects_gufunc_grammar() {
+        let err = normalize_fixed_signature_keywords(Some("(i),(i)->()"), None, 2, 1)
+            .expect_err("gufunc grammar should not be accepted in fixed-signature lane");
+        assert!(matches!(err, UFuncError::FixedSignatureInvalid { .. }));
+        assert_eq!(err.reason_code(), "ufunc_fixed_signature_invalid");
     }
 
     #[test]

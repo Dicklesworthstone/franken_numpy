@@ -4,10 +4,10 @@
   <img src="franken_numpy_illustration.webp" alt="FrankenNumPy - memory-safe clean-room NumPy reimplementation in Rust" width="400">
 
   **Memory-safe, clean-room NumPy reimplementation in Rust.**<br>
-  Zero unsafe code. 2,282 tests. Bit-exact RNG parity. Every feature family green.
+  Zero unsafe code. 2,358 tests. Bit-exact RNG parity. Every feature family green.
 
   ![Rust](https://img.shields.io/badge/Rust-nightly%202024-orange)
-  ![Tests](https://img.shields.io/badge/tests-2%2C282%20passing-brightgreen)
+  ![Tests](https://img.shields.io/badge/tests-2%2C358%20passing-brightgreen)
   ![Unsafe](https://img.shields.io/badge/unsafe-0%20blocks-blue)
   ![License](https://img.shields.io/badge/license-MIT-green)
 </div>
@@ -35,7 +35,7 @@ FrankenNumPy rebuilds NumPy's semantics from scratch in safe Rust with two non-n
 | Stride calculus | Evolved over decades | Clean-room deterministic engine (SCE) |
 | Runtime modes | Single mode | Strict (max compat) + Hardened (safety guards) |
 | Conformance | Self-referential | Differential oracle against real NumPy |
-| Test coverage | pytest suite | 2,282 Rust tests + 8-gate CI topology |
+| Test coverage | pytest suite | 2,358 Rust tests + 8-gate CI topology |
 
 ---
 
@@ -149,7 +149,7 @@ cargo test --workspace --all-features
       ▼           ▼               ▼              ▼           ▼
  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
  │ fnp-ufunc│ │fnp-linalg│ │fnp-random│ │  fnp-io  │ │ fnp-fft  │
- │ 1325     │ │ 199      │ │ 183      │ │ 146      │ │ (in-ufunc│
+ │ 1372     │ │ 199      │ │ 183      │ │ 146      │ │ (in-ufunc│
  │ tests    │ │ tests    │ │ tests    │ │ tests    │ │  module) │
  └─────┬────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘
        │
@@ -158,7 +158,7 @@ cargo test --workspace --all-features
  ▼                                                          ▼
  ┌──────────┐ ┌────────────┐ ┌──────────┐ ┌──────────────┐
  │ fnp-dtype│ │ fnp-ndarray│ │ fnp-iter │ │ fnp-runtime  │
- │ 116 tests│ │ 54 tests   │ │ 81 tests │ │ 53 tests     │
+ │ 116 tests│ │ 55 tests   │ │ 102 tests│ │ 53 tests     │
  │ promote  │ │ SCE core   │ │ transfer │ │ strict/      │
  │ cast     │ │ strides    │ │ semantics│ │ hardened     │
  └──────────┘ └────────────┘ └──────────┘ └──────────────┘
@@ -766,16 +766,16 @@ let restored = Generator::from_pickle_payload(payload)?;
 
 | Crate | Tests | What it covers |
 |---|---|---|
-| `fnp-ufunc` | 1,325 | Array ops, math, sorting, polynomials, NaN-correct reductions, oracle tests, linalg bridge, FFT metamorphic, masked cov/corrcoef, datetime parsing |
+| `fnp-ufunc` | 1,372 | Array ops, math, sorting, polynomials, reductions, oracle tests, linalg bridge, FFT, masked cov/corrcoef, datetime parsing, gufunc validation |
 | `fnp-linalg` | 199 | Decompositions, solvers, norms, 16 NumPy oracle tests |
 | `fnp-random` | 183 | 40 oracle-verified distributions, seeding, reproducibility |
 | `fnp-io` | 146 | NPY/NPZ read/write, text formats, compression, 7 format oracle tests |
 | `fnp-dtype` | 116 | Dtype taxonomy, promotion table, cast policy |
-| `fnp-conformance` | 122 | Differential parity, metamorphic identities, adversarial fuzzing |
-| `fnp-ndarray` | 54 | Shape legality, stride calculus, broadcast contracts, multi-axis negative strides |
-| `fnp-iter` | 81 | Transfer semantics, overlap detection, stride tricks, FPE handling |
-| `fnp-runtime` | 52 | Mode split, fail-closed decoding, override-audit gate, Bayesian decision engine, evidence ledger |
-| **Total** | **2,282** | **All passing in workspace** |
+| `fnp-conformance` | 114 | Differential parity, metamorphic identities, adversarial fuzzing, matmul conformance |
+| `fnp-ndarray` | 55 | Shape legality, stride calculus, broadcast contracts, multi-axis negative strides |
+| `fnp-iter` | 102 | Transfer semantics, NDIter traversal/broadcast/overlap, flatiter contracts, ndindex/ndenumerate |
+| `fnp-runtime` | 53 | Mode split, fail-closed decoding, override-audit gate, Bayesian decision engine, evidence ledger |
+| **Total** | **2,358** | **All passing in workspace** |
 
 ### Oracle Test Strategy
 
