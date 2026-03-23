@@ -542,9 +542,92 @@ impl NditerPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NditerOperandSpec {
+    pub shape: Vec<usize>,
+    pub no_broadcast: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NditerOperandBroadcastPlan {
+    pub shape: Vec<usize>,
+    pub broadcast_strides: Vec<isize>,
+    pub expanded_axes: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NditerBroadcastPlan {
+    pub broadcast_shape: Vec<usize>,
+    pub operands: Vec<NditerOperandBroadcastPlan>,
+}
+
+pub fn plan_nditer_broadcast(
+    operands: &[NditerOperandSpec],
+    item_size: usize,
+    order: NditerOrder,
+) -> Result<NditerBroadcastPlan, NditerError> {
+    if operands.is_empty() {
+        return Err(NditerError::InvalidConfiguration(
+            "nditer broadcast planner requires at least one operand",
+        ));
+    }
+
+    let mut broadcast_shape = Vec::<usize>::new();
+    for operand in operands {
+        broadcast_shape = merge_broadcast_shape(&broadcast_shape, &operand.shape)?;
+    }
+
+    let mut operand_plans = Vec::with_capacity(operands.len());
+    for operand in operands {
+        let base_strides = compatible_nditer_strides(&operand.shape, item_size, order)?;
+        let rank_delta = broadcast_shape.len().saturating_sub(operand.shape.len());
+        let mut broadcast_strides = Vec::with_capacity(broadcast_shape.len());
+        let mut expanded_axes = Vec::new();
+
+        for (axis, &broadcast_dim) in broadcast_shape.iter().enumerate() {
+            let aligned_axis = axis.checked_sub(rank_delta);
+            let (operand_dim, operand_stride) = aligned_axis
+                .map(|idx| (operand.shape[idx], base_strides[idx]))
+                .unwrap_or((1, 0));
+
+            if operand_dim == broadcast_dim {
+                broadcast_strides.push(operand_stride);
+                continue;
+            }
+
+            if operand_dim == 1 && broadcast_dim > 1 {
+                if operand.no_broadcast {
+                    return Err(NditerError::NoBroadcastViolation(
+                        "no_broadcast operand would need axis expansion",
+                    ));
+                }
+                broadcast_strides.push(0);
+                expanded_axes.push(axis);
+                continue;
+            }
+
+            return Err(NditerError::InvalidConfiguration(
+                "operand shape is not broadcast-compatible with iterator shape",
+            ));
+        }
+
+        operand_plans.push(NditerOperandBroadcastPlan {
+            shape: operand.shape.clone(),
+            broadcast_strides,
+            expanded_axes,
+        });
+    }
+
+    Ok(NditerBroadcastPlan {
+        broadcast_shape,
+        operands: operand_plans,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NditerError {
     InvalidConfiguration(&'static str),
     MultiIndexViolation(&'static str),
+    NoBroadcastViolation(&'static str),
 }
 
 impl NditerError {
@@ -553,6 +636,7 @@ impl NditerError {
         match self {
             Self::InvalidConfiguration(_) => "nditer_constructor_invalid_configuration",
             Self::MultiIndexViolation(_) => "nditer_multi_index_contract_violation",
+            Self::NoBroadcastViolation(_) => "nditer_no_broadcast_violation",
         }
     }
 }
@@ -560,7 +644,9 @@ impl NditerError {
 impl std::fmt::Display for NditerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidConfiguration(msg) | Self::MultiIndexViolation(msg) => write!(f, "{msg}"),
+            Self::InvalidConfiguration(msg)
+            | Self::MultiIndexViolation(msg)
+            | Self::NoBroadcastViolation(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -626,6 +712,37 @@ fn compatible_nditer_strides(
         }
     }
     Ok(strides)
+}
+
+fn merge_broadcast_shape(lhs: &[usize], rhs: &[usize]) -> Result<Vec<usize>, NditerError> {
+    let rank = lhs.len().max(rhs.len());
+    let mut merged = Vec::with_capacity(rank);
+    for axis in 0..rank {
+        let lhs_dim = if axis < rank - lhs.len() {
+            1
+        } else {
+            lhs[axis - (rank - lhs.len())]
+        };
+        let rhs_dim = if axis < rank - rhs.len() {
+            1
+        } else {
+            rhs[axis - (rank - rhs.len())]
+        };
+
+        let merged_dim = if lhs_dim == rhs_dim {
+            lhs_dim
+        } else if lhs_dim == 1 {
+            rhs_dim
+        } else if rhs_dim == 1 {
+            lhs_dim
+        } else {
+            return Err(NditerError::InvalidConfiguration(
+                "operand shapes are not broadcast-compatible",
+            ));
+        };
+        merged.push(merged_dim);
+    }
+    Ok(merged)
 }
 
 fn plan_external_loop(
@@ -1327,6 +1444,73 @@ mod tests {
             .seek_multi_index(&[2, 0])
             .expect_err("out-of-bounds multi-index should fail");
         assert_eq!(err.reason_code(), "nditer_multi_index_contract_violation");
+    }
+
+    #[test]
+    fn nditer_broadcast_plan_zero_stride_propagates_for_expanded_axes() {
+        let plan = plan_nditer_broadcast(
+            &[
+                NditerOperandSpec {
+                    shape: vec![2, 3],
+                    no_broadcast: false,
+                },
+                NditerOperandSpec {
+                    shape: vec![1, 3],
+                    no_broadcast: false,
+                },
+            ],
+            8,
+            NditerOrder::C,
+        )
+        .expect("broadcast plan");
+        assert_eq!(plan.broadcast_shape, vec![2, 3]);
+        assert_eq!(plan.operands[0].broadcast_strides, vec![24, 8]);
+        assert_eq!(plan.operands[0].expanded_axes, Vec::<usize>::new());
+        assert_eq!(plan.operands[1].broadcast_strides, vec![0, 8]);
+        assert_eq!(plan.operands[1].expanded_axes, vec![0]);
+    }
+
+    #[test]
+    fn nditer_broadcast_plan_rejects_protected_operand_expansion() {
+        let err = plan_nditer_broadcast(
+            &[
+                NditerOperandSpec {
+                    shape: vec![2, 3],
+                    no_broadcast: false,
+                },
+                NditerOperandSpec {
+                    shape: vec![1, 3],
+                    no_broadcast: true,
+                },
+            ],
+            8,
+            NditerOrder::C,
+        )
+        .expect_err("protected operand should reject broadcast expansion");
+        assert_eq!(err.reason_code(), "nditer_no_broadcast_violation");
+    }
+
+    #[test]
+    fn nditer_broadcast_plan_rejects_shape_mismatch() {
+        let err = plan_nditer_broadcast(
+            &[
+                NditerOperandSpec {
+                    shape: vec![2, 3],
+                    no_broadcast: false,
+                },
+                NditerOperandSpec {
+                    shape: vec![2, 4],
+                    no_broadcast: false,
+                },
+            ],
+            8,
+            NditerOrder::C,
+        )
+        .expect_err("incompatible shapes should fail");
+        assert_eq!(
+            err.reason_code(),
+            "nditer_constructor_invalid_configuration"
+        );
     }
 
     // -----------------------------------------------------------------------

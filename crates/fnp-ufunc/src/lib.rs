@@ -3454,6 +3454,40 @@ impl UFuncArray {
         }
     }
 
+    /// Sum with initial value (`np.sum(initial=...)`).
+    ///
+    /// The initial value is added to the sum result. For empty arrays,
+    /// the result is the initial value itself.
+    pub fn reduce_sum_initial(
+        &self,
+        axis: Option<isize>,
+        keepdims: bool,
+        initial: f64,
+    ) -> Result<Self, UFuncError> {
+        let mut result = self.reduce_sum(axis, keepdims)?;
+        for v in &mut result.values {
+            *v += initial;
+        }
+        Ok(result)
+    }
+
+    /// Product with initial value (`np.prod(initial=...)`).
+    ///
+    /// The initial value is multiplied into the product result. For empty arrays,
+    /// the result is the initial value itself.
+    pub fn reduce_prod_initial(
+        &self,
+        axis: Option<isize>,
+        keepdims: bool,
+        initial: f64,
+    ) -> Result<Self, UFuncError> {
+        let mut result = self.reduce_prod(axis, keepdims)?;
+        for v in &mut result.values {
+            *v *= initial;
+        }
+        Ok(result)
+    }
+
     pub fn reduce_prod(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
         let out_dtype = promote_for_sum_reduction(self.dtype);
         match axis {
@@ -3830,37 +3864,6 @@ impl UFuncArray {
             integer_sidecar: None,
         };
         masked.reduce_sum(axis, keepdims)
-    }
-
-    /// Sum with an initial value for the accumulator.
-    ///
-    /// Mimics `np.sum(a, initial=value)`. The initial value is added to
-    /// the reduction result. For empty arrays, returns the initial value.
-    pub fn reduce_sum_initial(
-        &self,
-        axis: Option<isize>,
-        keepdims: bool,
-        initial: f64,
-    ) -> Result<Self, UFuncError> {
-        let mut result = self.reduce_sum(axis, keepdims)?;
-        for v in &mut result.values {
-            *v += initial;
-        }
-        Ok(result)
-    }
-
-    /// Prod with an initial value for the accumulator.
-    pub fn reduce_prod_initial(
-        &self,
-        axis: Option<isize>,
-        keepdims: bool,
-        initial: f64,
-    ) -> Result<Self, UFuncError> {
-        let mut result = self.reduce_prod(axis, keepdims)?;
-        for v in &mut result.values {
-            *v *= initial;
-        }
-        Ok(result)
     }
 
     pub fn cumsum(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
@@ -5560,6 +5563,51 @@ impl UFuncArray {
             dtype: out_dtype,
             integer_sidecar: out_sidecar,
         })
+    }
+
+    /// Concatenate with dtype and casting control (`np.concatenate(dtype=, casting=)`).
+    ///
+    /// Casts all input arrays to `dtype` using the specified casting rule before
+    /// concatenation. Rejects the operation if any cast violates the casting policy.
+    pub fn concatenate_with_dtype(
+        arrays: &[&Self],
+        axis: isize,
+        dtype: DType,
+        casting: &str,
+    ) -> Result<Self, UFuncError> {
+        // Validate all casts
+        for (i, arr) in arrays.iter().enumerate() {
+            if !fnp_dtype::can_cast(arr.dtype, dtype, casting) {
+                return Err(UFuncError::Msg(format!(
+                    "concatenate: cannot cast operand {} from {:?} to {:?} with casting='{casting}'",
+                    i, arr.dtype, dtype
+                )));
+            }
+        }
+        // Cast all arrays to target dtype
+        let cast_arrays: Vec<Self> = arrays.iter().map(|a| a.astype(dtype)).collect();
+        let refs: Vec<&Self> = cast_arrays.iter().collect();
+        Self::concatenate(&refs, axis)
+    }
+
+    /// Stack with dtype and casting control (`np.stack(dtype=, casting=)`).
+    pub fn stack_with_dtype(
+        arrays: &[&Self],
+        axis: isize,
+        dtype: DType,
+        casting: &str,
+    ) -> Result<Self, UFuncError> {
+        for (i, arr) in arrays.iter().enumerate() {
+            if !fnp_dtype::can_cast(arr.dtype, dtype, casting) {
+                return Err(UFuncError::Msg(format!(
+                    "stack: cannot cast operand {} from {:?} to {:?} with casting='{casting}'",
+                    i, arr.dtype, dtype
+                )));
+            }
+        }
+        let cast_arrays: Vec<Self> = arrays.iter().map(|a| a.astype(dtype)).collect();
+        let refs: Vec<&Self> = cast_arrays.iter().collect();
+        Self::stack(&refs, axis)
     }
 
     /// Stack arrays along a new axis.
@@ -8331,6 +8379,69 @@ impl UFuncArray {
         }
     }
 
+    /// Percentile with keepdims support (`np.percentile(keepdims=True)`).
+    pub fn percentile_keepdims(
+        &self,
+        q: f64,
+        axis: Option<isize>,
+        keepdims: bool,
+    ) -> Result<Self, UFuncError> {
+        let result = self.percentile(q, axis)?;
+        if keepdims {
+            if let Some(ax) = axis {
+                let ax = normalize_axis(ax, self.shape.len())?;
+                let mut shape = result.shape.clone();
+                shape.insert(ax, 1);
+                return Ok(Self {
+                    shape,
+                    values: result.values,
+                    dtype: result.dtype,
+                    integer_sidecar: None,
+                });
+            }
+            // axis=None: result is scalar, keepdims gives shape [1, 1, ..., 1]
+            let shape = vec![1; self.shape.len()];
+            return Ok(Self {
+                shape,
+                values: result.values,
+                dtype: result.dtype,
+                integer_sidecar: None,
+            });
+        }
+        Ok(result)
+    }
+
+    /// Quantile with keepdims support (`np.quantile(keepdims=True)`).
+    pub fn quantile_keepdims(
+        &self,
+        q: f64,
+        axis: Option<isize>,
+        keepdims: bool,
+    ) -> Result<Self, UFuncError> {
+        let result = self.quantile(q, axis)?;
+        if keepdims {
+            if let Some(ax) = axis {
+                let ax = normalize_axis(ax, self.shape.len())?;
+                let mut shape = result.shape.clone();
+                shape.insert(ax, 1);
+                return Ok(Self {
+                    shape,
+                    values: result.values,
+                    dtype: result.dtype,
+                    integer_sidecar: None,
+                });
+            }
+            let shape = vec![1; self.shape.len()];
+            return Ok(Self {
+                shape,
+                values: result.values,
+                dtype: result.dtype,
+                integer_sidecar: None,
+            });
+        }
+        Ok(result)
+    }
+
     /// Percentile with explicit interpolation method (np.percentile with method parameter).
     pub fn percentile_method(
         &self,
@@ -9265,12 +9376,12 @@ impl UFuncArray {
         if bins == 0 {
             return Err(UFuncError::Msg("histogram: bins must be > 0".into()));
         }
-        if let Some(w) = weights {
-            if w.values.len() != self.values.len() {
-                return Err(UFuncError::Msg(
-                    "histogram: weights must have same length as input".into(),
-                ));
-            }
+        if let Some(w) = weights
+            && w.values.len() != self.values.len()
+        {
+            return Err(UFuncError::Msg(
+                "histogram: weights must have same length as input".into(),
+            ));
         }
 
         let (lo, hi) = match range {
@@ -12196,6 +12307,69 @@ impl UFuncArray {
             None
         };
         (unique, indices, inverse, counts)
+    }
+
+    /// Find unique sub-arrays along an axis (`np.unique(a, axis=...)`).
+    ///
+    /// For a 2-D array with `axis=0`, returns unique rows. With `axis=1`, unique columns.
+    /// Rows/columns are compared elementwise and returned in sorted order.
+    pub fn unique_axis(&self, axis: isize) -> Result<Self, UFuncError> {
+        if self.shape.len() < 2 {
+            return Ok(self.unique());
+        }
+        let ax = normalize_axis(axis, self.shape.len())?;
+        let axis_len = self.shape[ax];
+        if axis_len == 0 {
+            return Ok(self.clone());
+        }
+
+        // Collect each slice as a Vec<f64> for comparison
+        let outer: usize = self.shape[..ax].iter().product();
+        let inner: usize = self.shape[ax + 1..].iter().product();
+        let mut slices: Vec<(Vec<f64>, usize)> = Vec::with_capacity(axis_len);
+        for a in 0..axis_len {
+            let mut slice_vals = Vec::with_capacity(outer * inner);
+            for o in 0..outer {
+                for i in 0..inner {
+                    slice_vals.push(self.values[o * axis_len * inner + a * inner + i]);
+                }
+            }
+            slices.push((slice_vals, a));
+        }
+
+        // Sort by slice content
+        slices.sort_by(|a, b| {
+            a.0.iter()
+                .zip(&b.0)
+                .map(|(x, y)| x.total_cmp(y))
+                .find(|o| !o.is_eq())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Deduplicate
+        slices.dedup_by(|a, b| a.0 == b.0);
+
+        let unique_count = slices.len();
+        let mut new_shape = self.shape.clone();
+        new_shape[ax] = unique_count;
+        let total = new_shape.iter().product::<usize>();
+        let mut values = vec![0.0; total];
+
+        for (new_a, (slice_vals, _)) in slices.iter().enumerate() {
+            for o in 0..outer {
+                for i in 0..inner {
+                    values[o * unique_count * inner + new_a * inner + i] =
+                        slice_vals[o * inner + i];
+                }
+            }
+        }
+
+        Ok(Self {
+            shape: new_shape,
+            values,
+            dtype: self.dtype,
+            integer_sidecar: None,
+        })
     }
 
     /// Test whether each element of `self` is in `test_elements`. Returns a boolean array.
@@ -36660,6 +36834,84 @@ mod tests {
         let (counts, _) = a.histogram_full(2, Some((2.0, 4.0)), None, false).unwrap();
         // Only values 2, 3, 4 are in range [2, 4]; 2 bins of width 1
         assert_eq!(counts.shape(), &[2]);
+    }
+
+    // ── Remaining parameter parity tests (br-ksr) ──────────────
+
+    #[test]
+    fn percentile_keepdims_axis() {
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = a.percentile_keepdims(50.0, Some(1), true).unwrap();
+        assert_eq!(r.shape(), &[2, 1]); // axis 1 reduced but kept as dim 1
+    }
+
+    #[test]
+    fn percentile_keepdims_none_axis() {
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = a.percentile_keepdims(50.0, None, true).unwrap();
+        assert_eq!(r.shape(), &[1, 1]); // all axes reduced, keepdims makes [1, 1]
+    }
+
+    #[test]
+    fn quantile_keepdims() {
+        let a =
+            UFuncArray::new(vec![3, 2], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = a.quantile_keepdims(0.5, Some(0), true).unwrap();
+        assert_eq!(r.shape(), &[1, 2]); // axis 0 reduced, kept as size 1
+    }
+
+    #[test]
+    fn reduce_sum_with_initial() {
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let r = a.reduce_sum_initial(None, false, 10.0).unwrap();
+        // sum = 6.0, + initial 10.0 = 16.0
+        assert_eq!(r.values(), &[16.0]);
+    }
+
+    #[test]
+    fn reduce_prod_with_initial() {
+        let a = UFuncArray::new(vec![3], vec![2.0, 3.0, 4.0], DType::F64).unwrap();
+        let r = a.reduce_prod_initial(None, false, 10.0).unwrap();
+        // prod = 24.0, * initial 10.0 = 240.0
+        assert_eq!(r.values(), &[240.0]);
+    }
+
+    #[test]
+    fn concatenate_with_dtype_promotes() {
+        let a = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::I32).unwrap();
+        let b = UFuncArray::new(vec![2], vec![3.0, 4.0], DType::I32).unwrap();
+        let r = UFuncArray::concatenate_with_dtype(&[&a, &b], 0, DType::F64, "safe").unwrap();
+        assert_eq!(r.shape(), &[4]);
+        assert_eq!(r.dtype(), DType::F64);
+    }
+
+    #[test]
+    fn concatenate_with_dtype_rejects_unsafe_cast() {
+        let a = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        let r = UFuncArray::concatenate_with_dtype(&[&a], 0, DType::I32, "safe");
+        assert!(r.is_err()); // f64 → i32 is not safe
+    }
+
+    #[test]
+    fn unique_axis_rows() {
+        // [[1,2],[3,4],[1,2]] → unique rows: [[1,2],[3,4]]
+        let a =
+            UFuncArray::new(vec![3, 2], vec![1.0, 2.0, 3.0, 4.0, 1.0, 2.0], DType::F64).unwrap();
+        let r = a.unique_axis(0).unwrap();
+        assert_eq!(r.shape(), &[2, 2]);
+        assert_eq!(r.values(), &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn unique_axis_cols() {
+        // [[1,2,1],[3,4,3]] → unique cols: [[1,2],[3,4]]
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 1.0, 3.0, 4.0, 3.0], DType::F64).unwrap();
+        let r = a.unique_axis(1).unwrap();
+        assert_eq!(r.shape(), &[2, 2]);
+        assert_eq!(r.values(), &[1.0, 2.0, 3.0, 4.0]);
     }
 
     #[test]
