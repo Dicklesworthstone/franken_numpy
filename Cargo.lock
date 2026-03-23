@@ -448,6 +448,7 @@ dependencies = [
  "fnp-dtype",
  "fnp-linalg",
  "fnp-ndarray",
+ "fnp-runtime",
 ]
 
 [[package]]
