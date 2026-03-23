@@ -497,7 +497,7 @@ fn note_unary_float_errors(flags: &mut FloatErrorFlags, op: UnaryOp, value: f64,
     }
 }
 
-pub const UFUNC_PACKET_REASON_CODES: [&str; 17] = [
+pub const UFUNC_PACKET_REASON_CODES: [&str; 19] = [
     "ufunc_shape_contract_violation",
     "ufunc_invalid_input_length",
     "ufunc_axis_out_of_bounds",
@@ -511,6 +511,8 @@ pub const UFUNC_PACKET_REASON_CODES: [&str; 17] = [
     "ufunc_signature_parse_failed",
     "ufunc_fixed_signature_invalid",
     "ufunc_override_precedence_violation",
+    "ufunc_dispatch_resolution_failed",
+    "ufunc_type_resolution_invalid",
     "ufunc_reduction_contract_violation",
     "gufunc_loop_exception_propagated",
     "ufunc_loop_registry_invalid",
@@ -1283,6 +1285,18 @@ pub struct BinaryDispatchPlan {
     pub out_dtype: DType,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryDispatchMethod {
+    BuiltinPromoted,
+    FixedSignature,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryDispatchSelection {
+    pub method: BinaryDispatchMethod,
+    pub plan: BinaryDispatchPlan,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FixedSignature {
     pub inputs: Vec<DType>,
@@ -1729,14 +1743,63 @@ pub fn plan_binary_dispatch(
     lhs: &UFuncArray,
     rhs: &UFuncArray,
 ) -> Result<BinaryDispatchPlan, UFuncError> {
+    Ok(plan_binary_dispatch_with_signature(lhs, rhs, None)?.plan)
+}
+
+pub fn plan_binary_dispatch_with_signature(
+    lhs: &UFuncArray,
+    rhs: &UFuncArray,
+    fixed_signature: Option<&FixedSignature>,
+) -> Result<BinaryDispatchSelection, UFuncError> {
     let out_shape = broadcast_shape(lhs.shape(), rhs.shape()).map_err(UFuncError::Shape)?;
     let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
-    let out_dtype = promote(lhs.dtype(), rhs.dtype());
-    Ok(BinaryDispatchPlan {
-        out_shape,
-        out_count,
-        out_dtype,
+    let (method, out_dtype) = resolve_binary_output_dtype(lhs, rhs, fixed_signature)?;
+    Ok(BinaryDispatchSelection {
+        method,
+        plan: BinaryDispatchPlan {
+            out_shape,
+            out_count,
+            out_dtype,
+        },
     })
+}
+
+fn resolve_binary_output_dtype(
+    lhs: &UFuncArray,
+    rhs: &UFuncArray,
+    fixed_signature: Option<&FixedSignature>,
+) -> Result<(BinaryDispatchMethod, DType), UFuncError> {
+    let Some(signature) = fixed_signature else {
+        return Ok((
+            BinaryDispatchMethod::BuiltinPromoted,
+            promote(lhs.dtype(), rhs.dtype()),
+        ));
+    };
+
+    if signature.inputs.len() != 2 || signature.outputs.len() != 1 {
+        return Err(UFuncError::DispatchResolutionFailed {
+            detail: format!(
+                "binary dispatch requires a 2->1 fixed signature, got {} input dtype(s) and {} output dtype(s)",
+                signature.inputs.len(),
+                signature.outputs.len()
+            ),
+        });
+    }
+
+    if lhs.dtype() != signature.inputs[0] || rhs.dtype() != signature.inputs[1] {
+        return Err(UFuncError::TypeResolutionInvalid {
+            detail: format!(
+                "fixed signature '{}' expects input dtypes ({:?}, {:?}) but received ({:?}, {:?})",
+                signature.canonical(),
+                signature.inputs[0],
+                signature.inputs[1],
+                lhs.dtype(),
+                rhs.dtype()
+            ),
+        });
+    }
+
+    Ok((BinaryDispatchMethod::FixedSignature, signature.outputs[0]))
 }
 
 /// Sidecar for preserving exact integer values that exceed f64 representability
@@ -15555,6 +15618,12 @@ pub enum UFuncError {
     OverridePrecedenceViolation {
         detail: String,
     },
+    DispatchResolutionFailed {
+        detail: String,
+    },
+    TypeResolutionInvalid {
+        detail: String,
+    },
     ReductionContractViolation {
         detail: String,
     },
@@ -15596,6 +15665,12 @@ impl std::fmt::Display for UFuncError {
             Self::OverridePrecedenceViolation { detail } => {
                 write!(f, "ufunc override precedence violation: {detail}")
             }
+            Self::DispatchResolutionFailed { detail } => {
+                write!(f, "ufunc dispatch resolution failed: {detail}")
+            }
+            Self::TypeResolutionInvalid { detail } => {
+                write!(f, "ufunc type resolution invalid: {detail}")
+            }
             Self::ReductionContractViolation { detail } => {
                 write!(f, "ufunc reduction contract violation: {detail}")
             }
@@ -15627,6 +15702,8 @@ impl UFuncError {
             Self::SignatureParse { .. } => "ufunc_signature_parse_failed",
             Self::FixedSignatureInvalid { .. } => "ufunc_fixed_signature_invalid",
             Self::OverridePrecedenceViolation { .. } => "ufunc_override_precedence_violation",
+            Self::DispatchResolutionFailed { .. } => "ufunc_dispatch_resolution_failed",
+            Self::TypeResolutionInvalid { .. } => "ufunc_type_resolution_invalid",
             Self::ReductionContractViolation { .. } => "ufunc_reduction_contract_violation",
             Self::LoopRegistryInvalid { .. } => "ufunc_loop_registry_invalid",
             Self::Msg(_) => "ufunc_operation_error",
@@ -22303,8 +22380,8 @@ impl StringArray {
 #[cfg(test)]
 mod tests {
     use super::{
-        AxisSlice, BinaryOp, FloatErrorKind, FloatErrorMode, MAError, MaskedArray,
-        OverrideDispatchDecision, OverrideOperand, OverridePayloadClass, PrintOptions,
+        AxisSlice, BinaryDispatchMethod, BinaryOp, FixedSignature, FloatErrorKind, FloatErrorMode,
+        MAError, MaskedArray, OverrideDispatchDecision, OverrideOperand, OverridePayloadClass, PrintOptions,
         QuantileInterp, StringArray, UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncArrayView,
         UFuncError, UFuncLogRecord, UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp, bitwise_count,
         busday_count, busday_offset, cheb2poly, chebadd, chebder, chebfit, chebint, chebmul,
@@ -22317,12 +22394,13 @@ mod tests {
         legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub, legval, ma_is_mask,
         ma_is_masked, ma_make_mask, ma_mask_or, modf, normalize_fixed_signature_keywords,
         normalize_signature_keywords, pad_empty, pad_linear_ramp, pad_stat,
-        parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch, poly2cheb,
-        poly2herm, poly2lag, poly2leg, register_custom_loop, resolve_override_dispatch,
-        scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log, scimath_log2, scimath_log10,
-        scimath_power, scimath_sqrt, seterr, seterr_state, seterrcall, sort_complex,
-        take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
-        validate_override_payload_class, where_nonzero,
+        parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch,
+        plan_binary_dispatch_with_signature, poly2cheb, poly2herm, poly2lag, poly2leg,
+        register_custom_loop, resolve_override_dispatch, scimath_arccos, scimath_arcsin,
+        scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_power, scimath_sqrt,
+        seterr, seterr_state, seterrcall, sort_complex, take_float_error_events, unique_all,
+        unique_counts, unique_inverse, unique_values, validate_override_payload_class,
+        where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
@@ -23257,6 +23335,49 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_plan_with_fixed_signature_selects_explicit_output_dtype() {
+        let lhs = UFuncArray::new(vec![2, 1], vec![1.0, 2.0], DType::I32).expect("lhs");
+        let rhs = UFuncArray::new(vec![1, 2], vec![10.0, 20.0], DType::I32).expect("rhs");
+        let signature = parse_fixed_signature_string("ii->d", 2, 1).expect("signature");
+
+        let selection = plan_binary_dispatch_with_signature(&lhs, &rhs, Some(&signature))
+            .expect("fixed signature dispatch should succeed");
+
+        assert_eq!(selection.method, BinaryDispatchMethod::FixedSignature);
+        assert_eq!(selection.plan.out_shape, vec![2, 2]);
+        assert_eq!(selection.plan.out_count, 4);
+        assert_eq!(selection.plan.out_dtype, DType::F64);
+    }
+
+    #[test]
+    fn dispatch_plan_with_invalid_fixed_signature_arity_fails_closed() {
+        let lhs = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::I32).expect("lhs");
+        let rhs = UFuncArray::new(vec![2], vec![3.0, 4.0], DType::I32).expect("rhs");
+        let signature = super::FixedSignature {
+            inputs: vec![DType::I32],
+            outputs: vec![DType::I32],
+            canonical: "i->i".to_string(),
+        };
+
+        let err = plan_binary_dispatch_with_signature(&lhs, &rhs, Some(&signature))
+            .expect_err("bad arity should fail");
+        assert!(matches!(err, UFuncError::DispatchResolutionFailed { .. }));
+        assert_eq!(err.reason_code(), "ufunc_dispatch_resolution_failed");
+    }
+
+    #[test]
+    fn dispatch_plan_with_input_dtype_mismatch_reports_type_resolution_failure() {
+        let lhs = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::I32).expect("lhs");
+        let rhs = UFuncArray::new(vec![2], vec![3.0, 4.0], DType::F32).expect("rhs");
+        let signature = parse_fixed_signature_string("ii->i", 2, 1).expect("signature");
+
+        let err = plan_binary_dispatch_with_signature(&lhs, &rhs, Some(&signature))
+            .expect_err("mismatched input dtype should fail");
+        assert!(matches!(err, UFuncError::TypeResolutionInvalid { .. }));
+        assert_eq!(err.reason_code(), "ufunc_type_resolution_invalid");
+    }
+
+    #[test]
     fn override_payload_validation_rejects_unknown_class() {
         let err = validate_override_payload_class("bogus_payload")
             .expect_err("unknown override payload class must fail");
@@ -24083,6 +24204,8 @@ mod tests {
                 "ufunc_signature_parse_failed",
                 "ufunc_fixed_signature_invalid",
                 "ufunc_override_precedence_violation",
+                "ufunc_dispatch_resolution_failed",
+                "ufunc_type_resolution_invalid",
                 "ufunc_reduction_contract_violation",
                 "gufunc_loop_exception_propagated",
                 "ufunc_loop_registry_invalid",
