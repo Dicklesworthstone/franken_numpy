@@ -4032,6 +4032,42 @@ impl UFuncArray {
         }
     }
 
+    /// Clip with optional bounds (`np.clip` with `a_min=None` or `a_max=None`).
+    ///
+    /// Pass `None` for `min_val` or `max_val` to do one-sided clipping.
+    pub fn clip_optional(&self, min_val: Option<f64>, max_val: Option<f64>) -> Self {
+        let values = self
+            .values
+            .iter()
+            .map(|&v| {
+                let mut result = v;
+                if let Some(lo) = min_val {
+                    if lo.is_nan() || v.is_nan() {
+                        return f64::NAN;
+                    }
+                    if result < lo {
+                        result = lo;
+                    }
+                }
+                if let Some(hi) = max_val {
+                    if hi.is_nan() || v.is_nan() {
+                        return f64::NAN;
+                    }
+                    if result > hi {
+                        result = hi;
+                    }
+                }
+                result
+            })
+            .collect();
+        Self {
+            shape: self.shape.clone(),
+            values,
+            dtype: self.dtype,
+            integer_sidecar: None,
+        }
+    }
+
     /// Compute population variance along `axis` (ddof=0 by default, matching `numpy.var`).
     /// Output dtype follows `promote_for_mean_reduction` (integer types promote to F64).
     pub fn reduce_var(
@@ -4236,6 +4272,77 @@ impl UFuncArray {
             values: self.values.clone(),
             dtype: self.dtype,
             integer_sidecar: self.cloned_integer_sidecar(),
+        })
+    }
+
+    /// Reshape with memory order (`np.reshape(a, shape, order='C'|'F')`).
+    ///
+    /// `order='C'` (default) reads/writes elements in C (row-major) order.
+    /// `order='F'` reads/writes elements in Fortran (column-major) order.
+    pub fn reshape_order(&self, new_shape: &[isize], order: &str) -> Result<Self, UFuncError> {
+        let old_count = self.values.len();
+        let resolved = fix_unknown_dimension(new_shape, old_count).map_err(UFuncError::Shape)?;
+        if order == "C" || order == "A" || order == "K" {
+            return Ok(Self {
+                shape: resolved,
+                values: self.values.clone(),
+                dtype: self.dtype,
+                integer_sidecar: self.cloned_integer_sidecar(),
+            });
+        }
+        if order != "F" {
+            return Err(UFuncError::Msg(format!(
+                "reshape: order must be 'C' or 'F', got '{order}'"
+            )));
+        }
+        // F-order reshape: read in Fortran order from old shape, write in C order to new shape
+        let n = self.values.len();
+        let old_shape = &self.shape;
+        let old_ndim = old_shape.len();
+        let new_ndim = resolved.len();
+        let old_strides = c_strides_elems(old_shape);
+        let new_strides = c_strides_elems(&resolved);
+        let mut values = vec![0.0; n];
+        for flat in 0..n {
+            // Convert flat index to F-order multi-index in OLD shape
+            let mut rem = flat;
+            let mut old_idx = vec![0usize; old_ndim];
+            for d in 0..old_ndim {
+                let dim = old_shape[d];
+                if dim > 0 {
+                    old_idx[d] = rem % dim;
+                    rem /= dim;
+                }
+            }
+            let src = old_idx
+                .iter()
+                .zip(&old_strides)
+                .map(|(&i, &s)| i * s)
+                .sum::<usize>();
+            // Convert flat index to F-order multi-index in NEW shape
+            let mut rem2 = flat;
+            let mut new_idx = vec![0usize; new_ndim];
+            for d in 0..new_ndim {
+                let dim = resolved[d];
+                if dim > 0 {
+                    new_idx[d] = rem2 % dim;
+                    rem2 /= dim;
+                }
+            }
+            let dst = new_idx
+                .iter()
+                .zip(&new_strides)
+                .map(|(&i, &s)| i * s)
+                .sum::<usize>();
+            if src < n && dst < n {
+                values[dst] = self.values[src];
+            }
+        }
+        Ok(Self {
+            shape: resolved,
+            values,
+            dtype: self.dtype,
+            integer_sidecar: None,
         })
     }
 
@@ -9158,6 +9265,94 @@ impl UFuncArray {
             integer_sidecar: None,
         };
         Ok((counts_arr, edges_arr))
+    }
+
+    /// Extended histogram with `density`, `range`, and `weights` (`np.histogram` full API).
+    ///
+    /// - `range`: if `Some((lo, hi))`, restrict binning to `[lo, hi]`
+    /// - `weights`: if `Some(w)`, use weighted counts instead of integer counts
+    /// - `density`: if `true`, normalize so the integral over the range equals 1
+    pub fn histogram_full(
+        &self,
+        bins: usize,
+        range: Option<(f64, f64)>,
+        weights: Option<&Self>,
+        density: bool,
+    ) -> Result<(Self, Self), UFuncError> {
+        if self.shape.len() != 1 {
+            return Err(UFuncError::Msg(
+                "histogram: only 1-D arrays supported".into(),
+            ));
+        }
+        if bins == 0 {
+            return Err(UFuncError::Msg("histogram: bins must be > 0".into()));
+        }
+        if let Some(w) = weights {
+            if w.values.len() != self.values.len() {
+                return Err(UFuncError::Msg(
+                    "histogram: weights must have same length as input".into(),
+                ));
+            }
+        }
+
+        let (lo, hi) = match range {
+            Some((a, b)) => (a, b),
+            None => {
+                let mn = self.values.iter().copied().fold(f64::INFINITY, f64::min);
+                let mx = self
+                    .values
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max);
+                (mn, mx)
+            }
+        };
+        let span = if (hi - lo).abs() < f64::EPSILON {
+            1.0
+        } else {
+            hi - lo
+        };
+        let width = span / bins as f64;
+
+        let mut counts = vec![0.0f64; bins];
+        for (i, &v) in self.values.iter().enumerate() {
+            if v < lo || v > hi {
+                continue; // outside range
+            }
+            let idx = ((v - lo) / width) as usize;
+            let idx = idx.min(bins - 1);
+            let w = weights.map_or(1.0, |wt| wt.values[i]);
+            counts[idx] += w;
+        }
+
+        if density {
+            let total: f64 = counts.iter().sum();
+            if total > 0.0 {
+                for c in &mut counts {
+                    *c /= total * width;
+                }
+            }
+        }
+
+        let mut edges = Vec::with_capacity(bins + 1);
+        for i in 0..=bins {
+            edges.push(lo + i as f64 * width);
+        }
+
+        Ok((
+            Self {
+                shape: vec![bins],
+                values: counts,
+                dtype: DType::F64,
+                integer_sidecar: None,
+            },
+            Self {
+                shape: vec![bins + 1],
+                values: edges,
+                dtype: DType::F64,
+                integer_sidecar: None,
+            },
+        ))
     }
 
     /// Histogram with custom bin edges (np.histogram with array bins).
@@ -36418,6 +36613,75 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(sig.validate_shapes(&[&[5]]).is_err()); // needs 2 inputs
+    }
+
+    // ── Parameter parity tests (br-9m1) ─────────────────────────
+
+    #[test]
+    fn clip_optional_one_sided_min() {
+        let a = UFuncArray::new(vec![5], vec![1.0, 3.0, 5.0, 7.0, 9.0], DType::F64).unwrap();
+        let clipped = a.clip_optional(Some(4.0), None);
+        assert_eq!(clipped.values(), &[4.0, 4.0, 5.0, 7.0, 9.0]);
+    }
+
+    #[test]
+    fn clip_optional_one_sided_max() {
+        let a = UFuncArray::new(vec![5], vec![1.0, 3.0, 5.0, 7.0, 9.0], DType::F64).unwrap();
+        let clipped = a.clip_optional(None, Some(6.0));
+        assert_eq!(clipped.values(), &[1.0, 3.0, 5.0, 6.0, 6.0]);
+    }
+
+    #[test]
+    fn reshape_order_f() {
+        // 2x3 C-order: [[1,2,3],[4,5,6]] stored as [1,2,3,4,5,6]
+        // Reshape to 3x2 F-order should give [[1,4],[2,5],[3,6]] stored as [1,4,2,5,3,6]
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = a.reshape_order(&[3, 2], "F").unwrap();
+        assert_eq!(r.shape(), &[3, 2]);
+        assert_eq!(r.values(), &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    }
+
+    #[test]
+    fn reshape_order_c_is_default() {
+        let a = UFuncArray::new(vec![6], (1..=6).map(|v| v as f64).collect(), DType::F64).unwrap();
+        let c = a.reshape_order(&[2, 3], "C").unwrap();
+        let default = a.reshape(&[2, 3]).unwrap();
+        assert_eq!(c.values(), default.values());
+    }
+
+    #[test]
+    fn histogram_full_density() {
+        let a = UFuncArray::new(vec![4], vec![0.5, 1.5, 2.5, 3.5], DType::F64).unwrap();
+        let (counts, edges) = a.histogram_full(4, Some((0.0, 4.0)), None, true).unwrap();
+        // Each bin has 1 element, width=1.0, total=4
+        // density = count / (total * width) = 1 / (4 * 1) = 0.25 for each
+        assert_eq!(counts.shape(), &[4]);
+        for &c in counts.values() {
+            assert!(
+                (c - 0.25).abs() < 1e-10,
+                "density count should be 0.25, got {c}"
+            );
+        }
+        assert_eq!(edges.shape(), &[5]);
+    }
+
+    #[test]
+    fn histogram_full_with_weights() {
+        let a = UFuncArray::new(vec![3], vec![0.5, 1.5, 2.5], DType::F64).unwrap();
+        let w = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let (counts, _) = a
+            .histogram_full(3, Some((0.0, 3.0)), Some(&w), false)
+            .unwrap();
+        assert_eq!(counts.values(), &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn histogram_full_with_range() {
+        let a = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
+        let (counts, _) = a.histogram_full(2, Some((2.0, 4.0)), None, false).unwrap();
+        // Only values 2, 3, 4 are in range [2, 4]; 2 bins of width 1
+        assert_eq!(counts.shape(), &[2]);
     }
 
     #[test]
