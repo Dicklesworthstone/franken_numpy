@@ -1255,11 +1255,17 @@ fn assign_core_dim_bindings(
             .filter(|token| !parse_core_dim_token(token).1)
             .count();
 
-        if optional && next_shape_idx == required_to_the_left {
+        if optional && next_shape_idx <= required_to_the_left {
             bindings_rev.push(None);
             continue;
         }
 
+        if next_shape_idx == 0 {
+            return Err(UFuncError::Msg(format!(
+                "operand {}: not enough dimensions for required core dimension '{}'",
+                op_idx, base_name
+            )));
+        }
         let size = shape[next_shape_idx - 1];
         next_shape_idx -= 1;
         bindings_rev.push(Some((base_name.to_string(), size, optional)));
@@ -1434,24 +1440,129 @@ pub fn normalize_fixed_signature_keywords(
     Ok(Some(parse_fixed_signature_string(&normalized, nin, nout)?))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverridePayloadClass {
+    NdArray,
+    NotImplemented,
+    OverrideResult,
+}
+
+impl OverridePayloadClass {
+    fn parse(payload_class: &str) -> Result<Self, UFuncError> {
+        let normalized = payload_class.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            return Err(UFuncError::OverridePrecedenceViolation {
+                detail: "override payload class must not be empty".to_string(),
+            });
+        }
+
+        match normalized.as_str() {
+            "ndarray" => Ok(Self::NdArray),
+            "notimplemented" | "not_implemented" => Ok(Self::NotImplemented),
+            "override_result" => Ok(Self::OverrideResult),
+            _ => Err(UFuncError::OverridePrecedenceViolation {
+                detail: format!("unsupported override payload class '{payload_class}'"),
+            }),
+        }
+    }
+}
+
 pub fn validate_override_payload_class(payload_class: &str) -> Result<(), UFuncError> {
-    let normalized = payload_class.trim().to_ascii_lowercase();
-    if normalized.is_empty() {
-        return Err(UFuncError::OverridePrecedenceViolation {
-            detail: "override payload class must not be empty".to_string(),
-        });
+    OverridePayloadClass::parse(payload_class).map(|_| ())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverrideOperand {
+    pub type_name: String,
+    pub super_types: Vec<String>,
+    pub payload_class: String,
+}
+
+impl OverrideOperand {
+    fn is_subclass_of(&self, other: &Self) -> bool {
+        self.type_name != other.type_name
+            && self
+                .super_types
+                .iter()
+                .any(|super_type| super_type == &other.type_name)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OverrideDispatchDecision {
+    UseBuiltin,
+    UseOverride {
+        operand_index: usize,
+        payload_class: OverridePayloadClass,
+        attempted_indices: Vec<usize>,
+    },
+}
+
+pub fn resolve_override_dispatch(
+    operands: &[OverrideOperand],
+) -> Result<OverrideDispatchDecision, UFuncError> {
+    let mut unique = Vec::new();
+    let mut seen_types = HashSet::new();
+
+    for (operand_index, operand) in operands.iter().enumerate() {
+        let type_name = operand.type_name.trim();
+        if type_name.is_empty() {
+            return Err(UFuncError::OverridePrecedenceViolation {
+                detail: format!("override operand at index {operand_index} must have a type name"),
+            });
+        }
+
+        if !seen_types.insert(type_name.to_string()) {
+            continue;
+        }
+
+        unique.push((
+            operand_index,
+            operand,
+            OverridePayloadClass::parse(&operand.payload_class)?,
+        ));
     }
 
-    if matches!(
-        normalized.as_str(),
-        "ndarray" | "notimplemented" | "not_implemented" | "override_result"
-    ) {
-        Ok(())
-    } else {
-        Err(UFuncError::OverridePrecedenceViolation {
-            detail: format!("unsupported override payload class '{payload_class}'"),
-        })
+    if unique.is_empty() {
+        return Ok(OverrideDispatchDecision::UseBuiltin);
     }
+
+    let mut attempted_indices = Vec::new();
+    let mut remaining: Vec<usize> = (0..unique.len()).collect();
+
+    while !remaining.is_empty() {
+        let mut selected_pos = 0usize;
+        for (pos, &candidate_index) in remaining.iter().enumerate() {
+            let (_, candidate, _) = unique[candidate_index];
+            let shadowed_by_subclass = remaining
+                .iter()
+                .skip(pos + 1)
+                .any(|&other_index| unique[other_index].1.is_subclass_of(candidate));
+            if !shadowed_by_subclass {
+                selected_pos = pos;
+                break;
+            }
+        }
+
+        let selected = remaining.remove(selected_pos);
+        let (operand_index, _, payload_class) = unique[selected];
+        attempted_indices.push(operand_index);
+
+        if payload_class != OverridePayloadClass::NotImplemented {
+            return Ok(OverrideDispatchDecision::UseOverride {
+                operand_index,
+                payload_class,
+                attempted_indices,
+            });
+        }
+    }
+
+    Err(UFuncError::OverridePrecedenceViolation {
+        detail: format!(
+            "all override operands returned NotImplemented after attempts {:?}",
+            attempted_indices
+        ),
+    })
 }
 
 /// A registered custom loop binding: maps a (ufunc_name, input_dtypes, output_dtypes)
@@ -22167,7 +22278,8 @@ impl StringArray {
 #[cfg(test)]
 mod tests {
     use super::{
-        AxisSlice, BinaryOp, FloatErrorKind, FloatErrorMode, MAError, MaskedArray, PrintOptions,
+        AxisSlice, BinaryOp, FloatErrorKind, FloatErrorMode, MAError, MaskedArray,
+        OverrideDispatchDecision, OverrideOperand, OverridePayloadClass, PrintOptions,
         QuantileInterp, StringArray, UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncArrayView,
         UFuncError, UFuncLogRecord, UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp, bitwise_count,
         busday_count, busday_offset, cheb2poly, chebadd, chebder, chebfit, chebint, chebmul,
@@ -22181,11 +22293,11 @@ mod tests {
         ma_is_masked, ma_make_mask, ma_mask_or, modf, normalize_fixed_signature_keywords,
         normalize_signature_keywords, pad_empty, pad_linear_ramp, pad_stat,
         parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch, poly2cheb,
-        poly2herm, poly2lag, poly2leg, register_custom_loop, scimath_arccos, scimath_arcsin,
-        scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_power, scimath_sqrt,
-        seterr, seterr_state, seterrcall, sort_complex, take_float_error_events, unique_all,
-        unique_counts, unique_inverse, unique_values, validate_override_payload_class,
-        where_nonzero,
+        poly2herm, poly2lag, poly2leg, register_custom_loop, resolve_override_dispatch,
+        scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log, scimath_log2, scimath_log10,
+        scimath_power, scimath_sqrt, seterr, seterr_state, seterrcall, sort_complex,
+        take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
+        validate_override_payload_class, where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
@@ -23128,6 +23240,164 @@ mod tests {
             UFuncError::OverridePrecedenceViolation { .. }
         ));
         assert_eq!(err.reason_code(), "ufunc_override_precedence_violation");
+    }
+
+    #[test]
+    fn override_dispatch_uses_builtin_when_no_operands_define_override() {
+        let decision = resolve_override_dispatch(&[]).expect("empty override set should defer");
+        assert_eq!(decision, OverrideDispatchDecision::UseBuiltin);
+    }
+
+    #[test]
+    fn override_dispatch_prefers_subclass_to_the_right() {
+        let decision = resolve_override_dispatch(&[
+            OverrideOperand {
+                type_name: "A".to_string(),
+                super_types: vec![],
+                payload_class: "override_result".to_string(),
+            },
+            OverrideOperand {
+                type_name: "ASub".to_string(),
+                super_types: vec!["A".to_string()],
+                payload_class: "override_result".to_string(),
+            },
+        ])
+        .expect("subclass override should win");
+
+        assert_eq!(
+            decision,
+            OverrideDispatchDecision::UseOverride {
+                operand_index: 1,
+                payload_class: OverridePayloadClass::OverrideResult,
+                attempted_indices: vec![1],
+            }
+        );
+    }
+
+    #[test]
+    fn override_dispatch_uses_left_to_right_for_unrelated_types() {
+        let decision = resolve_override_dispatch(&[
+            OverrideOperand {
+                type_name: "A".to_string(),
+                super_types: vec![],
+                payload_class: "override_result".to_string(),
+            },
+            OverrideOperand {
+                type_name: "B".to_string(),
+                super_types: vec![],
+                payload_class: "override_result".to_string(),
+            },
+        ])
+        .expect("leftmost unrelated override should win");
+
+        assert_eq!(
+            decision,
+            OverrideDispatchDecision::UseOverride {
+                operand_index: 0,
+                payload_class: OverridePayloadClass::OverrideResult,
+                attempted_indices: vec![0],
+            }
+        );
+    }
+
+    #[test]
+    fn override_dispatch_skips_duplicate_types_after_first_occurrence() {
+        let decision = resolve_override_dispatch(&[
+            OverrideOperand {
+                type_name: "Repeat".to_string(),
+                super_types: vec![],
+                payload_class: "notimplemented".to_string(),
+            },
+            OverrideOperand {
+                type_name: "Repeat".to_string(),
+                super_types: vec![],
+                payload_class: "override_result".to_string(),
+            },
+            OverrideOperand {
+                type_name: "B".to_string(),
+                super_types: vec![],
+                payload_class: "override_result".to_string(),
+            },
+        ])
+        .expect("duplicate classes should only be considered once");
+
+        assert_eq!(
+            decision,
+            OverrideDispatchDecision::UseOverride {
+                operand_index: 2,
+                payload_class: OverridePayloadClass::OverrideResult,
+                attempted_indices: vec![0, 2],
+            }
+        );
+    }
+
+    #[test]
+    fn override_dispatch_falls_through_notimplemented_until_success() {
+        let decision = resolve_override_dispatch(&[
+            OverrideOperand {
+                type_name: "Base".to_string(),
+                super_types: vec![],
+                payload_class: "notimplemented".to_string(),
+            },
+            OverrideOperand {
+                type_name: "Child".to_string(),
+                super_types: vec!["Base".to_string()],
+                payload_class: "not_implemented".to_string(),
+            },
+            OverrideOperand {
+                type_name: "Peer".to_string(),
+                super_types: vec![],
+                payload_class: "ndarray".to_string(),
+            },
+        ])
+        .expect("resolver should continue after NotImplemented");
+
+        assert_eq!(
+            decision,
+            OverrideDispatchDecision::UseOverride {
+                operand_index: 2,
+                payload_class: OverridePayloadClass::NdArray,
+                attempted_indices: vec![1, 0, 2],
+            }
+        );
+    }
+
+    #[test]
+    fn override_dispatch_rejects_when_all_candidates_return_notimplemented() {
+        let err = resolve_override_dispatch(&[
+            OverrideOperand {
+                type_name: "Base".to_string(),
+                super_types: vec![],
+                payload_class: "notimplemented".to_string(),
+            },
+            OverrideOperand {
+                type_name: "Child".to_string(),
+                super_types: vec!["Base".to_string()],
+                payload_class: "notimplemented".to_string(),
+            },
+        ])
+        .expect_err("all NotImplemented should fail closed");
+
+        assert!(matches!(
+            err,
+            UFuncError::OverridePrecedenceViolation { .. }
+        ));
+        assert_eq!(err.reason_code(), "ufunc_override_precedence_violation");
+    }
+
+    #[test]
+    fn override_dispatch_rejects_empty_type_name() {
+        let err = resolve_override_dispatch(&[OverrideOperand {
+            type_name: " ".to_string(),
+            super_types: vec![],
+            payload_class: "override_result".to_string(),
+        }])
+        .expect_err("empty type names should fail");
+
+        assert!(matches!(
+            err,
+            UFuncError::OverridePrecedenceViolation { .. }
+        ));
     }
 
     #[test]
@@ -36804,6 +37074,35 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(sig.validate_shapes(&[&[5]]).is_err()); // needs 2 inputs
+    }
+
+    #[test]
+    fn gufunc_validate_optional_right_of_required_no_panic() {
+        // Regression: signature (a,b?) with shape [3] must not underflow.
+        // "b?" is optional at the right, "a" is required at the left.
+        // With only 1 shape dim, "b?" should be absent and "a" should bind to 3.
+        let sig = parse_gufunc_signature(Some("(a,b?)->(a)"), None)
+            .unwrap()
+            .unwrap();
+        let result = sig.validate_shapes(&[&[3]]);
+        // Should succeed: "a"=3, "b?" absent
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        let (_, dim_map, outputs) = result.unwrap();
+        assert_eq!(dim_map["a"], 3);
+        assert_eq!(outputs, vec![vec![3]]);
+    }
+
+    #[test]
+    fn gufunc_validate_all_optional_absent() {
+        // All core dims optional, scalar input → all absent
+        let sig = parse_gufunc_signature(Some("(a?,b?)->(a?,b?)"), None)
+            .unwrap()
+            .unwrap();
+        let result = sig.validate_shapes(&[&[]]);
+        assert!(result.is_ok());
+        let (_, _, outputs) = result.unwrap();
+        // Both optional dims absent → empty output core
+        assert_eq!(outputs, vec![Vec::<usize>::new()]);
     }
 
     // ── Parameter parity tests (br-9m1) ─────────────────────────
