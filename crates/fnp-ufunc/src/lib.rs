@@ -497,7 +497,7 @@ fn note_unary_float_errors(flags: &mut FloatErrorFlags, op: UnaryOp, value: f64,
     }
 }
 
-pub const UFUNC_PACKET_REASON_CODES: [&str; 16] = [
+pub const UFUNC_PACKET_REASON_CODES: [&str; 17] = [
     "ufunc_shape_contract_violation",
     "ufunc_invalid_input_length",
     "ufunc_axis_out_of_bounds",
@@ -511,6 +511,7 @@ pub const UFUNC_PACKET_REASON_CODES: [&str; 16] = [
     "ufunc_signature_parse_failed",
     "ufunc_fixed_signature_invalid",
     "ufunc_override_precedence_violation",
+    "ufunc_reduction_contract_violation",
     "gufunc_loop_exception_propagated",
     "ufunc_loop_registry_invalid",
     "ufunc_policy_unknown_metadata",
@@ -1563,6 +1564,29 @@ pub fn resolve_override_dispatch(
             attempted_indices
         ),
     })
+}
+
+fn normalize_reduction_where_mask(
+    mask: &UFuncArray,
+    shape: &[usize],
+) -> Result<UFuncArray, UFuncError> {
+    let expected = element_count(shape).map_err(UFuncError::Shape)?;
+    if mask.shape() == shape {
+        if mask.values().len() != expected {
+            return Err(UFuncError::ReductionContractViolation {
+                detail: format!(
+                    "where mask element count mismatch: expected {expected}, actual {}",
+                    mask.values().len()
+                ),
+            });
+        }
+        return Ok(mask.clone());
+    }
+
+    mask.broadcast_to(shape)
+        .map_err(|err| UFuncError::ReductionContractViolation {
+            detail: format!("where mask is not broadcastable to operand shape {shape:?}: {err}"),
+        })
 }
 
 /// A registered custom loop binding: maps a (ufunc_name, input_dtypes, output_dtypes)
@@ -3975,13 +3999,7 @@ impl UFuncArray {
         axis: Option<isize>,
         keepdims: bool,
     ) -> Result<Self, UFuncError> {
-        // Apply mask: zero out masked elements, then reduce
-        if mask.values.len() != self.values.len() {
-            return Err(UFuncError::InvalidInputLength {
-                expected: self.values.len(),
-                actual: mask.values.len(),
-            });
-        }
+        let mask = normalize_reduction_where_mask(mask, &self.shape)?;
         let masked_values: Vec<f64> = self
             .values
             .iter()
@@ -15537,6 +15555,9 @@ pub enum UFuncError {
     OverridePrecedenceViolation {
         detail: String,
     },
+    ReductionContractViolation {
+        detail: String,
+    },
     LoopRegistryInvalid {
         detail: String,
     },
@@ -15575,6 +15596,9 @@ impl std::fmt::Display for UFuncError {
             Self::OverridePrecedenceViolation { detail } => {
                 write!(f, "ufunc override precedence violation: {detail}")
             }
+            Self::ReductionContractViolation { detail } => {
+                write!(f, "ufunc reduction contract violation: {detail}")
+            }
             Self::LoopRegistryInvalid { detail } => {
                 write!(f, "ufunc loop registry invalid: {detail}")
             }
@@ -15603,6 +15627,7 @@ impl UFuncError {
             Self::SignatureParse { .. } => "ufunc_signature_parse_failed",
             Self::FixedSignatureInvalid { .. } => "ufunc_fixed_signature_invalid",
             Self::OverridePrecedenceViolation { .. } => "ufunc_override_precedence_violation",
+            Self::ReductionContractViolation { .. } => "ufunc_reduction_contract_violation",
             Self::LoopRegistryInvalid { .. } => "ufunc_loop_registry_invalid",
             Self::Msg(_) => "ufunc_operation_error",
         }
@@ -24058,6 +24083,7 @@ mod tests {
                 "ufunc_signature_parse_failed",
                 "ufunc_fixed_signature_invalid",
                 "ufunc_override_precedence_violation",
+                "ufunc_reduction_contract_violation",
                 "gufunc_loop_exception_propagated",
                 "ufunc_loop_registry_invalid",
                 "ufunc_policy_unknown_metadata",
@@ -31294,6 +31320,48 @@ mod tests {
         assert!((r.values()[0] - 1.0).abs() < 1e-9); // only row 0
         assert!((r.values()[1] - 5.0).abs() < 1e-9); // only row 1
         assert!((r.values()[2] - 3.0).abs() < 1e-9); // only row 0
+    }
+
+    #[test]
+    fn reduce_sum_where_broadcasts_trailing_mask() {
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![3], vec![1.0, 0.0, 1.0], DType::F64).unwrap();
+        let r = a.reduce_sum_where(&mask, Some(0), false).unwrap();
+        assert_eq!(r.shape(), &[3]);
+        assert_eq!(r.values(), &[5.0, 0.0, 9.0]);
+    }
+
+    #[test]
+    fn reduce_sum_where_broadcasts_leading_mask_column() {
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![2, 1], vec![1.0, 0.0], DType::F64).unwrap();
+        let r = a.reduce_sum_where(&mask, Some(0), false).unwrap();
+        assert_eq!(r.shape(), &[3]);
+        assert_eq!(r.values(), &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn reduce_sum_where_accepts_scalar_false_mask() {
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![], vec![0.0], DType::F64).unwrap();
+        let r = a.reduce_sum_where(&mask, Some(0), false).unwrap();
+        assert_eq!(r.shape(), &[3]);
+        assert_eq!(r.values(), &[0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn reduce_sum_where_rejects_incompatible_broadcast_mask() {
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![2], vec![1.0, 0.0], DType::F64).unwrap();
+        let err = a
+            .reduce_sum_where(&mask, Some(0), false)
+            .expect_err("incompatible where mask should fail");
+        assert!(matches!(err, UFuncError::ReductionContractViolation { .. }));
+        assert_eq!(err.reason_code(), "ufunc_reduction_contract_violation");
     }
 
     #[test]
