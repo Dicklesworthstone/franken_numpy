@@ -16209,14 +16209,14 @@ fn apply_binary_op_i64(op: BinaryOp, a: i64, b: i64) -> i64 {
         BinaryOp::Mul => a.wrapping_mul(b),
         BinaryOp::FloorDivide => {
             if b != 0 {
-                a.div_euclid(b)
+                a.checked_div_euclid(b).unwrap_or(a)
             } else {
                 0
             }
         }
         BinaryOp::Remainder => {
             if b != 0 {
-                a.rem_euclid(b)
+                a.checked_rem_euclid(b).unwrap_or(0)
             } else {
                 0
             }
@@ -16224,8 +16224,20 @@ fn apply_binary_op_i64(op: BinaryOp, a: i64, b: i64) -> i64 {
         BinaryOp::BitwiseAnd => a & b,
         BinaryOp::BitwiseOr => a | b,
         BinaryOp::BitwiseXor => a ^ b,
-        BinaryOp::LeftShift => a.wrapping_shl(b as u32),
-        BinaryOp::RightShift => a.wrapping_shr(b as u32),
+        BinaryOp::LeftShift => {
+            if b < 0 || b >= 64 {
+                0
+            } else {
+                a.wrapping_shl(b as u32)
+            }
+        }
+        BinaryOp::RightShift => {
+            if b < 0 || b >= 64 {
+                if a < 0 { -1 } else { 0 }
+            } else {
+                a.wrapping_shr(b as u32)
+            }
+        }
         _ => 0,
     }
 }
@@ -16246,8 +16258,20 @@ fn apply_binary_op_u64(op: BinaryOp, a: u64, b: u64) -> u64 {
         BinaryOp::BitwiseAnd => a & b,
         BinaryOp::BitwiseOr => a | b,
         BinaryOp::BitwiseXor => a ^ b,
-        BinaryOp::LeftShift => a.wrapping_shl(b as u32),
-        BinaryOp::RightShift => a.wrapping_shr(b as u32),
+        BinaryOp::LeftShift => {
+            if b >= 64 {
+                0
+            } else {
+                a.wrapping_shl(b as u32)
+            }
+        }
+        BinaryOp::RightShift => {
+            if b >= 64 {
+                0
+            } else {
+                a.wrapping_shr(b as u32)
+            }
+        }
         _ => 0,
     }
 }
@@ -22380,8 +22404,8 @@ impl StringArray {
 #[cfg(test)]
 mod tests {
     use super::{
-        AxisSlice, BinaryDispatchMethod, BinaryOp, FixedSignature, FloatErrorKind, FloatErrorMode,
-        MAError, MaskedArray, OverrideDispatchDecision, OverrideOperand, OverridePayloadClass, PrintOptions,
+        AxisSlice, BinaryDispatchMethod, BinaryOp, FloatErrorKind, FloatErrorMode, MAError,
+        MaskedArray, OverrideDispatchDecision, OverrideOperand, OverridePayloadClass, PrintOptions,
         QuantileInterp, StringArray, UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncArrayView,
         UFuncError, UFuncLogRecord, UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp, bitwise_count,
         busday_count, busday_offset, cheb2poly, chebadd, chebder, chebfit, chebint, chebmul,
