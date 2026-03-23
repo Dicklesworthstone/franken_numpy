@@ -1120,36 +1120,63 @@ impl GufuncSignature {
 
         let mut dim_map: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
+        let mut optional_dim_state: std::collections::HashMap<String, (bool, Option<usize>)> =
+            std::collections::HashMap::new();
         let mut loop_shapes: Vec<&[usize]> = Vec::with_capacity(operand_shapes.len());
 
         // Extract core dimensions from each operand
         for (op_idx, (shape, core_dims)) in operand_shapes.iter().zip(&self.inputs).enumerate() {
-            let n_core = core_dims.len();
-            if shape.len() < n_core {
-                return Err(UFuncError::Msg(format!(
-                    "operand {} has {} dimensions but signature requires at least {} core dimensions",
-                    op_idx,
-                    shape.len(),
-                    n_core
-                )));
-            }
-            let loop_ndim = shape.len() - n_core;
+            let (loop_ndim, bindings) = assign_core_dim_bindings(shape, core_dims, op_idx)?;
             loop_shapes.push(&shape[..loop_ndim]);
 
             // Map core dimension names to sizes
-            for (dim_idx, dim_name) in core_dims.iter().enumerate() {
-                let size = shape[loop_ndim + dim_idx];
-                if let Some(&existing) = dim_map.get(dim_name) {
-                    if existing != size {
+            for (dim_name, size, optional) in bindings.iter().flatten() {
+                if *optional {
+                    let state = optional_dim_state
+                        .entry(dim_name.clone())
+                        .or_insert((true, None));
+                    if let Some(existing) = state.1 {
+                        if existing != *size {
+                            return Err(UFuncError::Msg(format!(
+                                "core dimension '{}' size mismatch: {} vs {} (operand {})",
+                                dim_name, existing, size, op_idx
+                            )));
+                        }
+                    } else {
+                        state.1 = Some(*size);
+                    }
+                } else if let Some(&existing) = dim_map.get(dim_name) {
+                    if existing != *size {
                         return Err(UFuncError::Msg(format!(
                             "core dimension '{}' size mismatch: {} vs {} (operand {})",
                             dim_name, existing, size, op_idx
                         )));
                     }
                 } else {
-                    dim_map.insert(dim_name.clone(), size);
+                    dim_map.insert(dim_name.clone(), *size);
                 }
             }
+
+            for (binding, dim_name) in bindings.iter().zip(core_dims) {
+                let (base_name, optional) = parse_core_dim_token(dim_name);
+                if optional && binding.is_none() {
+                    let state = optional_dim_state
+                        .entry(base_name.to_string())
+                        .or_insert((true, None));
+                    state.0 = false;
+                } else if optional {
+                    optional_dim_state
+                        .entry(base_name.to_string())
+                        .or_insert((true, None));
+                }
+            }
+        }
+
+        for (dim_name, (all_present, size)) in &optional_dim_state {
+            dim_map.insert(
+                dim_name.clone(),
+                if *all_present { size.unwrap_or(1) } else { 1 },
+            );
         }
 
         // Broadcast loop dimensions
@@ -1168,19 +1195,78 @@ impl GufuncSignature {
         for output_core in &self.outputs {
             let mut out_shape = broadcast.clone();
             for dim_name in output_core {
-                let size = dim_map.get(dim_name).copied().ok_or_else(|| {
+                let (base_name, optional) = parse_core_dim_token(dim_name);
+                let size = dim_map.get(base_name).copied().ok_or_else(|| {
                     UFuncError::Msg(format!(
                         "output core dimension '{}' not bound by any input",
-                        dim_name
+                        base_name
                     ))
                 })?;
-                out_shape.push(size);
+                let include_dim = !optional
+                    || optional_dim_state
+                        .get(base_name)
+                        .is_some_and(|(all_present, _)| *all_present);
+                if include_dim {
+                    out_shape.push(size);
+                }
             }
             output_shapes.push(out_shape);
         }
 
         Ok((broadcast, dim_map, output_shapes))
     }
+}
+
+fn parse_core_dim_token(token: &str) -> (&str, bool) {
+    token
+        .strip_suffix('?')
+        .map_or((token, false), |base| (base, true))
+}
+
+type GufuncCoreDimBinding = Option<(String, usize, bool)>;
+
+#[allow(clippy::type_complexity)]
+fn assign_core_dim_bindings(
+    shape: &[usize],
+    core_dims: &[String],
+    op_idx: usize,
+) -> Result<(usize, Vec<GufuncCoreDimBinding>), UFuncError> {
+    let min_core_dims = core_dims
+        .iter()
+        .filter(|dim_name| !parse_core_dim_token(dim_name).1)
+        .count();
+    if shape.len() < min_core_dims {
+        return Err(UFuncError::Msg(format!(
+            "operand {} has {} dimensions but signature requires at least {} core dimensions",
+            op_idx,
+            shape.len(),
+            min_core_dims
+        )));
+    }
+
+    let mut bindings_rev = Vec::with_capacity(core_dims.len());
+    let mut next_shape_idx = shape.len();
+
+    for token_idx in (0..core_dims.len()).rev() {
+        let dim_name = &core_dims[token_idx];
+        let (base_name, optional) = parse_core_dim_token(dim_name);
+        let required_to_the_left = core_dims[..token_idx]
+            .iter()
+            .filter(|token| !parse_core_dim_token(token).1)
+            .count();
+
+        if optional && next_shape_idx == required_to_the_left {
+            bindings_rev.push(None);
+            continue;
+        }
+
+        let size = shape[next_shape_idx - 1];
+        next_shape_idx -= 1;
+        bindings_rev.push(Some((base_name.to_string(), size, optional)));
+    }
+
+    bindings_rev.reverse();
+    Ok((next_shape_idx, bindings_rev))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4709,7 +4795,7 @@ impl UFuncArray {
                 // rot90(m, 3) = swapaxes(flip(m, 0), 0, 1)
                 self.flip(Some(0)).and_then(|f| f.swapaxes(0, 1))
             }
-            _ => return Err(UFuncError::Msg("rot90 modulo math failed".to_string())),
+            _ => Err(UFuncError::Msg("rot90 modulo math failed".to_string())),
         }
     }
 
@@ -15158,6 +15244,13 @@ fn parse_fixed_signature_dtype(token: &str) -> Result<DType, UFuncError> {
 }
 
 fn validate_core_dim_identifier(token: &str) -> Result<(), UFuncError> {
+    let (token, optional) = parse_core_dim_token(token);
+    if optional && token.is_empty() {
+        return Err(UFuncError::SignatureParse {
+            detail: "signature optional dimension token must not be empty".to_string(),
+        });
+    }
+
     let mut chars = token.chars();
     let Some(first) = chars.next() else {
         return Err(UFuncError::SignatureParse {
@@ -22863,6 +22956,17 @@ mod tests {
     }
 
     #[test]
+    fn gufunc_signature_optional_dims_are_preserved() {
+        let sig = parse_gufunc_signature(Some("(n?,k),(k,m?)->(n?,m?)"), None)
+            .expect("parse")
+            .expect("present");
+        assert_eq!(sig.inputs[0], vec!["n?", "k"]);
+        assert_eq!(sig.inputs[1], vec!["k", "m?"]);
+        assert_eq!(sig.outputs[0], vec!["n?", "m?"]);
+        assert_eq!(sig.canonical(), "(n?,k),(k,m?)->(n?,m?)");
+    }
+
+    #[test]
     fn gufunc_signature_high_arity_dims() {
         // 8-dimensional signature
         let sig_str = "(a,b,c,d,e,f,g,h)->(a,h)";
@@ -22975,6 +23079,13 @@ mod tests {
     fn gufunc_signature_special_chars_in_dim_rejected() {
         let err = parse_gufunc_signature(Some("(a+b)->(c)"), None)
             .expect_err("special chars should fail");
+        assert!(matches!(err, UFuncError::SignatureParse { .. }));
+    }
+
+    #[test]
+    fn gufunc_signature_invalid_optional_dim_rejected() {
+        let err = parse_gufunc_signature(Some("(?)->(x)"), None)
+            .expect_err("bare optional marker should fail");
         assert!(matches!(err, UFuncError::SignatureParse { .. }));
     }
 
@@ -36216,6 +36327,58 @@ mod tests {
         assert_eq!(dim_map["n"], 4);
         assert_eq!(dim_map["p"], 5);
         assert_eq!(outputs, vec![vec![3, 5]]);
+    }
+
+    #[test]
+    fn gufunc_validate_optional_matmul_matrix_matrix() {
+        let sig = parse_gufunc_signature(Some("(n?,k),(k,m?)->(n?,m?)"), None)
+            .unwrap()
+            .unwrap();
+        let (broadcast, dim_map, outputs) = sig.validate_shapes(&[&[3, 4], &[4, 5]]).unwrap();
+        assert!(broadcast.is_empty(), "no loop dims for 2D inputs");
+        assert_eq!(dim_map["n"], 3);
+        assert_eq!(dim_map["k"], 4);
+        assert_eq!(dim_map["m"], 5);
+        assert_eq!(outputs, vec![vec![3, 5]]);
+    }
+
+    #[test]
+    fn gufunc_validate_optional_matmul_vector_matrix() {
+        let sig = parse_gufunc_signature(Some("(n?,k),(k,m?)->(n?,m?)"), None)
+            .unwrap()
+            .unwrap();
+        let (broadcast, dim_map, outputs) = sig.validate_shapes(&[&[4], &[4, 5]]).unwrap();
+        assert!(broadcast.is_empty(), "no loop dims for 1D @ 2D");
+        assert_eq!(dim_map["n"], 1);
+        assert_eq!(dim_map["k"], 4);
+        assert_eq!(dim_map["m"], 5);
+        assert_eq!(outputs, vec![vec![5]]);
+    }
+
+    #[test]
+    fn gufunc_validate_optional_matmul_matrix_vector() {
+        let sig = parse_gufunc_signature(Some("(n?,k),(k,m?)->(n?,m?)"), None)
+            .unwrap()
+            .unwrap();
+        let (broadcast, dim_map, outputs) = sig.validate_shapes(&[&[3, 4], &[4]]).unwrap();
+        assert!(broadcast.is_empty(), "no loop dims for 2D @ 1D");
+        assert_eq!(dim_map["n"], 3);
+        assert_eq!(dim_map["k"], 4);
+        assert_eq!(dim_map["m"], 1);
+        assert_eq!(outputs, vec![vec![3]]);
+    }
+
+    #[test]
+    fn gufunc_validate_optional_matmul_vector_vector() {
+        let sig = parse_gufunc_signature(Some("(n?,k),(k,m?)->(n?,m?)"), None)
+            .unwrap()
+            .unwrap();
+        let (broadcast, dim_map, outputs) = sig.validate_shapes(&[&[4], &[4]]).unwrap();
+        assert!(broadcast.is_empty(), "no loop dims for 1D @ 1D");
+        assert_eq!(dim_map["n"], 1);
+        assert_eq!(dim_map["k"], 4);
+        assert_eq!(dim_map["m"], 1);
+        assert_eq!(outputs, vec![Vec::<usize>::new()]);
     }
 
     #[test]
