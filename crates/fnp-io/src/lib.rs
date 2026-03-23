@@ -390,7 +390,7 @@ fn format_shape_tuple(shape: &[usize]) -> String {
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("({joined},)")
+            format!("({joined})")
         }
     }
 }
