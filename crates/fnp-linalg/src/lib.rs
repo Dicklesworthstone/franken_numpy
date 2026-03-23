@@ -3116,7 +3116,8 @@ pub fn vector_norm(values: &[f64], ord: Option<VectorNormOrder>) -> Result<f64, 
                 values.iter().map(|v| v.abs()).sum()
             } else if (p - 2.0).abs() < f64::EPSILON {
                 values.iter().map(|v| v * v).sum::<f64>().sqrt()
-            } else {                values
+            } else {
+                values
                     .iter()
                     .map(|v| v.abs().powf(p))
                     .sum::<f64>()
