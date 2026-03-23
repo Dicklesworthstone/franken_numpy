@@ -2470,8 +2470,9 @@ pub fn memmap_npy(path: &std::path::Path, mode: MemmapMode) -> Result<MemmapArra
     let (header_offset, header_len) = read_header_span(&header_bytes, version)?;
     let header_end = header_offset + header_len;
     let header = parse_header_dictionary(&header_bytes[header_offset..header_end], header_len)?;
-
-    memmap(path, header.descr, mode, header_end, &header.shape)
+    let mut mapped = memmap(path, header.descr, mode, header_end, &header.shape)?;
+    mapped.fortran_order = header.fortran_order;
+    Ok(mapped)
 }
 
 // ── Structured / Record Dtype NPY support ──
@@ -4948,6 +4949,38 @@ mod tests {
         assert_eq!(arr.dtype, IOSupportedDType::F64);
         let loaded = arr.to_f64_values().unwrap();
         assert_eq!(loaded, vec![1.25, 2.75, 3.5]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn memmap_npy_preserves_fortran_order_metadata() {
+        let dir = std::env::temp_dir().join("fnp_memmap_test_npy_fortran");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("npy_fortran.npy");
+        let header = NpyHeader {
+            shape: vec![2, 3],
+            fortran_order: true,
+            descr: IOSupportedDType::F64,
+        };
+        let payload = [1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0]
+            .into_iter()
+            .flat_map(f64::to_le_bytes)
+            .collect::<Vec<_>>();
+        let npy_bytes = write_npy_bytes(&header, &payload, false).expect("write fortran npy");
+        std::fs::write(&path, &npy_bytes).expect("persist npy");
+
+        let arr = memmap_npy(&path, MemmapMode::ReadOnly).expect("memmap_npy");
+        assert!(
+            arr.fortran_order,
+            "header layout metadata should be preserved"
+        );
+        assert_eq!(arr.shape, vec![2, 3]);
+        assert_eq!(arr.dtype, IOSupportedDType::F64);
+        assert_eq!(
+            arr.to_f64_values().unwrap(),
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
