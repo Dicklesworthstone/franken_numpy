@@ -352,6 +352,55 @@ pub fn write_flatiter<T: Copy>(
     Ok(selected)
 }
 
+pub fn ndindex(shape: &[usize]) -> Result<Vec<Vec<usize>>, NditerError> {
+    let total = ndindex_element_count(shape)?;
+    if shape.is_empty() {
+        return Ok(vec![Vec::new()]);
+    }
+    if total == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut indices = Vec::with_capacity(total);
+    let mut current = vec![0; shape.len()];
+    loop {
+        indices.push(current.clone());
+
+        let mut advanced = false;
+        for axis in (0..shape.len()).rev() {
+            current[axis] += 1;
+            if current[axis] < shape[axis] {
+                advanced = true;
+                break;
+            }
+            current[axis] = 0;
+        }
+
+        if !advanced {
+            break;
+        }
+    }
+
+    Ok(indices)
+}
+
+pub fn ndenumerate<T: Copy>(
+    shape: &[usize],
+    values: &[T],
+) -> Result<Vec<(Vec<usize>, T)>, NditerError> {
+    let total = ndindex_element_count(shape)?;
+    if values.len() != total {
+        return Err(NditerError::NdindexShapeValidation(
+            "ndenumerate values length must match shape element count",
+        ));
+    }
+
+    Ok(ndindex(shape)?
+        .into_iter()
+        .zip(values.iter().copied())
+        .collect())
+}
+
 fn count_selected_indices(len: usize, index: &FlatIterIndex) -> Result<usize, TransferError> {
     resolve_flatiter_indices(len, index)
         .map(|indices| indices.len())
@@ -379,6 +428,15 @@ fn count_true_mask(mask: &[bool]) -> usize {
         }
     }
     count
+}
+
+fn ndindex_element_count(shape: &[usize]) -> Result<usize, NditerError> {
+    shape.iter().try_fold(1usize, |acc, &dim| {
+        acc.checked_mul(dim)
+            .ok_or(NditerError::NdindexShapeValidation(
+                "ndindex shape element count overflow",
+            ))
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -765,6 +823,7 @@ pub enum NditerError {
     MultiIndexViolation(&'static str),
     NoBroadcastViolation(&'static str),
     OverlapPolicyTriggered(&'static str),
+    NdindexShapeValidation(&'static str),
 }
 
 impl NditerError {
@@ -775,6 +834,7 @@ impl NditerError {
             Self::MultiIndexViolation(_) => "nditer_multi_index_contract_violation",
             Self::NoBroadcastViolation(_) => "nditer_no_broadcast_violation",
             Self::OverlapPolicyTriggered(_) => "nditer_overlap_policy_triggered",
+            Self::NdindexShapeValidation(_) => "ndindex_shape_validation_failed",
         }
     }
 }
@@ -785,7 +845,8 @@ impl std::fmt::Display for NditerError {
             Self::InvalidConfiguration(msg)
             | Self::MultiIndexViolation(msg)
             | Self::NoBroadcastViolation(msg)
-            | Self::OverlapPolicyTriggered(msg) => write!(f, "{msg}"),
+            | Self::OverlapPolicyTriggered(msg)
+            | Self::NdindexShapeValidation(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -2408,6 +2469,54 @@ mod tests {
         let err = write_flatiter(&mut values, true, &idx, &[7.0, 8.0])
             .expect_err("non-scalar mismatched assignment should fail");
         assert_eq!(err.reason_code(), "flatiter_indexing_contract_violation");
+    }
+
+    #[test]
+    fn ndindex_emits_cartesian_coordinates_in_c_order() {
+        assert_eq!(
+            ndindex(&[2, 3]).expect("ndindex should succeed"),
+            vec![
+                vec![0, 0],
+                vec![0, 1],
+                vec![0, 2],
+                vec![1, 0],
+                vec![1, 1],
+                vec![1, 2]
+            ]
+        );
+    }
+
+    #[test]
+    fn ndindex_handles_zero_dim_and_zero_extent_shapes() {
+        assert_eq!(
+            ndindex(&[]).expect("scalar ndindex"),
+            vec![Vec::<usize>::new()]
+        );
+        assert!(
+            ndindex(&[2, 0, 3])
+                .expect("zero extent should be empty")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn ndenumerate_pairs_coordinates_with_values() {
+        let pairs = ndenumerate(&[2, 2], &[10, 20, 30, 40]).expect("ndenumerate should succeed");
+        assert_eq!(
+            pairs,
+            vec![
+                (vec![0, 0], 10),
+                (vec![0, 1], 20),
+                (vec![1, 0], 30),
+                (vec![1, 1], 40)
+            ]
+        );
+    }
+
+    #[test]
+    fn ndenumerate_rejects_value_length_mismatch() {
+        let err = ndenumerate(&[2, 2], &[1, 2, 3]).expect_err("length mismatch should fail");
+        assert_eq!(err.reason_code(), "ndindex_shape_validation_failed");
     }
 
     // -----------------------------------------------------------------------
