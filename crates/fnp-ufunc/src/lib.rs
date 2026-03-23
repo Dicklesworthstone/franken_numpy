@@ -1289,12 +1289,14 @@ pub struct BinaryDispatchPlan {
 pub enum BinaryDispatchMethod {
     BuiltinPromoted,
     FixedSignature,
+    CustomLoop,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinaryDispatchSelection {
     pub method: BinaryDispatchMethod,
     pub plan: BinaryDispatchPlan,
+    pub custom_loop_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1746,14 +1748,17 @@ pub fn plan_binary_dispatch(
     Ok(plan_binary_dispatch_with_signature(lhs, rhs, None)?.plan)
 }
 
-pub fn plan_binary_dispatch_with_signature(
+pub fn plan_binary_dispatch_with_registry(
+    ufunc_name: &str,
     lhs: &UFuncArray,
     rhs: &UFuncArray,
+    registry: &UFuncLoopRegistry,
     fixed_signature: Option<&FixedSignature>,
 ) -> Result<BinaryDispatchSelection, UFuncError> {
     let out_shape = broadcast_shape(lhs.shape(), rhs.shape()).map_err(UFuncError::Shape)?;
     let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
-    let (method, out_dtype) = resolve_binary_output_dtype(lhs, rhs, fixed_signature)?;
+    let (method, out_dtype, custom_loop_name) =
+        resolve_binary_output_dtype(ufunc_name, lhs, rhs, Some(registry), fixed_signature)?;
     Ok(BinaryDispatchSelection {
         method,
         plan: BinaryDispatchPlan {
@@ -1761,19 +1766,89 @@ pub fn plan_binary_dispatch_with_signature(
             out_count,
             out_dtype,
         },
+        custom_loop_name,
     })
 }
 
-fn resolve_binary_output_dtype(
+pub fn plan_binary_dispatch_with_signature(
     lhs: &UFuncArray,
     rhs: &UFuncArray,
     fixed_signature: Option<&FixedSignature>,
-) -> Result<(BinaryDispatchMethod, DType), UFuncError> {
+) -> Result<BinaryDispatchSelection, UFuncError> {
+    plan_binary_dispatch_with_registry("", lhs, rhs, &UFuncLoopRegistry::new(), fixed_signature)
+}
+
+fn resolve_binary_output_dtype(
+    ufunc_name: &str,
+    lhs: &UFuncArray,
+    rhs: &UFuncArray,
+    registry: Option<&UFuncLoopRegistry>,
+    fixed_signature: Option<&FixedSignature>,
+) -> Result<(BinaryDispatchMethod, DType, Option<String>), UFuncError> {
+    if let Some(registry) = registry {
+        let ufunc_name = ufunc_name.trim();
+        if !ufunc_name.is_empty()
+            && let Some(entry) = registry.resolve(ufunc_name, &[lhs.dtype(), rhs.dtype()])
+        {
+            if entry.output_dtypes.len() != 1 {
+                return Err(UFuncError::DispatchResolutionFailed {
+                    detail: format!(
+                        "custom loop '{}' for ufunc '{}' must declare exactly one output dtype for binary dispatch, got {}",
+                        entry.loop_name,
+                        entry.ufunc_name,
+                        entry.output_dtypes.len()
+                    ),
+                });
+            }
+
+            validate_fixed_binary_signature(lhs, rhs, fixed_signature)?;
+            let out_dtype = entry.output_dtypes[0];
+            if let Some(signature) = fixed_signature
+                && out_dtype != signature.outputs[0]
+            {
+                return Err(UFuncError::TypeResolutionInvalid {
+                    detail: format!(
+                        "custom loop '{}' resolves output dtype {:?} but fixed signature '{}' requires {:?}",
+                        entry.loop_name,
+                        out_dtype,
+                        signature.canonical(),
+                        signature.outputs[0]
+                    ),
+                });
+            }
+
+            return Ok((
+                BinaryDispatchMethod::CustomLoop,
+                out_dtype,
+                Some(entry.loop_name.clone()),
+            ));
+        }
+    }
+
+    validate_fixed_binary_signature(lhs, rhs, fixed_signature)?;
+
     let Some(signature) = fixed_signature else {
         return Ok((
             BinaryDispatchMethod::BuiltinPromoted,
             promote(lhs.dtype(), rhs.dtype()),
+            None,
         ));
+    };
+
+    Ok((
+        BinaryDispatchMethod::FixedSignature,
+        signature.outputs[0],
+        None,
+    ))
+}
+
+fn validate_fixed_binary_signature(
+    lhs: &UFuncArray,
+    rhs: &UFuncArray,
+    fixed_signature: Option<&FixedSignature>,
+) -> Result<(), UFuncError> {
+    let Some(signature) = fixed_signature else {
+        return Ok(());
     };
 
     if signature.inputs.len() != 2 || signature.outputs.len() != 1 {
@@ -1799,7 +1874,7 @@ fn resolve_binary_output_dtype(
         });
     }
 
-    Ok((BinaryDispatchMethod::FixedSignature, signature.outputs[0]))
+    Ok(())
 }
 
 /// Sidecar for preserving exact integer values that exceed f64 representability
@@ -22419,12 +22494,12 @@ mod tests {
         ma_is_masked, ma_make_mask, ma_mask_or, modf, normalize_fixed_signature_keywords,
         normalize_signature_keywords, pad_empty, pad_linear_ramp, pad_stat,
         parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch,
-        plan_binary_dispatch_with_signature, poly2cheb, poly2herm, poly2lag, poly2leg,
-        register_custom_loop, resolve_override_dispatch, scimath_arccos, scimath_arcsin,
-        scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_power, scimath_sqrt,
-        seterr, seterr_state, seterrcall, sort_complex, take_float_error_events, unique_all,
-        unique_counts, unique_inverse, unique_values, validate_override_payload_class,
-        where_nonzero,
+        plan_binary_dispatch_with_registry, plan_binary_dispatch_with_signature, poly2cheb,
+        poly2herm, poly2lag, poly2leg, register_custom_loop, resolve_override_dispatch,
+        scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log, scimath_log2, scimath_log10,
+        scimath_power, scimath_sqrt, seterr, seterr_state, seterrcall, sort_complex,
+        take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
+        validate_override_payload_class, where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
@@ -23368,8 +23443,79 @@ mod tests {
             .expect("fixed signature dispatch should succeed");
 
         assert_eq!(selection.method, BinaryDispatchMethod::FixedSignature);
+        assert_eq!(selection.custom_loop_name, None);
         assert_eq!(selection.plan.out_shape, vec![2, 2]);
         assert_eq!(selection.plan.out_count, 4);
+        assert_eq!(selection.plan.out_dtype, DType::F64);
+    }
+
+    #[test]
+    fn dispatch_plan_with_registry_prefers_custom_loop_over_builtin_promotion() {
+        let lhs = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::I32).expect("lhs");
+        let rhs = UFuncArray::new(vec![2], vec![3.0, 4.0], DType::I32).expect("rhs");
+        let mut registry = UFuncLoopRegistry::new();
+        registry
+            .register(
+                "custom_add_i32_to_f32",
+                "add",
+                vec![DType::I32, DType::I32],
+                vec![DType::F32],
+            )
+            .expect("registration");
+
+        let selection = plan_binary_dispatch_with_registry("add", &lhs, &rhs, &registry, None)
+            .expect("custom loop should win");
+
+        assert_eq!(selection.method, BinaryDispatchMethod::CustomLoop);
+        assert_eq!(
+            selection.custom_loop_name.as_deref(),
+            Some("custom_add_i32_to_f32")
+        );
+        assert_eq!(selection.plan.out_dtype, DType::F32);
+    }
+
+    #[test]
+    fn dispatch_plan_with_registry_validates_fixed_signature_against_custom_loop() {
+        let lhs = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::I32).expect("lhs");
+        let rhs = UFuncArray::new(vec![2], vec![3.0, 4.0], DType::I32).expect("rhs");
+        let mut registry = UFuncLoopRegistry::new();
+        registry
+            .register(
+                "custom_add_i32_to_i64",
+                "add",
+                vec![DType::I32, DType::I32],
+                vec![DType::I64],
+            )
+            .expect("registration");
+        let signature = parse_fixed_signature_string("ii->d", 2, 1).expect("signature");
+
+        let err =
+            plan_binary_dispatch_with_registry("add", &lhs, &rhs, &registry, Some(&signature))
+                .expect_err("conflicting custom-loop output dtype should fail");
+
+        assert!(matches!(err, UFuncError::TypeResolutionInvalid { .. }));
+        assert_eq!(err.reason_code(), "ufunc_type_resolution_invalid");
+    }
+
+    #[test]
+    fn dispatch_plan_with_registry_falls_back_when_no_custom_loop_matches() {
+        let lhs = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::I32).expect("lhs");
+        let rhs = UFuncArray::new(vec![2], vec![3.0, 4.0], DType::F32).expect("rhs");
+        let mut registry = UFuncLoopRegistry::new();
+        registry
+            .register(
+                "custom_add_i32",
+                "add",
+                vec![DType::I32, DType::I32],
+                vec![DType::I32],
+            )
+            .expect("registration");
+
+        let selection = plan_binary_dispatch_with_registry("add", &lhs, &rhs, &registry, None)
+            .expect("non-matching registration should fall back");
+
+        assert_eq!(selection.method, BinaryDispatchMethod::BuiltinPromoted);
+        assert_eq!(selection.custom_loop_name, None);
         assert_eq!(selection.plan.out_dtype, DType::F64);
     }
 
