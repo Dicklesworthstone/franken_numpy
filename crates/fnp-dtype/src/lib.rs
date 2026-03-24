@@ -520,56 +520,18 @@ fn can_cast_same_kind(from: DType, to: DType) -> bool {
     false
 }
 
-/// Minimum scalar dtype that can hold a given f64 value
-/// (np.min_scalar_type).
+/// Minimum scalar dtype for a floating scalar value
+/// (np.min_scalar_type on Python/NumPy float inputs).
 #[must_use]
 pub fn min_scalar_type(value: f64) -> DType {
-    if value.is_nan() || value.is_infinite() {
-        return DType::F64;
-    }
-    // Handle negative zero explicitly
-    if value == 0.0 && value.is_sign_negative() {
+    // NumPy's floating-scalar path never demotes to integer/bool kinds.
+    // It uses conservative magnitude thresholds rather than exact
+    // representability checks.
+    if !value.is_finite() || (value > -65_000.0 && value < 65_000.0) {
         return DType::F16;
     }
-    if value != value.floor() {
-        #[allow(clippy::cast_possible_truncation)]
-        let round_trip = (value as f32) as f64;
-        if round_trip == value {
-            return DType::F32;
-        }
-        return DType::F64;
-    }
-    if value == 0.0 || value == 1.0 {
-        return DType::Bool;
-    }
-    if value >= 0.0 {
-        if value <= f64::from(u8::MAX) {
-            return DType::U8;
-        }
-        if value <= f64::from(u16::MAX) {
-            return DType::U16;
-        }
-        if value <= f64::from(u32::MAX) {
-            return DType::U32;
-        }
-        // u64::MAX cannot be exactly represented in f64, but 2^64 is 18446744073709551616.0
-        if value < 18446744073709551616.0 {
-            return DType::U64;
-        }
-        return DType::F64;
-    }
-    if value >= f64::from(i8::MIN) {
-        return DType::I8;
-    }
-    if value >= f64::from(i16::MIN) {
-        return DType::I16;
-    }
-    if value >= f64::from(i32::MIN) {
-        return DType::I32;
-    }
-    // i64::MIN is exactly representable in f64 (-9223372036854775808.0)
-    if value >= -9223372036854775808.0 {
-        return DType::I64;
+    if value > -3.4e38 && value < 3.4e38 {
+        return DType::F32;
     }
     DType::F64
 }
@@ -1880,15 +1842,18 @@ mod tests {
     }
 
     #[test]
-    fn min_scalar_type_picks_smallest() {
-        assert_eq!(min_scalar_type(0.0), DType::Bool);
-        assert_eq!(min_scalar_type(1.0), DType::Bool);
-        assert_eq!(min_scalar_type(255.0), DType::U8);
-        assert_eq!(min_scalar_type(256.0), DType::U16);
-        assert_eq!(min_scalar_type(-1.0), DType::I8);
-        assert_eq!(min_scalar_type(-129.0), DType::I16);
-        assert_eq!(min_scalar_type(0.5), DType::F32);
-        assert_eq!(min_scalar_type(f64::NAN), DType::F64);
+    fn min_scalar_type_follows_numpy_float_scalar_thresholds() {
+        assert_eq!(min_scalar_type(0.0), DType::F16);
+        assert_eq!(min_scalar_type(1.0), DType::F16);
+        assert_eq!(min_scalar_type(255.0), DType::F16);
+        assert_eq!(min_scalar_type(-129.0), DType::F16);
+        assert_eq!(min_scalar_type(0.5), DType::F16);
+        assert_eq!(min_scalar_type(f64::NAN), DType::F16);
+        assert_eq!(min_scalar_type(f64::INFINITY), DType::F16);
+        assert_eq!(min_scalar_type(65_000.0), DType::F32);
+        assert_eq!(min_scalar_type(-65_000.0), DType::F32);
+        assert_eq!(min_scalar_type(1.0e10), DType::F32);
+        assert_eq!(min_scalar_type(1.0e39), DType::F64);
     }
 
     #[test]
