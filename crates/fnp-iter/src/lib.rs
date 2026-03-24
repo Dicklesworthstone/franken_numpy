@@ -402,6 +402,14 @@ pub fn ndenumerate<T: Copy>(
 }
 
 fn count_selected_indices(len: usize, index: &FlatIterIndex) -> Result<usize, TransferError> {
+    if let FlatIterIndex::BoolMask(mask) = index {
+        if mask.len() != len {
+            return Err(TransferError::FlatiterReadViolation(
+                "bool mask length must equal flatiter length",
+            ));
+        }
+        return Ok(count_true_mask(mask));
+    }
     resolve_flatiter_indices(len, index)
         .map(|indices| indices.len())
         .map_err(|err| {
