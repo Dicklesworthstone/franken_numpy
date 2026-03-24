@@ -24976,6 +24976,56 @@ mod tests {
     }
 
     #[test]
+    fn power_edge_cases() {
+        // 0^0 = 1 (NumPy convention)
+        let a = UFuncArray::scalar(0.0, DType::F64);
+        let b = UFuncArray::scalar(0.0, DType::F64);
+        let r = a.elementwise_binary(&b, BinaryOp::Power).unwrap();
+        assert_eq!(r.values()[0], 1.0);
+
+        // 0^(-1) = inf
+        let b = UFuncArray::scalar(-1.0, DType::F64);
+        let r = a.elementwise_binary(&b, BinaryOp::Power).unwrap();
+        assert!(r.values()[0].is_infinite() && r.values()[0] > 0.0);
+
+        // (-2)^0.5 = NaN (negative base, fractional exponent)
+        let a = UFuncArray::scalar(-2.0, DType::F64);
+        let b = UFuncArray::scalar(0.5, DType::F64);
+        let r = a.elementwise_binary(&b, BinaryOp::Power).unwrap();
+        assert!(r.values()[0].is_nan());
+    }
+
+    #[test]
+    fn signbit_negative_zero() {
+        // np.signbit(-0.0) = True
+        let arr = UFuncArray::new(vec![2], vec![-0.0, 0.0], DType::F64).unwrap();
+        let out = arr.elementwise_unary(UnaryOp::Signbit);
+        assert_eq!(out.values(), &[1.0, 0.0]);
+    }
+
+    #[test]
+    fn nan_comparison_ieee754() {
+        let nan = UFuncArray::scalar(f64::NAN, DType::F64);
+        let one = UFuncArray::scalar(1.0, DType::F64);
+
+        // NaN == NaN → false
+        let eq = nan.elementwise_binary(&nan, BinaryOp::Equal).unwrap();
+        assert_eq!(eq.values()[0], 0.0);
+
+        // NaN != NaN → true
+        let ne = nan.elementwise_binary(&nan, BinaryOp::NotEqual).unwrap();
+        assert_eq!(ne.values()[0], 1.0);
+
+        // NaN < 1 → false
+        let lt = nan.elementwise_binary(&one, BinaryOp::Less).unwrap();
+        assert_eq!(lt.values()[0], 0.0);
+
+        // NaN > 1 → false
+        let gt = nan.elementwise_binary(&one, BinaryOp::Greater).unwrap();
+        assert_eq!(gt.values()[0], 0.0);
+    }
+
+    #[test]
     fn binary_remainder_sign_follows_divisor() {
         let lhs = UFuncArray::new(vec![4], vec![7.0, -7.0, 7.0, -7.0], DType::F64).expect("lhs");
         let rhs = UFuncArray::new(vec![4], vec![3.0, 3.0, -3.0, -3.0], DType::F64).expect("rhs");
