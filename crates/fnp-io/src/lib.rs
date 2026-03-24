@@ -2772,6 +2772,11 @@ pub fn tofile_structured(
         if first_item_size == 0 {
             return Err(IOError::DTypeDescriptorInvalid);
         }
+        if !columns[0].len().is_multiple_of(first_item_size) {
+            return Err(IOError::WriteContractViolation(
+                "structured column byte length must be an exact multiple of field item size",
+            ));
+        }
         columns[0].len() / first_item_size
     };
 
@@ -2781,7 +2786,12 @@ pub fn tofile_structured(
             .dtype
             .item_size()
             .ok_or(IOError::DTypeDescriptorInvalid)?;
-        let col_records = columns[i].len().checked_div(item_size).unwrap_or(0);
+        if !columns[i].len().is_multiple_of(item_size) {
+            return Err(IOError::WriteContractViolation(
+                "structured column byte length must be an exact multiple of field item size",
+            ));
+        }
+        let col_records = columns[i].len() / item_size;
         if col_records != n {
             return Err(IOError::WriteContractViolation(
                 "structured columns have inconsistent record counts",
@@ -4688,6 +4698,18 @@ mod tests {
         let col_y = vec![0u8; 8]; // 2 records
         // Shape says 5 but only 2 records
         let err = save_structured(&[5], &desc, &[col_x, col_y]).unwrap_err();
+        assert_eq!(err.reason_code(), "io_write_contract_violation");
+    }
+
+    #[test]
+    fn tofile_structured_rejects_partial_field_bytes() {
+        let desc = make_test_descriptor();
+        let col_x = vec![0u8; 17];
+        let col_y = vec![0u8; 8];
+
+        let err = tofile_structured(&desc, &[col_x, col_y])
+            .expect_err("partial field bytes must fail closed");
+
         assert_eq!(err.reason_code(), "io_write_contract_violation");
     }
 
