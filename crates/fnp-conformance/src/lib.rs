@@ -2640,6 +2640,21 @@ fn build_flatiter_index(
     }
 }
 
+fn infer_flatiter_len(input: &IterFlatIndexFixtureInput) -> usize {
+    let fancy_upper = input
+        .indices
+        .iter()
+        .copied()
+        .max()
+        .map_or(0, |max_index| max_index.saturating_add(1));
+    input
+        .mask
+        .len()
+        .max(input.stop)
+        .max(input.index.saturating_add(1))
+        .max(fancy_upper)
+}
+
 fn execute_iter_operation(
     case_id: &str,
     operation: &str,
@@ -3138,11 +3153,7 @@ pub fn run_iter_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport,
                     ));
                     continue;
                 };
-                let len = flat_index
-                    .mask
-                    .len()
-                    .max(flat_index.stop)
-                    .max(flat_index.index.saturating_add(1));
+                let len = infer_flatiter_len(flat_index);
                 let Ok(IterOperationOutcome::SelectedCount(selected)) =
                     execute_iter_operation_with_len(
                         &case.id,
@@ -10425,17 +10436,17 @@ fn validate_runtime_policy_log_fields(
 #[cfg(test)]
 mod tests {
     use super::{
-        AsStridedFixtureCase, HarnessConfig, RngStatisticalCase, ShapeStrideFixtureCase,
-        default_rng_mean_abs_tol, default_rng_variance_abs_tol, evaluate_shape_stride_case,
-        generate_rng_samples, run_all_core_suites, run_crash_signature_regression_suite,
-        run_datetime_differential_suite, run_dtype_adversarial_suite, run_dtype_differential_suite,
-        run_dtype_metamorphic_suite, run_dtype_promotion_suite, run_fft_differential_suite,
-        run_io_adversarial_suite, run_io_differential_suite, run_io_metamorphic_suite,
-        run_iter_adversarial_suite, run_iter_differential_suite, run_iter_metamorphic_suite,
-        run_linalg_adversarial_suite, run_linalg_differential_suite, run_linalg_metamorphic_suite,
-        run_masked_differential_suite, run_polynomial_differential_suite,
-        run_rng_adversarial_suite, run_rng_differential_suite, run_rng_metamorphic_suite,
-        run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
+        AsStridedFixtureCase, HarnessConfig, IterFlatIndexFixtureInput, RngStatisticalCase,
+        ShapeStrideFixtureCase, default_rng_mean_abs_tol, default_rng_variance_abs_tol,
+        evaluate_shape_stride_case, generate_rng_samples, infer_flatiter_len, run_all_core_suites,
+        run_crash_signature_regression_suite, run_datetime_differential_suite,
+        run_dtype_adversarial_suite, run_dtype_differential_suite, run_dtype_metamorphic_suite,
+        run_dtype_promotion_suite, run_fft_differential_suite, run_io_adversarial_suite,
+        run_io_differential_suite, run_io_metamorphic_suite, run_iter_adversarial_suite,
+        run_iter_differential_suite, run_iter_metamorphic_suite, run_linalg_adversarial_suite,
+        run_linalg_differential_suite, run_linalg_metamorphic_suite, run_masked_differential_suite,
+        run_polynomial_differential_suite, run_rng_adversarial_suite, run_rng_differential_suite,
+        run_rng_metamorphic_suite, run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
         run_shape_stride_adversarial_suite, run_shape_stride_differential_suite,
         run_shape_stride_metamorphic_suite, run_shape_stride_suite, run_smoke,
         run_string_differential_suite, run_ufunc_adversarial_suite, run_ufunc_differential_suite,
@@ -10535,6 +10546,21 @@ mod tests {
             "failures={:?}",
             adversarial.failures
         );
+    }
+
+    #[test]
+    fn infer_flatiter_len_accounts_for_fancy_indices_without_stop_padding() {
+        let input = IterFlatIndexFixtureInput {
+            kind: "fancy".to_string(),
+            index: 0,
+            start: 0,
+            stop: 0,
+            step: 1,
+            indices: vec![1, 3, 5, 7],
+            mask: Vec::new(),
+        };
+
+        assert_eq!(infer_flatiter_len(&input), 8);
     }
 
     #[test]
