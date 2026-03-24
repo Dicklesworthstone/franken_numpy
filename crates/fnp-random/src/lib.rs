@@ -2891,7 +2891,10 @@ impl Generator {
         }
         // Validate probabilities are non-negative and sum to ~1.0
         let sum: f64 = p.iter().sum();
-        if (sum - 1.0).abs() > 1e-8 || p.iter().any(|&v| v < 0.0) {
+        if !sum.is_finite()
+            || (sum - 1.0).abs() > 1e-8
+            || p.iter().any(|&v| !v.is_finite() || v < 0.0)
+        {
             return Err(RandomError::InvalidUpperBound);
         }
         if !replace && p.iter().filter(|&&weight| weight > 0.0).count() < size {
@@ -5429,6 +5432,11 @@ mod tests {
         // Negative probability
         let p2 = [0.5, 0.7, -0.2];
         assert!(rng.choice_weighted(&a, 1, true, &p2).is_err());
+        // Non-finite probabilities must fail closed.
+        let p3 = [0.5, f64::NAN, 0.5];
+        assert!(rng.choice_weighted(&a, 1, true, &p3).is_err());
+        let p4 = [0.5, f64::INFINITY, 0.5];
+        assert!(rng.choice_weighted(&a, 1, true, &p4).is_err());
     }
 
     #[test]
