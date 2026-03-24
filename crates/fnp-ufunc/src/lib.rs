@@ -3502,15 +3502,16 @@ impl UFuncArray {
         op: BinaryOp,
         registry: &UFuncLoopRegistry,
     ) -> Result<Self, UFuncError> {
+        let selection = plan_binary_dispatch_with_registry(op.name(), self, rhs, registry, None)?;
         if matches!(
             op,
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div
         ) && (self.uses_complex_interleaved_storage() || rhs.uses_complex_interleaved_storage())
         {
-            return self.elementwise_complex_binary(rhs, op);
+            return self.elementwise_complex_binary_with_dtype(rhs, op, selection.plan.out_dtype);
         }
 
-        let plan = plan_binary_dispatch_with_registry(op.name(), self, rhs, registry, None)?.plan;
+        let plan = selection.plan;
         let out_shape = plan.out_shape;
         let out_count = plan.out_count;
         let mut float_error_flags = FloatErrorFlags::default();
@@ -3613,7 +3614,21 @@ impl UFuncArray {
         Ok(out)
     }
 
-    fn elementwise_complex_binary(&self, rhs: &Self, op: BinaryOp) -> Result<Self, UFuncError> {
+    fn elementwise_complex_binary_with_dtype(
+        &self,
+        rhs: &Self,
+        op: BinaryOp,
+        out_dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        if !out_dtype.is_complex() {
+            return Err(UFuncError::TypeResolutionInvalid {
+                detail: format!(
+                    "ufunc '{}' cannot route complex-backed execution into non-complex output dtype {:?}",
+                    op.name(),
+                    out_dtype
+                ),
+            });
+        }
         let lhs_shape = self.complex_logical_shape(op.name())?;
         let rhs_shape = rhs.complex_logical_shape(op.name())?;
         let out_shape = broadcast_shape(&lhs_shape, &rhs_shape).map_err(UFuncError::Shape)?;
@@ -3659,11 +3674,7 @@ impl UFuncArray {
 
         let mut physical_shape = out_shape;
         physical_shape.push(2);
-        Self::new(
-            physical_shape,
-            out_values,
-            self.complex_output_dtype(Some(rhs)),
-        )
+        Self::new(physical_shape, out_values, out_dtype)
     }
 
     pub fn try_elementwise_unary(&self, op: UnaryOp) -> Result<Self, UFuncError> {
@@ -23621,6 +23632,55 @@ mod tests {
 
         assert_eq!(result.dtype(), DType::F32);
         assert_eq!(result.values(), &[4.0, 6.0]);
+    }
+
+    #[test]
+    fn complex_elementwise_binary_with_registry_applies_custom_loop_output_dtype() {
+        let lhs =
+            UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::Complex128).expect("lhs");
+        let rhs =
+            UFuncArray::new(vec![2, 2], vec![5.0, 6.0, 7.0, 8.0], DType::Complex128).expect("rhs");
+        let mut registry = UFuncLoopRegistry::new();
+        registry
+            .register(
+                "custom_complex_add_to_c64",
+                "add",
+                vec![DType::Complex128, DType::Complex128],
+                vec![DType::Complex64],
+            )
+            .expect("registration");
+
+        let result = lhs
+            .elementwise_binary_with_registry(&rhs, BinaryOp::Add, &registry)
+            .expect("registry-backed complex execution should succeed");
+
+        assert_eq!(result.dtype(), DType::Complex64);
+        assert_eq!(result.shape(), &[2, 2]);
+        assert_eq!(result.values(), &[6.0, 8.0, 10.0, 12.0]);
+    }
+
+    #[test]
+    fn complex_elementwise_binary_with_registry_rejects_non_complex_output_dtype() {
+        let lhs =
+            UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::Complex128).expect("lhs");
+        let rhs =
+            UFuncArray::new(vec![2, 2], vec![5.0, 6.0, 7.0, 8.0], DType::Complex128).expect("rhs");
+        let mut registry = UFuncLoopRegistry::new();
+        registry
+            .register(
+                "custom_complex_add_to_f64",
+                "add",
+                vec![DType::Complex128, DType::Complex128],
+                vec![DType::F64],
+            )
+            .expect("registration");
+
+        let err = lhs
+            .elementwise_binary_with_registry(&rhs, BinaryOp::Add, &registry)
+            .expect_err("non-complex custom output should fail closed");
+
+        assert!(matches!(err, UFuncError::TypeResolutionInvalid { .. }));
+        assert_eq!(err.reason_code(), "ufunc_type_resolution_invalid");
     }
 
     #[test]
