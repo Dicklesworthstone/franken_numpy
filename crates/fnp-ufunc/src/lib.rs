@@ -32389,15 +32389,9 @@ mod tests {
 
     #[test]
     fn masked_array_binary_op_broadcasts_single_source_mask() {
-        let lhs_data =
-            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let lhs_data = UFuncArray::new(vec![1, 3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         let lhs_mask = UFuncArray::new(vec![1, 3], vec![0.0, 1.0, 0.0], DType::Bool).unwrap();
-        let lhs = MaskedArray {
-            data: lhs_data,
-            mask: Some(lhs_mask),
-            fill_value: 1e20,
-            hard_mask: false,
-        };
+        let lhs = MaskedArray::new(lhs_data, Some(lhs_mask), None).unwrap();
 
         let rhs_data = UFuncArray::new(
             vec![2, 3],
@@ -32412,7 +32406,7 @@ mod tests {
         assert_eq!(result.data().shape(), &[2, 3]);
         assert_eq!(
             result.data().values(),
-            &[11.0, 22.0, 33.0, 44.0, 55.0, 66.0]
+            &[11.0, 22.0, 33.0, 41.0, 52.0, 63.0]
         );
         assert_eq!(result.mask().unwrap().shape(), &[2, 3]);
         assert_eq!(
@@ -32427,23 +32421,17 @@ mod tests {
             UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
         let lhs = MaskedArray::new(lhs_data, None, None).unwrap();
 
-        let rhs_data = UFuncArray::new(
-            vec![2, 3],
-            vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
-            DType::F64,
-        )
-        .unwrap();
+        let rhs_data = UFuncArray::new(vec![2, 1], vec![10.0, 40.0], DType::F64).unwrap();
         let rhs_mask = UFuncArray::new(vec![2, 1], vec![1.0, 0.0], DType::Bool).unwrap();
-        let rhs = MaskedArray {
-            data: rhs_data,
-            mask: Some(rhs_mask),
-            fill_value: 1e20,
-            hard_mask: false,
-        };
+        let rhs = MaskedArray::new(rhs_data, Some(rhs_mask), None).unwrap();
 
         let result = lhs.elementwise_binary(&rhs, BinaryOp::Add).unwrap();
 
         assert_eq!(result.data().shape(), &[2, 3]);
+        assert_eq!(
+            result.data().values(),
+            &[11.0, 12.0, 13.0, 44.0, 45.0, 46.0]
+        );
         assert_eq!(result.mask().unwrap().shape(), &[2, 3]);
         assert_eq!(
             result.mask().unwrap().values(),
