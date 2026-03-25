@@ -2157,7 +2157,11 @@ pub fn tostring(values: &[f64], sep: &str) -> String {
     values
         .iter()
         .map(|v| {
-            if v.fract() == 0.0 && v.is_finite() && v.abs() < 1e15 {
+            if v.fract() == 0.0
+                && v.is_finite()
+                && v.abs() < 1e15
+                && !(*v == 0.0 && v.is_sign_negative())
+            {
                 format!("{}", *v as i64)
             } else {
                 format!("{v}")
@@ -4312,6 +4316,13 @@ mod tests {
         let vals = vec![1.5, 2.7, 3.25];
         let text = tostring(&vals, " ");
         assert_eq!(text, "1.5 2.7 3.25");
+    }
+
+    #[test]
+    fn tostring_preserves_negative_zero() {
+        let vals = vec![-0.0, 0.0, -1.0];
+        let text = tostring(&vals, " ");
+        assert_eq!(text, "-0 0 -1");
     }
 
     // ── High-level convenience function tests ──
