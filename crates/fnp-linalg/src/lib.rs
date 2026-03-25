@@ -8083,12 +8083,25 @@ mod tests {
 
 #[test]
 fn batch_solve_broadcasts_matrix_rhs_across_stacked_lhs() {
-    let a = vec![
-        1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0,
-    ];
-    let a_shape = [2, 3, 3];
-    let b = vec![1.0; 12];
-    let b_shape = [3, 4];
+    // Two stacked 2×2 systems: A0 = diag(2,3), A1 = diag(4,5)
+    // Shared matrix RHS B = [[1,0],[0,1]] (identity)
+    // Expected: X0 = diag(1/2, 1/3), X1 = diag(1/4, 1/5)
+    let a = vec![2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0, 5.0];
+    let a_shape = [2, 2, 2];
+    let b = vec![1.0, 0.0, 0.0, 1.0];
+    let b_shape = [2, 2];
     let solved = batch_solve(&a, &a_shape, &b, &b_shape, false).expect("batch_solve");
-    assert_eq!(solved, vec![1.0; 24]);
+    assert_eq!(solved.len(), 8); // 2 batches × 2×2
+    assert!((solved[0] - 0.5).abs() < 1e-12, "X0[0,0]={}", solved[0]);
+    assert!(solved[1].abs() < 1e-12, "X0[0,1]={}", solved[1]);
+    assert!(solved[2].abs() < 1e-12, "X0[1,0]={}", solved[2]);
+    assert!(
+        (solved[3] - 1.0 / 3.0).abs() < 1e-12,
+        "X0[1,1]={}",
+        solved[3]
+    );
+    assert!((solved[4] - 0.25).abs() < 1e-12, "X1[0,0]={}", solved[4]);
+    assert!(solved[5].abs() < 1e-12, "X1[0,1]={}", solved[5]);
+    assert!(solved[6].abs() < 1e-12, "X1[1,0]={}", solved[6]);
+    assert!((solved[7] - 0.2).abs() < 1e-12, "X1[1,1]={}", solved[7]);
 }
