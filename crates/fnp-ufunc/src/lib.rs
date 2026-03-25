@@ -2341,7 +2341,9 @@ impl UFuncArrayView {
                     break;
                 } else {
                     coords[i] = 0;
-                    let reset_span = (self.shape[i] as isize - 1)
+                    let dim_minus_1 = isize::try_from(self.shape[i] - 1)
+                        .map_err(|_| UFuncError::Msg("shared view: dimension overflow".to_string()))?;
+                    let reset_span = dim_minus_1
                         .checked_mul(self.strides[i])
                         .ok_or_else(|| {
                             UFuncError::Msg("shared view: offset overflow".to_string())
@@ -2557,8 +2559,10 @@ impl UFuncArrayView {
             if dim <= 1 {
                 continue;
             }
+            let dim_minus_1 = isize::try_from(dim - 1)
+                .map_err(|_| UFuncError::Msg("shared view: dimension overflow".to_string()))?;
             let span = stride
-                .checked_mul((dim - 1) as isize)
+                .checked_mul(dim_minus_1)
                 .ok_or_else(|| UFuncError::Msg("shared view: stride span overflow".to_string()))?;
             if span >= 0 {
                 max_offset = max_offset.checked_add(span).ok_or_else(|| {
@@ -2606,7 +2610,9 @@ impl UFuncArrayView {
                     break;
                 } else {
                     coords[i] = 0;
-                    let reset_span = (self.shape[i] as isize - 1)
+                    let dim_minus_1 = isize::try_from(self.shape[i] - 1)
+                        .map_err(|_| UFuncError::Msg("shared view: dimension overflow".to_string()))?;
+                    let reset_span = dim_minus_1
                         .checked_mul(self.strides[i])
                         .ok_or_else(|| {
                             UFuncError::Msg("shared view: offset overflow".to_string())
@@ -6224,7 +6230,11 @@ impl UFuncArray {
                 if n == 0 {
                     return Ok(self.clone());
                 }
-                let s = ((shift % n as isize) + n as isize) as usize % n;
+                let s = if shift >= 0 {
+                    (shift as usize) % n
+                } else {
+                    (n - (shift.unsigned_abs() % n)) % n
+                };
                 let mut values = vec![0.0f64; n];
                 let mut source_indices = vec![0usize; n];
                 for (i, &v) in self.values.iter().enumerate() {
@@ -6247,7 +6257,11 @@ impl UFuncArray {
                 if axis_len == 0 {
                     return Ok(self.clone());
                 }
-                let s = ((shift % axis_len as isize) + axis_len as isize) as usize % axis_len;
+                let s = if shift >= 0 {
+                    (shift as usize) % axis_len
+                } else {
+                    (axis_len - (shift.unsigned_abs() % axis_len)) % axis_len
+                };
                 let mut values = vec![0.0f64; self.values.len()];
                 let mut source_indices = vec![0usize; self.values.len()];
                 for o in 0..outer {
@@ -9290,8 +9304,11 @@ impl UFuncArray {
             for d in 0..ndim {
                 let out_idx = remainder / out_strides[d];
                 remainder %= out_strides[d];
-                let shifted = out_idx as isize - pad_width[d].0 as isize;
-                let src_idx = shifted.rem_euclid(self.shape[d] as isize) as usize;
+                let out_isize = isize::try_from(out_idx).unwrap_or(isize::MAX);
+                let pad_isize = isize::try_from(pad_width[d].0).unwrap_or(isize::MAX);
+                let shifted = out_isize.saturating_sub(pad_isize);
+                let dim_isize = isize::try_from(self.shape[d]).unwrap_or(isize::MAX);
+                let src_idx = shifted.rem_euclid(dim_isize) as usize;
                 src_flat += src_idx * src_strides[d];
             }
             values.push(self.values[src_flat]);
@@ -18199,7 +18216,11 @@ impl MaskedArray {
         };
         let count_result = self.count(axis)?;
         let count_broadcast = if keepdims {
-            let target: Vec<isize> = sum_result.shape().iter().map(|&d| d as isize).collect();
+            let target: Vec<isize> = sum_result
+                .shape()
+                .iter()
+                .map(|&d| isize::try_from(d).unwrap_or(isize::MAX))
+                .collect();
             count_result.reshape(&target)?
         } else {
             count_result
@@ -18259,7 +18280,12 @@ impl MaskedArray {
         let ddof_val = UFuncArray::scalar(ddof as f64, DType::F64);
         let adjusted_count = count_result.elementwise_binary(&ddof_val, BinaryOp::Sub)?;
         let adjusted_broadcast = if keepdims {
-            let target: Vec<isize> = sum_sq.data.shape().iter().map(|&d| d as isize).collect();
+            let target: Vec<isize> = sum_sq
+                .data
+                .shape()
+                .iter()
+                .map(|&d| isize::try_from(d).unwrap_or(isize::MAX))
+                .collect();
             adjusted_count.reshape(&target)?
         } else {
             adjusted_count

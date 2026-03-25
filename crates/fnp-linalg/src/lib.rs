@@ -2059,7 +2059,7 @@ pub fn eigvalsh_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
     let (mut d, mut e, _q) = tridiag_reduce(a, n);
     tridiag_eig_qr(&mut d, &mut e, None, n);
 
-    d.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    d.sort_by(|a, b| a.total_cmp(b));
     Ok(d)
 }
 
@@ -2485,6 +2485,11 @@ pub fn eig_nxn_full(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgE
 /// Condition number of a matrix (np.linalg.cond).
 /// Uses the ratio of largest to smallest singular value (2-norm condition number).
 pub fn cond_nxn(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
+    if n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "cond is not defined on empty arrays",
+        ));
+    }
     let sigmas = svd_nxn(a, n)?;
     let sigma_max = sigmas.first().copied().unwrap_or(0.0);
     let sigma_min = sigmas.last().copied().unwrap_or(0.0);

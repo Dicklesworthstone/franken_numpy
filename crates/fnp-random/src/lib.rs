@@ -1115,12 +1115,15 @@ impl Mt19937Rng {
         for (k, v) in entries {
             let normalized = k.trim();
             if normalized == "mt19937_pos" {
-                pos = *v as usize;
+                pos = usize::try_from(*v).ok()?;
+                if pos > MT_N {
+                    return None;
+                }
             } else if let Some(suffix) = normalized.strip_prefix("mt19937_s")
                 && let Ok(idx) = suffix.parse::<usize>()
                 && idx < MT_N
             {
-                mt[idx] = *v as u32;
+                mt[idx] = u32::try_from(*v).ok()?;
                 found_count += 1;
             }
         }
@@ -4652,6 +4655,41 @@ mod tests {
         let err = generator
             .set_state(&state)
             .expect_err("missing sfc64 state entries must fail closed");
+        assert_eq!(err.reason_code(), "rng_state_schema_invalid");
+    }
+
+    #[test]
+    fn bit_generator_state_schema_rejects_invalid_mt19937_position() {
+        let mut generator =
+            BitGenerator::new(BitGeneratorKind::Mt19937, SeedMaterial::U64(55)).expect("generator");
+        let mut state = generator.state();
+        for (key, value) in &mut state.schema_entries {
+            if key == "mt19937_pos" {
+                *value = u64::try_from(super::MT_N + 1).expect("small overflowed position");
+            }
+        }
+
+        let err = generator
+            .set_state(&state)
+            .expect_err("out-of-range mt19937 position must fail closed");
+        assert_eq!(err.reason_code(), "rng_state_schema_invalid");
+    }
+
+    #[test]
+    fn bit_generator_state_schema_rejects_oversized_mt19937_state_word() {
+        let mut generator =
+            BitGenerator::new(BitGeneratorKind::Mt19937, SeedMaterial::U64(77)).expect("generator");
+        let mut state = generator.state();
+        for (key, value) in &mut state.schema_entries {
+            if key == "mt19937_s0" {
+                *value = u64::from(u32::MAX) + 1;
+                break;
+            }
+        }
+
+        let err = generator
+            .set_state(&state)
+            .expect_err("oversized mt19937 word must fail closed");
         assert_eq!(err.reason_code(), "rng_state_schema_invalid");
     }
 
