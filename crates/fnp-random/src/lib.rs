@@ -626,7 +626,7 @@ impl Pcg64DxsmRng {
         let mut ihi = None;
         let mut ilo = None;
         for (k, v) in entries {
-            match k.as_str() {
+            match k.trim() {
                 "pcg64_state_hi" => hi = Some(*v),
                 "pcg64_state_lo" => lo = Some(*v),
                 "pcg64_inc_hi" => ihi = Some(*v),
@@ -852,7 +852,7 @@ impl PhiloxRng {
         let mut buffer = [0u64; 4];
         let mut buffer_pos = 4;
         for (k, v) in entries {
-            match k.as_str() {
+            match k.trim() {
                 "philox_ctr0" => ctr[0] = *v,
                 "philox_ctr1" => ctr[1] = *v,
                 "philox_ctr2" => ctr[2] = *v,
@@ -930,7 +930,7 @@ impl Sfc64Rng {
     pub fn from_state_entries(entries: &[(String, u64)]) -> Option<Self> {
         let mut s = [0u64; 4];
         for (k, v) in entries {
-            match k.as_str() {
+            match k.trim() {
                 "sfc64_s0" => s[0] = *v,
                 "sfc64_s1" => s[1] = *v,
                 "sfc64_s2" => s[2] = *v,
@@ -1095,9 +1095,10 @@ impl Mt19937Rng {
         let mut mt = vec![0u32; MT_N];
         let mut found_count = 0;
         for (k, v) in entries {
-            if k == "mt19937_pos" {
+            let normalized = k.trim();
+            if normalized == "mt19937_pos" {
                 pos = *v as usize;
-            } else if let Some(suffix) = k.strip_prefix("mt19937_s")
+            } else if let Some(suffix) = normalized.strip_prefix("mt19937_s")
                 && let Ok(idx) = suffix.parse::<usize>()
                 && idx < MT_N
             {
@@ -1460,14 +1461,15 @@ impl BitGeneratorState {
         );
         let expected_algorithm_key = algorithm_state_schema_key(self.kind);
         let has_unknown_entries = self.schema_entries.iter().any(|(k, _)| {
+            let normalized = k.trim();
             !matches!(
-                k.as_str(),
+                normalized,
                 "stream_seed" | "counter" | "algorithm_tag" | "schema_version"
-            ) && k.as_str() != expected_algorithm_key
-                && !k.starts_with("mt19937_")
-                && !k.starts_with("pcg64_")
-                && !k.starts_with("philox_")
-                && !k.starts_with("sfc64_")
+            ) && normalized != expected_algorithm_key
+                && !normalized.starts_with("mt19937_")
+                && !normalized.starts_with("pcg64_")
+                && !normalized.starts_with("philox_")
+                && !normalized.starts_with("sfc64_")
         });
 
         if (!is_real_prng || !has_unknown_entries)
@@ -4564,6 +4566,30 @@ mod tests {
             .set_state(&missing)
             .expect_err("missing algorithm-specific key must fail");
         assert_eq!(missing_err.reason_code(), "rng_state_schema_invalid");
+    }
+
+    #[test]
+    fn bit_generator_state_schema_normalizes_whitespace_padded_keys() {
+        let mut source =
+            BitGenerator::new(BitGeneratorKind::Pcg64, SeedMaterial::U64(1234)).expect("source");
+        for _ in 0..16 {
+            let _ = source.next_u64();
+        }
+
+        let mut state = source.state();
+        for (key, _) in &mut state.schema_entries {
+            *key = format!(" {key} ");
+        }
+
+        let mut restored =
+            BitGenerator::new(BitGeneratorKind::Pcg64, SeedMaterial::U64(1)).expect("restored");
+        restored
+            .set_state(&state)
+            .expect("whitespace-padded keys should normalize");
+
+        for _ in 0..32 {
+            assert_eq!(source.next_u64(), restored.next_u64());
+        }
     }
 
     #[test]
