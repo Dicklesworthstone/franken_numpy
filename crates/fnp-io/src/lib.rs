@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
+use bytemuck::{cast_slice, try_cast_slice};
 use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
 
 pub const IO_PACKET_ID: &str = "FNP-P2C-009";
@@ -1805,6 +1806,10 @@ pub fn fromfile(
         None => max_elems,
     };
 
+    if dtype_is_native_endian_f64(dtype) {
+        return fromfile_native_endian_f64(data, count);
+    }
+
     let mut values = Vec::with_capacity(n);
     for i in 0..n {
         let offset = i * item_size;
@@ -1822,6 +1827,9 @@ pub fn fromfile(
 pub fn tofile(values: &[f64], dtype: IOSupportedDType) -> Result<Vec<u8>, IOError> {
     if dtype.is_complex() || dtype.is_string() {
         return Err(IOError::DTypeDescriptorInvalid);
+    }
+    if dtype_is_native_endian_f64(dtype) {
+        return Ok(cast_slice(values).to_vec());
     }
     let item_size = dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?;
     let mut buf = Vec::with_capacity(values.len() * item_size);
@@ -1922,6 +1930,70 @@ fn encode_element(v: f64, dtype: IOSupportedDType, buf: &mut Vec<u8>) -> Result<
         | IOSupportedDType::Object => return Err(IOError::DTypeDescriptorInvalid),
     }
     Ok(())
+}
+
+fn dtype_is_native_endian_f64(dtype: IOSupportedDType) -> bool {
+    #[cfg(target_endian = "little")]
+    {
+        matches!(dtype, IOSupportedDType::F64)
+    }
+    #[cfg(target_endian = "big")]
+    {
+        matches!(dtype, IOSupportedDType::F64Be)
+    }
+}
+
+fn write_native_endian_f64_npy_bytes(
+    header: &NpyHeader,
+    values: &[f64],
+    allow_pickle: bool,
+) -> Result<Vec<u8>, IOError> {
+    let version = (1, 0);
+    validate_npy_version(version)?;
+    enforce_pickle_policy(header.descr, allow_pickle)?;
+    let _ = validate_write_contract(&header.shape, values.len(), header.descr)?;
+
+    let header_bytes = encode_npy_header_bytes(header, version)?;
+    let payload = cast_slice(values);
+    let mut encoded = Vec::with_capacity(
+        NPY_MAGIC_PREFIX.len()
+            + 2
+            + npy_length_field_size(version)?
+            + header_bytes.len()
+            + payload.len(),
+    );
+    write_npy_preamble(&mut encoded, version, header_bytes.len())?;
+    encoded.extend_from_slice(&header_bytes);
+    encoded.extend_from_slice(payload);
+    Ok(encoded)
+}
+
+fn fromfile_native_endian_f64(data: &[u8], count: Option<usize>) -> Result<Vec<f64>, IOError> {
+    let item_size = core::mem::size_of::<f64>();
+    let max_elems = data.len() / item_size;
+    let n = match count {
+        Some(c) => {
+            if c > max_elems {
+                return Err(IOError::ReadPayloadIncomplete(
+                    "insufficient data for requested element count",
+                ));
+            }
+            c
+        }
+        None => max_elems,
+    };
+    let payload = &data[..n * item_size];
+    if let Ok(values) = try_cast_slice::<u8, f64>(payload) {
+        return Ok(values.to_vec());
+    }
+
+    let mut values = Vec::with_capacity(n);
+    for chunk in payload.chunks_exact(item_size) {
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(chunk);
+        values.push(f64::from_ne_bytes(bytes));
+    }
+    Ok(values)
 }
 
 /// Read raw binary data from bytes into a flat array of complex values.
@@ -2079,7 +2151,18 @@ pub fn fromstring(data: &[u8], dtype: IOSupportedDType, sep: &str) -> Result<Vec
         let values = if sep.chars().all(char::is_whitespace) {
             parse_tokens(text.split_whitespace().collect())?
         } else {
-            parse_tokens(text.split(sep).filter(|s| !s.trim().is_empty()).collect())?
+            let split_tokens: Vec<&str> = text.split(sep).collect();
+            let mut tokens = Vec::new();
+            for (idx, token) in split_tokens.iter().enumerate() {
+                if token.trim().is_empty() {
+                    if idx + 1 == split_tokens.len() {
+                        continue;
+                    }
+                    return Err(IOError::ReadPayloadIncomplete("fromstring: parse error"));
+                }
+                tokens.push(*token);
+            }
+            parse_tokens(tokens)?
         };
         Ok(values)
     }
@@ -2195,6 +2278,9 @@ pub fn save(shape: &[usize], values: &[f64], dtype: IOSupportedDType) -> Result<
         fortran_order: false,
         descr: dtype,
     };
+    if dtype_is_native_endian_f64(dtype) {
+        return write_native_endian_f64_npy_bytes(&header, values, false);
+    }
     let payload = tobytes(values, dtype)?;
     write_npy_bytes(&header, &payload, false)
 }
@@ -2206,7 +2292,11 @@ pub fn load(data: &[u8]) -> Result<(Vec<usize>, Vec<f64>, IOSupportedDType), IOE
     let npy = read_npy_bytes(data, false)?;
     let dtype = npy.header.descr;
     let shape = npy.header.shape;
-    let values = fromfile(&npy.payload, dtype, None)?;
+    let values = if dtype_is_native_endian_f64(dtype) {
+        fromfile_native_endian_f64(&npy.payload, None)?
+    } else {
+        fromfile(&npy.payload, dtype, None)?
+    };
     Ok((shape, values, dtype))
 }
 
@@ -3206,6 +3296,8 @@ pub fn load_strings(data: &[u8]) -> Result<NpyLoadedStrings, IOError> {
 
 #[cfg(test)]
 mod tests {
+    use bytemuck::cast_slice;
+
     use super::{
         IO_PACKET_ID, IO_PACKET_REASON_CODES, IOError, IOLogRecord, IORuntimeMode,
         IOSupportedDType, LoadDispatch, MAX_ARCHIVE_MEMBERS, MAX_DISPATCH_RETRIES,
@@ -4263,6 +4355,23 @@ mod tests {
     }
 
     #[test]
+    fn fromstring_text_mode_rejects_internal_empty_fields() {
+        let err = fromstring(b"1,,2", IOSupportedDType::F64, ",")
+            .expect_err("internal empty fields must not be silently skipped");
+        assert!(matches!(err, IOError::ReadPayloadIncomplete(_)));
+
+        let err = fromstring(b",1,2", IOSupportedDType::F64, ",")
+            .expect_err("leading empty field must not be silently skipped");
+        assert!(matches!(err, IOError::ReadPayloadIncomplete(_)));
+    }
+
+    #[test]
+    fn fromstring_text_mode_allows_trailing_separator() {
+        let vals = fromstring(b"1,2,", IOSupportedDType::F64, ",").unwrap();
+        assert_eq!(vals, vec![1.0, 2.0]);
+    }
+
+    #[test]
     fn fromstring_text_mode_honors_unsigned_dtype_wrapping() {
         let data = b"255 256 257";
         let vals = fromstring(data, IOSupportedDType::U8, " ").unwrap();
@@ -4362,6 +4471,30 @@ mod tests {
         assert_eq!(loaded_shape, shape);
         assert_eq!(loaded_values, values);
         assert_eq!(loaded_dtype, IOSupportedDType::F64);
+    }
+
+    fn native_endian_f64_dtype() -> IOSupportedDType {
+        if cfg!(target_endian = "little") {
+            IOSupportedDType::F64
+        } else {
+            IOSupportedDType::F64Be
+        }
+    }
+
+    #[test]
+    fn tofile_native_endian_f64_matches_raw_bytes() {
+        let values = [1.25, -0.0, 7.5];
+        let bytes = tofile(&values, native_endian_f64_dtype()).unwrap();
+        assert_eq!(bytes, cast_slice(&values));
+    }
+
+    #[test]
+    fn fromfile_native_endian_f64_handles_misaligned_payload() {
+        let values = [1.25, -0.0, 7.5];
+        let mut padded = vec![0u8];
+        padded.extend_from_slice(cast_slice(&values));
+        let decoded = fromfile(&padded[1..], native_endian_f64_dtype(), None).unwrap();
+        assert_eq!(decoded, values);
     }
 
     #[test]

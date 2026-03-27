@@ -2804,7 +2804,7 @@ impl UFuncArray {
 
     fn ensure_mutable_integer_sidecar(&mut self, context: &str) -> Result<(), UFuncError> {
         if self.integer_sidecar.is_none() && matches!(self.dtype, DType::I64 | DType::U64) {
-            self.integer_sidecar = self.exact_integer_sidecar(context);
+            self.integer_sidecar = self.exact_integer_sidecar(context)?;
         }
         Ok(())
     }
@@ -2885,24 +2885,12 @@ impl UFuncArray {
         }
     }
 
-    fn synthesized_integer_sidecar(&self) -> Option<IntegerSidecar> {
+    fn synthesized_integer_sidecar(
+        &self,
+        context: &str,
+    ) -> Result<Option<IntegerSidecar>, UFuncError> {
         if let Some(s) = &self.integer_sidecar {
-            return Some(s.clone());
-        }
-        match self.dtype {
-            DType::I64 => Some(IntegerSidecar::I64(
-                self.values.iter().map(|&v| v as i64).collect(),
-            )),
-            DType::U64 => Some(IntegerSidecar::U64(
-                self.values.iter().map(|&v| v as u64).collect(),
-            )),
-            _ => None,
-        }
-    }
-
-    fn exact_integer_sidecar(&self, context: &str) -> Option<IntegerSidecar> {
-        if let Some(s) = &self.integer_sidecar {
-            return Some(s.clone());
+            return Ok(Some(s.clone()));
         }
         match self.dtype {
             DType::I64 => self
@@ -2911,25 +2899,58 @@ impl UFuncArray {
                 .copied()
                 .enumerate()
                 .map(|(index, value)| {
-                    ensure_exact_integer_bridge_value_supported(value, DType::I64, context, index)
-                        .ok()?;
-                    Some(value as i64)
+                    ensure_exact_integer_bridge_value_supported(value, DType::I64, context, index)?;
+                    Ok(value as i64)
                 })
-                .collect::<Option<Vec<_>>>()
-                .map(IntegerSidecar::I64),
+                .collect::<Result<Vec<_>, UFuncError>>()
+                .map(IntegerSidecar::I64)
+                .map(Some),
             DType::U64 => self
                 .values
                 .iter()
                 .copied()
                 .enumerate()
                 .map(|(index, value)| {
-                    ensure_exact_integer_bridge_value_supported(value, DType::U64, context, index)
-                        .ok()?;
-                    Some(value as u64)
+                    ensure_exact_integer_bridge_value_supported(value, DType::U64, context, index)?;
+                    Ok(value as u64)
                 })
-                .collect::<Option<Vec<_>>>()
-                .map(IntegerSidecar::U64),
-            _ => None,
+                .collect::<Result<Vec<_>, UFuncError>>()
+                .map(IntegerSidecar::U64)
+                .map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    fn exact_integer_sidecar(&self, context: &str) -> Result<Option<IntegerSidecar>, UFuncError> {
+        if let Some(s) = &self.integer_sidecar {
+            return Ok(Some(s.clone()));
+        }
+        match self.dtype {
+            DType::I64 => self
+                .values
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(index, value)| {
+                    ensure_exact_integer_bridge_value_supported(value, DType::I64, context, index)?;
+                    Ok(value as i64)
+                })
+                .collect::<Result<Vec<_>, UFuncError>>()
+                .map(IntegerSidecar::I64)
+                .map(Some),
+            DType::U64 => self
+                .values
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(index, value)| {
+                    ensure_exact_integer_bridge_value_supported(value, DType::U64, context, index)?;
+                    Ok(value as u64)
+                })
+                .collect::<Result<Vec<_>, UFuncError>>()
+                .map(IntegerSidecar::U64)
+                .map(Some),
+            _ => Ok(None),
         }
     }
 
@@ -3688,8 +3709,8 @@ impl UFuncArray {
             let mut out = Self::from_values_with_dtype(out_shape, values, out_dtype)?;
             if (self.integer_sidecar.is_some() || rhs.integer_sidecar.is_some())
                 && let (Some(l), Some(r)) = (
-                    self.synthesized_integer_sidecar(),
-                    rhs.synthesized_integer_sidecar(),
+                    self.synthesized_integer_sidecar(op.name())?,
+                    rhs.synthesized_integer_sidecar(op.name())?,
                 )
             {
                 out.integer_sidecar =
@@ -3705,37 +3726,171 @@ impl UFuncArray {
         let rhs_axis_steps =
             aligned_broadcast_axis_steps(out_shape.len(), &rhs.shape, &rhs_strides);
 
-        let mut out_multi = vec![0usize; out_shape.len()];
-        let mut lhs_flat = 0usize;
-        let mut rhs_flat = 0usize;
-        let mut out_values = Vec::with_capacity(out_count);
+        let mut out_values = vec![0.0f64; out_count];
 
-        for flat in 0..out_count {
-            let lhs_value = self.values[lhs_flat];
-            let rhs_value = rhs.values[rhs_flat];
-            let result = op.apply(lhs_value, rhs_value);
-            note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
-            out_values.push(result);
+        if self.shape == out_shape {
+            if let Some(rhs_span) = tail_contiguous_broadcast_span(&rhs.shape, &out_shape) {
+                for (lhs_chunk, out_chunk) in self
+                    .values
+                    .chunks_exact(rhs_span)
+                    .zip(out_values.chunks_exact_mut(rhs_span))
+                {
+                    if matches!(op, BinaryOp::Add) {
+                        out_chunk.copy_from_slice(lhs_chunk);
+                        for (slot, &rhs_value) in out_chunk.iter_mut().zip(rhs.values.iter()) {
+                            let lhs_value = *slot;
+                            let result = lhs_value + rhs_value;
+                            note_binary_float_errors(
+                                &mut float_error_flags,
+                                op,
+                                lhs_value,
+                                rhs_value,
+                                result,
+                            );
+                            *slot = result;
+                        }
+                    } else {
+                        for ((&lhs_value, &rhs_value), slot) in lhs_chunk
+                            .iter()
+                            .zip(rhs.values.iter())
+                            .zip(out_chunk.iter_mut())
+                        {
+                            let result = op.apply(lhs_value, rhs_value);
+                            note_binary_float_errors(
+                                &mut float_error_flags,
+                                op,
+                                lhs_value,
+                                rhs_value,
+                                result,
+                            );
+                            *slot = result;
+                        }
+                    }
+                }
+            } else {
+                let mut out_multi = vec![0usize; out_shape.len()];
+                let mut rhs_flat = 0usize;
 
-            // Increment the output index as an odometer and adjust source flat
-            // indices incrementally. This avoids re-unraveling and re-mapping
-            // every output element.
-            if flat + 1 == out_count || out_shape.is_empty() {
-                continue;
+                for (flat, slot) in out_values.iter_mut().enumerate() {
+                    let lhs_value = self.values[flat];
+                    let rhs_value = rhs.values[rhs_flat];
+                    let result = op.apply(lhs_value, rhs_value);
+                    note_binary_float_errors(
+                        &mut float_error_flags,
+                        op,
+                        lhs_value,
+                        rhs_value,
+                        result,
+                    );
+                    *slot = result;
+
+                    if flat + 1 == out_count || out_shape.is_empty() {
+                        continue;
+                    }
+
+                    for axis in (0..out_shape.len()).rev() {
+                        out_multi[axis] += 1;
+                        rhs_flat += rhs_axis_steps[axis];
+
+                        if out_multi[axis] < out_shape[axis] {
+                            break;
+                        }
+
+                        out_multi[axis] = 0;
+                        rhs_flat -= rhs_axis_steps[axis] * out_shape[axis];
+                    }
+                }
             }
+        } else if rhs.shape == out_shape {
+            if let Some(lhs_span) = tail_contiguous_broadcast_span(&self.shape, &out_shape) {
+                for (rhs_chunk, out_chunk) in rhs
+                    .values
+                    .chunks_exact(lhs_span)
+                    .zip(out_values.chunks_exact_mut(lhs_span))
+                {
+                    for ((&lhs_value, &rhs_value), slot) in self
+                        .values
+                        .iter()
+                        .zip(rhs_chunk.iter())
+                        .zip(out_chunk.iter_mut())
+                    {
+                        let result = op.apply(lhs_value, rhs_value);
+                        note_binary_float_errors(
+                            &mut float_error_flags,
+                            op,
+                            lhs_value,
+                            rhs_value,
+                            result,
+                        );
+                        *slot = result;
+                    }
+                }
+            } else {
+                let mut out_multi = vec![0usize; out_shape.len()];
+                let mut lhs_flat = 0usize;
 
-            for axis in (0..out_shape.len()).rev() {
-                out_multi[axis] += 1;
-                lhs_flat += lhs_axis_steps[axis];
-                rhs_flat += rhs_axis_steps[axis];
+                for (flat, slot) in out_values.iter_mut().enumerate() {
+                    let lhs_value = self.values[lhs_flat];
+                    let rhs_value = rhs.values[flat];
+                    let result = op.apply(lhs_value, rhs_value);
+                    note_binary_float_errors(
+                        &mut float_error_flags,
+                        op,
+                        lhs_value,
+                        rhs_value,
+                        result,
+                    );
+                    *slot = result;
 
-                if out_multi[axis] < out_shape[axis] {
-                    break;
+                    if flat + 1 == out_count || out_shape.is_empty() {
+                        continue;
+                    }
+
+                    for axis in (0..out_shape.len()).rev() {
+                        out_multi[axis] += 1;
+                        lhs_flat += lhs_axis_steps[axis];
+
+                        if out_multi[axis] < out_shape[axis] {
+                            break;
+                        }
+
+                        out_multi[axis] = 0;
+                        lhs_flat -= lhs_axis_steps[axis] * out_shape[axis];
+                    }
+                }
+            }
+        } else {
+            let mut out_multi = vec![0usize; out_shape.len()];
+            let mut lhs_flat = 0usize;
+            let mut rhs_flat = 0usize;
+
+            for (flat, slot) in out_values.iter_mut().enumerate() {
+                let lhs_value = self.values[lhs_flat];
+                let rhs_value = rhs.values[rhs_flat];
+                let result = op.apply(lhs_value, rhs_value);
+                note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                *slot = result;
+
+                // Increment the output index as an odometer and adjust source flat
+                // indices incrementally. This avoids re-unraveling and re-mapping
+                // every output element.
+                if flat + 1 == out_count || out_shape.is_empty() {
+                    continue;
                 }
 
-                out_multi[axis] = 0;
-                lhs_flat -= lhs_axis_steps[axis] * out_shape[axis];
-                rhs_flat -= rhs_axis_steps[axis] * out_shape[axis];
+                for axis in (0..out_shape.len()).rev() {
+                    out_multi[axis] += 1;
+                    lhs_flat += lhs_axis_steps[axis];
+                    rhs_flat += rhs_axis_steps[axis];
+
+                    if out_multi[axis] < out_shape[axis] {
+                        break;
+                    }
+
+                    out_multi[axis] = 0;
+                    lhs_flat -= lhs_axis_steps[axis] * out_shape[axis];
+                    rhs_flat -= rhs_axis_steps[axis] * out_shape[axis];
+                }
             }
         }
 
@@ -3743,8 +3898,8 @@ impl UFuncArray {
         let mut out = Self::from_values_with_dtype(out_shape, out_values, out_dtype)?;
         if (self.integer_sidecar.is_some() || rhs.integer_sidecar.is_some())
             && let (Some(l), Some(r)) = (
-                self.synthesized_integer_sidecar(),
-                rhs.synthesized_integer_sidecar(),
+                self.synthesized_integer_sidecar(op.name())?,
+                rhs.synthesized_integer_sidecar(op.name())?,
             )
         {
             out.integer_sidecar =
@@ -5175,8 +5330,8 @@ impl UFuncArray {
                         values.len()
                     )));
                 }
-                let mut sidecar_vals = self.exact_integer_sidecar("insert");
-                let insert_sidecar = insert_values.exact_integer_sidecar("insert");
+                let mut sidecar_vals = self.synthesized_integer_sidecar("insert")?;
+                let insert_sidecar = insert_values.synthesized_integer_sidecar("insert")?;
                 if sidecar_vals.is_some() && insert_sidecar.is_none() {
                     sidecar_vals = None;
                 }
@@ -5228,18 +5383,19 @@ impl UFuncArray {
                     Some(IntegerSidecar::U64(_)) => {
                         Some(IntegerSidecar::U64(Vec::with_capacity(values.capacity())))
                     }
-                    None => self
-                        .exact_integer_sidecar("insert")
-                        .map(|sidecar| match sidecar {
-                            IntegerSidecar::I64(_) => {
-                                IntegerSidecar::I64(Vec::with_capacity(values.capacity()))
-                            }
-                            IntegerSidecar::U64(_) => {
-                                IntegerSidecar::U64(Vec::with_capacity(values.capacity()))
-                            }
-                        }),
+                    None => {
+                        self.synthesized_integer_sidecar("insert")?
+                            .map(|sidecar| match sidecar {
+                                IntegerSidecar::I64(_) => {
+                                    IntegerSidecar::I64(Vec::with_capacity(values.capacity()))
+                                }
+                                IntegerSidecar::U64(_) => {
+                                    IntegerSidecar::U64(Vec::with_capacity(values.capacity()))
+                                }
+                            })
+                    }
                 };
-                let insert_sidecar = insert_values.exact_integer_sidecar("insert");
+                let insert_sidecar = insert_values.synthesized_integer_sidecar("insert")?;
                 if sidecar_vals.is_some() && insert_sidecar.is_none() {
                     sidecar_vals = None;
                 }
@@ -5310,8 +5466,8 @@ impl UFuncArray {
                 let mut out_sidecar = None;
                 let any_has_sidecar = self.has_integer_sidecar() || other.has_integer_sidecar();
                 if any_has_sidecar && (self.dtype == DType::I64 || self.dtype == DType::U64) {
-                    let s1 = self.synthesized_integer_sidecar();
-                    let s2 = other.synthesized_integer_sidecar();
+                    let s1 = self.synthesized_integer_sidecar("append")?;
+                    let s2 = other.synthesized_integer_sidecar("append")?;
                     match (s1, s2) {
                         (Some(IntegerSidecar::I64(mut v1)), Some(IntegerSidecar::I64(v2))) => {
                             v1.extend_from_slice(&v2);
@@ -5436,6 +5592,7 @@ impl UFuncArray {
             let steps = aligned_broadcast_axis_steps(ndim, &arr.shape, &arr_strides);
             let out_strides = c_strides_elems(&shape);
             let mut values = Vec::with_capacity(out_count);
+            let mut source_indices = Vec::with_capacity(out_count);
             for flat in 0..out_count {
                 let mut src_idx = 0usize;
                 for d in 0..ndim {
@@ -5446,12 +5603,13 @@ impl UFuncArray {
                     }
                 }
                 values.push(arr.values[src_idx]);
+                source_indices.push(src_idx);
             }
             result.push(Self {
                 shape: shape.clone(),
                 values,
                 dtype: arr.dtype,
-                integer_sidecar: None,
+                integer_sidecar: arr.reindexed_integer_sidecar(&source_indices),
             });
         }
         Ok(result)
@@ -5469,12 +5627,13 @@ impl UFuncArray {
             .rposition(|&v| v != 0.0)
             .map_or(start, |p| p + 1);
         let values = self.values[start..end].to_vec();
+        let source_indices: Vec<usize> = (start..end).collect();
         let len = values.len();
         Self {
             shape: vec![len],
             values,
             dtype: self.dtype,
-            integer_sidecar: None,
+            integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
         }
     }
 
@@ -5494,11 +5653,12 @@ impl UFuncArray {
         let values: Vec<f64> = (0..new_count)
             .map(|i| self.values[i % self.values.len()])
             .collect();
+        let source_indices: Vec<usize> = (0..new_count).map(|i| i % self.values.len()).collect();
         Ok(Self {
             shape: new_shape.to_vec(),
             values,
             dtype: self.dtype,
-            integer_sidecar: None,
+            integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
         })
     }
 
@@ -5569,8 +5729,122 @@ impl UFuncArray {
     /// `"mergesort"` / `"stable"` (guaranteed stable), or `"heapsort"`.
     pub fn sort(&self, axis: Option<isize>, kind: Option<&str>) -> Result<Self, UFuncError> {
         let kind = validate_sort_kind(kind)?;
+        if let Some(sidecar) = self.synthesized_integer_sidecar("sort")? {
+            return match sidecar {
+                IntegerSidecar::I64(values) => match axis {
+                    None => {
+                        let mut source_indices: Vec<usize> = (0..values.len()).collect();
+                        sort_indices_by_kind_ord(&mut source_indices, &values, kind);
+                        let sorted_values = source_indices
+                            .iter()
+                            .map(|&idx| values[idx] as f64)
+                            .collect();
+                        Ok(Self {
+                            shape: vec![values.len()],
+                            values: sorted_values,
+                            dtype: self.dtype,
+                            integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
+                        })
+                    }
+                    Some(axis) => {
+                        let axis = normalize_axis(axis, self.shape.len())?;
+                        let axis_len = self.shape[axis];
+                        if axis_len <= 1 {
+                            return Ok(self.clone());
+                        }
+
+                        let inner: usize = self.shape[axis + 1..].iter().copied().product();
+                        let outer: usize = self.shape[..axis].iter().copied().product();
+                        let mut out_values = vec![0.0f64; self.values.len()];
+                        let mut source_indices: Vec<usize> = (0..self.values.len()).collect();
+                        let mut lane_indices = vec![0usize; axis_len];
+                        for outer_idx in 0..outer {
+                            let base = outer_idx * axis_len * inner;
+                            for inner_idx in 0..inner {
+                                for (k, idx) in lane_indices.iter_mut().enumerate() {
+                                    *idx = base + k * inner + inner_idx;
+                                }
+                                sort_indices_by_kind_ord(&mut lane_indices, &values, kind);
+                                for (k, &src) in lane_indices.iter().enumerate() {
+                                    let dst = base + k * inner + inner_idx;
+                                    out_values[dst] = values[src] as f64;
+                                    source_indices[dst] = src;
+                                }
+                            }
+                        }
+
+                        Ok(Self {
+                            shape: self.shape.clone(),
+                            values: out_values,
+                            dtype: self.dtype,
+                            integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
+                        })
+                    }
+                },
+                IntegerSidecar::U64(values) => match axis {
+                    None => {
+                        let mut source_indices: Vec<usize> = (0..values.len()).collect();
+                        sort_indices_by_kind_ord(&mut source_indices, &values, kind);
+                        let sorted_values = source_indices
+                            .iter()
+                            .map(|&idx| values[idx] as f64)
+                            .collect();
+                        Ok(Self {
+                            shape: vec![values.len()],
+                            values: sorted_values,
+                            dtype: self.dtype,
+                            integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
+                        })
+                    }
+                    Some(axis) => {
+                        let axis = normalize_axis(axis, self.shape.len())?;
+                        let axis_len = self.shape[axis];
+                        if axis_len <= 1 {
+                            return Ok(self.clone());
+                        }
+
+                        let inner: usize = self.shape[axis + 1..].iter().copied().product();
+                        let outer: usize = self.shape[..axis].iter().copied().product();
+                        let mut out_values = vec![0.0f64; self.values.len()];
+                        let mut source_indices: Vec<usize> = (0..self.values.len()).collect();
+                        let mut lane_indices = vec![0usize; axis_len];
+                        for outer_idx in 0..outer {
+                            let base = outer_idx * axis_len * inner;
+                            for inner_idx in 0..inner {
+                                for (k, idx) in lane_indices.iter_mut().enumerate() {
+                                    *idx = base + k * inner + inner_idx;
+                                }
+                                sort_indices_by_kind_ord(&mut lane_indices, &values, kind);
+                                for (k, &src) in lane_indices.iter().enumerate() {
+                                    let dst = base + k * inner + inner_idx;
+                                    out_values[dst] = values[src] as f64;
+                                    source_indices[dst] = src;
+                                }
+                            }
+                        }
+
+                        Ok(Self {
+                            shape: self.shape.clone(),
+                            values: out_values,
+                            dtype: self.dtype,
+                            integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
+                        })
+                    }
+                },
+            };
+        }
         match axis {
             None => {
+                if kind == "quicksort"
+                    && let Some(values) = exact_i64_counting_sort_output(&self.values)
+                {
+                    return Ok(Self {
+                        shape: vec![values.len()],
+                        values,
+                        dtype: self.dtype,
+                        integer_sidecar: None,
+                    });
+                }
                 let mut values = self.values.clone();
                 sort_slice_by_kind(&mut values, kind);
                 Ok(Self {
@@ -5622,6 +5896,100 @@ impl UFuncArray {
     /// `"mergesort"` / `"stable"` (guaranteed stable), or `"heapsort"`.
     pub fn argsort(&self, axis: Option<isize>, kind: Option<&str>) -> Result<Self, UFuncError> {
         let kind = validate_sort_kind(kind)?;
+        if let Some(sidecar) = self.synthesized_integer_sidecar("argsort")? {
+            return match sidecar {
+                IntegerSidecar::I64(values) => match axis {
+                    None => {
+                        let mut indices: Vec<usize> = (0..values.len()).collect();
+                        sort_indices_by_kind_ord(&mut indices, &values, kind);
+                        Ok(Self {
+                            shape: vec![values.len()],
+                            values: indices.iter().map(|&i| i as f64).collect(),
+                            dtype: DType::I64,
+                            integer_sidecar: None,
+                        })
+                    }
+                    Some(axis) => {
+                        let axis = normalize_axis(axis, self.shape.len())?;
+                        let axis_len = self.shape[axis];
+                        let inner: usize = self.shape[axis + 1..].iter().copied().product();
+                        let outer: usize = self.shape[..axis].iter().copied().product();
+                        let mut out_values = vec![0.0f64; self.values.len()];
+
+                        let mut idx_lane: Vec<usize> = (0..axis_len).collect();
+                        for outer_idx in 0..outer {
+                            let base = outer_idx * axis_len * inner;
+                            for inner_idx in 0..inner {
+                                idx_lane.iter_mut().enumerate().for_each(|(i, v)| *v = i);
+                                let cmp = |a: &usize, b: &usize| {
+                                    values[base + a * inner + inner_idx]
+                                        .cmp(&values[base + b * inner + inner_idx])
+                                };
+                                match kind {
+                                    "stable" => idx_lane.sort_by(cmp),
+                                    _ => idx_lane.sort_unstable_by(cmp),
+                                }
+                                for k in 0..axis_len {
+                                    out_values[base + k * inner + inner_idx] = idx_lane[k] as f64;
+                                }
+                            }
+                        }
+
+                        Ok(Self {
+                            shape: self.shape.clone(),
+                            values: out_values,
+                            dtype: DType::I64,
+                            integer_sidecar: None,
+                        })
+                    }
+                },
+                IntegerSidecar::U64(values) => match axis {
+                    None => {
+                        let mut indices: Vec<usize> = (0..values.len()).collect();
+                        sort_indices_by_kind_ord(&mut indices, &values, kind);
+                        Ok(Self {
+                            shape: vec![values.len()],
+                            values: indices.iter().map(|&i| i as f64).collect(),
+                            dtype: DType::I64,
+                            integer_sidecar: None,
+                        })
+                    }
+                    Some(axis) => {
+                        let axis = normalize_axis(axis, self.shape.len())?;
+                        let axis_len = self.shape[axis];
+                        let inner: usize = self.shape[axis + 1..].iter().copied().product();
+                        let outer: usize = self.shape[..axis].iter().copied().product();
+                        let mut out_values = vec![0.0f64; self.values.len()];
+
+                        let mut idx_lane: Vec<usize> = (0..axis_len).collect();
+                        for outer_idx in 0..outer {
+                            let base = outer_idx * axis_len * inner;
+                            for inner_idx in 0..inner {
+                                idx_lane.iter_mut().enumerate().for_each(|(i, v)| *v = i);
+                                let cmp = |a: &usize, b: &usize| {
+                                    values[base + a * inner + inner_idx]
+                                        .cmp(&values[base + b * inner + inner_idx])
+                                };
+                                match kind {
+                                    "stable" => idx_lane.sort_by(cmp),
+                                    _ => idx_lane.sort_unstable_by(cmp),
+                                }
+                                for k in 0..axis_len {
+                                    out_values[base + k * inner + inner_idx] = idx_lane[k] as f64;
+                                }
+                            }
+                        }
+
+                        Ok(Self {
+                            shape: self.shape.clone(),
+                            values: out_values,
+                            dtype: DType::I64,
+                            integer_sidecar: None,
+                        })
+                    }
+                },
+            };
+        }
         match axis {
             None => {
                 let mut indices: Vec<usize> = (0..self.values.len()).collect();
@@ -5711,6 +6079,80 @@ impl UFuncArray {
             }
         }
         let use_right = side == "right";
+        if let (Some(data_sidecar), Some(needle_sidecar)) = (
+            self.synthesized_integer_sidecar("searchsorted")?,
+            values.exact_integer_sidecar("searchsorted")?,
+        ) {
+            let out_values = match (data_sidecar, needle_sidecar) {
+                (IntegerSidecar::I64(data), IntegerSidecar::I64(needles)) => {
+                    let n = data.len();
+                    needles
+                        .iter()
+                        .map(|needle| {
+                            let mut lo = 0usize;
+                            let mut hi = n;
+                            while lo < hi {
+                                let mid = lo + (hi - lo) / 2;
+                                let mid_val = if let Some(s) = sorter {
+                                    data[s[mid]]
+                                } else {
+                                    data[mid]
+                                };
+                                let go_right = if use_right {
+                                    mid_val <= *needle
+                                } else {
+                                    mid_val < *needle
+                                };
+                                if go_right {
+                                    lo = mid + 1;
+                                } else {
+                                    hi = mid;
+                                }
+                            }
+                            lo as f64
+                        })
+                        .collect()
+                }
+                (IntegerSidecar::U64(data), IntegerSidecar::U64(needles)) => {
+                    let n = data.len();
+                    needles
+                        .iter()
+                        .map(|needle| {
+                            let mut lo = 0usize;
+                            let mut hi = n;
+                            while lo < hi {
+                                let mid = lo + (hi - lo) / 2;
+                                let mid_val = if let Some(s) = sorter {
+                                    data[s[mid]]
+                                } else {
+                                    data[mid]
+                                };
+                                let go_right = if use_right {
+                                    mid_val <= *needle
+                                } else {
+                                    mid_val < *needle
+                                };
+                                if go_right {
+                                    lo = mid + 1;
+                                } else {
+                                    hi = mid;
+                                }
+                            }
+                            lo as f64
+                        })
+                        .collect()
+                }
+                _ => Vec::new(),
+            };
+            if !out_values.is_empty() {
+                return Ok(Self {
+                    shape: values.shape.clone(),
+                    values: out_values,
+                    dtype: DType::I64,
+                    integer_sidecar: None,
+                });
+            }
+        }
         let data = &self.values;
         let n = data.len();
 
@@ -5756,6 +6198,128 @@ impl UFuncArray {
     ///
     /// Mimics `np.partition(a, kth)`. Only 1-D supported.
     pub fn partition(&self, kth: usize, axis: Option<isize>) -> Result<Self, UFuncError> {
+        if let Some(sidecar) = self.synthesized_integer_sidecar("partition")? {
+            return match sidecar {
+                IntegerSidecar::I64(values) => match axis {
+                    None => {
+                        let n = values.len();
+                        if kth >= n {
+                            return Err(UFuncError::Msg(
+                                "partition: kth out of bounds".to_string(),
+                            ));
+                        }
+                        let mut source_indices: Vec<usize> = (0..n).collect();
+                        source_indices
+                            .select_nth_unstable_by(kth, |a, b| values[*a].cmp(&values[*b]));
+                        let out_values = source_indices
+                            .iter()
+                            .map(|&idx| values[idx] as f64)
+                            .collect();
+                        Ok(Self {
+                            shape: vec![n],
+                            values: out_values,
+                            dtype: self.dtype,
+                            integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
+                        })
+                    }
+                    Some(ax) => {
+                        let axis = normalize_axis(ax, self.shape.len())?;
+                        let axis_len = self.shape[axis];
+                        if kth >= axis_len {
+                            return Err(UFuncError::Msg(
+                                "partition: kth out of bounds".to_string(),
+                            ));
+                        }
+                        let inner: usize = self.shape[axis + 1..].iter().copied().product();
+                        let outer: usize = self.shape[..axis].iter().copied().product();
+                        let mut out_values = vec![0.0f64; self.values.len()];
+                        let mut source_indices: Vec<usize> = (0..self.values.len()).collect();
+                        let mut lane_indices = vec![0usize; axis_len];
+                        for outer_idx in 0..outer {
+                            let base = outer_idx * axis_len * inner;
+                            for inner_idx in 0..inner {
+                                for (k, idx) in lane_indices.iter_mut().enumerate() {
+                                    *idx = base + k * inner + inner_idx;
+                                }
+                                lane_indices.select_nth_unstable_by(kth, |a, b| {
+                                    values[*a].cmp(&values[*b])
+                                });
+                                for (k, &src) in lane_indices.iter().enumerate() {
+                                    let dst = base + k * inner + inner_idx;
+                                    out_values[dst] = values[src] as f64;
+                                    source_indices[dst] = src;
+                                }
+                            }
+                        }
+                        Ok(Self {
+                            shape: self.shape.clone(),
+                            values: out_values,
+                            dtype: self.dtype,
+                            integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
+                        })
+                    }
+                },
+                IntegerSidecar::U64(values) => match axis {
+                    None => {
+                        let n = values.len();
+                        if kth >= n {
+                            return Err(UFuncError::Msg(
+                                "partition: kth out of bounds".to_string(),
+                            ));
+                        }
+                        let mut source_indices: Vec<usize> = (0..n).collect();
+                        source_indices
+                            .select_nth_unstable_by(kth, |a, b| values[*a].cmp(&values[*b]));
+                        let out_values = source_indices
+                            .iter()
+                            .map(|&idx| values[idx] as f64)
+                            .collect();
+                        Ok(Self {
+                            shape: vec![n],
+                            values: out_values,
+                            dtype: self.dtype,
+                            integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
+                        })
+                    }
+                    Some(ax) => {
+                        let axis = normalize_axis(ax, self.shape.len())?;
+                        let axis_len = self.shape[axis];
+                        if kth >= axis_len {
+                            return Err(UFuncError::Msg(
+                                "partition: kth out of bounds".to_string(),
+                            ));
+                        }
+                        let inner: usize = self.shape[axis + 1..].iter().copied().product();
+                        let outer: usize = self.shape[..axis].iter().copied().product();
+                        let mut out_values = vec![0.0f64; self.values.len()];
+                        let mut source_indices: Vec<usize> = (0..self.values.len()).collect();
+                        let mut lane_indices = vec![0usize; axis_len];
+                        for outer_idx in 0..outer {
+                            let base = outer_idx * axis_len * inner;
+                            for inner_idx in 0..inner {
+                                for (k, idx) in lane_indices.iter_mut().enumerate() {
+                                    *idx = base + k * inner + inner_idx;
+                                }
+                                lane_indices.select_nth_unstable_by(kth, |a, b| {
+                                    values[*a].cmp(&values[*b])
+                                });
+                                for (k, &src) in lane_indices.iter().enumerate() {
+                                    let dst = base + k * inner + inner_idx;
+                                    out_values[dst] = values[src] as f64;
+                                    source_indices[dst] = src;
+                                }
+                            }
+                        }
+                        Ok(Self {
+                            shape: self.shape.clone(),
+                            values: out_values,
+                            dtype: self.dtype,
+                            integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
+                        })
+                    }
+                },
+            };
+        }
         match axis {
             None => {
                 let n = self.values.len();
@@ -5808,6 +6372,114 @@ impl UFuncArray {
     /// Mimics `np.argpartition(a, kth, axis)`. When `axis` is `None`, operates
     /// on the flattened array.
     pub fn argpartition(&self, kth: usize, axis: Option<isize>) -> Result<Self, UFuncError> {
+        if let Some(sidecar) = self.synthesized_integer_sidecar("argpartition")? {
+            return match sidecar {
+                IntegerSidecar::I64(values) => match axis {
+                    None => {
+                        let n = values.len();
+                        if kth >= n {
+                            return Err(UFuncError::Msg(
+                                "argpartition: kth out of bounds".to_string(),
+                            ));
+                        }
+                        let mut indices: Vec<usize> = (0..n).collect();
+                        indices.select_nth_unstable_by(kth, |a, b| values[*a].cmp(&values[*b]));
+                        Ok(Self {
+                            shape: vec![n],
+                            values: indices.iter().map(|&i| i as f64).collect(),
+                            dtype: DType::I64,
+                            integer_sidecar: None,
+                        })
+                    }
+                    Some(ax) => {
+                        let axis = normalize_axis(ax, self.shape.len())?;
+                        let axis_len = self.shape[axis];
+                        if kth >= axis_len {
+                            return Err(UFuncError::Msg(
+                                "argpartition: kth out of bounds".to_string(),
+                            ));
+                        }
+                        let inner: usize = self.shape[axis + 1..].iter().copied().product();
+                        let outer: usize = self.shape[..axis].iter().copied().product();
+                        let mut result = vec![0.0f64; self.values.len()];
+                        let mut indices: Vec<usize> = (0..axis_len).collect();
+                        for outer_idx in 0..outer {
+                            let base = outer_idx * axis_len * inner;
+                            for inner_idx in 0..inner {
+                                for (k, idx) in indices.iter_mut().enumerate() {
+                                    *idx = k;
+                                }
+                                indices.select_nth_unstable_by(kth, |a, b| {
+                                    values[base + a * inner + inner_idx]
+                                        .cmp(&values[base + b * inner + inner_idx])
+                                });
+                                for k in 0..axis_len {
+                                    result[base + k * inner + inner_idx] = indices[k] as f64;
+                                }
+                            }
+                        }
+                        Ok(Self {
+                            shape: self.shape.clone(),
+                            values: result,
+                            dtype: DType::I64,
+                            integer_sidecar: None,
+                        })
+                    }
+                },
+                IntegerSidecar::U64(values) => match axis {
+                    None => {
+                        let n = values.len();
+                        if kth >= n {
+                            return Err(UFuncError::Msg(
+                                "argpartition: kth out of bounds".to_string(),
+                            ));
+                        }
+                        let mut indices: Vec<usize> = (0..n).collect();
+                        indices.select_nth_unstable_by(kth, |a, b| values[*a].cmp(&values[*b]));
+                        Ok(Self {
+                            shape: vec![n],
+                            values: indices.iter().map(|&i| i as f64).collect(),
+                            dtype: DType::I64,
+                            integer_sidecar: None,
+                        })
+                    }
+                    Some(ax) => {
+                        let axis = normalize_axis(ax, self.shape.len())?;
+                        let axis_len = self.shape[axis];
+                        if kth >= axis_len {
+                            return Err(UFuncError::Msg(
+                                "argpartition: kth out of bounds".to_string(),
+                            ));
+                        }
+                        let inner: usize = self.shape[axis + 1..].iter().copied().product();
+                        let outer: usize = self.shape[..axis].iter().copied().product();
+                        let mut result = vec![0.0f64; self.values.len()];
+                        let mut indices: Vec<usize> = (0..axis_len).collect();
+                        for outer_idx in 0..outer {
+                            let base = outer_idx * axis_len * inner;
+                            for inner_idx in 0..inner {
+                                for (k, idx) in indices.iter_mut().enumerate() {
+                                    *idx = k;
+                                }
+                                indices.select_nth_unstable_by(kth, |a, b| {
+                                    values[base + a * inner + inner_idx]
+                                        .cmp(&values[base + b * inner + inner_idx])
+                                });
+                                for k in 0..axis_len {
+                                    result[base + k * inner + inner_idx] = indices[k] as f64;
+                                }
+                            }
+                        }
+                        Ok(Self {
+                            shape: self.shape.clone(),
+                            values: result,
+                            dtype: DType::I64,
+                            integer_sidecar: None,
+                        })
+                    }
+                },
+            };
+        }
         match axis {
             None => {
                 let n = self.values.len();
@@ -5884,11 +6556,19 @@ impl UFuncArray {
                 ));
             }
         }
+        let key_sidecars = keys
+            .iter()
+            .map(|key| key.synthesized_integer_sidecar("lexsort"))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut indices: Vec<usize> = (0..n).collect();
         indices.sort_by(|&a, &b| {
             // Compare from last key to first (last key is primary)
-            for key in keys.iter().rev() {
-                let ord = key.values[a].total_cmp(&key.values[b]);
+            for (key, sidecar) in keys.iter().zip(key_sidecars.iter()).rev() {
+                let ord = match sidecar {
+                    Some(IntegerSidecar::I64(values)) => values[a].cmp(&values[b]),
+                    Some(IntegerSidecar::U64(values)) => values[a].cmp(&values[b]),
+                    None => key.values[a].total_cmp(&key.values[b]),
+                };
                 if ord != std::cmp::Ordering::Equal {
                     return ord;
                 }
@@ -5979,7 +6659,7 @@ impl UFuncArray {
                         for &arr in arrays {
                             let arr_axis_len = arr.shape[axis];
                             let read_base = outer_idx * arr_axis_len * inner;
-                            let sidecar = arr.synthesized_integer_sidecar();
+                            let sidecar = arr.synthesized_integer_sidecar("concatenate")?;
                             if let Some(IntegerSidecar::I64(v)) = sidecar {
                                 for k in 0..arr_axis_len {
                                     for i in 0..inner {
@@ -6009,7 +6689,7 @@ impl UFuncArray {
                         for &arr in arrays {
                             let arr_axis_len = arr.shape[axis];
                             let read_base = outer_idx * arr_axis_len * inner;
-                            let sidecar = arr.synthesized_integer_sidecar();
+                            let sidecar = arr.synthesized_integer_sidecar("concatenate")?;
                             if let Some(IntegerSidecar::U64(v)) = sidecar {
                                 for k in 0..arr_axis_len {
                                     for i in 0..inner {
@@ -6150,16 +6830,20 @@ impl UFuncArray {
         let mut result = Vec::with_capacity(axis_len);
         for k in 0..axis_len {
             let mut values = Vec::with_capacity(out_count);
+            let mut source_indices = Vec::with_capacity(out_count);
             for o in 0..outer {
                 for i in 0..inner {
-                    values.push(self.values[o * axis_len * inner + k * inner + i]);
+                    let src_flat = o * axis_len * inner + k * inner + i;
+                    values.push(self.values[src_flat]);
+                    source_indices.push(src_flat);
                 }
             }
-            result.push(Self::from_values_with_dtype(
-                out_shape.clone(),
+            result.push(Self {
+                shape: out_shape.clone(),
                 values,
-                self.dtype,
-            )?);
+                dtype: self.dtype,
+                integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
+            });
         }
         Ok(result)
     }
@@ -6672,52 +7356,58 @@ impl UFuncArray {
         let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
         let mut out_values = vec![0.0f64; out_count];
 
-        let a_batch_strides = contiguous_strides_elems(a_batch);
-        let b_batch_strides = contiguous_strides_elems(b_batch);
-        let a_steps = aligned_broadcast_axis_steps(out_batch.len(), a_batch, &a_batch_strides);
-        let b_steps = aligned_broadcast_axis_steps(out_batch.len(), b_batch, &b_batch_strides);
-
         let a_matrix_size = m * k;
         let b_matrix_size = k * n;
         let out_matrix_size = m * n;
 
-        let mut out_batch_multi = vec![0usize; out_batch.len()];
-        let mut a_batch_flat = 0usize;
-        let mut b_batch_flat = 0usize;
+        if out_batch.is_empty() {
+            matmul_accumulate(
+                &self.values[..a_matrix_size],
+                &rhs.values[..b_matrix_size],
+                m,
+                k,
+                n,
+                &mut out_values[..out_matrix_size],
+            );
+        } else {
+            let a_batch_strides = contiguous_strides_elems(a_batch);
+            let b_batch_strides = contiguous_strides_elems(b_batch);
+            let a_steps = aligned_broadcast_axis_steps(out_batch.len(), a_batch, &a_batch_strides);
+            let b_steps = aligned_broadcast_axis_steps(out_batch.len(), b_batch, &b_batch_strides);
 
-        let batch_count: usize = out_batch.iter().product();
+            let mut out_batch_multi = vec![0usize; out_batch.len()];
+            let mut a_batch_flat = 0usize;
+            let mut b_batch_flat = 0usize;
+            let batch_count: usize = out_batch.iter().product();
 
-        for b_idx in 0..batch_count {
-            let a_ptr = a_batch_flat * a_matrix_size;
-            let b_ptr = b_batch_flat * b_matrix_size;
-            let out_ptr = b_idx * out_matrix_size;
+            for b_idx in 0..batch_count {
+                let a_ptr = a_batch_flat * a_matrix_size;
+                let b_ptr = b_batch_flat * b_matrix_size;
+                let out_ptr = b_idx * out_matrix_size;
 
-            for i in 0..m {
-                let a_row_ptr = a_ptr + i * k;
-                let out_row_ptr = out_ptr + i * n;
-                for p in 0..k {
-                    let a_val = self.values[a_row_ptr + p];
-                    let b_row_ptr = b_ptr + p * n;
-                    for j in 0..n {
-                        out_values[out_row_ptr + j] += a_val * rhs.values[b_row_ptr + j];
+                matmul_accumulate(
+                    &self.values[a_ptr..a_ptr + a_matrix_size],
+                    &rhs.values[b_ptr..b_ptr + b_matrix_size],
+                    m,
+                    k,
+                    n,
+                    &mut out_values[out_ptr..out_ptr + out_matrix_size],
+                );
+
+                if b_idx + 1 < batch_count {
+                    for axis in (0..out_batch.len()).rev() {
+                        out_batch_multi[axis] += 1;
+                        a_batch_flat += a_steps[axis];
+                        b_batch_flat += b_steps[axis];
+
+                        if out_batch_multi[axis] < out_batch[axis] {
+                            break;
+                        }
+
+                        out_batch_multi[axis] = 0;
+                        a_batch_flat -= a_steps[axis] * out_batch[axis];
+                        b_batch_flat -= b_steps[axis] * out_batch[axis];
                     }
-                }
-            }
-
-            // Increment batch odometer
-            if b_idx + 1 < batch_count {
-                for axis in (0..out_batch.len()).rev() {
-                    out_batch_multi[axis] += 1;
-                    a_batch_flat += a_steps[axis];
-                    b_batch_flat += b_steps[axis];
-
-                    if out_batch_multi[axis] < out_batch[axis] {
-                        break;
-                    }
-
-                    out_batch_multi[axis] = 0;
-                    a_batch_flat -= a_steps[axis] * out_batch[axis];
-                    b_batch_flat -= b_steps[axis] * out_batch[axis];
                 }
             }
         }
@@ -8111,9 +8801,10 @@ impl UFuncArray {
                 self.values.len()
             )));
         }
-        for (v, &m) in self.values.iter_mut().zip(&mask.values) {
+        for (flat_index, &m) in mask.values.iter().enumerate() {
             if m != 0.0 {
-                *v = value;
+                self.values[flat_index] = value;
+                self.write_integer_mutation(flat_index, value, None, flat_index, "boolean_set")?;
             }
         }
         Ok(())
@@ -8136,7 +8827,9 @@ impl UFuncArray {
                     "fancy_set: index {idx} out of bounds for size {n}"
                 )));
             }
-            self.values[i as usize] = val;
+            let flat_index = i as usize;
+            self.values[flat_index] = val;
+            self.write_integer_mutation(flat_index, val, None, flat_index, "fancy_set")?;
         }
         Ok(())
     }
@@ -8167,6 +8860,7 @@ impl UFuncArray {
         let idx_strides = c_strides_elems(&indices.shape);
         let total: usize = indices.shape.iter().product();
         let mut values = Vec::with_capacity(total);
+        let mut source_indices = Vec::with_capacity(total);
         for flat in 0..total {
             // Compute multi-dimensional index into indices array
             let mut rem = flat;
@@ -8189,12 +8883,13 @@ impl UFuncArray {
                 }
             }
             values.push(self.values[src_flat]);
+            source_indices.push(src_flat);
         }
         Ok(Self {
             shape: indices.shape.clone(),
             values,
             dtype: self.dtype,
-            integer_sidecar: None,
+            integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
         })
     }
 
@@ -9321,6 +10016,12 @@ impl UFuncArray {
                 ndim
             )));
         }
+        if matches!(self.dtype, DType::I64 | DType::U64)
+            && self.has_integer_sidecar()
+            && self.constant_integer_sidecar(constant, 1).is_none()
+        {
+            ensure_exact_integer_bridge_value_supported(constant, self.dtype, "pad", 0)?;
+        }
         let out_shape: Vec<usize> = self
             .shape
             .iter()
@@ -9581,7 +10282,7 @@ impl UFuncArray {
                 shape,
                 values: arr.values.clone(),
                 dtype: arr.dtype,
-                integer_sidecar: None,
+                integer_sidecar: arr.cloned_integer_sidecar(),
             });
         }
         Ok(result)
@@ -9627,16 +10328,18 @@ impl UFuncArray {
                 dim
             };
             let mut values = Vec::with_capacity(out_count);
+            let mut source_indices = Vec::with_capacity(out_count);
             for flat in 0..out_count {
                 let idx = (flat / out_strides[axis]) % out_shape[axis];
                 values.push(arr.values[idx]);
+                source_indices.push(idx);
             }
             let dtype = arr.dtype;
             results.push(Self {
                 shape: out_shape.clone(),
                 values,
                 dtype,
-                integer_sidecar: None,
+                integer_sidecar: arr.reindexed_integer_sidecar(&source_indices),
             });
         }
         Ok(results)
@@ -11409,18 +12112,14 @@ impl UFuncArray {
         // Build complex input (real from self.values, imag = 0)
         let mut re = vec![0.0_f64; len];
         let mut im = vec![0.0_f64; len];
-        for (i, v) in self.values.iter().enumerate() {
-            if i >= len {
-                break;
-            }
-            re[i] = *v;
-        }
+        let input_len = self.values.len().min(len);
+        re[..input_len].copy_from_slice(&self.values[..input_len]);
         fft_dit(&mut re, &mut im, false);
         // Interleave real/imag
-        let mut values = Vec::with_capacity(len * 2);
-        for i in 0..len {
-            values.push(re[i]);
-            values.push(im[i]);
+        let mut values = vec![0.0; len * 2];
+        for ((pair, &real), &imag) in values.chunks_exact_mut(2).zip(re.iter()).zip(im.iter()) {
+            pair[0] = real;
+            pair[1] = imag;
         }
         Ok(Self {
             shape: vec![len, 2],
@@ -12587,10 +13286,12 @@ impl UFuncArray {
     }
 
     /// Fill the array with a scalar value in-place.
-    pub fn fill(&mut self, value: f64) {
-        for v in &mut self.values {
-            *v = value;
+    pub fn fill(&mut self, value: f64) -> Result<(), UFuncError> {
+        for i in 0..self.values.len() {
+            self.values[i] = value;
+            self.write_integer_mutation(i, value, None, i, "fill")?;
         }
+        Ok(())
     }
 
     /// Return a flat Vec<f64> of all values (np.ndarray.tolist equivalent for numeric arrays).
@@ -12609,6 +13310,28 @@ impl UFuncArray {
     /// Swap byte order of each element in-place (np.ndarray.byteswap).
     #[must_use]
     pub fn byteswap(&self) -> Self {
+        if let Ok(Some(IntegerSidecar::I64(values))) = self.synthesized_integer_sidecar("byteswap")
+            && self.dtype == DType::I64
+        {
+            let swapped: Vec<i64> = values.into_iter().map(i64::swap_bytes).collect();
+            return Self {
+                shape: self.shape.clone(),
+                values: swapped.iter().map(|&v| v as f64).collect(),
+                dtype: self.dtype,
+                integer_sidecar: Some(IntegerSidecar::I64(swapped)),
+            };
+        }
+        if let Ok(Some(IntegerSidecar::U64(values))) = self.synthesized_integer_sidecar("byteswap")
+            && self.dtype == DType::U64
+        {
+            let swapped: Vec<u64> = values.into_iter().map(u64::swap_bytes).collect();
+            return Self {
+                shape: self.shape.clone(),
+                values: swapped.iter().map(|&v| v as f64).collect(),
+                dtype: self.dtype,
+                integer_sidecar: Some(IntegerSidecar::U64(swapped)),
+            };
+        }
         let swapped: Vec<f64> = self
             .values
             .iter()
@@ -12758,6 +13481,21 @@ impl UFuncArray {
         }
         let n_choices = choices.len();
         let mut values = Vec::with_capacity(self.values.len());
+        let choice_sidecars = if matches!(choices[0].dtype, DType::I64 | DType::U64) {
+            Some(
+                choices
+                    .iter()
+                    .map(|choice| choice.synthesized_integer_sidecar("choose"))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        } else {
+            None
+        };
+        let mut integer_sidecar = match choices[0].dtype {
+            DType::I64 => Some(IntegerSidecar::I64(Vec::with_capacity(self.values.len()))),
+            DType::U64 => Some(IntegerSidecar::U64(Vec::with_capacity(self.values.len()))),
+            _ => None,
+        };
         for (i, &idx) in self.values.iter().enumerate() {
             let choice_idx = idx as usize;
             if choice_idx >= n_choices {
@@ -12771,13 +13509,20 @@ impl UFuncArray {
                 )));
             }
             values.push(choices[choice_idx].values[i]);
+            if let (Some(sidecars), Some(out)) = (&choice_sidecars, integer_sidecar.as_mut()) {
+                match (out, &sidecars[choice_idx]) {
+                    (IntegerSidecar::I64(dst), Some(IntegerSidecar::I64(src))) => dst.push(src[i]),
+                    (IntegerSidecar::U64(dst), Some(IntegerSidecar::U64(src))) => dst.push(src[i]),
+                    _ => integer_sidecar = None,
+                }
+            }
         }
         let dtype = choices[0].dtype;
         Ok(Self {
             shape: self.shape.clone(),
             values,
             dtype,
-            integer_sidecar: None,
+            integer_sidecar,
         })
     }
 
@@ -12797,6 +13542,182 @@ impl UFuncArray {
         return_inverse: bool,
         return_counts: bool,
     ) -> (Self, Option<Self>, Option<Self>, Option<Self>) {
+        if let Ok(Some(sidecar)) = self.synthesized_integer_sidecar("unique_with_info") {
+            match sidecar {
+                IntegerSidecar::I64(values) => {
+                    let flat = &values;
+                    let mut indexed: Vec<(i64, usize)> = flat
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .map(|(i, v)| (v, i))
+                        .collect();
+                    indexed.sort_by_key(|a| a.0);
+
+                    let mut unique_vals: Vec<f64> = Vec::new();
+                    let mut first_indices: Vec<f64> = Vec::new();
+                    let mut counts_vec: Vec<f64> = Vec::new();
+                    let mut group_of_sorted: Vec<usize> = vec![0; flat.len()];
+
+                    let mut group = 0usize;
+                    for (i, &(val, orig_idx)) in indexed.iter().enumerate() {
+                        if i == 0 || val != indexed[i - 1].0 {
+                            unique_vals.push(val as f64);
+                            first_indices.push(orig_idx as f64);
+                            counts_vec.push(1.0);
+                            if i > 0 {
+                                group += 1;
+                            }
+                        } else if let Some(last) = counts_vec.last_mut() {
+                            *last += 1.0;
+                        }
+                        group_of_sorted[i] = group;
+                    }
+
+                    let inverse_vec: Vec<f64> = if return_inverse {
+                        let mut inv = vec![0.0; flat.len()];
+                        for (sorted_pos, &(_, orig_idx)) in indexed.iter().enumerate() {
+                            inv[orig_idx] = group_of_sorted[sorted_pos] as f64;
+                        }
+                        inv
+                    } else {
+                        Vec::new()
+                    };
+
+                    let nu = unique_vals.len();
+                    let n = flat.len();
+                    let source_indices: Vec<usize> = first_indices
+                        .iter()
+                        .map(|&idx_f64| idx_f64 as usize)
+                        .collect();
+
+                    let unique = Self {
+                        shape: vec![nu],
+                        values: unique_vals,
+                        dtype: self.dtype,
+                        integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
+                    };
+                    let indices = if return_index {
+                        Some(Self {
+                            shape: vec![nu],
+                            values: first_indices,
+                            dtype: DType::I64,
+                            integer_sidecar: None,
+                        })
+                    } else {
+                        None
+                    };
+                    let inverse = if return_inverse {
+                        Some(Self {
+                            shape: vec![n],
+                            values: inverse_vec,
+                            dtype: DType::I64,
+                            integer_sidecar: None,
+                        })
+                    } else {
+                        None
+                    };
+                    let counts = if return_counts {
+                        Some(Self {
+                            shape: vec![nu],
+                            values: counts_vec,
+                            dtype: DType::I64,
+                            integer_sidecar: None,
+                        })
+                    } else {
+                        None
+                    };
+
+                    return (unique, indices, inverse, counts);
+                }
+                IntegerSidecar::U64(values) => {
+                    let flat = &values;
+                    let mut indexed: Vec<(u64, usize)> = flat
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .map(|(i, v)| (v, i))
+                        .collect();
+                    indexed.sort_by_key(|a| a.0);
+
+                    let mut unique_vals: Vec<f64> = Vec::new();
+                    let mut first_indices: Vec<f64> = Vec::new();
+                    let mut counts_vec: Vec<f64> = Vec::new();
+                    let mut group_of_sorted: Vec<usize> = vec![0; flat.len()];
+
+                    let mut group = 0usize;
+                    for (i, &(val, orig_idx)) in indexed.iter().enumerate() {
+                        if i == 0 || val != indexed[i - 1].0 {
+                            unique_vals.push(val as f64);
+                            first_indices.push(orig_idx as f64);
+                            counts_vec.push(1.0);
+                            if i > 0 {
+                                group += 1;
+                            }
+                        } else if let Some(last) = counts_vec.last_mut() {
+                            *last += 1.0;
+                        }
+                        group_of_sorted[i] = group;
+                    }
+
+                    let inverse_vec: Vec<f64> = if return_inverse {
+                        let mut inv = vec![0.0; flat.len()];
+                        for (sorted_pos, &(_, orig_idx)) in indexed.iter().enumerate() {
+                            inv[orig_idx] = group_of_sorted[sorted_pos] as f64;
+                        }
+                        inv
+                    } else {
+                        Vec::new()
+                    };
+
+                    let nu = unique_vals.len();
+                    let n = flat.len();
+                    let source_indices: Vec<usize> = first_indices
+                        .iter()
+                        .map(|&idx_f64| idx_f64 as usize)
+                        .collect();
+
+                    let unique = Self {
+                        shape: vec![nu],
+                        values: unique_vals,
+                        dtype: self.dtype,
+                        integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
+                    };
+                    let indices = if return_index {
+                        Some(Self {
+                            shape: vec![nu],
+                            values: first_indices,
+                            dtype: DType::I64,
+                            integer_sidecar: None,
+                        })
+                    } else {
+                        None
+                    };
+                    let inverse = if return_inverse {
+                        Some(Self {
+                            shape: vec![n],
+                            values: inverse_vec,
+                            dtype: DType::I64,
+                            integer_sidecar: None,
+                        })
+                    } else {
+                        None
+                    };
+                    let counts = if return_counts {
+                        Some(Self {
+                            shape: vec![nu],
+                            values: counts_vec,
+                            dtype: DType::I64,
+                            integer_sidecar: None,
+                        })
+                    } else {
+                        None
+                    };
+
+                    return (unique, indices, inverse, counts);
+                }
+            }
+        }
         let flat = &self.values;
         // Build (value, original_index) pairs, sort by value.
         let mut indexed: Vec<(f64, usize)> = flat
@@ -12933,12 +13854,15 @@ impl UFuncArray {
         new_shape[ax] = unique_count;
         let total = new_shape.iter().product::<usize>();
         let mut values = vec![0.0; total];
+        let mut source_indices = Vec::with_capacity(total);
 
-        for (new_a, (slice_vals, _)) in slices.iter().enumerate() {
+        for (new_a, (slice_vals, original_a)) in slices.iter().enumerate() {
             for o in 0..outer {
                 for i in 0..inner {
-                    values[o * unique_count * inner + new_a * inner + i] =
-                        slice_vals[o * inner + i];
+                    let dst = o * unique_count * inner + new_a * inner + i;
+                    values[dst] = slice_vals[o * inner + i];
+                    let src = o * axis_len * inner + original_a * inner + i;
+                    source_indices.push(src);
                 }
             }
         }
@@ -12947,7 +13871,7 @@ impl UFuncArray {
             shape: new_shape,
             values,
             dtype: self.dtype,
-            integer_sidecar: None,
+            integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
         })
     }
 
@@ -12955,6 +13879,58 @@ impl UFuncArray {
     ///
     /// Mimics `np.in1d(ar1, ar2)`.
     pub fn in1d(&self, test_elements: &Self) -> Self {
+        if self.dtype == DType::I64
+            && test_elements.dtype == DType::I64
+            && let (Ok(Some(IntegerSidecar::I64(values))), Ok(Some(IntegerSidecar::I64(mut set)))) = (
+                self.synthesized_integer_sidecar("in1d"),
+                test_elements.synthesized_integer_sidecar("in1d"),
+            )
+        {
+            set.sort_unstable();
+            set.dedup();
+            let values: Vec<f64> = values
+                .iter()
+                .map(|v| {
+                    if set.binary_search(v).is_ok() {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            return Self {
+                shape: self.shape.clone(),
+                values,
+                dtype: DType::Bool,
+                integer_sidecar: None,
+            };
+        }
+        if self.dtype == DType::U64
+            && test_elements.dtype == DType::U64
+            && let (Ok(Some(IntegerSidecar::U64(values))), Ok(Some(IntegerSidecar::U64(mut set)))) = (
+                self.synthesized_integer_sidecar("in1d"),
+                test_elements.synthesized_integer_sidecar("in1d"),
+            )
+        {
+            set.sort_unstable();
+            set.dedup();
+            let values: Vec<f64> = values
+                .iter()
+                .map(|v| {
+                    if set.binary_search(v).is_ok() {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            return Self {
+                shape: self.shape.clone(),
+                values,
+                dtype: DType::Bool,
+                integer_sidecar: None,
+            };
+        }
         let mut set: Vec<f64> = test_elements.values.clone();
         set.sort_by(|a, b| a.total_cmp(b));
         set.dedup_by(|a, b| a.total_cmp(b).is_eq());
@@ -12994,6 +13970,40 @@ impl UFuncArray {
     ///
     /// Mimics `np.union1d(ar1, ar2)`.
     pub fn union1d(&self, other: &Self) -> Self {
+        if self.dtype == DType::I64 && other.dtype == DType::I64 {
+            if let (Ok(Some(IntegerSidecar::I64(mut a))), Ok(Some(IntegerSidecar::I64(b)))) = (
+                self.synthesized_integer_sidecar("union1d"),
+                other.synthesized_integer_sidecar("union1d"),
+            ) {
+                a.extend(b);
+                a.sort_unstable();
+                a.dedup();
+                let n = a.len();
+                return Self {
+                    shape: vec![n],
+                    values: a.iter().map(|&v| v as f64).collect(),
+                    dtype: self.dtype,
+                    integer_sidecar: Some(IntegerSidecar::I64(a)),
+                };
+            }
+        } else if self.dtype == DType::U64
+            && other.dtype == DType::U64
+            && let (Ok(Some(IntegerSidecar::U64(mut a))), Ok(Some(IntegerSidecar::U64(b)))) = (
+                self.synthesized_integer_sidecar("union1d"),
+                other.synthesized_integer_sidecar("union1d"),
+            )
+        {
+            a.extend(b);
+            a.sort_unstable();
+            a.dedup();
+            let n = a.len();
+            return Self {
+                shape: vec![n],
+                values: a.iter().map(|&v| v as f64).collect(),
+                dtype: self.dtype,
+                integer_sidecar: Some(IntegerSidecar::U64(a)),
+            };
+        }
         let mut combined: Vec<f64> = self
             .values
             .iter()
@@ -13015,6 +14025,68 @@ impl UFuncArray {
     ///
     /// Mimics `np.intersect1d(ar1, ar2)`.
     pub fn intersect1d(&self, other: &Self) -> Self {
+        if self.dtype == DType::I64 && other.dtype == DType::I64 {
+            if let (Ok(Some(IntegerSidecar::I64(mut a))), Ok(Some(IntegerSidecar::I64(mut b)))) = (
+                self.synthesized_integer_sidecar("intersect1d"),
+                other.synthesized_integer_sidecar("intersect1d"),
+            ) {
+                a.sort_unstable();
+                a.dedup();
+                b.sort_unstable();
+                b.dedup();
+                let mut result = Vec::new();
+                let (mut i, mut j) = (0, 0);
+                while i < a.len() && j < b.len() {
+                    match a[i].cmp(&b[j]) {
+                        std::cmp::Ordering::Equal => {
+                            result.push(a[i]);
+                            i += 1;
+                            j += 1;
+                        }
+                        std::cmp::Ordering::Less => i += 1,
+                        std::cmp::Ordering::Greater => j += 1,
+                    }
+                }
+                let n = result.len();
+                return Self {
+                    shape: vec![n],
+                    values: result.iter().map(|&v| v as f64).collect(),
+                    dtype: self.dtype,
+                    integer_sidecar: Some(IntegerSidecar::I64(result)),
+                };
+            }
+        } else if self.dtype == DType::U64
+            && other.dtype == DType::U64
+            && let (Ok(Some(IntegerSidecar::U64(mut a))), Ok(Some(IntegerSidecar::U64(mut b)))) = (
+                self.synthesized_integer_sidecar("intersect1d"),
+                other.synthesized_integer_sidecar("intersect1d"),
+            )
+        {
+            a.sort_unstable();
+            a.dedup();
+            b.sort_unstable();
+            b.dedup();
+            let mut result = Vec::new();
+            let (mut i, mut j) = (0, 0);
+            while i < a.len() && j < b.len() {
+                match a[i].cmp(&b[j]) {
+                    std::cmp::Ordering::Equal => {
+                        result.push(a[i]);
+                        i += 1;
+                        j += 1;
+                    }
+                    std::cmp::Ordering::Less => i += 1,
+                    std::cmp::Ordering::Greater => j += 1,
+                }
+            }
+            let n = result.len();
+            return Self {
+                shape: vec![n],
+                values: result.iter().map(|&v| v as f64).collect(),
+                dtype: self.dtype,
+                integer_sidecar: Some(IntegerSidecar::U64(result)),
+            };
+        }
         let mut a = self.values.clone();
         a.sort_by(|x, y| x.total_cmp(y));
         a.dedup_by(|x, y| x.total_cmp(y).is_eq());
@@ -13048,6 +14120,50 @@ impl UFuncArray {
     ///
     /// Mimics `np.setdiff1d(ar1, ar2)`.
     pub fn setdiff1d(&self, other: &Self) -> Self {
+        if self.dtype == DType::I64 && other.dtype == DType::I64 {
+            if let (Ok(Some(IntegerSidecar::I64(mut a))), Ok(Some(IntegerSidecar::I64(mut b)))) = (
+                self.synthesized_integer_sidecar("setdiff1d"),
+                other.synthesized_integer_sidecar("setdiff1d"),
+            ) {
+                a.sort_unstable();
+                a.dedup();
+                b.sort_unstable();
+                b.dedup();
+                let result: Vec<i64> = a
+                    .into_iter()
+                    .filter(|v| b.binary_search(v).is_err())
+                    .collect();
+                let n = result.len();
+                return Self {
+                    shape: vec![n],
+                    values: result.iter().map(|&v| v as f64).collect(),
+                    dtype: self.dtype,
+                    integer_sidecar: Some(IntegerSidecar::I64(result)),
+                };
+            }
+        } else if self.dtype == DType::U64
+            && other.dtype == DType::U64
+            && let (Ok(Some(IntegerSidecar::U64(mut a))), Ok(Some(IntegerSidecar::U64(mut b)))) = (
+                self.synthesized_integer_sidecar("setdiff1d"),
+                other.synthesized_integer_sidecar("setdiff1d"),
+            )
+        {
+            a.sort_unstable();
+            a.dedup();
+            b.sort_unstable();
+            b.dedup();
+            let result: Vec<u64> = a
+                .into_iter()
+                .filter(|v| b.binary_search(v).is_err())
+                .collect();
+            let n = result.len();
+            return Self {
+                shape: vec![n],
+                values: result.iter().map(|&v| v as f64).collect(),
+                dtype: self.dtype,
+                integer_sidecar: Some(IntegerSidecar::U64(result)),
+            };
+        }
         let mut b = other.values.clone();
         b.sort_by(|x, y| x.total_cmp(y));
         b.dedup_by(|x, y| x.total_cmp(y).is_eq());
@@ -13073,6 +14189,56 @@ impl UFuncArray {
     ///
     /// Mimics `np.setxor1d(ar1, ar2)`.
     pub fn setxor1d(&self, other: &Self) -> Self {
+        if self.dtype == DType::I64 && other.dtype == DType::I64 {
+            if let (Ok(Some(IntegerSidecar::I64(mut a))), Ok(Some(IntegerSidecar::I64(mut b)))) = (
+                self.synthesized_integer_sidecar("setxor1d"),
+                other.synthesized_integer_sidecar("setxor1d"),
+            ) {
+                a.sort_unstable();
+                a.dedup();
+                b.sort_unstable();
+                b.dedup();
+                let mut result: Vec<i64> = a
+                    .iter()
+                    .filter(|v| b.binary_search(v).is_err())
+                    .chain(b.iter().filter(|v| a.binary_search(v).is_err()))
+                    .copied()
+                    .collect();
+                result.sort_unstable();
+                let n = result.len();
+                return Self {
+                    shape: vec![n],
+                    values: result.iter().map(|&v| v as f64).collect(),
+                    dtype: self.dtype,
+                    integer_sidecar: Some(IntegerSidecar::I64(result)),
+                };
+            }
+        } else if self.dtype == DType::U64
+            && other.dtype == DType::U64
+            && let (Ok(Some(IntegerSidecar::U64(mut a))), Ok(Some(IntegerSidecar::U64(mut b)))) = (
+                self.synthesized_integer_sidecar("setxor1d"),
+                other.synthesized_integer_sidecar("setxor1d"),
+            )
+        {
+            a.sort_unstable();
+            a.dedup();
+            b.sort_unstable();
+            b.dedup();
+            let mut result: Vec<u64> = a
+                .iter()
+                .filter(|v| b.binary_search(v).is_err())
+                .chain(b.iter().filter(|v| a.binary_search(v).is_err()))
+                .copied()
+                .collect();
+            result.sort_unstable();
+            let n = result.len();
+            return Self {
+                shape: vec![n],
+                values: result.iter().map(|&v| v as f64).collect(),
+                dtype: self.dtype,
+                integer_sidecar: Some(IntegerSidecar::U64(result)),
+            };
+        }
         let mut a = self.values.clone();
         a.sort_by(|x, y| x.total_cmp(y));
         a.dedup_by(|x, y| x.total_cmp(y).is_eq());
@@ -14690,7 +15856,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: self.dtype,
-            integer_sidecar: None,
+            integer_sidecar: self.cloned_integer_sidecar(),
         }
     }
 
@@ -14761,7 +15927,7 @@ impl UFuncArray {
             shape: self.shape.clone(),
             values,
             dtype: self.dtype,
-            integer_sidecar: None,
+            integer_sidecar: self.cloned_integer_sidecar(),
         }
     }
 
@@ -15424,7 +16590,10 @@ impl UFuncArray {
         let mut vi = 0;
         for (i, &m) in mask.values.iter().enumerate() {
             if m != 0.0 {
-                self.values[i] = values[vi % values.len()];
+                let src_index = vi % values.len();
+                let value = values[src_index];
+                self.values[i] = value;
+                self.write_integer_mutation(i, value, None, src_index, "put_mask")?;
                 vi += 1;
             }
         }
@@ -15709,12 +16878,152 @@ fn nan_last_cmp(a: &f64, b: &f64) -> std::cmp::Ordering {
     }
 }
 
+fn partition_nan_tail(data: &mut [f64]) -> usize {
+    let mut non_nan_end = data.len();
+    let mut idx = 0usize;
+    while idx < non_nan_end {
+        if data[idx].is_nan() {
+            non_nan_end -= 1;
+            data.swap(idx, non_nan_end);
+        } else {
+            idx += 1;
+        }
+    }
+    non_nan_end
+}
+
+fn sort_exact_i64_values(data: &mut [f64]) -> bool {
+    let mut min_value = 0i64;
+    let mut max_value = 0i64;
+
+    for (idx, &value) in data.iter().enumerate() {
+        if !value.is_finite() || (value == 0.0 && value.is_sign_negative()) {
+            return false;
+        }
+        let integer = value as i64;
+        if (integer as f64) != value {
+            return false;
+        }
+        if idx == 0 {
+            min_value = integer;
+            max_value = integer;
+        } else {
+            min_value = min_value.min(integer);
+            max_value = max_value.max(integer);
+        }
+    }
+
+    let range_len = max_value
+        .checked_sub(min_value)
+        .and_then(|delta| delta.checked_add(1))
+        .and_then(|span| usize::try_from(span).ok());
+    let Some(range_len) = range_len else {
+        return false;
+    };
+
+    let max_span = data.len().saturating_mul(4).max(1024);
+    if range_len > max_span || range_len > 4_000_000 {
+        return false;
+    }
+
+    let mut counts = vec![0usize; range_len];
+    let mut all_unique = true;
+    for &value in data.iter() {
+        let bucket = ((value as i64) - min_value) as usize;
+        if counts[bucket] != 0 {
+            all_unique = false;
+        }
+        counts[bucket] += 1;
+    }
+
+    if all_unique && range_len == data.len() {
+        for (idx, slot) in data.iter_mut().enumerate() {
+            *slot = (min_value + idx as i64) as f64;
+        }
+        return true;
+    }
+
+    let mut out_idx = 0usize;
+    for (offset, &count) in counts.iter().enumerate() {
+        let value = (min_value + offset as i64) as f64;
+        for _ in 0..count {
+            data[out_idx] = value;
+            out_idx += 1;
+        }
+    }
+    true
+}
+
+fn exact_i64_counting_sort_output(data: &[f64]) -> Option<Vec<f64>> {
+    let mut min_value = 0i64;
+    let mut max_value = 0i64;
+
+    for (idx, &value) in data.iter().enumerate() {
+        if !value.is_finite() || (value == 0.0 && value.is_sign_negative()) {
+            return None;
+        }
+        let integer = value as i64;
+        if (integer as f64) != value {
+            return None;
+        }
+        if idx == 0 {
+            min_value = integer;
+            max_value = integer;
+        } else {
+            min_value = min_value.min(integer);
+            max_value = max_value.max(integer);
+        }
+    }
+
+    let range_len = max_value
+        .checked_sub(min_value)
+        .and_then(|delta| delta.checked_add(1))
+        .and_then(|span| usize::try_from(span).ok())?;
+
+    let max_span = data.len().saturating_mul(4).max(1024);
+    if range_len > max_span || range_len > 4_000_000 {
+        return None;
+    }
+
+    let mut counts = vec![0usize; range_len];
+    for &value in data {
+        let bucket = ((value as i64) - min_value) as usize;
+        counts[bucket] += 1;
+    }
+
+    let mut sorted = Vec::with_capacity(data.len());
+    for (offset, &count) in counts.iter().enumerate() {
+        let value = (min_value + offset as i64) as f64;
+        sorted.extend(std::iter::repeat_n(value, count));
+    }
+    Some(sorted)
+}
+
 fn sort_slice_by_kind(data: &mut [f64], kind: &str) {
     match kind {
-        "quicksort" => data.sort_unstable_by(nan_last_cmp),
-        "stable" => data.sort_by(nan_last_cmp),
+        "quicksort" => {
+            if sort_exact_i64_values(data) {
+                return;
+            }
+            let non_nan_len = partition_nan_tail(data);
+            data[..non_nan_len].sort_unstable_by(f64::total_cmp);
+        }
+        "stable" => {
+            let has_nan = data.iter().any(|value| value.is_nan());
+            if has_nan {
+                data.sort_by(nan_last_cmp);
+            } else {
+                data.sort_by(f64::total_cmp);
+            }
+        }
         "heapsort" => heapsort_f64(data),
-        _ => data.sort_unstable_by(nan_last_cmp),
+        _ => {
+            if sort_exact_i64_values(data) {
+                return;
+            }
+            let non_nan_len = partition_nan_tail(data);
+            data[..non_nan_len].sort_unstable_by(f64::total_cmp);
+        }
     }
 }
 
@@ -15725,6 +17034,14 @@ fn argsort_slice_by_kind(indices: &mut [usize], values: &dyn Fn(usize) -> f64, k
         "quicksort" => indices.sort_unstable_by(cmp),
         "stable" => indices.sort_by(cmp),
         "heapsort" => heapsort_indices_by(indices, values),
+        _ => indices.sort_unstable_by(cmp),
+    }
+}
+
+fn sort_indices_by_kind_ord<T: Ord>(indices: &mut [usize], values: &[T], kind: &str) {
+    let cmp = |a: &usize, b: &usize| values[*a].cmp(&values[*b]);
+    match kind {
+        "stable" => indices.sort_by(cmp),
         _ => indices.sort_unstable_by(cmp),
     }
 }
@@ -16429,6 +17746,43 @@ fn aligned_broadcast_axis_steps(
     axis_steps
 }
 
+#[must_use]
+fn tail_contiguous_broadcast_span(src_shape: &[usize], out_shape: &[usize]) -> Option<usize> {
+    if src_shape.len() > out_shape.len() {
+        return None;
+    }
+
+    let offset = out_shape.len() - src_shape.len();
+    let mut first_exact = out_shape.len();
+
+    for axis in 0..out_shape.len() {
+        let src_dim = if axis < offset {
+            1
+        } else {
+            src_shape[axis - offset]
+        };
+        let out_dim = out_shape[axis];
+
+        if src_dim == out_dim {
+            if first_exact == out_shape.len() {
+                first_exact = axis;
+            }
+        } else if src_dim == 1 && first_exact == out_shape.len() {
+            continue;
+        } else {
+            return None;
+        }
+    }
+
+    Some(
+        out_shape[first_exact..]
+            .iter()
+            .copied()
+            .product::<usize>()
+            .max(1),
+    )
+}
+
 fn apply_complex_binary_op(
     op: BinaryOp,
     lhs_re: f64,
@@ -16473,6 +17827,13 @@ fn reduce_sum_axis_contiguous(
     let inner = shape[axis + 1..].iter().copied().product::<usize>();
     let outer = shape[..axis].iter().copied().product::<usize>();
 
+    if inner == 1 {
+        for (slot, chunk) in out_values.iter_mut().zip(values.chunks_exact(axis_len)) {
+            *slot = chunk.iter().copied().sum();
+        }
+        return;
+    }
+
     let mut out_flat = 0usize;
     for outer_idx in 0..outer {
         let base = outer_idx * axis_len * inner;
@@ -16485,6 +17846,20 @@ fn reduce_sum_axis_contiguous(
             }
             out_values[out_flat] = sum;
             out_flat += 1;
+        }
+    }
+}
+
+fn matmul_accumulate(lhs: &[f64], rhs: &[f64], m: usize, k: usize, n: usize, out: &mut [f64]) {
+    debug_assert_eq!(lhs.len(), m * k);
+    debug_assert_eq!(rhs.len(), k * n);
+    debug_assert_eq!(out.len(), m * n);
+
+    for (lhs_row, out_row) in lhs.chunks_exact(k).zip(out.chunks_exact_mut(n)) {
+        for (&a_val, rhs_row) in lhs_row.iter().zip(rhs.chunks_exact(n)) {
+            for (slot, &rhs_value) in out_row.iter_mut().zip(rhs_row.iter()) {
+                *slot += a_val * rhs_value;
+            }
         }
     }
 }
@@ -18153,12 +19528,22 @@ impl MaskedArray {
     }
 
     /// Return data with masked elements replaced by `fill_value`.
-    #[must_use]
-    pub fn filled(&self, fill_value: f64) -> UFuncArray {
+    pub fn filled(&self, fill_value: f64) -> Result<UFuncArray, UFuncError> {
         match &self.mask {
-            None => self.data.clone(),
+            None => Ok(self.data.clone()),
             Some(mask) => {
                 let n = self.data.values().len();
+                if matches!(self.data.dtype(), DType::I64 | DType::U64)
+                    && self.data.has_integer_sidecar()
+                    && self.data.constant_integer_sidecar(fill_value, 1).is_none()
+                {
+                    ensure_exact_integer_bridge_value_supported(
+                        fill_value,
+                        self.data.dtype(),
+                        "filled",
+                        0,
+                    )?;
+                }
                 let mut vals = Vec::with_capacity(n);
                 let mut sidecar_vals = self.data.constant_integer_sidecar(fill_value, n);
 
@@ -18181,12 +19566,12 @@ impl MaskedArray {
                         }
                     }
                 }
-                UFuncArray {
+                Ok(UFuncArray {
                     shape: self.data.shape().to_vec(),
                     values: vals,
                     dtype: self.data.dtype(),
                     integer_sidecar: sidecar_vals,
-                }
+                })
             }
         }
     }
@@ -18360,7 +19745,7 @@ impl MaskedArray {
     /// Product of non-masked elements.
     pub fn prod(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, MAError> {
         // For product, replace masked values with 1.0 (identity), then reduce
-        let filled = self.filled(1.0);
+        let filled = self.filled(1.0)?;
         let result_data = filled.reduce_prod(axis, keepdims)?;
         Ok(Self {
             data: result_data,
@@ -18398,7 +19783,7 @@ impl MaskedArray {
 
     /// Minimum of non-masked elements.
     pub fn min(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, MAError> {
-        let filled = self.filled(f64::INFINITY);
+        let filled = self.filled(f64::INFINITY)?;
         let result_data = filled.reduce_min(axis, keepdims)?;
         Ok(Self {
             data: result_data,
@@ -18410,7 +19795,7 @@ impl MaskedArray {
 
     /// Maximum of non-masked elements.
     pub fn max(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, MAError> {
-        let filled = self.filled(f64::NEG_INFINITY);
+        let filled = self.filled(f64::NEG_INFINITY)?;
         let result_data = filled.reduce_max(axis, keepdims)?;
         Ok(Self {
             data: result_data,
@@ -18965,7 +20350,7 @@ impl MaskedArray {
     /// Cumulative sum over unmasked elements (np.ma.cumsum).
     /// Masked elements contribute 0 to the running sum; mask is preserved.
     pub fn cumsum(&self, axis: Option<isize>) -> Result<Self, MAError> {
-        let filled = self.filled(0.0);
+        let filled = self.filled(0.0)?;
         let cs = filled.cumsum(axis)?;
         Ok(Self {
             data: cs,
@@ -18978,7 +20363,7 @@ impl MaskedArray {
     /// Cumulative product over unmasked elements (np.ma.cumprod).
     /// Masked elements contribute 1 to the running product; mask is preserved.
     pub fn cumprod(&self, axis: Option<isize>) -> Result<Self, MAError> {
-        let filled = self.filled(1.0);
+        let filled = self.filled(1.0)?;
         let cp = filled.cumprod(axis)?;
         Ok(Self {
             data: cp,
@@ -19029,8 +20414,8 @@ impl MaskedArray {
     /// Dot product of two masked arrays (np.ma.dot).
     /// Masked elements are treated as zero.
     pub fn dot(&self, other: &Self) -> Result<Self, MAError> {
-        let a = self.filled(0.0);
-        let b = other.filled(0.0);
+        let a = self.filled(0.0)?;
+        let b = other.filled(0.0)?;
         let result = a.dot(&b)?;
         Ok(Self {
             data: result,
@@ -23513,6 +24898,19 @@ mod tests {
     }
 
     #[test]
+    fn reduce_sum_axis_one_preserves_left_to_right_rounding() {
+        let arr = UFuncArray::new(
+            vec![1, 8],
+            vec![1.0e16, 1.0, -1.0e16, 1.0, 1.0e16, 1.0, -1.0e16, 1.0],
+            DType::F64,
+        )
+        .expect("arr");
+
+        let out = arr.reduce_sum(Some(1), false).expect("sum axis=1");
+        assert_eq!(out.values(), &[1.0]);
+    }
+
+    #[test]
     fn reduce_sum_axis_zero_preserves_c_order() {
         let arr = UFuncArray::new(
             vec![2, 3, 2],
@@ -26495,46 +27893,50 @@ mod tests {
     }
 
     #[test]
-    fn pad_drops_sidecar_for_fractional_i64_constant() {
+    fn pad_rejects_fractional_i64_constant() {
         let large_val = (1_i64 << 53) + 7;
         let arr = UFuncArray::from_storage(vec![1], ArrayStorage::I64(vec![large_val]))
             .expect("from_storage");
-        let out = arr.pad(&[(1, 1)], 1.5).expect("pad");
-        assert!(!out.has_integer_sidecar());
-        assert!(out.to_storage().is_err());
+        let err = arr
+            .pad(&[(1, 1)], 1.5)
+            .expect_err("pad must reject fractional integer constants");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("pad")));
     }
 
     #[test]
-    fn pad_drops_sidecar_for_negative_u64_constant() {
+    fn pad_rejects_negative_u64_constant() {
         let large_val = (1_u64 << 53) + 42;
         let arr = UFuncArray::from_storage(vec![1], ArrayStorage::U64(vec![large_val]))
             .expect("from_storage");
-        let out = arr.pad(&[(1, 1)], -1.0).expect("pad");
-        assert!(!out.has_integer_sidecar());
-        assert!(out.to_storage().is_err());
+        let err = arr
+            .pad(&[(1, 1)], -1.0)
+            .expect_err("pad must reject negative u64 constants");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("pad")));
     }
 
     #[test]
-    fn insert_drops_sidecar_for_fractional_i64_values() {
+    fn insert_rejects_fractional_i64_values() {
         let large_val = (1_i64 << 53) + 7;
         let arr = UFuncArray::from_storage(vec![1], ArrayStorage::I64(vec![large_val]))
             .expect("from_storage");
         let insert_values = UFuncArray::new(vec![1], vec![1.5], DType::I64).expect("insert_values");
-        let out = arr.insert(1, &insert_values, None).expect("insert");
-        assert!(!out.has_integer_sidecar());
-        assert!(out.to_storage().is_err());
+        let err = arr
+            .insert(1, &insert_values, None)
+            .expect_err("insert must reject fractional integer values");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("insert")));
     }
 
     #[test]
-    fn insert_drops_sidecar_for_negative_u64_values() {
+    fn insert_rejects_negative_u64_values() {
         let large_val = (1_u64 << 53) + 42;
         let arr = UFuncArray::from_storage(vec![1], ArrayStorage::U64(vec![large_val]))
             .expect("from_storage");
         let insert_values =
             UFuncArray::new(vec![1], vec![-1.0], DType::U64).expect("insert_values");
-        let out = arr.insert(1, &insert_values, None).expect("insert");
-        assert!(!out.has_integer_sidecar());
-        assert!(out.to_storage().is_err());
+        let err = arr
+            .insert(1, &insert_values, None)
+            .expect_err("insert must reject negative u64 values");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("insert")));
     }
 
     #[test]
@@ -26809,6 +28211,21 @@ mod tests {
     }
 
     #[test]
+    fn sort_preserves_large_u64_sidecar_values() {
+        let arr = UFuncArray::from_storage(
+            vec![4],
+            ArrayStorage::U64(vec![9_007_199_254_740_995, 2, 9_007_199_254_740_993, 1]),
+        )
+        .unwrap();
+        let out = arr.sort(None, None).unwrap();
+        assert!(out.has_integer_sidecar());
+        assert_eq!(
+            out.to_storage().unwrap(),
+            ArrayStorage::U64(vec![1, 2, 9_007_199_254_740_993, 9_007_199_254_740_995])
+        );
+    }
+
+    #[test]
     fn argsort_axis_none() {
         // np.argsort([3,1,2]) = [1,2,0]
         let arr = UFuncArray::new(vec![3], vec![3.0, 1.0, 2.0], DType::F64).expect("arr");
@@ -26828,10 +28245,61 @@ mod tests {
     }
 
     #[test]
+    fn argsort_orders_large_u64_sidecar_values() {
+        let arr = UFuncArray::from_storage(
+            vec![4],
+            ArrayStorage::U64(vec![9_007_199_254_740_995, 9_007_199_254_740_993, 1, 2]),
+        )
+        .unwrap();
+        let out = arr.argsort(None, None).unwrap();
+        assert_eq!(out.values(), &[2.0, 3.0, 1.0, 0.0]);
+    }
+
+    #[test]
     fn sort_kind_quicksort() {
         let arr = UFuncArray::new(vec![5], vec![5.0, 3.0, 1.0, 4.0, 2.0], DType::F64).unwrap();
         let out = arr.sort(None, Some("quicksort")).unwrap();
         assert_eq!(out.values(), &[1.0, 2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn sort_kind_quicksort_preserves_negative_zero_ordering() {
+        let arr = UFuncArray::new(vec![4], vec![1.0, 0.0, -0.0, -1.0], DType::F64).unwrap();
+        let out = arr.sort(None, Some("quicksort")).unwrap();
+        let bits: Vec<u64> = out.values().iter().map(|value| value.to_bits()).collect();
+        assert_eq!(
+            bits,
+            vec![
+                (-1.0f64).to_bits(),
+                (-0.0f64).to_bits(),
+                0.0f64.to_bits(),
+                1.0f64.to_bits()
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_kind_quicksort_dense_exact_integer_permutation() {
+        let arr = UFuncArray::new(
+            vec![8],
+            vec![7.0, 2.0, 5.0, 0.0, 3.0, 1.0, 6.0, 4.0],
+            DType::F64,
+        )
+        .unwrap();
+        let out = arr.sort(None, Some("quicksort")).unwrap();
+        assert_eq!(out.values(), &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+    }
+
+    #[test]
+    fn sort_kind_quicksort_dense_exact_integer_multiset_without_sidecar() {
+        let arr = UFuncArray::new(
+            vec![9],
+            vec![3.0, 1.0, 2.0, 1.0, 0.0, 3.0, 2.0, 0.0, 1.0],
+            DType::F64,
+        )
+        .unwrap();
+        let out = arr.sort(None, Some("quicksort")).unwrap();
+        assert_eq!(out.values(), &[0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0]);
     }
 
     #[test]
@@ -26946,6 +28414,20 @@ mod tests {
     }
 
     #[test]
+    fn searchsorted_orders_large_u64_values_exactly() {
+        let sorted = UFuncArray::from_storage(
+            vec![2],
+            ArrayStorage::U64(vec![9_007_199_254_740_992, 9_007_199_254_740_993]),
+        )
+        .unwrap();
+        let probe =
+            UFuncArray::from_storage(vec![], ArrayStorage::U64(vec![9_007_199_254_740_993]))
+                .unwrap();
+        let out = sorted.searchsorted(&probe, Some("left"), None).unwrap();
+        assert_eq!(out.values(), &[1.0]);
+    }
+
+    #[test]
     fn concatenate_axis_zero() {
         let a = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).expect("a");
         let b = UFuncArray::new(vec![1, 2], vec![5.0, 6.0], DType::F64).expect("b");
@@ -26978,6 +28460,17 @@ mod tests {
         let a = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).expect("a");
         let b = UFuncArray::new(vec![1, 2], vec![3.0, 4.0], DType::F64).expect("b");
         assert!(UFuncArray::concatenate(&[&a, &b], 0).is_err());
+    }
+
+    #[test]
+    fn concatenate_rejects_inexact_integer_sidecar_synthesis() {
+        let invalid = UFuncArray::new(vec![1], vec![1.5], DType::I64).unwrap();
+        let exact =
+            UFuncArray::from_storage(vec![1], ArrayStorage::I64(vec![1_i64 << 54])).unwrap();
+
+        let err = UFuncArray::concatenate(&[&invalid, &exact], 0)
+            .expect_err("concatenate must reject inexact integer synthesis");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("concatenate")));
     }
 
     #[test]
@@ -27045,6 +28538,27 @@ mod tests {
         assert_eq!(parts[0].values(), &[1.0, 4.0]);
         assert_eq!(parts[1].values(), &[2.0, 5.0]);
         assert_eq!(parts[2].values(), &[3.0, 6.0]);
+    }
+
+    #[test]
+    fn unstack_preserves_large_u64_sidecar_values() {
+        let large = (1_u64 << 53) + 21;
+        let arr =
+            UFuncArray::from_storage(vec![2, 2], ArrayStorage::U64(vec![0, large, large + 1, 9]))
+                .unwrap();
+
+        let parts = arr.unstack(1).unwrap();
+
+        assert!(parts[0].has_integer_sidecar());
+        assert_eq!(
+            parts[0].to_storage().unwrap(),
+            ArrayStorage::U64(vec![0, large + 1])
+        );
+        assert!(parts[1].has_integer_sidecar());
+        assert_eq!(
+            parts[1].to_storage().unwrap(),
+            ArrayStorage::U64(vec![large, 9])
+        );
     }
 
     #[test]
@@ -28076,6 +29590,34 @@ mod tests {
     }
 
     #[test]
+    fn boolean_set_preserves_integer_sidecar_for_exact_values() {
+        let mut a =
+            UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![1, (1_i64 << 53) + 5]))
+                .unwrap();
+        let mask = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::Bool).unwrap();
+
+        a.boolean_set(&mask, (1_i64 << 53) as f64).unwrap();
+
+        assert!(a.has_integer_sidecar());
+        assert_eq!(
+            a.to_storage().unwrap(),
+            ArrayStorage::I64(vec![1, 1_i64 << 53])
+        );
+    }
+
+    #[test]
+    fn boolean_set_rejects_fractional_i64_values() {
+        let mut a = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![1, 2])).unwrap();
+        let mask = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::Bool).unwrap();
+
+        let err = a
+            .boolean_set(&mask, 1.5)
+            .expect_err("boolean_set must reject fractional i64 values");
+
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("boolean_set")));
+    }
+
+    #[test]
     fn fancy_index_flat() {
         let a = UFuncArray::new(vec![5], vec![10.0, 20.0, 30.0, 40.0, 50.0], DType::F64).unwrap();
         let r = a.fancy_index(&[4, 3, 2, 1, 0]).unwrap();
@@ -28094,6 +29636,30 @@ mod tests {
         let mut a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         a.fancy_set(&[-1], &[99.0]).unwrap();
         assert_eq!(a.values(), &[1.0, 2.0, 99.0]);
+    }
+
+    #[test]
+    fn fancy_set_preserves_integer_sidecar_for_exact_values() {
+        let mut a = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![7, 9])).unwrap();
+
+        a.fancy_set(&[1], &[(1_u64 << 53) as f64]).unwrap();
+
+        assert!(a.has_integer_sidecar());
+        assert_eq!(
+            a.to_storage().unwrap(),
+            ArrayStorage::U64(vec![7, 1_u64 << 53])
+        );
+    }
+
+    #[test]
+    fn fancy_set_rejects_negative_u64_values() {
+        let mut a = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![7, 9])).unwrap();
+
+        let err = a
+            .fancy_set(&[1], &[-1.0])
+            .expect_err("fancy_set must reject negative u64 values");
+
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("fancy_set")));
     }
 
     #[test]
@@ -28413,6 +29979,21 @@ mod tests {
         // yy shape should be (2, 3)
         assert_eq!(grids[1].shape(), &[2, 3]);
         assert_eq!(grids[1].values(), &[4.0, 4.0, 4.0, 5.0, 5.0, 5.0]);
+    }
+
+    #[test]
+    fn meshgrid_preserves_large_u64_sidecar_values() {
+        let large = (1_u64 << 53) + 7;
+        let x = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![0, large])).unwrap();
+        let y = UFuncArray::new(vec![2], vec![10.0, 20.0], DType::F64).unwrap();
+
+        let grids = UFuncArray::meshgrid(&[x, y]).unwrap();
+
+        assert!(grids[0].has_integer_sidecar());
+        assert_eq!(
+            grids[0].to_storage().unwrap(),
+            ArrayStorage::U64(vec![0, large, 0, large])
+        );
     }
 
     #[test]
@@ -28935,8 +30516,32 @@ mod tests {
     #[test]
     fn fill_array() {
         let mut a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
-        a.fill(7.0);
+        a.fill(7.0).unwrap();
         assert_eq!(a.values(), &[7.0, 7.0, 7.0]);
+    }
+
+    #[test]
+    fn fill_preserves_integer_sidecar_for_exact_values() {
+        let mut a = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![1, 2])).unwrap();
+
+        a.fill((1_u64 << 53) as f64).unwrap();
+
+        assert!(a.has_integer_sidecar());
+        assert_eq!(
+            a.to_storage().unwrap(),
+            ArrayStorage::U64(vec![1_u64 << 53, 1_u64 << 53])
+        );
+    }
+
+    #[test]
+    fn fill_rejects_fractional_i64_values() {
+        let mut a = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![1, 2])).unwrap();
+
+        let err = a
+            .fill(1.5)
+            .expect_err("fill must reject fractional i64 values");
+
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("fill")));
     }
 
     #[test]
@@ -28977,6 +30582,23 @@ mod tests {
         let c1 = UFuncArray::new(vec![4], vec![50.0, 60.0, 70.0, 80.0], DType::F64).unwrap();
         let r = idx.choose(&[c0, c1]).unwrap();
         assert_eq!(r.values(), &[10.0, 60.0, 30.0, 80.0]);
+    }
+
+    #[test]
+    fn choose_preserves_large_integer_sidecar_values() {
+        let large = (1_i64 << 53) + 9;
+        let idx = UFuncArray::new(vec![3], vec![0.0, 1.0, 0.0], DType::I64).unwrap();
+        let c0 = UFuncArray::from_storage(vec![3], ArrayStorage::I64(vec![1, 2, large])).unwrap();
+        let c1 =
+            UFuncArray::from_storage(vec![3], ArrayStorage::I64(vec![7, large + 1, 8])).unwrap();
+
+        let r = idx.choose(&[c0, c1]).unwrap();
+
+        assert!(r.has_integer_sidecar());
+        assert_eq!(
+            r.to_storage().unwrap(),
+            ArrayStorage::I64(vec![1, large + 1, large])
+        );
     }
 
     #[test]
@@ -29164,6 +30786,22 @@ mod tests {
     }
 
     #[test]
+    fn union1d_preserves_distinct_large_i64_values() {
+        let large_a = (1_i64 << 53) + 1;
+        let large_b = (1_i64 << 53) + 3;
+        let a = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![large_a, 1])).unwrap();
+        let b = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![large_b, 1])).unwrap();
+
+        let r = a.union1d(&b);
+
+        assert!(r.has_integer_sidecar());
+        assert_eq!(
+            r.to_storage().unwrap(),
+            ArrayStorage::I64(vec![1, large_a, large_b])
+        );
+    }
+
+    #[test]
     fn intersect1d_basic() {
         let a = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
         let b = UFuncArray::new(vec![3], vec![2.0, 4.0, 6.0], DType::F64).unwrap();
@@ -29177,6 +30815,18 @@ mod tests {
         let b = UFuncArray::new(vec![2], vec![2.0, 4.0], DType::F64).unwrap();
         let r = a.intersect1d(&b);
         assert_eq!(r.values(), &[] as &[f64]);
+    }
+
+    #[test]
+    fn intersect1d_preserves_large_u64_values() {
+        let large = (1_u64 << 53) + 5;
+        let a = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![large, 7])).unwrap();
+        let b = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![large, 9])).unwrap();
+
+        let r = a.intersect1d(&b);
+
+        assert!(r.has_integer_sidecar());
+        assert_eq!(r.to_storage().unwrap(), ArrayStorage::U64(vec![large]));
     }
 
     #[test]
@@ -29196,6 +30846,24 @@ mod tests {
     }
 
     #[test]
+    fn setdiff1d_preserves_large_i64_values() {
+        let large_keep = (1_i64 << 53) + 7;
+        let large_drop = (1_i64 << 53) + 9;
+        let a =
+            UFuncArray::from_storage(vec![3], ArrayStorage::I64(vec![large_keep, large_drop, 1]))
+                .unwrap();
+        let b = UFuncArray::from_storage(vec![1], ArrayStorage::I64(vec![large_drop])).unwrap();
+
+        let r = a.setdiff1d(&b);
+
+        assert!(r.has_integer_sidecar());
+        assert_eq!(
+            r.to_storage().unwrap(),
+            ArrayStorage::I64(vec![1, large_keep])
+        );
+    }
+
+    #[test]
     fn setxor1d_basic() {
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         let b = UFuncArray::new(vec![3], vec![2.0, 3.0, 4.0], DType::F64).unwrap();
@@ -29209,6 +30877,22 @@ mod tests {
         let b = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         let r = a.setxor1d(&b);
         assert_eq!(r.values(), &[] as &[f64]);
+    }
+
+    #[test]
+    fn setxor1d_preserves_distinct_large_u64_values() {
+        let large_a = (1_u64 << 53) + 11;
+        let large_b = (1_u64 << 53) + 13;
+        let a = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![large_a, 1])).unwrap();
+        let b = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![large_b, 1])).unwrap();
+
+        let r = a.setxor1d(&b);
+
+        assert!(r.has_integer_sidecar());
+        assert_eq!(
+            r.to_storage().unwrap(),
+            ArrayStorage::U64(vec![large_a, large_b])
+        );
     }
 
     // ── array manipulation batch 2: column_stack, vsplit, hsplit, dsplit, broadcast_arrays, trim_zeros, resize ──
@@ -29272,6 +30956,22 @@ mod tests {
     }
 
     #[test]
+    fn broadcast_arrays_preserves_large_u64_sidecar_repetition() {
+        let large_val = (1_u64 << 53) + 42;
+        let a = UFuncArray::from_storage(vec![2, 1], ArrayStorage::U64(vec![0, large_val]))
+            .expect("from_storage");
+        let b = UFuncArray::new(vec![1, 3], vec![10.0, 20.0, 30.0], DType::F64).unwrap();
+
+        let result = UFuncArray::broadcast_arrays(&[&a, &b]).unwrap();
+
+        assert!(result[0].has_integer_sidecar());
+        assert_eq!(
+            result[0].to_storage().expect("to_storage"),
+            ArrayStorage::U64(vec![0, 0, 0, large_val, large_val, large_val])
+        );
+    }
+
+    #[test]
     fn trim_zeros_basic() {
         let a =
             UFuncArray::new(vec![7], vec![0.0, 0.0, 1.0, 2.0, 3.0, 0.0, 0.0], DType::F64).unwrap();
@@ -29287,6 +30987,21 @@ mod tests {
     }
 
     #[test]
+    fn trim_zeros_preserves_large_u64_sidecar_values() {
+        let a = UFuncArray::from_storage(
+            vec![5],
+            ArrayStorage::U64(vec![0, 0, 9_007_199_254_740_993, 9_007_199_254_740_995, 0]),
+        )
+        .unwrap();
+        let r = a.trim_zeros();
+        assert!(r.has_integer_sidecar());
+        assert_eq!(
+            r.to_storage().unwrap(),
+            ArrayStorage::U64(vec![9_007_199_254_740_993, 9_007_199_254_740_995])
+        );
+    }
+
+    #[test]
     fn resize_basic() {
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         let r = a.resize(&[2, 3]).unwrap();
@@ -29299,6 +31014,27 @@ mod tests {
         let a = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
         let r = a.resize(&[2]).unwrap();
         assert_eq!(r.values(), &[1.0, 2.0]);
+    }
+
+    #[test]
+    fn resize_preserves_large_u64_sidecar_values() {
+        let a = UFuncArray::from_storage(
+            vec![2],
+            ArrayStorage::U64(vec![9_007_199_254_740_993, 9_007_199_254_740_995]),
+        )
+        .unwrap();
+        let r = a.resize(&[5]).unwrap();
+        assert!(r.has_integer_sidecar());
+        assert_eq!(
+            r.to_storage().unwrap(),
+            ArrayStorage::U64(vec![
+                9_007_199_254_740_993,
+                9_007_199_254_740_995,
+                9_007_199_254_740_993,
+                9_007_199_254_740_995,
+                9_007_199_254_740_993,
+            ])
+        );
     }
 
     // ── polynomial: polyfit, polyder, polyint, roots ──
@@ -29497,6 +31233,37 @@ mod tests {
     }
 
     #[test]
+    fn partition_preserves_large_i64_sidecar_values() {
+        let a = UFuncArray::from_storage(
+            vec![3],
+            ArrayStorage::I64(vec![-9_007_199_254_740_995, -9_007_199_254_740_993, -1]),
+        )
+        .unwrap();
+        let r = a.partition(1, None).unwrap();
+        assert!(r.has_integer_sidecar());
+        match r.to_storage().unwrap() {
+            ArrayStorage::I64(values) => {
+                assert_eq!(values[1], -9_007_199_254_740_993);
+                assert!(values[0] <= values[1]);
+                assert!(values[2] >= values[1]);
+            }
+            other => panic!("expected i64 storage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn argpartition_orders_large_i64_sidecar_values() {
+        let a = UFuncArray::from_storage(
+            vec![3],
+            ArrayStorage::I64(vec![-9_007_199_254_740_995, -9_007_199_254_740_993, -1]),
+        )
+        .unwrap();
+        let r = a.argpartition(1, None).unwrap();
+        let kth_idx = r.values()[1] as usize;
+        assert_eq!(kth_idx, 1);
+    }
+
+    #[test]
     fn partition_2d_axis1() {
         // 2x4 array, partition along axis 1 with kth=1
         let a = UFuncArray::new(
@@ -29552,6 +31319,18 @@ mod tests {
         let k = UFuncArray::new(vec![3], vec![3.0, 1.0, 2.0], DType::F64).unwrap();
         let r = UFuncArray::lexsort(&[&k]).unwrap();
         assert_eq!(r.values(), &[1.0, 2.0, 0.0]);
+    }
+
+    #[test]
+    fn lexsort_orders_large_u64_primary_keys_exactly() {
+        let first = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![2, 1])).unwrap();
+        let last = UFuncArray::from_storage(
+            vec![2],
+            ArrayStorage::U64(vec![9_007_199_254_740_992, 9_007_199_254_740_993]),
+        )
+        .unwrap();
+        let r = UFuncArray::lexsort(&[&first, &last]).unwrap();
+        assert_eq!(r.values(), &[0.0, 1.0]);
     }
 
     // ── statistics: quantile, average, cov, corrcoef, digitize, histogram2d ──
@@ -29713,6 +31492,21 @@ mod tests {
     }
 
     #[test]
+    fn ix_preserves_large_u64_sidecar_values() {
+        let large = (1_u64 << 53) + 11;
+        let a = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![0, large])).unwrap();
+        let b = UFuncArray::new(vec![1], vec![7.0], DType::F64).unwrap();
+
+        let result = UFuncArray::ix_(&[a, b]).unwrap();
+
+        assert!(result[0].has_integer_sidecar());
+        assert_eq!(
+            result[0].to_storage().unwrap(),
+            ArrayStorage::U64(vec![0, large])
+        );
+    }
+
+    #[test]
     fn ix_three_arrays() {
         let a = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
         let b = UFuncArray::new(vec![3], vec![3.0, 4.0, 5.0], DType::F64).unwrap();
@@ -29754,6 +31548,23 @@ mod tests {
         // Swapping twice returns original
         let restored = swapped.byteswap();
         assert_eq!(restored.values(), &[1.0, 2.0]);
+    }
+
+    #[test]
+    fn byteswap_preserves_exact_u64_values() {
+        let a = UFuncArray::from_storage(
+            vec![2],
+            ArrayStorage::U64(vec![0x0102_0304_0506_0708, 0x1112_1314_1516_1718]),
+        )
+        .unwrap();
+
+        let swapped = a.byteswap();
+
+        assert!(swapped.has_integer_sidecar());
+        assert_eq!(
+            swapped.to_storage().unwrap(),
+            ArrayStorage::U64(vec![0x0807_0605_0403_0201, 0x1817_1615_1413_1211])
+        );
     }
 
     #[test]
@@ -29865,6 +31676,18 @@ mod tests {
         let r = a.append(&b, Some(0)).unwrap();
         assert_eq!(r.shape(), &[3, 2]);
         assert_eq!(r.values(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn append_rejects_inexact_integer_sidecar_synthesis() {
+        let invalid = UFuncArray::new(vec![1], vec![1.5], DType::I64).unwrap();
+        let exact =
+            UFuncArray::from_storage(vec![1], ArrayStorage::I64(vec![1_i64 << 54])).unwrap();
+
+        let err = invalid
+            .append(&exact, None)
+            .expect_err("append must reject inexact integer synthesis");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("append")));
     }
 
     #[test]
@@ -30129,6 +31952,21 @@ mod tests {
     }
 
     #[test]
+    fn take_along_axis_preserves_large_integer_sidecar_values() {
+        let large = (1_i64 << 53) + 1;
+        let a =
+            UFuncArray::from_storage(vec![2, 2], ArrayStorage::I64(vec![1, large, large + 1, 4]))
+                .unwrap();
+        let idx = UFuncArray::new(vec![2, 1], vec![1.0, 0.0], DType::I64).unwrap();
+
+        let r = a.take_along_axis(&idx, 1).unwrap();
+
+        assert!(r.has_integer_sidecar());
+        let storage = r.to_storage().unwrap();
+        assert_eq!(storage, ArrayStorage::I64(vec![large, large + 1]));
+    }
+
+    #[test]
     fn put_along_axis_basic() {
         let mut a = UFuncArray::new(
             vec![2, 3],
@@ -30217,6 +32055,37 @@ mod tests {
     }
 
     #[test]
+    fn put_rejects_degraded_i64_sidecar_recovery() {
+        let mut arr = UFuncArray {
+            shape: vec![2],
+            values: vec![1.5, 2.0],
+            dtype: DType::I64,
+            integer_sidecar: None,
+        };
+
+        let err = arr
+            .put(&[1], &[3.0])
+            .expect_err("degraded integer arrays must fail closed during recovery");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("put")));
+    }
+
+    #[test]
+    fn place_rejects_degraded_u64_sidecar_recovery() {
+        let mut arr = UFuncArray {
+            shape: vec![2],
+            values: vec![-1.0, 2.0],
+            dtype: DType::U64,
+            integer_sidecar: None,
+        };
+        let mask = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::Bool).unwrap();
+
+        let err = arr
+            .place(&mask, &[3.0])
+            .expect_err("degraded unsigned integer arrays must fail closed during recovery");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("place")));
+    }
+
+    #[test]
     fn fill_diagonal_rejects_inexact_integer_bridge_values() {
         let mut arr =
             UFuncArray::from_storage(vec![2, 2], ArrayStorage::I64(vec![1, 2, 3, 4])).unwrap();
@@ -30232,10 +32101,10 @@ mod tests {
         let mut arr = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![1, 2])).unwrap();
         assert!(!arr.has_integer_sidecar());
 
-        arr.itemset(&[1], ((1_i64 << 53) + 1) as f64).unwrap();
+        arr.itemset(&[1], (1_i64 << 53) as f64).unwrap();
 
         let storage = arr.to_storage().unwrap();
-        assert_eq!(storage, ArrayStorage::I64(vec![1, (1_i64 << 53) + 1]));
+        assert_eq!(storage, ArrayStorage::I64(vec![1, 1_i64 << 53]));
     }
 
     #[test]
@@ -30252,7 +32121,8 @@ mod tests {
     fn putmask_preserves_large_integer_sidecar_values() {
         let mut dst = UFuncArray::from_storage(vec![3], ArrayStorage::I64(vec![1, 2, 3])).unwrap();
         let mask = UFuncArray::new(vec![3], vec![0.0, 1.0, 0.0], DType::Bool).unwrap();
-        let src = UFuncArray::from_storage(vec![1], ArrayStorage::I64(vec![(1_i64 << 53) + 1])).unwrap();
+        let src =
+            UFuncArray::from_storage(vec![1], ArrayStorage::I64(vec![(1_i64 << 53) + 1])).unwrap();
 
         dst.putmask(&mask, &src).unwrap();
 
@@ -30275,9 +32145,8 @@ mod tests {
     #[test]
     fn copyto_preserves_large_integer_sidecar_values() {
         let mut dst = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![1, 2])).unwrap();
-        let src =
-            UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![3, (1_i64 << 53) + 1]))
-                .unwrap();
+        let src = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![3, (1_i64 << 53) + 1]))
+            .unwrap();
 
         dst.copyto(&src, None, Some("safe")).unwrap();
 
@@ -32071,6 +33940,17 @@ mod tests {
     }
 
     #[test]
+    fn nan_to_num_preserves_large_integer_sidecar_values() {
+        let large = (1_u64 << 53) + 17;
+        let a = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![large, 9])).unwrap();
+
+        let r = a.nan_to_num_default();
+
+        assert!(r.has_integer_sidecar());
+        assert_eq!(r.to_storage().unwrap(), ArrayStorage::U64(vec![large, 9]));
+    }
+
+    #[test]
     fn flatnonzero_basic() {
         let a = UFuncArray::new(vec![5], vec![0.0, 1.0, 0.0, 3.0, 0.0], DType::F64).unwrap();
         let nz = a.flatnonzero();
@@ -32095,6 +33975,17 @@ mod tests {
         assert!((r.values()[1] - (-2.0)).abs() < 1e-10);
         assert!((r.values()[2] - 0.0).abs() < 1e-10);
         assert!((r.values()[3] - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn fix_preserves_large_integer_sidecar_values() {
+        let large = (1_i64 << 53) + 3;
+        let a = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![large, -7])).unwrap();
+
+        let r = a.fix();
+
+        assert!(r.has_integer_sidecar());
+        assert_eq!(r.to_storage().unwrap(), ArrayStorage::I64(vec![large, -7]));
     }
 
     #[test]
@@ -32664,7 +34555,7 @@ mod tests {
         let mut a = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
         let mask = UFuncArray::new(vec![4], vec![1.0, 0.0, 1.0, 0.0], DType::F64).unwrap();
         let vals = UFuncArray::new(vec![2], vec![10.0, 20.0], DType::F64).unwrap();
-        a.putmask(&mask, &vals);
+        a.putmask(&mask, &vals).unwrap();
         assert_eq!(a.values(), &[10.0, 2.0, 20.0, 4.0]);
     }
 
@@ -32673,7 +34564,7 @@ mod tests {
         let mut a = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
         let mask = UFuncArray::new(vec![4], vec![1.0, 1.0, 1.0, 1.0], DType::F64).unwrap();
         let vals = UFuncArray::new(vec![2], vec![10.0, 20.0], DType::F64).unwrap();
-        a.putmask(&mask, &vals);
+        a.putmask(&mask, &vals).unwrap();
         // Cycles: 10, 20, 10, 20
         assert_eq!(a.values(), &[10.0, 20.0, 10.0, 20.0]);
     }
@@ -32806,7 +34697,7 @@ mod tests {
         let data = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
         let mask = UFuncArray::new(vec![4], vec![0.0, 1.0, 0.0, 1.0], DType::Bool).unwrap();
         let ma = MaskedArray::new(data, Some(mask), None).unwrap();
-        let filled = ma.filled(-999.0);
+        let filled = ma.filled(-999.0).unwrap();
         assert_eq!(filled.values(), &[1.0, -999.0, 3.0, -999.0]);
     }
 
@@ -32817,7 +34708,7 @@ mod tests {
             .expect("from_storage");
         let mask = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::Bool).unwrap();
         let ma = MaskedArray::new(data, Some(mask), None).unwrap();
-        let filled = ma.filled(-9.0);
+        let filled = ma.filled(-9.0).unwrap();
         assert!(filled.has_integer_sidecar());
         assert_eq!(
             filled.to_storage().expect("to_storage"),
@@ -32826,27 +34717,29 @@ mod tests {
     }
 
     #[test]
-    fn masked_array_filled_drops_sidecar_for_fractional_i64_fill() {
+    fn masked_array_filled_rejects_fractional_i64_fill() {
         let large_val = (1_i64 << 53) + 7;
         let data = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![large_val, 3]))
             .expect("from_storage");
         let mask = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::Bool).unwrap();
         let ma = MaskedArray::new(data, Some(mask), None).unwrap();
-        let filled = ma.filled(1.5);
-        assert!(!filled.has_integer_sidecar());
-        assert!(filled.to_storage().is_err());
+        let err = ma
+            .filled(1.5)
+            .expect_err("filled must reject fractional integer fills");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("filled")));
     }
 
     #[test]
-    fn masked_array_filled_drops_sidecar_for_negative_u64_fill() {
+    fn masked_array_filled_rejects_negative_u64_fill() {
         let large_val = (1_u64 << 53) + 42;
         let data = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![large_val, 3]))
             .expect("from_storage");
         let mask = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::Bool).unwrap();
         let ma = MaskedArray::new(data, Some(mask), None).unwrap();
-        let filled = ma.filled(-1.0);
-        assert!(!filled.has_integer_sidecar());
-        assert!(filled.to_storage().is_err());
+        let err = ma
+            .filled(-1.0)
+            .expect_err("filled must reject negative u64 fills");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("filled")));
     }
 
     #[test]
@@ -34198,6 +36091,32 @@ mod tests {
         let mut a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         let mask = UFuncArray::new(vec![2], vec![1.0, 0.0], DType::Bool).unwrap();
         assert!(a.put_mask(&mask, &[99.0]).is_err());
+    }
+
+    #[test]
+    fn put_mask_preserves_integer_sidecar_for_exact_values() {
+        let mut a = UFuncArray::from_storage(vec![3], ArrayStorage::I64(vec![1, 2, 3])).unwrap();
+        let mask = UFuncArray::new(vec![3], vec![0.0, 1.0, 0.0], DType::Bool).unwrap();
+
+        a.put_mask(&mask, &[(1_i64 << 53) as f64]).unwrap();
+
+        assert!(a.has_integer_sidecar());
+        assert_eq!(
+            a.to_storage().unwrap(),
+            ArrayStorage::I64(vec![1, 1_i64 << 53, 3])
+        );
+    }
+
+    #[test]
+    fn put_mask_rejects_negative_u64_values() {
+        let mut a = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![7, 9])).unwrap();
+        let mask = UFuncArray::new(vec![2], vec![1.0, 0.0], DType::Bool).unwrap();
+
+        let err = a
+            .put_mask(&mask, &[-1.0])
+            .expect_err("put_mask must reject negative u64 values");
+
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("put_mask")));
     }
 
     // ── nanpercentile / nanquantile / real_if_close tests ──────────
@@ -35761,6 +37680,20 @@ mod tests {
         assert_eq!(result.values(), &[0.0, 0.0, 0.0]);
     }
 
+    #[test]
+    fn in1d_uses_exact_large_u64_membership() {
+        let arr = UFuncArray::from_storage(
+            vec![2],
+            ArrayStorage::U64(vec![9_007_199_254_740_992, 9_007_199_254_740_993]),
+        )
+        .unwrap();
+        let test =
+            UFuncArray::from_storage(vec![1], ArrayStorage::U64(vec![9_007_199_254_740_993]))
+                .unwrap();
+        let result = arr.in1d(&test);
+        assert_eq!(result.values(), &[0.0, 1.0]);
+    }
+
     // ── searchsorted side/sorter tests ──────────────────────────────────
 
     #[test]
@@ -35943,6 +37876,56 @@ mod tests {
         let (vals, counts) = unique_counts(&arr);
         assert_eq!(vals.values(), &[5.0]);
         assert_eq!(counts.values(), &[4.0]);
+    }
+
+    #[test]
+    fn unique_values_preserve_distinct_large_u64_values() {
+        let a = UFuncArray::from_storage(
+            vec![4],
+            ArrayStorage::U64(vec![
+                9_007_199_254_740_993,
+                9_007_199_254_740_992,
+                9_007_199_254_740_993,
+                9_007_199_254_740_994,
+            ]),
+        )
+        .unwrap();
+        let result = unique_values(&a);
+        assert!(result.has_integer_sidecar());
+        assert_eq!(
+            result.to_storage().unwrap(),
+            ArrayStorage::U64(vec![
+                9_007_199_254_740_992,
+                9_007_199_254_740_993,
+                9_007_199_254_740_994
+            ])
+        );
+    }
+
+    #[test]
+    fn unique_all_preserves_large_i64_indices_inverse_and_counts() {
+        let a = UFuncArray::from_storage(
+            vec![4],
+            ArrayStorage::I64(vec![
+                -9_007_199_254_740_993,
+                -9_007_199_254_740_992,
+                -9_007_199_254_740_993,
+                -9_007_199_254_740_994,
+            ]),
+        )
+        .unwrap();
+        let (vals, indices, inverse, counts) = unique_all(&a);
+        assert_eq!(
+            vals.to_storage().unwrap(),
+            ArrayStorage::I64(vec![
+                -9_007_199_254_740_994,
+                -9_007_199_254_740_993,
+                -9_007_199_254_740_992
+            ])
+        );
+        assert_eq!(indices.values(), &[3.0, 0.0, 1.0]);
+        assert_eq!(inverse.values(), &[1.0, 2.0, 1.0, 0.0]);
+        assert_eq!(counts.values(), &[1.0, 2.0, 1.0]);
     }
 
     // ── Chebyshev polynomial tests ──────────────────────────────────────
@@ -38578,6 +40561,24 @@ mod tests {
     }
 
     #[test]
+    fn unique_axis_preserves_large_integer_sidecar_values() {
+        let large = (1_u64 << 53) + 13;
+        let a = UFuncArray::from_storage(
+            vec![3, 2],
+            ArrayStorage::U64(vec![1, large, 7, 9, 1, large]),
+        )
+        .unwrap();
+
+        let r = a.unique_axis(0).unwrap();
+
+        assert!(r.has_integer_sidecar());
+        assert_eq!(
+            r.to_storage().unwrap(),
+            ArrayStorage::U64(vec![1, large, 7, 9])
+        );
+    }
+
+    #[test]
     fn binary_repr_zero() {
         assert_eq!(UFuncArray::binary_repr(0, None), "0");
     }
@@ -38628,6 +40629,18 @@ mod tests {
         } else {
             panic!("Expected I64 storage");
         }
+    }
+
+    #[test]
+    fn test_elementwise_binary_rejects_inexact_integer_sidecar_synthesis() {
+        let invalid = UFuncArray::new(vec![1], vec![1.5], DType::I64).expect("invalid");
+        let exact =
+            UFuncArray::from_storage(vec![1], ArrayStorage::I64(vec![1_i64 << 54])).expect("exact");
+
+        let err = invalid
+            .elementwise_binary(&exact, BinaryOp::Add)
+            .expect_err("binary op must reject inexact integer synthesis");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("add")));
     }
 
     #[test]

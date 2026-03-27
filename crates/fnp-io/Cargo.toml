@@ -5,4 +5,5 @@ edition = "2024"
 license-file = "../../LICENSE"
 
 [dependencies]
+bytemuck = "1.25.0"
 flate2 = "1.0.35"

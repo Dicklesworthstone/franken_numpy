@@ -6959,7 +6959,9 @@ fn execute_masked_differential_operation(
         }
         "filled" => {
             let fill_value = case.fill_value.unwrap_or_else(|| lhs.fill_value());
-            let result = lhs.filled(fill_value);
+            let result = lhs
+                .filled(fill_value)
+                .map_err(map_ufunc_error_to_masked_suite)?;
             Ok(MaskedOperationOutcome::Array {
                 shape: result.shape().to_vec(),
                 values: result.values().to_vec(),
