@@ -864,7 +864,14 @@ pub fn write_npy_bytes_with_version(
 pub fn read_npy_bytes(payload: &[u8], allow_pickle: bool) -> Result<NpyArrayBytes, IOError> {
     let version = validate_magic_version(payload)?;
     let (header_offset, header_len) = read_header_span(payload, version)?;
-    let header_end = header_offset + header_len;
+    let header_end = header_offset
+        .checked_add(header_len)
+        .ok_or(IOError::HeaderSchemaInvalid("header length overflow"))?;
+    if header_end > payload.len() {
+        return Err(IOError::HeaderSchemaInvalid(
+            "payload truncated before end of header",
+        ));
+    }
     let header = parse_header_dictionary(&payload[header_offset..header_end], header_len)?;
     let body = &payload[header_end..];
 
@@ -2573,7 +2580,14 @@ pub fn memmap_npy(path: &std::path::Path, mode: MemmapMode) -> Result<MemmapArra
         .map_err(|_| IOError::MemmapContractViolation("failed to read NPY file for header"))?;
     let version = validate_magic_version(&header_bytes)?;
     let (header_offset, header_len) = read_header_span(&header_bytes, version)?;
-    let header_end = header_offset + header_len;
+    let header_end = header_offset
+        .checked_add(header_len)
+        .ok_or(IOError::HeaderSchemaInvalid("header length overflow"))?;
+    if header_end > header_bytes.len() {
+        return Err(IOError::HeaderSchemaInvalid(
+            "payload truncated before end of header",
+        ));
+    }
     let header = parse_header_dictionary(&header_bytes[header_offset..header_end], header_len)?;
     let mut mapped = memmap(path, header.descr, mode, header_end, &header.shape)?;
     mapped.fortran_order = header.fortran_order;
@@ -2981,7 +2995,14 @@ pub fn save_structured(
 pub fn load_structured(data: &[u8]) -> Result<StructuredNpyData, IOError> {
     let version = validate_magic_version(data)?;
     let (header_offset, header_len) = read_header_span(data, version)?;
-    let header_end = header_offset + header_len;
+    let header_end = header_offset
+        .checked_add(header_len)
+        .ok_or(IOError::HeaderSchemaInvalid("header length overflow"))?;
+    if header_end > data.len() {
+        return Err(IOError::HeaderSchemaInvalid(
+            "payload truncated before end of header",
+        ));
+    }
     let header_bytes = &data[header_offset..header_end];
 
     let dictionary = std::str::from_utf8(header_bytes).map_err(|_| {

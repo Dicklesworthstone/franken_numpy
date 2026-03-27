@@ -166,12 +166,7 @@ pub fn fix_unknown_dimension(
 
     match unknown_index {
         Some(idx) => {
-            if known_product == 0 {
-                return Err(ShapeError::IncompatibleElementCount {
-                    old: old_element_count,
-                    new: known_product,
-                });
-            } else if !old_element_count.is_multiple_of(known_product) {
+            if known_product == 0 || !old_element_count.is_multiple_of(known_product) {
                 return Err(ShapeError::IncompatibleElementCount {
                     old: old_element_count,
                     new: known_product,

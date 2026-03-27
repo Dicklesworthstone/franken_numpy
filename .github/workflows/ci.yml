@@ -18,8 +18,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-02-20
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
@@ -27,25 +28,29 @@ jobs:
 
   g2-unit-property:
     name: "G2: unit + property"
+    needs: g1-fmt-lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-02-20
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --lib
 
   g3-differential:
     name: "G3: differential"
+    needs: g2-unit-property
     runs-on: ubuntu-latest
     env:
       FNP_REQUIRE_REAL_NUMPY_ORACLE: "1"
       FNP_ORACLE_PYTHON: "python3"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-02-20
           components: rustfmt, clippy
       - uses: actions/setup-python@v5
         with:
@@ -72,33 +77,39 @@ jobs:
 
   g4-adversarial-security:
     name: "G4: adversarial + security"
+    needs: g3-differential
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-02-20
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo run -p fnp-conformance --bin run_security_gate
 
   g5-test-contract:
     name: "G5: test contract"
+    needs: g4-adversarial-security
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-02-20
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo run -p fnp-conformance --bin run_test_contract_gate
 
   g6-workflow-forensics:
     name: "G6: workflow + forensics"
+    needs: g5-test-contract
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-02-20
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: >
@@ -107,11 +118,13 @@ jobs:
 
   g7-performance-budget:
     name: "G7: performance budget"
+    needs: g6-workflow-forensics
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-02-20
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Generate candidate baseline
@@ -128,11 +141,13 @@ jobs:
 
   g8-durability-decode:
     name: "G8: durability + decode proof"
+    needs: g7-performance-budget
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-02-20
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: >

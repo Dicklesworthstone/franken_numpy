@@ -2165,14 +2165,23 @@ impl UFuncArrayView {
             .write()
             .map_err(|_| UFuncError::Msg("shared view: write lock poisoned".to_string()))?;
         let offset = self.compute_offset(index, data.len())?;
+        if matches!(self.dtype, DType::I64 | DType::U64) {
+            ensure_exact_integer_bridge_value_supported(value, self.dtype, "itemset", offset)?;
+        }
         data[offset] = value;
         if let Some(ref sidecar) = self.integer_sidecar {
             let mut s = sidecar
                 .write()
                 .map_err(|_| UFuncError::Msg("shared view: sidecar lock poisoned".to_string()))?;
             match &mut *s {
-                IntegerSidecar::I64(v) => v[offset] = value as i64,
-                IntegerSidecar::U64(v) => v[offset] = value as u64,
+                IntegerSidecar::I64(v) => {
+                    ensure_exact_integer_bridge_value_supported(value, DType::I64, "itemset", offset)?;
+                    v[offset] = value as i64;
+                }
+                IntegerSidecar::U64(v) => {
+                    ensure_exact_integer_bridge_value_supported(value, DType::U64, "itemset", offset)?;
+                    v[offset] = value as u64;
+                }
             }
         }
         Ok(())
@@ -2781,6 +2790,77 @@ impl UFuncArray {
 
     fn cloned_integer_sidecar(&self) -> Option<IntegerSidecar> {
         self.integer_sidecar.clone()
+    }
+
+    fn ensure_mutable_integer_sidecar(&mut self, context: &str) -> Result<(), UFuncError> {
+        if self.integer_sidecar.is_none() && matches!(self.dtype, DType::I64 | DType::U64) {
+            self.integer_sidecar = self.exact_integer_sidecar(context);
+        }
+        Ok(())
+    }
+
+    fn write_integer_mutation(
+        &mut self,
+        flat_index: usize,
+        value: f64,
+        source_sidecar: Option<&IntegerSidecar>,
+        source_index: usize,
+        context: &str,
+    ) -> Result<(), UFuncError> {
+        self.ensure_mutable_integer_sidecar(context)?;
+        if let Some(sidecar) = self.integer_sidecar.as_mut() {
+            match sidecar {
+                IntegerSidecar::I64(dst) => {
+                    let exact = match source_sidecar {
+                        Some(IntegerSidecar::I64(src)) => src[source_index],
+                        Some(IntegerSidecar::U64(src)) => {
+                            i64::try_from(src[source_index]).map_err(|_| {
+                                UFuncError::Msg(format!(
+                                    "{context}: value at index {source_index} ({}) cannot be represented as i64",
+                                    src[source_index]
+                                ))
+                            })?
+                        }
+                        None => {
+                            ensure_exact_integer_bridge_value_supported(
+                                value,
+                                DType::I64,
+                                context,
+                                source_index,
+                            )?;
+                            value as i64
+                        }
+                    };
+                    dst[flat_index] = exact;
+                }
+                IntegerSidecar::U64(dst) => {
+                    let exact = match source_sidecar {
+                        Some(IntegerSidecar::I64(src)) => {
+                            u64::try_from(src[source_index]).map_err(|_| {
+                                UFuncError::Msg(format!(
+                                    "{context}: value at index {source_index} ({}) cannot be represented as u64",
+                                    src[source_index]
+                                ))
+                            })?
+                        }
+                        Some(IntegerSidecar::U64(src)) => src[source_index],
+                        None => {
+                            ensure_exact_integer_bridge_value_supported(
+                                value,
+                                DType::U64,
+                                context,
+                                source_index,
+                            )?;
+                            value as u64
+                        }
+                    };
+                    dst[flat_index] = exact;
+                }
+            }
+        } else if matches!(self.dtype, DType::I64 | DType::U64) {
+            ensure_exact_integer_bridge_value_supported(value, self.dtype, context, source_index)?;
+        }
+        Ok(())
     }
 
     fn reindexed_integer_sidecar(&self, source_indices: &[usize]) -> Option<IntegerSidecar> {
@@ -8154,7 +8234,15 @@ impl UFuncArray {
                     dst_flat += c * strides[d];
                 }
             }
-            self.values[dst_flat] = values.values[flat];
+            let val = values.values[flat];
+            self.values[dst_flat] = val;
+            self.write_integer_mutation(
+                dst_flat,
+                val,
+                values.integer_sidecar.as_ref(),
+                flat,
+                "put_along_axis",
+            )?;
         }
         Ok(())
     }
@@ -8168,19 +8256,20 @@ impl UFuncArray {
                 arr.values.len()
             )));
         }
-        let values: Vec<f64> = condition
-            .values
-            .iter()
-            .zip(&arr.values)
-            .filter(|(c, _)| **c != 0.0)
-            .map(|(_, v)| *v)
-            .collect();
+        let mut values = Vec::new();
+        let mut source_indices = Vec::new();
+        for (i, (c, v)) in condition.values.iter().zip(&arr.values).enumerate() {
+            if *c != 0.0 {
+                values.push(*v);
+                source_indices.push(i);
+            }
+        }
         let n = values.len();
         Ok(Self {
             shape: vec![n],
             values,
             dtype: arr.dtype,
-            integer_sidecar: None,
+            integer_sidecar: arr.reindexed_integer_sidecar(&source_indices),
         })
     }
 
@@ -8198,9 +8287,11 @@ impl UFuncArray {
             return Err(UFuncError::Msg("place: vals must not be empty".to_string()));
         }
         let mut vi = 0;
-        for (v, &m) in self.values.iter_mut().zip(&mask.values) {
+        for (i, &m) in mask.values.iter().enumerate() {
             if m != 0.0 {
-                *v = vals[vi % vals.len()];
+                let value = vals[vi % vals.len()];
+                self.values[i] = value;
+                self.write_integer_mutation(i, value, None, i, "place")?;
                 vi += 1;
             }
         }
@@ -8221,7 +8312,10 @@ impl UFuncArray {
                     "put: index {idx} out of bounds for size {n}"
                 )));
             }
-            self.values[resolved as usize] = vals[i % vals.len()];
+            let value = vals[i % vals.len()];
+            let flat = resolved as usize;
+            self.values[flat] = value;
+            self.write_integer_mutation(flat, value, None, i, "put")?;
         }
         Ok(())
     }
@@ -8236,7 +8330,9 @@ impl UFuncArray {
         let min_dim = self.shape[0].min(self.shape[1]);
         let cols = self.shape[1];
         for i in 0..min_dim {
-            self.values[i * cols + i] = val;
+            let flat = i * cols + i;
+            self.values[flat] = val;
+            self.write_integer_mutation(flat, val, None, i, "fill_diagonal")?;
         }
         Ok(())
     }
@@ -30050,6 +30146,49 @@ mod tests {
         let mut a = UFuncArray::new(vec![2, 4], vec![0.0; 8], DType::F64).unwrap();
         a.fill_diagonal(1.0).unwrap();
         assert_eq!(a.values(), &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn put_along_axis_materializes_integer_sidecar_from_large_source_values() {
+        let mut dest = UFuncArray::from_storage(vec![1, 2], ArrayStorage::I64(vec![1, 2])).unwrap();
+        assert!(!dest.has_integer_sidecar());
+
+        let idx = UFuncArray::new(vec![1, 1], vec![1.0], DType::I64).unwrap();
+        let large = (1_i64 << 53) + 1;
+        let values = UFuncArray::from_storage(vec![1, 1], ArrayStorage::I64(vec![large])).unwrap();
+        assert!(values.has_integer_sidecar());
+
+        dest.put_along_axis(&idx, &values, 1).unwrap();
+
+        let storage = dest.to_storage().unwrap();
+        assert_eq!(storage, ArrayStorage::I64(vec![1, large]));
+    }
+
+    #[test]
+    fn place_rejects_inexact_integer_bridge_values() {
+        let mut arr = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![1, 2])).unwrap();
+        let mask = UFuncArray::new(vec![2], vec![1.0, 0.0], DType::Bool).unwrap();
+
+        let err = arr.place(&mask, &[1.5]).expect_err("fractional integer write must fail");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("place")));
+    }
+
+    #[test]
+    fn put_rejects_inexact_integer_bridge_values() {
+        let mut arr = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![1, 2])).unwrap();
+
+        let err = arr.put(&[0], &[1.5]).expect_err("fractional integer write must fail");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("put")));
+    }
+
+    #[test]
+    fn fill_diagonal_rejects_inexact_integer_bridge_values() {
+        let mut arr = UFuncArray::from_storage(vec![2, 2], ArrayStorage::I64(vec![1, 2, 3, 4])).unwrap();
+
+        let err = arr
+            .fill_diagonal(1.5)
+            .expect_err("fractional diagonal write must fail");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("fill_diagonal")));
     }
 
     #[test]
