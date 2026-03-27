@@ -30992,6 +30992,20 @@ mod tests {
     }
 
     #[test]
+    fn column_stack_preserves_large_u64_sidecar_values() {
+        let large = (1_u64 << 53) + 21;
+        let a = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![1, large])).unwrap();
+        let b = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![3, 4])).unwrap();
+        let r = UFuncArray::column_stack(&[a, b]).unwrap();
+        assert_eq!(r.shape(), &[2, 2]);
+        assert_eq!(r.dtype(), DType::U64);
+        assert_eq!(
+            r.to_storage().unwrap(),
+            ArrayStorage::U64(vec![1, 3, large, 4])
+        );
+    }
+
+    #[test]
     fn vsplit_basic() {
         let a = UFuncArray::new(
             vec![4, 2],
