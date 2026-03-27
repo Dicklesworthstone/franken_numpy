@@ -1591,7 +1591,7 @@ pub fn loadtxt_usecols(
         if line_idx < skiprows {
             continue;
         }
-        let trimmed = line.trim();
+        let trimmed = strip_text_comment(line, comments).trim();
         if trimmed.is_empty() || trimmed.starts_with(comments) {
             continue;
         }
@@ -1738,7 +1738,7 @@ pub fn genfromtxt(
         if line_idx < skip_header {
             continue;
         }
-        let trimmed = line.trim();
+        let trimmed = strip_text_comment(line, comments).trim();
         if trimmed.is_empty() || trimmed.starts_with(comments) {
             continue;
         }
@@ -1779,6 +1779,10 @@ pub fn genfromtxt(
         nrows,
         ncols: ncols.unwrap_or(0),
     })
+}
+
+fn strip_text_comment(line: &str, comments: char) -> &str {
+    line.split_once(comments).map_or(line, |(prefix, _)| prefix)
 }
 
 /// Read raw binary data from bytes into a flat array of f64 values (np.fromfile).
@@ -2191,29 +2195,25 @@ fn parse_text_element_for_dtype(token: &str, dtype: IOSupportedDType) -> Result<
                 0.0
             },
         ),
-        IOSupportedDType::I8 => Ok((parse_signed_text_token(token)? as i8) as f64),
+        IOSupportedDType::I8 => Ok(f64::from(parse_signed_text_token_as::<i8>(token)?)),
         IOSupportedDType::I16 | IOSupportedDType::I16Be => {
-            Ok((parse_signed_text_token(token)? as i16) as f64)
+            Ok(f64::from(parse_signed_text_token_as::<i16>(token)?))
         }
         IOSupportedDType::I32 | IOSupportedDType::I32Be => {
-            Ok((parse_signed_text_token(token)? as i32) as f64)
+            Ok(f64::from(parse_signed_text_token_as::<i32>(token)?))
         }
         IOSupportedDType::I64 | IOSupportedDType::I64Be => {
-            let value = parse_signed_text_token(token)?;
-            let normalized = i64::try_from(value).unwrap_or(i64::MAX);
-            Ok(normalized as f64)
+            Ok(parse_signed_text_token_as::<i64>(token)? as f64)
         }
-        IOSupportedDType::U8 => Ok((parse_unsigned_text_token(token)? as u8) as f64),
+        IOSupportedDType::U8 => Ok(f64::from(parse_unsigned_text_token_as::<u8>(token)?)),
         IOSupportedDType::U16 | IOSupportedDType::U16Be => {
-            Ok((parse_unsigned_text_token(token)? as u16) as f64)
+            Ok(f64::from(parse_unsigned_text_token_as::<u16>(token)?))
         }
         IOSupportedDType::U32 | IOSupportedDType::U32Be => {
-            Ok((parse_unsigned_text_token(token)? as u32) as f64)
+            Ok(f64::from(parse_unsigned_text_token_as::<u32>(token)?))
         }
         IOSupportedDType::U64 | IOSupportedDType::U64Be => {
-            let value = parse_unsigned_text_token(token)?;
-            let normalized = u64::try_from(value).unwrap_or(u64::MAX);
-            Ok(normalized as f64)
+            Ok(parse_unsigned_text_token_as::<u64>(token)? as f64)
         }
         IOSupportedDType::F32 | IOSupportedDType::F32Be => {
             Ok(f64::from(token.parse::<f32>().map_err(|_| {
@@ -2240,10 +2240,26 @@ fn parse_signed_text_token(token: &str) -> Result<i128, IOError> {
         .map_err(|_| IOError::ReadPayloadIncomplete("fromstring: parse error"))
 }
 
+fn parse_signed_text_token_as<T>(token: &str) -> Result<T, IOError>
+where
+    T: TryFrom<i128>,
+{
+    let value = parse_signed_text_token(token)?;
+    T::try_from(value).map_err(|_| IOError::ReadPayloadIncomplete("fromstring: parse error"))
+}
+
 fn parse_unsigned_text_token(token: &str) -> Result<u128, IOError> {
     token
         .parse::<u128>()
         .map_err(|_| IOError::ReadPayloadIncomplete("fromstring: parse error"))
+}
+
+fn parse_unsigned_text_token_as<T>(token: &str) -> Result<T, IOError>
+where
+    T: TryFrom<u128>,
+{
+    let value = parse_unsigned_text_token(token)?;
+    T::try_from(value).map_err(|_| IOError::ReadPayloadIncomplete("fromstring: parse error"))
 }
 
 /// Serialize array values to a byte buffer (np.ndarray.tobytes equivalent).
@@ -3852,6 +3868,15 @@ mod tests {
     }
 
     #[test]
+    fn loadtxt_strips_inline_comments() {
+        let text = "1 2 # first row\n3 4#second row\n";
+        let result = loadtxt(text, ' ', '#', 0, 0).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 2);
+        assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
     fn loadtxt_skiprows() {
         let text = "header line\n1 2\n3 4\n";
         let result = loadtxt(text, ' ', '#', 1, 0).unwrap();
@@ -3912,6 +3937,15 @@ mod tests {
         let text = "col1,col2\n1,2\n3,4\n";
         let result = genfromtxt(text, ',', '#', 1, 0.0).unwrap();
         assert_eq!(result.nrows, 2);
+        assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn genfromtxt_strips_inline_comments() {
+        let text = "1,2#first row\n3,4 # second row\n";
+        let result = genfromtxt(text, ',', '#', 0, 0.0).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 2);
         assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0]);
     }
 
@@ -4382,10 +4416,11 @@ mod tests {
     }
 
     #[test]
-    fn fromstring_text_mode_honors_unsigned_dtype_wrapping() {
+    fn fromstring_text_mode_rejects_unsigned_overflow() {
         let data = b"255 256 257";
-        let vals = fromstring(data, IOSupportedDType::U8, " ").unwrap();
-        assert_eq!(vals, vec![255.0, 0.0, 1.0]);
+        let err = fromstring(data, IOSupportedDType::U8, " ")
+            .expect_err("unsigned text parser must reject overflow");
+        assert!(matches!(err, IOError::ReadPayloadIncomplete(_)));
     }
 
     #[test]
@@ -4437,6 +4472,28 @@ mod tests {
         let data = b"1.9 2.1";
         let err = fromstring(data, IOSupportedDType::I32, " ")
             .expect_err("integer dtype should reject decimal tokens");
+        assert!(matches!(err, IOError::ReadPayloadIncomplete(_)));
+    }
+
+    #[test]
+    fn fromstring_text_i8_rejects_out_of_range_token() {
+        let err = fromstring(b"128", IOSupportedDType::I8, " ")
+            .expect_err("i8 parser must reject out-of-range text");
+        assert!(matches!(err, IOError::ReadPayloadIncomplete(_)));
+    }
+
+    #[test]
+    fn fromstring_text_u8_rejects_out_of_range_token() {
+        let err = fromstring(b"256", IOSupportedDType::U8, " ")
+            .expect_err("u8 parser must reject out-of-range text");
+        assert!(matches!(err, IOError::ReadPayloadIncomplete(_)));
+    }
+
+    #[test]
+    fn fromstring_text_u64_rejects_out_of_range_token() {
+        let too_large = b"18446744073709551616";
+        let err = fromstring(too_large, IOSupportedDType::U64, " ")
+            .expect_err("u64 parser must reject out-of-range text");
         assert!(matches!(err, IOError::ReadPayloadIncomplete(_)));
     }
 
