@@ -12566,12 +12566,7 @@ impl UFuncArray {
             flat += resolved as usize * strides[i];
         }
         self.values[flat] = value;
-        if let Some(ref mut sidecar) = self.integer_sidecar {
-            match sidecar {
-                IntegerSidecar::I64(v) => v[flat] = value as i64,
-                IntegerSidecar::U64(v) => v[flat] = value as u64,
-            }
-        }
+        self.write_integer_mutation(flat, value, None, flat, "itemset")?;
         Ok(())
     }
 
@@ -14185,18 +14180,28 @@ impl UFuncArray {
     /// For each position where `mask` is nonzero, the corresponding element
     /// in `self` is replaced with the next value from `values` (cycling if
     /// `values` is shorter than the number of True entries).
-    pub fn putmask(&mut self, mask: &Self, values: &Self) {
+    pub fn putmask(&mut self, mask: &Self, values: &Self) -> Result<(), UFuncError> {
         if values.values.is_empty() {
-            return;
+            return Ok(());
         }
         let n = self.values.len().min(mask.values.len());
         let mut vi = 0;
         for i in 0..n {
             if mask.values[i] != 0.0 {
-                self.values[i] = values.values[vi % values.values.len()];
+                let src_index = vi % values.values.len();
+                let value = values.values[src_index];
+                self.values[i] = value;
+                self.write_integer_mutation(
+                    i,
+                    value,
+                    values.integer_sidecar.as_ref(),
+                    src_index,
+                    "putmask",
+                )?;
                 vi += 1;
             }
         }
+        Ok(())
     }
 
     /// Create an array with the given shape and strides into the source data.
@@ -14864,11 +14869,27 @@ impl UFuncArray {
                 for i in 0..self.values.len() {
                     if m.values[i] != 0.0 {
                         self.values[i] = src.values[i];
+                        self.write_integer_mutation(
+                            i,
+                            src.values[i],
+                            src.integer_sidecar.as_ref(),
+                            i,
+                            "copyto",
+                        )?;
                     }
                 }
             }
             None => {
                 self.values.copy_from_slice(&src.values);
+                for i in 0..self.values.len() {
+                    self.write_integer_mutation(
+                        i,
+                        src.values[i],
+                        src.integer_sidecar.as_ref(),
+                        i,
+                        "copyto",
+                    )?;
+                }
             }
         }
         Ok(())
@@ -30204,6 +30225,75 @@ mod tests {
             .fill_diagonal(1.5)
             .expect_err("fractional diagonal write must fail");
         assert!(matches!(err, UFuncError::Msg(message) if message.contains("fill_diagonal")));
+    }
+
+    #[test]
+    fn owned_itemset_materializes_integer_sidecar_for_large_exact_values() {
+        let mut arr = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![1, 2])).unwrap();
+        assert!(!arr.has_integer_sidecar());
+
+        arr.itemset(&[1], ((1_i64 << 53) + 1) as f64).unwrap();
+
+        let storage = arr.to_storage().unwrap();
+        assert_eq!(storage, ArrayStorage::I64(vec![1, (1_i64 << 53) + 1]));
+    }
+
+    #[test]
+    fn owned_itemset_rejects_inexact_integer_bridge_values() {
+        let mut arr = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![1, 2])).unwrap();
+
+        let err = arr
+            .itemset(&[0], 1.5)
+            .expect_err("fractional integer write must fail");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("itemset")));
+    }
+
+    #[test]
+    fn putmask_preserves_large_integer_sidecar_values() {
+        let mut dst = UFuncArray::from_storage(vec![3], ArrayStorage::I64(vec![1, 2, 3])).unwrap();
+        let mask = UFuncArray::new(vec![3], vec![0.0, 1.0, 0.0], DType::Bool).unwrap();
+        let src = UFuncArray::from_storage(vec![1], ArrayStorage::I64(vec![(1_i64 << 53) + 1])).unwrap();
+
+        dst.putmask(&mask, &src).unwrap();
+
+        let storage = dst.to_storage().unwrap();
+        assert_eq!(storage, ArrayStorage::I64(vec![1, (1_i64 << 53) + 1, 3]));
+    }
+
+    #[test]
+    fn putmask_rejects_inexact_integer_bridge_values() {
+        let mut dst = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![1, 2])).unwrap();
+        let mask = UFuncArray::new(vec![2], vec![1.0, 0.0], DType::Bool).unwrap();
+        let src = UFuncArray::new(vec![1], vec![1.5], DType::F64).unwrap();
+
+        let err = dst
+            .putmask(&mask, &src)
+            .expect_err("fractional integer write must fail");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("putmask")));
+    }
+
+    #[test]
+    fn copyto_preserves_large_integer_sidecar_values() {
+        let mut dst = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![1, 2])).unwrap();
+        let src =
+            UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![3, (1_i64 << 53) + 1]))
+                .unwrap();
+
+        dst.copyto(&src, None, Some("safe")).unwrap();
+
+        let storage = dst.to_storage().unwrap();
+        assert_eq!(storage, ArrayStorage::I64(vec![3, (1_i64 << 53) + 1]));
+    }
+
+    #[test]
+    fn copyto_rejects_inexact_integer_bridge_values() {
+        let mut dst = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![1, 2])).unwrap();
+        let src = UFuncArray::new(vec![2], vec![1.5, 2.0], DType::F64).unwrap();
+
+        let err = dst
+            .copyto(&src, None, Some("unsafe"))
+            .expect_err("fractional integer write must fail");
+        assert!(matches!(err, UFuncError::Msg(message) if message.contains("copyto")));
     }
 
     #[test]
