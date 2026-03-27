@@ -1629,6 +1629,11 @@ pub fn loadtxt_usecols(
             }
             _ => {}
         }
+        if values.len() + row_vals.len() > MAX_TEXT_ELEMENTS {
+            return Err(IOError::ReadPayloadIncomplete(
+                "loadtxt: text exceeds MAX_TEXT_ELEMENTS budget",
+            ));
+        }
         values.extend(row_vals);
         nrows += 1;
     }
@@ -2141,6 +2146,9 @@ pub fn fromstring(data: &[u8], dtype: IOSupportedDType, sep: &str) -> Result<Vec
         })?;
 
         let parse_tokens = |tokens: Vec<&str>| {
+            if tokens.len() > MAX_TEXT_ELEMENTS {
+                return Err(IOError::ReadPayloadIncomplete("fromstring: text exceeds MAX_TEXT_ELEMENTS budget"));
+            }
             tokens
                 .into_iter()
                 .map(|s| parse_text_element_for_dtype(s.trim(), dtype))
