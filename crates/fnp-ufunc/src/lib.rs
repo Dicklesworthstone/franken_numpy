@@ -5671,6 +5671,14 @@ impl UFuncArray {
         let out_shape = broadcast_shape(&shape_cx, &y.shape).map_err(UFuncError::Shape)?;
         let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
         let out_dtype = promote(x.dtype, y.dtype);
+        let x_sidecar = match out_dtype {
+            DType::I64 | DType::U64 => x.synthesized_integer_sidecar("where_select")?,
+            _ => None,
+        };
+        let y_sidecar = match out_dtype {
+            DType::I64 | DType::U64 => y.synthesized_integer_sidecar("where_select")?,
+            _ => None,
+        };
 
         let cond_strides = contiguous_strides_elems(&condition.shape);
         let x_strides = contiguous_strides_elems(&x.shape);
@@ -5686,12 +5694,70 @@ impl UFuncArray {
         let mut x_flat = 0usize;
         let mut y_flat = 0usize;
         let mut values = Vec::with_capacity(out_count);
+        let mut integer_sidecar = match out_dtype {
+            DType::I64 => Some(IntegerSidecar::I64(Vec::with_capacity(out_count))),
+            DType::U64 => Some(IntegerSidecar::U64(Vec::with_capacity(out_count))),
+            _ => None,
+        };
 
         for flat in 0..out_count {
-            if condition.values[cond_flat] != 0.0 {
-                values.push(x.values[x_flat]);
-            } else {
-                values.push(y.values[y_flat]);
+            let (selected_value, selected_flat, selected_sidecar) =
+                if condition.values[cond_flat] != 0.0 {
+                    (x.values[x_flat], x_flat, &x_sidecar)
+                } else {
+                    (y.values[y_flat], y_flat, &y_sidecar)
+                };
+            values.push(selected_value);
+
+            if let Some(out_sidecar) = integer_sidecar.as_mut() {
+                match out_sidecar {
+                    IntegerSidecar::I64(dst) => {
+                        let exact = match selected_sidecar {
+                            Some(IntegerSidecar::I64(src)) => src[selected_flat],
+                            Some(IntegerSidecar::U64(src)) => {
+                                i64::try_from(src[selected_flat]).map_err(|_| {
+                                    UFuncError::Msg(format!(
+                                        "where_select: value at index {selected_flat} ({}) cannot be represented as i64",
+                                        src[selected_flat]
+                                    ))
+                                })?
+                            }
+                            None => {
+                                ensure_exact_integer_bridge_value_supported(
+                                    selected_value,
+                                    DType::I64,
+                                    "where_select",
+                                    selected_flat,
+                                )?;
+                                selected_value as i64
+                            }
+                        };
+                        dst.push(exact);
+                    }
+                    IntegerSidecar::U64(dst) => {
+                        let exact = match selected_sidecar {
+                            Some(IntegerSidecar::I64(src)) => {
+                                u64::try_from(src[selected_flat]).map_err(|_| {
+                                    UFuncError::Msg(format!(
+                                        "where_select: value at index {selected_flat} ({}) cannot be represented as u64",
+                                        src[selected_flat]
+                                    ))
+                                })?
+                            }
+                            Some(IntegerSidecar::U64(src)) => src[selected_flat],
+                            None => {
+                                ensure_exact_integer_bridge_value_supported(
+                                    selected_value,
+                                    DType::U64,
+                                    "where_select",
+                                    selected_flat,
+                                )?;
+                                selected_value as u64
+                            }
+                        };
+                        dst.push(exact);
+                    }
+                }
             }
 
             if flat + 1 == out_count || ndim == 0 {
@@ -5718,7 +5784,7 @@ impl UFuncArray {
             shape: out_shape,
             values,
             dtype: out_dtype,
-            integer_sidecar: None,
+            integer_sidecar,
         })
     }
 
@@ -28180,6 +28246,23 @@ mod tests {
         let out = UFuncArray::where_select(&cond, &x, &y).expect("where");
         assert_eq!(out.shape(), &[2, 2]);
         assert_eq!(out.values(), &[1.0, 0.0, 0.0, 4.0]);
+    }
+
+    #[test]
+    fn where_select_preserves_large_u64_sidecar_values() {
+        let cond = UFuncArray::new(vec![3], vec![1.0, 0.0, 1.0], DType::Bool).unwrap();
+        let x = UFuncArray::from_storage(
+            vec![3],
+            ArrayStorage::U64(vec![9_007_199_254_740_993, 2, 9_007_199_254_740_995]),
+        )
+        .unwrap();
+        let y = UFuncArray::from_storage(vec![3], ArrayStorage::U64(vec![7, 8, 9])).unwrap();
+        let out = UFuncArray::where_select(&cond, &x, &y).unwrap();
+        assert!(out.has_integer_sidecar());
+        assert_eq!(
+            out.to_storage().unwrap(),
+            ArrayStorage::U64(vec![9_007_199_254_740_993, 8, 9_007_199_254_740_995])
+        );
     }
 
     #[test]
