@@ -5538,7 +5538,7 @@ impl UFuncArray {
                         shape: vec![a.shape[0], 1],
                         values: a.values.clone(),
                         dtype: a.dtype,
-                        integer_sidecar: None,
+                        integer_sidecar: a.cloned_integer_sidecar(),
                     }
                 } else {
                     a.clone()
@@ -12772,12 +12772,13 @@ impl UFuncArray {
         }
         let n = self.shape[0];
         let shift = n / 2;
-        let values: Vec<f64> = (0..n).map(|i| self.values[(i + n - shift) % n]).collect();
+        let source_indices: Vec<usize> = (0..n).map(|i| (i + n - shift) % n).collect();
+        let values: Vec<f64> = source_indices.iter().map(|&src| self.values[src]).collect();
         Ok(Self {
             shape: vec![n],
             values,
-            dtype: DType::F64,
-            integer_sidecar: None,
+            dtype: self.dtype,
+            integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
         })
     }
 
@@ -12790,12 +12791,13 @@ impl UFuncArray {
         }
         let n = self.shape[0];
         let shift = n.div_ceil(2);
-        let values: Vec<f64> = (0..n).map(|i| self.values[(i + n - shift) % n]).collect();
+        let source_indices: Vec<usize> = (0..n).map(|i| (i + n - shift) % n).collect();
+        let values: Vec<f64> = source_indices.iter().map(|&src| self.values[src]).collect();
         Ok(Self {
             shape: vec![n],
             values,
-            dtype: DType::F64,
-            integer_sidecar: None,
+            dtype: self.dtype,
+            integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
         })
     }
 
@@ -33174,6 +33176,32 @@ mod tests {
         for i in 0..8 {
             assert!((unshifted.values[i] - f.values[i]).abs() < 1e-10);
         }
+    }
+
+    #[test]
+    fn fftshift_preserves_large_u64_sidecar_values() {
+        let large = (1_u64 << 53) + 17;
+        let arr =
+            UFuncArray::from_storage(vec![4], ArrayStorage::U64(vec![1, large, 3, 4])).unwrap();
+        let shifted = arr.fftshift().unwrap();
+        assert_eq!(shifted.dtype(), DType::U64);
+        assert_eq!(
+            shifted.to_storage().unwrap(),
+            ArrayStorage::U64(vec![3, 4, 1, large])
+        );
+    }
+
+    #[test]
+    fn ifftshift_preserves_large_u64_sidecar_values() {
+        let large = (1_u64 << 53) + 17;
+        let arr =
+            UFuncArray::from_storage(vec![5], ArrayStorage::U64(vec![1, 2, large, 4, 5])).unwrap();
+        let shifted = arr.ifftshift().unwrap();
+        assert_eq!(shifted.dtype(), DType::U64);
+        assert_eq!(
+            shifted.to_storage().unwrap(),
+            ArrayStorage::U64(vec![large, 4, 5, 1, 2])
+        );
     }
 
     #[test]
