@@ -7685,6 +7685,54 @@ impl UFuncArray {
         Ok(Self::scalar(sum, dtype))
     }
 
+    /// Vector dot product along an axis (`np.linalg.vecdot`, NumPy 2.0).
+    ///
+    /// Computes the dot product of corresponding vectors along `axis` (default: last).
+    /// Supports batch dimensions: for inputs with shapes `(..., n)`, returns shape `(...)`.
+    pub fn vecdot(&self, other: &Self, axis: Option<isize>) -> Result<Self, UFuncError> {
+        let ndim = self.shape.len();
+        if ndim == 0 || other.shape.len() == 0 {
+            return Err(UFuncError::Msg(
+                "vecdot: inputs must have at least 1 dimension".to_string(),
+            ));
+        }
+        if self.shape != other.shape {
+            return Err(UFuncError::Msg(format!(
+                "vecdot: shapes must match, got {:?} and {:?}",
+                self.shape, other.shape
+            )));
+        }
+        let ax = match axis {
+            Some(a) => normalize_axis(a, ndim)?,
+            None => ndim - 1,
+        };
+        let axis_len = self.shape[ax];
+        let outer: usize = self.shape[..ax].iter().product();
+        let inner: usize = self.shape[ax + 1..].iter().product();
+
+        let mut out_shape: Vec<usize> = self.shape.clone();
+        out_shape.remove(ax);
+        let mut values = Vec::with_capacity(outer * inner);
+
+        for o in 0..outer {
+            for i in 0..inner {
+                let mut dot = 0.0;
+                for k in 0..axis_len {
+                    let idx = o * axis_len * inner + k * inner + i;
+                    dot += self.values[idx] * other.values[idx];
+                }
+                values.push(dot);
+            }
+        }
+
+        let dtype = promote(self.dtype, other.dtype);
+        if out_shape.is_empty() {
+            Ok(Self::scalar(values[0], dtype))
+        } else {
+            Self::from_values_with_dtype(out_shape, values, dtype)
+        }
+    }
+
     /// Cross product of two vectors (`np.cross`).
     ///
     /// Supports 2-D and 3-D vectors. For 2-D vectors `[a, b]` and `[c, d]`,
@@ -32557,6 +32605,38 @@ mod tests {
         let b = UFuncArray::new(vec![2, 2], vec![5.0, 6.0, 7.0, 8.0], DType::F64).unwrap();
         let r = a.vdot(&b).unwrap();
         assert_eq!(r.values(), &[70.0]); // 1*5+2*6+3*7+4*8=70
+    }
+
+    #[test]
+    fn vecdot_1d() {
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3], vec![4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = a.vecdot(&b, None).unwrap();
+        assert_eq!(r.values(), &[32.0]); // 1*4+2*5+3*6=32
+    }
+
+    #[test]
+    fn vecdot_batched() {
+        // Two 3-element vectors stacked as (2, 3)
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let b =
+            UFuncArray::new(vec![2, 3], vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0], DType::F64).unwrap();
+        let r = a.vecdot(&b, None).unwrap();
+        assert_eq!(r.shape(), &[2]);
+        assert_eq!(r.values(), &[1.0, 5.0]); // [1*1+2*0+3*0, 4*0+5*1+6*0]
+    }
+
+    #[test]
+    fn vecdot_axis0() {
+        // vecdot along axis=0 of (3, 2) → shape (2,)
+        let a =
+            UFuncArray::new(vec![3, 2], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let b =
+            UFuncArray::new(vec![3, 2], vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0], DType::F64).unwrap();
+        let r = a.vecdot(&b, Some(0)).unwrap();
+        assert_eq!(r.shape(), &[2]);
+        assert_eq!(r.values(), &[9.0, 12.0]); // col0: 1+3+5=9, col1: 2+4+6=12
     }
 
     #[test]

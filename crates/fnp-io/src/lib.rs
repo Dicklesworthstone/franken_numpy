@@ -3180,8 +3180,9 @@ fn decode_unicode_element(chunk: &[u8], is_le: bool) -> Result<String, IOError> 
         if cp == 0 {
             break;
         }
-        let c = char::from_u32(cp)
-            .ok_or(IOError::ReadPayloadIncomplete("invalid unicode code point in string payload"))?;
+        let c = char::from_u32(cp).ok_or(IOError::ReadPayloadIncomplete(
+            "invalid unicode code point in string payload",
+        ))?;
         chars.push(c);
     }
     Ok(chars.into_iter().collect())
