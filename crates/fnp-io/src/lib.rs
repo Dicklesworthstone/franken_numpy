@@ -3169,7 +3169,7 @@ fn decode_bytes_element(chunk: &[u8]) -> String {
 ///
 /// NumPy `<Un` or `>Un` stores each element as `n` UCS-4 code points (4 bytes each),
 /// null-padded. Little-endian if `is_le`, big-endian otherwise.
-fn decode_unicode_element(chunk: &[u8], is_le: bool) -> String {
+fn decode_unicode_element(chunk: &[u8], is_le: bool) -> Result<String, IOError> {
     let mut chars = Vec::with_capacity(chunk.len() / 4);
     for code_unit in chunk.chunks_exact(4) {
         let cp = if is_le {
@@ -3180,11 +3180,11 @@ fn decode_unicode_element(chunk: &[u8], is_le: bool) -> String {
         if cp == 0 {
             break;
         }
-        if let Some(c) = char::from_u32(cp) {
-            chars.push(c);
-        }
+        let c = char::from_u32(cp)
+            .ok_or(IOError::ReadPayloadIncomplete("invalid unicode code point in string payload"))?;
+        chars.push(c);
     }
-    chars.into_iter().collect()
+    Ok(chars.into_iter().collect())
 }
 
 /// Encode a string as a fixed-width byte string (NumPy `|Sn`).
@@ -3251,8 +3251,8 @@ pub fn fromfile_strings(
         let chunk = &data[offset..offset + item_size];
         let s = match dtype {
             IOSupportedDType::Bytes(_) => decode_bytes_element(chunk),
-            IOSupportedDType::Unicode(_) => decode_unicode_element(chunk, true),
-            IOSupportedDType::UnicodeBe(_) => decode_unicode_element(chunk, false),
+            IOSupportedDType::Unicode(_) => decode_unicode_element(chunk, true)?,
+            IOSupportedDType::UnicodeBe(_) => decode_unicode_element(chunk, false)?,
             _ => return Err(IOError::DTypeDescriptorInvalid),
         };
         strings.push(s);
@@ -4744,6 +4744,15 @@ mod tests {
         let encoded = tofile_strings(&strings, dtype).unwrap();
         let decoded = fromfile_strings(&encoded, dtype, None).unwrap();
         assert_eq!(decoded, strings);
+    }
+
+    #[test]
+    fn fromfile_strings_rejects_invalid_unicode_code_point() {
+        let dtype = IOSupportedDType::Unicode(1);
+        let encoded = 0x0011_0000_u32.to_le_bytes().to_vec();
+        let err = fromfile_strings(&encoded, dtype, None)
+            .expect_err("invalid unicode payload must fail closed");
+        assert!(matches!(err, IOError::ReadPayloadIncomplete(_)));
     }
 
     #[test]
