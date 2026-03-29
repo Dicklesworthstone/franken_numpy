@@ -2149,35 +2149,40 @@ pub fn fromstring(data: &[u8], dtype: IOSupportedDType, sep: &str) -> Result<Vec
             IOError::ReadPayloadIncomplete("fromstring: invalid UTF-8 in text mode")
         })?;
 
-        let parse_tokens = |tokens: Vec<&str>| {
-            if tokens.len() > MAX_TEXT_ELEMENTS {
-                return Err(IOError::ReadPayloadIncomplete(
-                    "fromstring: text exceeds MAX_TEXT_ELEMENTS budget",
-                ));
-            }
-            tokens
-                .into_iter()
-                .map(|s| parse_text_element_for_dtype(s.trim(), dtype))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| IOError::ReadPayloadIncomplete("fromstring: parse error"))
-        };
+        let mut values = Vec::new();
 
-        let values = if sep.chars().all(char::is_whitespace) {
-            parse_tokens(text.split_whitespace().collect())?
+        if sep.chars().all(char::is_whitespace) {
+            for token in text.split_whitespace() {
+                if values.len() >= MAX_TEXT_ELEMENTS {
+                    return Err(IOError::ReadPayloadIncomplete(
+                        "fromstring: text exceeds MAX_TEXT_ELEMENTS budget",
+                    ));
+                }
+                values.push(
+                    parse_text_element_for_dtype(token.trim(), dtype)
+                        .map_err(|_| IOError::ReadPayloadIncomplete("fromstring: parse error"))?,
+                );
+            }
         } else {
-            let split_tokens: Vec<&str> = text.split(sep).collect();
-            let mut tokens = Vec::new();
-            for (idx, token) in split_tokens.iter().enumerate() {
+            let mut iter = text.split(sep).peekable();
+            while let Some(token) = iter.next() {
                 if token.trim().is_empty() {
-                    if idx + 1 == split_tokens.len() {
+                    if iter.peek().is_none() {
                         continue;
                     }
                     return Err(IOError::ReadPayloadIncomplete("fromstring: parse error"));
                 }
-                tokens.push(*token);
+                if values.len() >= MAX_TEXT_ELEMENTS {
+                    return Err(IOError::ReadPayloadIncomplete(
+                        "fromstring: text exceeds MAX_TEXT_ELEMENTS budget",
+                    ));
+                }
+                values.push(
+                    parse_text_element_for_dtype(token.trim(), dtype)
+                        .map_err(|_| IOError::ReadPayloadIncomplete("fromstring: parse error"))?,
+                );
             }
-            parse_tokens(tokens)?
-        };
+        }
         Ok(values)
     }
 }

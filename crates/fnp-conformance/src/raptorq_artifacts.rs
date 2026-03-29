@@ -251,7 +251,7 @@ fn decode_payload_from_records(
         object_id,
         sidecar.source_size as u64,
         sidecar.symbol_size,
-        sidecar.source_blocks,
+        sidecar.source_blocks.into(),
         sidecar.source_symbols,
     );
     decoder

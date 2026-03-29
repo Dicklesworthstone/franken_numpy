@@ -17,6 +17,11 @@ readonly PHASE2C_PACKETS=(
 
 cd "$ROOT_DIR"
 
+# Remote artifact retrieval can race on Cargo's incremental cache directories.
+# The topology gate does not require incremental compilation, so default it off
+# unless the caller explicitly opts back in.
+export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
+
 resolve_require_real_oracle() {
   if [[ -n "${FNP_REQUIRE_REAL_NUMPY_ORACLE:-}" ]]; then
     printf '%s' "$FNP_REQUIRE_REAL_NUMPY_ORACLE"
@@ -51,6 +56,7 @@ validate_phase2c_packets() {
 }
 
 echo "[ci-topology] root=$ROOT_DIR"
+echo "[ci-topology] cargo_incremental=$CARGO_INCREMENTAL"
 
 echo "[ci-topology] G1 fmt+lint"
 rch exec -- cargo fmt --check
