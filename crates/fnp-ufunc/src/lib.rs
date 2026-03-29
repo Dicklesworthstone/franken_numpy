@@ -14407,7 +14407,11 @@ impl UFuncArray {
     fn nan_fill_for_axis(&self, axis: usize, fill: f64) -> (Self, Vec<usize>) {
         let strides = c_strides_elems(&self.shape);
         let axis_len = self.shape[axis];
-        let outer_count = self.values.len() / axis_len;
+        let outer_count = if axis_len == 0 {
+            0
+        } else {
+            self.values.len() / axis_len
+        };
 
         let mut filled = self.values.clone();
         let mut nan_counts = vec![0usize; outer_count];
@@ -14445,6 +14449,22 @@ impl UFuncArray {
             integer_sidecar: None,
         };
         (arr, nan_counts)
+    }
+
+    fn nan_empty_axis_result(
+        &self,
+        axis: usize,
+        keepdims: bool,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        let out_shape = reduced_shape(&self.shape, axis, keepdims);
+        let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+        Ok(Self {
+            shape: out_shape,
+            values: vec![f64::NAN; out_count],
+            dtype,
+            integer_sidecar: None,
+        })
     }
 
     /// `np.nansum` — sum ignoring NaN values.
@@ -14499,6 +14519,13 @@ impl UFuncArray {
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
                 let axis_len = self.shape[ax];
+                if axis_len == 0 {
+                    return self.nan_empty_axis_result(
+                        ax,
+                        keepdims,
+                        promote_for_mean_reduction(self.dtype),
+                    );
+                }
                 let (filled, nan_counts) = self.nan_fill_for_axis(ax, 0.0);
                 let mut result = filled.reduce_sum(Some(ax as isize), keepdims)?;
                 for (i, val) in result.values.iter_mut().enumerate() {
@@ -14544,9 +14571,16 @@ impl UFuncArray {
             }
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
+                let axis_len = self.shape[ax];
+                if axis_len == 0 {
+                    return self.nan_empty_axis_result(
+                        ax,
+                        keepdims,
+                        promote_for_mean_reduction(self.dtype),
+                    );
+                }
                 // Compute nanmean first, then compute variance from filled data
                 let mean_arr = self.nanmean(Some(ax as isize), true)?;
-                let axis_len = self.shape[ax];
                 let strides = c_strides_elems(&self.shape);
 
                 let out_shape = reduced_shape(&self.shape, ax, keepdims);
@@ -14696,6 +14730,13 @@ impl UFuncArray {
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
                 let axis_len = self.shape[ax];
+                if axis_len == 0 {
+                    return self.nan_empty_axis_result(
+                        ax,
+                        false,
+                        promote_for_mean_reduction(self.dtype),
+                    );
+                }
                 let strides = c_strides_elems(&self.shape);
                 let out_shape = reduced_shape(&self.shape, ax, false);
                 let outer_count = self.values.len() / axis_len;
@@ -14760,7 +14801,7 @@ impl UFuncArray {
                 }
                 let strides = c_strides_elems(&self.shape);
                 let out_shape = reduced_shape(&self.shape, ax, false);
-                let outer_count = self.values.len() / axis_len;
+                let outer_count = if axis_len == 0 { 0 } else { self.values.len() / axis_len };
                 let mut out_values = Vec::with_capacity(outer_count);
 
                 for outer in 0..outer_count {
@@ -14830,7 +14871,7 @@ impl UFuncArray {
                 }
                 let strides = c_strides_elems(&self.shape);
                 let out_shape = reduced_shape(&self.shape, ax, false);
-                let outer_count = self.values.len() / axis_len;
+                let outer_count = if axis_len == 0 { 0 } else { self.values.len() / axis_len };
                 let mut out_values = Vec::with_capacity(outer_count);
 
                 for outer in 0..outer_count {
@@ -31885,6 +31926,14 @@ mod tests {
     }
 
     #[test]
+    fn nansum_empty_axis_returns_zero_identities() {
+        let a = UFuncArray::zeros(vec![0, 5], DType::F64).unwrap();
+        let r = a.nansum(Some(0), false).unwrap();
+        assert_eq!(r.shape(), &[5]);
+        assert_eq!(r.values(), &[0.0, 0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
     fn nanmean_basic() {
         let a = UFuncArray::new(vec![4], vec![1.0, f64::NAN, 3.0, 4.0], DType::F64).unwrap();
         let r = a.nanmean(None, false).unwrap();
@@ -31906,12 +31955,28 @@ mod tests {
     }
 
     #[test]
+    fn nanmean_empty_axis_returns_nan_lanes() {
+        let a = UFuncArray::zeros(vec![0, 5], DType::F64).unwrap();
+        let r = a.nanmean(Some(0), false).unwrap();
+        assert_eq!(r.shape(), &[5]);
+        assert!(r.values().iter().all(|v| v.is_nan()));
+    }
+
+    #[test]
     fn nanvar_basic() {
         let a = UFuncArray::new(vec![5], vec![1.0, f64::NAN, 3.0, 4.0, 2.0], DType::F64).unwrap();
         let r = a.nanvar(None, false, 0).unwrap();
         // values: 1,3,4,2  mean=2.5, var = ((1-2.5)^2 + (3-2.5)^2 + (4-2.5)^2 + (2-2.5)^2)/4
         //       = (2.25 + 0.25 + 2.25 + 0.25)/4 = 5.0/4 = 1.25
         assert!((r.values()[0] - 1.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn nanvar_empty_axis_returns_nan_lanes() {
+        let a = UFuncArray::zeros(vec![0, 5], DType::F64).unwrap();
+        let r = a.nanvar(Some(0), false, 0).unwrap();
+        assert_eq!(r.shape(), &[5]);
+        assert!(r.values().iter().all(|v| v.is_nan()));
     }
 
     #[test]
@@ -31965,6 +32030,14 @@ mod tests {
             UFuncArray::new(vec![5], vec![1.0, f64::NAN, 3.0, 2.0, f64::NAN], DType::F64).unwrap();
         let r = a.nanmedian(None).unwrap();
         assert_eq!(r.values(), &[2.0]); // median of [1,2,3]
+    }
+
+    #[test]
+    fn nanmedian_empty_axis_returns_nan_lanes() {
+        let a = UFuncArray::zeros(vec![0, 5], DType::F64).unwrap();
+        let r = a.nanmedian(Some(0)).unwrap();
+        assert_eq!(r.shape(), &[5]);
+        assert!(r.values().iter().all(|v| v.is_nan()));
     }
 
     #[test]
