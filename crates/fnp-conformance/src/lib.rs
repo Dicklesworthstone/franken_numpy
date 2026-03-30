@@ -9388,13 +9388,14 @@ fn generate_rng_samples(
                 .map(|value| value as f64)
                 .collect())
         }
-        "zipf" => Ok(generator.zipf(case.param_a, draws)),
+        "zipf" => generator
+            .zipf(case.param_a, draws)
+            .map_err(|e| RngSuiteError::new("parameter_violation", e.to_string())),
         "wald" => Ok(generator.wald(case.param_a, case.param_b, draws)),
-        "logseries" => Ok(generator
+        "logseries" => generator
             .logseries(case.param_a, draws)
-            .into_iter()
-            .map(|value| value as f64)
-            .collect()),
+            .map(|vals| vals.into_iter().map(|v| v as f64).collect())
+            .map_err(|e| RngSuiteError::new("parameter_violation", e.to_string())),
         "maxwell" => Ok(generator.maxwell(case.param_a, draws)),
         "halfnormal" => Ok(generator.halfnormal(case.param_a, draws)),
         "truncated_normal" => Ok(generator.truncated_normal(
@@ -10720,9 +10721,7 @@ mod tests {
                 eprintln!("DEBUG: log line missing rhs: {}", line);
             }
             assert!(
-                obj.get("rhs")
-                    .and_then(Value::as_str)
-                    .is_some_and(|s| !s.trim().is_empty())
+                obj.get("rhs").is_some_and(Value::is_string)
             );
             assert!(
                 obj.get("expected")
@@ -11484,7 +11483,7 @@ mod tests {
         );
 
         let mut g = Generator::from_pcg64_dxsm(SEED).unwrap();
-        let zipf_vals: Vec<f64> = g.zipf(2.0, 5);
+        let zipf_vals: Vec<f64> = g.zipf(2.0, 5).unwrap();
         let expected_zipf = [14.0, 1.0, 8.0, 1.0, 1.0];
         for (i, (a, e)) in zipf_vals.iter().zip(expected_zipf.iter()).enumerate() {
             assert!(

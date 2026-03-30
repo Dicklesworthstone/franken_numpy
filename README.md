@@ -853,6 +853,15 @@ Run all gates:
 scripts/e2e/run_ci_gate_topology.sh
 ```
 
+For manual direct `rch` workspace checks in this repo, prefer disabling Cargo
+incremental artifacts to avoid noisy remote artifact-retrieval races under
+`target/debug/incremental`:
+
+```bash
+CARGO_INCREMENTAL=0 rch exec -- cargo check --workspace --all-targets
+CARGO_INCREMENTAL=0 rch exec -- cargo clippy --workspace --all-targets -- -D warnings
+```
+
 ---
 
 ## Conformance Pipeline

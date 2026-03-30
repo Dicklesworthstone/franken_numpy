@@ -37,7 +37,7 @@ fn main() {
     println!("multinomial: {:?}", g.multinomial(10, &[0.2, 0.3, 0.5], 2));
 
     let mut g = Generator::from_pcg64_dxsm(seed).unwrap();
-    println!("zipf: {:?}", g.zipf(2.0, 5));
+    println!("zipf: {:?}", g.zipf(2.0, 5).unwrap());
 
     let mut g = Generator::from_pcg64_dxsm(seed).unwrap();
     println!("hypergeometric: {:?}", g.hypergeometric(10, 20, 5, 5));

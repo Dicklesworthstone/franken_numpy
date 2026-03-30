@@ -724,9 +724,11 @@ fn pcg_advance_128(state: u128, mut delta: u128, mult: u128, inc: u128) -> u128 
             acc_mult = acc_mult.wrapping_mul(cur_mult);
             acc_plus = acc_plus.wrapping_mul(cur_mult).wrapping_add(cur_plus);
         }
-        cur_plus = cur_mult.wrapping_add(1).wrapping_mul(cur_plus);
-        cur_mult = cur_mult.wrapping_mul(cur_mult);
         delta >>= 1;
+        if delta > 0 {
+            cur_plus = cur_mult.wrapping_add(1).wrapping_mul(cur_plus);
+            cur_mult = cur_mult.wrapping_mul(cur_mult);
+        }
     }
     acc_mult.wrapping_mul(state).wrapping_add(acc_plus)
 }
@@ -3763,10 +3765,13 @@ impl Generator {
     ///
     /// Matches `random_zipf()` in NumPy's `distributions.c`.
     /// Returns integer-valued floats (zipf values are positive integers).
-    pub fn zipf(&mut self, a: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    pub fn zipf(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if a <= 1.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| self.sample_zipf_single(a) as f64)
-            .collect()
+            .collect())
     }
 
     fn sample_zipf_single(&mut self, a: f64) -> i64 {
@@ -3813,9 +3818,12 @@ impl Generator {
     }
 
     /// Logarithmic (log-series) distribution (matching NumPy's algorithm).
-    pub fn logseries(&mut self, p: f64, size: usize) -> Vec<u64> {
+    pub fn logseries(&mut self, p: f64, size: usize) -> Result<Vec<u64>, RandomError> {
+        if p <= 0.0 || p >= 1.0 {
+            return Err(RandomError::InvalidParameter);
+        }
         let r = (-p).ln_1p(); // log1p(-p) = ln(1 - p)
-        (0..size)
+        Ok((0..size)
             .map(|_| {
                 loop {
                     let v = self.next_f64();
@@ -3837,7 +3845,7 @@ impl Generator {
                     return 2;
                 }
             })
-            .collect()
+            .collect())
     }
 
     /// Maxwell distribution (np.random.Generator.maxwell).
@@ -5396,7 +5404,7 @@ mod tests {
     #[test]
     fn zipf_values_are_positive_integers() {
         let mut rng = test_generator();
-        let samples = rng.zipf(2.0, 5000);
+        let samples = rng.zipf(2.0, 5000).unwrap();
         for &s in &samples {
             assert!(s >= 1.0, "zipf values must be >= 1");
             assert!(
@@ -5427,7 +5435,7 @@ mod tests {
     #[test]
     fn logseries_values_are_positive_integers() {
         let mut rng = test_generator();
-        let samples = rng.logseries(0.5, 5000);
+        let samples = rng.logseries(0.5, 5000).unwrap();
         for &s in &samples {
             assert!(s >= 1, "logseries values must be >= 1");
         }
@@ -6719,7 +6727,7 @@ mod tests {
     #[test]
     fn oracle_logseries() {
         let mut g = oracle_gen();
-        let vals = g.logseries(0.6, 10);
+        let vals = g.logseries(0.6, 10).unwrap();
         let expected: Vec<u64> = vec![1, 1, 2, 1, 1, 2, 1, 2, 2, 1];
         assert_u64_seq("logseries", &vals, &expected);
     }
@@ -6817,7 +6825,7 @@ mod tests {
     #[test]
     fn oracle_zipf() {
         let mut g = oracle_gen();
-        let vals = g.zipf(2.0, 10);
+        let vals = g.zipf(2.0, 10).unwrap();
         // NumPy returns integers: [14, 1, 8, 1, 1, 8, 1, 1, 3, 1]
         let expected = [14.0, 1.0, 8.0, 1.0, 1.0, 8.0, 1.0, 1.0, 3.0, 1.0];
         assert_f64_seq("zipf", &vals, &expected);

@@ -2530,8 +2530,10 @@ pub fn matrix_power_nxn(a: &[f64], n: usize, p: i64) -> Result<Vec<f64>, LinAlgE
         if exp & 1 == 1 {
             result = mat_mul_flat(&result, &cur, n);
         }
-        cur = mat_mul_flat(&cur, &cur, n);
         exp >>= 1;
+        if exp > 0 {
+            cur = mat_mul_flat(&cur, &cur, n);
+        }
     }
     Ok(result)
 }
@@ -2571,7 +2573,7 @@ pub fn expm_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
     };
 
     // Scale: A_s = A / 2^s
-    let scale = 2.0f64.powi(s.try_into().unwrap_or(0));
+    let scale = 2.0f64.powi(s as i32);
     let a_s: Vec<f64> = a.iter().map(|&v| v / scale).collect();
 
     // Taylor series: exp(A_s) = I + A_s + A_s^2/2! + A_s^3/3! + ...
@@ -2683,7 +2685,7 @@ pub fn logm_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
     // Inverse scaling: compute A^{1/2^s} until close to identity
     let mut m = a.to_vec();
     let mut s = 0u32;
-    let max_s = u32::try_from(LOGM_MAX_SCALING_ITERATIONS).unwrap_or(u32::MAX);
+    let max_s = LOGM_MAX_SCALING_ITERATIONS as u32;
 
     let mut identity = vec![0.0; n * n];
     for i in 0..n {
@@ -2731,7 +2733,7 @@ pub fn logm_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
     }
 
     // Undo scaling: multiply by 2^s
-    let scale = 2.0f64.powi(s.try_into().unwrap_or(0));
+    let scale = 2.0f64.powi(s as i32);
     for v in &mut result {
         *v *= scale;
     }

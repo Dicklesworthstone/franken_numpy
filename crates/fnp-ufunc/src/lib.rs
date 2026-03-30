@@ -14407,11 +14407,7 @@ impl UFuncArray {
     fn nan_fill_for_axis(&self, axis: usize, fill: f64) -> (Self, Vec<usize>) {
         let strides = c_strides_elems(&self.shape);
         let axis_len = self.shape[axis];
-        let outer_count = if axis_len == 0 {
-            0
-        } else {
-            self.values.len() / axis_len
-        };
+        let outer_count = self.values.len().checked_div(axis_len).unwrap_or(0);
 
         let mut filled = self.values.clone();
         let mut nan_counts = vec![0usize; outer_count];
@@ -14801,7 +14797,7 @@ impl UFuncArray {
                 }
                 let strides = c_strides_elems(&self.shape);
                 let out_shape = reduced_shape(&self.shape, ax, false);
-                let outer_count = if axis_len == 0 { 0 } else { self.values.len() / axis_len };
+                let outer_count = self.values.len().checked_div(axis_len).unwrap_or(0);
                 let mut out_values = Vec::with_capacity(outer_count);
 
                 for outer in 0..outer_count {
@@ -14871,7 +14867,7 @@ impl UFuncArray {
                 }
                 let strides = c_strides_elems(&self.shape);
                 let out_shape = reduced_shape(&self.shape, ax, false);
-                let outer_count = if axis_len == 0 { 0 } else { self.values.len() / axis_len };
+                let outer_count = self.values.len().checked_div(axis_len).unwrap_or(0);
                 let mut out_values = Vec::with_capacity(outer_count);
 
                 for outer in 0..outer_count {
