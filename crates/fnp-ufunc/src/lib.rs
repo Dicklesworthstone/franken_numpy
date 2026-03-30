@@ -661,6 +661,8 @@ impl BinaryOp {
             Self::Minimum => {
                 if lhs.is_nan() || rhs.is_nan() {
                     f64::NAN
+                } else if lhs == rhs {
+                    rhs
                 } else {
                     lhs.min(rhs)
                 }
@@ -668,6 +670,8 @@ impl BinaryOp {
             Self::Maximum => {
                 if lhs.is_nan() || rhs.is_nan() {
                     f64::NAN
+                } else if lhs == rhs {
+                    rhs
                 } else {
                     lhs.max(rhs)
                 }
@@ -14562,8 +14566,13 @@ impl UFuncArray {
                     .collect();
                 let n = non_nan.len();
                 let mean = non_nan.iter().sum::<f64>() / n as f64;
-                let var =
-                    non_nan.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n - ddof) as f64;
+                let denom = n.saturating_sub(ddof);
+                let sq_sum = non_nan.iter().map(|v| (v - mean).powi(2)).sum::<f64>();
+                let var = if denom == 0 {
+                    f64::NAN
+                } else {
+                    sq_sum / denom as f64
+                };
                 let shape = if keepdims {
                     vec![1; self.shape.len()]
                 } else {
@@ -14620,7 +14629,12 @@ impl UFuncArray {
                             valid += 1;
                         }
                     }
-                    *out_val = sq_sum / (valid - ddof) as f64;
+                    let denom = valid.saturating_sub(ddof);
+                    *out_val = if denom == 0 {
+                        f64::NAN
+                    } else {
+                        sq_sum / denom as f64
+                    };
                 }
 
                 Ok(Self {
@@ -14659,7 +14673,8 @@ impl UFuncArray {
                     .iter()
                     .copied()
                     .filter(|v| !v.is_nan())
-                    .fold(f64::INFINITY, f64::min);
+                    .reduce(f64::min)
+                    .unwrap_or(f64::NAN);
                 let shape = if keepdims {
                     vec![1; self.shape.len()]
                 } else {
@@ -14677,8 +14692,15 @@ impl UFuncArray {
                 if self.shape[ax] == 0 {
                     return Err(UFuncError::EmptyReduction { op: "nanmin" });
                 }
-                let (filled, _) = self.nan_fill_for_axis(ax, f64::INFINITY);
-                filled.reduce_min(Some(ax as isize), keepdims)
+                let axis_len = self.shape[ax];
+                let (filled, nan_counts) = self.nan_fill_for_axis(ax, f64::INFINITY);
+                let mut result = filled.reduce_min(Some(ax as isize), keepdims)?;
+                for (val, &count) in result.values.iter_mut().zip(&nan_counts) {
+                    if count == axis_len {
+                        *val = f64::NAN;
+                    }
+                }
+                Ok(result)
             }
         }
     }
@@ -18639,12 +18661,16 @@ fn digamma_approx(mut x: f64) -> f64 {
     if x.is_nan() {
         return f64::NAN;
     }
-    // Reflection formula for x < 0
+    if x == 0.0 {
+        if x.is_sign_negative() {
+            return f64::INFINITY;
+        } else {
+            return f64::NEG_INFINITY;
+        }
+    }
+    // Reflection formula for x < 0 (and now we know x is not -0.0)
     if x < 0.0 {
         return digamma_approx(1.0 - x) - std::f64::consts::PI / (std::f64::consts::PI * x).tan();
-    }
-    if x == 0.0 {
-        return f64::NEG_INFINITY;
     }
     let mut result = 0.0;
     // Recurrence to shift argument above 6
@@ -21148,10 +21174,7 @@ pub fn unique_counts(x: &UFuncArray) -> (UFuncArray, UFuncArray) {
 /// `numpy.unique_inverse(x)` — sorted unique values and indices to reconstruct.
 pub fn unique_inverse(x: &UFuncArray) -> (UFuncArray, UFuncArray) {
     let (values, _, inverse, _) = x.unique_with_info(false, true, false);
-    (
-        values,
-        inverse.unwrap_or_else(|| unreachable!("inverse requested")),
-    )
+    (values, inverse.expect("inverse requested"))
 }
 
 /// `numpy.unique_all(x)` — sorted unique values, first indices, inverse indices, and counts.
@@ -21159,9 +21182,9 @@ pub fn unique_all(x: &UFuncArray) -> (UFuncArray, UFuncArray, UFuncArray, UFuncA
     let (values, indices, inverse, counts) = x.unique_with_info(true, true, true);
     (
         values,
-        indices.unwrap_or_else(|| unreachable!("indices requested")),
-        inverse.unwrap_or_else(|| unreachable!("inverse requested")),
-        counts.unwrap_or_else(|| unreachable!("counts requested")),
+        indices.expect("indices requested"),
+        inverse.expect("inverse requested"),
+        counts.expect("counts requested"),
     )
 }
 
@@ -31987,6 +32010,21 @@ mod tests {
     }
 
     #[test]
+    fn nanvar_ddof_larger_than_valid_count_returns_nan() {
+        let a = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
+        let r = a.nanvar(None, false, 1).unwrap();
+        assert!(r.values()[0].is_nan());
+    }
+
+    #[test]
+    fn nanvar_axis_ddof_larger_than_valid_count_returns_nan_lanes() {
+        let a = UFuncArray::new(vec![2, 1], vec![1.0, 2.0], DType::F64).unwrap();
+        let r = a.nanvar(Some(0), false, 3).unwrap();
+        assert_eq!(r.shape(), &[1]);
+        assert!(r.values().iter().all(|v| v.is_nan()));
+    }
+
+    #[test]
     fn nanstd_basic() {
         let a = UFuncArray::new(vec![5], vec![1.0, f64::NAN, 3.0, 4.0, 2.0], DType::F64).unwrap();
         let r = a.nanstd(None, false, 0).unwrap();
@@ -32017,6 +32055,14 @@ mod tests {
         .unwrap();
         let r = a.nanmin(Some(1), false).unwrap();
         assert_eq!(r.values(), &[2.0, 4.0]);
+    }
+
+    #[test]
+    fn nanmin_all_nan_axis_returns_nan_lanes() {
+        let a = UFuncArray::new(vec![2, 1], vec![f64::NAN, f64::NAN], DType::F64).unwrap();
+        let r = a.nanmin(Some(0), false).unwrap();
+        assert_eq!(r.shape(), &[1]);
+        assert!(r.values().iter().all(|v| v.is_nan()));
     }
 
     #[test]
@@ -39321,7 +39367,7 @@ mod tests {
         let arr = UFuncArray::new(vec![2], vec![f64::NAN, f64::NAN], DType::F64).unwrap();
         let result = arr.nanmin(None, false).unwrap();
         // When all values are NaN, nanmin returns NaN (with warning in NumPy)
-        assert!(result.values()[0].is_nan() || result.values()[0] == f64::INFINITY);
+        assert!(result.values()[0].is_nan());
     }
 
     #[test]
@@ -40969,4 +41015,3 @@ mod tests {
         }
     }
 }
-

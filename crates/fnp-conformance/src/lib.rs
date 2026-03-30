@@ -10720,9 +10720,7 @@ mod tests {
             if obj.get("rhs").is_none() {
                 eprintln!("DEBUG: log line missing rhs: {}", line);
             }
-            assert!(
-                obj.get("rhs").is_some_and(Value::is_string)
-            );
+            assert!(obj.get("rhs").is_some_and(Value::is_string));
             assert!(
                 obj.get("expected")
                     .and_then(Value::as_str)
