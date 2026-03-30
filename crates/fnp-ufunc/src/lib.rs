@@ -10817,6 +10817,11 @@ impl UFuncArray {
                     .iter()
                     .copied()
                     .fold(f64::NEG_INFINITY, f64::max);
+                if !mn.is_finite() || !mx.is_finite() {
+                    return Err(UFuncError::Msg(format!(
+                        "ValueError: autodetected range of [{mn}, {mx}] is not finite"
+                    )));
+                }
                 (mn, mx)
             }
         };
@@ -11345,6 +11350,12 @@ impl UFuncArray {
                     maxs[d] = v;
                 }
             }
+        }
+
+        if mins.iter().any(|&m| !m.is_finite()) || maxs.iter().any(|&m| !m.is_finite()) {
+            return Err(UFuncError::Msg(
+                "ValueError: autodetected range is not finite".to_string(),
+            ));
         }
 
         // Build edges per dimension
@@ -40958,3 +40969,4 @@ mod tests {
         }
     }
 }
+
