@@ -477,7 +477,7 @@ impl NdLayout {
         true
     }
 
-    pub fn sliding_window_view(&self, window_shape: Vec<usize>) -> Result<Self, ShapeError> {
+    pub fn sliding_window_view(&self, window_shape: &[usize]) -> Result<Self, ShapeError> {
         if window_shape.len() != self.shape.len() {
             return Err(ShapeError::RankMismatch {
                 expected: self.shape.len(),
@@ -486,7 +486,7 @@ impl NdLayout {
         }
 
         let mut shape = Vec::with_capacity(self.shape.len() * 2);
-        for (axis, (&dim, &window)) in self.shape.iter().zip(&window_shape).enumerate() {
+        for (axis, (&dim, &window)) in self.shape.iter().zip(window_shape).enumerate() {
             if window == 0 || window > dim {
                 return Err(ShapeError::InvalidWindowDimension { axis, window, dim });
             }
@@ -831,7 +831,7 @@ mod tests {
     fn sliding_window_view_builds_expected_shape_and_strides() {
         let base = NdLayout::contiguous(vec![4, 5], 8, MemoryOrder::C).expect("layout");
         let view = base
-            .sliding_window_view(vec![2, 3])
+            .sliding_window_view(&[2, 3])
             .expect("valid sliding window");
         assert_eq!(view.shape, vec![3, 3, 2, 3]);
         assert_eq!(view.strides, vec![40, 8, 40, 8]);
@@ -859,7 +859,7 @@ mod tests {
     fn sliding_window_view_rejects_rank_mismatch() {
         let base = NdLayout::contiguous(vec![4, 5], 8, MemoryOrder::C).expect("layout");
         let err = base
-            .sliding_window_view(vec![2])
+            .sliding_window_view(&[2])
             .expect_err("window rank must match input rank");
         assert!(matches!(
             err,
@@ -1050,7 +1050,7 @@ mod tests {
     fn sliding_window_size_one_is_still_read_only_without_overlap() {
         let base = NdLayout::contiguous(vec![4], 8, MemoryOrder::C).expect("layout");
         let view = base
-            .sliding_window_view(vec![1])
+            .sliding_window_view(&[1])
             .expect("unit window should succeed");
         assert!(!view.has_internal_overlap());
         assert!(!view.is_writeable());

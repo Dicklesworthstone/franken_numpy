@@ -1898,7 +1898,7 @@ fn evaluate_shape_stride_case(case: &ShapeStrideFixtureCase) -> (bool, Vec<Strin
 
     if let Some(sliding_window_case) = &case.sliding_window {
         if let Some(base) = &base_layout {
-            match base.sliding_window_view(sliding_window_case.window_shape.clone()) {
+            match base.sliding_window_view(&sliding_window_case.window_shape) {
                 Ok(view) => {
                     if let Some(needle) = &sliding_window_case.expected_error_contains {
                         ok = false;
@@ -2499,7 +2499,7 @@ pub fn run_shape_stride_adversarial_suite(config: &HarnessConfig) -> Result<Suit
         if let Some(sliding_window_case) = &case.sliding_window
             && let Some(needle) = &sliding_window_case.expected_error_contains
         {
-            match base.sliding_window_view(sliding_window_case.window_shape.clone()) {
+            match base.sliding_window_view(&sliding_window_case.window_shape) {
                 Ok(view) => {
                     record_suite_check(
                         &mut report,

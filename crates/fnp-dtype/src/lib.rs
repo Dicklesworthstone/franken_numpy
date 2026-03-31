@@ -1401,8 +1401,8 @@ impl ArrayStorage {
                 .iter()
                 .map(|&(r, i)| {
                     let mag = (r * r + i * i).sqrt();
-                    let re = ((mag + r) / 2.0).sqrt();
-                    let im = ((mag - r) / 2.0).sqrt();
+                    let re = f64::midpoint(mag, r).sqrt();
+                    let im = f64::midpoint(mag, -r).sqrt();
                     (re, if i >= 0.0 { im } else { -im })
                 })
                 .collect(),
