@@ -58,6 +58,17 @@
 - **Replacements:** `serde_yml` or `serde_yaml_ng` (both are maintained forks)
 - **Action:** Flagged for user decision — migration would be a minor API change
 
+## 2026-03-31 - serde_yaml migration closure
+
+### Summary
+- **Completed:** direct migration to `serde_yaml_ng` in `fnp-conformance`
+- **Status:** no remaining live `serde_yaml` dependency in workspace manifests or lockfile
+
+### Notes
+- `crates/fnp-conformance/Cargo.toml` now uses `serde_yaml_ng = "0.10.0"`.
+- YAML parsing and serialization call sites use `serde_yaml_ng::*`.
+- The earlier "Needs Attention" entry remains as historical context from the original upgrade sweep.
+
 ## 2026-03-21 - Bug Fixes and Parity Improvements
 
 ### Summary

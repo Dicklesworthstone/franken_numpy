@@ -61,7 +61,7 @@ We only use **Cargo** in this project, NEVER any other package manager.
 | `asupersync` | Structured async runtime (optional in `fnp-runtime`) |
 | `ftui` (frankentui) | Terminal-native observability dashboards (optional in `fnp-runtime`) |
 | `serde` + `serde_json` | Serialization for conformance fixtures and artifacts |
-| `serde_yaml` | YAML parsing for security control maps and contracts |
+| `serde_yaml_ng` | YAML parsing for security control maps and contracts |
 | `sha2` | Content hashing for artifact integrity |
 | `base64` | Encoding for artifact payloads |
 
