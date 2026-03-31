@@ -2197,16 +2197,37 @@ pub fn schur_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgErro
 ///
 /// Returns `a × b = [a1*b2 - a2*b1, a2*b0 - a0*b2, a0*b1 - a1*b0]`.
 pub fn cross_product(a: &[f64], b: &[f64]) -> Result<Vec<f64>, LinAlgError> {
-    if a.len() != 3 || b.len() != 3 {
-        return Err(LinAlgError::ShapeContractViolation(
-            "cross_product: both inputs must have exactly 3 elements",
-        ));
+    match (a.len(), b.len()) {
+        (2, 2) => {
+            // 2D cross product: returns scalar (as 1-element vec)
+            // np.cross([a0, a1], [b0, b1]) = a0*b1 - a1*b0
+            Ok(vec![a[0] * b[1] - a[1] * b[0]])
+        }
+        (2, 3) => {
+            // Treat 2D as 3D with z=0
+            Ok(vec![
+                a[1] * b[2],
+                -a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ])
+        }
+        (3, 2) => {
+            // Treat 2D as 3D with z=0
+            Ok(vec![
+                -a[2] * b[1],
+                a[2] * b[0],
+                a[0] * b[1] - a[1] * b[0],
+            ])
+        }
+        (3, 3) => Ok(vec![
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]),
+        _ => Err(LinAlgError::ShapeContractViolation(
+            "cross_product: inputs must have 2 or 3 elements",
+        )),
     }
-    Ok(vec![
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ])
 }
 
 /// Kronecker product of two matrices (np.kron).
@@ -2485,18 +2506,51 @@ pub fn eig_nxn_full(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgE
 /// Condition number of a matrix (np.linalg.cond).
 /// Uses the ratio of largest to smallest singular value (2-norm condition number).
 pub fn cond_nxn(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
+    cond_p_nxn(a, n, None)
+}
+
+/// Condition number with explicit norm order (np.linalg.cond with p parameter).
+///
+/// `p`: `None` defaults to 2-norm. Supported: `"1"`, `"-1"`, `"2"`, `"-2"`,
+/// `"inf"`, `"-inf"`, `"fro"`.
+/// For p=2 or p=-2, uses SVD (sigma_max/sigma_min).
+/// For other p, computes `norm(A, p) * norm(inv(A), p)`.
+pub fn cond_p_nxn(a: &[f64], n: usize, p: Option<&str>) -> Result<f64, LinAlgError> {
     if n == 0 {
         return Err(LinAlgError::ShapeContractViolation(
             "cond is not defined on empty arrays",
         ));
     }
-    let sigmas = svd_nxn(a, n)?;
-    let sigma_max = sigmas.first().copied().unwrap_or(0.0);
-    let sigma_min = sigmas.last().copied().unwrap_or(0.0);
-    if sigma_min == 0.0 {
-        return Ok(f64::INFINITY);
+    let ord = p.unwrap_or("2");
+    match ord {
+        "2" => {
+            let sigmas = svd_nxn(a, n)?;
+            let sigma_max = sigmas.first().copied().unwrap_or(0.0);
+            let sigma_min = sigmas.last().copied().unwrap_or(0.0);
+            if sigma_min == 0.0 {
+                return Ok(f64::INFINITY);
+            }
+            Ok(sigma_max / sigma_min)
+        }
+        "-2" => {
+            let sigmas = svd_nxn(a, n)?;
+            let sigma_max = sigmas.first().copied().unwrap_or(0.0);
+            let sigma_min = sigmas.last().copied().unwrap_or(0.0);
+            if sigma_max == 0.0 {
+                return Ok(f64::INFINITY);
+            }
+            Ok(sigma_min / sigma_max)
+        }
+        "1" | "-1" | "inf" | "-inf" | "fro" => {
+            let norm_a = matrix_norm_nxn(a, n, n, ord)?;
+            let a_inv = inv_nxn(a, n)?;
+            let norm_inv = matrix_norm_nxn(&a_inv, n, n, ord)?;
+            Ok(norm_a * norm_inv)
+        }
+        _ => Err(LinAlgError::ShapeContractViolation(
+            "cond: p must be one of None, '1', '-1', '2', '-2', 'inf', '-inf', 'fro'",
+        )),
     }
-    Ok(sigma_max / sigma_min)
 }
 
 /// Matrix exponentiation: compute A^p for integer p (np.linalg.matrix_power).
@@ -3139,12 +3193,6 @@ pub fn pinv_2x2(matrix: [[f64; 2]; 2], rcond: f64) -> Result<[[f64; 2]; 2], LinA
 }
 
 pub fn vector_norm(values: &[f64], ord: Option<VectorNormOrder>) -> Result<f64, LinAlgError> {
-    if values.iter().any(|value| !value.is_finite()) {
-        return Err(LinAlgError::NormDetRankPolicyViolation(
-            "vector norm requires finite entries",
-        ));
-    }
-
     let order = ord.unwrap_or(VectorNormOrder::Two);
     if values.is_empty() {
         if matches!(order, VectorNormOrder::NegInf) {
@@ -3159,8 +3207,20 @@ pub fn vector_norm(values: &[f64], ord: Option<VectorNormOrder>) -> Result<f64, 
         VectorNormOrder::Zero => values.iter().filter(|v| **v != 0.0).count() as f64,
         VectorNormOrder::One => values.iter().map(|v| v.abs()).sum(),
         VectorNormOrder::Two => values.iter().map(|v| v * v).sum::<f64>().sqrt(),
-        VectorNormOrder::Inf => values.iter().map(|v| v.abs()).fold(0.0, f64::max),
-        VectorNormOrder::NegInf => values.iter().map(|v| v.abs()).fold(f64::INFINITY, f64::min),
+        VectorNormOrder::Inf => {
+            if values.iter().any(|value| value.is_nan()) {
+                f64::NAN
+            } else {
+                values.iter().map(|v| v.abs()).fold(0.0, f64::max)
+            }
+        }
+        VectorNormOrder::NegInf => {
+            if values.iter().any(|value| value.is_nan()) {
+                f64::NAN
+            } else {
+                values.iter().map(|v| v.abs()).fold(f64::INFINITY, f64::min)
+            }
+        }
         VectorNormOrder::P(p) => {
             if (p - 1.0).abs() < f64::EPSILON {
                 values.iter().map(|v| v.abs()).sum()
@@ -4598,6 +4658,7 @@ mod tests {
         cholesky_nxn,
         cholesky_solve,
         cholesky_solve_multi,
+        cond_p_nxn,
         // Complex linalg
         complex_cholesky_nxn,
         complex_conjugate_transpose,
@@ -5017,10 +5078,56 @@ mod tests {
     }
 
     #[test]
-    fn norm_paths_reject_non_finite_inputs() {
-        let err = vector_norm(&[f64::NAN, 1.0], None).expect_err("vector nan");
-        assert_eq!(err.reason_code(), "linalg_norm_det_rank_policy_violation");
+    fn vector_norm_matches_numpy_non_finite_semantics() {
+        assert!(vector_norm(&[f64::NAN, 1.0], None)
+            .expect("vector nan default")
+            .is_nan());
+        assert!(vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::One))
+            .expect("vector nan l1")
+            .is_nan());
+        assert!(vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::Two))
+            .expect("vector nan l2")
+            .is_nan());
+        assert!(vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::Inf))
+            .expect("vector nan inf")
+            .is_nan());
+        assert!(vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::NegInf))
+            .expect("vector nan neginf")
+            .is_nan());
+        assert!(approx_equal(
+            vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::Zero)).expect("vector nan zero"),
+            2.0,
+            1e-12
+        ));
 
+        assert!(vector_norm(&[f64::INFINITY, 1.0], None)
+            .expect("vector inf default")
+            .is_infinite());
+        assert!(vector_norm(&[f64::INFINITY, 1.0], Some(VectorNormOrder::One))
+            .expect("vector inf l1")
+            .is_infinite());
+        assert!(vector_norm(&[f64::INFINITY, 1.0], Some(VectorNormOrder::Two))
+            .expect("vector inf l2")
+            .is_infinite());
+        assert!(vector_norm(&[f64::INFINITY, 1.0], Some(VectorNormOrder::Inf))
+            .expect("vector inf inf")
+            .is_infinite());
+        assert!(approx_equal(
+            vector_norm(&[f64::INFINITY, 1.0], Some(VectorNormOrder::NegInf))
+                .expect("vector inf neginf"),
+            1.0,
+            1e-12
+        ));
+        assert!(approx_equal(
+            vector_norm(&[f64::INFINITY, 1.0], Some(VectorNormOrder::Zero))
+                .expect("vector inf zero"),
+            2.0,
+            1e-12
+        ));
+    }
+
+    #[test]
+    fn matrix_norm_paths_still_reject_non_finite_inputs() {
         let err = matrix_norm_2x2([[f64::INFINITY, 0.0], [0.0, 1.0]], None).expect_err("inf");
         assert_eq!(err.reason_code(), "linalg_norm_det_rank_policy_violation");
     }
@@ -6582,8 +6689,58 @@ mod tests {
     }
 
     #[test]
+    fn cross_product_2d() {
+        // np.cross([1, 2], [3, 4]) = 1*4 - 2*3 = -2
+        let r = cross_product(&[1.0, 2.0], &[3.0, 4.0]).unwrap();
+        assert_eq!(r.len(), 1);
+        assert!((r[0] - (-2.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cross_product_2d_3d_mixed() {
+        // np.cross([1, 2], [3, 4, 5]) = [2*5, -1*5, 1*4-2*3] = [10, -5, -2]
+        let r = cross_product(&[1.0, 2.0], &[3.0, 4.0, 5.0]).unwrap();
+        assert_eq!(r.len(), 3);
+        assert!((r[0] - 10.0).abs() < 1e-12);
+        assert!((r[1] - (-5.0)).abs() < 1e-12);
+        assert!((r[2] - (-2.0)).abs() < 1e-12);
+    }
+
+    #[test]
     fn cross_product_rejects_wrong_size() {
-        assert!(cross_product(&[1.0, 2.0], &[3.0, 4.0]).is_err());
+        assert!(cross_product(&[1.0], &[3.0, 4.0]).is_err());
+        assert!(cross_product(&[1.0, 2.0, 3.0, 4.0], &[5.0, 6.0, 7.0, 8.0]).is_err());
+    }
+
+    #[test]
+    fn cond_p_frobenius() {
+        // Frobenius condition number is ||A||_F * ||A^-1||_F.
+        // For I2 this is sqrt(2) * sqrt(2) = 2, matching NumPy.
+        let eye = [1.0, 0.0, 0.0, 1.0];
+        let c = cond_p_nxn(&eye, 2, Some("fro")).unwrap();
+        assert!((c - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn cond_p_one_norm() {
+        let eye = [1.0, 0.0, 0.0, 1.0];
+        let c = cond_p_nxn(&eye, 2, Some("1")).unwrap();
+        assert!((c - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn cond_p_inf_norm() {
+        let eye = [1.0, 0.0, 0.0, 1.0];
+        let c = cond_p_nxn(&eye, 2, Some("inf")).unwrap();
+        assert!((c - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn cond_p_default_matches_cond() {
+        let a = [4.0, 7.0, 2.0, 6.0];
+        let c1 = cond_nxn(&a, 2).unwrap();
+        let c2 = cond_p_nxn(&a, 2, None).unwrap();
+        assert!((c1 - c2).abs() < 1e-10);
     }
 
     // ── Kronecker product tests ──
