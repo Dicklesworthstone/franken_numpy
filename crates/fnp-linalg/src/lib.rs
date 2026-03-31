@@ -1526,14 +1526,14 @@ pub fn matrix_norm_nxn(a: &[f64], m: usize, n: usize, ord: &str) -> Result<f64, 
             "matrix_norm_nxn: input must be m*n with m,n > 0",
         ));
     }
-    if a.iter().any(|v| !v.is_finite()) {
-        return Err(LinAlgError::NormDetRankPolicyViolation(
-            "matrix entries must be finite for norm",
-        ));
-    }
+    let has_nan = a.iter().any(|value| value.is_nan());
+    let has_inf = a.iter().any(|value| value.is_infinite());
     match ord {
         "fro" => Ok(a.iter().map(|v| v * v).sum::<f64>().sqrt()),
         "1" => {
+            if has_nan {
+                return Ok(f64::NAN);
+            }
             // Max absolute column sum
             let mut max_col = 0.0_f64;
             for j in 0..n {
@@ -1546,6 +1546,9 @@ pub fn matrix_norm_nxn(a: &[f64], m: usize, n: usize, ord: &str) -> Result<f64, 
             Ok(max_col)
         }
         "-1" => {
+            if has_nan {
+                return Ok(f64::NAN);
+            }
             // Min absolute column sum
             let mut min_col = f64::INFINITY;
             for j in 0..n {
@@ -1558,6 +1561,9 @@ pub fn matrix_norm_nxn(a: &[f64], m: usize, n: usize, ord: &str) -> Result<f64, 
             Ok(min_col)
         }
         "inf" => {
+            if has_nan {
+                return Ok(f64::NAN);
+            }
             // Max absolute row sum
             let mut max_row = 0.0_f64;
             for i in 0..m {
@@ -1570,6 +1576,9 @@ pub fn matrix_norm_nxn(a: &[f64], m: usize, n: usize, ord: &str) -> Result<f64, 
             Ok(max_row)
         }
         "-inf" => {
+            if has_nan {
+                return Ok(f64::NAN);
+            }
             // Min absolute row sum
             let mut min_row = f64::INFINITY;
             for i in 0..m {
@@ -1588,6 +1597,12 @@ pub fn matrix_norm_nxn(a: &[f64], m: usize, n: usize, ord: &str) -> Result<f64, 
                     "spectral norm requires square matrix",
                 ));
             }
+            if has_nan {
+                return Err(LinAlgError::SvdNonConvergence);
+            }
+            if has_inf {
+                return Ok(f64::NAN);
+            }
             let sigmas = svd_nxn(a, n)?;
             Ok(sigmas.first().copied().unwrap_or(0.0))
         }
@@ -1598,6 +1613,12 @@ pub fn matrix_norm_nxn(a: &[f64], m: usize, n: usize, ord: &str) -> Result<f64, 
                     "spectral norm requires square matrix",
                 ));
             }
+            if has_nan {
+                return Err(LinAlgError::SvdNonConvergence);
+            }
+            if has_inf {
+                return Ok(f64::NAN);
+            }
             let sigmas = svd_nxn(a, n)?;
             Ok(sigmas.last().copied().unwrap_or(0.0))
         }
@@ -1607,6 +1628,12 @@ pub fn matrix_norm_nxn(a: &[f64], m: usize, n: usize, ord: &str) -> Result<f64, 
                 return Err(LinAlgError::ShapeContractViolation(
                     "nuclear norm requires square matrix",
                 ));
+            }
+            if has_nan {
+                return Err(LinAlgError::SvdNonConvergence);
+            }
+            if has_inf {
+                return Ok(f64::NAN);
             }
             let sigmas = svd_nxn(a, n)?;
             Ok(sigmas.iter().sum())
@@ -3242,9 +3269,10 @@ pub fn matrix_norm_2x2(
     matrix: [[f64; 2]; 2],
     ord: Option<MatrixNormOrder>,
 ) -> Result<f64, LinAlgError> {
-    validate_finite_matrix_2x2(matrix)?;
-
     let order = ord.unwrap_or(MatrixNormOrder::Fro);
+    let flat = [matrix[0][0], matrix[0][1], matrix[1][0], matrix[1][1]];
+    let has_nan = flat.iter().any(|value| value.is_nan());
+    let has_inf = flat.iter().any(|value| value.is_infinite());
     let result = match order {
         MatrixNormOrder::Fro => {
             let mut sum_sq = 0.0;
@@ -3256,28 +3284,62 @@ pub fn matrix_norm_2x2(
             sum_sq.sqrt()
         }
         MatrixNormOrder::One => {
+            if has_nan {
+                return Ok(f64::NAN);
+            }
             let col0 = matrix[0][0].abs() + matrix[1][0].abs();
             let col1 = matrix[0][1].abs() + matrix[1][1].abs();
             col0.max(col1)
         }
         MatrixNormOrder::NegOne => {
+            if has_nan {
+                return Ok(f64::NAN);
+            }
             let col0 = matrix[0][0].abs() + matrix[1][0].abs();
             let col1 = matrix[0][1].abs() + matrix[1][1].abs();
             col0.min(col1)
         }
         MatrixNormOrder::Inf => {
+            if has_nan {
+                return Ok(f64::NAN);
+            }
             let row0 = matrix[0][0].abs() + matrix[0][1].abs();
             let row1 = matrix[1][0].abs() + matrix[1][1].abs();
             row0.max(row1)
         }
         MatrixNormOrder::NegInf => {
+            if has_nan {
+                return Ok(f64::NAN);
+            }
             let row0 = matrix[0][0].abs() + matrix[0][1].abs();
             let row1 = matrix[1][0].abs() + matrix[1][1].abs();
             row0.min(row1)
         }
-        MatrixNormOrder::Two => singular_values_2x2(matrix)?[0],
-        MatrixNormOrder::NegTwo => singular_values_2x2(matrix)?[1],
+        MatrixNormOrder::Two => {
+            if has_nan {
+                return Err(LinAlgError::SvdNonConvergence);
+            }
+            if has_inf {
+                return Ok(f64::NAN);
+            }
+            singular_values_2x2(matrix)?[0]
+        }
+        MatrixNormOrder::NegTwo => {
+            if has_nan {
+                return Err(LinAlgError::SvdNonConvergence);
+            }
+            if has_inf {
+                return Ok(f64::NAN);
+            }
+            singular_values_2x2(matrix)?[1]
+        }
         MatrixNormOrder::Nuclear => {
+            if has_nan {
+                return Err(LinAlgError::SvdNonConvergence);
+            }
+            if has_inf {
+                return Ok(f64::NAN);
+            }
             let singular_values = singular_values_2x2(matrix)?;
             singular_values[0] + singular_values[1]
         }
@@ -5127,9 +5189,110 @@ mod tests {
     }
 
     #[test]
-    fn matrix_norm_paths_still_reject_non_finite_inputs() {
-        let err = matrix_norm_2x2([[f64::INFINITY, 0.0], [0.0, 1.0]], None).expect_err("inf");
-        assert_eq!(err.reason_code(), "linalg_norm_det_rank_policy_violation");
+    fn matrix_norm_matches_numpy_non_finite_semantics() {
+        let nan_matrix = [[f64::NAN, 1.0], [2.0, 3.0]];
+        assert!(matrix_norm_2x2(nan_matrix, None).expect("nan fro").is_nan());
+        assert!(matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::One))
+            .expect("nan one")
+            .is_nan());
+        assert!(matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::NegOne))
+            .expect("nan neg one")
+            .is_nan());
+        assert!(matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::Inf))
+            .expect("nan inf")
+            .is_nan());
+        assert!(matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::NegInf))
+            .expect("nan neg inf")
+            .is_nan());
+        let err = matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::Two)).expect_err("nan two");
+        assert_eq!(err.reason_code(), "linalg_svd_nonconvergence");
+        let err =
+            matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::Nuclear)).expect_err("nan nuclear");
+        assert_eq!(err.reason_code(), "linalg_svd_nonconvergence");
+
+        let inf_matrix = [[f64::INFINITY, 1.0], [2.0, 3.0]];
+        assert!(matrix_norm_2x2(inf_matrix, None)
+            .expect("inf fro")
+            .is_infinite());
+        assert!(matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::One))
+            .expect("inf one")
+            .is_infinite());
+        assert!(approx_equal(
+            matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::NegOne)).expect("inf neg one"),
+            4.0,
+            1e-12
+        ));
+        assert!(matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::Inf))
+            .expect("inf inf")
+            .is_infinite());
+        assert!(approx_equal(
+            matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::NegInf)).expect("inf neg inf"),
+            5.0,
+            1e-12
+        ));
+        assert!(matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::Two))
+            .expect("inf two")
+            .is_nan());
+        assert!(matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::NegTwo))
+            .expect("inf neg two")
+            .is_nan());
+        assert!(matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::Nuclear))
+            .expect("inf nuclear")
+            .is_nan());
+    }
+
+    #[test]
+    fn matrix_norm_nxn_matches_numpy_non_finite_semantics() {
+        let nan_matrix = [f64::NAN, 1.0, 2.0, 3.0];
+        assert!(matrix_norm_nxn(&nan_matrix, 2, 2, "fro")
+            .expect("nan fro")
+            .is_nan());
+        assert!(matrix_norm_nxn(&nan_matrix, 2, 2, "1")
+            .expect("nan one")
+            .is_nan());
+        assert!(matrix_norm_nxn(&nan_matrix, 2, 2, "-1")
+            .expect("nan neg one")
+            .is_nan());
+        assert!(matrix_norm_nxn(&nan_matrix, 2, 2, "inf")
+            .expect("nan inf")
+            .is_nan());
+        assert!(matrix_norm_nxn(&nan_matrix, 2, 2, "-inf")
+            .expect("nan neg inf")
+            .is_nan());
+        let err = matrix_norm_nxn(&nan_matrix, 2, 2, "2").expect_err("nan two");
+        assert_eq!(err.reason_code(), "linalg_svd_nonconvergence");
+        let err = matrix_norm_nxn(&nan_matrix, 2, 2, "nuc").expect_err("nan nuclear");
+        assert_eq!(err.reason_code(), "linalg_svd_nonconvergence");
+
+        let inf_matrix = [f64::INFINITY, 1.0, 2.0, 3.0];
+        assert!(matrix_norm_nxn(&inf_matrix, 2, 2, "fro")
+            .expect("inf fro")
+            .is_infinite());
+        assert!(matrix_norm_nxn(&inf_matrix, 2, 2, "1")
+            .expect("inf one")
+            .is_infinite());
+        assert!(approx_equal(
+            matrix_norm_nxn(&inf_matrix, 2, 2, "-1").expect("inf neg one"),
+            4.0,
+            1e-12
+        ));
+        assert!(matrix_norm_nxn(&inf_matrix, 2, 2, "inf")
+            .expect("inf inf")
+            .is_infinite());
+        assert!(approx_equal(
+            matrix_norm_nxn(&inf_matrix, 2, 2, "-inf").expect("inf neg inf"),
+            5.0,
+            1e-12
+        ));
+        assert!(matrix_norm_nxn(&inf_matrix, 2, 2, "2")
+            .expect("inf two")
+            .is_nan());
+        assert!(matrix_norm_nxn(&inf_matrix, 2, 2, "-2")
+            .expect("inf neg two")
+            .is_nan());
+        assert!(matrix_norm_nxn(&inf_matrix, 2, 2, "nuc")
+            .expect("inf nuclear")
+            .is_nan());
     }
 
     #[test]
