@@ -3230,6 +3230,22 @@ impl UFuncArray {
         self.shape == other.shape && self.values == other.values
     }
 
+    /// `np.array_equal` with explicit `equal_nan` parameter (NumPy 1.25+).
+    ///
+    /// When `equal_nan` is true, NaN values in the same position are considered equal.
+    pub fn array_equal_nan(&self, other: &Self, equal_nan: bool) -> bool {
+        if self.shape != other.shape {
+            return false;
+        }
+        if !equal_nan {
+            return self.values == other.values;
+        }
+        self.values
+            .iter()
+            .zip(&other.values)
+            .all(|(&a, &b)| (a == b) || (a.is_nan() && b.is_nan()))
+    }
+
     /// Check if two arrays are element-wise equal within broadcasting (np.array_equiv).
     /// Returns true if shapes are broadcastable and all corresponding elements match.
     pub fn array_equiv(&self, other: &Self) -> bool {
@@ -5623,17 +5639,32 @@ impl UFuncArray {
         Ok(result)
     }
 
-    /// Trim leading and trailing zeros from a 1-D array.
+    /// Trim leading and trailing zeros from a 1-D array (default: both ends).
     ///
     /// Mimics `np.trim_zeros(filt)`.
     pub fn trim_zeros(&self) -> Self {
+        self.trim_zeros_mode("fb")
+    }
+
+    /// Trim zeros with explicit trim mode (np.trim_zeros with trim parameter).
+    ///
+    /// `trim`: `"f"` trims front only, `"b"` trims back only, `"fb"` trims both (default).
+    pub fn trim_zeros_mode(&self, trim: &str) -> Self {
         let n = self.values.len();
-        let start = self.values.iter().position(|&v| v != 0.0).unwrap_or(n);
-        let end = self
-            .values
-            .iter()
-            .rposition(|&v| v != 0.0)
-            .map_or(start, |p| p + 1);
+        let start = if trim.contains('f') {
+            self.values.iter().position(|&v| v != 0.0).unwrap_or(n)
+        } else {
+            0
+        };
+        let end = if trim.contains('b') {
+            self.values
+                .iter()
+                .rposition(|&v| v != 0.0)
+                .map_or(start, |p| p + 1)
+        } else {
+            n
+        };
+        let end = end.max(start);
         let values = self.values[start..end].to_vec();
         let source_indices: Vec<usize> = (start..end).collect();
         let len = values.len();
@@ -9593,12 +9624,57 @@ impl UFuncArray {
         Ok(current)
     }
 
+    /// `np.diff` with prepend/append (NumPy 1.16+).
+    ///
+    /// Values to prepend/append along axis before computing differences.
+    /// This preserves the output length: with prepend of length p and append of length a,
+    /// the output axis length is `axis_len + p + a - n` (for n-th order diff).
+    pub fn diff_with(
+        &self,
+        n: usize,
+        axis: Option<isize>,
+        prepend: Option<&Self>,
+        append: Option<&Self>,
+    ) -> Result<Self, UFuncError> {
+        if prepend.is_none() && append.is_none() {
+            return self.diff(n, axis);
+        }
+        // Concatenate prepend + self + append along axis, then diff
+        let ax = match axis {
+            Some(a) => normalize_axis(a, self.shape.len())?,
+            None => self.shape.len() - 1,
+        };
+        let mut arrays: Vec<&Self> = Vec::new();
+        if let Some(p) = prepend {
+            arrays.push(p);
+        }
+        arrays.push(self);
+        if let Some(a) = append {
+            arrays.push(a);
+        }
+        let combined = Self::concatenate(&arrays, ax as isize)?;
+        combined.diff(n, axis)
+    }
+
     /// Element-wise comparison: |a - b| <= atol + rtol * |b| (np.isclose).
     /// Returns a boolean array where two arrays are element-wise equal within tolerance.
     ///
     /// Mimics `np.isclose(a, b, rtol=1e-05, atol=1e-08, equal_nan=False)`.
     /// Broadcasting is fully supported.
     pub fn isclose(&self, other: &Self, rtol: f64, atol: f64) -> Result<Self, UFuncError> {
+        self.isclose_equal_nan(other, rtol, atol, false)
+    }
+
+    /// `np.isclose` with explicit `equal_nan` parameter.
+    ///
+    /// When `equal_nan` is true, NaN values in the same position are considered close.
+    pub fn isclose_equal_nan(
+        &self,
+        other: &Self,
+        rtol: f64,
+        atol: f64,
+        equal_nan: bool,
+    ) -> Result<Self, UFuncError> {
         let out_shape = broadcast_shape(&self.shape, &other.shape).map_err(UFuncError::Shape)?;
         let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
 
@@ -9619,7 +9695,7 @@ impl UFuncArray {
             let b = other.values[rhs_flat];
 
             let is_close = if a.is_nan() || b.is_nan() {
-                false
+                equal_nan && a.is_nan() && b.is_nan()
             } else if a.is_infinite() || b.is_infinite() {
                 a == b
             } else {
@@ -9659,6 +9735,18 @@ impl UFuncArray {
     /// Supports broadcasting.
     pub fn allclose(&self, other: &Self, rtol: f64, atol: f64) -> Result<bool, UFuncError> {
         let close = self.isclose(other, rtol, atol)?;
+        Ok(close.values.iter().all(|&v| v != 0.0))
+    }
+
+    /// `np.allclose` with explicit `equal_nan` parameter.
+    pub fn allclose_equal_nan(
+        &self,
+        other: &Self,
+        rtol: f64,
+        atol: f64,
+        equal_nan: bool,
+    ) -> Result<bool, UFuncError> {
+        let close = self.isclose_equal_nan(other, rtol, atol, equal_nan)?;
         Ok(close.values.iter().all(|&v| v != 0.0))
     }
 
@@ -10748,16 +10836,20 @@ impl UFuncArray {
             return Ok((counts, edges));
         }
 
-        let min = self.values.iter().copied().fold(f64::INFINITY, f64::min);
-        let max = self
-            .values
-            .iter()
-            .copied()
-            .fold(f64::NEG_INFINITY, f64::max);
-        if !min.is_finite() || !max.is_finite() {
-            return Err(UFuncError::Msg(format!(
-                "ValueError: autodetected range of [{min}, {max}] is not finite"
-            )));
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+        for &v in &self.values {
+            if !v.is_finite() {
+                return Err(UFuncError::Msg(format!(
+                    "ValueError: autodetected range of [{v}, {v}] is not finite"
+                )));
+            }
+            if v < min {
+                min = v;
+            }
+            if v > max {
+                max = v;
+            }
         }
         let range = if (max - min).abs() < f64::EPSILON {
             1.0
@@ -10824,12 +10916,21 @@ impl UFuncArray {
         let (lo, hi) = match range {
             Some((a, b)) => (a, b),
             None => {
-                let mn = self.values.iter().copied().fold(f64::INFINITY, f64::min);
-                let mx = self
-                    .values
-                    .iter()
-                    .copied()
-                    .fold(f64::NEG_INFINITY, f64::max);
+                let mut mn = f64::INFINITY;
+                let mut mx = f64::NEG_INFINITY;
+                for &v in &self.values {
+                    if !v.is_finite() {
+                        return Err(UFuncError::Msg(format!(
+                            "ValueError: autodetected range of [{v}, {v}] is not finite"
+                        )));
+                    }
+                    if v < mn {
+                        mn = v;
+                    }
+                    if v > mx {
+                        mx = v;
+                    }
+                }
                 if !mn.is_finite() || !mx.is_finite() {
                     return Err(UFuncError::Msg(format!(
                         "ValueError: autodetected range of [{mn}, {mx}] is not finite"
@@ -11259,14 +11360,36 @@ impl UFuncArray {
                 actual: y.values.len(),
             });
         }
-        let xmin = self.values.iter().copied().fold(f64::INFINITY, f64::min);
-        let xmax = self
-            .values
-            .iter()
-            .copied()
-            .fold(f64::NEG_INFINITY, f64::max);
-        let ymin = y.values.iter().copied().fold(f64::INFINITY, f64::min);
-        let ymax = y.values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let mut xmin = f64::INFINITY;
+        let mut xmax = f64::NEG_INFINITY;
+        for &v in &self.values {
+            if !v.is_finite() {
+                return Err(UFuncError::Msg(format!(
+                    "ValueError: autodetected range of [{v}, {v}] is not finite"
+                )));
+            }
+            if v < xmin {
+                xmin = v;
+            }
+            if v > xmax {
+                xmax = v;
+            }
+        }
+        let mut ymin = f64::INFINITY;
+        let mut ymax = f64::NEG_INFINITY;
+        for &v in &y.values {
+            if !v.is_finite() {
+                return Err(UFuncError::Msg(format!(
+                    "ValueError: autodetected range of [{v}, {v}] is not finite"
+                )));
+            }
+            if v < ymin {
+                ymin = v;
+            }
+            if v > ymax {
+                ymax = v;
+            }
+        }
 
         let xedges = Self::linspace(xmin, xmax, xbins + 1, DType::F64)?;
         let yedges = Self::linspace(ymin, ymax, ybins + 1, DType::F64)?;
@@ -11314,16 +11437,20 @@ impl UFuncArray {
                 "histogram_bin_edges: bins must be > 0".to_string(),
             ));
         }
-        let min_val = self.values.iter().copied().fold(f64::INFINITY, f64::min);
-        let max_val = self
-            .values
-            .iter()
-            .copied()
-            .fold(f64::NEG_INFINITY, f64::max);
-        if !min_val.is_finite() || !max_val.is_finite() {
-            return Err(UFuncError::Msg(format!(
-                "ValueError: autodetected range of [{min_val}, {max_val}] is not finite"
-            )));
+        let mut min_val = f64::INFINITY;
+        let mut max_val = f64::NEG_INFINITY;
+        for &v in &self.values {
+            if !v.is_finite() {
+                return Err(UFuncError::Msg(format!(
+                    "ValueError: autodetected range of [{v}, {v}] is not finite"
+                )));
+            }
+            if v < min_val {
+                min_val = v;
+            }
+            if v > max_val {
+                max_val = v;
+            }
         }
         Self::linspace(min_val, max_val, bins + 1, DType::F64)
     }
@@ -15807,6 +15934,26 @@ impl UFuncArray {
     /// Input values > 0 are treated as 1. Returns a 1-D u8 array
     /// stored as f64 values (each value is a packed byte, 0–255).
     pub fn packbits(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
+        self.packbits_order(axis, "big")
+    }
+
+    /// Pack binary array into uint8 with explicit bit order (np.packbits with bitorder).
+    ///
+    /// `bitorder`: `"big"` (default) packs MSB first, `"little"` packs LSB first.
+    pub fn packbits_order(
+        &self,
+        axis: Option<isize>,
+        bitorder: &str,
+    ) -> Result<Self, UFuncError> {
+        let little = match bitorder {
+            "big" => false,
+            "little" => true,
+            _ => {
+                return Err(UFuncError::Msg(format!(
+                    "packbits: bitorder must be 'big' or 'little', got '{bitorder}'"
+                )));
+            }
+        };
         match axis {
             None => {
                 let n = self.values.len();
@@ -15815,7 +15962,7 @@ impl UFuncArray {
                 for (i, &v) in self.values.iter().enumerate() {
                     if v > 0.0 {
                         let byte_idx = i / 8;
-                        let bit_idx = 7 - (i % 8);
+                        let bit_idx = if little { i % 8 } else { 7 - (i % 8) };
                         packed[byte_idx] += (1u8 << bit_idx) as f64;
                     }
                 }
@@ -15842,7 +15989,7 @@ impl UFuncArray {
                             let v = self.values[o * axis_len * inner + k * inner + i];
                             if v > 0.0 {
                                 let byte_idx = k / 8;
-                                let bit_idx = 7 - (k % 8);
+                                let bit_idx = if little { k % 8 } else { 7 - (k % 8) };
                                 packed[o * packed_len * inner + byte_idx * inner + i] +=
                                     (1u8 << bit_idx) as f64;
                             }
@@ -15867,12 +16014,37 @@ impl UFuncArray {
         axis: Option<isize>,
         count: Option<usize>,
     ) -> Result<Self, UFuncError> {
+        self.unpackbits_order(axis, count, "big")
+    }
+
+    /// Unpack uint8 array into binary with explicit bit order (np.unpackbits with bitorder).
+    ///
+    /// `bitorder`: `"big"` (default) unpacks MSB first, `"little"` unpacks LSB first.
+    pub fn unpackbits_order(
+        &self,
+        axis: Option<isize>,
+        count: Option<usize>,
+        bitorder: &str,
+    ) -> Result<Self, UFuncError> {
+        let little = match bitorder {
+            "big" => false,
+            "little" => true,
+            _ => {
+                return Err(UFuncError::Msg(format!(
+                    "unpackbits: bitorder must be 'big' or 'little', got '{bitorder}'"
+                )));
+            }
+        };
+        let bit_iter = |b: u32| -> u32 {
+            if little { b } else { 7 - b }
+        };
         match axis {
             None => {
                 let mut bits = Vec::with_capacity(self.values.len() * 8);
                 for &v in &self.values {
                     let byte = v as u8;
-                    for bit in (0..8).rev() {
+                    for b in 0..8 {
+                        let bit = bit_iter(b);
                         bits.push(if byte & (1 << bit) != 0 { 1.0 } else { 0.0 });
                     }
                 }
@@ -15903,12 +16075,13 @@ impl UFuncArray {
                         let mut bit_pos = 0usize;
                         for k in 0..axis_len {
                             let byte = self.values[o * axis_len * inner + k * inner + i] as u8;
-                            for b in (0..8).rev() {
+                            for b in 0..8 {
                                 if bit_pos >= out_bits {
                                     break;
                                 }
+                                let bit = bit_iter(b);
                                 bits[o * out_bits * inner + bit_pos * inner + i] =
-                                    if byte & (1 << b) != 0 { 1.0 } else { 0.0 };
+                                    if byte & (1 << bit) != 0 { 1.0 } else { 0.0 };
                                 bit_pos += 1;
                             }
                         }
@@ -30059,6 +30232,47 @@ mod tests {
     }
 
     #[test]
+    fn diff_with_prepend() {
+        // np.diff([1, 2, 4], prepend=[0]) → [1, 1, 2]
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 4.0], DType::F64).unwrap();
+        let prepend = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+        let r = a.diff_with(1, None, Some(&prepend), None).unwrap();
+        assert_eq!(r.shape(), &[3]);
+        assert_eq!(r.values(), &[1.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn diff_with_append() {
+        // np.diff([1, 2, 4], append=[7]) → [1, 2, 3]
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 4.0], DType::F64).unwrap();
+        let append = UFuncArray::new(vec![1], vec![7.0], DType::F64).unwrap();
+        let r = a.diff_with(1, None, None, Some(&append)).unwrap();
+        assert_eq!(r.shape(), &[3]);
+        assert_eq!(r.values(), &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn diff_with_prepend_and_append() {
+        // np.diff([1, 2, 4], prepend=[0], append=[7]) → [1, 1, 2, 3]
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 4.0], DType::F64).unwrap();
+        let prepend = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+        let append = UFuncArray::new(vec![1], vec![7.0], DType::F64).unwrap();
+        let r = a
+            .diff_with(1, None, Some(&prepend), Some(&append))
+            .unwrap();
+        assert_eq!(r.shape(), &[4]);
+        assert_eq!(r.values(), &[1.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn diff_with_none_matches_diff() {
+        let a = UFuncArray::new(vec![5], vec![1.0, 3.0, 6.0, 10.0, 15.0], DType::F64).unwrap();
+        let d1 = a.diff(1, None).unwrap();
+        let d2 = a.diff_with(1, None, None, None).unwrap();
+        assert_eq!(d1.values(), d2.values());
+    }
+
+    #[test]
     fn isclose_basic() {
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         let b = UFuncArray::new(vec![3], vec![1.0, 2.0001, 3.1], DType::F64).unwrap();
@@ -30085,6 +30299,35 @@ mod tests {
         let a = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
         let b = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         assert!(a.isclose(&b, 1e-5, 1e-8).is_err());
+    }
+
+    #[test]
+    fn isclose_equal_nan_true() {
+        let a = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
+        // Default: NaN != NaN
+        let r = a.isclose(&b, 1e-5, 1e-8).unwrap();
+        assert_eq!(r.values(), &[1.0, 0.0, 1.0]);
+        // equal_nan=true: NaN == NaN
+        let r2 = a.isclose_equal_nan(&b, 1e-5, 1e-8, true).unwrap();
+        assert_eq!(r2.values(), &[1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn isclose_equal_nan_one_nan() {
+        let a = UFuncArray::new(vec![2], vec![f64::NAN, 1.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![2], vec![1.0, f64::NAN], DType::F64).unwrap();
+        // Even with equal_nan=true, NaN vs non-NaN is not close
+        let r = a.isclose_equal_nan(&b, 1e-5, 1e-8, true).unwrap();
+        assert_eq!(r.values(), &[0.0, 0.0]);
+    }
+
+    #[test]
+    fn allclose_equal_nan() {
+        let a = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
+        assert!(!a.allclose(&b, 1e-5, 1e-8).unwrap());
+        assert!(a.allclose_equal_nan(&b, 1e-5, 1e-8, true).unwrap());
     }
 
     // ── median / percentile / cummin / cummax / pad ─────────────────
@@ -31264,6 +31507,31 @@ mod tests {
     }
 
     #[test]
+    fn trim_zeros_front_only() {
+        let a =
+            UFuncArray::new(vec![7], vec![0.0, 0.0, 1.0, 2.0, 3.0, 0.0, 0.0], DType::F64).unwrap();
+        let r = a.trim_zeros_mode("f");
+        assert_eq!(r.values(), &[1.0, 2.0, 3.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn trim_zeros_back_only() {
+        let a =
+            UFuncArray::new(vec![7], vec![0.0, 0.0, 1.0, 2.0, 3.0, 0.0, 0.0], DType::F64).unwrap();
+        let r = a.trim_zeros_mode("b");
+        assert_eq!(r.values(), &[0.0, 0.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn trim_zeros_fb_matches_default() {
+        let a =
+            UFuncArray::new(vec![7], vec![0.0, 0.0, 1.0, 2.0, 3.0, 0.0, 0.0], DType::F64).unwrap();
+        let default = a.trim_zeros();
+        let explicit = a.trim_zeros_mode("fb");
+        assert_eq!(default.values(), explicit.values());
+    }
+
+    #[test]
     fn trim_zeros_preserves_large_u64_sidecar_values() {
         let a = UFuncArray::from_storage(
             vec![5],
@@ -31695,6 +31963,20 @@ mod tests {
         assert_eq!(ye.shape(), &[3]);
         // All points on the diagonal, so hist should be [[2,0],[0,2]]
         assert_eq!(h.values()[0] + h.values()[3], 4.0); // diagonal sum
+    }
+
+    #[test]
+    fn histogram2d_rejects_nan_in_x() {
+        let x = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
+        let y = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        assert!(x.histogram2d(&y, 3, 3).is_err());
+    }
+
+    #[test]
+    fn histogram2d_rejects_nan_in_y() {
+        let x = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let y = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
+        assert!(x.histogram2d(&y, 3, 3).is_err());
     }
 
     // ── array manipulation: swapaxes, moveaxis, atleast, dstack, delete, insert, append, rot90 ──
@@ -33574,6 +33856,48 @@ mod tests {
     }
 
     #[test]
+    fn packbits_little_endian() {
+        // np.packbits([1,0,1,0,1,1,0,0,1], bitorder='little') → [53, 1]
+        let a = UFuncArray::new(
+            vec![9],
+            vec![1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0],
+            DType::U8,
+        )
+        .unwrap();
+        let packed = a.packbits_order(None, "little").unwrap();
+        assert_eq!(packed.shape(), &[2]);
+        // 10101 in little-endian: bit0=1, bit2=1, bit4=1, bit5=1 → 0b00110101 = 53
+        assert!((packed.values()[0] - 53.0).abs() < 1e-10);
+        // second byte: bit0=1 → 0b00000001 = 1
+        assert!((packed.values()[1] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn packbits_big_endian_matches_default() {
+        let a = UFuncArray::new(vec![8], vec![1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0], DType::U8)
+            .unwrap();
+        let default = a.packbits(None).unwrap();
+        let big = a.packbits_order(None, "big").unwrap();
+        assert_eq!(default.values(), big.values());
+    }
+
+    #[test]
+    fn unpackbits_little_endian_roundtrip() {
+        let bits = vec![1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0];
+        let a = UFuncArray::new(vec![8], bits.clone(), DType::U8).unwrap();
+        let packed = a.packbits_order(None, "little").unwrap();
+        let unpacked = packed.unpackbits_order(None, None, "little").unwrap();
+        assert_eq!(unpacked.shape(), &[8]);
+        assert_eq!(unpacked.values(), &bits);
+    }
+
+    #[test]
+    fn packbits_invalid_bitorder() {
+        let a = UFuncArray::new(vec![8], vec![1.0; 8], DType::U8).unwrap();
+        assert!(a.packbits_order(None, "invalid").is_err());
+    }
+
+    #[test]
     fn mode_returns_most_frequent() {
         let a =
             UFuncArray::new(vec![7], vec![1.0, 2.0, 2.0, 3.0, 3.0, 3.0, 4.0], DType::F64).unwrap();
@@ -33637,6 +33961,26 @@ mod tests {
         assert!(!a.array_equal(&c));
         assert!(a.array_equiv(&b));
         assert!(!a.array_equiv(&c));
+    }
+
+    #[test]
+    fn array_equal_nan_parameter() {
+        let a = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
+        // Default: NaN != NaN
+        assert!(!a.array_equal(&b));
+        // equal_nan=false: same as default
+        assert!(!a.array_equal_nan(&b, false));
+        // equal_nan=true: NaN == NaN
+        assert!(a.array_equal_nan(&b, true));
+    }
+
+    #[test]
+    fn array_equal_nan_mixed() {
+        let a = UFuncArray::new(vec![2], vec![f64::NAN, 1.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![2], vec![1.0, f64::NAN], DType::F64).unwrap();
+        // Different positions: not equal even with equal_nan=true
+        assert!(!a.array_equal_nan(&b, true));
     }
 
     #[test]

@@ -2193,11 +2193,11 @@ fn parse_text_element_for_dtype(token: &str, dtype: IOSupportedDType) -> Result<
             if token
                 .parse::<f64>()
                 .map_err(|_| IOError::ReadPayloadIncomplete("fromstring: parse error"))?
-                != 0.0
+                == 0.0
             {
-                1.0
-            } else {
                 0.0
+            } else {
+                1.0
             },
         ),
         IOSupportedDType::I8 => Ok(f64::from(parse_signed_text_token_as::<i8>(token)?)),
@@ -4736,7 +4736,7 @@ mod tests {
 
     #[test]
     fn empty_string_roundtrip() {
-        let strings = vec!["".to_string(), "x".to_string(), "".to_string()];
+        let strings = vec![String::new(), "x".to_string(), String::new()];
         let dtype = IOSupportedDType::Bytes(4);
         let encoded = tofile_strings(&strings, dtype).unwrap();
         let decoded = fromfile_strings(&encoded, dtype, None).unwrap();
