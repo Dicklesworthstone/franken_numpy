@@ -2549,6 +2549,7 @@ pub fn cond_p_nxn(a: &[f64], n: usize, p: Option<&str>) -> Result<f64, LinAlgErr
         ));
     }
     let ord = p.unwrap_or("2");
+    let has_nan = a.iter().any(|value| value.is_nan());
     match ord {
         "2" => {
             let sigmas = svd_nxn(a, n)?;
@@ -2569,6 +2570,9 @@ pub fn cond_p_nxn(a: &[f64], n: usize, p: Option<&str>) -> Result<f64, LinAlgErr
             Ok(sigma_min / sigma_max)
         }
         "1" | "-1" | "inf" | "-inf" | "fro" => {
+            if has_nan {
+                return Ok(f64::NAN);
+            }
             let norm_a = matrix_norm_nxn(a, n, n, ord)?;
             let a_inv = inv_nxn(a, n)?;
             let norm_inv = matrix_norm_nxn(&a_inv, n, n, ord)?;
@@ -6904,6 +6908,21 @@ mod tests {
         let c1 = cond_nxn(&a, 2).unwrap();
         let c2 = cond_p_nxn(&a, 2, None).unwrap();
         assert!((c1 - c2).abs() < 1e-10);
+    }
+
+    #[test]
+    fn cond_p_non_spectral_nan_orders_match_numpy() {
+        let a = [f64::NAN, 1.0, 2.0, 3.0];
+        for ord in ["fro", "1", "-1", "inf", "-inf"] {
+            assert!(
+                cond_p_nxn(&a, 2, Some(ord)).expect("nan cond should propagate").is_nan(),
+                "order {ord} should propagate NaN",
+            );
+        }
+
+        cond_p_nxn(&a, 2, None).expect_err("default cond should remain spectral");
+        cond_p_nxn(&a, 2, Some("2")).expect_err("2-norm cond should remain spectral");
+        cond_p_nxn(&a, 2, Some("-2")).expect_err("-2 cond should remain spectral");
     }
 
     // ── Kronecker product tests ──
