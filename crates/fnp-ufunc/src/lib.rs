@@ -10754,6 +10754,11 @@ impl UFuncArray {
             .iter()
             .copied()
             .fold(f64::NEG_INFINITY, f64::max);
+        if !min.is_finite() || !max.is_finite() {
+            return Err(UFuncError::Msg(format!(
+                "ValueError: autodetected range of [{min}, {max}] is not finite"
+            )));
+        }
         let range = if (max - min).abs() < f64::EPSILON {
             1.0
         } else {
@@ -11315,6 +11320,11 @@ impl UFuncArray {
             .iter()
             .copied()
             .fold(f64::NEG_INFINITY, f64::max);
+        if !min_val.is_finite() || !max_val.is_finite() {
+            return Err(UFuncError::Msg(format!(
+                "ValueError: autodetected range of [{min_val}, {max_val}] is not finite"
+            )));
+        }
         Self::linspace(min_val, max_val, bins + 1, DType::F64)
     }
 
@@ -30274,6 +30284,27 @@ mod tests {
         // All values in same bin
         let total: f64 = counts.values().iter().sum();
         assert_eq!(total, 3.0);
+    }
+
+    #[test]
+    fn histogram_rejects_nan_input() {
+        let a = UFuncArray::new(vec![4], vec![1.0, 2.0, f64::NAN, 3.0], DType::F64).unwrap();
+        let err = a.histogram(3).unwrap_err();
+        assert!(err.to_string().contains("not finite"));
+    }
+
+    #[test]
+    fn histogram_rejects_inf_input() {
+        let a = UFuncArray::new(vec![3], vec![1.0, f64::INFINITY, 3.0], DType::F64).unwrap();
+        let err = a.histogram(3).unwrap_err();
+        assert!(err.to_string().contains("not finite"));
+    }
+
+    #[test]
+    fn histogram_bin_edges_rejects_nan() {
+        let a = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
+        let err = a.histogram_bin_edges(5).unwrap_err();
+        assert!(err.to_string().contains("not finite"));
     }
 
     #[test]

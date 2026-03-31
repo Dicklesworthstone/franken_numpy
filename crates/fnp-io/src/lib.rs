@@ -281,15 +281,15 @@ impl fmt::Display for IOError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MagicInvalid => write!(f, "invalid or unsupported npy/npz magic/version"),
-            Self::HeaderSchemaInvalid(msg) => write!(f, "{msg}"),
             Self::DTypeDescriptorInvalid => write!(f, "dtype descriptor is invalid or unsupported"),
-            Self::WriteContractViolation(msg) => write!(f, "{msg}"),
-            Self::ReadPayloadIncomplete(msg) => write!(f, "{msg}"),
             Self::PicklePolicyViolation => write!(f, "pickle/object payload rejected by policy"),
-            Self::MemmapContractViolation(msg) => write!(f, "{msg}"),
-            Self::LoadDispatchInvalid(msg) => write!(f, "{msg}"),
-            Self::NpzArchiveContractViolation(msg) => write!(f, "{msg}"),
-            Self::PolicyUnknownMetadata(msg) => write!(f, "{msg}"),
+            Self::HeaderSchemaInvalid(msg)
+            | Self::WriteContractViolation(msg)
+            | Self::ReadPayloadIncomplete(msg)
+            | Self::MemmapContractViolation(msg)
+            | Self::LoadDispatchInvalid(msg)
+            | Self::NpzArchiveContractViolation(msg)
+            | Self::PolicyUnknownMetadata(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -371,7 +371,7 @@ fn element_count(shape: &[usize]) -> Result<usize, IOError> {
     shape
         .iter()
         .copied()
-        .try_fold(1usize, |acc, dim| acc.checked_mul(dim))
+        .try_fold(1usize, usize::checked_mul)
         .ok_or(IOError::HeaderSchemaInvalid(
             "shape element-count overflowed",
         ))
@@ -1909,7 +1909,7 @@ fn decode_element(chunk: &[u8], dtype: IOSupportedDType) -> Result<f64, IOError>
 fn encode_element(v: f64, dtype: IOSupportedDType, buf: &mut Vec<u8>) -> Result<(), IOError> {
     match dtype {
         IOSupportedDType::Bool => {
-            buf.push(if v != 0.0 { 1 } else { 0 });
+            buf.push(u8::from(v != 0.0));
         }
         IOSupportedDType::I8 => buf.push((v as i8) as u8),
         IOSupportedDType::U8 => buf.push(v as u8),
