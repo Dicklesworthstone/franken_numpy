@@ -2274,8 +2274,8 @@ pub fn run_shape_stride_metamorphic_suite(config: &HarnessConfig) -> Result<Suit
         if let Some(sliding_window_case) = &case.sliding_window
             && sliding_window_case.expected_error_contains.is_none()
         {
-            let first = base.sliding_window_view(sliding_window_case.window_shape.clone());
-            let second = base.sliding_window_view(sliding_window_case.window_shape.clone());
+            let first = base.sliding_window_view(&sliding_window_case.window_shape);
+            let second = base.sliding_window_view(&sliding_window_case.window_shape);
             let deterministic_ok = matches!((&first, &second), (Ok(lhs), Ok(rhs)) if lhs == rhs);
             record_suite_check(
                 &mut report,

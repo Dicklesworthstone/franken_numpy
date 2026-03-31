@@ -843,7 +843,7 @@ mod tests {
     fn sliding_window_view_rejects_invalid_window_size() {
         let base = NdLayout::contiguous(vec![4, 5], 8, MemoryOrder::C).expect("layout");
         let err = base
-            .sliding_window_view(vec![0, 3])
+            .sliding_window_view(&[0, 3])
             .expect_err("window size zero should fail");
         assert!(matches!(
             err,
@@ -940,7 +940,7 @@ mod tests {
         for (shape, window_shape) in cases {
             let base = NdLayout::contiguous(shape.clone(), 8, MemoryOrder::C).expect("layout");
             let view = base
-                .sliding_window_view(window_shape.clone())
+                .sliding_window_view(&window_shape)
                 .expect("window should be valid");
 
             let mut expected_shape: Vec<usize> = shape

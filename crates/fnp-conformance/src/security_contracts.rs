@@ -84,9 +84,9 @@ pub fn run_security_contract_suite(config: &HarnessConfig) -> Result<SuiteReport
     let control_map_raw = fs::read_to_string(&control_map_path)
         .map_err(|err| format!("failed reading {}: {err}", control_map_path.display()))?;
 
-    let allowlist: HardenedAllowlist = serde_yaml::from_str(&allowlist_raw)
+    let allowlist: HardenedAllowlist = serde_yaml_ng::from_str(&allowlist_raw)
         .map_err(|err| format!("invalid YAML {}: {err}", allowlist_path.display()))?;
-    let control_map: SecurityControlMap = serde_yaml::from_str(&control_map_raw)
+    let control_map: SecurityControlMap = serde_yaml_ng::from_str(&control_map_raw)
         .map_err(|err| format!("invalid YAML {}: {err}", control_map_path.display()))?;
 
     let mut report = SuiteReport {

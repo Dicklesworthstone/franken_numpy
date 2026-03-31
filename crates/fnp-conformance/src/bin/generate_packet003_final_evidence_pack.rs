@@ -444,7 +444,7 @@ fn write_yaml_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
             .map_err(|err| format!("failed creating {}: {err}", parent.display()))?;
     }
     let raw =
-        serde_yaml::to_string(value).map_err(|err| format!("failed serializing yaml: {err}"))?;
+        serde_yaml_ng::to_string(value).map_err(|err| format!("failed serializing yaml: {err}"))?;
     fs::write(path, raw).map_err(|err| format!("failed writing {}: {err}", path.display()))
 }
 

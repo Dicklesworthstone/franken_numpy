@@ -1,0 +1,356 @@
+{
+  "schema_version": 1,
+  "generated_at_unix_ms": 1774598229038,
+  "git_commit": "a51cbac",
+  "workloads": [
+    {
+      "name": "ufunc_add_broadcast_256x256_by_256",
+      "runs": 20,
+      "samples_ms": [
+        1.6776149999999999,
+        1.568279,
+        1.281646,
+        1.182819,
+        1.122505,
+        1.0458290000000001,
+        1.00949,
+        0.987529,
+        0.98785,
+        0.992188,
+        0.98779,
+        0.98785,
+        0.9929889999999999,
+        0.9906959999999999,
+        0.9859359999999999,
+        1.358301,
+        1.266126,
+        1.3520400000000001,
+        1.366236,
+        1.36825
+      ],
+      "percentiles": {
+        "p50_ms": 1.122505,
+        "p95_ms": 1.568279,
+        "p99_ms": 1.6776149999999999,
+        "min_ms": 0.9859359999999999,
+        "max_ms": 1.6776149999999999
+      },
+      "telemetry": {
+        "elements_per_run": 65536,
+        "bytes_processed_per_run": 1572864,
+        "throughput_elements_per_sec_p50": 58383704.30421245,
+        "throughput_elements_per_sec_p95": 41788482.789095566,
+        "bandwidth_mib_per_sec_p50": 1336.2969429980267,
+        "bandwidth_mib_per_sec_p95": 956.4624661810814
+      }
+    },
+    {
+      "name": "reduce_sum_axis1_keepdims_false_256x256",
+      "runs": 20,
+      "samples_ms": [
+        0.059332,
+        0.057248,
+        0.056908,
+        0.056908,
+        0.056797,
+        0.056848,
+        0.056878,
+        0.056916999999999995,
+        0.06869,
+        0.056877,
+        0.056898000000000004,
+        0.056858,
+        0.056867,
+        0.057178,
+        0.056016,
+        0.055906000000000004,
+        0.055996,
+        0.056046,
+        0.055996,
+        0.055956
+      ],
+      "percentiles": {
+        "p50_ms": 0.056877,
+        "p95_ms": 0.059332,
+        "p99_ms": 0.06869,
+        "min_ms": 0.055906000000000004,
+        "max_ms": 0.06869
+      },
+      "telemetry": {
+        "elements_per_run": 256,
+        "bytes_processed_per_run": 526336,
+        "throughput_elements_per_sec_p50": 4500940.626263692,
+        "throughput_elements_per_sec_p95": 4314703.701206769,
+        "bandwidth_mib_per_sec_p50": 8825.23911247077,
+        "bandwidth_mib_per_sec_p95": 8460.07424324142
+      }
+    },
+    {
+      "name": "reduce_sum_all_keepdims_false_256x256",
+      "runs": 20,
+      "samples_ms": [
+        0.061978,
+        0.061647,
+        0.061646,
+        0.061647,
+        0.061657,
+        0.072648,
+        0.061636,
+        0.061647,
+        0.061647,
+        0.061657,
+        0.072537,
+        0.072006,
+        0.072007,
+        0.071976,
+        0.071986,
+        0.071996,
+        0.071996,
+        0.071987,
+        0.071996,
+        0.083167
+      ],
+      "percentiles": {
+        "p50_ms": 0.071986,
+        "p95_ms": 0.072648,
+        "p99_ms": 0.083167,
+        "min_ms": 0.061636,
+        "max_ms": 0.083167
+      },
+      "telemetry": {
+        "elements_per_run": 1,
+        "bytes_processed_per_run": 524296,
+        "throughput_elements_per_sec_p50": 13891.590031394995,
+        "throughput_elements_per_sec_p95": 13765.003854201079,
+        "bandwidth_mib_per_sec_p50": 6945.901000118513,
+        "bandwidth_mib_per_sec_p95": 6882.606945745667
+      }
+    },
+    {
+      "name": "ufunc_add_broadcast_1024x1024_by_1024",
+      "runs": 8,
+      "samples_ms": [
+        21.19623,
+        21.732956,
+        23.15634,
+        21.141376,
+        18.851161,
+        18.074511,
+        18.187585,
+        18.05797
+      ],
+      "percentiles": {
+        "p50_ms": 21.141376,
+        "p95_ms": 23.15634,
+        "p99_ms": 23.15634,
+        "min_ms": 18.05797,
+        "max_ms": 23.15634
+      },
+      "telemetry": {
+        "elements_per_run": 1048576,
+        "bytes_processed_per_run": 25165824,
+        "throughput_elements_per_sec_p50": 49598285.37177523,
+        "throughput_elements_per_sec_p95": 45282458.28140371,
+        "bandwidth_mib_per_sec_p50": 1135.2146615243964,
+        "bandwidth_mib_per_sec_p95": 1036.4332187210932
+      }
+    },
+    {
+      "name": "matmul_256x256_by_256x256",
+      "runs": 6,
+      "samples_ms": [
+        3.131928,
+        2.820609,
+        3.139142,
+        3.469046,
+        3.43409,
+        3.435032
+      ],
+      "percentiles": {
+        "p50_ms": 3.43409,
+        "p95_ms": 3.469046,
+        "p99_ms": 3.469046,
+        "min_ms": 2.820609,
+        "max_ms": 3.469046
+      },
+      "telemetry": {
+        "elements_per_run": 65536,
+        "bytes_processed_per_run": 1572864,
+        "throughput_elements_per_sec_p50": 19083949.45968219,
+        "throughput_elements_per_sec_p95": 18891649.17386509,
+        "bandwidth_mib_per_sec_p50": 436.796938927052,
+        "bandwidth_mib_per_sec_p95": 432.3955346801397
+      }
+    },
+    {
+      "name": "sort_quicksort_1m",
+      "runs": 8,
+      "samples_ms": [
+        33.016623,
+        25.100259,
+        23.540197,
+        23.639423999999998,
+        23.978807,
+        24.094504999999998,
+        24.090789,
+        23.681915
+      ],
+      "percentiles": {
+        "p50_ms": 24.090789,
+        "p95_ms": 33.016623,
+        "p99_ms": 33.016623,
+        "min_ms": 23.540197,
+        "max_ms": 33.016623
+      },
+      "telemetry": {
+        "elements_per_run": 1000000,
+        "bytes_processed_per_run": 16000000,
+        "throughput_elements_per_sec_p50": 41509640.88390795,
+        "throughput_elements_per_sec_p95": 30287773.52547533,
+        "bandwidth_mib_per_sec_p50": 633.3868543076775,
+        "bandwidth_mib_per_sec_p95": 462.15474739800004
+      }
+    },
+    {
+      "name": "fft_65536",
+      "runs": 8,
+      "samples_ms": [
+        1.4846300000000001,
+        1.5086249999999999,
+        1.4957010000000002,
+        1.4606949999999999,
+        1.471425,
+        1.4634500000000001,
+        1.471225,
+        1.46878
+      ],
+      "percentiles": {
+        "p50_ms": 1.471425,
+        "p95_ms": 1.5086249999999999,
+        "p99_ms": 1.5086249999999999,
+        "min_ms": 1.4606949999999999,
+        "max_ms": 1.5086249999999999
+      },
+      "telemetry": {
+        "elements_per_run": 65536,
+        "bytes_processed_per_run": 1572864,
+        "throughput_elements_per_sec_p50": 44539137.230915606,
+        "throughput_elements_per_sec_p95": 43440881.597481154,
+        "bandwidth_mib_per_sec_p50": 1019.4199500484225,
+        "bandwidth_mib_per_sec_p95": 994.2828734775044
+      }
+    },
+    {
+      "name": "astype_f64_to_i32_1024x1024",
+      "runs": 10,
+      "samples_ms": [
+        3.9862760000000006,
+        0.779455,
+        0.756211,
+        0.769417,
+        0.7732330000000001,
+        0.770768,
+        0.769887,
+        0.764858,
+        0.764046,
+        0.768474
+      ],
+      "percentiles": {
+        "p50_ms": 0.769887,
+        "p95_ms": 3.9862760000000006,
+        "p99_ms": 3.9862760000000006,
+        "min_ms": 0.756211,
+        "max_ms": 3.9862760000000006
+      },
+      "telemetry": {
+        "elements_per_run": 1048576,
+        "bytes_processed_per_run": 12582912,
+        "throughput_elements_per_sec_p50": 1361986888.9850068,
+        "throughput_elements_per_sec_p95": 263046512.584678,
+        "bandwidth_mib_per_sec_p50": 15586.70298368462,
+        "bandwidth_mib_per_sec_p95": 3010.3284368668897
+      }
+    },
+    {
+      "name": "reshape_1024x1024_to_2048x512",
+      "runs": 20,
+      "samples_ms": [
+        0.213784,
+        0.207213,
+        0.214556,
+        0.21687,
+        0.205229,
+        0.185982,
+        0.170182,
+        0.167628,
+        0.166785,
+        0.174621,
+        0.16597399999999998,
+        0.167958,
+        0.166916,
+        0.166516,
+        0.167447,
+        0.176173,
+        0.160183,
+        0.159271,
+        0.15860000000000002,
+        0.16042399999999998
+      ],
+      "percentiles": {
+        "p50_ms": 0.167958,
+        "p95_ms": 0.214556,
+        "p99_ms": 0.21687,
+        "min_ms": 0.15860000000000002,
+        "max_ms": 0.21687
+      },
+      "telemetry": {
+        "elements_per_run": 1048576,
+        "bytes_processed_per_run": 8388608,
+        "throughput_elements_per_sec_p50": 6243084580.668977,
+        "throughput_elements_per_sec_p95": 4887190290.646731,
+        "bandwidth_mib_per_sec_p50": 47630.95535788709,
+        "bandwidth_mib_per_sec_p95": 37286.30287663827
+      }
+    },
+    {
+      "name": "io_npy_save_load_512x512_f64",
+      "runs": 8,
+      "samples_ms": [
+        0.9320350000000001,
+        0.864236,
+        0.866169,
+        0.868594,
+        0.92426,
+        0.891798,
+        0.873263,
+        0.8635440000000001
+      ],
+      "percentiles": {
+        "p50_ms": 0.873263,
+        "p95_ms": 0.9320350000000001,
+        "p99_ms": 0.9320350000000001,
+        "min_ms": 0.8635440000000001,
+        "max_ms": 0.9320350000000001
+      },
+      "telemetry": {
+        "elements_per_run": 262144,
+        "bytes_processed_per_run": 4194304,
+        "throughput_elements_per_sec_p50": 300189061.0274339,
+        "throughput_elements_per_sec_p95": 281259823.93365055,
+        "bandwidth_mib_per_sec_p50": 4580.521561087553,
+        "bandwidth_mib_per_sec_p95": 4291.684325159463
+      }
+    }
+  ],
+  "environment_fingerprint": "os=linux arch=x86_64 cpus=64 rustc=rustc 1.95.0-nightly (7f99507f5 2026-02-19)",
+  "reproducibility": {
+    "command": "cargo run -p fnp-conformance --bin generate_benchmark_baseline",
+    "repo_root": "/data/projects/franken_numpy/crates/fnp-conformance/../..",
+    "output_path": "artifacts/optimization/ufunc_benchmark_baseline_htg_after.json",
+    "rustc_version": "rustc 1.95.0-nightly (7f99507f5 2026-02-19)",
+    "cargo_profile": "release"
+  },
+  "evidence_log_refs": [
+    "artifacts/logs/test_contract_e2e_1773942388557.jsonl"
+  ]
+}

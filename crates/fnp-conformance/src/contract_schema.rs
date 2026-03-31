@@ -266,7 +266,7 @@ fn validate_yaml_required_fields(
         }
     };
 
-    let yaml_value: serde_yaml::Value = match serde_yaml::from_str(&raw) {
+    let yaml_value: serde_yaml_ng::Value = match serde_yaml_ng::from_str(&raw) {
         Ok(value) => value,
         Err(err) => {
             parse_errors.push(format!("invalid YAML {}: {err}", path.display()));
