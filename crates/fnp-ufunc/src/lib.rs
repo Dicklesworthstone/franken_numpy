@@ -4748,8 +4748,12 @@ impl UFuncArray {
                     &mut var_values,
                 );
                 let divisor = axis_len.saturating_sub(ddof) as f64;
-                for v in &mut var_values {
-                    *v /= divisor;
+                if divisor == 0.0 {
+                    var_values.fill(f64::NAN);
+                } else {
+                    for v in &mut var_values {
+                        *v /= divisor;
+                    }
                 }
 
                 Ok(Self {
@@ -27672,6 +27676,30 @@ mod tests {
         let arr = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::I32).expect("arr");
         let out = arr.reduce_var(None, false, 0).expect("var");
         assert_eq!(out.dtype(), DType::F64);
+    }
+
+    #[test]
+    fn reduce_var_axis_ddof_ge_axis_len_returns_nan() {
+        // np.var([[1,2],[3,4]], axis=1, ddof=2) => [nan, nan]
+        let arr =
+            UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).expect("arr");
+        let out = arr.reduce_var(Some(1), false, 2).expect("var ddof=axis_len");
+        assert_eq!(out.shape(), &[2]);
+        assert!(out.values()[0].is_nan());
+        assert!(out.values()[1].is_nan());
+        // ddof > axis_len should also return NaN
+        let out2 = arr.reduce_var(Some(1), false, 5).expect("var ddof>axis_len");
+        assert!(out2.values()[0].is_nan());
+        assert!(out2.values()[1].is_nan());
+    }
+
+    #[test]
+    fn reduce_std_axis_ddof_ge_axis_len_returns_nan() {
+        let arr =
+            UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).expect("arr");
+        let out = arr.reduce_std(Some(1), false, 2).expect("std ddof=axis_len");
+        assert!(out.values()[0].is_nan());
+        assert!(out.values()[1].is_nan());
     }
 
     #[test]
