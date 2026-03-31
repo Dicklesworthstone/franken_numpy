@@ -2550,8 +2550,12 @@ pub fn cond_p_nxn(a: &[f64], n: usize, p: Option<&str>) -> Result<f64, LinAlgErr
     }
     let ord = p.unwrap_or("2");
     let has_nan = a.iter().any(|value| value.is_nan());
+    let has_inf = a.iter().any(|value| value.is_infinite());
     match ord {
         "2" => {
+            if has_inf {
+                return Ok(f64::INFINITY);
+            }
             let sigmas = svd_nxn(a, n)?;
             let sigma_max = sigmas.first().copied().unwrap_or(0.0);
             let sigma_min = sigmas.last().copied().unwrap_or(0.0);
@@ -2561,6 +2565,9 @@ pub fn cond_p_nxn(a: &[f64], n: usize, p: Option<&str>) -> Result<f64, LinAlgErr
             Ok(sigma_max / sigma_min)
         }
         "-2" => {
+            if has_inf {
+                return Ok(f64::INFINITY);
+            }
             let sigmas = svd_nxn(a, n)?;
             let sigma_max = sigmas.first().copied().unwrap_or(0.0);
             let sigma_min = sigmas.last().copied().unwrap_or(0.0);
@@ -6923,6 +6930,18 @@ mod tests {
         cond_p_nxn(&a, 2, None).expect_err("default cond should remain spectral");
         cond_p_nxn(&a, 2, Some("2")).expect_err("2-norm cond should remain spectral");
         cond_p_nxn(&a, 2, Some("-2")).expect_err("-2 cond should remain spectral");
+    }
+
+    #[test]
+    fn cond_p_spectral_infinite_orders_match_numpy() {
+        let a = [f64::INFINITY, 1.0, 2.0, 3.0];
+        assert!(cond_p_nxn(&a, 2, None).expect("default cond on inf").is_infinite());
+        assert!(cond_p_nxn(&a, 2, Some("2"))
+            .expect("2-norm cond on inf")
+            .is_infinite());
+        assert!(cond_p_nxn(&a, 2, Some("-2"))
+            .expect("-2 cond on inf")
+            .is_infinite());
     }
 
     // ── Kronecker product tests ──
