@@ -4507,6 +4507,9 @@ impl UFuncArray {
     }
 
     /// Variance over multiple axes simultaneously (np.var with axis tuple).
+    ///
+    /// Computes mean over the specified axes, then mean of squared deviations.
+    /// This gives the correct population/sample variance, not sequential single-axis variance.
     pub fn reduce_var_axes(
         &self,
         axes: &[isize],
@@ -4516,26 +4519,46 @@ impl UFuncArray {
         if axes.is_empty() {
             return Ok(self.clone());
         }
+        // Compute mean with keepdims=true so we can broadcast-subtract
+        let mean = self.reduce_mean_axes(axes, true)?;
+        let mean_broadcast = mean.broadcast_to(&self.shape)?;
+        // Compute squared deviations
+        let sq_dev: Vec<f64> = self
+            .values
+            .iter()
+            .zip(&mean_broadcast.values)
+            .map(|(&v, &m)| (v - m) * (v - m))
+            .collect();
+        let sq_arr = Self {
+            shape: self.shape.clone(),
+            values: sq_dev,
+            dtype: promote_for_mean_reduction(self.dtype),
+            integer_sidecar: None,
+        };
+        // Sum squared deviations over the axes
+        let sum_sq = sq_arr.reduce_sum_axes(axes, keepdims)?;
+        // Compute count of elements reduced
         let ndim = self.shape.len();
-        let mut norm_axes: Vec<usize> = Vec::with_capacity(axes.len());
+        let mut count: usize = 1;
         for &ax in axes {
             let n = normalize_axis(ax, ndim)?;
-            if !norm_axes.contains(&n) {
-                norm_axes.push(n);
+            count *= self.shape[n];
+        }
+        let denom = count.saturating_sub(ddof) as f64;
+        let mut values = sum_sq.values;
+        if denom == 0.0 {
+            values.fill(f64::NAN);
+        } else {
+            for v in &mut values {
+                *v /= denom;
             }
         }
-        norm_axes.sort_unstable();
-        norm_axes.reverse();
-
-        let mut result = self.clone();
-        for ax in norm_axes {
-            let ax_isize = isize::try_from(ax).map_err(|_| UFuncError::AxisOutOfBounds {
-                axis: ax as isize,
-                ndim: self.shape.len(),
-            })?;
-            result = result.reduce_var(Some(ax_isize), keepdims, ddof)?;
-        }
-        Ok(result)
+        Ok(Self {
+            shape: sum_sq.shape,
+            values,
+            dtype: sum_sq.dtype,
+            integer_sidecar: None,
+        })
     }
 
     /// Standard deviation over multiple axes simultaneously (np.std with axis tuple).
@@ -9789,6 +9812,50 @@ impl UFuncArray {
                 })
             }
         }
+    }
+
+    /// `np.any` over multiple axes simultaneously.
+    pub fn any_axes(&self, axes: &[isize]) -> Result<Self, UFuncError> {
+        if axes.is_empty() {
+            return Ok(self.clone());
+        }
+        let ndim = self.shape.len();
+        let mut norm_axes: Vec<usize> = Vec::with_capacity(axes.len());
+        for &ax in axes {
+            let n = normalize_axis(ax, ndim)?;
+            if !norm_axes.contains(&n) {
+                norm_axes.push(n);
+            }
+        }
+        norm_axes.sort_unstable();
+        norm_axes.reverse();
+        let mut result = self.clone();
+        for ax in norm_axes {
+            result = result.any(Some(ax as isize))?;
+        }
+        Ok(result)
+    }
+
+    /// `np.all` over multiple axes simultaneously.
+    pub fn all_axes(&self, axes: &[isize]) -> Result<Self, UFuncError> {
+        if axes.is_empty() {
+            return Ok(self.clone());
+        }
+        let ndim = self.shape.len();
+        let mut norm_axes: Vec<usize> = Vec::with_capacity(axes.len());
+        for &ax in axes {
+            let n = normalize_axis(ax, ndim)?;
+            if !norm_axes.contains(&n) {
+                norm_axes.push(n);
+            }
+        }
+        norm_axes.sort_unstable();
+        norm_axes.reverse();
+        let mut result = self.clone();
+        for ax in norm_axes {
+            result = result.all(Some(ax as isize))?;
+        }
+        Ok(result)
     }
 
     /// Return the indices of non-zero (truthy) elements (flat).
@@ -23806,21 +23873,9 @@ pub fn sort_complex(a: &UFuncArray) -> Result<UFuncArray, UFuncError> {
     };
     // Sort by real part first, then imaginary part. NaN sorts to end.
     pairs.sort_by(|a, b| {
-        let cmp_re = a.0.partial_cmp(&b.0);
-        let cmp_im = a.1.partial_cmp(&b.1);
-        match cmp_re {
-            Some(std::cmp::Ordering::Equal) => cmp_im.unwrap_or(std::cmp::Ordering::Equal),
-            Some(ord) => ord,
-            None => {
-                // NaN handling: NaN sorts to end
-                if a.0.is_nan() && b.0.is_nan() {
-                    cmp_im.unwrap_or(std::cmp::Ordering::Equal)
-                } else if a.0.is_nan() {
-                    std::cmp::Ordering::Greater
-                } else {
-                    std::cmp::Ordering::Less
-                }
-            }
+        match nan_last_cmp(&a.0, &b.0) {
+            std::cmp::Ordering::Equal => nan_last_cmp(&a.1, &b.1),
+            ord => ord,
         }
     });
     let n = pairs.len();
@@ -35909,6 +35964,55 @@ mod tests {
             UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
         let r = a.reduce_mean_axes(&[0, 1], false).unwrap();
         assert!((r.values()[0] - 3.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reduce_var_axes_basic() {
+        // np.var([[1,2,3],[4,5,6]], axis=(0,1)) = var of all elements = 2.9166...
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = a.reduce_var_axes(&[0, 1], false, 0).unwrap();
+        let expected = 35.0 / 12.0; // population variance of [1,2,3,4,5,6]
+        assert!((r.values()[0] - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reduce_std_axes_basic() {
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = a.reduce_std_axes(&[0, 1], false, 0).unwrap();
+        let expected = (35.0_f64 / 12.0).sqrt();
+        assert!((r.values()[0] - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reduce_var_axes_empty_is_noop() {
+        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
+            .unwrap();
+        let r = a.reduce_var_axes(&[], false, 0).unwrap();
+        assert_eq!(r.values(), a.values());
+    }
+
+    #[test]
+    fn any_axes_basic() {
+        // np.any([[0,0],[1,0],[0,0]], axis=(0,1)) → True
+        let a = UFuncArray::new(vec![3, 2], vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.0], DType::F64)
+            .unwrap();
+        let r = a.any_axes(&[0, 1]).unwrap();
+        assert_eq!(r.values(), &[1.0]);
+    }
+
+    #[test]
+    fn all_axes_basic() {
+        // np.all([[1,1],[1,1]], axis=(0,1)) → True
+        let a = UFuncArray::new(vec![2, 2], vec![1.0, 1.0, 1.0, 1.0], DType::F64).unwrap();
+        let r = a.all_axes(&[0, 1]).unwrap();
+        assert_eq!(r.values(), &[1.0]);
+
+        // One zero → False
+        let b = UFuncArray::new(vec![2, 2], vec![1.0, 0.0, 1.0, 1.0], DType::F64).unwrap();
+        let r2 = b.all_axes(&[0, 1]).unwrap();
+        assert_eq!(r2.values(), &[0.0]);
     }
 
     // ── reduce with where/initial tests ──
