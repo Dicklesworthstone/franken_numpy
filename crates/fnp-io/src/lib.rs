@@ -1644,6 +1644,35 @@ pub fn loadtxt_usecols(
     })
 }
 
+/// Extended `np.loadtxt` with `unpack` parameter.
+///
+/// When `unpack` is true, the returned data is transposed so that columns become
+/// rows. This is equivalent to `np.loadtxt(..., unpack=True)`, commonly used as:
+/// `x, y, z = np.loadtxt('data.txt', unpack=True)`
+pub fn loadtxt_unpack(
+    text: &str,
+    delimiter: char,
+    comments: char,
+    skiprows: usize,
+    max_rows: usize,
+    usecols: Option<&[usize]>,
+    unpack: bool,
+) -> Result<TextArrayData, IOError> {
+    let mut result = loadtxt_usecols(text, delimiter, comments, skiprows, max_rows, usecols)?;
+    if unpack && result.nrows > 0 && result.ncols > 0 {
+        // Transpose: row-major [nrows, ncols] → [ncols, nrows]
+        let mut transposed = vec![0.0f64; result.values.len()];
+        for r in 0..result.nrows {
+            for c in 0..result.ncols {
+                transposed[c * result.nrows + r] = result.values[r * result.ncols + c];
+            }
+        }
+        result.values = transposed;
+        std::mem::swap(&mut result.nrows, &mut result.ncols);
+    }
+    Ok(result)
+}
+
 /// Configuration for savetxt.
 #[derive(Debug, Clone)]
 pub struct SaveTxtConfig<'a> {
@@ -1782,6 +1811,7 @@ pub fn genfromtxt(
 }
 
 /// Extended `np.genfromtxt` with `usecols`, `skip_footer`, and `max_rows` parameters.
+#[allow(clippy::too_many_arguments)]
 pub fn genfromtxt_full(
     text: &str,
     delimiter: char,
@@ -1935,6 +1965,44 @@ pub fn tofile(values: &[f64], dtype: IOSupportedDType) -> Result<Vec<u8>, IOErro
         encode_element(v, dtype, &mut buf)?;
     }
     Ok(buf)
+}
+
+/// Read text-formatted data with a separator (np.fromfile with sep parameter).
+///
+/// When `sep` is non-empty, `fromfile` treats the data as text rather than binary.
+/// Elements are separated by `sep` and parsed as f64.
+pub fn fromfile_text(text: &str, sep: &str, count: Option<usize>) -> Result<Vec<f64>, IOError> {
+    let values: Vec<f64> = text
+        .split(sep)
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            s.parse::<f64>().map_err(|_| {
+                IOError::ReadPayloadIncomplete("fromfile_text: could not parse float")
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    match count {
+        Some(c) => Ok(values.into_iter().take(c).collect()),
+        None => Ok(values),
+    }
+}
+
+/// Write array values as text with a separator (np.ndarray.tofile with sep parameter).
+///
+/// When `sep` is non-empty, `tofile` writes elements as text separated by `sep`.
+pub fn tofile_text(values: &[f64], sep: &str) -> String {
+    values
+        .iter()
+        .map(|v| {
+            if v.fract() == 0.0 && v.is_finite() && v.abs() < 1e15 {
+                format!("{}", *v as i64)
+            } else {
+                format!("{v}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(sep)
 }
 
 /// Decode a single element from raw bytes to f64.
@@ -3425,11 +3493,13 @@ mod tests {
         MAX_HEADER_BYTES, MAX_MEMMAP_VALIDATION_RETRIES, MemmapMode, NPY_MAGIC_PREFIX,
         NPZ_MAGIC_PREFIX, NpyHeader, NpzCompression, SaveTxtConfig, StructuredIODescriptor,
         StructuredIOField, classify_load_dispatch, encode_npy_header_bytes, enforce_pickle_policy,
-        fromfile, fromfile_complex, fromfile_strings, fromfile_structured, fromstring, genfromtxt, genfromtxt_full,
-        load, load_complex, load_npz, load_strings, load_structured, loadtxt, loadtxt_usecols,
+        fromfile, fromfile_complex, fromfile_strings, fromfile_structured, fromfile_text, fromstring,
+        genfromtxt, genfromtxt_full,
+        load, load_complex, load_npz, load_strings, load_structured, loadtxt, loadtxt_unpack,
+        loadtxt_usecols,
         memmap, memmap_npy, parse_structured_descr, read_npy_bytes, read_npz_bytes, save,
         save_complex, save_strings, save_structured, savetxt, savez, savez_compressed,
-        synthesize_npz_member_names, tobytes, tofile, tofile_complex, tofile_strings,
+        synthesize_npz_member_names, tobytes, tofile, tofile_complex, tofile_strings, tofile_text,
         tofile_structured, tostring, validate_descriptor_roundtrip, validate_header_schema,
         validate_io_policy_metadata, validate_magic_version, validate_memmap_contract,
         validate_npz_archive_budget, validate_read_payload, validate_write_contract,
@@ -4085,6 +4155,47 @@ mod tests {
     }
 
     #[test]
+    fn fromfile_text_basic() {
+        let text = "1.0 2.0 3.0 4.5";
+        let result = fromfile_text(text, " ", None).unwrap();
+        assert_eq!(result, vec![1.0, 2.0, 3.0, 4.5]);
+    }
+
+    #[test]
+    fn fromfile_text_comma_sep() {
+        let text = "1,2,3";
+        let result = fromfile_text(text, ",", None).unwrap();
+        assert_eq!(result, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn fromfile_text_with_count() {
+        let text = "1 2 3 4 5";
+        let result = fromfile_text(text, " ", Some(3)).unwrap();
+        assert_eq!(result, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn tofile_text_basic() {
+        let result = tofile_text(&[1.0, 2.0, 3.5], " ");
+        assert_eq!(result, "1 2 3.5");
+    }
+
+    #[test]
+    fn tofile_text_comma_sep() {
+        let result = tofile_text(&[10.0, 20.0, 30.0], ",");
+        assert_eq!(result, "10,20,30");
+    }
+
+    #[test]
+    fn fromfile_tofile_text_roundtrip() {
+        let original = vec![1.0, 2.5, 3.0, 4.75];
+        let text = tofile_text(&original, " ");
+        let recovered = fromfile_text(&text, " ", None).unwrap();
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
     fn loadtxt_usecols_selects_columns() {
         let text = "1,2,3,4\n5,6,7,8\n";
         let result = loadtxt_usecols(text, ',', '#', 0, 0, Some(&[0, 2])).unwrap();
@@ -4116,6 +4227,25 @@ mod tests {
         let result = loadtxt_usecols(text, ',', '#', 0, 0, None).unwrap();
         assert_eq!(result.ncols, 3);
         assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn loadtxt_unpack_basic() {
+        // [[1,2,3],[4,5,6]] with unpack=true → [[1,4],[2,5],[3,6]]
+        let text = "1,2,3\n4,5,6\n";
+        let result = loadtxt_unpack(text, ',', '#', 0, 0, None, true).unwrap();
+        // After transpose: nrows=3 (was ncols), ncols=2 (was nrows)
+        assert_eq!(result.nrows, 3);
+        assert_eq!(result.ncols, 2);
+        assert_eq!(result.values, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    }
+
+    #[test]
+    fn loadtxt_unpack_false_matches_default() {
+        let text = "1,2,3\n4,5,6\n";
+        let default = loadtxt_usecols(text, ',', '#', 0, 0, None).unwrap();
+        let no_unpack = loadtxt_unpack(text, ',', '#', 0, 0, None, false).unwrap();
+        assert_eq!(default.values, no_unpack.values);
     }
 
     #[test]

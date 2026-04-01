@@ -4,10 +4,10 @@
   <img src="franken_numpy_illustration.webp" alt="FrankenNumPy - memory-safe clean-room NumPy reimplementation in Rust" width="400">
 
   **Memory-safe, clean-room NumPy reimplementation in Rust.**<br>
-  Zero unsafe code. 2,426 tests. Bit-exact RNG parity. Every feature family green.
+  Zero unsafe code. 2,594 tests. Bit-exact RNG parity. Every feature family green.
 
   ![Rust](https://img.shields.io/badge/Rust-nightly%202024-orange)
-  ![Tests](https://img.shields.io/badge/tests-2%2C426%20passing-brightgreen)
+  ![Tests](https://img.shields.io/badge/tests-2%2C594%20passing-brightgreen)
   ![Unsafe](https://img.shields.io/badge/unsafe-0%20blocks-blue)
   ![License](https://img.shields.io/badge/license-MIT-green)
 </div>
@@ -35,7 +35,7 @@ FrankenNumPy rebuilds NumPy's semantics from scratch in safe Rust with two non-n
 | Stride calculus | Evolved over decades | Clean-room deterministic engine (SCE) |
 | Runtime modes | Single mode | Strict (max compat) + Hardened (safety guards) |
 | Conformance | Self-referential | Differential oracle against real NumPy |
-| Test coverage | pytest suite | 2,358 Rust tests + 8-gate CI topology |
+| Test coverage | pytest suite | 2,594 Rust tests + 8-gate CI topology |
 
 ---
 
@@ -149,7 +149,7 @@ cargo test --workspace --all-features
       ▼           ▼               ▼              ▼           ▼
  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
  │ fnp-ufunc│ │fnp-linalg│ │fnp-random│ │  fnp-io  │ │ fnp-fft  │
- │ 1421     │ │ 205      │ │ 191      │ │ 154      │ │ (in-ufunc│
+ │ 1549     │ │ 217      │ │ 191      │ │ 174      │ │ (in-ufunc│
  │ tests    │ │ tests    │ │ tests    │ │ tests    │ │  module) │
  └─────┬────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘
        │

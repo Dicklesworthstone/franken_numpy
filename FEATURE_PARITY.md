@@ -49,16 +49,16 @@
 
 | Crate | Tests | Description |
 |---|---|---|
-| fnp-ufunc | 1,421 | Core array operations, math, sorting, polynomials, reductions, oracle tests, linalg bridge, FFT (hfft/ihfft), hermfit/lagfit, masked cov/corrcoef, datetime parsing, gufunc validation, parameter parity (clip_optional, reshape_order, histogram_full, unique_axis, concatenate_with_dtype) |
+| fnp-ufunc | 1,549 | Core array operations, math, sorting, polynomials, reductions, oracle tests, linalg bridge, FFT (hfft/ihfft), hermfit/lagfit, masked cov/corrcoef, datetime parsing, gufunc validation, parameter parity (equal_nan, bitorder, mode, endpoint, trim, period, axes, prepend/append, left/right) |
 | fnp-ndarray | 55 | Shape legality, stride calculus, broadcast contracts, overlap detection, multi-axis negative strides |
-| fnp-linalg | 205 | Linear algebra decompositions, solvers, norms, 16 NumPy oracle tests, extreme-scale regression |
+| fnp-linalg | 217 | Linear algebra decompositions, solvers, norms, 16 NumPy oracle tests, extreme-scale regression, non-finite parity (cond_p, cross_product 2D, NaN/Inf propagation) |
 | fnp-random | 191 | RNG distributions (40 oracle-verified), seeding, reproducibility, large-n binomial/multinomial |
 | fnp-iter | 103 | Transfer-loop selector, NDIter traversal/broadcast/overlap contracts, flatiter indexing/assignment, ndindex/ndenumerate iterators |
-| fnp-io | 154 | NPY/NPZ read/write, text formats, compression, 7 format oracle tests |
+| fnp-io | 174 | NPY/NPZ read/write, text formats, compression, 7 format oracle tests, genfromtxt_full, fromfile_text/tofile_text |
 | fnp-conformance | 117 | Differential parity, metamorphic identities, adversarial fuzzing, witness stability, matmul conformance |
 | fnp-dtype | 117 | Dtype taxonomy, promotion table, cast policy primitives, NumPy byte-width parsing |
 | fnp-runtime | 54 | Mode split, fail-closed decoding, override-audit gate, Bayesian decision engine, evidence ledger |
-| **Total** | **2,426** | |
+| **Total** | **2,594** | |
 
 ## Remaining Gaps (Python-specific, low priority)
 

@@ -6170,7 +6170,7 @@ mod tests {
         let a = [3.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 5.0];
         let eigvals = eigvalsh_nxn(&a, 3).expect("eigvalsh repeated");
         let mut sorted = eigvals.clone();
-        sorted.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        sorted.sort_by(|a, b| b.total_cmp(a));
         assert!((sorted[0] - 5.0).abs() < 1e-10, "eig0={}", sorted[0]);
         assert!((sorted[1] - 3.0).abs() < 1e-10, "eig1={}", sorted[1]);
         assert!((sorted[2] - 3.0).abs() < 1e-10, "eig2={}", sorted[2]);
@@ -6361,7 +6361,7 @@ mod tests {
         // Known eigenvalues: 2 - 2*cos(k*π/(n+1)) for k=1..n
         // All should be in (0, 4)
         let mut sorted = eigvals.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(f64::total_cmp);
         for (k, &val) in sorted.iter().enumerate() {
             let expected =
                 2.0 - 2.0 * ((k + 1) as f64 * std::f64::consts::PI / (n + 1) as f64).cos();
@@ -6632,7 +6632,7 @@ mod tests {
         assert!(eigs[1].abs() < 1e-6, "im0={}", eigs[1]); // real
         assert!(eigs[3].abs() < 1e-6, "im1={}", eigs[3]); // real
         let mut vals = [eigs[0], eigs[2]];
-        vals.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        vals.sort_by(|a, b| b.total_cmp(a));
         assert!((vals[0] - 3.0).abs() < 1e-6, "eig0={}", vals[0]);
         assert!((vals[1] - 1.0).abs() < 1e-6, "eig1={}", vals[1]);
     }
@@ -6643,7 +6643,7 @@ mod tests {
         let eigs = eig_nxn(&a, 3).unwrap();
         assert_eq!(eigs.len(), 6);
         let mut reals: Vec<f64> = (0..3).map(|i| eigs[i * 2]).collect();
-        reals.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        reals.sort_by(|a, b| b.total_cmp(a));
         assert!((reals[0] - 5.0).abs() < 1e-6);
         assert!((reals[1] - 3.0).abs() < 1e-6);
         assert!((reals[2] - 1.0).abs() < 1e-6);
@@ -6659,7 +6659,7 @@ mod tests {
         assert!(eigs[0].abs() < 1e-6, "re0={}", eigs[0]);
         assert!(eigs[2].abs() < 1e-6, "re1={}", eigs[2]);
         let mut imags = [eigs[1].abs(), eigs[3].abs()];
-        imags.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        imags.sort_by(f64::total_cmp);
         assert!((imags[0] - 1.0).abs() < 1e-6, "im magnitude={}", imags[0]);
         assert!((imags[1] - 1.0).abs() < 1e-6, "im magnitude={}", imags[1]);
     }
@@ -6937,7 +6937,7 @@ mod tests {
         let (t, z) = schur_nxn(&a, 2).unwrap();
         // T should have eigenvalues on diagonal
         let mut diag = [t[0], t[3]];
-        diag.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        diag.sort_by(|a, b| b.total_cmp(a));
         assert!((diag[0] - 5.0).abs() < 1e-6, "t00={}", diag[0]);
         assert!((diag[1] - 3.0).abs() < 1e-6, "t11={}", diag[1]);
 
@@ -8160,7 +8160,7 @@ mod tests {
         assert!(eigs[5].abs() < 1e-10, "should be real");
         assert!(eigs[7].abs() < 1e-10, "should be real");
         let mut real_eigs = [re0, re1];
-        real_eigs.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        real_eigs.sort_by(|a, b| b.total_cmp(a));
         assert!((real_eigs[0] - 7.0).abs() < 1e-10);
         assert!((real_eigs[1] - 5.0).abs() < 1e-10);
     }
@@ -8518,7 +8518,7 @@ mod tests {
         let (eigenvalues, _eigenvectors) = eig_nxn_full(&[1.0, 2.0, 3.0, 4.0], 2).unwrap();
         // eigenvalues are interleaved [re0, im0, re1, im1]
         let mut vals_re: Vec<f64> = eigenvalues.chunks(2).map(|c| c[0]).collect();
-        vals_re.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        vals_re.sort_by(f64::total_cmp);
         assert_oracle("eig[0]", vals_re[0], -0.3722813232690143);
         assert_oracle("eig[1]", vals_re[1], 5.372281323269014);
     }
@@ -8527,7 +8527,7 @@ mod tests {
     fn numpy_oracle_eigvalsh_3x3() {
         let b = [2.0, 1.0, 0.0, 1.0, 3.0, 1.0, 0.0, 1.0, 2.0];
         let mut vals = eigvalsh_nxn(&b, 3).unwrap();
-        vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        vals.sort_by(f64::total_cmp);
         assert_oracle("eigvalsh[0]", vals[0], 1.0);
         assert_oracle("eigvalsh[1]", vals[1], 2.0);
         assert_oracle("eigvalsh[2]", vals[2], 4.0);
@@ -8537,7 +8537,7 @@ mod tests {
     fn numpy_oracle_svd_2x2() {
         let result = svd_2x2([[1.0, 2.0], [3.0, 4.0]], true).unwrap();
         let mut s = result.singular_values.to_vec();
-        s.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        s.sort_by(|a, b| b.total_cmp(a));
         assert_oracle("svd_s[0]", s[0], 5.464985704219043);
         assert_oracle("svd_s[1]", s[1], 0.3659661906262575);
     }
