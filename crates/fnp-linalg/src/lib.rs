@@ -364,19 +364,33 @@ fn validate_finite_matrix_2x2(matrix: [[f64; 2]; 2]) -> Result<(), LinAlgError> 
 }
 
 pub fn det_2x2(matrix: [[f64; 2]; 2]) -> Result<f64, LinAlgError> {
-    validate_finite_matrix_2x2(matrix)?;
     Ok(matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0])
 }
 
 pub fn slogdet_2x2(matrix: [[f64; 2]; 2]) -> Result<(f64, f64), LinAlgError> {
-    let det = det_2x2(matrix)?;
-    if det > 0.0 {
-        Ok((1.0, det.ln()))
-    } else if det < 0.0 {
-        Ok((-1.0, (-det).ln()))
-    } else {
-        Ok((0.0, f64::NEG_INFINITY))
+    let flat = [matrix[0][0], matrix[0][1], matrix[1][0], matrix[1][1]];
+    let (lu, _, sign) = match lu_decompose_for_det(&flat, 2) {
+        Ok(parts) => parts,
+        Err(LinAlgError::SolverSingularity) => return Ok((0.0, f64::NEG_INFINITY)),
+        Err(err) => return Err(err),
+    };
+    let mut det_sign = sign;
+    let mut log_abs_det = 0.0;
+    for i in 0..2 {
+        let diag = lu[i * 2 + i];
+        if diag.is_nan() {
+            return Ok((det_sign, f64::NAN));
+        }
+        if diag < 0.0 {
+            det_sign = -det_sign;
+            log_abs_det += (-diag).ln();
+        } else if diag > 0.0 {
+            log_abs_det += diag.ln();
+        } else {
+            return Ok((0.0, f64::NEG_INFINITY));
+        }
     }
+    Ok((det_sign, log_abs_det))
 }
 
 pub fn inv_2x2(matrix: [[f64; 2]; 2]) -> Result<[[f64; 2]; 2], LinAlgError> {
@@ -397,20 +411,28 @@ pub fn inv_2x2(matrix: [[f64; 2]; 2]) -> Result<[[f64; 2]; 2], LinAlgError> {
 /// Returns (lu, perm, sign) with L and U packed into one flat row-major
 /// buffer.  `perm[i]` records the original row index that ended up at
 /// position i after pivoting; `sign` is +1 or -1.
-fn lu_decompose(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<usize>, f64), LinAlgError> {
+fn lu_decompose_inner(
+    a: &[f64],
+    n: usize,
+    reject_non_finite: bool,
+) -> Result<(Vec<f64>, Vec<usize>, f64), LinAlgError> {
     if Some(a.len()) != n.checked_mul(n) || n == 0 {
         return Err(LinAlgError::ShapeContractViolation(
             "LU input must be n*n with n > 0",
         ));
     }
-    if a.iter().any(|v| !v.is_finite()) {
+    if reject_non_finite && a.iter().any(|v| !v.is_finite()) {
         return Err(LinAlgError::NormDetRankPolicyViolation(
             "matrix entries must be finite for LU decomposition",
         ));
     }
 
     let matrix_max_abs = a.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-    let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
+    let singularity_threshold = if matrix_max_abs.is_finite() {
+        (n as f64) * f64::EPSILON * matrix_max_abs
+    } else {
+        0.0
+    };
 
     let mut lu = a.to_vec();
     let mut perm: Vec<usize> = (0..n).collect();
@@ -452,6 +474,14 @@ fn lu_decompose(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<usize>, f64), LinA
     }
 
     Ok((lu, perm, sign))
+}
+
+fn lu_decompose(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<usize>, f64), LinAlgError> {
+    lu_decompose_inner(a, n, true)
+}
+
+fn lu_decompose_for_det(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<usize>, f64), LinAlgError> {
+    lu_decompose_inner(a, n, false)
 }
 
 /// Forward-substitution (Ly = Pb) then back-substitution (Ux = y).
@@ -504,13 +534,8 @@ pub fn det_nxn(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
             "det_nxn: input must be n*n with n > 0",
         ));
     }
-    if a.iter().any(|v| !v.is_finite()) {
-        return Err(LinAlgError::NormDetRankPolicyViolation(
-            "matrix entries must be finite for det",
-        ));
-    }
 
-    match lu_decompose(a, n) {
+    match lu_decompose_for_det(a, n) {
         Ok((lu, _, sign)) => {
             let mut det = sign;
             for i in 0..n {
@@ -530,18 +555,16 @@ pub fn slogdet_nxn(a: &[f64], n: usize) -> Result<(f64, f64), LinAlgError> {
             "slogdet_nxn: input must be n*n with n > 0",
         ));
     }
-    if a.iter().any(|v| !v.is_finite()) {
-        return Err(LinAlgError::NormDetRankPolicyViolation(
-            "matrix entries must be finite for slogdet",
-        ));
-    }
 
-    match lu_decompose(a, n) {
+    match lu_decompose_for_det(a, n) {
         Ok((lu, _, sign)) => {
             let mut det_sign = sign;
             let mut log_abs_det = 0.0;
             for i in 0..n {
                 let diag = lu[i * n + i];
+                if diag.is_nan() {
+                    return Ok((det_sign, f64::NAN));
+                }
                 if diag < 0.0 {
                     det_sign = -det_sign;
                     log_abs_det += (-diag).ln();
@@ -5001,6 +5024,45 @@ mod tests {
     }
 
     #[test]
+    fn det_and_slogdet_match_numpy_non_finite_semantics() {
+        let nan_diag = [[f64::NAN, 1.0], [2.0, 3.0]];
+        assert!(det_2x2(nan_diag).expect("nan det").is_nan());
+        let (sign, log_abs_det) = slogdet_2x2(nan_diag).expect("nan slogdet");
+        assert!(approx_equal(sign, 1.0, 1e-12));
+        assert!(log_abs_det.is_nan());
+
+        let nan_offdiag = [[1.0, f64::NAN], [2.0, 3.0]];
+        assert!(det_2x2(nan_offdiag).expect("nan det offdiag").is_nan());
+        let (sign, log_abs_det) = slogdet_2x2(nan_offdiag).expect("nan slogdet offdiag");
+        assert!(approx_equal(sign, -1.0, 1e-12));
+        assert!(log_abs_det.is_nan());
+
+        let inf_diag = [[f64::INFINITY, 1.0], [2.0, 3.0]];
+        assert!(det_2x2(inf_diag).expect("inf det").is_infinite());
+        let (sign, log_abs_det) = slogdet_2x2(inf_diag).expect("inf slogdet");
+        assert!(approx_equal(sign, 1.0, 1e-12));
+        assert!(log_abs_det.is_infinite() && log_abs_det.is_sign_positive());
+
+        let inf_offdiag = [[1.0, f64::INFINITY], [2.0, 3.0]];
+        assert!(det_2x2(inf_offdiag).expect("inf det offdiag").is_infinite());
+        let (sign, log_abs_det) = slogdet_2x2(inf_offdiag).expect("inf slogdet offdiag");
+        assert!(approx_equal(sign, -1.0, 1e-12));
+        assert!(log_abs_det.is_infinite() && log_abs_det.is_sign_positive());
+
+        let nan_nxn = [f64::NAN, 1.0, 0.0, 0.0, 3.0, 1.0, 2.0, 0.0, 3.0];
+        assert!(det_nxn(&nan_nxn, 3).expect("nan det nxn").is_nan());
+        let (sign, log_abs_det) = slogdet_nxn(&nan_nxn, 3).expect("nan slogdet nxn");
+        assert!(approx_equal(sign, 1.0, 1e-12));
+        assert!(log_abs_det.is_nan());
+
+        let inf_nxn = [f64::INFINITY, 1.0, 0.0, 0.0, 3.0, 1.0, 2.0, 0.0, 3.0];
+        assert!(det_nxn(&inf_nxn, 3).expect("inf det nxn").is_infinite());
+        let (sign, log_abs_det) = slogdet_nxn(&inf_nxn, 3).expect("inf slogdet nxn");
+        assert!(approx_equal(sign, 1.0, 1e-12));
+        assert!(log_abs_det.is_infinite() && log_abs_det.is_sign_positive());
+    }
+
+    #[test]
     fn inv_2x2_matches_identity_reconstruction() {
         let matrix = [[4.0, 7.0], [2.0, 6.0]];
         let inv = inv_2x2(matrix).expect("inverse");
@@ -5073,10 +5135,7 @@ mod tests {
     }
 
     #[test]
-    fn norm_det_rank_pinv_reject_non_finite_inputs() {
-        let err = det_2x2([[f64::NAN, 1.0], [2.0, 3.0]]).expect_err("nan matrix");
-        assert_eq!(err.reason_code(), "linalg_norm_det_rank_policy_violation");
-
+    fn rank_and_pinv_still_reject_non_finite_inputs() {
         let err = pinv_2x2([[f64::INFINITY, 0.0], [0.0, 1.0]], 1e-12).expect_err("inf matrix");
         assert_eq!(err.reason_code(), "linalg_norm_det_rank_policy_violation");
     }
