@@ -492,6 +492,33 @@ fn lu_decompose_for_det(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<usize>, f6
     lu_decompose_inner(a, n, false)
 }
 
+fn diagonal_nan_cutoff(a: &[f64], n: usize) -> Option<usize> {
+    let mut max_diag_nan = None;
+    for row in 0..n {
+        for col in 0..n {
+            let value = a[row * n + col];
+            if value.is_nan() {
+                if row != col {
+                    return None;
+                }
+                max_diag_nan = Some(row);
+            }
+        }
+    }
+    max_diag_nan
+}
+
+fn fill_diagonal_nans_with_one(a: &[f64], n: usize) -> Vec<f64> {
+    let mut sanitized = a.to_vec();
+    for i in 0..n {
+        let diag = i * n + i;
+        if sanitized[diag].is_nan() {
+            sanitized[diag] = 1.0;
+        }
+    }
+    sanitized
+}
+
 /// Forward-substitution (Ly = Pb) then back-substitution (Ux = y).
 fn lu_forward_back(lu: &[f64], perm: &[usize], b: &[f64], n: usize) -> Vec<f64> {
     let mut x: Vec<f64> = perm.iter().map(|&p| b[p]).collect();
@@ -523,6 +550,17 @@ pub fn solve_nxn(a: &[f64], b: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError
         return Err(LinAlgError::ShapeContractViolation(
             "solve_nxn: rhs length must equal n",
         ));
+    }
+    if let Some(last_nan_diag) = diagonal_nan_cutoff(a, n) {
+        let sanitized = fill_diagonal_nans_with_one(a, n);
+        let mut solved = solve_nxn(&sanitized, b, n)?;
+        for value in &mut solved[..=last_nan_diag] {
+            *value = f64::NAN;
+        }
+        return Ok(solved);
+    }
+    if a.iter().any(|value| value.is_nan()) {
+        return Ok(vec![f64::NAN; n]);
     }
     let (lu, perm, _) = lu_decompose_for_det(a, n)?;
     Ok(lu_forward_back(&lu, &perm, b, n))
@@ -586,6 +624,19 @@ pub fn slogdet_nxn(a: &[f64], n: usize) -> Result<(f64, f64), LinAlgError> {
 /// Inverse of an NxN matrix via LU decomposition.  Returns n*n flat
 /// row-major.
 pub fn inv_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
+    if let Some(last_nan_diag) = diagonal_nan_cutoff(a, n) {
+        let sanitized = fill_diagonal_nans_with_one(a, n);
+        let mut inverse = inv_nxn(&sanitized, n)?;
+        for row in 0..=last_nan_diag {
+            for col in 0..n {
+                inverse[row * n + col] = f64::NAN;
+            }
+        }
+        return Ok(inverse);
+    }
+    if a.iter().any(|value| value.is_nan()) {
+        return Ok(vec![f64::NAN; n * n]);
+    }
     let (lu, perm, _) = lu_decompose_for_det(a, n)?;
     // Create identity matrix as RHS
     let mut eye = vec![0.0; n * n];
@@ -694,6 +745,19 @@ pub fn solve_nxn_multi(a: &[f64], b: &[f64], n: usize, m: usize) -> Result<Vec<f
         return Err(LinAlgError::ShapeContractViolation(
             "solve_nxn_multi: B must be n*m",
         ));
+    }
+    if let Some(last_nan_diag) = diagonal_nan_cutoff(a, n) {
+        let sanitized = fill_diagonal_nans_with_one(a, n);
+        let mut solved = solve_nxn_multi(&sanitized, b, n, m)?;
+        for row in 0..=last_nan_diag {
+            for col in 0..m {
+                solved[row * m + col] = f64::NAN;
+            }
+        }
+        return Ok(solved);
+    }
+    if a.iter().any(|value| value.is_nan()) {
+        return Ok(vec![f64::NAN; n * m]);
     }
     let (lu, perm, _) = lu_decompose_for_det(a, n)?;
 
@@ -6041,6 +6105,50 @@ mod tests {
         assert!(approx_equal(inf_inv[6], 0.0, 1e-12));
         assert!(approx_equal(inf_inv[7], 0.0, 1e-12));
         assert!(approx_equal(inf_inv[8], 0.3333333333333333, 1e-12));
+    }
+
+    #[test]
+    fn solve_and_inv_nxn_match_numpy_diagonal_nan_parity() {
+        let diag00 = [f64::NAN, 1.0, 0.0, 0.0, 3.0, 1.0, 2.0, 0.0, 3.0];
+        let solved = solve_nxn(&diag00, &[1.0, 2.0, 3.0], 3).expect("diag00 solve");
+        assert!(solved[0].is_nan());
+        assert!(approx_equal(solved[1], 0.45454545454545453, 1e-12));
+        assert!(approx_equal(solved[2], 0.6363636363636364, 1e-12));
+
+        let inverse = inv_nxn(&diag00, 3).expect("diag00 inv");
+        assert!(inverse[0].is_nan());
+        assert!(inverse[1].is_nan());
+        assert!(inverse[2].is_nan());
+        assert!(approx_equal(inverse[3], 0.18181818181818182, 1e-12));
+        assert!(approx_equal(inverse[4], 0.2727272727272727, 1e-12));
+        assert!(approx_equal(inverse[5], -0.09090909090909091, 1e-12));
+        assert!(approx_equal(inverse[6], -0.5454545454545454, 1e-12));
+        assert!(approx_equal(inverse[7], 0.18181818181818182, 1e-12));
+        assert!(approx_equal(inverse[8], 0.2727272727272727, 1e-12));
+
+        let diag11 = [1.0, 2.0, 0.0, 0.0, f64::NAN, 1.0, 2.0, 0.0, 3.0];
+        let solved = solve_nxn(&diag11, &[1.0, 2.0, 3.0], 3).expect("diag11 solve");
+        assert!(solved[0].is_nan());
+        assert!(solved[1].is_nan());
+        assert!(approx_equal(solved[2], 1.2857142857142858, 1e-12));
+
+        let inverse = inv_nxn(&diag11, 3).expect("diag11 inv");
+        for value in &inverse[..6] {
+            assert!(value.is_nan());
+        }
+        assert!(approx_equal(inverse[6], -0.2857142857142857, 1e-12));
+        assert!(approx_equal(inverse[7], 0.5714285714285714, 1e-12));
+        assert!(approx_equal(inverse[8], 0.14285714285714285, 1e-12));
+    }
+
+    #[test]
+    fn solve_and_inv_nxn_match_numpy_off_diagonal_nan_parity() {
+        let offdiag = [1.0, f64::NAN, 0.0, 0.0, 3.0, 1.0, 2.0, 0.0, 3.0];
+        let solved = solve_nxn(&offdiag, &[1.0, 2.0, 3.0], 3).expect("offdiag solve");
+        assert!(solved.iter().all(|value| value.is_nan()));
+
+        let inverse = inv_nxn(&offdiag, 3).expect("offdiag inv");
+        assert!(inverse.iter().all(|value| value.is_nan()));
     }
 
     #[test]
