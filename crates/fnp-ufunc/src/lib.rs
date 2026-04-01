@@ -4506,6 +4506,52 @@ impl UFuncArray {
         Ok(result)
     }
 
+    /// Variance over multiple axes simultaneously (np.var with axis tuple).
+    pub fn reduce_var_axes(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+        ddof: usize,
+    ) -> Result<Self, UFuncError> {
+        if axes.is_empty() {
+            return Ok(self.clone());
+        }
+        let ndim = self.shape.len();
+        let mut norm_axes: Vec<usize> = Vec::with_capacity(axes.len());
+        for &ax in axes {
+            let n = normalize_axis(ax, ndim)?;
+            if !norm_axes.contains(&n) {
+                norm_axes.push(n);
+            }
+        }
+        norm_axes.sort_unstable();
+        norm_axes.reverse();
+
+        let mut result = self.clone();
+        for ax in norm_axes {
+            let ax_isize = isize::try_from(ax).map_err(|_| UFuncError::AxisOutOfBounds {
+                axis: ax as isize,
+                ndim: self.shape.len(),
+            })?;
+            result = result.reduce_var(Some(ax_isize), keepdims, ddof)?;
+        }
+        Ok(result)
+    }
+
+    /// Standard deviation over multiple axes simultaneously (np.std with axis tuple).
+    pub fn reduce_std_axes(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+        ddof: usize,
+    ) -> Result<Self, UFuncError> {
+        let mut var_result = self.reduce_var_axes(axes, keepdims, ddof)?;
+        for v in &mut var_result.values {
+            *v = v.sqrt();
+        }
+        Ok(var_result)
+    }
+
     /// Sum with a boolean mask (where parameter).
     ///
     /// Mimics `np.sum(a, where=mask)`. Only elements where mask is nonzero
@@ -7150,6 +7196,15 @@ impl UFuncArray {
             });
         }
         Ok(result)
+    }
+
+    /// Split at specific indices along an axis (np.split with indices_or_sections as array).
+    ///
+    /// Unlike equal-section `split`, this splits at the given indices.
+    /// For indices `[2, 5]` along axis 0, produces sub-arrays `[0:2]`, `[2:5]`, `[5:]`.
+    pub fn split_at(&self, indices: &[usize], axis: isize) -> Result<Vec<Self>, UFuncError> {
+        let ax = normalize_axis(axis, self.shape.len())?;
+        self.array_split_at_indices(indices, ax)
     }
 
     /// Construct an array by repeating input the given number of times along each axis.
@@ -10684,6 +10739,14 @@ impl UFuncArray {
     /// Returns one array per input, each with shape (len(y), len(x)) for 2 inputs.
     /// Only supports 'xy' indexing (default NumPy).
     pub fn meshgrid(arrays: &[Self]) -> Result<Vec<Self>, UFuncError> {
+        Self::meshgrid_indexing(arrays, "xy")
+    }
+
+    /// `np.meshgrid` with explicit `indexing` parameter.
+    ///
+    /// `indexing`: `"xy"` (default, Cartesian) swaps first two dimensions.
+    /// `"ij"` (matrix indexing) preserves input order.
+    pub fn meshgrid_indexing(arrays: &[Self], indexing: &str) -> Result<Vec<Self>, UFuncError> {
         if arrays.len() < 2 {
             return Err(UFuncError::Msg(
                 "meshgrid requires at least 2 arrays".to_string(),
@@ -10696,12 +10759,18 @@ impl UFuncArray {
                 ));
             }
         }
-        // For 2-D case: shape = (len(arrays[1]), len(arrays[0])) with xy indexing
-        // Generalized N-D: output shape = (len(a1), len(a0), len(a2), ...)
-        // NumPy xy indexing swaps the first two
+        let swap = match indexing {
+            "xy" => true,
+            "ij" => false,
+            _ => {
+                return Err(UFuncError::Msg(format!(
+                    "meshgrid: indexing must be 'xy' or 'ij', got '{indexing}'"
+                )));
+            }
+        };
         let ndim = arrays.len();
         let mut out_shape: Vec<usize> = arrays.iter().map(|a| a.shape[0]).collect();
-        if ndim >= 2 {
+        if swap && ndim >= 2 {
             out_shape.swap(0, 1);
         }
         let out_count: usize = out_shape.iter().product();
@@ -10710,7 +10779,7 @@ impl UFuncArray {
         let mut results = Vec::with_capacity(ndim);
         for (dim, arr) in arrays.iter().enumerate() {
             // Which output axis does this input correspond to?
-            let axis = if ndim >= 2 {
+            let axis = if swap && ndim >= 2 {
                 match dim {
                     0 => 1,
                     1 => 0,
@@ -12258,9 +12327,14 @@ impl UFuncArray {
             // Constant polynomial — no roots (just trailing zeros if any)
             let mut values: Vec<f64> = vec![0.0; trailing_zeros];
             values.sort_by(|a, b| {
-                b.abs()
-                    .partial_cmp(&a.abs())
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                let a_abs = a.abs();
+                let b_abs = b.abs();
+                match (a_abs.is_nan(), b_abs.is_nan()) {
+                    (true, true) => std::cmp::Ordering::Equal,
+                    (true, false) => std::cmp::Ordering::Greater,
+                    (false, true) => std::cmp::Ordering::Less,
+                    (false, false) => b_abs.total_cmp(&a_abs),
+                }
             });
             return Ok(Self {
                 shape: vec![values.len()],
@@ -12330,9 +12404,14 @@ impl UFuncArray {
 
         // Sort by descending absolute value (NumPy convention)
         values.sort_by(|a, b| {
-            b.abs()
-                .partial_cmp(&a.abs())
-                .unwrap_or(std::cmp::Ordering::Equal)
+            let a_abs = a.abs();
+            let b_abs = b.abs();
+            match (a_abs.is_nan(), b_abs.is_nan()) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                (false, false) => b_abs.total_cmp(&a_abs),
+            }
         });
 
         // Append trailing zeros
@@ -29201,6 +29280,32 @@ mod tests {
     }
 
     #[test]
+    fn concatenate_empty_arrays() {
+        // np.concatenate([np.empty((0, 3)), np.array([[1,2,3]])], axis=0)
+        let empty = UFuncArray::new(vec![0, 3], vec![], DType::F64).unwrap();
+        let arr = UFuncArray::new(vec![1, 3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let r = UFuncArray::concatenate(&[&empty, &arr], 0).unwrap();
+        assert_eq!(r.shape(), &[1, 3]);
+        assert_eq!(r.values(), &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn concatenate_all_empty() {
+        let a = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+        let r = UFuncArray::concatenate(&[&a, &b], 0).unwrap();
+        assert_eq!(r.shape(), &[0]);
+        assert!(r.values().is_empty());
+    }
+
+    #[test]
+    fn clip_scalar() {
+        let scalar = UFuncArray::scalar(5.5, DType::F64);
+        let r = scalar.clip(2.0, 4.0);
+        assert_eq!(r.values(), &[4.0]);
+    }
+
+    #[test]
     fn stack_axis_zero() {
         let a = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).expect("a");
         let b = UFuncArray::new(vec![2], vec![3.0, 4.0], DType::F64).expect("b");
@@ -29790,6 +29895,17 @@ mod tests {
     fn split_uneven_fails() {
         let arr = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
         assert!(arr.split(3, 0).is_err());
+    }
+
+    #[test]
+    fn split_at_indices() {
+        // np.split([1,2,3,4,5,6], [2, 4]) → [[1,2], [3,4], [5,6]]
+        let a = UFuncArray::new(vec![6], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let parts = a.split_at(&[2, 4], 0).unwrap();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0].values(), &[1.0, 2.0]);
+        assert_eq!(parts[1].values(), &[3.0, 4.0]);
+        assert_eq!(parts[2].values(), &[5.0, 6.0]);
     }
 
     #[test]
@@ -30851,6 +30967,37 @@ mod tests {
         let a = UFuncArray::new(vec![2, 2], vec![1.0; 4], DType::F64).unwrap();
         let b = UFuncArray::new(vec![3], vec![1.0; 3], DType::F64).unwrap();
         assert!(UFuncArray::meshgrid(&[a, b]).is_err());
+    }
+
+    #[test]
+    fn meshgrid_ij_indexing() {
+        // np.meshgrid([1,2], [3,4,5], indexing='ij')
+        // With ij: shape = (2, 3), no swap
+        let x = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        let y = UFuncArray::new(vec![3], vec![3.0, 4.0, 5.0], DType::F64).unwrap();
+        let grids = UFuncArray::meshgrid_indexing(&[x, y], "ij").unwrap();
+        assert_eq!(grids[0].shape(), &[2, 3]);
+        // X grid: [[1,1,1],[2,2,2]]
+        assert_eq!(grids[0].values(), &[1.0, 1.0, 1.0, 2.0, 2.0, 2.0]);
+        // Y grid: [[3,4,5],[3,4,5]]
+        assert_eq!(grids[1].values(), &[3.0, 4.0, 5.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn meshgrid_xy_matches_default() {
+        let x = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        let y = UFuncArray::new(vec![3], vec![3.0, 4.0, 5.0], DType::F64).unwrap();
+        let default = UFuncArray::meshgrid(&[x.clone(), y.clone()]).unwrap();
+        let explicit = UFuncArray::meshgrid_indexing(&[x, y], "xy").unwrap();
+        assert_eq!(default[0].values(), explicit[0].values());
+        assert_eq!(default[1].values(), explicit[1].values());
+    }
+
+    #[test]
+    fn meshgrid_invalid_indexing() {
+        let x = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        let y = UFuncArray::new(vec![2], vec![3.0, 4.0], DType::F64).unwrap();
+        assert!(UFuncArray::meshgrid_indexing(&[x, y], "bad").is_err());
     }
 
     #[test]
@@ -33625,6 +33772,23 @@ mod tests {
         let b = UFuncArray::new(vec![3], vec![4.0, 5.0, 6.0], DType::F64).unwrap();
         let r = a.tensordot(&b, 1).unwrap();
         assert_eq!(r.values(), &[32.0]); // 1*4+2*5+3*6=32
+    }
+
+    #[test]
+    fn tensordot_axes_zero_outer_product() {
+        // np.tensordot([1,2], [3,4,5], axes=0) → [[3,4,5],[6,8,10]]
+        let a = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3], vec![3.0, 4.0, 5.0], DType::F64).unwrap();
+        let r = a.tensordot(&b, 0).unwrap();
+        assert_eq!(r.shape(), &[2, 3]);
+        assert_eq!(r.values(), &[3.0, 4.0, 5.0, 6.0, 8.0, 10.0]);
+    }
+
+    #[test]
+    fn tensordot_axes_exceeds_dims() {
+        let a = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3], vec![3.0, 4.0, 5.0], DType::F64).unwrap();
+        assert!(a.tensordot(&b, 2).is_err());
     }
 
     #[test]
