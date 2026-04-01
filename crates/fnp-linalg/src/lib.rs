@@ -463,6 +463,14 @@ fn lu_decompose_inner(
         }
 
         let pivot = lu[k * n + k];
+        
+        // LAPACK dgetrf compatibility: if pivot is NaN, it doesn't divide or eliminate,
+        // it just leaves the trailing matrix alone and proceeds. This produces the exact
+        // same garbage LU factorization that NumPy/SciPy return for matrices with NaNs.
+        if pivot.is_nan() {
+            continue;
+        }
+        
         for i in (k + 1)..n {
             let factor = lu[i * n + k] / pivot;
             lu[i * n + k] = factor;

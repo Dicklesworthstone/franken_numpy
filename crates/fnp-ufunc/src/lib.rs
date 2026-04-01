@@ -15723,6 +15723,84 @@ impl UFuncArray {
         }
     }
 
+    /// Trapezoidal integration with non-uniform spacing (np.trapezoid with x parameter).
+    ///
+    /// `x` provides the sample points along the integration axis. Must be 1-D
+    /// with the same length as the integration axis.
+    pub fn trapezoid_x(
+        &self,
+        x: &Self,
+        axis: Option<isize>,
+    ) -> Result<Self, UFuncError> {
+        let ndim = self.shape.len();
+        if ndim == 0 {
+            return Err(UFuncError::Msg(
+                "trapezoid: input must have at least 1 dimension".to_string(),
+            ));
+        }
+        if x.shape.len() != 1 {
+            return Err(UFuncError::Msg(
+                "trapezoid: x must be 1-D".to_string(),
+            ));
+        }
+        let ax = match axis {
+            Some(a) => normalize_axis(a, ndim)?,
+            None => ndim - 1,
+        };
+        let axis_len = self.shape[ax];
+        if x.shape[0] != axis_len {
+            return Err(UFuncError::Msg(format!(
+                "trapezoid: x length {} must match axis length {axis_len}",
+                x.shape[0]
+            )));
+        }
+        if axis_len < 2 {
+            let mut out_shape: Vec<usize> = self.shape.clone();
+            out_shape.remove(ax);
+            if out_shape.is_empty() {
+                return Ok(Self::scalar(0.0, DType::F64));
+            }
+            let total: usize = out_shape.iter().product();
+            return Ok(Self {
+                shape: out_shape,
+                values: vec![0.0; total],
+                dtype: DType::F64,
+                integer_sidecar: None,
+            });
+        }
+
+        let mut out_shape: Vec<usize> = self.shape.clone();
+        out_shape.remove(ax);
+        let outer: usize = self.shape[..ax].iter().copied().product();
+        let inner: usize = self.shape[ax + 1..].iter().copied().product();
+        let out_total = outer * inner;
+        let mut out_values = vec![0.0f64; out_total];
+
+        for o in 0..outer {
+            for i in 0..inner {
+                let mut sum = 0.0f64;
+                for k in 0..axis_len - 1 {
+                    let idx0 = o * axis_len * inner + k * inner + i;
+                    let idx1 = o * axis_len * inner + (k + 1) * inner + i;
+                    let dx = x.values[k + 1] - x.values[k];
+                    sum += (self.values[idx0] + self.values[idx1]) / 2.0 * dx;
+                }
+                out_values[o * inner + i] = sum;
+            }
+        }
+
+        if out_shape.is_empty() {
+            Ok(Self::scalar(out_values[0], DType::F64))
+        } else {
+            Ok(Self {
+                shape: out_shape,
+                values: out_values,
+                dtype: DType::F64,
+                integer_sidecar: None,
+            })
+        }
+    }
+
     /// Legacy alias for trapezoid (np.trapz, deprecated in NumPy 2.0).
     pub fn trapz(&self, dx: f64, axis: Option<isize>) -> Result<Self, UFuncError> {
         self.trapezoid(dx, axis)
@@ -16188,6 +16266,32 @@ impl UFuncArray {
             dtype: self.dtype,
             integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
         })
+    }
+
+    /// Count nonzero over multiple axes simultaneously (np.count_nonzero with axis tuple).
+    pub fn count_nonzero_axes(
+        &self,
+        axes: &[isize],
+        keepdims: bool,
+    ) -> Result<Self, UFuncError> {
+        if axes.is_empty() {
+            return Ok(self.clone());
+        }
+        // Convert to boolean (0/1), then sum over the axes
+        let bool_vals: Vec<f64> = self
+            .values
+            .iter()
+            .map(|&v| if v != 0.0 { 1.0 } else { 0.0 })
+            .collect();
+        let bool_arr = Self {
+            shape: self.shape.clone(),
+            values: bool_vals,
+            dtype: DType::F64,
+            integer_sidecar: None,
+        };
+        let mut result = bool_arr.reduce_sum_axes(axes, keepdims)?;
+        result.dtype = DType::I64;
+        Ok(result)
     }
 
     /// Create a sliding window view of the array (np.lib.stride_tricks.sliding_window_view).
@@ -34313,6 +34417,32 @@ mod tests {
     }
 
     #[test]
+    fn trapezoid_x_non_uniform() {
+        // np.trapezoid([1, 2, 4], x=[0, 1, 3]) = 0.5*(1+2)*1 + 0.5*(2+4)*2 = 1.5 + 6 = 7.5
+        let y = UFuncArray::new(vec![3], vec![1.0, 2.0, 4.0], DType::F64).unwrap();
+        let x = UFuncArray::new(vec![3], vec![0.0, 1.0, 3.0], DType::F64).unwrap();
+        let r = y.trapezoid_x(&x, None).unwrap();
+        assert!((r.values()[0] - 7.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn trapezoid_x_uniform_matches_dx() {
+        // With uniform x=[0,1,2], should match dx=1
+        let y = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let x = UFuncArray::new(vec![3], vec![0.0, 1.0, 2.0], DType::F64).unwrap();
+        let with_x = y.trapezoid_x(&x, None).unwrap();
+        let with_dx = y.trapezoid(1.0, None).unwrap();
+        assert!((with_x.values()[0] - with_dx.values()[0]).abs() < 1e-10);
+    }
+
+    #[test]
+    fn trapezoid_x_length_mismatch() {
+        let y = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let x = UFuncArray::new(vec![4], vec![0.0, 1.0, 2.0, 3.0], DType::F64).unwrap();
+        assert!(y.trapezoid_x(&x, None).is_err());
+    }
+
+    #[test]
     fn sinc_basic() {
         let a = UFuncArray::new(vec![3], vec![0.0, 1.0, -1.0], DType::F64).unwrap();
         let r = a.sinc();
@@ -35991,6 +36121,15 @@ mod tests {
             .unwrap();
         let r = a.reduce_var_axes(&[], false, 0).unwrap();
         assert_eq!(r.values(), a.values());
+    }
+
+    #[test]
+    fn count_nonzero_axes_basic() {
+        // np.count_nonzero([[1,0,3],[0,5,0]], axis=(0,1)) → 3
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 0.0, 3.0, 0.0, 5.0, 0.0], DType::F64).unwrap();
+        let r = a.count_nonzero_axes(&[0, 1], false).unwrap();
+        assert_eq!(r.values(), &[3.0]);
     }
 
     #[test]
