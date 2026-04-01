@@ -516,13 +516,7 @@ pub fn solve_nxn(a: &[f64], b: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError
             "solve_nxn: rhs length must equal n",
         ));
     }
-    if b.iter().any(|v| !v.is_finite()) {
-        return Err(LinAlgError::NormDetRankPolicyViolation(
-            "rhs entries must be finite for solve",
-        ));
-    }
-
-    let (lu, perm, _) = lu_decompose(a, n)?;
+    let (lu, perm, _) = lu_decompose_for_det(a, n)?;
     Ok(lu_forward_back(&lu, &perm, b, n))
 }
 
@@ -584,7 +578,7 @@ pub fn slogdet_nxn(a: &[f64], n: usize) -> Result<(f64, f64), LinAlgError> {
 /// Inverse of an NxN matrix via LU decomposition.  Returns n*n flat
 /// row-major.
 pub fn inv_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
-    let (lu, perm, _) = lu_decompose(a, n)?;
+    let (lu, perm, _) = lu_decompose_for_det(a, n)?;
     // Create identity matrix as RHS
     let mut eye = vec![0.0; n * n];
     for i in 0..n {
@@ -693,13 +687,7 @@ pub fn solve_nxn_multi(a: &[f64], b: &[f64], n: usize, m: usize) -> Result<Vec<f
             "solve_nxn_multi: B must be n*m",
         ));
     }
-    if b.iter().any(|v| !v.is_finite()) {
-        return Err(LinAlgError::NormDetRankPolicyViolation(
-            "rhs entries must be finite for solve",
-        ));
-    }
-
-    let (lu, perm, _) = lu_decompose(a, n)?;
+    let (lu, perm, _) = lu_decompose_for_det(a, n)?;
 
     let mut result = vec![0.0; n * m];
     for col in 0..m {
@@ -6028,11 +6016,55 @@ mod tests {
     }
 
     #[test]
-    fn solve_nxn_rejects_non_finite() {
-        let a = [f64::NAN, 1.0, 0.0, 1.0];
-        let b = [1.0, 2.0];
-        let err = solve_nxn(&a, &b, 2).expect_err("nan matrix");
-        assert_eq!(err.reason_code(), "linalg_norm_det_rank_policy_violation");
+    fn solve_and_inv_nxn_propagate_infinite_inputs() {
+        let inf_matrix = [f64::INFINITY, 1.0, 0.0, 0.0, 3.0, 1.0, 2.0, 0.0, 3.0];
+        let inf_solve = solve_nxn(&inf_matrix, &[1.0, 2.0, 3.0], 3).expect("inf solve");
+        assert!(approx_equal(inf_solve[0], 0.0, 1e-12));
+        assert!(approx_equal(inf_solve[1], 0.3333333333333333, 1e-12));
+        assert!(approx_equal(inf_solve[2], 1.0, 1e-12));
+
+        let inf_inv = inv_nxn(&inf_matrix, 3).expect("inf inv");
+        assert!(approx_equal(inf_inv[0], 0.0, 1e-12));
+        assert!(approx_equal(inf_inv[1], 0.0, 1e-12));
+        assert!(approx_equal(inf_inv[2], 0.0, 1e-12));
+        assert!(approx_equal(inf_inv[3], 0.0, 1e-12));
+        assert!(approx_equal(inf_inv[4], 0.3333333333333333, 1e-12));
+        assert!(approx_equal(inf_inv[5], -0.1111111111111111, 1e-12));
+        assert!(approx_equal(inf_inv[6], 0.0, 1e-12));
+        assert!(approx_equal(inf_inv[7], 0.0, 1e-12));
+        assert!(approx_equal(inf_inv[8], 0.3333333333333333, 1e-12));
+    }
+
+    #[test]
+    fn solve_nxn_allows_non_finite_rhs() {
+        let a = [2.0, 1.0, 0.0, 0.0, 3.0, 1.0, 1.0, 0.0, 2.0];
+
+        let nan_rhs = solve_nxn(&a, &[f64::NAN, 2.0, 3.0], 3).expect("nan rhs solve");
+        assert!(nan_rhs.iter().all(|value| value.is_nan()));
+
+        let inf_rhs = solve_nxn(&a, &[f64::INFINITY, 2.0, 3.0], 3).expect("inf rhs solve");
+        assert!(inf_rhs.iter().all(|value| value.is_nan()));
+    }
+
+    #[test]
+    fn solve_nxn_multi_propagates_non_finite_inputs() {
+        let inf_matrix = [f64::INFINITY, 1.0, 0.0, 0.0, 3.0, 1.0, 2.0, 0.0, 3.0];
+        let rhs = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let solved = solve_nxn_multi(&inf_matrix, &rhs, 3, 2).expect("inf matrix multi solve");
+        let expected = [0.0, 0.0, 0.4444444444444444, 0.6666666666666666, 1.6666666666666667, 2.0];
+        for (actual, expected) in solved.iter().zip(expected) {
+            assert!(approx_equal(*actual, expected, 1e-12));
+        }
+
+        let finite_matrix = [2.0, 1.0, 0.0, 0.0, 3.0, 1.0, 1.0, 0.0, 2.0];
+        let non_finite_rhs = [f64::NAN, 1.0, 2.0, 3.0, 4.0, 5.0];
+        let solved = solve_nxn_multi(&finite_matrix, &non_finite_rhs, 3, 2).expect("nan rhs multi solve");
+        assert!(solved[0].is_nan());
+        assert!(approx_equal(solved[1], 0.38461538461538464, 1e-12));
+        assert!(solved[2].is_nan());
+        assert!(approx_equal(solved[3], 0.23076923076923078, 1e-12));
+        assert!(solved[4].is_nan());
+        assert!(approx_equal(solved[5], 2.3076923076923075, 1e-12));
     }
 
     #[test]
