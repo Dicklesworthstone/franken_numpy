@@ -984,12 +984,6 @@ pub fn tensorsolve(
     b_data: &[f64],
     b_shape: &[usize],
 ) -> Result<Vec<f64>, LinAlgError> {
-    if a_data.iter().chain(b_data.iter()).any(|v| !v.is_finite()) {
-        return Err(LinAlgError::NormDetRankPolicyViolation(
-            "tensorsolve requires finite entries",
-        ));
-    }
-
     // The equation a x = b: a has shape (b_shape..., x_shape...) and
     // x has shape x_shape such that contracting the last len(x_shape) dims of a
     // with x produces b.
@@ -1051,12 +1045,6 @@ pub fn tensorinv(
             "tensorinv: ind must be > 0 and < ndim(a)",
         ));
     }
-    if a_data.iter().any(|v| !v.is_finite()) {
-        return Err(LinAlgError::NormDetRankPolicyViolation(
-            "tensorinv requires finite entries",
-        ));
-    }
-
     let output_shape = &a_shape[..ind];
     let input_shape = &a_shape[ind..];
     let n: usize = output_shape.iter().product();
@@ -7992,6 +7980,21 @@ mod tests {
         assert!(matches!(err, LinAlgError::ShapeContractViolation(_)));
     }
 
+    #[test]
+    fn tensorsolve_matches_numpy_non_finite_semantics() {
+        let inf_matrix = [f64::INFINITY, 1.0, 0.0, 0.0, 3.0, 1.0, 2.0, 0.0, 3.0];
+        let solved = tensorsolve(&inf_matrix, &[3, 3], &[1.0, 2.0, 3.0], &[3]).expect("inf tensorsolve");
+        assert!(approx_equal(solved[0], 0.0, 1e-12));
+        assert!(approx_equal(solved[1], 0.3333333333333333, 1e-12));
+        assert!(approx_equal(solved[2], 1.0, 1e-12));
+
+        let nan_matrix = [f64::NAN, 1.0, 0.0, 0.0, 3.0, 1.0, 2.0, 0.0, 3.0];
+        let solved = tensorsolve(&nan_matrix, &[3, 3], &[1.0, 2.0, 3.0], &[3]).expect("nan tensorsolve");
+        assert!(solved[0].is_nan());
+        assert!(approx_equal(solved[1], 0.45454545454545453, 1e-12));
+        assert!(approx_equal(solved[2], 0.6363636363636364, 1e-12));
+    }
+
     // ── tensorinv tests ──
 
     #[test]
@@ -8023,6 +8026,35 @@ mod tests {
         let a = [1.0; 6];
         let err = tensorinv(&a, &[2, 3], 1).expect_err("non-square should fail");
         assert!(matches!(err, LinAlgError::ShapeContractViolation(_)));
+    }
+
+    #[test]
+    fn tensorinv_matches_numpy_non_finite_semantics() {
+        let inf_matrix = [f64::INFINITY, 1.0, 0.0, 0.0, 3.0, 1.0, 2.0, 0.0, 3.0];
+        let (inverse, shape) = tensorinv(&inf_matrix, &[3, 3], 1).expect("inf tensorinv");
+        assert_eq!(shape, vec![3, 3]);
+        assert!(approx_equal(inverse[0], 0.0, 1e-12));
+        assert!(approx_equal(inverse[1], 0.0, 1e-12));
+        assert!(approx_equal(inverse[2], 0.0, 1e-12));
+        assert!(approx_equal(inverse[3], 0.0, 1e-12));
+        assert!(approx_equal(inverse[4], 0.3333333333333333, 1e-12));
+        assert!(approx_equal(inverse[5], -0.1111111111111111, 1e-12));
+        assert!(approx_equal(inverse[6], 0.0, 1e-12));
+        assert!(approx_equal(inverse[7], 0.0, 1e-12));
+        assert!(approx_equal(inverse[8], 0.3333333333333333, 1e-12));
+
+        let nan_matrix = [f64::NAN, 1.0, 0.0, 0.0, 3.0, 1.0, 2.0, 0.0, 3.0];
+        let (inverse, shape) = tensorinv(&nan_matrix, &[3, 3], 1).expect("nan tensorinv");
+        assert_eq!(shape, vec![3, 3]);
+        assert!(inverse[0].is_nan());
+        assert!(inverse[1].is_nan());
+        assert!(inverse[2].is_nan());
+        assert!(approx_equal(inverse[3], 0.18181818181818182, 1e-12));
+        assert!(approx_equal(inverse[4], 0.2727272727272727, 1e-12));
+        assert!(approx_equal(inverse[5], -0.09090909090909091, 1e-12));
+        assert!(approx_equal(inverse[6], -0.5454545454545454, 1e-12));
+        assert!(approx_equal(inverse[7], 0.18181818181818182, 1e-12));
+        assert!(approx_equal(inverse[8], 0.2727272727272727, 1e-12));
     }
 
     #[test]
