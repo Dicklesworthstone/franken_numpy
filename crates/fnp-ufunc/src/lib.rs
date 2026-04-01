@@ -405,10 +405,8 @@ fn note_binary_float_errors(
                 flags.note(FloatErrorKind::Invalid);
             }
         }
-        BinaryOp::Remainder | BinaryOp::Fmod => {
-            if lhs.is_finite() && rhs == 0.0 {
-                flags.note(FloatErrorKind::Invalid);
-            }
+        BinaryOp::Remainder | BinaryOp::Fmod if lhs.is_finite() && rhs == 0.0 => {
+            flags.note(FloatErrorKind::Invalid);
         }
         BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Power | BinaryOp::FloatPower => {
             if lhs.is_finite() && rhs.is_finite() && result.is_infinite() {
@@ -459,15 +457,11 @@ fn note_unary_float_errors(flags: &mut FloatErrorFlags, op: UnaryOp, value: f64,
                 flags.note(FloatErrorKind::Invalid);
             }
         }
-        UnaryOp::Sqrt => {
-            if value.is_finite() && value < 0.0 {
-                flags.note(FloatErrorKind::Invalid);
-            }
+        UnaryOp::Sqrt if value.is_finite() && value < 0.0 => {
+            flags.note(FloatErrorKind::Invalid);
         }
-        UnaryOp::Arcsin | UnaryOp::Arccos => {
-            if value.is_finite() && value.abs() > 1.0 {
-                flags.note(FloatErrorKind::Invalid);
-            }
+        UnaryOp::Arcsin | UnaryOp::Arccos if value.is_finite() && value.abs() > 1.0 => {
+            flags.note(FloatErrorKind::Invalid);
         }
         UnaryOp::Arctanh => {
             if value.abs() == 1.0 {
@@ -476,10 +470,8 @@ fn note_unary_float_errors(flags: &mut FloatErrorFlags, op: UnaryOp, value: f64,
                 flags.note(FloatErrorKind::Invalid);
             }
         }
-        UnaryOp::Arccosh => {
-            if value.is_finite() && value < 1.0 {
-                flags.note(FloatErrorKind::Invalid);
-            }
+        UnaryOp::Arccosh if value.is_finite() && value < 1.0 => {
+            flags.note(FloatErrorKind::Invalid);
         }
         UnaryOp::Exp | UnaryOp::Exp2 | UnaryOp::Expm1 | UnaryOp::Sinh | UnaryOp::Cosh => {
             if value.is_finite() && result.is_infinite() {
@@ -3128,7 +3120,11 @@ impl UFuncArray {
         if step == 0.0 {
             return Err(UFuncError::Msg("arange step must be non-zero".to_string()));
         }
-        let n = ((stop - start) / step).ceil().max(0.0) as usize;
+        let n_f64 = ((stop - start) / step).ceil().max(0.0);
+        if !n_f64.is_finite() || n_f64 > isize::MAX as f64 {
+            return Err(UFuncError::Msg("Maximum allowed size exceeded".to_string()));
+        }
+        let n = n_f64 as usize;
         let values: Vec<f64> = (0..n).map(|i| start + step * i as f64).collect();
         Self::from_values_with_dtype(vec![n], values, dtype)
     }
@@ -7799,16 +7795,19 @@ impl UFuncArray {
     }
 
     /// Compute the outer product of two 1-D arrays.
+    /// Outer product of two arrays (np.outer).
+    ///
+    /// Flattens both inputs and computes `result[i, j] = a.ravel()[i] * b.ravel()[j]`.
+    /// Output shape is `[a.size, b.size]`.
     pub fn outer(&self, rhs: &Self) -> Result<Self, UFuncError> {
-        if self.shape.len() != 1 || rhs.shape.len() != 1 {
-            return Err(UFuncError::Msg("outer requires 1-D arrays".to_string()));
-        }
-        let m = self.shape[0];
-        let n = rhs.shape[0];
-        let mut values = vec![0.0f64; m * n];
-        for i in 0..m {
-            for j in 0..n {
-                values[i * n + j] = self.values[i] * rhs.values[j];
+        let a = &self.values;
+        let b = &rhs.values;
+        let m = a.len();
+        let n = b.len();
+        let mut values = Vec::with_capacity(m * n);
+        for &ai in a {
+            for &bj in b {
+                values.push(ai * bj);
             }
         }
         let dtype = promote(self.dtype, rhs.dtype);
@@ -18931,20 +18930,10 @@ fn apply_binary_op_i64(op: BinaryOp, a: i64, b: i64) -> i64 {
         BinaryOp::Add => a.wrapping_add(b),
         BinaryOp::Sub => a.wrapping_sub(b),
         BinaryOp::Mul => a.wrapping_mul(b),
-        BinaryOp::FloorDivide => {
-            if b != 0 {
-                a.checked_div_euclid(b).unwrap_or(a)
-            } else {
-                0
-            }
-        }
-        BinaryOp::Remainder => {
-            if b != 0 {
-                a.checked_rem_euclid(b).unwrap_or(0)
-            } else {
-                0
-            }
-        }
+        BinaryOp::FloorDivide if b != 0 => a.checked_div_euclid(b).unwrap_or(a),
+        BinaryOp::FloorDivide => 0,
+        BinaryOp::Remainder if b != 0 => a.checked_rem_euclid(b).unwrap_or(0),
+        BinaryOp::Remainder => 0,
         BinaryOp::BitwiseAnd => a & b,
         BinaryOp::BitwiseOr => a | b,
         BinaryOp::BitwiseXor => a ^ b,
@@ -18972,13 +18961,8 @@ fn apply_binary_op_u64(op: BinaryOp, a: u64, b: u64) -> u64 {
         BinaryOp::Sub => a.wrapping_sub(b),
         BinaryOp::Mul => a.wrapping_mul(b),
         BinaryOp::FloorDivide => a.checked_div(b).unwrap_or(0),
-        BinaryOp::Remainder => {
-            if b != 0 {
-                a % b
-            } else {
-                0
-            }
-        }
+        BinaryOp::Remainder if b != 0 => a % b,
+        BinaryOp::Remainder => 0,
         BinaryOp::BitwiseAnd => a & b,
         BinaryOp::BitwiseOr => a | b,
         BinaryOp::BitwiseXor => a ^ b,
@@ -30496,10 +30480,13 @@ mod tests {
     }
 
     #[test]
-    fn outer_requires_1d() {
-        let a = UFuncArray::new(vec![2, 2], vec![1.0; 4], DType::F64).unwrap();
+    fn outer_accepts_nd_by_flattening() {
+        // np.outer now flattens N-D inputs instead of rejecting them
+        let a = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
         let b = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
-        assert!(a.outer(&b).is_err());
+        let r = a.outer(&b).unwrap();
+        assert_eq!(r.shape(), &[4, 2]); // flattened 2x2 → 4 elements
+        assert_eq!(r.values(), &[1.0, 2.0, 2.0, 4.0, 3.0, 6.0, 4.0, 8.0]);
     }
 
     #[test]
@@ -30515,6 +30502,35 @@ mod tests {
         let a = UFuncArray::new(vec![2, 2], vec![1.0; 4], DType::F64).unwrap();
         let b = UFuncArray::new(vec![2, 2], vec![1.0; 4], DType::F64).unwrap();
         assert!(a.inner(&b).is_err());
+    }
+
+    #[test]
+    fn outer_basic() {
+        // np.outer([1, 2, 3], [4, 5]) → [[4,5],[8,10],[12,15]]
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![2], vec![4.0, 5.0], DType::F64).unwrap();
+        let r = a.outer(&b).unwrap();
+        assert_eq!(r.shape(), &[3, 2]);
+        assert_eq!(r.values(), &[4.0, 5.0, 8.0, 10.0, 12.0, 15.0]);
+    }
+
+    #[test]
+    fn outer_flattens_2d() {
+        // np.outer([[1, 2]], [3, 4]) flattens first → outer([1,2], [3,4])
+        let a = UFuncArray::new(vec![1, 2], vec![1.0, 2.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![2], vec![3.0, 4.0], DType::F64).unwrap();
+        let r = a.outer(&b).unwrap();
+        assert_eq!(r.shape(), &[2, 2]);
+        assert_eq!(r.values(), &[3.0, 4.0, 6.0, 8.0]);
+    }
+
+    #[test]
+    fn outer_scalar() {
+        let a = UFuncArray::scalar(3.0, DType::F64);
+        let b = UFuncArray::new(vec![2], vec![4.0, 5.0], DType::F64).unwrap();
+        let r = a.outer(&b).unwrap();
+        assert_eq!(r.shape(), &[1, 2]);
+        assert_eq!(r.values(), &[12.0, 15.0]);
     }
 
     #[test]
