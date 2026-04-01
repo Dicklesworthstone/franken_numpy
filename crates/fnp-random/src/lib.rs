@@ -4566,7 +4566,7 @@ mod tests {
         }
 
         let mut invalid = state.clone();
-        invalid.schema_entries.push(("".to_string(), 1));
+        invalid.schema_entries.push((String::new(), 1));
         let state_err = restored
             .set_state(&invalid)
             .expect_err("empty schema key must be rejected");
@@ -5112,7 +5112,7 @@ mod tests {
         assert_eq!(vals.len(), 3);
         // All unique (since no replacement)
         let mut sorted = vals.clone();
-        sorted.sort_by(|a, b| a.total_cmp(b));
+        sorted.sort_by(f64::total_cmp);
         sorted.dedup();
         assert_eq!(sorted.len(), 3);
     }
@@ -5130,7 +5130,7 @@ mod tests {
         let mut vals = [1.0, 2.0, 3.0, 4.0, 5.0];
         rng.shuffle(&mut vals).unwrap();
         let mut sorted = vals;
-        sorted.sort_by(|a, b| a.total_cmp(b));
+        sorted.sort_by(f64::total_cmp);
         assert_eq!(sorted, [1.0, 2.0, 3.0, 4.0, 5.0]);
     }
 
@@ -5140,7 +5140,7 @@ mod tests {
         let vals = [1.0, 2.0, 3.0, 4.0, 5.0];
         let perm = rng.permutation(&vals).unwrap();
         let mut sorted = perm;
-        sorted.sort_by(|a, b| a.total_cmp(b));
+        sorted.sort_by(f64::total_cmp);
         assert_eq!(sorted, [1.0, 2.0, 3.0, 4.0, 5.0]);
     }
 

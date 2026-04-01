@@ -172,16 +172,16 @@ impl LinAlgError {
 impl fmt::Display for LinAlgError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ShapeContractViolation(msg) => write!(f, "{msg}"),
             Self::SolverSingularity => write!(f, "solve/inv rejected singular matrix"),
-            Self::CholeskyContractViolation(msg) => write!(f, "{msg}"),
             Self::QrModeInvalid => write!(f, "qr mode is not one of reduced|complete|r|raw"),
             Self::SvdNonConvergence => write!(f, "svd did not converge"),
             Self::SpectralConvergenceFailed => write!(f, "spectral decomposition did not converge"),
-            Self::LstsqTupleContractViolation(msg) => write!(f, "{msg}"),
-            Self::NormDetRankPolicyViolation(msg) => write!(f, "{msg}"),
-            Self::BackendBridgeInvalid(msg) => write!(f, "{msg}"),
-            Self::PolicyUnknownMetadata(msg) => write!(f, "{msg}"),
+            Self::ShapeContractViolation(msg)
+            | Self::CholeskyContractViolation(msg)
+            | Self::LstsqTupleContractViolation(msg)
+            | Self::NormDetRankPolicyViolation(msg)
+            | Self::BackendBridgeInvalid(msg)
+            | Self::PolicyUnknownMetadata(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -1667,10 +1667,15 @@ pub fn matrix_rank_mxn(a: &[f64], m: usize, n: usize, rcond: f64) -> Result<usiz
             "rcond must be finite and >= 0",
         ));
     }
-    if a.iter().any(|v| !v.is_finite()) {
+    let has_nan = a.iter().any(|value| value.is_nan());
+    let has_inf = a.iter().any(|value| value.is_infinite());
+    if has_nan {
         return Err(LinAlgError::NormDetRankPolicyViolation(
             "matrix entries must be finite for rank",
         ));
+    }
+    if has_inf {
+        return Ok(0);
     }
 
     let sigmas = svd_mxn(a, m, n)?;
@@ -2232,19 +2237,11 @@ pub fn cross_product(a: &[f64], b: &[f64]) -> Result<Vec<f64>, LinAlgError> {
         }
         (2, 3) => {
             // Treat 2D as 3D with z=0
-            Ok(vec![
-                a[1] * b[2],
-                -a[0] * b[2],
-                a[0] * b[1] - a[1] * b[0],
-            ])
+            Ok(vec![a[1] * b[2], -a[0] * b[2], a[0] * b[1] - a[1] * b[0]])
         }
         (3, 2) => {
             // Treat 2D as 3D with z=0
-            Ok(vec![
-                -a[2] * b[1],
-                a[2] * b[0],
-                a[0] * b[1] - a[1] * b[0],
-            ])
+            Ok(vec![-a[2] * b[1], a[2] * b[0], a[0] * b[1] - a[1] * b[0]])
         }
         (3, 3) => Ok(vec![
             a[1] * b[2] - a[2] * b[1],
@@ -3140,6 +3137,15 @@ fn real_eigenvalues_2x2(matrix: [[f64; 2]; 2]) -> Result<[f64; 2], LinAlgError> 
 
 pub fn matrix_rank_2x2(matrix: [[f64; 2]; 2], rcond: f64) -> Result<usize, LinAlgError> {
     validate_tolerance_policy(rcond, 0)?;
+    let flat = [matrix[0][0], matrix[0][1], matrix[1][0], matrix[1][1]];
+    if flat.iter().any(|value| value.is_nan()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "matrix entries must be finite for rank",
+        ));
+    }
+    if flat.iter().any(|value| value.is_infinite()) {
+        return Ok(0);
+    }
     let singular_values = singular_values_2x2(matrix)?;
     let sigma_max = singular_values[0];
     if sigma_max == 0.0 {
@@ -4731,7 +4737,6 @@ mod tests {
         cholesky_nxn,
         cholesky_solve,
         cholesky_solve_multi,
-        cond_p_nxn,
         // Complex linalg
         complex_cholesky_nxn,
         complex_conjugate_transpose,
@@ -4744,6 +4749,7 @@ mod tests {
         complex_solve_nxn,
         complex_trace_nxn,
         cond_nxn,
+        cond_p_nxn,
         cross_product,
         det_2x2,
         det_nxn,
@@ -5024,6 +5030,24 @@ mod tests {
     }
 
     #[test]
+    fn matrix_rank_matches_numpy_non_finite_semantics() {
+        assert_eq!(
+            matrix_rank_2x2([[f64::INFINITY, 1.0], [2.0, 3.0]], 1e-12).expect("inf rank"),
+            0
+        );
+        assert_eq!(
+            matrix_rank_nxn(&[f64::INFINITY, 1.0, 2.0, 3.0], 2, 1e-12).expect("inf rank nxn"),
+            0
+        );
+
+        let err = matrix_rank_2x2([[f64::NAN, 1.0], [2.0, 3.0]], 1e-12).expect_err("nan rank");
+        assert_eq!(err.reason_code(), "linalg_norm_det_rank_policy_violation");
+        let err =
+            matrix_rank_nxn(&[f64::NAN, 1.0, 2.0, 3.0], 2, 1e-12).expect_err("nan rank nxn");
+        assert_eq!(err.reason_code(), "linalg_norm_det_rank_policy_violation");
+    }
+
+    #[test]
     fn pinv_2x2_full_rank_and_rank_deficient_paths() {
         let matrix = [[4.0, 7.0], [2.0, 6.0]];
         let pinv = pinv_2x2(matrix, 1e-12).expect("pinv");
@@ -5152,39 +5176,57 @@ mod tests {
 
     #[test]
     fn vector_norm_matches_numpy_non_finite_semantics() {
-        assert!(vector_norm(&[f64::NAN, 1.0], None)
-            .expect("vector nan default")
-            .is_nan());
-        assert!(vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::One))
-            .expect("vector nan l1")
-            .is_nan());
-        assert!(vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::Two))
-            .expect("vector nan l2")
-            .is_nan());
-        assert!(vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::Inf))
-            .expect("vector nan inf")
-            .is_nan());
-        assert!(vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::NegInf))
-            .expect("vector nan neginf")
-            .is_nan());
+        assert!(
+            vector_norm(&[f64::NAN, 1.0], None)
+                .expect("vector nan default")
+                .is_nan()
+        );
+        assert!(
+            vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::One))
+                .expect("vector nan l1")
+                .is_nan()
+        );
+        assert!(
+            vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::Two))
+                .expect("vector nan l2")
+                .is_nan()
+        );
+        assert!(
+            vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::Inf))
+                .expect("vector nan inf")
+                .is_nan()
+        );
+        assert!(
+            vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::NegInf))
+                .expect("vector nan neginf")
+                .is_nan()
+        );
         assert!(approx_equal(
             vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::Zero)).expect("vector nan zero"),
             2.0,
             1e-12
         ));
 
-        assert!(vector_norm(&[f64::INFINITY, 1.0], None)
-            .expect("vector inf default")
-            .is_infinite());
-        assert!(vector_norm(&[f64::INFINITY, 1.0], Some(VectorNormOrder::One))
-            .expect("vector inf l1")
-            .is_infinite());
-        assert!(vector_norm(&[f64::INFINITY, 1.0], Some(VectorNormOrder::Two))
-            .expect("vector inf l2")
-            .is_infinite());
-        assert!(vector_norm(&[f64::INFINITY, 1.0], Some(VectorNormOrder::Inf))
-            .expect("vector inf inf")
-            .is_infinite());
+        assert!(
+            vector_norm(&[f64::INFINITY, 1.0], None)
+                .expect("vector inf default")
+                .is_infinite()
+        );
+        assert!(
+            vector_norm(&[f64::INFINITY, 1.0], Some(VectorNormOrder::One))
+                .expect("vector inf l1")
+                .is_infinite()
+        );
+        assert!(
+            vector_norm(&[f64::INFINITY, 1.0], Some(VectorNormOrder::Two))
+                .expect("vector inf l2")
+                .is_infinite()
+        );
+        assert!(
+            vector_norm(&[f64::INFINITY, 1.0], Some(VectorNormOrder::Inf))
+                .expect("vector inf inf")
+                .is_infinite()
+        );
         assert!(approx_equal(
             vector_norm(&[f64::INFINITY, 1.0], Some(VectorNormOrder::NegInf))
                 .expect("vector inf neginf"),
@@ -5203,18 +5245,26 @@ mod tests {
     fn matrix_norm_matches_numpy_non_finite_semantics() {
         let nan_matrix = [[f64::NAN, 1.0], [2.0, 3.0]];
         assert!(matrix_norm_2x2(nan_matrix, None).expect("nan fro").is_nan());
-        assert!(matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::One))
-            .expect("nan one")
-            .is_nan());
-        assert!(matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::NegOne))
-            .expect("nan neg one")
-            .is_nan());
-        assert!(matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::Inf))
-            .expect("nan inf")
-            .is_nan());
-        assert!(matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::NegInf))
-            .expect("nan neg inf")
-            .is_nan());
+        assert!(
+            matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::One))
+                .expect("nan one")
+                .is_nan()
+        );
+        assert!(
+            matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::NegOne))
+                .expect("nan neg one")
+                .is_nan()
+        );
+        assert!(
+            matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::Inf))
+                .expect("nan inf")
+                .is_nan()
+        );
+        assert!(
+            matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::NegInf))
+                .expect("nan neg inf")
+                .is_nan()
+        );
         let err = matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::Two)).expect_err("nan two");
         assert_eq!(err.reason_code(), "linalg_svd_nonconvergence");
         let err =
@@ -5222,88 +5272,122 @@ mod tests {
         assert_eq!(err.reason_code(), "linalg_svd_nonconvergence");
 
         let inf_matrix = [[f64::INFINITY, 1.0], [2.0, 3.0]];
-        assert!(matrix_norm_2x2(inf_matrix, None)
-            .expect("inf fro")
-            .is_infinite());
-        assert!(matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::One))
-            .expect("inf one")
-            .is_infinite());
+        assert!(
+            matrix_norm_2x2(inf_matrix, None)
+                .expect("inf fro")
+                .is_infinite()
+        );
+        assert!(
+            matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::One))
+                .expect("inf one")
+                .is_infinite()
+        );
         assert!(approx_equal(
             matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::NegOne)).expect("inf neg one"),
             4.0,
             1e-12
         ));
-        assert!(matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::Inf))
-            .expect("inf inf")
-            .is_infinite());
+        assert!(
+            matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::Inf))
+                .expect("inf inf")
+                .is_infinite()
+        );
         assert!(approx_equal(
             matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::NegInf)).expect("inf neg inf"),
             5.0,
             1e-12
         ));
-        assert!(matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::Two))
-            .expect("inf two")
-            .is_nan());
-        assert!(matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::NegTwo))
-            .expect("inf neg two")
-            .is_nan());
-        assert!(matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::Nuclear))
-            .expect("inf nuclear")
-            .is_nan());
+        assert!(
+            matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::Two))
+                .expect("inf two")
+                .is_nan()
+        );
+        assert!(
+            matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::NegTwo))
+                .expect("inf neg two")
+                .is_nan()
+        );
+        assert!(
+            matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::Nuclear))
+                .expect("inf nuclear")
+                .is_nan()
+        );
     }
 
     #[test]
     fn matrix_norm_nxn_matches_numpy_non_finite_semantics() {
         let nan_matrix = [f64::NAN, 1.0, 2.0, 3.0];
-        assert!(matrix_norm_nxn(&nan_matrix, 2, 2, "fro")
-            .expect("nan fro")
-            .is_nan());
-        assert!(matrix_norm_nxn(&nan_matrix, 2, 2, "1")
-            .expect("nan one")
-            .is_nan());
-        assert!(matrix_norm_nxn(&nan_matrix, 2, 2, "-1")
-            .expect("nan neg one")
-            .is_nan());
-        assert!(matrix_norm_nxn(&nan_matrix, 2, 2, "inf")
-            .expect("nan inf")
-            .is_nan());
-        assert!(matrix_norm_nxn(&nan_matrix, 2, 2, "-inf")
-            .expect("nan neg inf")
-            .is_nan());
+        assert!(
+            matrix_norm_nxn(&nan_matrix, 2, 2, "fro")
+                .expect("nan fro")
+                .is_nan()
+        );
+        assert!(
+            matrix_norm_nxn(&nan_matrix, 2, 2, "1")
+                .expect("nan one")
+                .is_nan()
+        );
+        assert!(
+            matrix_norm_nxn(&nan_matrix, 2, 2, "-1")
+                .expect("nan neg one")
+                .is_nan()
+        );
+        assert!(
+            matrix_norm_nxn(&nan_matrix, 2, 2, "inf")
+                .expect("nan inf")
+                .is_nan()
+        );
+        assert!(
+            matrix_norm_nxn(&nan_matrix, 2, 2, "-inf")
+                .expect("nan neg inf")
+                .is_nan()
+        );
         let err = matrix_norm_nxn(&nan_matrix, 2, 2, "2").expect_err("nan two");
         assert_eq!(err.reason_code(), "linalg_svd_nonconvergence");
         let err = matrix_norm_nxn(&nan_matrix, 2, 2, "nuc").expect_err("nan nuclear");
         assert_eq!(err.reason_code(), "linalg_svd_nonconvergence");
 
         let inf_matrix = [f64::INFINITY, 1.0, 2.0, 3.0];
-        assert!(matrix_norm_nxn(&inf_matrix, 2, 2, "fro")
-            .expect("inf fro")
-            .is_infinite());
-        assert!(matrix_norm_nxn(&inf_matrix, 2, 2, "1")
-            .expect("inf one")
-            .is_infinite());
+        assert!(
+            matrix_norm_nxn(&inf_matrix, 2, 2, "fro")
+                .expect("inf fro")
+                .is_infinite()
+        );
+        assert!(
+            matrix_norm_nxn(&inf_matrix, 2, 2, "1")
+                .expect("inf one")
+                .is_infinite()
+        );
         assert!(approx_equal(
             matrix_norm_nxn(&inf_matrix, 2, 2, "-1").expect("inf neg one"),
             4.0,
             1e-12
         ));
-        assert!(matrix_norm_nxn(&inf_matrix, 2, 2, "inf")
-            .expect("inf inf")
-            .is_infinite());
+        assert!(
+            matrix_norm_nxn(&inf_matrix, 2, 2, "inf")
+                .expect("inf inf")
+                .is_infinite()
+        );
         assert!(approx_equal(
             matrix_norm_nxn(&inf_matrix, 2, 2, "-inf").expect("inf neg inf"),
             5.0,
             1e-12
         ));
-        assert!(matrix_norm_nxn(&inf_matrix, 2, 2, "2")
-            .expect("inf two")
-            .is_nan());
-        assert!(matrix_norm_nxn(&inf_matrix, 2, 2, "-2")
-            .expect("inf neg two")
-            .is_nan());
-        assert!(matrix_norm_nxn(&inf_matrix, 2, 2, "nuc")
-            .expect("inf nuclear")
-            .is_nan());
+        assert!(
+            matrix_norm_nxn(&inf_matrix, 2, 2, "2")
+                .expect("inf two")
+                .is_nan()
+        );
+        assert!(
+            matrix_norm_nxn(&inf_matrix, 2, 2, "-2")
+                .expect("inf neg two")
+                .is_nan()
+        );
+        assert!(
+            matrix_norm_nxn(&inf_matrix, 2, 2, "nuc")
+                .expect("inf nuclear")
+                .is_nan()
+        );
     }
 
     #[test]
@@ -6922,7 +7006,9 @@ mod tests {
         let a = [f64::NAN, 1.0, 2.0, 3.0];
         for ord in ["fro", "1", "-1", "inf", "-inf"] {
             assert!(
-                cond_p_nxn(&a, 2, Some(ord)).expect("nan cond should propagate").is_nan(),
+                cond_p_nxn(&a, 2, Some(ord))
+                    .expect("nan cond should propagate")
+                    .is_nan(),
                 "order {ord} should propagate NaN",
             );
         }
@@ -6935,13 +7021,21 @@ mod tests {
     #[test]
     fn cond_p_spectral_infinite_orders_match_numpy() {
         let a = [f64::INFINITY, 1.0, 2.0, 3.0];
-        assert!(cond_p_nxn(&a, 2, None).expect("default cond on inf").is_infinite());
-        assert!(cond_p_nxn(&a, 2, Some("2"))
-            .expect("2-norm cond on inf")
-            .is_infinite());
-        assert!(cond_p_nxn(&a, 2, Some("-2"))
-            .expect("-2 cond on inf")
-            .is_infinite());
+        assert!(
+            cond_p_nxn(&a, 2, None)
+                .expect("default cond on inf")
+                .is_infinite()
+        );
+        assert!(
+            cond_p_nxn(&a, 2, Some("2"))
+                .expect("2-norm cond on inf")
+                .is_infinite()
+        );
+        assert!(
+            cond_p_nxn(&a, 2, Some("-2"))
+                .expect("-2 cond on inf")
+                .is_infinite()
+        );
     }
 
     // ── Kronecker product tests ──

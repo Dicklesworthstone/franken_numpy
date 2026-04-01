@@ -3900,8 +3900,8 @@ mod tests {
     fn savetxt_basic() {
         let values = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let output = savetxt(&values, 2, 3, &SaveTxtConfig::default()).unwrap();
-        assert!(output.contains("1"));
-        assert!(output.contains("6"));
+        assert!(output.contains('1'));
+        assert!(output.contains('6'));
         assert_eq!(output.lines().count(), 2);
     }
 

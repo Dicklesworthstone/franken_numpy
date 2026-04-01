@@ -54,7 +54,7 @@ impl DType {
     #[must_use]
     pub const fn item_size(self) -> usize {
         match self {
-            Self::Bool | Self::I8 | Self::U8 => 1,
+            Self::Bool | Self::I8 | Self::U8 | Self::Str | Self::Structured => 1,
             Self::I16 | Self::U16 | Self::F16 => 2,
             Self::I32 | Self::U32 | Self::F32 => 4,
             Self::I64
@@ -64,7 +64,6 @@ impl DType {
             | Self::DateTime64
             | Self::TimeDelta64 => 8,
             Self::Complex128 => 16,
-            Self::Str | Self::Structured => 1, // variable-length/void minimum
         }
     }
 

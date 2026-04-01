@@ -3135,16 +3135,33 @@ impl UFuncArray {
 
     /// Create an array with evenly spaced values over a closed interval.
     pub fn linspace(start: f64, stop: f64, num: usize, dtype: DType) -> Result<Self, UFuncError> {
+        Self::linspace_endpoint(start, stop, num, true, dtype)
+    }
+
+    /// `np.linspace` with explicit `endpoint` parameter.
+    ///
+    /// When `endpoint` is false, the stop value is excluded and the step size
+    /// is `(stop - start) / num` instead of `(stop - start) / (num - 1)`.
+    pub fn linspace_endpoint(
+        start: f64,
+        stop: f64,
+        num: usize,
+        endpoint: bool,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
         if num == 0 {
             return Self::from_values_with_dtype(vec![0], Vec::new(), dtype);
         }
         if num == 1 {
             return Self::from_values_with_dtype(vec![1], vec![start], dtype);
         }
-        let step = (stop - start) / (num - 1) as f64;
+        let divisor = if endpoint { (num - 1) as f64 } else { num as f64 };
+        let step = (stop - start) / divisor;
         let mut values: Vec<f64> = (0..num).map(|i| start + step * i as f64).collect();
-        // Guarantee exact endpoint
-        if let Some(last) = values.last_mut() {
+        // Guarantee exact endpoint when included
+        if endpoint
+            && let Some(last) = values.last_mut()
+        {
             *last = stop;
         }
         Self::from_values_with_dtype(vec![num], values, dtype)
@@ -3160,7 +3177,19 @@ impl UFuncArray {
         base: f64,
         dtype: DType,
     ) -> Result<Self, UFuncError> {
-        let lin = Self::linspace(start, stop, num, dtype)?;
+        Self::logspace_endpoint(start, stop, num, base, true, dtype)
+    }
+
+    /// `np.logspace` with explicit `endpoint` parameter.
+    pub fn logspace_endpoint(
+        start: f64,
+        stop: f64,
+        num: usize,
+        base: f64,
+        endpoint: bool,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        let lin = Self::linspace_endpoint(start, stop, num, endpoint, dtype)?;
         let values: Vec<f64> = lin.values.iter().map(|&v| base.powf(v)).collect();
         Self::from_values_with_dtype(vec![num], values, dtype)
     }
@@ -3169,6 +3198,17 @@ impl UFuncArray {
     ///
     /// Mimics `np.geomspace(start, stop, num)`.
     pub fn geomspace(start: f64, stop: f64, num: usize, dtype: DType) -> Result<Self, UFuncError> {
+        Self::geomspace_endpoint(start, stop, num, true, dtype)
+    }
+
+    /// `np.geomspace` with explicit `endpoint` parameter.
+    pub fn geomspace_endpoint(
+        start: f64,
+        stop: f64,
+        num: usize,
+        endpoint: bool,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
         if start == 0.0 || stop == 0.0 {
             return Err(UFuncError::Msg(
                 "geomspace start and stop must be non-zero".to_string(),
@@ -3180,7 +3220,8 @@ impl UFuncArray {
         if num == 1 {
             return Self::from_values_with_dtype(vec![1], vec![start], dtype);
         }
-        let ratio = (stop / start).powf(1.0 / (num - 1) as f64);
+        let divisor = if endpoint { (num - 1) as f64 } else { num as f64 };
+        let ratio = (stop / start).powf(1.0 / divisor);
         let values: Vec<f64> = (0..num).map(|i| start * ratio.powi(i as i32)).collect();
         Self::from_values_with_dtype(vec![num], values, dtype)
     }
@@ -5096,6 +5137,38 @@ impl UFuncArray {
         }
     }
 
+    /// Squeeze multiple axes simultaneously (np.squeeze with tuple of axes).
+    ///
+    /// All specified axes must have size 1. Axes are removed from highest to
+    /// lowest to preserve correct indexing.
+    pub fn squeeze_axes(&self, axes: &[isize]) -> Result<Self, UFuncError> {
+        let mut normalized: Vec<usize> = axes
+            .iter()
+            .map(|&a| normalize_axis(a, self.shape.len()))
+            .collect::<Result<_, _>>()?;
+        for &ax in &normalized {
+            if self.shape[ax] != 1 {
+                return Err(UFuncError::Shape(ShapeError::IncompatibleElementCount {
+                    old: self.shape[ax],
+                    new: 1,
+                }));
+            }
+        }
+        // Sort descending so we remove from the end first
+        normalized.sort_unstable();
+        normalized.dedup();
+        let mut new_shape = self.shape.clone();
+        for &ax in normalized.iter().rev() {
+            new_shape.remove(ax);
+        }
+        Ok(Self {
+            shape: new_shape,
+            values: self.values.clone(),
+            dtype: self.dtype,
+            integer_sidecar: self.cloned_integer_sidecar(),
+        })
+    }
+
     /// Insert a size-1 dimension at position `axis`. Matches `numpy.expand_dims`.
     pub fn expand_dims(&self, axis: isize) -> Result<Self, UFuncError> {
         let ndim = self.shape.len() + 1; // new ndim after insertion
@@ -5122,6 +5195,43 @@ impl UFuncArray {
         })
     }
 
+    /// Insert size-1 dimensions at multiple positions (np.expand_dims with tuple, NumPy 1.18+).
+    ///
+    /// Axes are normalized relative to the final ndim (original ndim + number of new axes).
+    pub fn expand_dims_axes(&self, axes: &[isize]) -> Result<Self, UFuncError> {
+        let new_ndim = self.shape.len() + axes.len();
+        let mut normalized: Vec<usize> = axes
+            .iter()
+            .map(|&a| {
+                let n = if a < 0 {
+                    (new_ndim as isize + a) as usize
+                } else {
+                    a as usize
+                };
+                if n > new_ndim {
+                    Err(UFuncError::AxisOutOfBounds {
+                        axis: a,
+                        ndim: new_ndim,
+                    })
+                } else {
+                    Ok(n)
+                }
+            })
+            .collect::<Result<_, _>>()?;
+        normalized.sort_unstable();
+        let mut new_shape = self.shape.clone();
+        for (offset, &ax) in normalized.iter().enumerate() {
+            new_shape.insert(ax.min(new_shape.len()), 1);
+            let _ = offset; // insertions shift indices but we sorted ascending
+        }
+        Ok(Self {
+            shape: new_shape,
+            values: self.values.clone(),
+            dtype: self.dtype,
+            integer_sidecar: self.cloned_integer_sidecar(),
+        })
+    }
+
     /// Swap two axes of an array.
     ///
     /// Mimics `np.swapaxes(a, axis1, axis2)`.
@@ -5138,12 +5248,51 @@ impl UFuncArray {
     ///
     /// Mimics `np.moveaxis(a, source, destination)`.
     pub fn moveaxis(&self, source: isize, destination: isize) -> Result<Self, UFuncError> {
+        self.moveaxis_multi(&[source], &[destination])
+    }
+
+    /// Move multiple axes to new positions simultaneously (np.moveaxis with array args).
+    ///
+    /// `source` and `destination` must have the same length.
+    pub fn moveaxis_multi(
+        &self,
+        source: &[isize],
+        destination: &[isize],
+    ) -> Result<Self, UFuncError> {
+        if source.len() != destination.len() {
+            return Err(UFuncError::Msg(
+                "moveaxis: source and destination must have same length".to_string(),
+            ));
+        }
         let ndim = self.shape.len();
-        let src = normalize_axis(source, ndim)?;
-        let dst = normalize_axis(destination, ndim)?;
-        let mut perm: Vec<usize> = (0..ndim).collect();
-        perm.remove(src);
-        perm.insert(dst, src);
+        let mut srcs: Vec<usize> = source
+            .iter()
+            .map(|&s| normalize_axis(s, ndim))
+            .collect::<Result<_, _>>()?;
+        let mut dsts: Vec<usize> = destination
+            .iter()
+            .map(|&d| normalize_axis(d, ndim))
+            .collect::<Result<_, _>>()?;
+
+        // Build permutation: NumPy algorithm
+        // 1. Sort (source, destination) pairs by source
+        let mut order: Vec<usize> = (0..srcs.len()).collect();
+        order.sort_by_key(|&i| srcs[i]);
+        srcs = order.iter().map(|&i| srcs[i]).collect();
+        dsts = order.iter().map(|&i| dsts[i]).collect();
+
+        // 2. Build perm by removing sources and inserting at destinations
+        let mut perm: Vec<usize> = (0..ndim).filter(|a| !srcs.contains(a)).collect();
+        // Sort destinations for correct insertion order
+        let mut dst_src_pairs: Vec<(usize, usize)> =
+            dsts.iter().copied().zip(srcs.iter().copied()).collect();
+        dst_src_pairs.sort_by_key(|&(d, _)| d);
+        for (i, &(d, s)) in dst_src_pairs.iter().enumerate() {
+            perm.insert(d.min(perm.len()), s);
+            // Adjust subsequent insertion points if needed
+            let _ = i; // pairs are pre-sorted
+        }
+
         self.transpose(Some(&perm))
     }
 
@@ -5520,26 +5669,31 @@ impl UFuncArray {
     ///
     /// Mimics `np.rot90(m, k=1)`. Operates on the first two axes.
     pub fn rot90(&self, k: i32) -> Result<Self, UFuncError> {
+        self.rot90_axes(k, (0, 1))
+    }
+
+    /// `np.rot90` with explicit `axes` parameter.
+    ///
+    /// Rotates in the plane defined by `axes`. Default is `(0, 1)`.
+    pub fn rot90_axes(&self, k: i32, axes: (isize, isize)) -> Result<Self, UFuncError> {
         if self.shape.len() < 2 {
             return Err(UFuncError::Msg(
                 "rot90 requires at least 2-D input".to_string(),
             ));
         }
+        let ax0 = normalize_axis(axes.0, self.shape.len())? as isize;
+        let ax1 = normalize_axis(axes.1, self.shape.len())? as isize;
+        if ax0 == ax1 {
+            return Err(UFuncError::Msg(
+                "rot90: axes must be different".to_string(),
+            ));
+        }
         let k = k.rem_euclid(4);
         match k {
             0 => Ok(self.clone()),
-            1 => {
-                // rot90(m, 1) = flip(swapaxes(m, 0, 1), axis=0)
-                self.swapaxes(0, 1).and_then(|t| t.flip(Some(0)))
-            }
-            2 => {
-                // rot90(m, 2) = flip(flip(m, 0), 1)
-                self.flip(Some(0)).and_then(|f| f.flip(Some(1)))
-            }
-            3 => {
-                // rot90(m, 3) = swapaxes(flip(m, 0), 0, 1)
-                self.flip(Some(0)).and_then(|f| f.swapaxes(0, 1))
-            }
+            1 => self.swapaxes(ax0, ax1).and_then(|t| t.flip(Some(ax0))),
+            2 => self.flip(Some(ax0)).and_then(|f| f.flip(Some(ax1))),
+            3 => self.flip(Some(ax0)).and_then(|f| f.swapaxes(ax0, ax1)),
             _ => Err(UFuncError::Msg("rot90 modulo math failed".to_string())),
         }
     }
@@ -7199,6 +7353,23 @@ impl UFuncArray {
         }
     }
 
+    /// Roll along multiple axes simultaneously (np.roll with array shift/axis).
+    ///
+    /// `shifts` and `axes` must have the same length. Each axis is rolled by the
+    /// corresponding shift amount sequentially.
+    pub fn roll_multi(&self, shifts: &[isize], axes: &[isize]) -> Result<Self, UFuncError> {
+        if shifts.len() != axes.len() {
+            return Err(UFuncError::Msg(
+                "roll: shift and axis must have same length".to_string(),
+            ));
+        }
+        let mut current = self.clone();
+        for (&s, &a) in shifts.iter().zip(axes.iter()) {
+            current = current.roll(s, Some(a))?;
+        }
+        Ok(current)
+    }
+
     /// Reverse the order of elements along an axis.
     pub fn flip(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
         match axis {
@@ -7250,6 +7421,17 @@ impl UFuncArray {
                 })
             }
         }
+    }
+
+    /// Flip along multiple axes (np.flip with tuple of axes).
+    ///
+    /// Applies flip sequentially along each specified axis.
+    pub fn flip_axes(&self, axes: &[isize]) -> Result<Self, UFuncError> {
+        let mut current = self.clone();
+        for &ax in axes {
+            current = current.flip(Some(ax))?;
+        }
+        Ok(current)
     }
 
     /// Flip array in the left/right direction (np.fliplr).
@@ -11116,6 +11298,20 @@ impl UFuncArray {
     /// One-dimensional linear interpolation (np.interp).
     /// `xp` and `fp` must be 1-D with the same length and `xp` sorted.
     pub fn interp(x: &Self, xp: &Self, fp: &Self) -> Result<Self, UFuncError> {
+        Self::interp_lr(x, xp, fp, None, None)
+    }
+
+    /// `np.interp` with explicit `left`/`right` out-of-range fill values.
+    ///
+    /// `left`: value to return for `x < xp[0]` (default: `fp[0]`).
+    /// `right`: value to return for `x > xp[-1]` (default: `fp[-1]`).
+    pub fn interp_lr(
+        x: &Self,
+        xp: &Self,
+        fp: &Self,
+        left: Option<f64>,
+        right: Option<f64>,
+    ) -> Result<Self, UFuncError> {
         if xp.shape.len() != 1 || fp.shape.len() != 1 {
             return Err(UFuncError::Msg("interp: xp and fp must be 1-D".to_string()));
         }
@@ -11128,6 +11324,8 @@ impl UFuncArray {
         if n == 0 {
             return Err(UFuncError::Msg("interp: xp must not be empty".to_string()));
         }
+        let left_val = left.unwrap_or(fp.values[0]);
+        let right_val = right.unwrap_or(fp.values[n - 1]);
 
         let values: Vec<f64> = x
             .values
@@ -11137,10 +11335,10 @@ impl UFuncArray {
                     return fp.values[0];
                 }
                 if xi <= xp.values[0] {
-                    return fp.values[0];
+                    return left_val;
                 }
                 if xi >= xp.values[n - 1] {
-                    return fp.values[n - 1];
+                    return right_val;
                 }
                 // Binary search for interval
                 let mut lo = 0;
@@ -11316,18 +11514,44 @@ impl UFuncArray {
     /// Mimics `np.digitize(x, bins)`. Bins are assumed sorted ascending.
     /// Returns index i such that `bins[i-1] <= x < bins[i]`.
     pub fn digitize(&self, bins: &Self) -> Result<Self, UFuncError> {
+        self.digitize_right(bins, false)
+    }
+
+    /// `np.digitize` with explicit `right` parameter.
+    ///
+    /// When `right` is false (default), the bin intervals are `[bins[i-1], bins[i])`.
+    /// When `right` is true, the bin intervals are `(bins[i-1], bins[i]]`.
+    pub fn digitize_right(&self, bins: &Self, right: bool) -> Result<Self, UFuncError> {
         if bins.shape.len() != 1 {
             return Err(UFuncError::Msg("digitize: bins must be 1-D".to_string()));
         }
         let b = &bins.values;
+        let is_increasing = b.windows(2).all(|w| w[0] <= w[1]);
         let values: Vec<f64> = self
             .values
             .iter()
             .map(|&v| {
-                // Binary search: find rightmost bin index
-                match b.binary_search_by(|probe| probe.total_cmp(&v)) {
-                    Ok(idx) => (idx + 1) as f64,
-                    Err(idx) => idx as f64,
+                if is_increasing {
+                    if right {
+                        // right=true: intervals (bins[i-1], bins[i]]
+                        // Find leftmost position where bins[pos] >= v
+                        let idx = b.partition_point(|&probe| probe < v);
+                        idx as f64
+                    } else {
+                        // right=false (default): intervals [bins[i-1], bins[i])
+                        // Find leftmost position where bins[pos] > v
+                        let idx = b.partition_point(|&probe| probe <= v);
+                        idx as f64
+                    }
+                } else {
+                    // Decreasing bins: reverse the logic
+                    if right {
+                        let idx = b.partition_point(|&probe| probe > v);
+                        idx as f64
+                    } else {
+                        let idx = b.partition_point(|&probe| probe >= v);
+                        idx as f64
+                    }
                 }
             })
             .collect();
@@ -11558,6 +11782,15 @@ impl UFuncArray {
 
     /// Discrete linear convolution of two 1-D sequences (np.convolve, mode='full').
     pub fn convolve(&self, kernel: &Self) -> Result<Self, UFuncError> {
+        self.convolve_mode(kernel, "full")
+    }
+
+    /// Discrete, linear convolution with mode parameter (np.convolve with mode).
+    ///
+    /// `mode`: `"full"` (default) returns full convolution, `"valid"` returns only
+    /// the part that does not rely on zero-padding, `"same"` returns output with
+    /// the same length as the first input.
+    pub fn convolve_mode(&self, kernel: &Self, mode: &str) -> Result<Self, UFuncError> {
         if self.shape.len() != 1 || kernel.shape.len() != 1 {
             return Err(UFuncError::Msg(
                 "convolve: only 1-D arrays supported".to_string(),
@@ -11573,13 +11806,33 @@ impl UFuncArray {
                 integer_sidecar: None,
             });
         }
-        let out_len = n + m - 1;
-        let mut values = vec![0.0f64; out_len];
+        // Compute full convolution
+        let full_len = n + m - 1;
+        let mut full = vec![0.0f64; full_len];
         for i in 0..n {
             for j in 0..m {
-                values[i + j] += self.values[i] * kernel.values[j];
+                full[i + j] += self.values[i] * kernel.values[j];
             }
         }
+        // Trim based on mode
+        let values = match mode {
+            "full" => full,
+            "same" => {
+                let start = (m - 1) / 2;
+                full[start..start + n].to_vec()
+            }
+            "valid" => {
+                let valid_len = n.max(m) - n.min(m) + 1;
+                let start = n.min(m) - 1;
+                full[start..start + valid_len].to_vec()
+            }
+            _ => {
+                return Err(UFuncError::Msg(format!(
+                    "convolve: mode must be 'full', 'valid', or 'same', got '{mode}'"
+                )));
+            }
+        };
+        let out_len = values.len();
         Ok(Self {
             shape: vec![out_len],
             values,
@@ -11590,6 +11843,11 @@ impl UFuncArray {
 
     /// Cross-correlation of two 1-D sequences (np.correlate, mode='full').
     pub fn correlate(&self, kernel: &Self) -> Result<Self, UFuncError> {
+        self.correlate_mode(kernel, "full")
+    }
+
+    /// Cross-correlation with mode parameter (np.correlate with mode).
+    pub fn correlate_mode(&self, kernel: &Self, mode: &str) -> Result<Self, UFuncError> {
         if self.shape.len() != 1 || kernel.shape.len() != 1 {
             return Err(UFuncError::Msg(
                 "correlate: only 1-D arrays supported".to_string(),
@@ -11602,7 +11860,7 @@ impl UFuncArray {
             dtype: kernel.dtype,
             integer_sidecar: None,
         };
-        self.convolve(&reversed)
+        self.convolve_mode(&reversed, mode)
     }
 
     /// 2-D convolution (full mode). Equivalent to scipy.signal.convolve2d(mode='full').
@@ -15220,16 +15478,30 @@ impl UFuncArray {
 
     /// Differences between consecutive elements of an array (np.ediff1d).
     pub fn ediff1d(&self) -> Result<Self, UFuncError> {
+        self.ediff1d_ext(None, None)
+    }
+
+    /// `np.ediff1d` with `to_begin` and `to_end` parameters.
+    ///
+    /// Values from `to_begin` are prepended and `to_end` are appended to the
+    /// difference array.
+    pub fn ediff1d_ext(
+        &self,
+        to_begin: Option<&[f64]>,
+        to_end: Option<&[f64]>,
+    ) -> Result<Self, UFuncError> {
         let flat = &self.values;
-        if flat.len() < 2 {
-            return Ok(Self {
-                shape: vec![0],
-                values: Vec::new(),
-                dtype: self.dtype,
-                integer_sidecar: None,
-            });
-        }
-        let values: Vec<f64> = flat.windows(2).map(|w| w[1] - w[0]).collect();
+        let diffs: Vec<f64> = if flat.len() < 2 {
+            Vec::new()
+        } else {
+            flat.windows(2).map(|w| w[1] - w[0]).collect()
+        };
+        let begin = to_begin.unwrap_or(&[]);
+        let end = to_end.unwrap_or(&[]);
+        let mut values = Vec::with_capacity(begin.len() + diffs.len() + end.len());
+        values.extend_from_slice(begin);
+        values.extend_from_slice(&diffs);
+        values.extend_from_slice(end);
         let n = values.len();
         Ok(Self {
             shape: vec![n],
@@ -15451,25 +15723,34 @@ impl UFuncArray {
 
     /// Unwrap phase angles by changing deltas > discont to their 2*pi complement (np.unwrap).
     pub fn unwrap(&self, discont: Option<f64>) -> Result<Self, UFuncError> {
+        self.unwrap_period(discont, None)
+    }
+
+    /// `np.unwrap` with explicit `period` parameter (NumPy 1.21+).
+    ///
+    /// `period`: size of the range over which the input wraps (default: 2*PI).
+    pub fn unwrap_period(
+        &self,
+        discont: Option<f64>,
+        period: Option<f64>,
+    ) -> Result<Self, UFuncError> {
         if self.shape.len() != 1 {
             return Err(UFuncError::Msg(
                 "unwrap: only 1-D arrays supported".to_string(),
             ));
         }
-        let disc = discont.unwrap_or(std::f64::consts::PI);
+        let p = period.unwrap_or(2.0 * std::f64::consts::PI);
+        let half_p = p / 2.0;
+        let disc = discont.unwrap_or(half_p);
         let mut values = self.values.clone();
         let mut offset = 0.0;
         for i in 1..values.len() {
             let diff = values[i] - values[i - 1] + offset;
             offset = 0.0;
             if diff > disc {
-                offset = -2.0
-                    * std::f64::consts::PI
-                    * ((diff + std::f64::consts::PI) / (2.0 * std::f64::consts::PI)).floor();
+                offset = -p * ((diff + half_p) / p).floor();
             } else if diff < -disc {
-                offset = 2.0
-                    * std::f64::consts::PI
-                    * ((-diff + std::f64::consts::PI) / (2.0 * std::f64::consts::PI)).floor();
+                offset = p * ((-diff + half_p) / p).floor();
             }
             values[i] += offset;
         }
@@ -15940,11 +16221,7 @@ impl UFuncArray {
     /// Pack binary array into uint8 with explicit bit order (np.packbits with bitorder).
     ///
     /// `bitorder`: `"big"` (default) packs MSB first, `"little"` packs LSB first.
-    pub fn packbits_order(
-        &self,
-        axis: Option<isize>,
-        bitorder: &str,
-    ) -> Result<Self, UFuncError> {
+    pub fn packbits_order(&self, axis: Option<isize>, bitorder: &str) -> Result<Self, UFuncError> {
         let little = match bitorder {
             "big" => false,
             "little" => true,
@@ -16035,9 +16312,7 @@ impl UFuncArray {
                 )));
             }
         };
-        let bit_iter = |b: u32| -> u32 {
-            if little { b } else { 7 - b }
-        };
+        let bit_iter = |b: u32| -> u32 { if little { b } else { 7 - b } };
         match axis {
             None => {
                 let mut bits = Vec::with_capacity(self.values.len() * 8);
@@ -27864,23 +28139,27 @@ mod tests {
     #[test]
     fn reduce_var_axis_ddof_ge_axis_len_returns_nan() {
         // np.var([[1,2],[3,4]], axis=1, ddof=2) => [nan, nan]
-        let arr =
-            UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).expect("arr");
-        let out = arr.reduce_var(Some(1), false, 2).expect("var ddof=axis_len");
+        let arr = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).expect("arr");
+        let out = arr
+            .reduce_var(Some(1), false, 2)
+            .expect("var ddof=axis_len");
         assert_eq!(out.shape(), &[2]);
         assert!(out.values()[0].is_nan());
         assert!(out.values()[1].is_nan());
         // ddof > axis_len should also return NaN
-        let out2 = arr.reduce_var(Some(1), false, 5).expect("var ddof>axis_len");
+        let out2 = arr
+            .reduce_var(Some(1), false, 5)
+            .expect("var ddof>axis_len");
         assert!(out2.values()[0].is_nan());
         assert!(out2.values()[1].is_nan());
     }
 
     #[test]
     fn reduce_std_axis_ddof_ge_axis_len_returns_nan() {
-        let arr =
-            UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).expect("arr");
-        let out = arr.reduce_std(Some(1), false, 2).expect("std ddof=axis_len");
+        let arr = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).expect("arr");
+        let out = arr
+            .reduce_std(Some(1), false, 2)
+            .expect("std ddof=axis_len");
         assert!(out.values()[0].is_nan());
         assert!(out.values()[1].is_nan());
     }
@@ -28481,6 +28760,22 @@ mod tests {
     }
 
     #[test]
+    fn squeeze_axes_multi() {
+        // Shape [1, 3, 1, 2] → squeeze axes (0, 2) → [3, 2]
+        let arr = UFuncArray::new(vec![1, 3, 1, 2], (1..=6).map(|i| i as f64).collect(), DType::F64)
+            .unwrap();
+        let r = arr.squeeze_axes(&[0, 2]).unwrap();
+        assert_eq!(r.shape(), &[3, 2]);
+        assert_eq!(r.values(), arr.values());
+    }
+
+    #[test]
+    fn squeeze_axes_rejects_non_one() {
+        let arr = UFuncArray::new(vec![1, 3, 1], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        assert!(arr.squeeze_axes(&[0, 1]).is_err());
+    }
+
+    #[test]
     fn expand_dims_front() {
         let arr = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).expect("arr");
         let out = arr.expand_dims(0).expect("expand front");
@@ -28500,6 +28795,23 @@ mod tests {
             .expect("arr");
         let out = arr.expand_dims(1).expect("expand middle");
         assert_eq!(out.shape(), &[2, 1, 3]);
+    }
+
+    #[test]
+    fn expand_dims_axes_multi() {
+        // np.expand_dims([1,2,3], axis=(0, 2)) → shape [1, 3, 1]
+        let arr = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let r = arr.expand_dims_axes(&[0, 2]).unwrap();
+        assert_eq!(r.shape(), &[1, 3, 1]);
+        assert_eq!(r.values(), arr.values());
+    }
+
+    #[test]
+    fn expand_dims_axes_single_matches_expand_dims() {
+        let arr = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let single = arr.expand_dims(0).unwrap();
+        let multi = arr.expand_dims_axes(&[0]).unwrap();
+        assert_eq!(single.shape(), multi.shape());
     }
 
     #[test]
@@ -29337,6 +29649,24 @@ mod tests {
     }
 
     #[test]
+    fn linspace_endpoint_false() {
+        // np.linspace(0, 1, 5, endpoint=False) → [0.0, 0.2, 0.4, 0.6, 0.8]
+        let arr = UFuncArray::linspace_endpoint(0.0, 1.0, 5, false, DType::F64).unwrap();
+        assert_eq!(arr.shape(), &[5]);
+        let expected = [0.0, 0.2, 0.4, 0.6, 0.8];
+        for (i, &exp) in expected.iter().enumerate() {
+            assert!((arr.values()[i] - exp).abs() < 1e-12, "i={i}");
+        }
+    }
+
+    #[test]
+    fn linspace_endpoint_true_matches_default() {
+        let default = UFuncArray::linspace(0.0, 1.0, 5, DType::F64).unwrap();
+        let explicit = UFuncArray::linspace_endpoint(0.0, 1.0, 5, true, DType::F64).unwrap();
+        assert_eq!(default.values(), explicit.values());
+    }
+
+    #[test]
     fn eye_identity_3x3() {
         let arr = UFuncArray::eye(3, None, 0, DType::F64).unwrap();
         assert_eq!(arr.shape(), &[3, 3]);
@@ -29558,6 +29888,24 @@ mod tests {
     }
 
     #[test]
+    fn roll_multi_basic() {
+        // np.roll([[1,2,3],[4,5,6]], [1, 1], [0, 1])
+        // Roll axis 0 by 1: [[4,5,6],[1,2,3]]
+        // Then roll axis 1 by 1: [[6,4,5],[3,1,2]]
+        let arr =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = arr.roll_multi(&[1, 1], &[0, 1]).unwrap();
+        assert_eq!(r.shape(), &[2, 3]);
+        assert_eq!(r.values(), &[6.0, 4.0, 5.0, 3.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn roll_multi_length_mismatch() {
+        let arr = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        assert!(arr.roll_multi(&[1, 2], &[0]).is_err());
+    }
+
+    #[test]
     fn flip_flat() {
         let arr = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
         let flipped = arr.flip(None).unwrap();
@@ -29607,6 +29955,25 @@ mod tests {
         let arr = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
         let flipped = arr.flipud().unwrap();
         assert_eq!(flipped.values(), &[4.0, 3.0, 2.0, 1.0]);
+    }
+
+    #[test]
+    fn flip_axes_multi() {
+        // np.flip([[1,2,3],[4,5,6]], (0, 1)) = flip both axes
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = a.flip_axes(&[0, 1]).unwrap();
+        // flip axis 0: [[4,5,6],[1,2,3]], then flip axis 1: [[6,5,4],[3,2,1]]
+        assert_eq!(r.values(), &[6.0, 5.0, 4.0, 3.0, 2.0, 1.0]);
+    }
+
+    #[test]
+    fn flip_axes_matches_sequential() {
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let sequential = a.flip(Some(0)).unwrap().flip(Some(1)).unwrap();
+        let multi = a.flip_axes(&[0, 1]).unwrap();
+        assert_eq!(sequential.values(), multi.values());
     }
 
     #[test]
@@ -30257,9 +30624,7 @@ mod tests {
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 4.0], DType::F64).unwrap();
         let prepend = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
         let append = UFuncArray::new(vec![1], vec![7.0], DType::F64).unwrap();
-        let r = a
-            .diff_with(1, None, Some(&prepend), Some(&append))
-            .unwrap();
+        let r = a.diff_with(1, None, Some(&prepend), Some(&append)).unwrap();
         assert_eq!(r.shape(), &[4]);
         assert_eq!(r.values(), &[1.0, 1.0, 2.0, 3.0]);
     }
@@ -30591,6 +30956,38 @@ mod tests {
         assert_eq!(r.values(), &[100.0, 200.0, 300.0]);
     }
 
+    #[test]
+    fn interp_lr_custom_fill() {
+        // np.interp([-1, 5], [0, 1], [10, 20], left=-1, right=-2) → [-1, -2]
+        let x = UFuncArray::new(vec![2], vec![-1.0, 5.0], DType::F64).unwrap();
+        let xp = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::F64).unwrap();
+        let fp = UFuncArray::new(vec![2], vec![10.0, 20.0], DType::F64).unwrap();
+        let r = UFuncArray::interp_lr(&x, &xp, &fp, Some(-1.0), Some(-2.0)).unwrap();
+        assert_eq!(r.values(), &[-1.0, -2.0]);
+    }
+
+    #[test]
+    fn interp_lr_none_matches_default() {
+        let x = UFuncArray::new(vec![2], vec![-1.0, 5.0], DType::F64).unwrap();
+        let xp = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::F64).unwrap();
+        let fp = UFuncArray::new(vec![2], vec![10.0, 20.0], DType::F64).unwrap();
+        let default = UFuncArray::interp(&x, &xp, &fp).unwrap();
+        let explicit = UFuncArray::interp_lr(&x, &xp, &fp, None, None).unwrap();
+        assert_eq!(default.values(), explicit.values());
+    }
+
+    #[test]
+    fn interp_lr_nan_fill() {
+        // Common pattern: fill out-of-range with NaN
+        let x = UFuncArray::new(vec![3], vec![-1.0, 0.5, 5.0], DType::F64).unwrap();
+        let xp = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::F64).unwrap();
+        let fp = UFuncArray::new(vec![2], vec![10.0, 20.0], DType::F64).unwrap();
+        let r = UFuncArray::interp_lr(&x, &xp, &fp, Some(f64::NAN), Some(f64::NAN)).unwrap();
+        assert!(r.values()[0].is_nan());
+        assert!((r.values()[1] - 15.0).abs() < 1e-10);
+        assert!(r.values()[2].is_nan());
+    }
+
     // ── convolve / correlate / polyval / cross / vstack / hstack ─────
 
     #[test]
@@ -30620,6 +31017,53 @@ mod tests {
         assert_eq!(r.shape(), &[5]);
         // correlate reverses kernel: convolve([1,2,3], [0.5,1,0])
         assert_eq!(r.values(), &[0.5, 2.0, 3.5, 3.0, 0.0]);
+    }
+
+    #[test]
+    fn convolve_mode_same() {
+        // np.convolve([1,2,3,4,5], [1,2,3], mode='same') → [4, 10, 16, 22, 22]
+        let a = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
+        let k = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let r = a.convolve_mode(&k, "same").unwrap();
+        assert_eq!(r.shape(), &[5]);
+        // Full: [1, 4, 10, 16, 22, 22, 15] → same takes middle 5: [4, 10, 16, 22, 22]
+        assert_eq!(r.values(), &[4.0, 10.0, 16.0, 22.0, 22.0]);
+    }
+
+    #[test]
+    fn convolve_mode_valid() {
+        // np.convolve([1,2,3,4,5], [1,2,3], mode='valid') → [10, 16, 22]
+        let a = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
+        let k = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let r = a.convolve_mode(&k, "valid").unwrap();
+        assert_eq!(r.shape(), &[3]);
+        assert_eq!(r.values(), &[10.0, 16.0, 22.0]);
+    }
+
+    #[test]
+    fn convolve_mode_full_matches_default() {
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let k = UFuncArray::new(vec![3], vec![0.0, 1.0, 0.5], DType::F64).unwrap();
+        let full = a.convolve_mode(&k, "full").unwrap();
+        let default = a.convolve(&k).unwrap();
+        assert_eq!(full.values(), default.values());
+    }
+
+    #[test]
+    fn correlate_mode_same() {
+        let a = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
+        let k = UFuncArray::new(vec![3], vec![1.0, 1.0, 1.0], DType::F64).unwrap();
+        let r = a.correlate_mode(&k, "same").unwrap();
+        assert_eq!(r.shape(), &[5]);
+        // correlate reverses kernel [1,1,1] → same kernel. Same as convolve same.
+        assert_eq!(r.values(), &[3.0, 6.0, 9.0, 12.0, 9.0]);
+    }
+
+    #[test]
+    fn convolve_mode_invalid() {
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let k = UFuncArray::new(vec![2], vec![1.0, 1.0], DType::F64).unwrap();
+        assert!(a.convolve_mode(&k, "invalid").is_err());
     }
 
     #[test]
@@ -31144,6 +31588,35 @@ mod tests {
     #[test]
     fn geomspace_zero_error() {
         assert!(UFuncArray::geomspace(0.0, 10.0, 5, DType::F64).is_err());
+    }
+
+    #[test]
+    fn logspace_endpoint_false() {
+        // np.logspace(0, 2, 3, base=10, endpoint=False) → [1, 10^(2/3), 10^(4/3)]
+        let r = UFuncArray::logspace_endpoint(0.0, 2.0, 3, 10.0, false, DType::F64).unwrap();
+        assert_eq!(r.shape(), &[3]);
+        assert!((r.values()[0] - 1.0).abs() < 1e-12);
+        // step = 2/3, so values are 10^0, 10^(2/3), 10^(4/3)
+        assert!((r.values()[1] - 10.0_f64.powf(2.0 / 3.0)).abs() < 1e-10);
+        // Should NOT include 10^2 = 100
+        assert!((r.values()[2] - 10.0_f64.powf(4.0 / 3.0)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn geomspace_endpoint_false() {
+        // np.geomspace(1, 1000, 4, endpoint=False)
+        let r = UFuncArray::geomspace_endpoint(1.0, 1000.0, 4, false, DType::F64).unwrap();
+        assert_eq!(r.shape(), &[4]);
+        assert!((r.values()[0] - 1.0).abs() < 1e-12);
+        // Should not include 1000 as endpoint
+        assert!(r.values()[3] < 1000.0);
+    }
+
+    #[test]
+    fn logspace_endpoint_true_matches_default() {
+        let default = UFuncArray::logspace(0.0, 2.0, 5, 10.0, DType::F64).unwrap();
+        let explicit = UFuncArray::logspace_endpoint(0.0, 2.0, 5, 10.0, true, DType::F64).unwrap();
+        assert_eq!(default.values(), explicit.values());
     }
 
     #[test]
@@ -31954,6 +32427,26 @@ mod tests {
     }
 
     #[test]
+    fn digitize_right_true() {
+        // np.digitize([0.5, 1.0, 1.5, 2.0, 2.5], [1, 2, 3], right=True)
+        // right=True uses searchsorted(side='left'): finds first bin >= x
+        // 0.5 → 0, 1.0 → 0, 1.5 → 1, 2.0 → 1, 2.5 → 2
+        let x = UFuncArray::new(vec![5], vec![0.5, 1.0, 1.5, 2.0, 2.5], DType::F64).unwrap();
+        let bins = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let r = x.digitize_right(&bins, true).unwrap();
+        assert_eq!(r.values(), &[0.0, 0.0, 1.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn digitize_right_false_matches_default() {
+        let x = UFuncArray::new(vec![4], vec![0.5, 1.5, 2.5, 3.5], DType::F64).unwrap();
+        let bins = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let default = x.digitize(&bins).unwrap();
+        let explicit = x.digitize_right(&bins, false).unwrap();
+        assert_eq!(default.values(), explicit.values());
+    }
+
+    #[test]
     fn histogram2d_basic() {
         let x = UFuncArray::new(vec![4], vec![0.0, 1.0, 2.0, 3.0], DType::F64).unwrap();
         let y = UFuncArray::new(vec![4], vec![0.0, 1.0, 2.0, 3.0], DType::F64).unwrap();
@@ -32000,6 +32493,44 @@ mod tests {
         .unwrap();
         let r = a.moveaxis(0, 2).unwrap();
         assert_eq!(r.shape(), &[3, 4, 2]);
+    }
+
+    #[test]
+    fn moveaxis_multi_basic() {
+        // np.moveaxis(a, [0, 2], [2, 0]) on shape (2,3,4) → shape (4,3,2)
+        let a = UFuncArray::new(
+            vec![2, 3, 4],
+            (0..24).map(|i| i as f64).collect(),
+            DType::F64,
+        )
+        .unwrap();
+        let r = a.moveaxis_multi(&[0, 2], &[2, 0]).unwrap();
+        assert_eq!(r.shape(), &[4, 3, 2]);
+    }
+
+    #[test]
+    fn moveaxis_multi_single_matches_moveaxis() {
+        let a = UFuncArray::new(
+            vec![2, 3, 4],
+            (0..24).map(|i| i as f64).collect(),
+            DType::F64,
+        )
+        .unwrap();
+        let r1 = a.moveaxis(0, 2).unwrap();
+        let r2 = a.moveaxis_multi(&[0], &[2]).unwrap();
+        assert_eq!(r1.shape(), r2.shape());
+        assert_eq!(r1.values(), r2.values());
+    }
+
+    #[test]
+    fn moveaxis_multi_length_mismatch() {
+        let a = UFuncArray::new(
+            vec![2, 3, 4],
+            (0..24).map(|i| i as f64).collect(),
+            DType::F64,
+        )
+        .unwrap();
+        assert!(a.moveaxis_multi(&[0, 1], &[2]).is_err());
     }
 
     #[test]
@@ -32273,6 +32804,36 @@ mod tests {
         let r = a.rot90(-1).unwrap();
         // np.rot90(a, 3) => [[3,1],[4,2]]
         assert_eq!(r.values(), &[3.0, 1.0, 4.0, 2.0]);
+    }
+
+    #[test]
+    fn rot90_axes_custom() {
+        // 3D array: rotate in (0, 2) plane instead of default (0, 1)
+        let a = UFuncArray::new(
+            vec![2, 2, 2],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            DType::F64,
+        )
+        .unwrap();
+        let r = a.rot90_axes(1, (0, 2)).unwrap();
+        // After rotation in (0,2) plane: shape should be [2, 2, 2]
+        assert_eq!(r.shape(), &[2, 2, 2]);
+    }
+
+    #[test]
+    fn rot90_axes_default_matches_rot90() {
+        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
+            .unwrap();
+        let default = a.rot90(1).unwrap();
+        let explicit = a.rot90_axes(1, (0, 1)).unwrap();
+        assert_eq!(default.values(), explicit.values());
+    }
+
+    #[test]
+    fn rot90_axes_same_error() {
+        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
+            .unwrap();
+        assert!(a.rot90_axes(1, (0, 0)).is_err());
     }
 
     // ── NaN-aware reductions ────────────────────────────────────────────
@@ -33425,6 +33986,29 @@ mod tests {
     }
 
     #[test]
+    fn ediff1d_ext_to_begin() {
+        // np.ediff1d([1, 3, 6], to_begin=[0]) → [0, 2, 3]
+        let a = UFuncArray::new(vec![3], vec![1.0, 3.0, 6.0], DType::F64).unwrap();
+        let r = a.ediff1d_ext(Some(&[0.0]), None).unwrap();
+        assert_eq!(r.values(), &[0.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn ediff1d_ext_to_end() {
+        // np.ediff1d([1, 3, 6], to_end=[99]) → [2, 3, 99]
+        let a = UFuncArray::new(vec![3], vec![1.0, 3.0, 6.0], DType::F64).unwrap();
+        let r = a.ediff1d_ext(None, Some(&[99.0])).unwrap();
+        assert_eq!(r.values(), &[2.0, 3.0, 99.0]);
+    }
+
+    #[test]
+    fn ediff1d_ext_both() {
+        let a = UFuncArray::new(vec![3], vec![1.0, 3.0, 6.0], DType::F64).unwrap();
+        let r = a.ediff1d_ext(Some(&[-1.0]), Some(&[99.0])).unwrap();
+        assert_eq!(r.values(), &[-1.0, 2.0, 3.0, 99.0]);
+    }
+
+    #[test]
     fn trapezoid_basic() {
         // trapezoid([1, 2, 3], dx=1) = 0.5*(1+2)*1 + 0.5*(2+3)*1 = 1.5 + 2.5 = 4.0
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
@@ -33542,6 +34126,36 @@ mod tests {
         // The first two values should be unchanged
         assert!((r.values()[0]).abs() < 1e-10);
         assert!((r.values()[1] - pi / 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn unwrap_period_360() {
+        // Unwrap degrees: period=360
+        let a = UFuncArray::new(
+            vec![4],
+            vec![0.0, 90.0, 180.0, -90.0],
+            DType::F64,
+        )
+        .unwrap();
+        let r = a.unwrap_period(None, Some(360.0)).unwrap();
+        assert!((r.values()[0]).abs() < 1e-10);
+        assert!((r.values()[1] - 90.0).abs() < 1e-10);
+        assert!((r.values()[2] - 180.0).abs() < 1e-10);
+        assert!((r.values()[3] - 270.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn unwrap_period_none_matches_default() {
+        let pi = std::f64::consts::PI;
+        let a = UFuncArray::new(
+            vec![4],
+            vec![0.0, pi / 2.0, pi, pi / 2.0 - 2.0 * pi],
+            DType::F64,
+        )
+        .unwrap();
+        let default = a.unwrap(None).unwrap();
+        let explicit = a.unwrap_period(None, None).unwrap();
+        assert_eq!(default.values(), explicit.values());
     }
 
     // ── histogram enhancement tests ────────
@@ -33874,8 +34488,12 @@ mod tests {
 
     #[test]
     fn packbits_big_endian_matches_default() {
-        let a = UFuncArray::new(vec![8], vec![1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0], DType::U8)
-            .unwrap();
+        let a = UFuncArray::new(
+            vec![8],
+            vec![1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0],
+            DType::U8,
+        )
+        .unwrap();
         let default = a.packbits(None).unwrap();
         let big = a.packbits_order(None, "big").unwrap();
         assert_eq!(default.values(), big.values());

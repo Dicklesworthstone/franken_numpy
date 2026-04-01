@@ -171,9 +171,8 @@ pub fn fix_unknown_dimension(
                     old: old_element_count,
                     new: known_product,
                 });
-            } else {
-                out[idx] = old_element_count / known_product;
             }
+            out[idx] = old_element_count / known_product;
         }
         None => {
             if known_product != old_element_count {

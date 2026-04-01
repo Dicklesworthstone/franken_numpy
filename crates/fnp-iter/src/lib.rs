@@ -748,9 +748,8 @@ pub fn plan_nditer_broadcast(
 
         for (axis, &broadcast_dim) in broadcast_shape.iter().enumerate() {
             let aligned_axis = axis.checked_sub(rank_delta);
-            let (operand_dim, operand_stride) = aligned_axis
-                .map(|idx| (operand.shape[idx], base_strides[idx]))
-                .unwrap_or((1, 0));
+            let (operand_dim, operand_stride) =
+                aligned_axis.map_or((1, 0), |idx| (operand.shape[idx], base_strides[idx]));
 
             if operand_dim == broadcast_dim {
                 broadcast_strides.push(operand_stride);
@@ -1208,7 +1207,7 @@ pub fn select_transfer_loop(ctx: TransferContext) -> Result<TransferLoopDecision
     Ok(TransferLoopDecision {
         loop_class,
         overlap_action,
-        reason_code: transfer_loop_class_reason(&loop_class),
+        reason_code: transfer_loop_class_reason(loop_class),
     })
 }
 
@@ -1217,7 +1216,7 @@ pub fn select_transfer_loop(ctx: TransferContext) -> Result<TransferLoopDecision
 /// For successful resolutions, this identifies which P2C003 contract row governs
 /// the selected transfer path. This is NOT an error code — it's the contract
 /// family tag used by the evidence ledger.
-fn transfer_loop_class_reason(class: &TransferLoopClass) -> &'static str {
+fn transfer_loop_class_reason(class: TransferLoopClass) -> &'static str {
     match class {
         TransferLoopClass::SimpleContiguous
         | TransferLoopClass::ContiguousCast
