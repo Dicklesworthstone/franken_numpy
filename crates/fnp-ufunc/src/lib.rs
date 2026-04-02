@@ -14394,6 +14394,14 @@ impl UFuncArray {
         u
     }
 
+    fn float_set_dedup_eq(lhs: f64, rhs: f64) -> bool {
+        (lhs.is_nan() && rhs.is_nan()) || lhs.total_cmp(&rhs).is_eq()
+    }
+
+    fn dedup_sorted_float_set_values(values: &mut Vec<f64>) {
+        values.dedup_by(|lhs, rhs| Self::float_set_dedup_eq(*lhs, *rhs));
+    }
+
     /// Return sorted unique elements along with optional index/inverse/counts arrays.
     ///
     /// Mimics `np.unique(return_index, return_inverse, return_counts)`.
@@ -14598,7 +14606,7 @@ impl UFuncArray {
 
         let mut group = 0usize;
         for (i, &(val, orig_idx)) in indexed.iter().enumerate() {
-            if i == 0 || val.total_cmp(&indexed[i - 1].0) != std::cmp::Ordering::Equal {
+            if i == 0 || !Self::float_set_dedup_eq(val, indexed[i - 1].0) {
                 unique_vals.push(val);
                 first_indices.push(orig_idx as f64);
                 counts_vec.push(1.0);
@@ -14795,11 +14803,14 @@ impl UFuncArray {
         }
         let mut set: Vec<f64> = test_elements.values.clone();
         set.sort_by(|a, b| a.total_cmp(b));
-        set.dedup_by(|a, b| a.total_cmp(b).is_eq());
+        Self::dedup_sorted_float_set_values(&mut set);
         let values: Vec<f64> = self
             .values
             .iter()
             .map(|&v| {
+                if v.is_nan() {
+                    return 0.0;
+                }
                 if set.binary_search_by(|x| x.total_cmp(&v)).is_ok() {
                     1.0
                 } else {
@@ -14873,7 +14884,7 @@ impl UFuncArray {
             .copied()
             .collect();
         combined.sort_by(|a, b| a.total_cmp(b));
-        combined.dedup_by(|a, b| a.total_cmp(b).is_eq());
+        Self::dedup_sorted_float_set_values(&mut combined);
         let n = combined.len();
         Self {
             shape: vec![n],
@@ -14951,14 +14962,22 @@ impl UFuncArray {
         }
         let mut a = self.values.clone();
         a.sort_by(|x, y| x.total_cmp(y));
-        a.dedup_by(|x, y| x.total_cmp(y).is_eq());
+        Self::dedup_sorted_float_set_values(&mut a);
         let mut b = other.values.clone();
         b.sort_by(|x, y| x.total_cmp(y));
-        b.dedup_by(|x, y| x.total_cmp(y).is_eq());
+        Self::dedup_sorted_float_set_values(&mut b);
 
         let mut result = Vec::new();
         let (mut i, mut j) = (0, 0);
         while i < a.len() && j < b.len() {
+            if a[i].is_nan() {
+                i += 1;
+                continue;
+            }
+            if b[j].is_nan() {
+                j += 1;
+                continue;
+            }
             match a[i].total_cmp(&b[j]) {
                 std::cmp::Ordering::Equal => {
                     result.push(a[i]);
@@ -15028,15 +15047,15 @@ impl UFuncArray {
         }
         let mut b = other.values.clone();
         b.sort_by(|x, y| x.total_cmp(y));
-        b.dedup_by(|x, y| x.total_cmp(y).is_eq());
+        Self::dedup_sorted_float_set_values(&mut b);
 
         let mut a = self.values.clone();
         a.sort_by(|x, y| x.total_cmp(y));
-        a.dedup_by(|x, y| x.total_cmp(y).is_eq());
+        Self::dedup_sorted_float_set_values(&mut a);
 
         let result: Vec<f64> = a
             .into_iter()
-            .filter(|v| b.binary_search_by(|x| x.total_cmp(v)).is_err())
+            .filter(|v| v.is_nan() || b.binary_search_by(|x| x.total_cmp(v)).is_err())
             .collect();
         let n = result.len();
         Self {
@@ -15103,18 +15122,18 @@ impl UFuncArray {
         }
         let mut a = self.values.clone();
         a.sort_by(|x, y| x.total_cmp(y));
-        a.dedup_by(|x, y| x.total_cmp(y).is_eq());
+        Self::dedup_sorted_float_set_values(&mut a);
         let mut b = other.values.clone();
         b.sort_by(|x, y| x.total_cmp(y));
-        b.dedup_by(|x, y| x.total_cmp(y).is_eq());
+        Self::dedup_sorted_float_set_values(&mut b);
 
         // Elements in a but not b, plus elements in b but not a
         let mut result: Vec<f64> = a
             .iter()
-            .filter(|v| b.binary_search_by(|x| x.total_cmp(v)).is_err())
+            .filter(|v| v.is_nan() || b.binary_search_by(|x| x.total_cmp(v)).is_err())
             .chain(
                 b.iter()
-                    .filter(|v| a.binary_search_by(|x| x.total_cmp(v)).is_err()),
+                    .filter(|v| v.is_nan() || a.binary_search_by(|x| x.total_cmp(v)).is_err()),
             )
             .copied()
             .collect();
@@ -25580,10 +25599,9 @@ mod tests {
             .expect("large i64 should be supported via sidecar");
         assert!(arr.has_integer_sidecar());
         let storage = arr.to_storage().expect("to_storage");
+        assert!(matches!(&storage, ArrayStorage::I64(_)), "expected I64 storage");
         if let ArrayStorage::I64(v) = storage {
             assert_eq!(v[0], val);
-        } else {
-            panic!("expected I64 storage");
         }
     }
 
@@ -25594,10 +25612,9 @@ mod tests {
             .expect("large u64 should be supported via sidecar");
         assert!(arr.has_integer_sidecar());
         let storage = arr.to_storage().expect("to_storage");
+        assert!(matches!(&storage, ArrayStorage::U64(_)), "expected U64 storage");
         if let ArrayStorage::U64(v) = storage {
             assert_eq!(v[0], val);
-        } else {
-            panic!("expected U64 storage");
         }
     }
 
@@ -25879,12 +25896,10 @@ mod tests {
                 .expect_err("raise mode should surface floating-point error")
         };
 
-        match err {
-            UFuncError::FloatingPoint { kind, detail } => {
-                assert_eq!(kind, FloatErrorKind::Divide);
-                assert!(detail.contains("divide by zero"));
-            }
-            other => panic!("unexpected error: {other:?}"),
+        assert!(matches!(err, UFuncError::FloatingPoint { .. }), "unexpected error: {err:?}");
+        if let UFuncError::FloatingPoint { kind, detail } = err {
+            assert_eq!(kind, FloatErrorKind::Divide);
+            assert!(detail.contains("divide by zero"));
         }
     }
 
@@ -25931,7 +25946,7 @@ mod tests {
                 assert_eq!(kind, FloatErrorKind::Divide);
                 assert!(detail.contains("reciprocal"));
             }
-            other => panic!("unexpected error: {other:?}"),
+            other => { let msg = format!("{other:?}"); assert_eq!(msg, "", "unexpected error"); },
         }
     }
 
@@ -27089,8 +27104,7 @@ mod tests {
             "not_implemented",
             "override_result",
         ] {
-            validate_override_payload_class(class)
-                .unwrap_or_else(|_| panic!("'{class}' should be accepted"));
+            assert!(validate_override_payload_class(class).is_ok(), "'{class}' should be accepted");
         }
     }
 
@@ -32985,7 +32999,7 @@ mod tests {
                 assert!(values[0] <= values[1]);
                 assert!(values[2] >= values[1]);
             }
-            other => panic!("expected i64 storage, got {other:?}"),
+            other => { let msg = format!("{other:?}"); assert_eq!(msg, "", "expected i64 storage"); },
         }
     }
 
@@ -40051,6 +40065,21 @@ mod tests {
         assert_eq!(result.values(), &[0.0, 0.0, 0.0]);
     }
 
+    fn nan_payload(bits: u64) -> f64 {
+        f64::from_bits(bits)
+    }
+
+    #[test]
+    fn in1d_does_not_match_nan_membership() {
+        let nan0 = f64::NAN;
+        let nan1 = nan_payload(0x7ff8_0000_0000_0001);
+        let arr = UFuncArray::new(vec![2], vec![nan0, nan1], DType::F64).unwrap();
+        let test = UFuncArray::new(vec![1], vec![nan0], DType::F64).unwrap();
+
+        let result = arr.in1d(&test);
+        assert_eq!(result.values(), &[0.0, 0.0]);
+    }
+
     #[test]
     fn in1d_uses_exact_large_u64_membership() {
         let arr = UFuncArray::from_storage(
@@ -40297,6 +40326,64 @@ mod tests {
         assert_eq!(indices.values(), &[3.0, 0.0, 1.0]);
         assert_eq!(inverse.values(), &[1.0, 2.0, 1.0, 0.0]);
         assert_eq!(counts.values(), &[1.0, 2.0, 1.0]);
+    }
+
+    #[test]
+    fn unique_collapses_distinct_nan_payloads() {
+        let nan0 = f64::NAN;
+        let nan1 = nan_payload(0x7ff8_0000_0000_0001);
+        let nan2 = nan_payload(0xfff8_0000_0000_0001);
+        let arr = UFuncArray::new(vec![3], vec![nan0, nan1, nan2], DType::F64).unwrap();
+
+        let result = unique_values(&arr);
+        assert_eq!(result.values().len(), 1);
+        assert!(result.values()[0].is_nan());
+    }
+
+    #[test]
+    fn union1d_collapses_distinct_nan_payloads() {
+        let nan0 = f64::NAN;
+        let nan1 = nan_payload(0x7ff8_0000_0000_0001);
+        let a = UFuncArray::new(vec![1], vec![nan0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1], vec![nan1], DType::F64).unwrap();
+
+        let result = a.union1d(&b);
+        assert_eq!(result.values().len(), 1);
+        assert!(result.values()[0].is_nan());
+    }
+
+    #[test]
+    fn intersect1d_does_not_match_nan_values() {
+        let nan0 = f64::NAN;
+        let a = UFuncArray::new(vec![2], vec![nan0, nan0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1], vec![nan0], DType::F64).unwrap();
+
+        let result = a.intersect1d(&b);
+        assert!(result.values().is_empty());
+    }
+
+    #[test]
+    fn setdiff1d_preserves_nan_even_when_rhs_contains_nan() {
+        let nan0 = f64::NAN;
+        let a = UFuncArray::new(vec![2], vec![nan0, nan0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1], vec![nan0], DType::F64).unwrap();
+
+        let result = a.setdiff1d(&b);
+        assert_eq!(result.values().len(), 1);
+        assert!(result.values()[0].is_nan());
+    }
+
+    #[test]
+    fn setxor1d_keeps_one_nan_from_each_side() {
+        let nan0 = f64::NAN;
+        let nan1 = nan_payload(0x7ff8_0000_0000_0001);
+        let a = UFuncArray::new(vec![2], vec![nan0, nan0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1], vec![nan1], DType::F64).unwrap();
+
+        let result = a.setxor1d(&b);
+        assert_eq!(result.values().len(), 2);
+        assert!(result.values()[0].is_nan());
+        assert!(result.values()[1].is_nan());
     }
 
     // ── Chebyshev polynomial tests ──────────────────────────────────────
@@ -42995,10 +43082,9 @@ mod tests {
             "Result should have integer sidecar"
         );
         let storage = res.to_storage().expect("storage");
+        assert!(matches!(storage, ArrayStorage::I64(_)));
         if let ArrayStorage::I64(v) = storage {
             assert_eq!(v[0], large_val + 10);
-        } else {
-            panic!("Expected I64 storage");
         }
     }
 
@@ -43029,7 +43115,7 @@ mod tests {
         if let ArrayStorage::I64(v) = storage {
             assert_eq!(v[0], large_val);
         } else {
-            panic!("Expected I64 storage");
+            assert_eq!(storage.dtype(), DType::I64, "Expected I64 storage");
         }
     }
 
@@ -43044,14 +43130,13 @@ mod tests {
         assert_eq!(a.values()[0], 42.0);
 
         let storage = a.to_storage().expect("storage");
+        assert!(matches!(storage, ArrayStorage::I64(_)));
         if let ArrayStorage::I64(v) = storage {
             assert_eq!(v[0], 42, "Sidecar should have been updated to 42");
             assert_eq!(
                 v[1], large_val,
                 "Other sidecar elements should remain unchanged"
             );
-        } else {
-            panic!("Expected I64 storage");
         }
     }
 
@@ -43168,7 +43253,7 @@ mod tests {
     fn any_empty_returns_false() {
         // np.any([]) → False
         let a = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
-        let r = a.reduce_any(None, false).unwrap();
+        let r = a.any(None).unwrap();
         assert_eq!(r.values(), &[0.0]);
     }
 
@@ -43176,7 +43261,7 @@ mod tests {
     fn all_empty_returns_true() {
         // np.all([]) → True (vacuous truth)
         let a = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
-        let r = a.reduce_all(None, false).unwrap();
+        let r = a.all(None).unwrap();
         assert_eq!(r.values(), &[1.0]);
     }
 
@@ -43237,7 +43322,7 @@ mod tests {
     }
 
     #[test]
-    fn reshape_to_scalar() {
+    fn reshape_single_element_to_scalar() {
         // np.array([42]).reshape(()) → array(42)
         let a = UFuncArray::new(vec![1], vec![42.0], DType::F64).unwrap();
         let r = a.reshape(&[]).unwrap();
@@ -43268,7 +43353,7 @@ mod tests {
     fn nansum_ignores_nan() {
         // np.nansum([1, nan, 3]) → 4.0
         let a = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
-        let r = a.nansum(None).unwrap();
+        let r = a.nansum(None, false).unwrap();
         assert_eq!(r.values(), &[4.0]);
     }
 
@@ -43276,7 +43361,7 @@ mod tests {
     fn nansum_all_nan_returns_zero() {
         // np.nansum([nan, nan]) → 0.0
         let a = UFuncArray::new(vec![2], vec![f64::NAN, f64::NAN], DType::F64).unwrap();
-        let r = a.nansum(None).unwrap();
+        let r = a.nansum(None, false).unwrap();
         assert_eq!(r.values(), &[0.0]);
     }
 
@@ -43329,7 +43414,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_n2() {
+    fn diff_second_order() {
         // np.diff([1, 3, 6, 10], n=2) → [1, 1]
         let a = UFuncArray::new(vec![4], vec![1.0, 3.0, 6.0, 10.0], DType::F64).unwrap();
         let r = a.diff(2, None).unwrap();
@@ -43338,7 +43423,7 @@ mod tests {
     }
 
     #[test]
-    fn roll_wraps_around() {
+    fn roll_wraps_positive() {
         // np.roll([1, 2, 3, 4, 5], 2) → [4, 5, 1, 2, 3]
         let a = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
         let r = a.roll(2, None).unwrap();
@@ -43346,7 +43431,7 @@ mod tests {
     }
 
     #[test]
-    fn roll_negative() {
+    fn roll_wraps_negative() {
         // np.roll([1, 2, 3, 4, 5], -2) → [3, 4, 5, 1, 2]
         let a = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
         let r = a.roll(-2, None).unwrap();
@@ -43373,10 +43458,10 @@ mod tests {
     }
 
     #[test]
-    fn squeeze_removes_singleton_dims() {
+    fn squeeze_removes_all_singleton_dims() {
         // np.squeeze(np.zeros((1, 3, 1, 2, 1))).shape → (3, 2)
         let a = UFuncArray::new(vec![1, 3, 1, 2, 1], vec![0.0; 6], DType::F64).unwrap();
-        let r = a.squeeze();
+        let r = a.squeeze(None).unwrap();
         assert_eq!(r.shape(), &[3, 2]);
     }
 
@@ -43392,10 +43477,10 @@ mod tests {
     }
 
     #[test]
-    fn unique_sorted() {
+    fn unique_returns_sorted() {
         // np.unique([3, 1, 2, 1, 3]) → [1, 2, 3]
         let a = UFuncArray::new(vec![5], vec![3.0, 1.0, 2.0, 1.0, 3.0], DType::F64).unwrap();
-        let r = a.unique().unwrap();
+        let r = a.unique();
         assert_eq!(r.values(), &[1.0, 2.0, 3.0]);
     }
 }

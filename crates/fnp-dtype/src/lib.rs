@@ -2177,11 +2177,10 @@ mod tests {
         let storage = ArrayStorage::Bool(vec![true, false]);
         let cast = storage.cast_to(DType::Str).unwrap();
         assert_eq!(cast.dtype(), DType::Str);
+        assert!(matches!(&cast, ArrayStorage::String(_)), "expected String storage");
         if let ArrayStorage::String(v) = &cast {
             assert_eq!(v[0], "True");
             assert_eq!(v[1], "False");
-        } else {
-            panic!("expected String storage");
         }
     }
 
@@ -2830,11 +2829,11 @@ mod tests {
         assert_eq!(s.dtype(), DType::Structured);
         assert_eq!(s.len(), 3);
         assert!(!s.is_empty());
-        let ArrayStorage::Structured(storage) = s else {
-            panic!("expected structured storage");
-        };
-        assert_eq!(storage.len(), 3);
-        assert_eq!(storage.num_fields(), 0);
+        assert!(matches!(&s, ArrayStorage::Structured(_)), "expected structured storage");
+        if let ArrayStorage::Structured(storage) = s {
+            assert_eq!(storage.len(), 3);
+            assert_eq!(storage.num_fields(), 0);
+        }
     }
 
     #[test]

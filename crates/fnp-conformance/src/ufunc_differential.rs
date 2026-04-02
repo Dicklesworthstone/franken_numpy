@@ -2,7 +2,7 @@
 
 use fnp_dtype::DType;
 use fnp_ufunc::{BinaryOp, UFuncArray, UnaryOp, parse_fixed_signature_string};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer, de::Error as _, ser::SerializeSeq};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -243,6 +243,27 @@ def py_reduced_shape(shape, axis, keepdims):
         return [1 if i == axis else dim for i, dim in enumerate(shape)]
     return [dim for i, dim in enumerate(shape) if i != axis]
 
+def py_nan_aware_min(lhs, rhs):
+    if math.isnan(lhs) or math.isnan(rhs):
+        return float('nan')
+    return lhs if lhs <= rhs else rhs
+
+def py_nan_aware_max(lhs, rhs):
+    if math.isnan(lhs) or math.isnan(rhs):
+        return float('nan')
+    return lhs if lhs >= rhs else rhs
+
+def json_safe_scalar(value):
+    if isinstance(value, float):
+        if math.isnan(value):
+            return 'NaN'
+        if math.isinf(value):
+            return 'Infinity' if value > 0.0 else '-Infinity'
+    return value
+
+def json_safe_values(values):
+    return [json_safe_scalar(value) for value in values]
+
 def py_sum(vals, shape, axis, keepdims):
     if axis is None:
         out_shape = [1] * len(shape) if keepdims else []
@@ -282,11 +303,11 @@ def py_reduce(vals, shape, axis, keepdims, op):
         elif op == 'min':
             result = float('inf')
             for v in vals:
-                result = min(result, v)
+                result = py_nan_aware_min(result, v)
         elif op == 'max':
             result = float('-inf')
             for v in vals:
-                result = max(result, v)
+                result = py_nan_aware_max(result, v)
         elif op == 'mean':
             result = float(sum(vals)) / len(vals)
         else:
@@ -329,9 +350,9 @@ def py_reduce(vals, shape, axis, keepdims, op):
         if op == 'prod':
             out[out_flat] *= vals[flat]
         elif op == 'min':
-            out[out_flat] = min(out[out_flat], vals[flat])
+            out[out_flat] = py_nan_aware_min(out[out_flat], vals[flat])
         elif op == 'max':
-            out[out_flat] = max(out[out_flat], vals[flat])
+            out[out_flat] = py_nan_aware_max(out[out_flat], vals[flat])
         elif op == 'mean':
             out[out_flat] += vals[flat]
 
@@ -1250,7 +1271,7 @@ for case in cases:
             'status': 'ok',
             'error': None,
             'shape': shape,
-            'values': values,
+            'values': json_safe_values(values),
             'dtype': dtype,
         })
     except Exception as exc:
@@ -1420,8 +1441,60 @@ pub struct UFuncOracleCase {
     pub status: String,
     pub error: Option<String>,
     pub shape: Vec<usize>,
+    #[serde(
+        serialize_with = "serialize_oracle_values",
+        deserialize_with = "deserialize_oracle_values"
+    )]
     pub values: Vec<f64>,
     pub dtype: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OracleJsonFloat {
+    Number(f64),
+    String(String),
+}
+
+fn serialize_oracle_values<S>(values: &[f64], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut seq = serializer.serialize_seq(Some(values.len()))?;
+    for value in values {
+        if value.is_nan() {
+            seq.serialize_element("NaN")?;
+        } else if value.is_infinite() {
+            if value.is_sign_positive() {
+                seq.serialize_element("Infinity")?;
+            } else {
+                seq.serialize_element("-Infinity")?;
+            }
+        } else {
+            seq.serialize_element(value)?;
+        }
+    }
+    seq.end()
+}
+
+fn deserialize_oracle_values<'de, D>(deserializer: D) -> Result<Vec<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<OracleJsonFloat>::deserialize(deserializer)?;
+    raw.into_iter()
+        .map(|value| match value {
+            OracleJsonFloat::Number(value) => Ok(value),
+            OracleJsonFloat::String(value) => match value.as_str() {
+                "NaN" => Ok(f64::NAN),
+                "Infinity" => Ok(f64::INFINITY),
+                "-Infinity" => Ok(f64::NEG_INFINITY),
+                _ => Err(D::Error::custom(format!(
+                    "invalid non-finite float sentinel: {value}"
+                ))),
+            },
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1906,7 +1979,16 @@ pub fn capture_numpy_oracle(
     }
 
     let python = resolve_oracle_python()?;
-    let output = Command::new(&python)
+    capture_numpy_oracle_with_python(input_path, output_path, legacy_oracle_root, &python)
+}
+
+fn capture_numpy_oracle_with_python(
+    input_path: &Path,
+    output_path: &Path,
+    legacy_oracle_root: &Path,
+    python: &str,
+) -> Result<UFuncOracleCapture, String> {
+    let output = Command::new(python)
         .arg("-c")
         .arg(PY_CAPTURE_SCRIPT)
         .arg(input_path)
@@ -2570,9 +2652,11 @@ fn compare_arrays(
 mod tests {
     use super::{
         UFuncInputCase, UFuncOperation, UFuncOracleCapture, UFuncOracleCase,
-        compare_against_oracle, execute_input_case, load_oracle_capture, write_differential_report,
+        capture_numpy_oracle_with_python, compare_against_oracle, execute_input_case,
+        load_oracle_capture, write_differential_report,
     };
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     fn temp_file(name: &str) -> PathBuf {
@@ -2580,6 +2664,13 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
         std::env::temp_dir().join(format!("fnp_{name}_{ts}.json"))
+    }
+
+    fn temp_script(name: &str) -> PathBuf {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        std::env::temp_dir().join(format!("fnp_{name}_{ts}.sh"))
     }
 
     #[test]
@@ -2970,6 +3061,44 @@ mod tests {
 
         let _ = fs::remove_file(input_path);
         let _ = fs::remove_file(oracle_path);
+    }
+
+    #[test]
+    fn capture_fallback_min_reduction_propagates_nan() {
+        let input_path = temp_file("fallback_nan_min_input");
+        let output_path = temp_file("fallback_nan_min_output");
+        let python_wrapper = temp_script("fallback_nan_min_python");
+
+        fs::write(
+            &input_path,
+            r#"[{"id":"min_nan_case","op":"min","lhs_shape":[2],"lhs_values":[NaN,1.0],"lhs_dtype":"f64","rhs_shape":null,"rhs_values":null,"rhs_dtype":null,"axis":null,"keepdims":false}]"#,
+        )
+        .expect("write input");
+        fs::write(&python_wrapper, "#!/bin/sh\nexec python3 -S \"$@\"\n").expect("write wrapper");
+        let mut perms = fs::metadata(&python_wrapper)
+            .expect("wrapper metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&python_wrapper, perms).expect("chmod wrapper");
+
+        let legacy_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("legacy_numpy_code");
+        let capture = capture_numpy_oracle_with_python(
+            &input_path,
+            &output_path,
+            &legacy_root,
+            python_wrapper.to_str().expect("utf-8 wrapper path"),
+        )
+        .expect("capture should succeed");
+
+        assert_eq!(capture.oracle_source, "pure_python_fallback");
+        assert_eq!(capture.cases.len(), 1);
+        assert!(capture.cases[0].values[0].is_nan());
+
+        let _ = fs::remove_file(input_path);
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(python_wrapper);
     }
 
     // Helper to make a unary input case
