@@ -864,6 +864,53 @@ pub enum QuantileInterp {
     Midpoint,
 }
 
+/// Specification for a single axis of `mgrid`/`ogrid`, matching NumPy's dual semantics.
+///
+/// NumPy's `mgrid`/`ogrid` support two modes via slice syntax:
+/// - **Arange mode** (`mgrid[start:stop:step]`): exclusive stop, step-based (like `np.arange`).
+/// - **Linspace mode** (`mgrid[start:stop:Nj]`): inclusive endpoints, count-based (like `np.linspace`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GridSpec {
+    /// Arange-style: `[start, start+step, start+2*step, ...)` while `< stop` (exclusive stop).
+    Arange {
+        start: f64,
+        stop: f64,
+        step: f64,
+    },
+    /// Linspace-style: `num` equally-spaced points from `start` to `stop` inclusive.
+    Linspace {
+        start: f64,
+        stop: f64,
+        num: usize,
+    },
+}
+
+impl GridSpec {
+    /// Generate the 1-D values for this spec and return `(values, count)`.
+    fn generate(&self) -> Vec<f64> {
+        match *self {
+            Self::Arange { start, stop, step } => {
+                if step == 0.0 || (stop - start) / step < 0.0 {
+                    return vec![];
+                }
+                let n = ((stop - start) / step).ceil() as usize;
+                (0..n).map(|i| start + i as f64 * step).collect()
+            }
+            Self::Linspace { start, stop, num } => {
+                if num == 0 {
+                    return vec![];
+                }
+                if num == 1 {
+                    return vec![start];
+                }
+                let step = (stop - start) / (num as f64 - 1.0);
+                (0..num).map(|i| start + i as f64 * step).collect()
+            }
+        }
+    }
+
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
     Abs,
@@ -3120,11 +3167,34 @@ impl UFuncArray {
         if step == 0.0 {
             return Err(UFuncError::Msg("arange step must be non-zero".to_string()));
         }
-        let n_f64 = ((stop - start) / step).ceil().max(0.0);
+        // Use NumPy's length formula: ceil((stop - start) / step), clamped to 0.
+        // To avoid floating-point over-count, we also check whether the last
+        // candidate value actually falls before stop (for positive step) or
+        // after stop (for negative step).
+        let raw = (stop - start) / step;
+        let n_f64 = raw.ceil().max(0.0);
         if !n_f64.is_finite() || n_f64 > isize::MAX as f64 {
             return Err(UFuncError::Msg("Maximum allowed size exceeded".to_string()));
         }
-        let n = n_f64 as usize;
+        let mut n = n_f64 as usize;
+        // Guard against floating-point over-count: if the last value would
+        // equal or overshoot stop (within tolerance), trim.
+        if n > 0 {
+            let last = start + step * (n - 1) as f64;
+            if step > 0.0 && last >= stop && n > 1 {
+                // Only trim if the overshoot exceeds what exact arithmetic expects.
+                // Use a relative tolerance of 0.5 * step-ULP.
+                let tol = (stop - start).abs() * f64::EPSILON;
+                if last - stop > tol {
+                    n -= 1;
+                }
+            } else if step < 0.0 && last <= stop && n > 1 {
+                let tol = (stop - start).abs() * f64::EPSILON;
+                if stop - last > tol {
+                    n -= 1;
+                }
+            }
+        }
         let values: Vec<f64> = (0..n).map(|i| start + step * i as f64).collect();
         Self::from_values_with_dtype(vec![n], values, dtype)
     }
@@ -13863,6 +13933,85 @@ impl UFuncArray {
         Self::vstack(arrays)
     }
 
+    /// Row-wise concatenation helper (np.r_ equivalent).
+    ///
+    /// Concatenates arrays and scalars along axis 0 (row-wise). Scalars and 1-D
+    /// arrays are concatenated directly; higher-dimensional arrays are concatenated
+    /// along axis 0 like `vstack`.
+    ///
+    /// This is the Rust equivalent of NumPy's `np.r_[...]` indexing object.
+    /// For range-based inputs, construct them with `arange` first:
+    /// ```ignore
+    /// // np.r_[1:5, 0, 0, array([1,2,3])]
+    /// UFuncArray::r_(&[
+    ///     UFuncArray::arange(1.0, 5.0, 1.0, DType::F64)?,
+    ///     UFuncArray::scalar(0.0, DType::F64),
+    ///     UFuncArray::scalar(0.0, DType::F64),
+    ///     UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64)?,
+    /// ])
+    /// ```
+    pub fn r_(arrays: &[Self]) -> Result<Self, UFuncError> {
+        if arrays.is_empty() {
+            return Err(UFuncError::Msg("r_: need at least 1 array".to_string()));
+        }
+        // Flatten scalars to 1-D, then concatenate along axis 0
+        let promoted: Vec<Self> = arrays
+            .iter()
+            .map(|a| if a.shape.is_empty() || a.shape == [1] { a.ravel() } else { a.clone() })
+            .collect();
+        // If all 1-D, simple concatenation along axis 0
+        if promoted.iter().all(|a| a.shape.len() == 1) {
+            return Self::concatenate(&promoted.iter().collect::<Vec<_>>(), 0);
+        }
+        // Otherwise treat as vstack (atleast_2d then concat axis 0)
+        Self::vstack(&promoted)
+    }
+
+    /// Column-wise concatenation helper (np.c_ equivalent).
+    ///
+    /// Concatenates arrays along axis 1 (column-wise). 1-D arrays are promoted to
+    /// column vectors (N,) → (N, 1) before concatenation.
+    ///
+    /// This is the Rust equivalent of NumPy's `np.c_[...]` indexing object.
+    /// ```ignore
+    /// // np.c_[array([1,2,3]), array([4,5,6])]
+    /// // → [[1, 4], [2, 5], [3, 6]]
+    /// UFuncArray::c_(&[
+    ///     UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64)?,
+    ///     UFuncArray::new(vec![3], vec![4.0, 5.0, 6.0], DType::F64)?,
+    /// ])
+    /// ```
+    pub fn c_(arrays: &[Self]) -> Result<Self, UFuncError> {
+        if arrays.is_empty() {
+            return Err(UFuncError::Msg("c_: need at least 1 array".to_string()));
+        }
+        // Promote 1-D → column (N,1), scalars → (1,1)
+        let promoted: Vec<Self> = arrays
+            .iter()
+            .map(|a| {
+                if a.shape.is_empty() || a.shape == [1] {
+                    Self {
+                        shape: vec![1, 1],
+                        values: a.values.clone(),
+                        dtype: a.dtype,
+                        integer_sidecar: a.integer_sidecar.clone(),
+                    }
+                } else if a.shape.len() == 1 {
+                    // (N,) → (N, 1)
+                    Self {
+                        shape: vec![a.shape[0], 1],
+                        values: a.values.clone(),
+                        dtype: a.dtype,
+                        integer_sidecar: a.integer_sidecar.clone(),
+                    }
+                } else {
+                    a.clone()
+                }
+            })
+            .collect();
+        Self::concatenate(&promoted.iter().collect::<Vec<_>>(), 1)
+    }
+
     /// Stack arrays horizontally (np.hstack). Column-wise concatenation.
     pub fn hstack(arrays: &[Self]) -> Result<Self, UFuncError> {
         if arrays.is_empty() {
@@ -16062,18 +16211,29 @@ impl UFuncArray {
 
     /// Open meshgrid: return sparse arrays for N-D indexing (np.ogrid equivalent).
     /// Each returned array has shape with 1s everywhere except along its own axis.
+    ///
+    /// Accepts `(start, stop, num)` tuples using **linspace semantics** (inclusive endpoints).
+    /// For full NumPy parity (arange vs linspace modes), use [`ogrid_spec`].
     pub fn ogrid(slices: &[(f64, f64, usize)]) -> Vec<Self> {
-        let ndim = slices.len();
-        slices
+        let specs: Vec<GridSpec> = slices
+            .iter()
+            .map(|&(start, stop, num)| GridSpec::Linspace { start, stop, num })
+            .collect();
+        Self::ogrid_spec(&specs)
+    }
+
+    /// Open meshgrid with full NumPy parity via [`GridSpec`].
+    ///
+    /// Each returned array has shape with 1s everywhere except along its own axis.
+    /// Supports both arange-style (exclusive stop) and linspace-style (inclusive endpoints).
+    pub fn ogrid_spec(specs: &[GridSpec]) -> Vec<Self> {
+        let ndim = specs.len();
+        specs
             .iter()
             .enumerate()
-            .map(|(ax, &(start, stop, num))| {
-                let step = if num <= 1 {
-                    0.0
-                } else {
-                    (stop - start) / (num as f64 - 1.0)
-                };
-                let vals: Vec<f64> = (0..num).map(|i| start + i as f64 * step).collect();
+            .map(|(ax, spec)| {
+                let vals = spec.generate();
+                let num = vals.len();
                 let mut shape = vec![1usize; ndim];
                 shape[ax] = num;
                 Self {
@@ -16088,23 +16248,45 @@ impl UFuncArray {
 
     /// Dense meshgrid: return full arrays for N-D indexing (np.mgrid equivalent).
     /// Each returned array has the full output shape.
+    ///
+    /// Accepts `(start, stop, num)` tuples using **linspace semantics** (inclusive endpoints).
+    /// For full NumPy parity (arange vs linspace modes), use [`mgrid_spec`].
     pub fn mgrid(slices: &[(f64, f64, usize)]) -> Vec<Self> {
-        let out_shape: Vec<usize> = slices.iter().map(|s| s.2).collect();
+        let specs: Vec<GridSpec> = slices
+            .iter()
+            .map(|&(start, stop, num)| GridSpec::Linspace { start, stop, num })
+            .collect();
+        Self::mgrid_spec(&specs)
+    }
+
+    /// Dense meshgrid with full NumPy parity via [`GridSpec`].
+    ///
+    /// Each returned array has the full output shape. Supports both arange-style
+    /// (exclusive stop) and linspace-style (inclusive endpoints).
+    pub fn mgrid_spec(specs: &[GridSpec]) -> Vec<Self> {
+        let axis_vals: Vec<Vec<f64>> = specs.iter().map(GridSpec::generate).collect();
+        let out_shape: Vec<usize> = axis_vals.iter().map(Vec::len).collect();
         let out_count: usize = out_shape.iter().product();
+        if out_count == 0 {
+            return axis_vals
+                .iter()
+                .map(|_| Self {
+                    shape: out_shape.clone(),
+                    values: vec![],
+                    dtype: DType::F64,
+                    integer_sidecar: None,
+                })
+                .collect();
+        }
         let out_strides = c_strides_elems(&out_shape);
-        slices
+        axis_vals
             .iter()
             .enumerate()
-            .map(|(ax, &(start, stop, num))| {
-                let step = if num <= 1 {
-                    0.0
-                } else {
-                    (stop - start) / (num as f64 - 1.0)
-                };
+            .map(|(ax, vals)| {
                 let values: Vec<f64> = (0..out_count)
                     .map(|flat| {
                         let coord = (flat / out_strides[ax]) % out_shape[ax];
-                        start + coord as f64 * step
+                        vals[coord]
                     })
                     .collect();
                 Self {
@@ -25134,9 +25316,10 @@ impl StringArray {
 #[cfg(test)]
 mod tests {
     use super::{
-        AxisSlice, BinaryDispatchMethod, BinaryOp, FloatErrorKind, FloatErrorMode, MAError,
-        MaskedArray, OverrideDispatchDecision, OverrideOperand, OverridePayloadClass, PrintOptions,
-        QuantileInterp, StringArray, UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncArrayView,
+        AxisSlice, BinaryDispatchMethod, BinaryOp, FloatErrorKind, FloatErrorMode, GridSpec,
+        MAError, MaskedArray, OverrideDispatchDecision, OverrideOperand, OverridePayloadClass,
+        PrintOptions, QuantileInterp, StringArray, UFUNC_PACKET_REASON_CODES, UFuncArray,
+        UFuncArrayView,
         UFuncError, UFuncLogRecord, UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp, bitwise_count,
         busday_count, busday_offset, cheb2poly, chebadd, chebder, chebfit, chebint, chebmul,
         chebsub, chebval, divmod_arrays, errstate, financial_fv, financial_ipmt, financial_irr,
@@ -31537,6 +31720,108 @@ mod tests {
         assert_eq!(r.values(), &[1.0, 3.0, 4.0, 2.0, 5.0, 6.0]);
     }
 
+    // ── r_ / c_ tests ──────────
+
+    #[test]
+    fn r_concat_1d_arrays() {
+        // np.r_[array([1,2]), array([3,4,5])] → [1,2,3,4,5]
+        let a = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3], vec![3.0, 4.0, 5.0], DType::F64).unwrap();
+        let r = UFuncArray::r_(&[a, b]).unwrap();
+        assert_eq!(r.shape(), &[5]);
+        assert_eq!(r.values(), &[1.0, 2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn r_concat_with_scalars() {
+        // np.r_[array([1,2]), 0, 0, array([3])] → [1,2,0,0,3]
+        let a = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        let s1 = UFuncArray::scalar(0.0, DType::F64);
+        let s2 = UFuncArray::scalar(0.0, DType::F64);
+        let b = UFuncArray::new(vec![1], vec![3.0], DType::F64).unwrap();
+        let r = UFuncArray::r_(&[a, s1, s2, b]).unwrap();
+        assert_eq!(r.shape(), &[5]);
+        assert_eq!(r.values(), &[1.0, 2.0, 0.0, 0.0, 3.0]);
+    }
+
+    #[test]
+    fn r_concat_with_arange() {
+        // np.r_[1:5, 0, array([7,8])]
+        let range = UFuncArray::arange(1.0, 5.0, 1.0, DType::F64).unwrap();
+        let zero = UFuncArray::scalar(0.0, DType::F64);
+        let arr = UFuncArray::new(vec![2], vec![7.0, 8.0], DType::F64).unwrap();
+        let r = UFuncArray::r_(&[range, zero, arr]).unwrap();
+        assert_eq!(r.shape(), &[7]);
+        assert_eq!(r.values(), &[1.0, 2.0, 3.0, 4.0, 0.0, 7.0, 8.0]);
+    }
+
+    #[test]
+    fn r_concat_2d() {
+        // np.r_[array([[1,2]]), array([[3,4]])] → [[1,2],[3,4]]
+        let a = UFuncArray::new(vec![1, 2], vec![1.0, 2.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1, 2], vec![3.0, 4.0], DType::F64).unwrap();
+        let r = UFuncArray::r_(&[a, b]).unwrap();
+        assert_eq!(r.shape(), &[2, 2]);
+        assert_eq!(r.values(), &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn c_concat_1d_to_columns() {
+        // np.c_[array([1,2,3]), array([4,5,6])] → [[1,4],[2,5],[3,6]]
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3], vec![4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = UFuncArray::c_(&[a, b]).unwrap();
+        assert_eq!(r.shape(), &[3, 2]);
+        assert_eq!(r.values(), &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    }
+
+    #[test]
+    fn c_concat_2d() {
+        // np.c_[array([[1],[2]]), array([[3],[4]])] → [[1,3],[2,4]]
+        let a = UFuncArray::new(vec![2, 1], vec![1.0, 2.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![2, 1], vec![3.0, 4.0], DType::F64).unwrap();
+        let r = UFuncArray::c_(&[a, b]).unwrap();
+        assert_eq!(r.shape(), &[2, 2]);
+        assert_eq!(r.values(), &[1.0, 3.0, 2.0, 4.0]);
+    }
+
+    #[test]
+    fn c_concat_mixed_1d_2d() {
+        // np.c_[array([1,2]), array([[3,4],[5,6]])] → [[1,3,4],[2,5,6]]
+        let a = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![2, 2], vec![3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = UFuncArray::c_(&[a, b]).unwrap();
+        assert_eq!(r.shape(), &[2, 3]);
+        assert_eq!(r.values(), &[1.0, 3.0, 4.0, 2.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn c_concat_three_arrays() {
+        let a = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![2], vec![3.0, 4.0], DType::F64).unwrap();
+        let c = UFuncArray::new(vec![2], vec![5.0, 6.0], DType::F64).unwrap();
+        let r = UFuncArray::c_(&[a, b, c]).unwrap();
+        assert_eq!(r.shape(), &[2, 3]);
+        assert_eq!(r.values(), &[1.0, 3.0, 5.0, 2.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn r_single_array_passthrough() {
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let r = UFuncArray::r_(std::slice::from_ref(&a)).unwrap();
+        assert_eq!(r.values(), a.values());
+    }
+
+    #[test]
+    fn c_scalar_concat() {
+        // Scalars promoted to (1,1) then column-stacked
+        let a = UFuncArray::scalar(1.0, DType::F64);
+        let b = UFuncArray::scalar(2.0, DType::F64);
+        let r = UFuncArray::c_(&[a, b]).unwrap();
+        assert_eq!(r.shape(), &[1, 2]);
+        assert_eq!(r.values(), &[1.0, 2.0]);
+    }
+
     // ── slice / item / ravel / fill / ptp / round / choose ──────────
 
     #[test]
@@ -33872,6 +34157,204 @@ mod tests {
         assert_eq!(grids[0].values(), &[0.0, 0.0, 1.0, 1.0]);
         // Second grid varies along axis 1: [[0,1],[0,1]]
         assert_eq!(grids[1].values(), &[0.0, 1.0, 0.0, 1.0]);
+    }
+
+    // ── GridSpec mgrid/ogrid tests ────────
+
+    #[test]
+    fn gridspec_arange_basic() {
+        // np.mgrid[0:5] → [0, 1, 2, 3, 4]
+        let spec = GridSpec::Arange { start: 0.0, stop: 5.0, step: 1.0 };
+        let vals = spec.generate();
+        assert_eq!(vals, vec![0.0, 1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn gridspec_arange_step2() {
+        // np.mgrid[0:5:2] → [0, 2, 4]
+        let spec = GridSpec::Arange { start: 0.0, stop: 5.0, step: 2.0 };
+        let vals = spec.generate();
+        assert_eq!(vals, vec![0.0, 2.0, 4.0]);
+    }
+
+    #[test]
+    fn gridspec_arange_fractional_step() {
+        // np.mgrid[0:1:0.3] → [0.0, 0.3, 0.6, 0.9]
+        let spec = GridSpec::Arange { start: 0.0, stop: 1.0, step: 0.3 };
+        let vals = spec.generate();
+        assert_eq!(vals.len(), 4);
+        assert!((vals[0] - 0.0).abs() < 1e-10);
+        assert!((vals[1] - 0.3).abs() < 1e-10);
+        assert!((vals[2] - 0.6).abs() < 1e-10);
+        assert!((vals[3] - 0.9).abs() < 1e-10);
+    }
+
+    #[test]
+    fn gridspec_arange_negative_step() {
+        // np.mgrid[5:0:-1] → [5, 4, 3, 2, 1]
+        let spec = GridSpec::Arange { start: 5.0, stop: 0.0, step: -1.0 };
+        let vals = spec.generate();
+        assert_eq!(vals, vec![5.0, 4.0, 3.0, 2.0, 1.0]);
+    }
+
+    #[test]
+    fn gridspec_arange_empty_wrong_direction() {
+        // step positive but stop < start → empty
+        let spec = GridSpec::Arange { start: 5.0, stop: 0.0, step: 1.0 };
+        assert!(spec.generate().is_empty());
+    }
+
+    #[test]
+    fn gridspec_arange_zero_step() {
+        let spec = GridSpec::Arange { start: 0.0, stop: 5.0, step: 0.0 };
+        assert!(spec.generate().is_empty());
+    }
+
+    #[test]
+    fn gridspec_linspace_basic() {
+        // np.mgrid[0:1:5j] → [0.0, 0.25, 0.5, 0.75, 1.0]
+        let spec = GridSpec::Linspace { start: 0.0, stop: 1.0, num: 5 };
+        let vals = spec.generate();
+        assert_eq!(vals.len(), 5);
+        assert!((vals[0] - 0.0).abs() < 1e-10);
+        assert!((vals[1] - 0.25).abs() < 1e-10);
+        assert!((vals[2] - 0.5).abs() < 1e-10);
+        assert!((vals[3] - 0.75).abs() < 1e-10);
+        assert!((vals[4] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn gridspec_linspace_single() {
+        let spec = GridSpec::Linspace { start: 3.0, stop: 7.0, num: 1 };
+        assert_eq!(spec.generate(), vec![3.0]);
+    }
+
+    #[test]
+    fn gridspec_linspace_empty() {
+        let spec = GridSpec::Linspace { start: 0.0, stop: 1.0, num: 0 };
+        assert!(spec.generate().is_empty());
+    }
+
+    #[test]
+    fn mgrid_spec_arange_2d() {
+        // np.mgrid[0:3, 0:4] — arange mode, exclusive stop, step=1
+        let grids = UFuncArray::mgrid_spec(&[
+            GridSpec::Arange { start: 0.0, stop: 3.0, step: 1.0 },
+            GridSpec::Arange { start: 0.0, stop: 4.0, step: 1.0 },
+        ]);
+        assert_eq!(grids.len(), 2);
+        assert_eq!(grids[0].shape(), &[3, 4]);
+        assert_eq!(grids[1].shape(), &[3, 4]);
+        // axis-0 grid: each row is constant
+        assert_eq!(
+            grids[0].values(),
+            &[0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0]
+        );
+        // axis-1 grid: each column is constant
+        assert_eq!(
+            grids[1].values(),
+            &[0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0]
+        );
+    }
+
+    #[test]
+    fn mgrid_spec_linspace_2d() {
+        // np.mgrid[0:1:3j, 0:1:3j] — linspace mode: 3 points from 0 to 1 inclusive
+        let grids = UFuncArray::mgrid_spec(&[
+            GridSpec::Linspace { start: 0.0, stop: 1.0, num: 3 },
+            GridSpec::Linspace { start: 0.0, stop: 1.0, num: 3 },
+        ]);
+        assert_eq!(grids[0].shape(), &[3, 3]);
+        assert_eq!(
+            grids[0].values(),
+            &[0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 1.0, 1.0, 1.0]
+        );
+        assert_eq!(
+            grids[1].values(),
+            &[0.0, 0.5, 1.0, 0.0, 0.5, 1.0, 0.0, 0.5, 1.0]
+        );
+    }
+
+    #[test]
+    fn mgrid_spec_mixed_modes() {
+        // Mix arange (axis 0) and linspace (axis 1)
+        let grids = UFuncArray::mgrid_spec(&[
+            GridSpec::Arange { start: 0.0, stop: 2.0, step: 1.0 },
+            GridSpec::Linspace { start: 0.0, stop: 1.0, num: 3 },
+        ]);
+        assert_eq!(grids[0].shape(), &[2, 3]);
+        assert_eq!(grids[1].shape(), &[2, 3]);
+        assert_eq!(grids[0].values(), &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+        assert_eq!(grids[1].values(), &[0.0, 0.5, 1.0, 0.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn ogrid_spec_arange_2d() {
+        // np.ogrid[0:3, 0:4] — sparse, arange mode
+        let grids = UFuncArray::ogrid_spec(&[
+            GridSpec::Arange { start: 0.0, stop: 3.0, step: 1.0 },
+            GridSpec::Arange { start: 0.0, stop: 4.0, step: 1.0 },
+        ]);
+        assert_eq!(grids.len(), 2);
+        assert_eq!(grids[0].shape(), &[3, 1]);
+        assert_eq!(grids[1].shape(), &[1, 4]);
+        assert_eq!(grids[0].values(), &[0.0, 1.0, 2.0]);
+        assert_eq!(grids[1].values(), &[0.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn ogrid_spec_linspace() {
+        // np.ogrid[0:1:5j, 0:2:3j]
+        let grids = UFuncArray::ogrid_spec(&[
+            GridSpec::Linspace { start: 0.0, stop: 1.0, num: 5 },
+            GridSpec::Linspace { start: 0.0, stop: 2.0, num: 3 },
+        ]);
+        assert_eq!(grids[0].shape(), &[5, 1]);
+        assert_eq!(grids[1].shape(), &[1, 3]);
+        assert_eq!(grids[0].values(), &[0.0, 0.25, 0.5, 0.75, 1.0]);
+        assert_eq!(grids[1].values(), &[0.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn mgrid_spec_3d() {
+        // 3-D grid: 2x3x2
+        let grids = UFuncArray::mgrid_spec(&[
+            GridSpec::Arange { start: 0.0, stop: 2.0, step: 1.0 },
+            GridSpec::Arange { start: 0.0, stop: 3.0, step: 1.0 },
+            GridSpec::Arange { start: 0.0, stop: 2.0, step: 1.0 },
+        ]);
+        assert_eq!(grids.len(), 3);
+        for g in &grids {
+            assert_eq!(g.shape(), &[2, 3, 2]);
+        }
+        // axis-0: varies slowest
+        assert_eq!(
+            grids[0].values(),
+            &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn mgrid_spec_1d() {
+        // 1-D case: just arange
+        let grids = UFuncArray::mgrid_spec(&[
+            GridSpec::Arange { start: 0.0, stop: 5.0, step: 1.0 },
+        ]);
+        assert_eq!(grids.len(), 1);
+        assert_eq!(grids[0].shape(), &[5]);
+        assert_eq!(grids[0].values(), &[0.0, 1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn mgrid_spec_empty_axis() {
+        // One axis generates empty → all outputs empty
+        let grids = UFuncArray::mgrid_spec(&[
+            GridSpec::Arange { start: 5.0, stop: 0.0, step: 1.0 },
+            GridSpec::Arange { start: 0.0, stop: 3.0, step: 1.0 },
+        ]);
+        assert_eq!(grids.len(), 2);
+        assert_eq!(grids[0].shape(), &[0, 3]);
+        assert!(grids[0].values().is_empty());
     }
 
     #[test]

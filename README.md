@@ -4,10 +4,10 @@
   <img src="franken_numpy_illustration.webp" alt="FrankenNumPy - memory-safe clean-room NumPy reimplementation in Rust" width="400">
 
   **Memory-safe, clean-room NumPy reimplementation in Rust.**<br>
-  Zero unsafe code. 2,594 tests. Bit-exact RNG parity. Every feature family green.
+  Zero unsafe code. 2,638 tests. Bit-exact RNG parity. Every feature family green.
 
   ![Rust](https://img.shields.io/badge/Rust-nightly%202024-orange)
-  ![Tests](https://img.shields.io/badge/tests-2%2C594%20passing-brightgreen)
+  ![Tests](https://img.shields.io/badge/tests-2%2C638%20passing-brightgreen)
   ![Unsafe](https://img.shields.io/badge/unsafe-0%20blocks-blue)
   ![License](https://img.shields.io/badge/license-MIT-green)
 </div>
@@ -35,7 +35,7 @@ FrankenNumPy rebuilds NumPy's semantics from scratch in safe Rust with two non-n
 | Stride calculus | Evolved over decades | Clean-room deterministic engine (SCE) |
 | Runtime modes | Single mode | Strict (max compat) + Hardened (safety guards) |
 | Conformance | Self-referential | Differential oracle against real NumPy |
-| Test coverage | pytest suite | 2,594 Rust tests + 8-gate CI topology |
+| Test coverage | pytest suite | 2,638 Rust tests + 8-gate CI topology |
 
 ---
 
@@ -97,8 +97,8 @@ Over 1,000 public functions across 9 crates covering the full NumPy API:
 
 | Category | Functions (highlights) |
 |---|---|
-| **Array creation** | `zeros`, `ones`, `empty`, `full`, `arange`, `linspace`, `logspace`, `geomspace`, `eye`, `identity`, `diag`, `meshgrid`, `fromfunction`, `array` |
-| **Shape manipulation** | `reshape`, `ravel`, `flatten`, `transpose`, `swapaxes`, `expand_dims`, `squeeze`, `broadcast_to`, `concatenate`, `stack`, `vstack`, `hstack`, `split`, `tile`, `repeat`, `pad` |
+| **Array creation** | `zeros`, `ones`, `empty`, `full`, `arange`, `linspace`, `logspace`, `geomspace`, `eye`, `identity`, `diag`, `meshgrid`, `mgrid`, `ogrid`, `fromfunction`, `array` |
+| **Shape manipulation** | `reshape`, `ravel`, `flatten`, `transpose`, `swapaxes`, `expand_dims`, `squeeze`, `broadcast_to`, `concatenate`, `stack`, `vstack`, `hstack`, `split`, `tile`, `repeat`, `pad`, `r_`, `c_` |
 | **Unary math** | `abs`, `sqrt`, `exp`, `log`, `sin`, `cos`, `tan`, `arcsin`, `arccos`, `arctan`, `sinh`, `cosh`, `tanh`, `floor`, `ceil`, `round`, `sign`, `isnan`, `isinf`, `isfinite` (42 total) |
 | **Binary math** | `add`, `subtract`, `multiply`, `divide`, `floor_divide`, `remainder`, `power`, `fmod`, `arctan2`, `gcd`, `lcm`, `bitwise_and/or/xor`, comparisons (34 total) |
 | **Reductions** | `sum`, `prod`, `min`, `max`, `mean`, `var`, `std`, `argmin`, `argmax`, `cumsum`, `cumprod`, `all`, `any`, `count_nonzero`, `nansum`, `nanmin`, `nanmax`, `ptp` (22 total) |
@@ -149,7 +149,7 @@ cargo test --workspace --all-features
       ▼           ▼               ▼              ▼           ▼
  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
  │ fnp-ufunc│ │fnp-linalg│ │fnp-random│ │  fnp-io  │ │ fnp-fft  │
- │ 1549     │ │ 217      │ │ 191      │ │ 174      │ │ (in-ufunc│
+ │ 1593     │ │ 217      │ │ 191      │ │ 174      │ │ (in-ufunc│
  │ tests    │ │ tests    │ │ tests    │ │ tests    │ │  module) │
  └─────┬────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘
        │
@@ -766,16 +766,16 @@ let restored = Generator::from_pickle_payload(payload)?;
 
 | Crate | Tests | What it covers |
 |---|---|---|
-| `fnp-ufunc` | 1,421 | Array ops, math, sorting, polynomials, reductions, oracle tests, linalg bridge, FFT, masked cov/corrcoef, datetime parsing, gufunc validation |
-| `fnp-linalg` | 205 | Decompositions, solvers, norms, 16 NumPy oracle tests, extreme-scale regression |
+| `fnp-ufunc` | 1,593 | Array ops, math, sorting, polynomials, reductions, oracle tests, linalg bridge, FFT (including hfft/ihfft), hermfit/lagfit, masked cov/corrcoef, datetime parsing, gufunc validation, parameter parity, r_/c_ helpers, mgrid/ogrid |
+| `fnp-linalg` | 217 | Decompositions, solvers, norms, 16 NumPy oracle tests, extreme-scale regression, non-finite parity |
 | `fnp-random` | 191 | 40 oracle-verified distributions, seeding, reproducibility, large-n binomial/multinomial |
-| `fnp-io` | 154 | NPY/NPZ read/write, text formats, compression, 7 format oracle tests |
-| `fnp-dtype` | 117 | Dtype taxonomy, promotion table, cast policy, NumPy byte-width parsing |
-| `fnp-conformance` | 117 | Differential parity, metamorphic identities, adversarial fuzzing, matmul conformance |
-| `fnp-ndarray` | 55 | Shape legality, stride calculus, broadcast contracts, multi-axis negative strides |
-| `fnp-iter` | 103 | Transfer semantics, NDIter traversal/broadcast/overlap, flatiter contracts, ndindex/ndenumerate |
+| `fnp-io` | 174 | NPY/NPZ read/write, text formats, compression, 7 format oracle tests, genfromtxt_full, fromfile_text/tofile_text |
+| `fnp-dtype` | 117 | Dtype taxonomy, promotion table, cast policy primitives, NumPy byte-width parsing |
+| `fnp-conformance` | 117 | Differential parity, metamorphic identities, adversarial fuzzing, witness stability, matmul conformance |
+| `fnp-ndarray` | 55 | Shape legality, stride calculus, broadcast contracts, overlap detection, multi-axis negative strides |
+| `fnp-iter` | 103 | Transfer-loop selector, NDIter traversal/broadcast/overlap contracts, flatiter indexing/assignment, ndindex/ndenumerate iterators |
 | `fnp-runtime` | 54 | Mode split, fail-closed decoding, override-audit gate, Bayesian decision engine, evidence ledger |
-| **Total** | **2,426** | **All passing in workspace** |
+| **Total** | **2,638** | **All passing in workspace** |
 
 ### Oracle Test Strategy
 

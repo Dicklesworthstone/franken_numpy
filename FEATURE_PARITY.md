@@ -49,7 +49,7 @@
 
 | Crate | Tests | Description |
 |---|---|---|
-| fnp-ufunc | 1,549 | Core array operations, math, sorting, polynomials, reductions, oracle tests, linalg bridge, FFT (hfft/ihfft), hermfit/lagfit, masked cov/corrcoef, datetime parsing, gufunc validation, parameter parity (equal_nan, bitorder, mode, endpoint, trim, period, axes, prepend/append, left/right) |
+| fnp-ufunc | 1,593 | Core array operations, math, sorting, polynomials, reductions, oracle tests, linalg bridge, FFT (hfft/ihfft), hermfit/lagfit, masked cov/corrcoef, datetime parsing, gufunc validation, parameter parity (equal_nan, bitorder, mode, endpoint, trim, period, axes, prepend/append, left/right), r_/c_ concat helpers, GridSpec mgrid/ogrid |
 | fnp-ndarray | 55 | Shape legality, stride calculus, broadcast contracts, overlap detection, multi-axis negative strides |
 | fnp-linalg | 217 | Linear algebra decompositions, solvers, norms, 16 NumPy oracle tests, extreme-scale regression, non-finite parity (cond_p, cross_product 2D, NaN/Inf propagation) |
 | fnp-random | 191 | RNG distributions (40 oracle-verified), seeding, reproducibility, large-n binomial/multinomial |
@@ -58,7 +58,7 @@
 | fnp-conformance | 117 | Differential parity, metamorphic identities, adversarial fuzzing, witness stability, matmul conformance |
 | fnp-dtype | 117 | Dtype taxonomy, promotion table, cast policy primitives, NumPy byte-width parsing |
 | fnp-runtime | 54 | Mode split, fail-closed decoding, override-audit gate, Bayesian decision engine, evidence ledger |
-| **Total** | **2,594** | |
+| **Total** | **2,638** | |
 
 ## Remaining Gaps (Python-specific, low priority)
 
@@ -70,9 +70,9 @@
 
 ### Implemented (non-exhaustive highlights)
 
-**Array creation**: zeros, ones, empty, full, arange, linspace, logspace, geomspace, eye, identity, diag, meshgrid, fromfunction, frombuffer, fromfile, copy, asarray, array
+**Array creation**: zeros, ones, empty, full, arange, linspace, logspace, geomspace, eye, identity, diag, meshgrid, mgrid, ogrid, fromfunction, frombuffer, fromfile, copy, asarray, array
 
-**Shape manipulation**: reshape, ravel, flatten, transpose, swapaxes, expand_dims, squeeze, broadcast_to, broadcast_arrays, broadcast_shapes, concatenate, stack, vstack, hstack, dstack, split, array_split, tile, repeat, pad, append, delete, insert, roll, flip, fliplr, flipud, rot90, moveaxis, rollaxis, resize, trim_zeros, column_stack
+**Shape manipulation**: reshape, ravel, flatten, transpose, swapaxes, expand_dims, squeeze, broadcast_to, broadcast_arrays, broadcast_shapes, concatenate, stack, vstack, hstack, dstack, split, array_split, tile, repeat, pad, append, delete, insert, roll, flip, fliplr, flipud, rot90, moveaxis, rollaxis, resize, trim_zeros, column_stack, r_, c_
 
 **Math (unary)**: abs, negative, positive, sign, sqrt, square, cbrt, exp, exp2, expm1, log, log2, log10, log1p, sin, cos, tan, arcsin, arccos, arctan, sinh, cosh, tanh, arcsinh, arccosh, arctanh, degrees, radians, floor, ceil, rint, trunc, round, reciprocal, spacing, fabs, signbit, isnan, isinf, isfinite, logical_not, bitwise_not
 
