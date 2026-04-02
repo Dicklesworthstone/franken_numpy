@@ -43145,4 +43145,257 @@ mod tests {
         let err = UFuncArray::einsum("ij,jk->ik", &[&a]).unwrap_err();
         assert!(err.to_string().contains("2 input subscripts but 1 operands"));
     }
+
+    // ── NumPy behavioral edge-case parity tests ────────
+
+    #[test]
+    fn sum_empty_array_returns_zero() {
+        // np.sum([]) → 0.0
+        let a = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+        let r = a.reduce_sum(None, false).unwrap();
+        assert_eq!(r.values(), &[0.0]);
+    }
+
+    #[test]
+    fn prod_empty_array_returns_one() {
+        // np.prod([]) → 1.0
+        let a = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+        let r = a.reduce_prod(None, false).unwrap();
+        assert_eq!(r.values(), &[1.0]);
+    }
+
+    #[test]
+    fn any_empty_returns_false() {
+        // np.any([]) → False
+        let a = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+        let r = a.reduce_any(None, false).unwrap();
+        assert_eq!(r.values(), &[0.0]);
+    }
+
+    #[test]
+    fn all_empty_returns_true() {
+        // np.all([]) → True (vacuous truth)
+        let a = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+        let r = a.reduce_all(None, false).unwrap();
+        assert_eq!(r.values(), &[1.0]);
+    }
+
+    #[test]
+    fn sum_keepdims_preserves_rank() {
+        // np.sum([[1,2],[3,4]], axis=0, keepdims=True) → [[4, 6]] shape (1,2)
+        let a = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let r = a.reduce_sum(Some(0), true).unwrap();
+        assert_eq!(r.shape(), &[1, 2]);
+        assert_eq!(r.values(), &[4.0, 6.0]);
+    }
+
+    #[test]
+    fn mean_empty_returns_nan() {
+        // np.mean([]) → nan (with RuntimeWarning in NumPy)
+        let a = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+        let r = a.reduce_mean(None, false).unwrap();
+        assert!(r.values()[0].is_nan());
+    }
+
+    #[test]
+    fn scalar_broadcast_to_shape() {
+        // np.broadcast_to(5, (3, 2)) → [[5,5],[5,5],[5,5]]
+        let s = UFuncArray::scalar(5.0, DType::F64);
+        let r = s.broadcast_to(&[3, 2]).unwrap();
+        assert_eq!(r.shape(), &[3, 2]);
+        assert_eq!(r.values(), &[5.0; 6]);
+    }
+
+    #[test]
+    fn where_scalar_broadcast() {
+        // np.where([True, False, True], 1, 0) → [1, 0, 1]
+        let cond = UFuncArray::new(vec![3], vec![1.0, 0.0, 1.0], DType::F64).unwrap();
+        let x = UFuncArray::scalar(1.0, DType::F64).broadcast_to(&[3]).unwrap();
+        let y = UFuncArray::scalar(0.0, DType::F64).broadcast_to(&[3]).unwrap();
+        let r = UFuncArray::where_select(&cond, &x, &y).unwrap();
+        assert_eq!(r.values(), &[1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn negative_zero_preserves_sign_in_operations() {
+        // np.copysign(1.0, -0.0) → -1.0
+        let a = UFuncArray::new(vec![2], vec![1.0, 1.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![2], vec![-0.0, 0.0], DType::F64).unwrap();
+        let r = a.elementwise_binary(&b, BinaryOp::Copysign).unwrap();
+        assert!(r.values()[0].is_sign_negative(), "copysign(1, -0) should be -1");
+        assert!(r.values()[1].is_sign_positive(), "copysign(1, +0) should be +1");
+    }
+
+    #[test]
+    fn reshape_minus_one_inference() {
+        // np.arange(12).reshape(3, -1) → shape (3, 4)
+        let a = UFuncArray::arange(0.0, 12.0, 1.0, DType::F64).unwrap();
+        let r = a.reshape(&[3, -1]).unwrap();
+        assert_eq!(r.shape(), &[3, 4]);
+        assert_eq!(r.values()[0], 0.0);
+        assert_eq!(r.values()[11], 11.0);
+    }
+
+    #[test]
+    fn reshape_to_scalar() {
+        // np.array([42]).reshape(()) → array(42)
+        let a = UFuncArray::new(vec![1], vec![42.0], DType::F64).unwrap();
+        let r = a.reshape(&[]).unwrap();
+        assert!(r.shape().is_empty());
+        assert_eq!(r.values(), &[42.0]);
+    }
+
+    #[test]
+    fn concatenate_flat_mixed_dims() {
+        // np.concatenate([np.array(1), np.array([2, 3]), np.array([[4, 5]])], axis=None)
+        let a = UFuncArray::scalar(1.0, DType::F64);
+        let b = UFuncArray::new(vec![2], vec![2.0, 3.0], DType::F64).unwrap();
+        let c = UFuncArray::new(vec![1, 2], vec![4.0, 5.0], DType::F64).unwrap();
+        let r = UFuncArray::concatenate_flat(&[&a, &b, &c]).unwrap();
+        assert_eq!(r.shape(), &[5]);
+        assert_eq!(r.values(), &[1.0, 2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn nan_propagates_through_sum() {
+        // np.sum([1, nan, 3]) → nan
+        let a = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
+        let r = a.reduce_sum(None, false).unwrap();
+        assert!(r.values()[0].is_nan());
+    }
+
+    #[test]
+    fn nansum_ignores_nan() {
+        // np.nansum([1, nan, 3]) → 4.0
+        let a = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
+        let r = a.nansum(None).unwrap();
+        assert_eq!(r.values(), &[4.0]);
+    }
+
+    #[test]
+    fn nansum_all_nan_returns_zero() {
+        // np.nansum([nan, nan]) → 0.0
+        let a = UFuncArray::new(vec![2], vec![f64::NAN, f64::NAN], DType::F64).unwrap();
+        let r = a.nansum(None).unwrap();
+        assert_eq!(r.values(), &[0.0]);
+    }
+
+    #[test]
+    fn clip_nan_propagation() {
+        // np.clip([nan, 1, 2], 0, 3) → [nan, 1, 2]
+        let a = UFuncArray::new(vec![3], vec![f64::NAN, 1.0, 2.0], DType::F64).unwrap();
+        let r = a.clip(0.0, 3.0);
+        assert!(r.values()[0].is_nan());
+        assert_eq!(r.values()[1], 1.0);
+        assert_eq!(r.values()[2], 2.0);
+    }
+
+    #[test]
+    fn sort_nan_goes_to_end() {
+        // np.sort([3, nan, 1, nan, 2]) → [1, 2, 3, nan, nan]
+        let a = UFuncArray::new(vec![5], vec![3.0, f64::NAN, 1.0, f64::NAN, 2.0], DType::F64).unwrap();
+        let r = a.sort(None, None).unwrap();
+        assert_eq!(r.values()[0], 1.0);
+        assert_eq!(r.values()[1], 2.0);
+        assert_eq!(r.values()[2], 3.0);
+        assert!(r.values()[3].is_nan());
+        assert!(r.values()[4].is_nan());
+    }
+
+    #[test]
+    fn tile_scalar_to_array() {
+        // np.tile(7, 3) → [7, 7, 7]
+        let a = UFuncArray::scalar(7.0, DType::F64);
+        let r = a.tile(&[3]).unwrap();
+        assert_eq!(r.shape(), &[3]);
+        assert_eq!(r.values(), &[7.0, 7.0, 7.0]);
+    }
+
+    #[test]
+    fn repeat_axis() {
+        // np.repeat([1, 2, 3], 2) → [1, 1, 2, 2, 3, 3]
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let r = a.repeat(2, None).unwrap();
+        assert_eq!(r.values(), &[1.0, 1.0, 2.0, 2.0, 3.0, 3.0]);
+    }
+
+    #[test]
+    fn diff_basic() {
+        // np.diff([1, 3, 6, 10]) → [2, 3, 4]
+        let a = UFuncArray::new(vec![4], vec![1.0, 3.0, 6.0, 10.0], DType::F64).unwrap();
+        let r = a.diff(1, None).unwrap();
+        assert_eq!(r.shape(), &[3]);
+        assert_eq!(r.values(), &[2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn diff_n2() {
+        // np.diff([1, 3, 6, 10], n=2) → [1, 1]
+        let a = UFuncArray::new(vec![4], vec![1.0, 3.0, 6.0, 10.0], DType::F64).unwrap();
+        let r = a.diff(2, None).unwrap();
+        assert_eq!(r.shape(), &[2]);
+        assert_eq!(r.values(), &[1.0, 1.0]);
+    }
+
+    #[test]
+    fn roll_wraps_around() {
+        // np.roll([1, 2, 3, 4, 5], 2) → [4, 5, 1, 2, 3]
+        let a = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
+        let r = a.roll(2, None).unwrap();
+        assert_eq!(r.values(), &[4.0, 5.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn roll_negative() {
+        // np.roll([1, 2, 3, 4, 5], -2) → [3, 4, 5, 1, 2]
+        let a = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
+        let r = a.roll(-2, None).unwrap();
+        assert_eq!(r.values(), &[3.0, 4.0, 5.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn inf_arithmetic_parity() {
+        // np.array([inf]) + np.array([1]) → [inf]
+        // np.array([inf]) - np.array([inf]) → [nan]
+        // np.array([inf]) * np.array([0]) → [nan]
+        let inf_arr = UFuncArray::new(vec![1], vec![f64::INFINITY], DType::F64).unwrap();
+        let one = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
+        let zero = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+
+        let r1 = inf_arr.elementwise_binary(&one, BinaryOp::Add).unwrap();
+        assert_eq!(r1.values()[0], f64::INFINITY);
+
+        let r2 = inf_arr.elementwise_binary(&inf_arr, BinaryOp::Sub).unwrap();
+        assert!(r2.values()[0].is_nan(), "inf - inf should be nan");
+
+        let r3 = inf_arr.elementwise_binary(&zero, BinaryOp::Mul).unwrap();
+        assert!(r3.values()[0].is_nan(), "inf * 0 should be nan");
+    }
+
+    #[test]
+    fn squeeze_removes_singleton_dims() {
+        // np.squeeze(np.zeros((1, 3, 1, 2, 1))).shape → (3, 2)
+        let a = UFuncArray::new(vec![1, 3, 1, 2, 1], vec![0.0; 6], DType::F64).unwrap();
+        let r = a.squeeze();
+        assert_eq!(r.shape(), &[3, 2]);
+    }
+
+    #[test]
+    fn expand_dims_inserts_axis() {
+        // np.expand_dims([1, 2, 3], axis=0).shape → (1, 3)
+        // np.expand_dims([1, 2, 3], axis=1).shape → (3, 1)
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let r0 = a.expand_dims(0).unwrap();
+        assert_eq!(r0.shape(), &[1, 3]);
+        let r1 = a.expand_dims(1).unwrap();
+        assert_eq!(r1.shape(), &[3, 1]);
+    }
+
+    #[test]
+    fn unique_sorted() {
+        // np.unique([3, 1, 2, 1, 3]) → [1, 2, 3]
+        let a = UFuncArray::new(vec![5], vec![3.0, 1.0, 2.0, 1.0, 3.0], DType::F64).unwrap();
+        let r = a.unique().unwrap();
+        assert_eq!(r.values(), &[1.0, 2.0, 3.0]);
+    }
 }
