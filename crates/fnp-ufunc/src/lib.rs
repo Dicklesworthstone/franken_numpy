@@ -6585,10 +6585,11 @@ impl UFuncArray {
                     } else {
                         data[mid]
                     };
+                    let cmp = UFuncArray::float_membership_cmp(mid_val, *needle);
                     let go_right = if use_right {
-                        nan_last_cmp(&mid_val, needle) != std::cmp::Ordering::Greater
+                        cmp != std::cmp::Ordering::Greater
                     } else {
-                        nan_last_cmp(&mid_val, needle) == std::cmp::Ordering::Less
+                        cmp == std::cmp::Ordering::Less
                     };
                     if go_right {
                         lo = mid + 1;
@@ -14394,8 +14395,33 @@ impl UFuncArray {
         u
     }
 
+    fn float_membership_cmp(lhs: f64, rhs: f64) -> std::cmp::Ordering {
+        match (lhs.is_nan(), rhs.is_nan()) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            (false, false) => {
+                if lhs == 0.0 && rhs == 0.0 {
+                    std::cmp::Ordering::Equal
+                } else {
+                    lhs.total_cmp(&rhs)
+                }
+            }
+        }
+    }
+
+    fn float_membership_contains(values: &[f64], needle: f64) -> bool {
+        if needle.is_nan() {
+            return false;
+        }
+        values
+            .binary_search_by(|value| Self::float_membership_cmp(*value, needle))
+            .is_ok()
+    }
+
     fn float_set_dedup_eq(lhs: f64, rhs: f64) -> bool {
-        (lhs.is_nan() && rhs.is_nan()) || lhs.total_cmp(&rhs).is_eq()
+        (lhs.is_nan() && rhs.is_nan())
+            || ((lhs == 0.0 && rhs == 0.0) || lhs.total_cmp(&rhs).is_eq())
     }
 
     fn dedup_sorted_float_set_values(values: &mut Vec<f64>) {
@@ -14596,7 +14622,7 @@ impl UFuncArray {
             .enumerate()
             .map(|(i, v)| (v, i))
             .collect();
-        indexed.sort_by(|a, b| a.0.total_cmp(&b.0));
+        indexed.sort_by(|a, b| nan_last_cmp(&a.0, &b.0));
 
         let mut unique_vals: Vec<f64> = Vec::new();
         let mut first_indices: Vec<f64> = Vec::new();
@@ -14616,6 +14642,14 @@ impl UFuncArray {
             } else {
                 if let Some(last) = counts_vec.last_mut() {
                     *last += 1.0;
+                }
+                if let Some(first_index) = first_indices.last_mut()
+                    && orig_idx < *first_index as usize
+                {
+                    *first_index = orig_idx as f64;
+                    if let Some(unique_value) = unique_vals.last_mut() {
+                        *unique_value = val;
+                    }
                 }
             }
             group_of_sorted[i] = group;
@@ -14802,7 +14836,7 @@ impl UFuncArray {
             };
         }
         let mut set: Vec<f64> = test_elements.values.clone();
-        set.sort_by(|a, b| a.total_cmp(b));
+        set.sort_by(nan_last_cmp);
         Self::dedup_sorted_float_set_values(&mut set);
         let values: Vec<f64> = self
             .values
@@ -14811,7 +14845,7 @@ impl UFuncArray {
                 if v.is_nan() {
                     return 0.0;
                 }
-                if set.binary_search_by(|x| x.total_cmp(&v)).is_ok() {
+                if Self::float_membership_contains(&set, v) {
                     1.0
                 } else {
                     0.0
@@ -14877,21 +14911,18 @@ impl UFuncArray {
                 integer_sidecar: Some(IntegerSidecar::U64(a)),
             };
         }
-        let mut combined: Vec<f64> = self
-            .values
-            .iter()
-            .chain(other.values.iter())
-            .copied()
-            .collect();
-        combined.sort_by(|a, b| a.total_cmp(b));
-        Self::dedup_sorted_float_set_values(&mut combined);
-        let n = combined.len();
         Self {
-            shape: vec![n],
-            values: combined,
+            shape: vec![self.values.len() + other.values.len()],
+            values: self
+                .values
+                .iter()
+                .chain(other.values.iter())
+                .copied()
+                .collect(),
             dtype: self.dtype,
             integer_sidecar: None,
         }
+        .unique()
     }
 
     /// Return the sorted intersection of two 1-D arrays.
@@ -14961,10 +14992,10 @@ impl UFuncArray {
             };
         }
         let mut a = self.values.clone();
-        a.sort_by(|x, y| x.total_cmp(y));
+        a.sort_by(nan_last_cmp);
         Self::dedup_sorted_float_set_values(&mut a);
         let mut b = other.values.clone();
-        b.sort_by(|x, y| x.total_cmp(y));
+        b.sort_by(nan_last_cmp);
         Self::dedup_sorted_float_set_values(&mut b);
 
         let mut result = Vec::new();
@@ -14978,7 +15009,7 @@ impl UFuncArray {
                 j += 1;
                 continue;
             }
-            match a[i].total_cmp(&b[j]) {
+            match Self::float_membership_cmp(a[i], b[j]) {
                 std::cmp::Ordering::Equal => {
                     result.push(a[i]);
                     i += 1;
@@ -15046,16 +15077,16 @@ impl UFuncArray {
             };
         }
         let mut b = other.values.clone();
-        b.sort_by(|x, y| x.total_cmp(y));
+        b.sort_by(nan_last_cmp);
         Self::dedup_sorted_float_set_values(&mut b);
 
         let mut a = self.values.clone();
-        a.sort_by(|x, y| x.total_cmp(y));
+        a.sort_by(nan_last_cmp);
         Self::dedup_sorted_float_set_values(&mut a);
 
         let result: Vec<f64> = a
             .into_iter()
-            .filter(|v| v.is_nan() || b.binary_search_by(|x| x.total_cmp(v)).is_err())
+            .filter(|v| v.is_nan() || !Self::float_membership_contains(&b, *v))
             .collect();
         let n = result.len();
         Self {
@@ -15121,23 +15152,23 @@ impl UFuncArray {
             };
         }
         let mut a = self.values.clone();
-        a.sort_by(|x, y| x.total_cmp(y));
+        a.sort_by(nan_last_cmp);
         Self::dedup_sorted_float_set_values(&mut a);
         let mut b = other.values.clone();
-        b.sort_by(|x, y| x.total_cmp(y));
+        b.sort_by(nan_last_cmp);
         Self::dedup_sorted_float_set_values(&mut b);
 
         // Elements in a but not b, plus elements in b but not a
         let mut result: Vec<f64> = a
             .iter()
-            .filter(|v| v.is_nan() || b.binary_search_by(|x| x.total_cmp(v)).is_err())
+            .filter(|v| v.is_nan() || !Self::float_membership_contains(&b, **v))
             .chain(
                 b.iter()
-                    .filter(|v| v.is_nan() || a.binary_search_by(|x| x.total_cmp(v)).is_err()),
+                    .filter(|v| v.is_nan() || !Self::float_membership_contains(&a, **v)),
             )
             .copied()
             .collect();
-        result.sort_by(|x, y| x.total_cmp(y));
+        result.sort_by(nan_last_cmp);
         let n = result.len();
         Self {
             shape: vec![n],
@@ -40081,6 +40112,15 @@ mod tests {
     }
 
     #[test]
+    fn in1d_matches_signed_zero_membership() {
+        let arr = UFuncArray::new(vec![2], vec![-0.0, 0.0], DType::F64).unwrap();
+        let test = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+
+        let result = arr.in1d(&test);
+        assert_eq!(result.values(), &[1.0, 1.0]);
+    }
+
+    #[test]
     fn in1d_uses_exact_large_u64_membership() {
         let arr = UFuncArray::from_storage(
             vec![2],
@@ -40142,6 +40182,18 @@ mod tests {
 
         assert_eq!(left.values(), &[0.0, 1.0, 2.0]);
         assert_eq!(right.values(), &[0.0, 1.0, 3.0]);
+    }
+
+    #[test]
+    fn searchsorted_treats_signed_zero_as_equal() {
+        let sorted = UFuncArray::new(vec![2], vec![-0.0, 0.0], DType::F64).unwrap();
+        let probe = UFuncArray::scalar(0.0, DType::F64);
+
+        let left = sorted.searchsorted(&probe, Some("left"), None).unwrap();
+        let right = sorted.searchsorted(&probe, Some("right"), None).unwrap();
+
+        assert_eq!(left.values(), &[0.0]);
+        assert_eq!(right.values(), &[2.0]);
     }
 
     #[test]
@@ -40341,6 +40393,32 @@ mod tests {
     }
 
     #[test]
+    fn unique_preserves_first_signed_zero_representative() {
+        let arr = UFuncArray::new(vec![2], vec![0.0, -0.0], DType::F64).unwrap();
+        let (values, indices, inverse, counts) = unique_all(&arr);
+
+        assert_eq!(values.values(), &[0.0]);
+        assert_eq!(indices.values(), &[0.0]);
+        assert_eq!(inverse.values(), &[0.0, 0.0]);
+        assert_eq!(counts.values(), &[2.0]);
+    }
+
+    #[test]
+    fn unique_collapses_mixed_sign_nans_and_sorts_them_last() {
+        let nan_neg = nan_payload(0xfff8_0000_0000_0001);
+        let nan_pos = nan_payload(0x7ff8_0000_0000_0002);
+        let arr = UFuncArray::new(vec![3], vec![nan_neg, 1.0, nan_pos], DType::F64).unwrap();
+        let (values, indices, inverse, counts) = unique_all(&arr);
+
+        assert_eq!(values.values().len(), 2);
+        assert_eq!(values.values()[0], 1.0);
+        assert!(values.values()[1].is_nan());
+        assert_eq!(indices.values(), &[1.0, 0.0]);
+        assert_eq!(inverse.values(), &[1.0, 0.0, 1.0]);
+        assert_eq!(counts.values(), &[1.0, 2.0]);
+    }
+
+    #[test]
     fn union1d_collapses_distinct_nan_payloads() {
         let nan0 = f64::NAN;
         let nan1 = nan_payload(0x7ff8_0000_0000_0001);
@@ -40353,6 +40431,28 @@ mod tests {
     }
 
     #[test]
+    fn union1d_collapses_mixed_sign_nans_in_mixed_arrays() {
+        let nan_neg = nan_payload(0xfff8_0000_0000_0001);
+        let nan_pos = nan_payload(0x7ff8_0000_0000_0002);
+        let a = UFuncArray::new(vec![2], vec![nan_neg, 1.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1], vec![nan_pos], DType::F64).unwrap();
+
+        let result = a.union1d(&b);
+        assert_eq!(result.values().len(), 2);
+        assert_eq!(result.values()[0], 1.0);
+        assert!(result.values()[1].is_nan());
+    }
+
+    #[test]
+    fn union1d_preserves_first_signed_zero_representative() {
+        let a = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1], vec![-0.0], DType::F64).unwrap();
+
+        let result = a.union1d(&b);
+        assert_eq!(result.values(), &[0.0]);
+    }
+
+    #[test]
     fn intersect1d_does_not_match_nan_values() {
         let nan0 = f64::NAN;
         let a = UFuncArray::new(vec![2], vec![nan0, nan0], DType::F64).unwrap();
@@ -40360,6 +40460,15 @@ mod tests {
 
         let result = a.intersect1d(&b);
         assert!(result.values().is_empty());
+    }
+
+    #[test]
+    fn intersect1d_matches_signed_zero_values() {
+        let a = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1], vec![-0.0], DType::F64).unwrap();
+
+        let result = a.intersect1d(&b);
+        assert_eq!(result.values(), &[0.0]);
     }
 
     #[test]
@@ -40374,6 +40483,28 @@ mod tests {
     }
 
     #[test]
+    fn setdiff1d_collapses_mixed_sign_nans_in_self() {
+        let nan_neg = nan_payload(0xfff8_0000_0000_0001);
+        let nan_pos = nan_payload(0x7ff8_0000_0000_0002);
+        let a = UFuncArray::new(vec![3], vec![nan_neg, 1.0, nan_pos], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+
+        let result = a.setdiff1d(&b);
+        assert_eq!(result.values().len(), 2);
+        assert_eq!(result.values()[0], 1.0);
+        assert!(result.values()[1].is_nan());
+    }
+
+    #[test]
+    fn setdiff1d_treats_signed_zero_as_present_in_rhs() {
+        let a = UFuncArray::new(vec![1], vec![-0.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+
+        let result = a.setdiff1d(&b);
+        assert!(result.values().is_empty());
+    }
+
+    #[test]
     fn setxor1d_keeps_one_nan_from_each_side() {
         let nan0 = f64::NAN;
         let nan1 = nan_payload(0x7ff8_0000_0000_0001);
@@ -40384,6 +40515,15 @@ mod tests {
         assert_eq!(result.values().len(), 2);
         assert!(result.values()[0].is_nan());
         assert!(result.values()[1].is_nan());
+    }
+
+    #[test]
+    fn setxor1d_elides_signed_zero_pairs() {
+        let a = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1], vec![-0.0], DType::F64).unwrap();
+
+        let result = a.setxor1d(&b);
+        assert!(result.values().is_empty());
     }
 
     // ── Chebyshev polynomial tests ──────────────────────────────────────

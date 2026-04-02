@@ -549,8 +549,9 @@ fn detect_internal_overlap(
         if stride < required_stride {
             return Ok(true);
         }
-        let dim = isize::try_from(dim).map_err(|_| ShapeError::Overflow)?;
-        required_stride = stride.checked_mul(dim).ok_or(ShapeError::Overflow)?;
+        let dim_minus_1 = isize::try_from(dim - 1).map_err(|_| ShapeError::Overflow)?;
+        let span = stride.checked_mul(dim_minus_1).ok_or(ShapeError::Overflow)?;
+        required_stride = required_stride.checked_add(span).ok_or(ShapeError::Overflow)?;
     }
 
     Ok(false)
@@ -561,6 +562,7 @@ mod tests {
     use super::{
         MemoryOrder, NdLayout, ShapeError, broadcast_shape, broadcast_shapes, broadcast_strides,
         can_broadcast, contiguous_strides, element_count, fix_unknown_dimension,
+        required_view_nbytes,
     };
 
     #[test]
@@ -1208,5 +1210,224 @@ mod tests {
         // This should NOT panic/overflow. With current implementation it might.
         // Actually, 2 * isize::MAX overflows isize.
         let _ = layout.is_contiguous();
+    }
+
+    // ── broadcast shape edge cases ────────
+
+    #[test]
+    fn broadcast_scalar_with_anything() {
+        // () + (3, 4) → (3, 4)
+        let r = broadcast_shape(&[], &[3, 4]).unwrap();
+        assert_eq!(r, vec![3, 4]);
+    }
+
+    #[test]
+    fn broadcast_scalar_with_scalar() {
+        // () + () → ()
+        let r = broadcast_shape(&[], &[]).unwrap();
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn broadcast_same_shape_identity() {
+        let r = broadcast_shape(&[2, 3, 4], &[2, 3, 4]).unwrap();
+        assert_eq!(r, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn broadcast_rank_promotion() {
+        // (3,) + (2, 3) → (2, 3)
+        let r = broadcast_shape(&[3], &[2, 3]).unwrap();
+        assert_eq!(r, vec![2, 3]);
+    }
+
+    #[test]
+    fn broadcast_multiple_ones() {
+        // (1, 3, 1) + (2, 1, 4) → (2, 3, 4)
+        let r = broadcast_shape(&[1, 3, 1], &[2, 1, 4]).unwrap();
+        assert_eq!(r, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn broadcast_with_zero_dim() {
+        // (0, 3) + (1, 3) → (0, 3)
+        let r = broadcast_shape(&[0, 3], &[1, 3]).unwrap();
+        assert_eq!(r, vec![0, 3]);
+    }
+
+    #[test]
+    fn broadcast_incompatible_fails() {
+        // (2, 3) + (2, 4) → error
+        assert!(broadcast_shape(&[2, 3], &[2, 4]).is_err());
+    }
+
+    #[test]
+    fn broadcast_shapes_multiple() {
+        // (1, 3) + (2, 1) + (1, 1) → (2, 3)
+        let r = broadcast_shapes(&[&[1, 3], &[2, 1], &[1, 1]]).unwrap();
+        assert_eq!(r, vec![2, 3]);
+    }
+
+    #[test]
+    fn broadcast_shapes_empty_list() {
+        let r = broadcast_shapes(&[]).unwrap();
+        assert!(r.is_empty());
+    }
+
+    // ── reshape edge cases ────────
+
+    #[test]
+    fn fix_unknown_dim_basic() {
+        // 12 elements → reshape(3, -1) = (3, 4)
+        let r = fix_unknown_dimension(&[3, -1], 12).unwrap();
+        assert_eq!(r, vec![3, 4]);
+    }
+
+    #[test]
+    fn fix_unknown_dim_first_axis() {
+        // 12 elements → reshape(-1, 4) = (3, 4)
+        let r = fix_unknown_dimension(&[-1, 4], 12).unwrap();
+        assert_eq!(r, vec![3, 4]);
+    }
+
+    #[test]
+    fn fix_unknown_dim_no_unknowns() {
+        let r = fix_unknown_dimension(&[3, 4], 12).unwrap();
+        assert_eq!(r, vec![3, 4]);
+    }
+
+    #[test]
+    fn fix_unknown_dim_multiple_unknowns_fails() {
+        assert!(fix_unknown_dimension(&[-1, -1], 12).is_err());
+    }
+
+    #[test]
+    fn fix_unknown_dim_incompatible_fails() {
+        // 12 elements → reshape(5, -1) — 12 not divisible by 5
+        assert!(fix_unknown_dimension(&[5, -1], 12).is_err());
+    }
+
+    #[test]
+    fn fix_unknown_dim_empty_shape() {
+        // 0 elements → reshape(0, -1) — allowed with 0 elements
+        // Actually, known_product = 0 so this should fail
+        assert!(fix_unknown_dimension(&[0, -1], 0).is_err());
+    }
+
+    #[test]
+    fn fix_unknown_dim_scalar() {
+        // 1 element → reshape() = scalar
+        let r = fix_unknown_dimension(&[], 1).unwrap();
+        assert!(r.is_empty());
+    }
+
+    // ── stride computation edge cases ────────
+
+    #[test]
+    fn contiguous_strides_c_order() {
+        let s = contiguous_strides(&[2, 3, 4], 8, MemoryOrder::C).unwrap();
+        assert_eq!(s, vec![96, 32, 8]); // 3*4*8, 4*8, 8
+    }
+
+    #[test]
+    fn contiguous_strides_f_order() {
+        let s = contiguous_strides(&[2, 3, 4], 8, MemoryOrder::F).unwrap();
+        assert_eq!(s, vec![8, 16, 48]); // 8, 2*8, 2*3*8
+    }
+
+    #[test]
+    fn contiguous_strides_scalar() {
+        // Scalar has empty shape → empty strides
+        let s = contiguous_strides(&[], 8, MemoryOrder::C).unwrap();
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn contiguous_strides_1d() {
+        let s = contiguous_strides(&[5], 8, MemoryOrder::C).unwrap();
+        assert_eq!(s, vec![8]);
+    }
+
+    #[test]
+    fn contiguous_strides_zero_item_size_fails() {
+        assert!(contiguous_strides(&[2, 3], 0, MemoryOrder::C).is_err());
+    }
+
+    #[test]
+    fn contiguous_strides_with_singleton() {
+        // (1, 3) has strides (24, 8) in C order — stride along dim-0 is 3*8
+        let s = contiguous_strides(&[1, 3], 8, MemoryOrder::C).unwrap();
+        assert_eq!(s, vec![24, 8]);
+    }
+
+    // ── broadcast strides edge cases ────────
+
+    #[test]
+    fn broadcast_strides_scalar_to_2d() {
+        // Scalar () → (3, 4): strides all zero
+        let out = broadcast_strides(&[], &[], &[3, 4]).unwrap();
+        assert_eq!(out, vec![0, 0]);
+    }
+
+    #[test]
+    fn broadcast_strides_1d_to_2d() {
+        // (4,) → (3, 4): row stride = 0, col stride preserved
+        let out = broadcast_strides(&[4], &[8], &[3, 4]).unwrap();
+        assert_eq!(out, vec![0, 8]);
+    }
+
+    // ── element count edge cases ────────
+
+    #[test]
+    fn element_count_scalar() {
+        assert_eq!(element_count(&[]).unwrap(), 1); // scalar = 1 element
+    }
+
+    #[test]
+    fn element_count_with_zero() {
+        assert_eq!(element_count(&[2, 0, 3]).unwrap(), 0);
+    }
+
+    #[test]
+    fn element_count_overflow_detection() {
+        assert!(element_count(&[usize::MAX, 2]).is_err());
+    }
+
+    // ── NdLayout Fortran order ────────
+
+    #[test]
+    fn ndlayout_fortran_contiguous_strides() {
+        let layout = NdLayout::contiguous(vec![2, 3], 8, MemoryOrder::F).unwrap();
+        assert_eq!(layout.strides, vec![8, 16]); // col-major
+        assert!(layout.is_fortran_contiguous());
+        assert!(!layout.is_contiguous()); // C-contiguous check should be false
+    }
+
+    #[test]
+    fn ndlayout_c_contiguous_strides() {
+        let layout = NdLayout::contiguous(vec![2, 3], 8, MemoryOrder::C).unwrap();
+        assert_eq!(layout.strides, vec![24, 8]); // row-major
+        assert!(layout.is_contiguous());
+    }
+
+    #[test]
+    fn ndlayout_1d_is_both_c_and_f_contiguous() {
+        let layout = NdLayout::contiguous(vec![5], 8, MemoryOrder::C).unwrap();
+        assert!(layout.is_contiguous());
+        assert!(layout.is_fortran_contiguous());
+    }
+
+    // ── required_view_nbytes edge cases ────────
+
+    #[test]
+    fn required_nbytes_zero_extent_is_zero() {
+        let n = required_view_nbytes(&[0, 5], &[40, 8], 8).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn required_nbytes_scalar_is_item_size() {
+        let n = required_view_nbytes(&[], &[], 8).unwrap();
+        assert_eq!(n, 8);
     }
 }
