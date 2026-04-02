@@ -3233,6 +3233,28 @@ impl UFuncArray {
         Self::from_values_with_dtype(vec![num], values, dtype)
     }
 
+    /// `np.linspace` with `retstep=True`: returns `(array, step)`.
+    ///
+    /// The step is `(stop - start) / (num - 1)` when endpoint is true,
+    /// or `(stop - start) / num` when endpoint is false.
+    /// Returns `NaN` as step when `num < 2`.
+    pub fn linspace_retstep(
+        start: f64,
+        stop: f64,
+        num: usize,
+        endpoint: bool,
+        dtype: DType,
+    ) -> Result<(Self, f64), UFuncError> {
+        let step = if num < 2 {
+            f64::NAN
+        } else {
+            let divisor = if endpoint { (num - 1) as f64 } else { num as f64 };
+            (stop - start) / divisor
+        };
+        let arr = Self::linspace_endpoint(start, stop, num, endpoint, dtype)?;
+        Ok((arr, step))
+    }
+
     /// Create an array with values spaced evenly on a log scale.
     ///
     /// Mimics `np.logspace(start, stop, num, base=10.0)`.
@@ -7139,6 +7161,22 @@ impl UFuncArray {
         let cast_arrays: Vec<Self> = arrays.iter().map(|a| a.astype(dtype)).collect();
         let refs: Vec<&Self> = cast_arrays.iter().collect();
         Self::concatenate(&refs, axis)
+    }
+
+    /// Concatenate arrays after flattening (`np.concatenate(arrays, axis=None)`).
+    ///
+    /// Equivalent to flattening each array with `ravel()` then concatenating
+    /// along axis 0. This is what NumPy does when `axis=None` is passed.
+    pub fn concatenate_flat(arrays: &[&Self]) -> Result<Self, UFuncError> {
+        if arrays.is_empty() {
+            return Err(UFuncError::InvalidInputLength {
+                expected: 1,
+                actual: 0,
+            });
+        }
+        let flat: Vec<Self> = arrays.iter().map(|a| a.ravel()).collect();
+        let refs: Vec<&Self> = flat.iter().collect();
+        Self::concatenate(&refs, 0)
     }
 
     /// Stack with dtype and casting control (`np.stack(dtype=, casting=)`).
@@ -30098,6 +30136,81 @@ mod tests {
     }
 
     #[test]
+    fn linspace_retstep_basic() {
+        let (arr, step) = UFuncArray::linspace_retstep(0.0, 1.0, 5, true, DType::F64).unwrap();
+        assert_eq!(arr.shape(), &[5]);
+        assert_eq!(arr.values(), &[0.0, 0.25, 0.5, 0.75, 1.0]);
+        assert!((step - 0.25).abs() < 1e-15);
+    }
+
+    #[test]
+    fn linspace_retstep_no_endpoint() {
+        let (arr, step) = UFuncArray::linspace_retstep(0.0, 1.0, 5, false, DType::F64).unwrap();
+        assert_eq!(arr.shape(), &[5]);
+        assert!((step - 0.2).abs() < 1e-15);
+        assert!((arr.values()[1] - 0.2).abs() < 1e-12);
+    }
+
+    #[test]
+    fn linspace_retstep_single_returns_nan_step() {
+        let (arr, step) = UFuncArray::linspace_retstep(5.0, 10.0, 1, true, DType::F64).unwrap();
+        assert_eq!(arr.values(), &[5.0]);
+        assert!(step.is_nan());
+    }
+
+    #[test]
+    fn arange_float_precision_0_1_step() {
+        // np.arange(0, 1, 0.1) → exactly 10 elements
+        let arr = UFuncArray::arange(0.0, 1.0, 0.1, DType::F64).unwrap();
+        assert_eq!(arr.shape(), &[10], "arange(0, 1, 0.1) should produce exactly 10 elements");
+    }
+
+    #[test]
+    fn arange_float_precision_0_to_0_3() {
+        // np.arange(0, 0.3, 0.1) → exactly 3 elements [0.0, 0.1, 0.2]
+        let arr = UFuncArray::arange(0.0, 0.3, 0.1, DType::F64).unwrap();
+        assert_eq!(arr.shape(), &[3]);
+    }
+
+    #[test]
+    fn arange_wrong_direction_empty() {
+        // Positive step, start > stop → empty
+        let arr = UFuncArray::arange(5.0, 0.0, 1.0, DType::F64).unwrap();
+        assert_eq!(arr.shape(), &[0]);
+        // Negative step, start < stop → empty
+        let arr2 = UFuncArray::arange(0.0, 5.0, -1.0, DType::F64).unwrap();
+        assert_eq!(arr2.shape(), &[0]);
+    }
+
+    #[test]
+    fn concatenate_flat_basic() {
+        // np.concatenate([[1,2], [[3,4],[5,6]]], axis=None) → [1,2,3,4,5,6]
+        let a = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![2, 2], vec![3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = UFuncArray::concatenate_flat(&[&a, &b]).unwrap();
+        assert_eq!(r.shape(), &[6]);
+        assert_eq!(r.values(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn concatenate_flat_3d() {
+        // Flatten 3D arrays then concatenate
+        let a = UFuncArray::new(vec![2, 1, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3], vec![5.0, 6.0, 7.0], DType::F64).unwrap();
+        let r = UFuncArray::concatenate_flat(&[&a, &b]).unwrap();
+        assert_eq!(r.shape(), &[7]);
+        assert_eq!(r.values(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+    }
+
+    #[test]
+    fn concatenate_flat_single() {
+        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = UFuncArray::concatenate_flat(&[&a]).unwrap();
+        assert_eq!(r.shape(), &[6]);
+        assert_eq!(r.values(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
     fn eye_identity_3x3() {
         let arr = UFuncArray::eye(3, None, 0, DType::F64).unwrap();
         assert_eq!(arr.shape(), &[3, 3]);
@@ -42940,5 +43053,96 @@ mod tests {
         } else {
             panic!("Expected I64 storage");
         }
+    }
+
+    // ── einsum additional tests ────────
+
+    #[test]
+    fn einsum_transpose_via_subscript() {
+        // np.einsum('ij->ji', A) = A.T
+        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = UFuncArray::einsum("ij->ji", &[&a]).unwrap();
+        assert_eq!(r.shape(), &[3, 2]);
+        assert_eq!(r.values(), &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    }
+
+    #[test]
+    fn einsum_diagonal_extraction() {
+        // np.einsum('ii->i', A) = diagonal
+        let a = UFuncArray::new(vec![3, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], DType::F64).unwrap();
+        let r = UFuncArray::einsum("ii->i", &[&a]).unwrap();
+        assert_eq!(r.shape(), &[3]);
+        assert_eq!(r.values(), &[1.0, 5.0, 9.0]);
+    }
+
+    #[test]
+    fn einsum_hadamard_product() {
+        // np.einsum('ij,ij->ij', A, B) = element-wise multiply
+        let a = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![2, 2], vec![5.0, 6.0, 7.0, 8.0], DType::F64).unwrap();
+        let r = UFuncArray::einsum("ij,ij->ij", &[&a, &b]).unwrap();
+        assert_eq!(r.shape(), &[2, 2]);
+        assert_eq!(r.values(), &[5.0, 12.0, 21.0, 32.0]);
+    }
+
+    #[test]
+    fn einsum_row_sum() {
+        // np.einsum('ij->i', A) = sum over axis 1
+        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = UFuncArray::einsum("ij->i", &[&a]).unwrap();
+        assert_eq!(r.shape(), &[2]);
+        assert_eq!(r.values(), &[6.0, 15.0]);
+    }
+
+    #[test]
+    fn einsum_implicit_matmul() {
+        // np.einsum('ij,jk', A, B) → implicit output 'ik'
+        let a = UFuncArray::new(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![2, 2], vec![3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = UFuncArray::einsum("ij,jk", &[&a, &b]).unwrap();
+        assert_eq!(r.shape(), &[2, 2]);
+        assert_eq!(r.values(), &[3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn einsum_batch_matmul() {
+        // np.einsum('bij,bjk->bik', A, B) = batched matmul
+        let a = UFuncArray::new(vec![1, 2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1, 2, 2], vec![5.0, 6.0, 7.0, 8.0], DType::F64).unwrap();
+        let r = UFuncArray::einsum("bij,bjk->bik", &[&a, &b]).unwrap();
+        assert_eq!(r.shape(), &[1, 2, 2]);
+        assert_eq!(r.values(), &[19.0, 22.0, 43.0, 50.0]);
+    }
+
+    #[test]
+    fn einsum_total_sum() {
+        // np.einsum('ij->', A) = total sum
+        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = UFuncArray::einsum("ij->", &[&a]).unwrap();
+        assert_eq!(r.values(), &[21.0]);
+    }
+
+    #[test]
+    fn einsum_triple_contraction() {
+        // np.einsum('ij,jk,kl->il', I, B, I) = B
+        let i = UFuncArray::new(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![2, 2], vec![2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
+        let r = UFuncArray::einsum("ij,jk,kl->il", &[&i, &b, &i]).unwrap();
+        assert_eq!(r.values(), &[2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn einsum_dim_mismatch_error() {
+        let a = UFuncArray::new(vec![2, 3], vec![1.0; 6], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![4, 2], vec![1.0; 8], DType::F64).unwrap();
+        let err = UFuncArray::einsum("ij,jk->ik", &[&a, &b]).unwrap_err();
+        assert!(err.to_string().contains("conflicting sizes"));
+    }
+
+    #[test]
+    fn einsum_operand_count_error() {
+        let a = UFuncArray::new(vec![2, 2], vec![1.0; 4], DType::F64).unwrap();
+        let err = UFuncArray::einsum("ij,jk->ik", &[&a]).unwrap_err();
+        assert!(err.to_string().contains("2 input subscripts but 1 operands"));
     }
 }
