@@ -844,7 +844,9 @@ pub fn write_npy_bytes_with_version(
                 "payload bytes must align with dtype item size",
             ));
         }
-        let value_count = payload.len() / item_size;
+        let value_count = payload.len().checked_div(item_size).ok_or(
+            IOError::WriteContractViolation("payload bytes must align with dtype item size"),
+        )?;
         let _ = validate_write_contract(&header.shape, value_count, header.descr)?;
     }
 

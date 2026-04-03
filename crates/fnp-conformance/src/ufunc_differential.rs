@@ -23,6 +23,19 @@ legacy_root = sys.argv[3]
 with open(input_path, 'r', encoding='utf-8') as fh:
     cases = json.load(fh)
 
+# ORACLE SOURCE RESOLUTION
+# ========================
+# The oracle tries three sources in order:
+#   1. "legacy"  — NumPy from legacy_numpy_code/ (strongest, bit-exact reference)
+#   2. "system"  — system-installed NumPy (strong, but version may differ)
+#   3. "pure_python_fallback" — simplified Python reimplementation (weakest)
+#
+# The fallback exists so CI can run without NumPy installed, but its results
+# are NOT equivalent to real NumPy (simplified edge-case handling, different
+# float semantics for division/modulo/min/max).
+#
+# To enforce real NumPy: set FNP_REQUIRE_REAL_NUMPY_ORACLE=1
+# The oracle_source field in capture output records which source was used.
 oracle_source = 'legacy'
 oracle_diagnostics = []
 np = None
@@ -2982,6 +2995,38 @@ mod tests {
         assert_eq!(loaded.cases[0].values.len(), 3);
         assert_eq!(loaded.cases[1].status, "error");
         assert_eq!(loaded.cases[1].error.as_deref(), Some("division by zero"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn oracle_capture_roundtrip_preserves_non_finite_values() {
+        let path = temp_file("oracle_non_finite_roundtrip");
+        let capture = UFuncOracleCapture {
+            schema_version: 1,
+            oracle_source: "pure_python_fallback".to_string(),
+            oracle_diagnostics: Some("fallback".to_string()),
+            generated_at_unix_ms: 99,
+            cases: vec![UFuncOracleCase {
+                id: "non_finite".to_string(),
+                status: "ok".to_string(),
+                error: None,
+                shape: vec![4],
+                values: vec![f64::NEG_INFINITY, -0.0, f64::INFINITY, f64::NAN],
+                dtype: "float64".to_string(),
+            }],
+        };
+
+        super::write_oracle_capture(&path, &capture).expect("write");
+        let loaded = load_oracle_capture(&path).expect("load");
+
+        assert_eq!(loaded.cases.len(), 1);
+        let values = &loaded.cases[0].values;
+        assert_eq!(values.len(), 4);
+        assert!(values[0].is_infinite() && values[0].is_sign_negative());
+        assert_eq!(values[1].to_bits(), (-0.0f64).to_bits());
+        assert!(values[2].is_infinite() && values[2].is_sign_positive());
+        assert!(values[3].is_nan());
+
         let _ = fs::remove_file(path);
     }
 

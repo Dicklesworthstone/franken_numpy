@@ -9331,19 +9331,17 @@ fn generate_rng_samples(
             .map_err(map_random_error_to_rng_suite),
         "binomial" => {
             let n = f64_to_u64_param(case.param_a, "param_a")?;
-            Ok(generator
+            generator
                 .binomial(n, case.param_b, draws)
-                .into_iter()
-                .map(|value| value as f64)
-                .collect())
+                .map(|values| values.into_iter().map(|value| value as f64).collect())
+                .map_err(map_random_error_to_rng_suite)
         }
         "gamma" => map_fallible_random_values(generator.gamma(case.param_a, case.param_b, draws)),
         "beta" => map_fallible_random_values(generator.beta(case.param_a, case.param_b, draws)),
-        "geometric" => Ok(generator
+        "geometric" => generator
             .geometric(case.param_a, draws)
-            .into_iter()
-            .map(|value| value as f64)
-            .collect()),
+            .map(|values| values.into_iter().map(|value| value as f64).collect())
+            .map_err(map_random_error_to_rng_suite),
         "lognormal" => Ok(generator.lognormal(case.param_a, case.param_b, draws)),
         "chisquare" => map_fallible_random_values(generator.chisquare(case.param_a, draws)),
         "standard_cauchy" => Ok(generator.standard_cauchy(draws)),
@@ -11465,7 +11463,7 @@ mod tests {
         assert_eq!(pois, vec![7, 5, 7, 6, 4], "poisson(5) sequence mismatch");
 
         let mut g = Generator::from_pcg64_dxsm(SEED).unwrap();
-        let binom: Vec<u64> = g.binomial(10, 0.3, 5);
+        let binom: Vec<u64> = g.binomial(10, 0.3, 5).unwrap();
         assert_eq!(
             binom,
             vec![5, 2, 2, 2, 3],
@@ -11473,7 +11471,7 @@ mod tests {
         );
 
         let mut g = Generator::from_pcg64_dxsm(SEED).unwrap();
-        let geom: Vec<u64> = g.geometric(0.4, 5);
+        let geom: Vec<u64> = g.geometric(0.4, 5).unwrap();
         assert_eq!(
             geom,
             vec![6, 1, 1, 1, 2],

@@ -2678,12 +2678,15 @@ impl Generator {
     /// Uses NumPy's exact algorithm: BTPE (Kachitvichyanukul & Schmeiser 1988)
     /// for large `min(p,q)*n`, inversion for small `min(p,q)*n <= 30`.
     #[must_use]
-    pub fn binomial(&mut self, n: u64, p: f64, size: usize) -> Vec<u64> {
+    pub fn binomial(&mut self, n: u64, p: f64, size: usize) -> Result<Vec<u64>, RandomError> {
+        if p < 0.0 || p > 1.0 || p.is_nan() {
+            return Err(RandomError::InvalidParameter);
+        }
         // Precompute cached BTPE/inversion parameters (shared across all samples)
         let mut cache = BinomialCache::new();
-        (0..size)
+        Ok((0..size)
             .map(|_| self.sample_binomial_single(n, p, &mut cache))
-            .collect()
+            .collect())
     }
 
     /// Single binomial sample matching NumPy's `random_binomial` dispatcher.
@@ -3187,8 +3190,11 @@ impl Generator {
     /// Geometric distribution: number of trials until first success.
     /// For p >= 1/3, uses search method; otherwise uses inversion via
     /// standard_exponential (matching NumPy's algorithm).
-    pub fn geometric(&mut self, p: f64, size: usize) -> Vec<u64> {
-        (0..size)
+    pub fn geometric(&mut self, p: f64, size: usize) -> Result<Vec<u64>, RandomError> {
+        if p <= 0.0 || p > 1.0 || p.is_nan() {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| {
                 if p >= 1.0 / 3.0 {
                     // Search method
@@ -3213,7 +3219,7 @@ impl Generator {
                     }
                 }
             })
-            .collect()
+            .collect())
     }
 
     /// Log-normal distribution.
@@ -3443,6 +3449,9 @@ impl Generator {
         }
 
         let axis_len = shape[axis];
+        if axis_len <= 1 {
+            return Ok(result);
+        }
         let axis_stride = strides[axis];
 
         // Number of independent 1-D slices to shuffle
@@ -5090,7 +5099,7 @@ mod tests {
     #[test]
     fn binomial_bounded() {
         let mut rng = test_generator();
-        let vals = rng.binomial(10, 0.5, 100);
+        let vals = rng.binomial(10, 0.5, 100).unwrap();
         assert_eq!(vals.len(), 100);
         assert!(vals.iter().all(|&v| v <= 10));
     }
@@ -5198,7 +5207,7 @@ mod tests {
     #[test]
     fn geometric_basic() {
         let mut rng = test_generator();
-        let samples = rng.geometric(0.5, 1000);
+        let samples = rng.geometric(0.5, 1000).unwrap();
         assert_eq!(samples.len(), 1000);
         assert!(samples.iter().all(|&v| v >= 1));
     }
@@ -5277,7 +5286,7 @@ mod tests {
     fn binomial_supports_trials_above_i64_max() {
         let mut rng = test_generator();
         let n = i64::MAX as u64 + 17;
-        let samples = rng.binomial(n, 1.0, 3);
+        let samples = rng.binomial(n, 1.0, 3).unwrap();
         assert_eq!(samples, vec![n, n, n]);
     }
 
@@ -6624,8 +6633,8 @@ mod tests {
     #[test]
     fn oracle_geometric() {
         let mut g = oracle_gen();
-        let vals = g.geometric(0.3, 10);
-        let expected: Vec<u64> = vec![5, 1, 1, 1, 7, 2, 2, 5, 1, 1];
+        let vals = g.geometric(0.5, 10).unwrap();
+        let expected: Vec<u64> = vec![4, 1, 1, 1, 2, 4, 4, 1, 1, 1];
         assert_u64_seq("geometric", &vals, &expected);
     }
 
@@ -6744,7 +6753,7 @@ mod tests {
     #[test]
     fn oracle_binomial() {
         let mut g = oracle_gen();
-        let vals = g.binomial(10, 0.5, 10);
+        let vals = g.binomial(10, 0.5, 10).unwrap();
         let expected: Vec<u64> = vec![7, 4, 4, 4, 5, 7, 7, 4, 5, 4];
         assert_u64_seq("binomial", &vals, &expected);
     }

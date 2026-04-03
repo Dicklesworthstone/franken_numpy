@@ -50,21 +50,28 @@
 | Crate | Tests | Description |
 |---|---|---|
 | fnp-ufunc | 1,652 | Core array operations, math, sorting, polynomials, reductions, oracle tests, linalg bridge, FFT (hfft/ihfft), hermfit/lagfit, masked cov/corrcoef, datetime parsing, gufunc validation, parameter parity (equal_nan, bitorder, mode, endpoint, trim, period, axes, prepend/append, left/right), r_/c_ concat helpers, GridSpec mgrid/ogrid, linspace_retstep, concatenate_flat, einsum coverage, NaN set-op parity, behavioral edge cases |
-| fnp-ndarray | 55 | Shape legality, stride calculus, broadcast contracts, overlap detection, multi-axis negative strides |
+| fnp-ndarray | 87 | Shape legality, stride calculus, broadcast contracts, overlap detection, multi-axis negative strides, broadcast/reshape/stride edge cases, F-order, required_view_nbytes |
 | fnp-linalg | 217 | Linear algebra decompositions, solvers, norms, 16 NumPy oracle tests, extreme-scale regression, non-finite parity (cond_p, cross_product 2D, NaN/Inf propagation) |
 | fnp-random | 191 | RNG distributions (40 oracle-verified), seeding, reproducibility, large-n binomial/multinomial |
 | fnp-iter | 103 | Transfer-loop selector, NDIter traversal/broadcast/overlap contracts, flatiter indexing/assignment, ndindex/ndenumerate iterators |
 | fnp-io | 174 | NPY/NPZ read/write, text formats, compression, 7 format oracle tests, genfromtxt_full, fromfile_text/tofile_text |
 | fnp-conformance | 117 | Differential parity, metamorphic identities, adversarial fuzzing, witness stability, matmul conformance |
-| fnp-dtype | 117 | Dtype taxonomy, promotion table, cast policy primitives, NumPy byte-width parsing |
+| fnp-dtype | 123 | Dtype taxonomy, promotion table (all 324 pairs explicit), cast policy primitives, NumPy byte-width parsing |
 | fnp-runtime | 54 | Mode split, fail-closed decoding, override-audit gate, Bayesian decision engine, evidence ledger |
-| **Total** | **2,707** | |
+| **Total** | **2,754** | |
 
 ## Remaining Gaps (Python-specific, low priority)
 
 1. `frompyfunc` — requires Python callable protocol (N/A for Rust)
 2. `nditer` — Python-level iterator protocol (N/A for Rust)
 3. Expanded CI matrix for alternate oracle environments and longer-horizon benchmark trend regression
+
+## Intentional Design Decisions
+
+1. **`register_custom_loop()` fail-closed stub** (`fnp-ufunc`): Always returns `Err` directing callers to `UFuncLoopRegistry::register()`. This is deliberate — the registry-based API is the canonical entry point; the standalone function exists only for discovery and always rejects registration.
+2. **`empty()` / `empty_like()` delegate to `zeros()`**: In safe Rust (`#![forbid(unsafe_code)]`), there is no uninitialized memory. These functions correctly zero-fill, matching NumPy's observed behavior for freshly allocated arrays.
+3. **Dtype promotion `_ => F64` fallback**: The catch-all in `promote()` is a safety net for future DType variants. All 324 current pairs are explicitly handled; the fallback is unreachable with the current enum.
+4. **Oracle pure-Python fallback**: When real NumPy is unavailable, `fnp-conformance` falls back to a simplified Python reimplementation. Set `FNP_REQUIRE_REAL_NUMPY_ORACLE=1` to enforce real NumPy. The `oracle_source` field in capture results records which oracle was used.
 
 ## API Surface Inventory
 

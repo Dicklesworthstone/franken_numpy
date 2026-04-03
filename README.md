@@ -4,10 +4,10 @@
   <img src="franken_numpy_illustration.webp" alt="FrankenNumPy - memory-safe clean-room NumPy reimplementation in Rust" width="400">
 
   **Memory-safe, clean-room NumPy reimplementation in Rust.**<br>
-  Zero unsafe code. 2,707 tests. Bit-exact RNG parity. Every feature family green.
+  Zero unsafe code. 2,754 tests. Bit-exact RNG parity. Every feature family green.
 
   ![Rust](https://img.shields.io/badge/Rust-nightly%202024-orange)
-  ![Tests](https://img.shields.io/badge/tests-2%2C707%20passing-brightgreen)
+  ![Tests](https://img.shields.io/badge/tests-2%2C754%20passing-brightgreen)
   ![Unsafe](https://img.shields.io/badge/unsafe-0%20blocks-blue)
   ![License](https://img.shields.io/badge/license-MIT-green)
 </div>
@@ -35,7 +35,7 @@ FrankenNumPy rebuilds NumPy's semantics from scratch in safe Rust with two non-n
 | Stride calculus | Evolved over decades | Clean-room deterministic engine (SCE) |
 | Runtime modes | Single mode | Strict (max compat) + Hardened (safety guards) |
 | Conformance | Self-referential | Differential oracle against real NumPy |
-| Test coverage | pytest suite | 2,707 Rust tests + 8-gate CI topology |
+| Test coverage | pytest suite | 2,754 Rust tests + 8-gate CI topology |
 
 ---
 
@@ -158,7 +158,7 @@ cargo test --workspace --all-features
  ▼                                                          ▼
  ┌──────────┐ ┌────────────┐ ┌──────────┐ ┌──────────────┐
  │ fnp-dtype│ │ fnp-ndarray│ │ fnp-iter │ │ fnp-runtime  │
- │ 117 tests│ │ 55 tests   │ │ 103 tests│ │ 54 tests     │
+ │ 123 tests│ │ 87 tests   │ │ 103 tests│ │ 54 tests     │
  │ promote  │ │ SCE core   │ │ transfer │ │ strict/      │
  │ cast     │ │ strides    │ │ semantics│ │ hardened     │
  └──────────┘ └────────────┘ └──────────┘ └──────────────┘
@@ -770,12 +770,12 @@ let restored = Generator::from_pickle_payload(payload)?;
 | `fnp-linalg` | 225 | Decompositions, solvers, norms, 16 NumPy oracle tests, extreme-scale regression, non-finite parity |
 | `fnp-random` | 191 | 40 oracle-verified distributions, seeding, reproducibility, large-n binomial/multinomial |
 | `fnp-io` | 176 | NPY/NPZ read/write, text formats, compression, 7 format oracle tests, genfromtxt_full, fromfile_text/tofile_text |
-| `fnp-dtype` | 117 | Dtype taxonomy, promotion table, cast policy primitives, NumPy byte-width parsing |
+| `fnp-dtype` | 123 | Dtype taxonomy, promotion table (all 324 pairs explicit), cast policy primitives, NumPy byte-width parsing |
 | `fnp-conformance` | 134 | Differential parity, metamorphic identities, adversarial fuzzing, witness stability, matmul conformance, oracle NaN fallback |
-| `fnp-ndarray` | 55 | Shape legality, stride calculus, broadcast contracts, overlap detection, multi-axis negative strides |
+| `fnp-ndarray` | 87 | Shape legality, stride calculus, broadcast contracts, overlap detection, multi-axis negative strides, F-order, edge cases |
 | `fnp-iter` | 103 | Transfer-loop selector, NDIter traversal/broadcast/overlap contracts, flatiter indexing/assignment, ndindex/ndenumerate iterators |
 | `fnp-runtime` | 54 | Mode split, fail-closed decoding, override-audit gate, Bayesian decision engine, evidence ledger |
-| **Total** | **2,707** | **All passing in workspace** |
+| **Total** | **2,754** | **All passing in workspace** |
 
 ### Oracle Test Strategy
 

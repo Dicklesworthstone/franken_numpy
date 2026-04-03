@@ -886,7 +886,7 @@ pub enum GridSpec {
 }
 
 impl GridSpec {
-    /// Generate the 1-D values for this spec and return `(values, count)`.
+    /// Generate the 1-D values for this spec.
     fn generate(&self) -> Vec<f64> {
         match *self {
             Self::Arange { start, stop, step } => {
@@ -9509,12 +9509,12 @@ impl UFuncArray {
                 self.values.len()
             )));
         }
-        if vals.is_empty() {
-            return Err(UFuncError::Msg("place: vals must not be empty".to_string()));
-        }
         let mut vi = 0;
         for (i, &m) in mask.values.iter().enumerate() {
             if m != 0.0 {
+                if vals.is_empty() {
+                    return Err(UFuncError::Msg("place: vals must not be empty".to_string()));
+                }
                 let value = vals[vi % vals.len()];
                 self.values[i] = value;
                 self.write_integer_mutation(i, value, None, i, "place")?;
@@ -11374,8 +11374,8 @@ impl UFuncArray {
 
         let mut counts = vec![0.0f64; bins];
         for (i, &v) in self.values.iter().enumerate() {
-            if v < lo || v > hi {
-                continue; // outside range
+            if !(v >= lo && v <= hi) {
+                continue; // outside range or NaN
             }
             let idx = ((v - lo) / width) as usize;
             let idx = idx.min(bins - 1);
@@ -11502,6 +11502,11 @@ impl UFuncArray {
         }
         let mut max_val = 0usize;
         for &v in &self.values {
+            if !v.is_finite() {
+                return Err(UFuncError::Msg(
+                    "bincount: input must be finite".to_string(),
+                ));
+            }
             if v < 0.0 {
                 return Err(UFuncError::Msg(
                     "bincount: input must be non-negative".to_string(),
@@ -11775,6 +11780,9 @@ impl UFuncArray {
             .values
             .iter()
             .map(|&v| {
+                if v.is_nan() {
+                    return if is_increasing { b.len() as f64 } else { 0.0 };
+                }
                 if is_increasing {
                     if right {
                         // right=true: intervals (bins[i-1], bins[i]]
@@ -14428,6 +14436,32 @@ impl UFuncArray {
         values.dedup_by(|lhs, rhs| Self::float_set_dedup_eq(*lhs, *rhs));
     }
 
+    fn float_axis_unique_eq(lhs: f64, rhs: f64) -> bool {
+        (lhs == 0.0 && rhs == 0.0) || lhs == rhs
+    }
+
+    fn float_axis_unique_slice_cmp(lhs: &[f64], rhs: &[f64]) -> std::cmp::Ordering {
+        lhs.iter()
+            .zip(rhs)
+            .map(|(x, y)| {
+                if *x == 0.0 && *y == 0.0 {
+                    std::cmp::Ordering::Equal
+                } else {
+                    nan_last_cmp(x, y)
+                }
+            })
+            .find(|ordering| !ordering.is_eq())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }
+
+    fn float_axis_unique_slice_eq(lhs: &[f64], rhs: &[f64]) -> bool {
+        lhs.len() == rhs.len()
+            && lhs
+                .iter()
+                .zip(rhs)
+                .all(|(x, y)| Self::float_axis_unique_eq(*x, *y))
+    }
+
     /// Return sorted unique elements along with optional index/inverse/counts arrays.
     ///
     /// Mimics `np.unique(return_index, return_inverse, return_counts)`.
@@ -14727,6 +14761,96 @@ impl UFuncArray {
             return Ok(self.clone());
         }
 
+        if self.dtype == DType::I64
+            && let Some(IntegerSidecar::I64(values)) = self.synthesized_integer_sidecar("unique_axis")?
+        {
+            let outer: usize = self.shape[..ax].iter().product();
+            let inner: usize = self.shape[ax + 1..].iter().product();
+            let mut slices: Vec<(Vec<i64>, usize)> = Vec::with_capacity(axis_len);
+            for a in 0..axis_len {
+                let mut slice_vals = Vec::with_capacity(outer * inner);
+                for o in 0..outer {
+                    for i in 0..inner {
+                        slice_vals.push(values[o * axis_len * inner + a * inner + i]);
+                    }
+                }
+                slices.push((slice_vals, a));
+            }
+
+            slices.sort_by(|a, b| a.0.cmp(&b.0));
+            slices.dedup_by(|a, b| a.0 == b.0);
+
+            let unique_count = slices.len();
+            let mut new_shape = self.shape.clone();
+            new_shape[ax] = unique_count;
+            let total = new_shape.iter().product::<usize>();
+            let mut out_values = vec![0.0; total];
+            let mut source_indices = vec![0; total];
+
+            for (new_a, (_, original_a)) in slices.iter().enumerate() {
+                for o in 0..outer {
+                    for i in 0..inner {
+                        let dst = o * unique_count * inner + new_a * inner + i;
+                        let src = o * axis_len * inner + original_a * inner + i;
+                        out_values[dst] = self.values[src];
+                        source_indices[dst] = src;
+                    }
+                }
+            }
+
+            return Ok(Self {
+                shape: new_shape,
+                values: out_values,
+                dtype: self.dtype,
+                integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
+            });
+        }
+
+        if self.dtype == DType::U64
+            && let Some(IntegerSidecar::U64(values)) = self.synthesized_integer_sidecar("unique_axis")?
+        {
+            let outer: usize = self.shape[..ax].iter().product();
+            let inner: usize = self.shape[ax + 1..].iter().product();
+            let mut slices: Vec<(Vec<u64>, usize)> = Vec::with_capacity(axis_len);
+            for a in 0..axis_len {
+                let mut slice_vals = Vec::with_capacity(outer * inner);
+                for o in 0..outer {
+                    for i in 0..inner {
+                        slice_vals.push(values[o * axis_len * inner + a * inner + i]);
+                    }
+                }
+                slices.push((slice_vals, a));
+            }
+
+            slices.sort_by(|a, b| a.0.cmp(&b.0));
+            slices.dedup_by(|a, b| a.0 == b.0);
+
+            let unique_count = slices.len();
+            let mut new_shape = self.shape.clone();
+            new_shape[ax] = unique_count;
+            let total = new_shape.iter().product::<usize>();
+            let mut out_values = vec![0.0; total];
+            let mut source_indices = vec![0; total];
+
+            for (new_a, (_, original_a)) in slices.iter().enumerate() {
+                for o in 0..outer {
+                    for i in 0..inner {
+                        let dst = o * unique_count * inner + new_a * inner + i;
+                        let src = o * axis_len * inner + original_a * inner + i;
+                        out_values[dst] = self.values[src];
+                        source_indices[dst] = src;
+                    }
+                }
+            }
+
+            return Ok(Self {
+                shape: new_shape,
+                values: out_values,
+                dtype: self.dtype,
+                integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
+            });
+        }
+
         // Collect each slice as a Vec<f64> for comparison
         let outer: usize = self.shape[..ax].iter().product();
         let inner: usize = self.shape[ax + 1..].iter().product();
@@ -14741,24 +14865,19 @@ impl UFuncArray {
             slices.push((slice_vals, a));
         }
 
-        // Sort by slice content
-        slices.sort_by(|a, b| {
-            a.0.iter()
-                .zip(&b.0)
-                .map(|(x, y)| x.total_cmp(y))
-                .find(|o| !o.is_eq())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        // Sort by slice content. Signed zeros compare equal here so stable sorting
+        // preserves the first original representative, matching NumPy.
+        slices.sort_by(|a, b| Self::float_axis_unique_slice_cmp(&a.0, &b.0));
 
-        // Deduplicate
-        slices.dedup_by(|a, b| a.0 == b.0);
+        // Deduplicate with signed-zero equivalence but NaN lane distinctness.
+        slices.dedup_by(|a, b| Self::float_axis_unique_slice_eq(&a.0, &b.0));
 
         let unique_count = slices.len();
         let mut new_shape = self.shape.clone();
         new_shape[ax] = unique_count;
         let total = new_shape.iter().product::<usize>();
         let mut values = vec![0.0; total];
-        let mut source_indices = Vec::with_capacity(total);
+        let mut source_indices = vec![0; total];
 
         for (new_a, (slice_vals, original_a)) in slices.iter().enumerate() {
             for o in 0..outer {
@@ -14766,7 +14885,7 @@ impl UFuncArray {
                     let dst = o * unique_count * inner + new_a * inner + i;
                     values[dst] = slice_vals[o * inner + i];
                     let src = o * axis_len * inner + original_a * inner + i;
-                    source_indices.push(src);
+                    source_indices[dst] = src;
                 }
             }
         }
@@ -16448,10 +16567,15 @@ impl UFuncArray {
     /// in `self` is replaced with the next value from `values` (cycling if
     /// `values` is shorter than the number of True entries).
     pub fn putmask(&mut self, mask: &Self, values: &Self) -> Result<(), UFuncError> {
+        if self.values.len() != mask.values.len() {
+            return Err(UFuncError::Msg(
+                "putmask: mask and data must be the same size".to_string(),
+            ));
+        }
         if values.values.is_empty() {
             return Ok(());
         }
-        let n = self.values.len().min(mask.values.len());
+        let n = self.values.len();
         let mut vi = 0;
         for i in 0..n {
             if mask.values[i] != 0.0 {
@@ -43174,6 +43298,60 @@ mod tests {
             r.to_storage().unwrap(),
             ArrayStorage::U64(vec![1, large, 7, 9])
         );
+    }
+
+    #[test]
+    fn unique_axis_rows_distinguish_large_u64_values_that_alias_in_f64() {
+        let large = 1_u64 << 53;
+        let a = UFuncArray::from_storage(
+            vec![2, 2],
+            ArrayStorage::U64(vec![large, 1, large + 1, 1]),
+        )
+        .unwrap();
+
+        let r = a.unique_axis(0).unwrap();
+
+        assert_eq!(r.shape(), &[2, 2]);
+        assert_eq!(
+            r.to_storage().unwrap(),
+            ArrayStorage::U64(vec![large, 1, large + 1, 1])
+        );
+    }
+
+    #[test]
+    fn unique_axis_cols_distinguish_large_i64_values_that_alias_in_f64() {
+        let large = 1_i64 << 53;
+        let a = UFuncArray::from_storage(
+            vec![2, 2],
+            ArrayStorage::I64(vec![large, large + 1, 7, 7]),
+        )
+        .unwrap();
+
+        let r = a.unique_axis(1).unwrap();
+
+        assert_eq!(r.shape(), &[2, 2]);
+        assert_eq!(
+            r.to_storage().unwrap(),
+            ArrayStorage::I64(vec![large, large + 1, 7, 7])
+        );
+    }
+
+    #[test]
+    fn unique_axis_rows_preserve_first_signed_zero_representative() {
+        let a = UFuncArray::new(vec![2, 2], vec![0.0, 1.0, -0.0, 1.0], DType::F64).unwrap();
+        let r = a.unique_axis(0).unwrap();
+        assert_eq!(r.values(), &[0.0, 1.0]);
+        assert_eq!(r.values()[0].to_bits(), 0.0f64.to_bits());
+    }
+
+    #[test]
+    fn unique_axis_cols_preserve_first_signed_zero_representative() {
+        let a = UFuncArray::new(vec![2, 3], vec![1.0, 0.0, -0.0, 2.0, 1.0, 1.0], DType::F64)
+            .unwrap();
+        let r = a.unique_axis(1).unwrap();
+        assert_eq!(r.shape(), &[2, 2]);
+        assert_eq!(r.values(), &[0.0, 1.0, 1.0, 2.0]);
+        assert_eq!(r.values()[0].to_bits(), 0.0f64.to_bits());
     }
 
     #[test]
