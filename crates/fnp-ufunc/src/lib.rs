@@ -15673,7 +15673,7 @@ impl UFuncArray {
                     .iter()
                     .copied()
                     .filter(|v| !v.is_nan())
-                    .reduce(f64::max)
+                    .reduce(|a, b| if a > b { a } else { b })
                     .unwrap_or(f64::NAN);
                 let shape = if keepdims {
                     vec![1; self.shape.len()]

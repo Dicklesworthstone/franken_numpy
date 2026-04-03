@@ -9309,11 +9309,17 @@ fn generate_rng_samples(
         Generator::from_pcg64_dxsm(case.seed).map_err(map_seedsequence_error_to_rng_suite)?;
     match case.distribution.as_str() {
         "random" => Ok(generator.random(draws)),
-        "uniform" => Ok(generator.uniform(case.param_a, case.param_b, draws)),
+        "uniform" => {
+            map_fallible_random_values(generator.uniform(case.param_a, case.param_b, draws))
+        }
         "standard_normal" => Ok(generator.standard_normal(draws)),
-        "normal" => Ok(generator.normal(case.param_a, case.param_b, draws)),
+        "normal" => {
+            map_fallible_random_values(generator.normal(case.param_a, case.param_b, draws))
+        }
         "standard_exponential" => Ok(generator.standard_exponential(draws)),
-        "exponential" => Ok(generator.exponential(case.param_a, draws)),
+        "exponential" => {
+            map_fallible_random_values(generator.exponential(case.param_a, draws))
+        }
         "standard_gamma" => {
             map_fallible_random_values(generator.standard_gamma(case.param_a, draws))
         }
@@ -9342,18 +9348,25 @@ fn generate_rng_samples(
             .geometric(case.param_a, draws)
             .map(|values| values.into_iter().map(|value| value as f64).collect())
             .map_err(map_random_error_to_rng_suite),
-        "lognormal" => Ok(generator.lognormal(case.param_a, case.param_b, draws)),
+        "lognormal" => {
+            map_fallible_random_values(generator.lognormal(case.param_a, case.param_b, draws))
+        }
         "chisquare" => map_fallible_random_values(generator.chisquare(case.param_a, draws)),
         "standard_cauchy" => Ok(generator.standard_cauchy(draws)),
-        "triangular" => Ok(generator.triangular(case.param_a, case.param_b, case.param_c, draws)),
-        "laplace" => Ok(generator.laplace(case.param_a, case.param_b, draws)),
-        "gumbel" => Ok(generator.gumbel(case.param_a, case.param_b, draws)),
+        "triangular" => map_fallible_random_values(
+            generator.triangular(case.param_a, case.param_b, case.param_c, draws),
+        ),
+        "laplace" => {
+            map_fallible_random_values(generator.laplace(case.param_a, case.param_b, draws))
+        }
+        "gumbel" => {
+            map_fallible_random_values(generator.gumbel(case.param_a, case.param_b, draws))
+        }
         "weibull" => map_fallible_random_values(generator.weibull(case.param_a, draws)),
-        "negative_binomial" => Ok(generator
+        "negative_binomial" => generator
             .negative_binomial(case.param_a, case.param_b, draws)
-            .into_iter()
-            .map(|value| value as f64)
-            .collect()),
+            .map(|values| values.into_iter().map(|value| value as f64).collect())
+            .map_err(map_random_error_to_rng_suite),
         "f_distribution" => {
             map_fallible_random_values(generator.f_distribution(case.param_a, case.param_b, draws))
         }
@@ -9369,9 +9382,11 @@ fn generate_rng_samples(
             case.param_c,
             draws,
         )),
-        "power" => Ok(generator.power(case.param_a, draws)),
-        "vonmises" => Ok(generator.vonmises(case.param_a, case.param_b, draws)),
-        "rayleigh" => Ok(generator.rayleigh(case.param_a, draws)),
+        "power" => map_fallible_random_values(generator.power(case.param_a, draws)),
+        "vonmises" => {
+            map_fallible_random_values(generator.vonmises(case.param_a, case.param_b, draws))
+        }
+        "rayleigh" => map_fallible_random_values(generator.rayleigh(case.param_a, draws)),
         "pareto" => map_fallible_random_values(generator.pareto(case.param_a, draws)),
         "logistic" => {
             map_fallible_random_values(generator.logistic(case.param_a, case.param_b, draws))
@@ -11178,7 +11193,7 @@ mod tests {
         );
         check_seq!(
             "uniform(0,10)",
-            |g: &mut Generator| g.uniform(0.0, 10.0, 5),
+            |g: &mut Generator| g.uniform(0.0, 10.0, 5).unwrap(),
             [
                 9.32081690319876266e0,
                 3.37505601117676779e0,
@@ -11200,7 +11215,7 @@ mod tests {
         );
         check_seq!(
             "normal(5,2)",
-            |g: &mut Generator| g.normal(5.0, 2.0, 5),
+            |g: &mut Generator| g.normal(5.0, 2.0, 5).unwrap(),
             [
                 6.29794119144017372e0,
                 7.17816699844268946e0,
@@ -11222,7 +11237,7 @@ mod tests {
         );
         check_seq!(
             "exponential(2)",
-            |g: &mut Generator| g.exponential(2.0, 5),
+            |g: &mut Generator| g.exponential(2.0, 5).unwrap(),
             [
                 3.42806963240442419e0,
                 2.60971466095836990e-1,
@@ -11277,7 +11292,7 @@ mod tests {
         );
         check_seq!(
             "lognormal(0,1)",
-            |g: &mut Generator| g.lognormal(0.0, 1.0, 5),
+            |g: &mut Generator| g.lognormal(0.0, 1.0, 5).unwrap(),
             [
                 1.91356997766160775e0,
                 2.97154939683406250e0,
@@ -11299,7 +11314,7 @@ mod tests {
         );
         check_seq!(
             "triangular(0,5,10)",
-            |g: &mut Generator| g.triangular(0.0, 5.0, 10.0, 5),
+            |g: &mut Generator| g.triangular(0.0, 5.0, 10.0, 5).unwrap(),
             [
                 8.15719901128575842e0,
                 4.10795326846397302e0,
@@ -11310,7 +11325,7 @@ mod tests {
         );
         check_seq!(
             "laplace(0,1)",
-            |g: &mut Generator| g.laplace(0.0, 1.0, 5),
+            |g: &mut Generator| g.laplace(0.0, 1.0, 5).unwrap(),
             [
                 1.99630244365275855e0,
                 -3.93025992343090158e-1,
@@ -11321,7 +11336,7 @@ mod tests {
         );
         check_seq!(
             "gumbel(0,1)",
-            |g: &mut Generator| g.gumbel(0.0, 1.0, 5),
+            |g: &mut Generator| g.gumbel(0.0, 1.0, 5).unwrap(),
             [
                 -9.89336572015754090e-1,
                 8.87355484014991536e-1,
@@ -11365,7 +11380,7 @@ mod tests {
         );
         check_seq!(
             "power(3)",
-            |g: &mut Generator| g.power(3.0, 5),
+            |g: &mut Generator| g.power(3.0, 5).unwrap(),
             [
                 9.35937841864501463e-1,
                 4.96415680680427018e-1,
@@ -11376,7 +11391,7 @@ mod tests {
         );
         check_seq!(
             "vonmises(0,2)",
-            |g: &mut Generator| g.vonmises(0.0, 2.0, 5),
+            |g: &mut Generator| g.vonmises(0.0, 2.0, 5).unwrap(),
             [
                 2.47613248673183906e-1,
                 -3.58286679084546367e-1,
@@ -11387,7 +11402,7 @@ mod tests {
         );
         check_seq!(
             "rayleigh(1)",
-            |g: &mut Generator| g.rayleigh(1.0, 5),
+            |g: &mut Generator| g.rayleigh(1.0, 5).unwrap(),
             [
                 1.85150469413513075e0,
                 5.10853664072048130e-1,
@@ -11573,7 +11588,7 @@ mod tests {
 
         // negative_binomial(n=5, p=0.3)
         let mut g = Generator::from_pcg64_dxsm(SEED).unwrap();
-        let neg_bin = g.negative_binomial(5.0, 0.3, 5);
+        let neg_bin = g.negative_binomial(5.0, 0.3, 5).unwrap();
         assert_eq!(
             neg_bin,
             vec![11, 8, 12, 14, 8],

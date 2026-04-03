@@ -2474,10 +2474,17 @@ impl Generator {
     /// Generate uniform random floats in `[low, high)`.
     ///
     /// Mimics `rng.uniform(low, high, size)`.
-    #[must_use]
-    pub fn uniform(&mut self, low: f64, high: f64, size: usize) -> Vec<f64> {
+    ///
+    /// NumPy requires `high >= low` and both to be finite.
+    pub fn uniform(&mut self, low: f64, high: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if !low.is_finite() || !high.is_finite() {
+            return Err(RandomError::InvalidParameter);
+        }
+        if high < low {
+            return Err(RandomError::InvalidParameter);
+        }
         let range = high - low;
-        (0..size).map(|_| low + self.next_f64() * range).collect()
+        Ok((0..size).map(|_| low + self.next_f64() * range).collect())
     }
 
     /// Generate random integers in `[low, high)`.
@@ -2541,22 +2548,31 @@ impl Generator {
     /// Generate normal (Gaussian) samples with given mean and standard deviation.
     ///
     /// Mimics `rng.normal(loc, scale, size)`.
-    #[must_use]
-    pub fn normal(&mut self, loc: f64, scale: f64, size: usize) -> Vec<f64> {
-        self.standard_normal(size)
+    ///
+    /// NumPy requires `scale >= 0`.
+    pub fn normal(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if scale < 0.0 || scale.is_nan() {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok(self
+            .standard_normal(size)
             .into_iter()
             .map(|z| loc + scale * z)
-            .collect()
+            .collect())
     }
 
     /// Generate exponentially distributed samples.
     ///
     /// Mimics `rng.exponential(scale, size)`.
-    #[must_use]
-    pub fn exponential(&mut self, scale: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    ///
+    /// NumPy requires `scale >= 0`.
+    pub fn exponential(&mut self, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if scale < 0.0 || scale.is_nan() {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| scale * self.sample_ziggurat_exponential())
-            .collect()
+            .collect())
     }
 
     /// Generate standard exponential samples (scale=1).
@@ -2677,9 +2693,8 @@ impl Generator {
     /// Mimics `rng.binomial(n, p, size)`.
     /// Uses NumPy's exact algorithm: BTPE (Kachitvichyanukul & Schmeiser 1988)
     /// for large `min(p,q)*n`, inversion for small `min(p,q)*n <= 30`.
-    #[must_use]
     pub fn binomial(&mut self, n: u64, p: f64, size: usize) -> Result<Vec<u64>, RandomError> {
-        if p < 0.0 || p > 1.0 || p.is_nan() {
+        if !(0.0..=1.0).contains(&p) || p.is_nan() {
             return Err(RandomError::InvalidParameter);
         }
         // Precompute cached BTPE/inversion parameters (shared across all samples)
@@ -3041,7 +3056,10 @@ impl Generator {
         scale: f64,
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
-        if shape_param <= 0.0 {
+        if shape_param <= 0.0 || shape_param.is_nan() {
+            return Err(RandomError::InvalidParameter);
+        }
+        if scale <= 0.0 || scale.is_nan() {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -3223,13 +3241,16 @@ impl Generator {
     }
 
     /// Log-normal distribution.
-    pub fn lognormal(&mut self, mean: f64, sigma: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    pub fn lognormal(&mut self, mean: f64, sigma: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if sigma < 0.0 || sigma.is_nan() {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| {
                 let z = self.sample_standard_normal_single();
                 (mean + sigma * z).exp()
             })
-            .collect()
+            .collect())
     }
 
     /// Chi-squared distribution with df degrees of freedom.
@@ -3250,13 +3271,27 @@ impl Generator {
     }
 
     /// Triangular distribution (matching NumPy's exact formula).
-    pub fn triangular(&mut self, left: f64, mode: f64, right: f64, size: usize) -> Vec<f64> {
+    ///
+    /// NumPy requires `left <= mode <= right` and `left < right`.
+    pub fn triangular(
+        &mut self,
+        left: f64,
+        mode: f64,
+        right: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, RandomError> {
+        if left > mode || mode > right || left >= right {
+            return Err(RandomError::InvalidParameter);
+        }
+        if !left.is_finite() || !mode.is_finite() || !right.is_finite() {
+            return Err(RandomError::InvalidParameter);
+        }
         let base = right - left;
         let leftbase = mode - left;
         let ratio = leftbase / base;
         let leftprod = leftbase * base;
         let rightprod = (right - mode) * base;
-        (0..size)
+        Ok((0..size)
             .map(|_| {
                 let u = self.next_f64();
                 if u <= ratio {
@@ -3265,12 +3300,17 @@ impl Generator {
                     right - ((1.0 - u) * rightprod).sqrt()
                 }
             })
-            .collect()
+            .collect())
     }
 
     /// Laplace (double exponential) distribution (matching NumPy's algorithm).
-    pub fn laplace(&mut self, loc: f64, scale: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    ///
+    /// NumPy requires `scale >= 0`.
+    pub fn laplace(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if scale < 0.0 || scale.is_nan() {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| {
                 loop {
                     let u = self.next_f64();
@@ -3279,25 +3319,28 @@ impl Generator {
                     } else if u > 0.0 {
                         return loc + scale * (u + u).ln();
                     }
-                    // u == 0.0: retry (matches NumPy's recursive call)
                 }
             })
-            .collect()
+            .collect())
     }
 
     /// Gumbel distribution (matching NumPy: uses 1-u to avoid log(0)).
-    pub fn gumbel(&mut self, loc: f64, scale: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    ///
+    /// NumPy requires `scale >= 0`.
+    pub fn gumbel(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if scale < 0.0 || scale.is_nan() {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| {
                 loop {
                     let u = 1.0 - self.next_f64();
                     if u < 1.0 {
                         return loc - scale * (-u.ln()).ln();
                     }
-                    // u == 1.0 (i.e., next_f64 returned 0.0): retry
                 }
             })
-            .collect()
+            .collect())
     }
 
     /// Weibull distribution (matching NumPy: uses standard_exponential).
@@ -3386,13 +3429,24 @@ impl Generator {
     ///
     /// Uses gamma-Poisson mixture matching NumPy's `random_negative_binomial`:
     /// `Y = gamma(n, (1-p)/p); return poisson(Y)`.
-    pub fn negative_binomial(&mut self, n: f64, p: f64, size: usize) -> Vec<u64> {
-        (0..size)
+    /// Negative binomial distribution.
+    ///
+    /// NumPy requires `n > 0` and `0 < p <= 1`.
+    pub fn negative_binomial(
+        &mut self,
+        n: f64,
+        p: f64,
+        size: usize,
+    ) -> Result<Vec<u64>, RandomError> {
+        if n <= 0.0 || n.is_nan() || p.is_nan() || p <= 0.0 || p > 1.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| {
                 let y = self.sample_gamma(n) * (1.0 - p) / p;
                 self.sample_poisson_single(y)
             })
-            .collect()
+            .collect())
     }
 
     /// F-distribution (Fisher-Snedecor).  Ratio of two scaled chi-squared
@@ -3573,14 +3627,25 @@ impl Generator {
     }
 
     /// Power distribution (matching NumPy: uses standard_exponential).
-    pub fn power(&mut self, a: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    ///
+    /// NumPy requires `a > 0`.
+    pub fn power(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if a <= 0.0 || a.is_nan() {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| (-(-self.sample_ziggurat_exponential()).exp_m1()).powf(1.0 / a))
-            .collect()
+            .collect())
     }
 
     /// Von Mises circular distribution (Best-Fisher algorithm).
-    pub fn vonmises(&mut self, mu: f64, kappa: f64, size: usize) -> Vec<f64> {
+    ///
+    /// NumPy requires `kappa >= 0`.
+    pub fn vonmises(&mut self, mu: f64, kappa: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if kappa < 0.0 || kappa.is_nan() {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok(
         (0..size)
             .map(|_| {
                 if kappa < 1e-6 {
@@ -3602,14 +3667,19 @@ impl Generator {
                     }
                 }
             })
-            .collect()
+            .collect())
     }
 
     /// Rayleigh distribution (matching NumPy: uses standard_exponential).
-    pub fn rayleigh(&mut self, scale: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    ///
+    /// NumPy requires `scale >= 0`.
+    pub fn rayleigh(&mut self, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if scale < 0.0 || scale.is_nan() {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| scale * (2.0 * self.sample_ziggurat_exponential()).sqrt())
-            .collect()
+            .collect())
     }
 
     /// Pareto distribution (matching NumPy: uses expm1 of standard_exponential).
@@ -5027,7 +5097,7 @@ mod tests {
     #[test]
     fn uniform_in_range() {
         let mut rng = test_generator();
-        let vals = rng.uniform(2.0, 5.0, 100);
+        let vals = rng.uniform(2.0, 5.0, 100).unwrap();
         assert_eq!(vals.len(), 100);
         assert!(vals.iter().all(|&v| (2.0..5.0).contains(&v)));
     }
@@ -5059,7 +5129,7 @@ mod tests {
     #[test]
     fn normal_shifted() {
         let mut rng = test_generator();
-        let vals = rng.normal(100.0, 1.0, 10000);
+        let vals = rng.normal(100.0, 1.0, 10000).unwrap();
         let mean: f64 = vals.iter().sum::<f64>() / vals.len() as f64;
         assert!((mean - 100.0).abs() < 0.5, "mean was {mean}");
     }
@@ -5067,7 +5137,7 @@ mod tests {
     #[test]
     fn exponential_positive() {
         let mut rng = test_generator();
-        let vals = rng.exponential(1.0, 100);
+        let vals = rng.exponential(1.0, 100).unwrap();
         assert_eq!(vals.len(), 100);
         assert!(vals.iter().all(|&v| v > 0.0));
     }
@@ -5215,7 +5285,7 @@ mod tests {
     #[test]
     fn lognormal_basic() {
         let mut rng = test_generator();
-        let samples = rng.lognormal(0.0, 1.0, 1000);
+        let samples = rng.lognormal(0.0, 1.0, 1000).unwrap();
         assert_eq!(samples.len(), 1000);
         assert!(samples.iter().all(|&v| v > 0.0));
     }
@@ -5240,7 +5310,7 @@ mod tests {
     #[test]
     fn triangular_basic() {
         let mut rng = test_generator();
-        let samples = rng.triangular(0.0, 5.0, 10.0, 1000);
+        let samples = rng.triangular(0.0, 5.0, 10.0, 1000).unwrap();
         assert!(samples.iter().all(|&v| (0.0..=10.0).contains(&v)));
         let mean: f64 = samples.iter().sum::<f64>() / 1000.0;
         // E[tri(a,c,b)] = (a+b+c)/3 = (0+5+10)/3 = 5.0
@@ -5250,7 +5320,7 @@ mod tests {
     #[test]
     fn laplace_basic() {
         let mut rng = test_generator();
-        let samples = rng.laplace(0.0, 1.0, 1000);
+        let samples = rng.laplace(0.0, 1.0, 1000).unwrap();
         let mean: f64 = samples.iter().sum::<f64>() / 1000.0;
         assert!(mean.abs() < 0.3);
     }
@@ -5258,7 +5328,7 @@ mod tests {
     #[test]
     fn gumbel_basic() {
         let mut rng = test_generator();
-        let samples = rng.gumbel(0.0, 1.0, 100);
+        let samples = rng.gumbel(0.0, 1.0, 100).unwrap();
         assert_eq!(samples.len(), 100);
     }
 
@@ -5329,7 +5399,7 @@ mod tests {
     #[test]
     fn negative_binomial_basic() {
         let mut rng = test_generator();
-        let samples = rng.negative_binomial(5.0, 0.5, 100);
+        let samples = rng.negative_binomial(5.0, 0.5, 100).unwrap();
         assert_eq!(samples.len(), 100);
     }
 
@@ -5354,7 +5424,7 @@ mod tests {
     #[test]
     fn power_values_in_unit_interval() {
         let mut rng = test_generator();
-        let samples = rng.power(2.0, 1000);
+        let samples = rng.power(2.0, 1000).unwrap();
         assert!(samples.iter().all(|&v| (0.0..1.0).contains(&v)));
     }
 
@@ -5362,7 +5432,7 @@ mod tests {
     fn vonmises_centered_on_mu() {
         let mut rng = test_generator();
         let mu = 1.5;
-        let samples = rng.vonmises(mu, 5.0, 5000);
+        let samples = rng.vonmises(mu, 5.0, 5000).unwrap();
         let mean: f64 = samples.iter().sum::<f64>() / 5000.0;
         assert!((mean - mu).abs() < 0.2, "vonmises mean={mean}");
     }
@@ -5371,7 +5441,7 @@ mod tests {
     fn rayleigh_positive_and_expected_mean() {
         let mut rng = test_generator();
         let scale = 2.0;
-        let samples = rng.rayleigh(scale, 5000);
+        let samples = rng.rayleigh(scale, 5000).unwrap();
         assert!(samples.iter().all(|&v| v > 0.0));
         let mean: f64 = samples.iter().sum::<f64>() / 5000.0;
         let expected = scale * (std::f64::consts::FRAC_PI_2).sqrt();
@@ -6340,7 +6410,7 @@ mod tests {
     #[test]
     fn oracle_uniform() {
         let mut g = oracle_gen();
-        let vals = g.uniform(2.0, 5.0, 10);
+        let vals = g.uniform(2.0, 5.0, 10).unwrap();
         let expected = [
             4.796245070959629,
             3.0125168033530305,
@@ -6378,7 +6448,7 @@ mod tests {
     #[test]
     fn oracle_normal() {
         let mut g = oracle_gen();
-        let vals = g.normal(5.0, 2.0, 10);
+        let vals = g.normal(5.0, 2.0, 10).unwrap();
         let expected = [
             6.297941191440174,
             7.1781669984426895,
@@ -6416,7 +6486,7 @@ mod tests {
     #[test]
     fn oracle_exponential() {
         let mut g = oracle_gen();
-        let vals = g.exponential(2.5, 10);
+        let vals = g.exponential(2.5, 10).unwrap();
         let expected = [
             4.28508704050553,
             0.32621433261979627,
@@ -6443,7 +6513,7 @@ mod tests {
     #[test]
     fn oracle_laplace() {
         let mut g = oracle_gen();
-        let vals = g.laplace(0.0, 1.0, 10);
+        let vals = g.laplace(0.0, 1.0, 10).unwrap();
         let expected = [
             1.9963024436527586,
             -0.39302599234309016,
@@ -6462,7 +6532,7 @@ mod tests {
     #[test]
     fn oracle_gumbel() {
         let mut g = oracle_gen();
-        let vals = g.gumbel(0.0, 1.0, 10);
+        let vals = g.gumbel(0.0, 1.0, 10).unwrap();
         let expected = [
             -0.9893365720157541,
             0.8873554840149915,
@@ -6500,7 +6570,7 @@ mod tests {
     #[test]
     fn oracle_lognormal() {
         let mut g = oracle_gen();
-        let vals = g.lognormal(0.0, 1.0, 10);
+        let vals = g.lognormal(0.0, 1.0, 10).unwrap();
         let expected = [
             1.9135699776616077,
             2.9715493968340625,
@@ -6538,7 +6608,7 @@ mod tests {
     #[test]
     fn oracle_rayleigh() {
         let mut g = oracle_gen();
-        let vals = g.rayleigh(1.0, 10);
+        let vals = g.rayleigh(1.0, 10).unwrap();
         let expected = [
             1.8515046941351307,
             0.5108536640720481,
@@ -6576,7 +6646,7 @@ mod tests {
     #[test]
     fn oracle_power() {
         let mut g = oracle_gen();
-        let vals = g.power(5.0, 10);
+        let vals = g.power(5.0, 10).unwrap();
         let expected = [
             0.9610549152494955,
             0.6569121505771804,
@@ -6595,7 +6665,7 @@ mod tests {
     #[test]
     fn oracle_triangular() {
         let mut g = oracle_gen();
-        let vals = g.triangular(-1.0, 0.0, 1.0, 10);
+        let vals = g.triangular(-1.0, 0.0, 1.0, 10).unwrap();
         let expected = [
             0.6314398022571518,
             -0.1784093463072054,
@@ -6815,7 +6885,7 @@ mod tests {
     #[test]
     fn oracle_vonmises() {
         let mut g = oracle_gen();
-        let vals = g.vonmises(0.0, 4.0, 10);
+        let vals = g.vonmises(0.0, 4.0, 10).unwrap();
         let expected = [
             0.1765341139961678,
             -0.25614490477469687,
@@ -6843,7 +6913,7 @@ mod tests {
     #[test]
     fn oracle_negative_binomial() {
         let mut g = oracle_gen();
-        let vals = g.negative_binomial(5.0, 0.5, 10);
+        let vals = g.negative_binomial(5.0, 0.5, 10).unwrap();
         let expected: Vec<u64> = vec![7, 2, 9, 2, 8, 8, 2, 2, 8, 3];
         assert_u64_seq("negative_binomial", &vals, &expected);
     }
@@ -6852,7 +6922,7 @@ mod tests {
     fn oracle_negative_binomial_large_n() {
         // Large n produces gamma values that trigger PTRS Poisson path (lam >= 10)
         let mut g = oracle_gen();
-        let vals = g.negative_binomial(50.0, 0.3, 5);
+        let vals = g.negative_binomial(50.0, 0.3, 5).unwrap();
         let expected: Vec<u64> = vec![117, 124, 101, 100, 191];
         assert_u64_seq("negative_binomial_large_n", &vals, &expected);
     }

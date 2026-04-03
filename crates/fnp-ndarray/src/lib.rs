@@ -452,7 +452,9 @@ impl NdLayout {
         if self.shape.contains(&0) {
             return true;
         }
-        let mut expected_stride = isize::try_from(self.item_size).unwrap_or(isize::MAX);
+        let Ok(mut expected_stride) = isize::try_from(self.item_size) else {
+            return false;
+        };
         for (&dim, &stride) in self.shape.iter().zip(&self.strides) {
             if dim == 1 {
                 continue;
@@ -460,8 +462,13 @@ impl NdLayout {
             if stride != expected_stride {
                 return false;
             }
-            let dim_isize = isize::try_from(dim).unwrap_or(isize::MAX);
-            expected_stride = expected_stride.checked_mul(dim_isize).unwrap_or(isize::MAX);
+            let Ok(dim_isize) = isize::try_from(dim) else {
+                return false;
+            };
+            let Some(next_stride) = expected_stride.checked_mul(dim_isize) else {
+                return false;
+            };
+            expected_stride = next_stride;
         }
         true
     }
