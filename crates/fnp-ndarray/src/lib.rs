@@ -430,13 +430,8 @@ impl NdLayout {
             if stride != expected_stride {
                 return false;
             }
-            let Ok(dim_isize) = isize::try_from(dim) else {
-                return false;
-            };
-            let Some(next) = expected_stride.checked_mul(dim_isize) else {
-                return false;
-            };
-            expected_stride = next;
+            let dim_isize = isize::try_from(dim).unwrap_or(isize::MAX);
+            expected_stride = expected_stride.checked_mul(dim_isize).unwrap_or(isize::MAX);
         }
         true
     }
@@ -465,13 +460,8 @@ impl NdLayout {
             if stride != expected_stride {
                 return false;
             }
-            let Ok(dim_isize) = isize::try_from(dim) else {
-                return false;
-            };
-            let Some(next) = expected_stride.checked_mul(dim_isize) else {
-                return false;
-            };
-            expected_stride = next;
+            let dim_isize = isize::try_from(dim).unwrap_or(isize::MAX);
+            expected_stride = expected_stride.checked_mul(dim_isize).unwrap_or(isize::MAX);
         }
         true
     }
@@ -1308,9 +1298,9 @@ mod tests {
     }
 
     #[test]
-    fn fix_unknown_dim_empty_shape() {
-        // 0 elements → reshape(0, -1) — allowed with 0 elements
-        // Actually, known_product = 0 so this should fail
+    fn fix_unknown_dim_zero_with_unknown_fails() {
+        // reshape(0, -1) with 0 elements: known_product = 0, so the -1
+        // dimension cannot be inferred (division by zero). This must error.
         assert!(fix_unknown_dimension(&[0, -1], 0).is_err());
     }
 

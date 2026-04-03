@@ -2772,7 +2772,7 @@ impl UFuncArray {
         // For I64/U64 with values exceeding f64 exact range, preserve the
         // originals in a sidecar so `to_storage()` can round-trip losslessly.
         let integer_sidecar = match &storage {
-            ArrayStorage::I64(values) if values.iter().any(|v| v.abs() > MAX_EXACT_F64_I64) => {
+            ArrayStorage::I64(values) if values.iter().any(|v| v.unsigned_abs() > MAX_EXACT_F64_U64) => {
                 Some(IntegerSidecar::I64(values.clone()))
             }
             ArrayStorage::U64(values) if values.iter().any(|v| *v > MAX_EXACT_F64_U64) => {
@@ -2797,12 +2797,16 @@ impl UFuncArray {
     ) -> Result<Self, UFuncError> {
         ensure_bridge_dtype_supported(dtype, "from_storage_with_dtype")?;
 
-        // If source and target dtype match for I64/U64, route through
-        // from_storage to preserve the integer sidecar.
-        if storage.dtype() == dtype {
+        let is_storage_compatible = storage.dtype() == dtype
+            || (matches!(storage, ArrayStorage::I64(_))
+                && matches!(dtype, DType::DateTime64 | DType::TimeDelta64));
+
+        if is_storage_compatible {
             match &storage {
                 ArrayStorage::I64(_) | ArrayStorage::U64(_) => {
-                    return Self::from_storage(shape, storage);
+                    let mut arr = Self::from_storage(shape, storage)?;
+                    arr.dtype = dtype;
+                    return Ok(arr);
                 }
                 _ => {}
             }
@@ -10494,6 +10498,58 @@ impl UFuncArray {
         if self.values.is_empty() {
             return Err(UFuncError::Msg("mode: empty array".to_string()));
         }
+        if self.dtype == DType::I64
+            && let Some(IntegerSidecar::I64(mut values)) = self.synthesized_integer_sidecar("mode")?
+        {
+            values.sort_unstable();
+            let mut best_val = values[0];
+            let mut best_count = 1_usize;
+            let mut cur_val = values[0];
+            let mut cur_count = 1_usize;
+            for &v in &values[1..] {
+                if v == cur_val {
+                    cur_count += 1;
+                } else {
+                    if cur_count > best_count {
+                        best_val = cur_val;
+                        best_count = cur_count;
+                    }
+                    cur_val = v;
+                    cur_count = 1;
+                }
+            }
+            if cur_count > best_count {
+                best_val = cur_val;
+                best_count = cur_count;
+            }
+            return Ok((best_val as f64, best_count));
+        }
+        if self.dtype == DType::U64
+            && let Some(IntegerSidecar::U64(mut values)) = self.synthesized_integer_sidecar("mode")?
+        {
+            values.sort_unstable();
+            let mut best_val = values[0];
+            let mut best_count = 1_usize;
+            let mut cur_val = values[0];
+            let mut cur_count = 1_usize;
+            for &v in &values[1..] {
+                if v == cur_val {
+                    cur_count += 1;
+                } else {
+                    if cur_count > best_count {
+                        best_val = cur_val;
+                        best_count = cur_count;
+                    }
+                    cur_val = v;
+                    cur_count = 1;
+                }
+            }
+            if cur_count > best_count {
+                best_val = cur_val;
+                best_count = cur_count;
+            }
+            return Ok((best_val as f64, best_count));
+        }
         let mut sorted = self.values.clone();
         sorted.sort_by(nan_last_cmp);
         let mut best_val = sorted[0];
@@ -10501,7 +10557,7 @@ impl UFuncArray {
         let mut cur_val = sorted[0];
         let mut cur_count = 1_usize;
         for &v in &sorted[1..] {
-            if (v - cur_val).abs() < f64::EPSILON {
+            if Self::float_set_dedup_eq(v, cur_val) {
                 cur_count += 1;
             } else {
                 if cur_count > best_count {
@@ -18347,7 +18403,6 @@ fn c_strides_elems(shape: &[usize]) -> Vec<usize> {
     strides
 }
 
-const MAX_EXACT_F64_I64: i64 = 9_007_199_254_740_992;
 const MAX_EXACT_F64_U64: u64 = 9_007_199_254_740_992;
 const MAX_EXACT_F64_INTEGER: f64 = 9_007_199_254_740_992.0;
 
@@ -18417,7 +18472,7 @@ fn ensure_storage_bridge_input_supported(
                 .iter()
                 .copied()
                 .enumerate()
-                .find(|(_, value)| value.abs() > MAX_EXACT_F64_I64)
+                .find(|(_, value)| value.unsigned_abs() > MAX_EXACT_F64_U64)
             {
                 return Err(UFuncError::Msg(format!(
                     "{context}: i64 value at index {index} ({value}) exceeds exact f64 bridge range"
@@ -20105,6 +20160,9 @@ fn parse_datetime_string_to_ticks(raw: &str, unit: DateTimeUnit) -> Result<i64, 
     if trimmed.is_empty() {
         return Err("value must not be empty".to_string());
     }
+    if trimmed == "NaT" {
+        return Ok(i64::MIN);
+    }
     let (date_part, time_part) = trimmed
         .split_once('T')
         .or_else(|| trimmed.split_once(' '))
@@ -20125,6 +20183,9 @@ fn parse_timedelta_string_to_ticks(raw: &str, unit: DateTimeUnit) -> Result<i64,
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("value must not be empty".to_string());
+    }
+    if trimmed == "NaT" {
+        return Ok(i64::MIN);
     }
     let (sign, body) = match trimmed.as_bytes()[0] {
         b'+' => (1_i128, &trimmed[1..]),
@@ -35659,6 +35720,47 @@ mod tests {
         let a = UFuncArray::new(vec![4], vec![1.0, 1.0, 2.0, 2.0], DType::F64).unwrap();
         let (val, count) = a.mode().unwrap();
         assert!((val - 1.0).abs() < 1e-10);
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn mode_distinguishes_adjacent_f64_values() {
+        let a = UFuncArray::new(
+            vec![3],
+            vec![1.0, f64::from_bits(1.0f64.to_bits() + 1), f64::from_bits(1.0f64.to_bits() + 1)],
+            DType::F64,
+        )
+        .unwrap();
+        let (val, count) = a.mode().unwrap();
+        assert_eq!(val.to_bits(), f64::from_bits(1.0f64.to_bits() + 1).to_bits());
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn mode_counts_repeated_nans_together() {
+        let a = UFuncArray::new(vec![3], vec![f64::NAN, 1.0, f64::NAN], DType::F64).unwrap();
+        let (val, count) = a.mode().unwrap();
+        assert!(val.is_nan());
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn mode_groups_signed_zeros_together() {
+        let a = UFuncArray::new(vec![3], vec![-0.0, 0.0, -0.0], DType::F64).unwrap();
+        let (val, count) = a.mode().unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(val.to_bits(), (-0.0f64).to_bits());
+    }
+
+    #[test]
+    fn mode_counts_large_u64_values_exactly_via_sidecar() {
+        let large = 1_u64 << 53;
+        let a = UFuncArray::from_storage(
+            vec![3],
+            ArrayStorage::U64(vec![large, large + 1, large + 1]),
+        )
+        .unwrap();
+        let (_val, count) = a.mode().unwrap();
         assert_eq!(count, 2);
     }
 

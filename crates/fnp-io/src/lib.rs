@@ -844,9 +844,18 @@ pub fn write_npy_bytes_with_version(
                 "payload bytes must align with dtype item size",
             ));
         }
-        let value_count = payload.len().checked_div(item_size).ok_or(
-            IOError::WriteContractViolation("payload bytes must align with dtype item size"),
-        )?;
+        let expected_count = element_count(&header.shape)
+            .map_err(|_| IOError::WriteContractViolation("shape exceeds element capacity"))?;
+        let value_count = if item_size == 0 {
+            if !payload.is_empty() {
+                return Err(IOError::WriteContractViolation(
+                    "payload bytes must align with dtype item size",
+                ));
+            }
+            expected_count
+        } else {
+            payload.len() / item_size
+        };
         let _ = validate_write_contract(&header.shape, value_count, header.descr)?;
     }
 
@@ -3185,7 +3194,16 @@ pub fn tofile_structured(
                 "structured column byte length must be an exact multiple of field item size",
             ));
         }
-        let col_records = columns[i].len() / item_size;
+        let col_records = if item_size == 0 {
+            if !columns[i].is_empty() {
+                return Err(IOError::WriteContractViolation(
+                    "structured column byte length must be 0 for zero-width field",
+                ));
+            }
+            n
+        } else {
+            columns[i].len() / item_size
+        };
         if col_records != n {
             return Err(IOError::WriteContractViolation(
                 "structured columns have inconsistent record counts",
