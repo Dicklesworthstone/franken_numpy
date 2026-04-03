@@ -440,6 +440,9 @@ version = "0.1.0"
 [[package]]
 name = "fnp-linalg"
 version = "0.1.0"
+dependencies = [
+ "fnp-ndarray",
+]
 
 [[package]]
 name = "fnp-ndarray"
@@ -448,6 +451,9 @@ version = "0.1.0"
 [[package]]
 name = "fnp-random"
 version = "0.1.0"
+dependencies = [
+ "fnp-ndarray",
+]
 
 [[package]]
 name = "fnp-runtime"

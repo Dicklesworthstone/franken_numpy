@@ -5,3 +5,4 @@ edition = "2024"
 license-file = "../../LICENSE"
 
 [dependencies]
+fnp-ndarray = { version = "0.1.0", path = "../fnp-ndarray" }

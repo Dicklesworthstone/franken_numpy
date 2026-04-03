@@ -1006,13 +1006,13 @@ pub fn tensorsolve(
 
     // x_shape is the trailing dims of a after b_shape
     let x_shape = &a_shape[b_ndim..];
-    let n: usize = b_shape.iter().product();
+    let n: usize = fnp_ndarray::element_count(b_shape).map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?;
     if b_data.len() != n {
         return Err(LinAlgError::ShapeContractViolation(
             "tensorsolve: b_data length must equal product of b_shape",
         ));
     }
-    let m: usize = x_shape.iter().product(); // product of x_shape
+    let m: usize = fnp_ndarray::element_count(x_shape).map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?; // product of x_shape
 
     if n != m {
         return Err(LinAlgError::ShapeContractViolation(
@@ -1047,8 +1047,8 @@ pub fn tensorinv(
     }
     let output_shape = &a_shape[..ind];
     let input_shape = &a_shape[ind..];
-    let n: usize = output_shape.iter().product();
-    let m: usize = input_shape.iter().product();
+    let n: usize = fnp_ndarray::element_count(output_shape).map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?;
+    let m: usize = fnp_ndarray::element_count(input_shape).map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?;
 
     if n != m {
         return Err(LinAlgError::ShapeContractViolation(
@@ -4007,11 +4007,11 @@ pub fn validate_policy_metadata(mode: &str, class: &str) -> Result<(), LinAlgErr
 // ---------------------------------------------------------------------------
 
 /// Compute the total number of matrices in the batch (product of leading dims).
-fn batch_count(shape: &[usize]) -> usize {
+fn batch_count(shape: &[usize]) -> Result<usize, LinAlgError> {
     if shape.len() <= 2 {
-        1
+        Ok(1)
     } else {
-        shape[..shape.len() - 2].iter().product()
+        fnp_ndarray::element_count(&shape[..shape.len() - 2]).map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))
     }
 }
 
@@ -4024,7 +4024,7 @@ fn parse_batched_shape(shape: &[usize]) -> Result<(usize, usize, usize), LinAlgE
     }
     let m = shape[shape.len() - 2];
     let n = shape[shape.len() - 1];
-    let batch = batch_count(shape);
+    let batch = batch_count(shape)?;
     Ok((batch, m, n))
 }
 
@@ -4118,7 +4118,7 @@ pub fn batch_solve(
         let b_batch = if b_shape.len() <= 1 {
             1
         } else {
-            b_shape[..b_shape.len() - 1].iter().product()
+            fnp_ndarray::element_count(&b_shape[..b_shape.len() - 1]).map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?
         };
         (b_batch, 1, n)
     } else {
@@ -4136,7 +4136,7 @@ pub fn batch_solve(
         let b_batch = if b_shape.len() <= 2 {
             1
         } else {
-            b_shape[..b_shape.len() - 2].iter().product()
+            fnp_ndarray::element_count(&b_shape[..b_shape.len() - 2]).map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?
         };
         (b_batch, rhs_cols, rhs_width)
     };

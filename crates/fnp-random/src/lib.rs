@@ -3488,7 +3488,7 @@ impl Generator {
         if shape.is_empty() || axis >= shape.len() {
             return Err(RandomError::InvalidUpperBound);
         }
-        let total: usize = shape.iter().product();
+        let total: usize = fnp_ndarray::element_count(shape).map_err(|_| RandomError::InvalidParameter)?;
         if x.len() != total {
             return Err(RandomError::InvalidUpperBound);
         }
