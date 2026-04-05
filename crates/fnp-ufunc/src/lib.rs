@@ -837,12 +837,20 @@ impl BinaryOp {
             Self::LeftShift => {
                 let a = lhs as i64;
                 let b = rhs as i64;
-                (a << (b & 63)) as f64
+                if !(0..64).contains(&b) {
+                    0.0
+                } else {
+                    (a << b) as f64
+                }
             }
             Self::RightShift => {
                 let a = lhs as i64;
                 let b = rhs as i64;
-                (a >> (b & 63)) as f64
+                if !(0..64).contains(&b) {
+                    if a < 0 { -1.0 } else { 0.0 }
+                } else {
+                    (a >> b) as f64
+                }
             }
         }
     }
@@ -4173,10 +4181,11 @@ impl UFuncArray {
 
     pub fn reduce_sum(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
         let out_dtype = promote_for_sum_reduction(self.dtype);
+        let source_sidecar = self.synthesized_integer_sidecar("sum")?;
         match axis {
             None => {
                 let sum: f64 = self.values.iter().copied().sum();
-                let out_sidecar = self.integer_sidecar.as_ref().map(|s| match s {
+                let out_sidecar = source_sidecar.as_ref().map(|s| match s {
                     IntegerSidecar::I64(v) => IntegerSidecar::I64(vec![v.iter().copied().sum()]),
                     IntegerSidecar::U64(v) => IntegerSidecar::U64(vec![v.iter().copied().sum()]),
                 });
@@ -4199,7 +4208,7 @@ impl UFuncArray {
                 let mut out_values = vec![0.0f64; out_count];
                 reduce_sum_axis_contiguous(&self.values, &self.shape, axis, &mut out_values);
 
-                let out_sidecar = self.integer_sidecar.as_ref().map(|s| {
+                let out_sidecar = source_sidecar.as_ref().map(|s| {
                     let mut out_v = match s {
                         IntegerSidecar::I64(_) => IntegerSidecar::I64(vec![0; out_count]),
                         IntegerSidecar::U64(_) => IntegerSidecar::U64(vec![0; out_count]),
@@ -4229,8 +4238,26 @@ impl UFuncArray {
         initial: f64,
     ) -> Result<Self, UFuncError> {
         let mut result = self.reduce_sum(axis, keepdims)?;
-        for v in &mut result.values {
-            *v += initial;
+        match (&mut result.integer_sidecar, result.dtype) {
+            (Some(IntegerSidecar::I64(sidecar)), DType::I64) => {
+                let initial = initial as i64;
+                for v in sidecar.iter_mut() {
+                    *v = v.wrapping_add(initial);
+                }
+                result.values = sidecar.iter().map(|&v| v as f64).collect();
+            }
+            (Some(IntegerSidecar::U64(sidecar)), DType::U64) => {
+                let initial = initial as u64;
+                for v in sidecar.iter_mut() {
+                    *v = v.wrapping_add(initial);
+                }
+                result.values = sidecar.iter().map(|&v| v as f64).collect();
+            }
+            _ => {
+                for v in &mut result.values {
+                    *v += initial;
+                }
+            }
         }
         Ok(result)
     }
@@ -4246,24 +4273,46 @@ impl UFuncArray {
         initial: f64,
     ) -> Result<Self, UFuncError> {
         let mut result = self.reduce_prod(axis, keepdims)?;
-        for v in &mut result.values {
-            *v *= initial;
+        match (&mut result.integer_sidecar, result.dtype) {
+            (Some(IntegerSidecar::I64(sidecar)), DType::I64) => {
+                let initial = initial as i64;
+                for v in sidecar.iter_mut() {
+                    *v = v.wrapping_mul(initial);
+                }
+                result.values = sidecar.iter().map(|&v| v as f64).collect();
+            }
+            (Some(IntegerSidecar::U64(sidecar)), DType::U64) => {
+                let initial = initial as u64;
+                for v in sidecar.iter_mut() {
+                    *v = v.wrapping_mul(initial);
+                }
+                result.values = sidecar.iter().map(|&v| v as f64).collect();
+            }
+            _ => {
+                for v in &mut result.values {
+                    *v *= initial;
+                }
+            }
         }
         Ok(result)
     }
 
     pub fn reduce_prod(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
         let out_dtype = promote_for_sum_reduction(self.dtype);
+        let source_sidecar = self.synthesized_integer_sidecar("prod")?;
         match axis {
             None => {
                 let prod: f64 = self.values.iter().copied().product();
                 let out_sidecar = if self.values.is_empty() {
-                    self.integer_sidecar.as_ref().map(|s| match s {
+                    source_sidecar.as_ref().map(|s| match s {
                         IntegerSidecar::I64(_) => IntegerSidecar::I64(vec![1]),
                         IntegerSidecar::U64(_) => IntegerSidecar::U64(vec![1]),
                     })
                 } else {
-                    None
+                    source_sidecar.as_ref().map(|s| match s {
+                        IntegerSidecar::I64(v) => IntegerSidecar::I64(vec![v.iter().copied().product()]),
+                        IntegerSidecar::U64(v) => IntegerSidecar::U64(vec![v.iter().copied().product()]),
+                    })
                 };
                 let shape = if keepdims {
                     vec![1; self.shape.len()]
@@ -4290,7 +4339,7 @@ impl UFuncArray {
                     |acc, v| acc * v,
                 );
 
-                let out_sidecar = self.integer_sidecar.as_ref().map(|s| {
+                let out_sidecar = source_sidecar.as_ref().map(|s| {
                     let mut out_v = match s {
                         IntegerSidecar::I64(_) => IntegerSidecar::I64(vec![1; out_count]),
                         IntegerSidecar::U64(_) => IntegerSidecar::U64(vec![1; out_count]),
@@ -4861,23 +4910,106 @@ impl UFuncArray {
         keepdims: bool,
     ) -> Result<Self, UFuncError> {
         let mask = normalize_reduction_where_mask(mask, &self.shape)?;
+        let source_sidecar = self.synthesized_integer_sidecar("sum_where")?;
         let masked_values: Vec<f64> = self
             .values
             .iter()
             .zip(mask.values.iter())
             .map(|(&v, &m)| if m != 0.0 { v } else { 0.0 })
             .collect();
+        let masked_sidecar = source_sidecar.map(|sidecar| match sidecar {
+            IntegerSidecar::I64(values) => IntegerSidecar::I64(
+                values
+                    .into_iter()
+                    .zip(mask.values.iter())
+                    .map(|(v, &m)| if m != 0.0 { v } else { 0 })
+                    .collect(),
+            ),
+            IntegerSidecar::U64(values) => IntegerSidecar::U64(
+                values
+                    .into_iter()
+                    .zip(mask.values.iter())
+                    .map(|(v, &m)| if m != 0.0 { v } else { 0 })
+                    .collect(),
+            ),
+        });
         let masked = Self {
             shape: self.shape.clone(),
             values: masked_values,
             dtype: self.dtype,
-            integer_sidecar: None,
+            integer_sidecar: masked_sidecar,
         };
         masked.reduce_sum(axis, keepdims)
     }
 
     pub fn cumsum(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
         let out_dtype = promote_for_sum_reduction(self.dtype);
+        if self.dtype == DType::I64
+            && let Some(IntegerSidecar::I64(values)) = self.synthesized_integer_sidecar("cumsum")?
+        {
+            return match axis {
+                None => {
+                    let mut acc = 0i64;
+                    let out_sidecar: Vec<i64> = values
+                        .iter()
+                        .map(|&v| {
+                            acc = acc.wrapping_add(v);
+                            acc
+                        })
+                        .collect();
+                    Ok(Self {
+                        shape: vec![out_sidecar.len()],
+                        values: out_sidecar.iter().map(|&v| v as f64).collect(),
+                        dtype: out_dtype,
+                        integer_sidecar: Some(IntegerSidecar::I64(out_sidecar)),
+                    })
+                }
+                Some(axis) => {
+                    let axis = normalize_axis(axis, self.shape.len())?;
+                    let out_sidecar =
+                        cumulate_axis_i64(&values, &self.shape, axis, 0, i64::wrapping_add)?;
+                    Ok(Self {
+                        shape: self.shape.clone(),
+                        values: out_sidecar.iter().map(|&v| v as f64).collect(),
+                        dtype: out_dtype,
+                        integer_sidecar: Some(IntegerSidecar::I64(out_sidecar)),
+                    })
+                }
+            };
+        }
+        if self.dtype == DType::U64
+            && let Some(IntegerSidecar::U64(values)) = self.synthesized_integer_sidecar("cumsum")?
+        {
+            return match axis {
+                None => {
+                    let mut acc = 0u64;
+                    let out_sidecar: Vec<u64> = values
+                        .iter()
+                        .map(|&v| {
+                            acc = acc.wrapping_add(v);
+                            acc
+                        })
+                        .collect();
+                    Ok(Self {
+                        shape: vec![out_sidecar.len()],
+                        values: out_sidecar.iter().map(|&v| v as f64).collect(),
+                        dtype: out_dtype,
+                        integer_sidecar: Some(IntegerSidecar::U64(out_sidecar)),
+                    })
+                }
+                Some(axis) => {
+                    let axis = normalize_axis(axis, self.shape.len())?;
+                    let out_sidecar =
+                        cumulate_axis_u64(&values, &self.shape, axis, 0, u64::wrapping_add)?;
+                    Ok(Self {
+                        shape: self.shape.clone(),
+                        values: out_sidecar.iter().map(|&v| v as f64).collect(),
+                        dtype: out_dtype,
+                        integer_sidecar: Some(IntegerSidecar::U64(out_sidecar)),
+                    })
+                }
+            };
+        }
         match axis {
             None => {
                 // Flatten and cumsum
@@ -4913,6 +5045,72 @@ impl UFuncArray {
 
     pub fn cumprod(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
         let out_dtype = promote_for_sum_reduction(self.dtype);
+        if self.dtype == DType::I64
+            && let Some(IntegerSidecar::I64(values)) = self.synthesized_integer_sidecar("cumprod")?
+        {
+            return match axis {
+                None => {
+                    let mut acc = 1i64;
+                    let out_sidecar: Vec<i64> = values
+                        .iter()
+                        .map(|&v| {
+                            acc = acc.wrapping_mul(v);
+                            acc
+                        })
+                        .collect();
+                    Ok(Self {
+                        shape: vec![out_sidecar.len()],
+                        values: out_sidecar.iter().map(|&v| v as f64).collect(),
+                        dtype: out_dtype,
+                        integer_sidecar: Some(IntegerSidecar::I64(out_sidecar)),
+                    })
+                }
+                Some(axis) => {
+                    let axis = normalize_axis(axis, self.shape.len())?;
+                    let out_sidecar =
+                        cumulate_axis_i64(&values, &self.shape, axis, 1, i64::wrapping_mul)?;
+                    Ok(Self {
+                        shape: self.shape.clone(),
+                        values: out_sidecar.iter().map(|&v| v as f64).collect(),
+                        dtype: out_dtype,
+                        integer_sidecar: Some(IntegerSidecar::I64(out_sidecar)),
+                    })
+                }
+            };
+        }
+        if self.dtype == DType::U64
+            && let Some(IntegerSidecar::U64(values)) = self.synthesized_integer_sidecar("cumprod")?
+        {
+            return match axis {
+                None => {
+                    let mut acc = 1u64;
+                    let out_sidecar: Vec<u64> = values
+                        .iter()
+                        .map(|&v| {
+                            acc = acc.wrapping_mul(v);
+                            acc
+                        })
+                        .collect();
+                    Ok(Self {
+                        shape: vec![out_sidecar.len()],
+                        values: out_sidecar.iter().map(|&v| v as f64).collect(),
+                        dtype: out_dtype,
+                        integer_sidecar: Some(IntegerSidecar::U64(out_sidecar)),
+                    })
+                }
+                Some(axis) => {
+                    let axis = normalize_axis(axis, self.shape.len())?;
+                    let out_sidecar =
+                        cumulate_axis_u64(&values, &self.shape, axis, 1, u64::wrapping_mul)?;
+                    Ok(Self {
+                        shape: self.shape.clone(),
+                        values: out_sidecar.iter().map(|&v| v as f64).collect(),
+                        dtype: out_dtype,
+                        integer_sidecar: Some(IntegerSidecar::U64(out_sidecar)),
+                    })
+                }
+            };
+        }
         match axis {
             None => {
                 let mut acc = 1.0;
@@ -9769,7 +9967,13 @@ impl UFuncArray {
                 let coord = rem / idx_strides[d];
                 rem %= idx_strides[d];
                 if d == ax {
-                    let idx = indices.values[flat] as i64;
+                    let idx_f = indices.values[flat];
+                    if !idx_f.is_finite() {
+                        return Err(UFuncError::Msg(
+                            "indices must be finite integers".to_string()
+                        ));
+                    }
+                    let idx = idx_f as i64;
                     let resolved = if idx < 0 { idx + axis_len as i64 } else { idx };
                     if resolved < 0 || resolved >= axis_len as i64 {
                         return Err(UFuncError::Msg(format!(
@@ -9826,7 +10030,13 @@ impl UFuncArray {
                 let coord = rem / idx_strides[d];
                 rem %= idx_strides[d];
                 if d == ax {
-                    let idx = indices.values[flat] as i64;
+                    let idx_f = indices.values[flat];
+                    if !idx_f.is_finite() {
+                        return Err(UFuncError::Msg(
+                            "indices must be finite integers".to_string()
+                        ));
+                    }
+                    let idx = idx_f as i64;
                     let resolved = if idx < 0 { idx + axis_len as i64 } else { idx };
                     if resolved < 0 || resolved >= axis_len as i64 {
                         return Err(UFuncError::Msg(format!(
@@ -14853,6 +15063,11 @@ impl UFuncArray {
             _ => None,
         };
         for (i, &idx) in self.values.iter().enumerate() {
+            if !idx.is_finite() || idx < 0.0 {
+                return Err(UFuncError::Msg(format!(
+                    "choose: invalid index value {idx}"
+                )));
+            }
             let choice_idx = idx as usize;
             if choice_idx >= n_choices {
                 return Err(UFuncError::Msg(format!(
@@ -15865,6 +16080,9 @@ impl UFuncArray {
 
     /// `np.nansum` — sum ignoring NaN values.
     pub fn nansum(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
+        if matches!(self.dtype, DType::I64 | DType::U64) {
+            return self.reduce_sum(axis, keepdims);
+        }
         match axis {
             None => {
                 let sum: f64 = self.values.iter().copied().filter(|v| !v.is_nan()).sum();
@@ -16344,18 +16562,27 @@ impl UFuncArray {
 
     /// `np.nanprod` — product of elements ignoring NaN values (treated as 1).
     pub fn nanprod(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
+        if matches!(self.dtype, DType::I64 | DType::U64) {
+            return self.reduce_prod(axis, keepdims);
+        }
         let filled = self.nan_filtered_fill(1.0);
         filled.reduce_prod(axis, keepdims)
     }
 
     /// `np.nancumsum` — cumulative sum ignoring NaN (treated as 0).
     pub fn nancumsum(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
+        if matches!(self.dtype, DType::I64 | DType::U64) {
+            return self.cumsum(axis);
+        }
         let filled = self.nan_filtered_fill(0.0);
         filled.cumsum(axis)
     }
 
     /// `np.nancumprod` — cumulative product ignoring NaN (treated as 1).
     pub fn nancumprod(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
+        if matches!(self.dtype, DType::I64 | DType::U64) {
+            return self.cumprod(axis);
+        }
         let filled = self.nan_filtered_fill(1.0);
         filled.cumprod(axis)
     }
@@ -19968,6 +20195,76 @@ fn cumulate_axis(
     debug_assert!(axis < shape.len());
     let total = element_count(shape).map_err(UFuncError::Shape)?;
     let mut out = vec![0.0; total];
+
+    let axis_len = shape[axis];
+    if axis_len == 0 || total == 0 {
+        return Ok(out);
+    }
+
+    let inner: usize = fnp_ndarray::element_count(&shape[axis + 1..]).map_err(UFuncError::Shape)?;
+    let outer: usize = fnp_ndarray::element_count(&shape[..axis]).map_err(UFuncError::Shape)?;
+
+    for outer_idx in 0..outer {
+        let base = outer_idx * axis_len * inner;
+        for inner_idx in 0..inner {
+            let mut acc = identity;
+            let mut offset = base + inner_idx;
+            for _ in 0..axis_len {
+                acc = fold(acc, values[offset]);
+                out[offset] = acc;
+                offset += inner;
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+fn cumulate_axis_i64(
+    values: &[i64],
+    shape: &[usize],
+    axis: usize,
+    identity: i64,
+    fold: impl Fn(i64, i64) -> i64,
+) -> Result<Vec<i64>, UFuncError> {
+    debug_assert!(axis < shape.len());
+    let total = element_count(shape).map_err(UFuncError::Shape)?;
+    let mut out = vec![0i64; total];
+
+    let axis_len = shape[axis];
+    if axis_len == 0 || total == 0 {
+        return Ok(out);
+    }
+
+    let inner: usize = fnp_ndarray::element_count(&shape[axis + 1..]).map_err(UFuncError::Shape)?;
+    let outer: usize = fnp_ndarray::element_count(&shape[..axis]).map_err(UFuncError::Shape)?;
+
+    for outer_idx in 0..outer {
+        let base = outer_idx * axis_len * inner;
+        for inner_idx in 0..inner {
+            let mut acc = identity;
+            let mut offset = base + inner_idx;
+            for _ in 0..axis_len {
+                acc = fold(acc, values[offset]);
+                out[offset] = acc;
+                offset += inner;
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+fn cumulate_axis_u64(
+    values: &[u64],
+    shape: &[usize],
+    axis: usize,
+    identity: u64,
+    fold: impl Fn(u64, u64) -> u64,
+) -> Result<Vec<u64>, UFuncError> {
+    debug_assert!(axis < shape.len());
+    let total = element_count(shape).map_err(UFuncError::Shape)?;
+    let mut out = vec![0u64; total];
 
     let axis_len = shape[axis];
     if axis_len == 0 || total == 0 {
@@ -29375,6 +29672,14 @@ mod tests {
     }
 
     #[test]
+    fn cumsum_preserves_exact_large_u64_values() {
+        let large = 1_u64 << 53;
+        let arr = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![large, 3])).unwrap();
+        let out = arr.cumsum(None).expect("cumsum");
+        assert_eq!(out.to_storage().unwrap(), ArrayStorage::U64(vec![large, large + 3]));
+    }
+
+    #[test]
     fn cumprod_axis_none_flattens() {
         let arr = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
             .expect("arr");
@@ -29390,6 +29695,18 @@ mod tests {
         let out = arr.cumprod(Some(1)).expect("cumprod axis=1");
         assert_eq!(out.shape(), &[2, 3]);
         assert_eq!(out.values(), &[1.0, 2.0, 6.0, 4.0, 20.0, 120.0]);
+    }
+
+    #[test]
+    fn cumprod_preserves_exact_large_i64_values_along_axis() {
+        let large = 1_i64 << 53;
+        let arr = UFuncArray::from_storage(vec![2, 2], ArrayStorage::I64(vec![large, 2, 3, 4]))
+            .unwrap();
+        let out = arr.cumprod(Some(1)).expect("cumprod axis=1");
+        assert_eq!(
+            out.to_storage().unwrap(),
+            ArrayStorage::I64(vec![large, large.wrapping_mul(2), 3, 12])
+        );
     }
 
     #[test]
@@ -35141,10 +35458,45 @@ mod tests {
     }
 
     #[test]
+    fn nancumsum_integer_preserves_exact_large_u64_values() {
+        let large = 1_u64 << 53;
+        let a = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![large, 5])).unwrap();
+        let r = a.nancumsum(None).unwrap();
+        assert_eq!(r.to_storage().unwrap(), ArrayStorage::U64(vec![large, large + 5]));
+    }
+
+    #[test]
     fn nancumprod_basic() {
         let a = UFuncArray::new(vec![4], vec![2.0, f64::NAN, 3.0, 4.0], DType::F64).unwrap();
         let r = a.nancumprod(None).unwrap();
         assert_eq!(r.values(), &[2.0, 2.0, 6.0, 24.0]);
+    }
+
+    #[test]
+    fn nancumprod_integer_preserves_exact_large_i64_values() {
+        let large = 1_i64 << 53;
+        let a = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![large, 2])).unwrap();
+        let r = a.nancumprod(None).unwrap();
+        assert_eq!(
+            r.to_storage().unwrap(),
+            ArrayStorage::I64(vec![large, large.wrapping_mul(2)])
+        );
+    }
+
+    #[test]
+    fn nansum_integer_preserves_exact_large_u64_value() {
+        let large = 1_u64 << 53;
+        let a = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![large, 7])).unwrap();
+        let r = a.nansum(None, false).unwrap();
+        assert_eq!(r.to_storage().unwrap(), ArrayStorage::U64(vec![large + 7]));
+    }
+
+    #[test]
+    fn nanprod_integer_preserves_exact_large_i64_value() {
+        let large = 1_i64 << 53;
+        let a = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![large, 3])).unwrap();
+        let r = a.nanprod(None, false).unwrap();
+        assert_eq!(r.to_storage().unwrap(), ArrayStorage::I64(vec![large.wrapping_mul(3)]));
     }
 
     // ── pad mode tests ────────
@@ -37830,6 +38182,15 @@ mod tests {
     }
 
     #[test]
+    fn reduce_sum_where_preserves_exact_large_u64_values() {
+        let large = 1_u64 << 53;
+        let a = UFuncArray::from_storage(vec![3], ArrayStorage::U64(vec![large, 5, 7])).unwrap();
+        let mask = UFuncArray::new(vec![3], vec![1.0, 0.0, 1.0], DType::F64).unwrap();
+        let r = a.reduce_sum_where(&mask, None, false).unwrap();
+        assert_eq!(r.to_storage().unwrap(), ArrayStorage::U64(vec![large + 7]));
+    }
+
+    #[test]
     fn reduce_sum_where_rejects_incompatible_broadcast_mask() {
         let a =
             UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
@@ -37853,6 +38214,25 @@ mod tests {
         let a = UFuncArray::new(vec![3], vec![2.0, 3.0, 4.0], DType::F64).unwrap();
         let r = a.reduce_prod_initial(None, false, 0.5).unwrap();
         assert!((r.values()[0] - 12.0).abs() < 1e-9); // 24 * 0.5 = 12
+    }
+
+    #[test]
+    fn reduce_sum_initial_preserves_exact_large_u64_sidecar() {
+        let large = (1u64 << 53) + 17;
+        let a = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![large, 5])).unwrap();
+        let r = a.reduce_sum_initial(None, false, 7.0).unwrap();
+        assert_eq!(r.to_storage().unwrap(), ArrayStorage::U64(vec![large + 12]));
+    }
+
+    #[test]
+    fn reduce_prod_initial_preserves_exact_large_i64_sidecar() {
+        let large = (1i64 << 53) + 11;
+        let a = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![large, 3])).unwrap();
+        let r = a.reduce_prod_initial(None, false, 2.0).unwrap();
+        assert_eq!(
+            r.to_storage().unwrap(),
+            ArrayStorage::I64(vec![large.wrapping_mul(6)])
+        );
     }
 
     // ── histogram_bin_edges tests ──

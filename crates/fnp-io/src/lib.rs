@@ -2788,10 +2788,12 @@ pub fn memmap(
                 .write(true)
                 .open(path)
                 .map_err(|_| IOError::MemmapContractViolation("failed to open file for rw"))?;
-            let file_len = file
-                .metadata()
-                .map_err(|_| IOError::MemmapContractViolation("failed to read file metadata"))?
-                .len() as usize;
+            let file_len = usize::try_from(
+                file.metadata()
+                    .map_err(|_| IOError::MemmapContractViolation("failed to read file metadata"))?
+                    .len(),
+            )
+            .unwrap_or(usize::MAX);
             let end = offset
                 .checked_add(expected_bytes)
                 .ok_or(IOError::MemmapContractViolation("mapping range overflowed"))?;
@@ -2818,10 +2820,12 @@ pub fn memmap(
         MemmapMode::ReadOnly | MemmapMode::CopyOnWrite => {
             let mut file = std::fs::File::open(path)
                 .map_err(|_| IOError::MemmapContractViolation("failed to open file"))?;
-            let file_len = file
-                .metadata()
-                .map_err(|_| IOError::MemmapContractViolation("failed to read file metadata"))?
-                .len() as usize;
+            let file_len = usize::try_from(
+                file.metadata()
+                    .map_err(|_| IOError::MemmapContractViolation("failed to read file metadata"))?
+                    .len(),
+            )
+            .unwrap_or(usize::MAX);
             let end = offset
                 .checked_add(expected_bytes)
                 .ok_or(IOError::MemmapContractViolation("mapping range overflowed"))?;
