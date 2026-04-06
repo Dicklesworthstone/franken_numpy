@@ -25039,9 +25039,12 @@ pub fn pad_stat(
         if values.is_empty() {
             return 0.0;
         }
+        if values.iter().any(|v| v.is_nan()) {
+            return f64::NAN;
+        }
         match mode {
-            "maximum" => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-            "minimum" => values.iter().copied().fold(f64::INFINITY, f64::min),
+            "maximum" => values.iter().copied().fold(f64::NEG_INFINITY, |a, b| a.max(b)),
+            "minimum" => values.iter().copied().fold(f64::INFINITY, |a, b| a.min(b)),
             "mean" => values.iter().sum::<f64>() / values.len() as f64,
             "median" => {
                 let mut sorted = values.to_vec();
@@ -26537,13 +26540,13 @@ mod tests {
         PrintOptions, QuantileInterp, StringArray, UFUNC_PACKET_REASON_CODES, UFuncArray,
         UFuncArrayView,
         UFuncError, UFuncLogRecord, UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp, bitwise_count,
-        busday_count, busday_offset, cheb2poly, chebadd, chebder, chebfit, chebint, chebmul,
+        busday_count, busday_offset, cheb2poly, chebadd, chebder, chebdiv, chebfit, chebfromroots, chebint, chebmul, chebroots,
         chebsub, chebval, divmod_arrays, errstate, financial_fv, financial_ipmt, financial_irr,
         financial_mirr, financial_nper, financial_npv, financial_pmt, financial_ppmt, financial_pv,
-        financial_rate, frexp, gcd_arrays, geterr, herm2poly, hermadd, hermder, herme2poly,
-        hermeadd, hermemul, hermeroots, hermeval, hermfit, hermfromroots, hermint, hermmul,
-        hermroots, hermsub, hermval, is_busday, isneginf, isposinf, lag2poly, lagadd, lagder,
-        lagfit, lagfromroots, lagmul, lagroots, lagsub, lagval, lcm_arrays, leg2poly, legadd,
+        financial_rate, frexp, gcd_arrays, geterr, herm2poly, hermadd, hermder, hermdiv, herme2poly,
+        hermeadd, hermediv, hermefromroots, hermemul, hermeroots, hermeval, hermfit, hermfromroots, hermint, hermmul,
+        hermroots, hermsub, hermval, is_busday, isneginf, isposinf, lag2poly, lagadd, lagder, lagdiv,
+        lagfit, lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, lcm_arrays, leg2poly, legadd,
         legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub, legval, ma_is_mask,
         ma_is_masked, ma_make_mask, ma_mask_or, mediate_ufunc_runtime_policy, modf,
         normalize_fixed_signature_keywords, normalize_signature_keywords, pad_empty,
@@ -39415,6 +39418,12 @@ mod tests {
     }
 
     #[test]
+    fn financial_pv_zero_rate() {
+        let pv = financial_pv(0.0, 12.0, -50.0, -400.0, 0);
+        assert!((pv - 1000.0).abs() < 1e-10);
+    }
+
+    #[test]
     fn financial_pmt_basic() {
         // Monthly payment on $200k loan, 30 years, 6%/12 monthly
         let pmt = financial_pmt(0.06 / 12.0, 360.0, 200_000.0, 0.0, 0);
@@ -39422,10 +39431,22 @@ mod tests {
     }
 
     #[test]
+    fn financial_pmt_zero_rate() {
+        let pmt = financial_pmt(0.0, 10.0, 1000.0, 500.0, 0);
+        assert!((pmt - (-150.0)).abs() < 1e-10);
+    }
+
+    #[test]
     fn financial_nper_basic() {
         // How many periods to pay off $1000 at 1%/period with $100 payments?
         let n = financial_nper(0.01, -100.0, 1000.0, 0.0, 0);
         assert!((n - 10.58).abs() < 0.01);
+    }
+
+    #[test]
+    fn financial_nper_zero_rate() {
+        let nper = financial_nper(0.0, -125.0, 1000.0, 0.0, 0);
+        assert!((nper - 8.0).abs() < 1e-10);
     }
 
     #[test]
@@ -39453,6 +39474,12 @@ mod tests {
     }
 
     #[test]
+    fn financial_irr_short_cashflows_returns_nan() {
+        assert!(financial_irr(&[]).is_nan());
+        assert!(financial_irr(&[-100.0]).is_nan());
+    }
+
+    #[test]
     fn financial_ipmt_ppmt_sum_equals_pmt() {
         let rate = 0.05 / 12.0;
         let nper = 360.0;
@@ -39468,11 +39495,31 @@ mod tests {
     }
 
     #[test]
+    fn financial_ipmt_beginning_period_first_payment_has_zero_interest() {
+        let ipmt = financial_ipmt(0.05 / 12.0, 1.0, 360.0, 200_000.0, 0.0, 1);
+        assert!(ipmt.abs() < 1e-12);
+    }
+
+    #[test]
+    fn financial_ppmt_beginning_period_first_payment_matches_total_payment() {
+        let rate = 0.05 / 12.0;
+        let total_pmt = financial_pmt(rate, 360.0, 200_000.0, 0.0, 1);
+        let ppmt = financial_ppmt(rate, 1.0, 360.0, 200_000.0, 0.0, 1);
+        assert!((ppmt - total_pmt).abs() < 1e-10);
+    }
+
+    #[test]
     fn financial_mirr_basic() {
         let cashflows = [-1000.0, 200.0, 300.0, 400.0, 500.0];
         let mirr = financial_mirr(&cashflows, 0.1, 0.12);
         assert!(mirr.is_finite());
         assert!(mirr > 0.0 && mirr < 1.0);
+    }
+
+    #[test]
+    fn financial_mirr_without_negative_cashflows_returns_nan() {
+        let cashflows = [100.0, 200.0, 300.0];
+        assert!(financial_mirr(&cashflows, 0.1, 0.12).is_nan());
     }
 
     #[test]
@@ -39482,6 +39529,13 @@ mod tests {
         // Verify: with this rate, pmt should reconstruct
         let pmt_check = financial_pmt(r, 10.0, 800.0, 0.0, 0);
         assert!((pmt_check - (-100.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn financial_rate_beginning_of_period_reconstructs_payment() {
+        let r = financial_rate(24.0, -250.0, 5000.0, 0.0, 1, 0.05);
+        let pmt_check = financial_pmt(r, 24.0, 5000.0, 0.0, 1);
+        assert!((pmt_check - (-250.0)).abs() < 0.01);
     }
 
     // ── StringArray tests ──────────────────────────────────────────
@@ -42030,6 +42084,130 @@ mod tests {
         assert_eq!(result, vec![0.0, 0.0]);
     }
 
+    #[test]
+    fn chebdiv_exact() {
+        // (T_0 + T_1 + T_2) / T_1 — T_1 = [0, 1]
+        let c1 = vec![1.0, 1.0, 1.0];
+        let c2 = vec![0.0, 1.0];
+        let (q, r) = chebdiv(&c1, &c2).unwrap();
+        // Reconstruct: c1 should equal chebmul(q, c2) + r
+        let product = chebmul(&q, &c2);
+        let reconstructed = chebadd(&product, &r);
+        for i in 0..c1.len() {
+            assert!(
+                (reconstructed[i] - c1[i]).abs() < 1e-10,
+                "chebdiv reconstruction failed at {}: {} vs {}",
+                i,
+                reconstructed[i],
+                c1[i]
+            );
+        }
+    }
+
+    #[test]
+    fn chebdiv_by_zero_polynomial() {
+        let c1 = vec![1.0, 2.0];
+        let c2 = vec![0.0, 0.0];
+        assert!(chebdiv(&c1, &c2).is_err());
+    }
+
+    #[test]
+    fn chebdiv_by_empty() {
+        let c1 = vec![1.0, 2.0];
+        assert!(chebdiv(&c1, &[]).is_err());
+    }
+
+    #[test]
+    fn chebroots_linear() {
+        // c[0] + c[1]*x = 0 → x = -c[0]/c[1]
+        let roots = chebroots(&[3.0, 2.0]).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert!((roots[0] - (-1.5)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn chebroots_quadratic() {
+        // T_2(x) = 2x^2 - 1, roots at x = ±1/√2
+        let roots = chebroots(&[0.0, 0.0, 1.0]).unwrap();
+        assert_eq!(roots.len(), 2);
+        let inv_sqrt2 = 1.0 / 2.0_f64.sqrt();
+        assert!(
+            (roots[0] - (-inv_sqrt2)).abs() < 1e-10,
+            "root[0] = {}",
+            roots[0]
+        );
+        assert!(
+            (roots[1] - inv_sqrt2).abs() < 1e-10,
+            "root[1] = {}",
+            roots[1]
+        );
+    }
+
+    #[test]
+    fn chebroots_constant() {
+        // Constant polynomial has no roots
+        let roots = chebroots(&[5.0]).unwrap();
+        assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn chebfromroots_single() {
+        // Single root r → polynomial (x - r) → Chebyshev [-r, 1]
+        let c = chebfromroots(&[0.5]);
+        assert_eq!(c.len(), 2);
+        assert!((c[0] - (-0.5)).abs() < 1e-14);
+        assert!((c[1] - 1.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn chebfromroots_empty() {
+        let c = chebfromroots(&[]);
+        assert_eq!(c, vec![1.0]);
+    }
+
+    #[test]
+    fn chebfromroots_chebroots_roundtrip() {
+        // Build polynomial from known roots, extract roots, compare
+        let original_roots = vec![-0.5, 0.25, 0.75];
+        let c = chebfromroots(&original_roots);
+        let recovered = chebroots(&c).unwrap();
+        assert_eq!(recovered.len(), original_roots.len());
+        for (i, (&orig, &rec)) in original_roots.iter().zip(recovered.iter()).enumerate() {
+            assert!(
+                (orig - rec).abs() < 1e-8,
+                "root roundtrip failed at {}: {} vs {}",
+                i,
+                orig,
+                rec
+            );
+        }
+    }
+
+    #[test]
+    fn chebmul_empty() {
+        let result = chebmul(&[], &[1.0, 2.0]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn chebder_zero_order() {
+        let c = vec![1.0, 2.0, 3.0];
+        assert_eq!(chebder(&c, 0), c);
+    }
+
+    #[test]
+    fn chebder_constant() {
+        let c = vec![5.0];
+        let dc = chebder(&c, 1);
+        assert_eq!(dc, vec![0.0]);
+    }
+
+    #[test]
+    fn chebint_zero_order() {
+        let c = vec![1.0, 2.0, 3.0];
+        assert_eq!(chebint(&c, 0), c);
+    }
+
     // ── Legendre polynomial tests ───────────────────────────────────────
 
     #[test]
@@ -42205,6 +42383,54 @@ mod tests {
         }
     }
 
+    #[test]
+    fn legdiv_by_zero() {
+        assert!(legdiv(&[1.0, 2.0], &[0.0]).is_err());
+    }
+
+    #[test]
+    fn legroots_constant() {
+        assert!(legroots(&[5.0]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn legfromroots_empty() {
+        assert_eq!(legfromroots(&[]), vec![1.0]);
+    }
+
+    #[test]
+    fn legfromroots_three_roots() {
+        let original_roots = vec![-0.5, 0.0, 0.5];
+        let c = legfromroots(&original_roots);
+        let recovered = legroots(&c).unwrap();
+        assert_eq!(recovered.len(), 3);
+        for (i, (&orig, &rec)) in original_roots.iter().zip(recovered.iter()).enumerate() {
+            assert!(
+                (orig - rec).abs() < 1e-8,
+                "leg root roundtrip [{}]: {} vs {}",
+                i,
+                orig,
+                rec
+            );
+        }
+    }
+
+    #[test]
+    fn legint_legder_roundtrip() {
+        let c = vec![1.0, 2.0, 3.0];
+        let integrated = legint(&c, 1);
+        let roundtrip = legder(&integrated, 1);
+        for i in 0..c.len() {
+            assert!(
+                (roundtrip[i] - c[i]).abs() < 1e-10,
+                "Legendre int/der roundtrip [{}]: {} vs {}",
+                i,
+                roundtrip[i],
+                c[i]
+            );
+        }
+    }
+
     // ── Hermite polynomial tests ────────────────────────────────────────
 
     #[test]
@@ -42371,6 +42597,122 @@ mod tests {
         assert!((roots[0] - (-2.0 / 3.0)).abs() < 1e-12);
     }
 
+    #[test]
+    fn hermdiv_exact() {
+        // Divide H_2 coefficients [0, 0, 1] by H_1 coefficients [0, 1]
+        let (q, r) = hermdiv(&[0.0, 0.0, 1.0], &[0.0, 1.0]).unwrap();
+        // Reconstruct and verify
+        let product = hermmul(&q, &[0.0, 1.0]);
+        let reconstructed = hermadd(&product, &r);
+        let original = [0.0, 0.0, 1.0];
+        for i in 0..original.len() {
+            let rec = if i < reconstructed.len() {
+                reconstructed[i]
+            } else {
+                0.0
+            };
+            assert!(
+                (rec - original[i]).abs() < 1e-8,
+                "hermdiv reconstruction [{}]: {} vs {}",
+                i,
+                rec,
+                original[i]
+            );
+        }
+    }
+
+    #[test]
+    fn hermdiv_by_zero() {
+        assert!(hermdiv(&[1.0, 2.0], &[0.0]).is_err());
+    }
+
+    #[test]
+    fn hermroots_quadratic() {
+        // Build from known roots and verify roundtrip
+        let c = hermfromroots(&[1.0, -1.0]);
+        let roots = hermroots(&c).unwrap();
+        assert_eq!(roots.len(), 2);
+        assert!((roots[0] - (-1.0)).abs() < 1e-8, "root[0] = {}", roots[0]);
+        assert!((roots[1] - 1.0).abs() < 1e-8, "root[1] = {}", roots[1]);
+    }
+
+    #[test]
+    fn hermroots_constant() {
+        assert!(hermroots(&[5.0]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn hermfromroots_empty() {
+        assert_eq!(hermfromroots(&[]), vec![1.0]);
+    }
+
+    #[test]
+    fn hermediv_exact() {
+        let (q, r) = hermediv(&[0.0, 0.0, 1.0], &[0.0, 1.0]).unwrap();
+        let product = hermemul(&q, &[0.0, 1.0]);
+        let reconstructed = hermeadd(&product, &r);
+        let original = [0.0, 0.0, 1.0];
+        for i in 0..original.len() {
+            let rec = if i < reconstructed.len() {
+                reconstructed[i]
+            } else {
+                0.0
+            };
+            assert!(
+                (rec - original[i]).abs() < 1e-8,
+                "hermediv reconstruction [{}]: {} vs {}",
+                i,
+                rec,
+                original[i]
+            );
+        }
+    }
+
+    #[test]
+    fn hermediv_by_zero() {
+        assert!(hermediv(&[1.0, 2.0], &[0.0]).is_err());
+    }
+
+    #[test]
+    fn hermeroots_quadratic() {
+        let c = hermefromroots(&[1.0, -1.0]);
+        let roots = hermeroots(&c).unwrap();
+        assert_eq!(roots.len(), 2);
+        assert!(
+            (roots[0] - (-1.0)).abs() < 1e-8,
+            "root[0] = {}",
+            roots[0]
+        );
+        assert!((roots[1] - 1.0).abs() < 1e-8, "root[1] = {}", roots[1]);
+    }
+
+    #[test]
+    fn hermeroots_constant() {
+        assert!(hermeroots(&[5.0]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn hermefromroots_empty() {
+        assert_eq!(hermefromroots(&[]), vec![1.0]);
+    }
+
+    #[test]
+    fn hermefromroots_roundtrip() {
+        let original_roots = vec![-0.5, 0.5, 1.5];
+        let c = hermefromroots(&original_roots);
+        let recovered = hermeroots(&c).unwrap();
+        assert_eq!(recovered.len(), 3);
+        for (i, (&orig, &rec)) in original_roots.iter().zip(recovered.iter()).enumerate() {
+            assert!(
+                (orig - rec).abs() < 1e-6,
+                "herme root roundtrip [{}]: {} vs {}",
+                i,
+                orig,
+                rec
+            );
+        }
+    }
+
     // ── Laguerre polynomial tests ───────────────────────────────────────
 
     #[test]
@@ -42480,6 +42822,87 @@ mod tests {
         assert_eq!(roots.len(), 2);
         assert!((roots[0] - 1.0).abs() < 1e-10, "root0 = {}", roots[0]);
         assert!((roots[1] - 2.0).abs() < 1e-10, "root1 = {}", roots[1]);
+    }
+
+    #[test]
+    fn lagdiv_exact() {
+        // Divide L_2 [0,0,1] by L_1 [0,1], verify reconstruction
+        let (q, r) = lagdiv(&[0.0, 0.0, 1.0], &[0.0, 1.0]).unwrap();
+        let product = lagmul(&q, &[0.0, 1.0]);
+        let reconstructed = lagadd(&product, &r);
+        let original = [0.0, 0.0, 1.0];
+        for i in 0..original.len() {
+            let rec = if i < reconstructed.len() {
+                reconstructed[i]
+            } else {
+                0.0
+            };
+            assert!(
+                (rec - original[i]).abs() < 1e-8,
+                "lagdiv reconstruction [{}]: {} vs {}",
+                i,
+                rec,
+                original[i]
+            );
+        }
+    }
+
+    #[test]
+    fn lagdiv_by_zero() {
+        assert!(lagdiv(&[1.0, 2.0], &[0.0]).is_err());
+    }
+
+    #[test]
+    fn lagroots_constant() {
+        assert!(lagroots(&[5.0]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn lagroots_quadratic() {
+        // Build from roots at 1.0 and 3.0, verify roundtrip
+        let c = lagfromroots(&[1.0, 3.0]);
+        let roots = lagroots(&c).unwrap();
+        assert_eq!(roots.len(), 2);
+        assert!((roots[0] - 1.0).abs() < 1e-8, "root[0] = {}", roots[0]);
+        assert!((roots[1] - 3.0).abs() < 1e-8, "root[1] = {}", roots[1]);
+    }
+
+    #[test]
+    fn lagfromroots_empty() {
+        assert_eq!(lagfromroots(&[]), vec![1.0]);
+    }
+
+    #[test]
+    fn lagfromroots_three_roots() {
+        let original_roots = vec![0.5, 1.5, 2.5];
+        let c = lagfromroots(&original_roots);
+        let recovered = lagroots(&c).unwrap();
+        assert_eq!(recovered.len(), 3);
+        for (i, (&orig, &rec)) in original_roots.iter().zip(recovered.iter()).enumerate() {
+            assert!(
+                (orig - rec).abs() < 1e-6,
+                "lag root roundtrip [{}]: {} vs {}",
+                i,
+                orig,
+                rec
+            );
+        }
+    }
+
+    #[test]
+    fn lagint_lagder_roundtrip() {
+        let c = vec![1.0, 2.0, 3.0];
+        let integrated = lagint(&c, 1);
+        let roundtrip = lagder(&integrated, 1);
+        for i in 0..c.len() {
+            assert!(
+                (roundtrip[i] - c[i]).abs() < 1e-10,
+                "Laguerre int/der roundtrip [{}]: {} vs {}",
+                i,
+                roundtrip[i],
+                c[i]
+            );
+        }
     }
 
     // ── scimath tests ───────────────────────────────────────────────────

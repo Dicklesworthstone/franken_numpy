@@ -422,9 +422,7 @@ fn lu_decompose_inner(
         ));
     }
     if reject_non_finite && a.iter().any(|v| !v.is_finite()) {
-        return Err(LinAlgError::NormDetRankPolicyViolation(
-            "matrix entries must be finite for LU decomposition",
-        ));
+        return Err(LinAlgError::SolverSingularity);
     }
 
     let matrix_max_abs = a.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);

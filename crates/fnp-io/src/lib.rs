@@ -1566,6 +1566,32 @@ pub struct TextArrayData {
     pub ncols: usize,
 }
 
+/// Configuration for extended `genfromtxt` parsing.
+#[derive(Debug, Clone)]
+pub struct GenFromTxtConfig<'a> {
+    pub delimiter: char,
+    pub comments: char,
+    pub skip_header: usize,
+    pub skip_footer: usize,
+    pub filling_values: f64,
+    pub usecols: Option<&'a [usize]>,
+    pub max_rows: usize,
+}
+
+impl Default for GenFromTxtConfig<'_> {
+    fn default() -> Self {
+        Self {
+            delimiter: ' ',
+            comments: '#',
+            skip_header: 0,
+            skip_footer: 0,
+            filling_values: f64::NAN,
+            usecols: None,
+            max_rows: usize::MAX,
+        }
+    }
+}
+
 /// Load data from a text string (np.loadtxt equivalent).
 /// Each line is a row; columns are separated by `delimiter`.
 /// Lines starting with `comments` char are skipped.
@@ -1818,27 +1844,20 @@ pub fn genfromtxt(
 }
 
 /// Extended `np.genfromtxt` with `usecols`, `skip_footer`, and `max_rows` parameters.
-#[allow(clippy::too_many_arguments)]
 pub fn genfromtxt_full(
     text: &str,
-    delimiter: char,
-    comments: char,
-    skip_header: usize,
-    skip_footer: usize,
-    filling_values: f64,
-    usecols: Option<&[usize]>,
-    max_rows: usize,
+    config: &GenFromTxtConfig<'_>,
 ) -> Result<TextArrayData, IOError> {
     // First, collect all non-skipped content lines
     let all_lines: Vec<&str> = text
         .lines()
         .enumerate()
         .filter_map(|(i, line)| {
-            if i < skip_header {
+            if i < config.skip_header {
                 return None;
             }
-            let trimmed = strip_text_comment(line, comments).trim();
-            if trimmed.is_empty() || trimmed.starts_with(comments) {
+            let trimmed = strip_text_comment(line, config.comments).trim();
+            if trimmed.is_empty() || trimmed.starts_with(config.comments) {
                 return None;
             }
             Some(trimmed)
@@ -1846,8 +1865,8 @@ pub fn genfromtxt_full(
         .collect();
 
     // Apply skip_footer
-    let effective_len = all_lines.len().saturating_sub(skip_footer);
-    let effective_len = effective_len.min(max_rows);
+    let effective_len = all_lines.len().saturating_sub(config.skip_footer);
+    let effective_len = effective_len.min(config.max_rows);
 
     let mut values = Vec::new();
     let mut ncols: Option<usize> = None;
@@ -1855,19 +1874,19 @@ pub fn genfromtxt_full(
 
     for &trimmed in all_lines.iter().take(effective_len) {
         let row_vals: Vec<f64> = trimmed
-            .split(delimiter)
-            .filter(|s| delimiter != ' ' || !s.is_empty())
-            .map(|s| s.trim().parse::<f64>().unwrap_or(filling_values))
+            .split(config.delimiter)
+            .filter(|s| config.delimiter != ' ' || !s.is_empty())
+            .map(|s| s.trim().parse::<f64>().unwrap_or(config.filling_values))
             .collect();
 
         // Apply usecols filter
-        let row_vals = if let Some(cols) = usecols {
+        let row_vals = if let Some(cols) = config.usecols {
             cols.iter()
                 .map(|&c| {
                     if c < row_vals.len() {
                         row_vals[c]
                     } else {
-                        filling_values
+                        config.filling_values
                     }
                 })
                 .collect()
@@ -1891,7 +1910,7 @@ pub fn genfromtxt_full(
             }
             Some(expected) if current_ncols != expected => {
                 let mut padded = row_vals;
-                padded.resize(expected, filling_values);
+                padded.resize(expected, config.filling_values);
                 values.extend(padded);
             }
             Some(_) => {
@@ -3505,7 +3524,7 @@ mod tests {
 
     use super::{
         IO_PACKET_ID, IO_PACKET_REASON_CODES, IOError, IOLogRecord, IORuntimeMode,
-        IOSupportedDType, LoadDispatch, MAX_ARCHIVE_MEMBERS, MAX_DISPATCH_RETRIES,
+        IOSupportedDType, GenFromTxtConfig, LoadDispatch, MAX_ARCHIVE_MEMBERS, MAX_DISPATCH_RETRIES,
         MAX_HEADER_BYTES, MAX_MEMMAP_VALIDATION_RETRIES, MemmapMode, NPY_MAGIC_PREFIX,
         NPZ_MAGIC_PREFIX, NpyHeader, NpzCompression, SaveTxtConfig, StructuredIODescriptor,
         StructuredIOField, classify_load_dispatch, encode_npy_header_bytes, enforce_pickle_policy,
@@ -4133,7 +4152,14 @@ mod tests {
     #[test]
     fn genfromtxt_full_skip_footer() {
         let text = "1,2\n3,4\n5,6\n7,8\n";
-        let result = genfromtxt_full(text, ',', '#', 0, 1, 0.0, None, usize::MAX).unwrap();
+        let config = GenFromTxtConfig {
+            delimiter: ',',
+            comments: '#',
+            skip_footer: 1,
+            filling_values: 0.0,
+            ..GenFromTxtConfig::default()
+        };
+        let result = genfromtxt_full(text, &config).unwrap();
         assert_eq!(result.nrows, 3);
         assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
     }
@@ -4141,8 +4167,15 @@ mod tests {
     #[test]
     fn genfromtxt_full_usecols() {
         let text = "1,2,3\n4,5,6\n7,8,9\n";
-        let result =
-            genfromtxt_full(text, ',', '#', 0, 0, 0.0, Some(&[0, 2]), usize::MAX).unwrap();
+        let usecols = [0usize, 2usize];
+        let config = GenFromTxtConfig {
+            delimiter: ',',
+            comments: '#',
+            filling_values: 0.0,
+            usecols: Some(&usecols),
+            ..GenFromTxtConfig::default()
+        };
+        let result = genfromtxt_full(text, &config).unwrap();
         assert_eq!(result.nrows, 3);
         assert_eq!(result.ncols, 2);
         assert_eq!(result.values, vec![1.0, 3.0, 4.0, 6.0, 7.0, 9.0]);
@@ -4151,7 +4184,14 @@ mod tests {
     #[test]
     fn genfromtxt_full_max_rows() {
         let text = "1,2\n3,4\n5,6\n7,8\n";
-        let result = genfromtxt_full(text, ',', '#', 0, 0, 0.0, None, 2).unwrap();
+        let config = GenFromTxtConfig {
+            delimiter: ',',
+            comments: '#',
+            filling_values: 0.0,
+            max_rows: 2,
+            ..GenFromTxtConfig::default()
+        };
+        let result = genfromtxt_full(text, &config).unwrap();
         assert_eq!(result.nrows, 2);
         assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0]);
     }
@@ -4160,8 +4200,17 @@ mod tests {
     fn genfromtxt_full_combined() {
         // skip_header=1, skip_footer=1, usecols=[1], max_rows=2
         let text = "a,b,c\n1,2,3\n4,5,6\n7,8,9\nfooter\n";
-        let result =
-            genfromtxt_full(text, ',', '#', 1, 1, f64::NAN, Some(&[1]), usize::MAX).unwrap();
+        let usecols = [1usize];
+        let config = GenFromTxtConfig {
+            delimiter: ',',
+            comments: '#',
+            skip_header: 1,
+            skip_footer: 1,
+            filling_values: f64::NAN,
+            usecols: Some(&usecols),
+            ..GenFromTxtConfig::default()
+        };
+        let result = genfromtxt_full(text, &config).unwrap();
         // After skip_header=1: rows are "1,2,3", "4,5,6", "7,8,9", "footer"
         // After skip_footer=1: "1,2,3", "4,5,6", "7,8,9"
         // usecols=[1]: pick column 1 → 2, 5, 8
