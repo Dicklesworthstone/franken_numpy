@@ -4,10 +4,10 @@
   <img src="franken_numpy_illustration.webp" alt="FrankenNumPy - memory-safe clean-room NumPy reimplementation in Rust" width="400">
 
   **Memory-safe, clean-room NumPy reimplementation in Rust.**<br>
-  Zero unsafe code. 2,754 tests. Bit-exact RNG parity. Every feature family green.
+  Zero unsafe code. Extensive conformance coverage. Bit-exact RNG parity. Every feature family green.
 
   ![Rust](https://img.shields.io/badge/Rust-nightly%202024-orange)
-  ![Tests](https://img.shields.io/badge/tests-2%2C754%20passing-brightgreen)
+  ![Tests](https://img.shields.io/badge/tests-extensive%20coverage-brightgreen)
   ![Unsafe](https://img.shields.io/badge/unsafe-0%20blocks-blue)
   ![License](https://img.shields.io/badge/license-MIT-green)
 </div>
@@ -35,7 +35,7 @@ FrankenNumPy rebuilds NumPy's semantics from scratch in safe Rust with two non-n
 | Stride calculus | Evolved over decades | Clean-room deterministic engine (SCE) |
 | Runtime modes | Single mode | Strict (max compat) + Hardened (safety guards) |
 | Conformance | Self-referential | Differential oracle against real NumPy |
-| Test coverage | pytest suite | 2,754 Rust tests + 8-gate CI topology |
+| Test coverage | pytest suite | Extensive Rust test coverage + 8-gate CI topology |
 
 ---
 
@@ -105,7 +105,7 @@ Over 1,000 public functions across 9 crates covering the full NumPy API:
 | **Sorting** | `sort`, `argsort`, `searchsorted`, `partition`, `argpartition`, `unique`, `unique_all/counts/inverse/values` |
 | **Set operations** | `union1d`, `intersect1d`, `setdiff1d`, `setxor1d`, `in1d`, `isin` |
 | **Linear algebra** | `solve`, `det`, `inv`, `eig`, `svd`, `qr`, `cholesky`, `lstsq`, `norm`, `matrix_rank`, `matrix_power`, `multi_dot`, `pinv`, `cond`, `slogdet`, `funm` |
-| **Random** | 39 statistical distributions plus permutation/state helpers via PCG64DXSM: `normal`, `uniform`, `binomial`, `poisson`, `gamma`, `beta`, `hypergeometric`, `multinomial`, `dirichlet`, `vonmises`, `zipf`, etc. |
+| **Random** | Statistical distributions plus permutation/state helpers via PCG64DXSM: `normal`, `uniform`, `binomial`, `poisson`, `gamma`, `beta`, `hypergeometric`, `multinomial`, `dirichlet`, `vonmises`, `zipf`, etc. |
 | **FFT** | `fft`, `ifft`, `fft2`, `ifft2`, `fftn`, `ifftn`, `rfft`, `irfft`, `fftfreq`, `rfftfreq`, `fftshift` |
 | **Statistics** | `histogram`, `percentile`, `quantile`, `median`, `average`, `corrcoef`, `cov`, `bincount`, `digitize` |
 | **Polynomials** | Chebyshev, Legendre, Hermite, Laguerre families + power series (33 functions) |
@@ -149,8 +149,8 @@ cargo test --workspace --all-features
       ▼           ▼               ▼              ▼           ▼
  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
  │ fnp-ufunc│ │fnp-linalg│ │fnp-random│ │  fnp-io  │ │ fnp-fft  │
- │ 1652     │ │ 225      │ │ 191      │ │ 176      │ │ (in-ufunc│
- │ tests    │ │ tests    │ │ tests    │ │ tests    │ │  module) │
+ │ array ops│ │ linalg   │ │ RNG      │ │ NPY/NPZ  │ │ (in-ufunc│
+ │ dispatch │ │ kernels  │ │ engine   │ │ + text   │ │  module) │
  └─────┬────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘
        │
  ┌─────┴────────────────────────────────────────────────────┐
@@ -158,9 +158,8 @@ cargo test --workspace --all-features
  ▼                                                          ▼
  ┌──────────┐ ┌────────────┐ ┌──────────┐ ┌──────────────┐
  │ fnp-dtype│ │ fnp-ndarray│ │ fnp-iter │ │ fnp-runtime  │
- │ 123 tests│ │ 87 tests   │ │ 103 tests│ │ 54 tests     │
- │ promote  │ │ SCE core   │ │ transfer │ │ strict/      │
- │ cast     │ │ strides    │ │ semantics│ │ hardened     │
+ │ dtype    │ │ SCE core   │ │ transfer │ │ strict/      │
+ │ rules    │ │ strides    │ │ semantics│ │ hardened     │
  └──────────┘ └────────────┘ └──────────┘ └──────────────┘
                     ▲
                     │
@@ -764,27 +763,28 @@ let restored = Generator::from_pickle_payload(payload)?;
 
 ## Test Coverage
 
-| Crate | Tests | What it covers |
-|---|---|---|
-| `fnp-ufunc` | 1,652 | Array ops, math, sorting, polynomials, reductions, oracle tests, linalg bridge, FFT (including hfft/ihfft), hermfit/lagfit, masked cov/corrcoef, datetime parsing, gufunc validation, parameter parity, r_/c_ helpers, mgrid/ogrid, einsum, edge-case parity |
-| `fnp-linalg` | 225 | Decompositions, solvers, norms, 16 NumPy oracle tests, extreme-scale regression, non-finite parity |
-| `fnp-random` | 191 | 40 oracle-verified distributions, seeding, reproducibility, large-n binomial/multinomial |
-| `fnp-io` | 176 | NPY/NPZ read/write, text formats, compression, 7 format oracle tests, genfromtxt_full, fromfile_text/tofile_text |
-| `fnp-dtype` | 123 | Dtype taxonomy, promotion table (all 324 pairs explicit), cast policy primitives, NumPy byte-width parsing |
-| `fnp-conformance` | 134 | Differential parity, metamorphic identities, adversarial fuzzing, witness stability, matmul conformance, oracle NaN fallback |
-| `fnp-ndarray` | 87 | Shape legality, stride calculus, broadcast contracts, overlap detection, multi-axis negative strides, F-order, edge cases |
-| `fnp-iter` | 103 | Transfer-loop selector, NDIter traversal/broadcast/overlap contracts, flatiter indexing/assignment, ndindex/ndenumerate iterators |
-| `fnp-runtime` | 54 | Mode split, fail-closed decoding, override-audit gate, Bayesian decision engine, evidence ledger |
-| **Total** | **2,754** | **All passing in workspace** |
+Current per-crate counts move over time; see `FEATURE_PARITY.md` for the live inventory. Coverage focus by crate:
+
+| Crate | Coverage focus |
+|---|---|
+| `fnp-ufunc` | Array ops, math, sorting, polynomials, reductions, oracle tests, linalg bridge, FFT, gufunc validation, parameter parity, einsum, and edge-case parity |
+| `fnp-linalg` | Decompositions, solvers, norms, NumPy oracle tests, extreme-scale regression, and non-finite parity |
+| `fnp-random` | Oracle-verified distributions, seeding, reproducibility, and large-n binomial/multinomial behavior |
+| `fnp-io` | NPY/NPZ read/write, text formats, compression, oracle format tests, and `genfromtxt`/`fromfile` coverage |
+| `fnp-dtype` | Dtype taxonomy, promotion table coverage, cast policy primitives, and NumPy byte-width parsing |
+| `fnp-conformance` | Differential parity, metamorphic identities, adversarial fuzzing, witness stability, and matmul conformance |
+| `fnp-ndarray` | Shape legality, stride calculus, broadcast contracts, overlap detection, multi-axis negative strides, F-order, and edge cases |
+| `fnp-iter` | Transfer-loop selection, NDIter traversal/broadcast/overlap contracts, flatiter indexing/assignment, and enumeration helpers |
+| `fnp-runtime` | Mode split, fail-closed decoding, override-audit gates, Bayesian decisions, and evidence-ledger behavior |
 
 ### Oracle Test Strategy
 
-83 oracle tests verify bit-exact parity against NumPy:
+The oracle suite verifies bit-exact or behaviorally equivalent parity against NumPy across the major subsystems:
 
-- **40 RNG oracle tests:** every distribution produces identical output from the same seed, verified against `numpy.random.Generator(PCG64DXSM(12345))`
-- **20 ufunc edge-case tests:** NaN propagation, empty arrays, Inf arithmetic, boolean dtype promotion, sort ordering
-- **16 linalg oracle tests:** det, inv, solve, eig, svd, cholesky, QR, norm, cond, slogdet, lstsq, rank
-- **7 I/O format tests:** NPY roundtrip, magic bytes, header dict format, 16-byte alignment
+- **RNG oracle tests:** every distribution produces identical output from the same seed, verified against `numpy.random.Generator(PCG64DXSM(12345))`
+- **Ufunc edge-case tests:** NaN propagation, empty arrays, Inf arithmetic, boolean dtype promotion, and sort ordering
+- **Linalg oracle tests:** `det`, `inv`, `solve`, `eig`, `svd`, `cholesky`, `qr`, `norm`, `cond`, `slogdet`, `lstsq`, and rank checks
+- **I/O format tests:** NPY roundtrip, magic bytes, header dict format, and 16-byte alignment
 
 ### RNG Algorithm Parity
 
@@ -823,7 +823,7 @@ Every feature family is `parity_green`:
 | Masked arrays | parity_green |
 | Datetime/timedelta | parity_green |
 | Linear algebra | parity_green |
-| Random (39 statistical distributions) | parity_green |
+| Random generation | parity_green |
 | I/O (npy/npz) | parity_green |
 | Financial | parity_green |
 | Scimath | parity_green |
@@ -899,20 +899,21 @@ FNP_ORACLE_PYTHON="$(pwd)/.venv-numpy314/bin/python3" \
 ```
 franken_numpy/
 ├── Cargo.toml                         # Workspace root (9 crates)
+├── FEATURE_PARITY.md                  # Live parity matrix + evidence links
+├── PROPOSED_ARCHITECTURE.md           # High-level architecture notes
 ├── crates/
 │   ├── fnp-dtype/                     # Dtype taxonomy, promotion table, cast policy
 │   ├── fnp-ndarray/                   # Stride Calculus Engine (SCE)
 │   ├── fnp-iter/                      # Transfer semantics, overlap-safe iteration
 │   ├── fnp-ufunc/                     # 1,000+ array operations, reductions, einsum
 │   ├── fnp-linalg/                    # solve, eig, svd, qr, cholesky, lstsq, etc.
-│   ├── fnp-random/                    # 39 statistical distributions + generator helpers, PCG64DXSM, bit-exact parity
+│   ├── fnp-random/                    # Statistical distributions + generator helpers, PCG64DXSM, bit-exact parity
 │   ├── fnp-io/                        # NPY/NPZ read/write, text I/O, DEFLATE
 │   ├── fnp-conformance/               # Oracle capture, differential harness, benchmarks
 │   └── fnp-runtime/                   # Strict/hardened mode, evidence ledger
 ├── legacy_numpy_code/numpy/           # Behavioral oracle (upstream NumPy source)
 ├── artifacts/                         # Contracts, security maps, logs, proofs
-├── scripts/                           # E2E gate scripts
-└── docs/                              # Specs and planning documents
+└── scripts/                           # E2E gate scripts
 ```
 
 ---
