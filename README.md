@@ -30,7 +30,7 @@ FrankenNumPy rebuilds NumPy's semantics from scratch in safe Rust with two non-n
 | | NumPy (C) | FrankenNumPy (Rust) |
 |---|---|---|
 | Memory safety | Buffer overflows possible | `#![forbid(unsafe_code)]` on all 9 crates |
-| RNG parity | Reference implementation | Bit-exact match (40 oracle-verified distributions) |
+| RNG parity | Reference implementation | Bit-exact PCG64DXSM core stream plus broad statistical and replay conformance coverage |
 | NaN semantics | Implicit C behavior | Explicit propagation verified by 20+ oracle tests |
 | Stride calculus | Evolved over decades | Clean-room deterministic engine (SCE) |
 | Runtime modes | Single mode | Strict (max compat) + Hardened (safety guards) |
@@ -608,21 +608,21 @@ These match `numpy.lib.scimath` and are useful in signal processing and physics 
 
 ## Complete Distribution List
 
-All 49 random-generation methods available on `Generator`, grouped by family:
+Random-generation methods available on `Generator`, grouped by family:
 
-**Continuous (28):** `beta`, `chisquare`, `exponential`, `f`/`f_distribution`, `gamma`, `gumbel`, `halfnormal`, `laplace`, `levy`, `logistic`, `lognormal`, `lomax`, `maxwell`, `noncentral_chisquare`, `noncentral_f`, `normal`, `pareto`, `power`, `rayleigh`, `standard_cauchy`, `standard_exponential`, `standard_gamma`, `standard_normal`, `standard_t`, `triangular`, `vonmises`, `wald`, `weibull`
+**Continuous:** `beta`, `chisquare`, `exponential`, `f`/`f_distribution`, `gamma`, `gumbel`, `halfnormal`, `laplace`, `levy`, `logistic`, `lognormal`, `lomax`, `maxwell`, `noncentral_chisquare`, `noncentral_f`, `normal`, `pareto`, `power`, `rayleigh`, `standard_cauchy`, `standard_exponential`, `standard_gamma`, `standard_normal`, `standard_t`, `triangular`, `vonmises`, `wald`, `weibull`
 
-**Discrete (7):** `binomial`, `geometric`, `hypergeometric`, `logseries`, `negative_binomial`, `poisson`, `zipf`
+**Discrete:** `binomial`, `geometric`, `hypergeometric`, `logseries`, `negative_binomial`, `poisson`, `zipf`
 
-**Multivariate (3):** `dirichlet`, `multinomial`, `multivariate_normal`
+**Multivariate:** `dirichlet`, `multinomial`, `multivariate_normal`
 
-**Uniform (3):** `random` (float [0,1)), `uniform` (float [low,high)), `integers` (int [low,high))
+**Uniform:** `random` (float [0,1)), `uniform` (float [low,high)), `integers` (int [low,high))
 
-**Permutation (3):** `shuffle` (in-place), `permutation` (copy), `permuted` (axis-aware)
+**Permutation:** `shuffle` (in-place), `permutation` (copy), `permuted` (axis-aware)
 
-**Utility (2):** `bytes`, `choice`/`choice_weighted`
+**Utility:** `bytes`, `choice`/`choice_weighted`
 
-**State (3):** `spawn`, `jumped`, `state`/`set_state`
+**State:** `spawn`, `jumped`, `state`/`set_state`
 
 ---
 
