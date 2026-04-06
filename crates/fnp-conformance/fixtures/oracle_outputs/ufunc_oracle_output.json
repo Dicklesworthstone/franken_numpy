@@ -2,7 +2,7 @@
   "schema_version": 1,
   "oracle_source": "system",
   "oracle_diagnostics": "legacy import failed: ImportError(\"cannot import name 'version' from partially initialized module 'numpy' (most likely due to a circular import) (/data/projects/franken_numpy/crates/fnp-conformance/../../legacy_numpy_code/numpy/numpy/__init__.py)\")",
-  "generated_at_unix_ms": 1774204892967,
+  "generated_at_unix_ms": 1775432960550,
   "cases": [
     {
       "id": "add_broadcast_2x3_plus_3",
