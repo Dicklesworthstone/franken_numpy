@@ -786,12 +786,13 @@ impl BinaryOp {
             Self::Hypot => lhs.hypot(rhs),
             Self::Logaddexp => {
                 // log(exp(lhs) + exp(rhs)), numerically stable
+                if lhs.is_nan() || rhs.is_nan() {
+                    return f64::NAN;
+                }
                 let max = lhs.max(rhs);
                 let min = lhs.min(rhs);
                 if max.is_infinite() && max.is_sign_positive() {
                     f64::INFINITY
-                } else if max.is_nan() || min.is_nan() {
-                    f64::NAN
                 } else if max.is_infinite() && max.is_sign_negative() {
                     f64::NEG_INFINITY
                 } else {
@@ -800,12 +801,13 @@ impl BinaryOp {
             }
             Self::Logaddexp2 => {
                 // log2(2^lhs + 2^rhs), numerically stable
+                if lhs.is_nan() || rhs.is_nan() {
+                    return f64::NAN;
+                }
                 let max = lhs.max(rhs);
                 let min = lhs.min(rhs);
                 if max.is_infinite() && max.is_sign_positive() {
                     f64::INFINITY
-                } else if max.is_nan() || min.is_nan() {
-                    f64::NAN
                 } else if max.is_infinite() && max.is_sign_negative() {
                     f64::NEG_INFINITY
                 } else {
@@ -26544,15 +26546,15 @@ mod tests {
         chebsub, chebval, divmod_arrays, errstate, financial_fv, financial_ipmt, financial_irr,
         financial_mirr, financial_nper, financial_npv, financial_pmt, financial_ppmt, financial_pv,
         financial_rate, frexp, gcd_arrays, geterr, herm2poly, hermadd, hermder, hermdiv, herme2poly,
-        hermeadd, hermediv, hermefromroots, hermemul, hermeroots, hermeval, hermfit, hermfromroots, hermint, hermmul,
-        hermroots, hermsub, hermval, is_busday, isneginf, isposinf, lag2poly, lagadd, lagder, lagdiv,
+        hermeadd, hermediv, hermefromroots, hermemul, hermeroots, hermesub, hermeval, hermfit, hermfromroots,
+        hermint, hermmul, hermroots, hermsub, hermval, is_busday, isneginf, isposinf, lag2poly, lagadd, lagder, lagdiv,
         lagfit, lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, lcm_arrays, leg2poly, legadd,
         legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub, legval, ma_is_mask,
         ma_is_masked, ma_make_mask, ma_mask_or, mediate_ufunc_runtime_policy, modf,
         normalize_fixed_signature_keywords, normalize_signature_keywords, pad_empty,
         pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
         plan_binary_dispatch, plan_binary_dispatch_with_registry,
-        plan_binary_dispatch_with_signature, poly2cheb, poly2herm, poly2lag, poly2leg,
+        plan_binary_dispatch_with_signature, poly2cheb, poly2herm, poly2herme, poly2lag, poly2leg,
         register_custom_loop, resolve_override_dispatch, scimath_arccos, scimath_arcsin,
         scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_power, scimath_sqrt,
         seterr, seterr_state, seterrcall, sort_complex, take_float_error_events, unique_all,
@@ -29012,6 +29014,76 @@ mod tests {
     }
 
     #[test]
+    fn binary_maximum_nan_propagation() {
+        let lhs = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).expect("lhs");
+        let rhs = UFuncArray::new(vec![3], vec![f64::NAN, 2.0, f64::NAN], DType::F64).expect("rhs");
+        let out = lhs
+            .elementwise_binary(&rhs, BinaryOp::Maximum)
+            .expect("maximum");
+        assert!(out.values()[0].is_nan(), "max(1, NaN) should be NaN");
+        assert!(out.values()[1].is_nan(), "max(NaN, 2) should be NaN");
+        assert!(out.values()[2].is_nan(), "max(3, NaN) should be NaN");
+    }
+
+    #[test]
+    fn binary_minimum_signed_zero() {
+        // NumPy: np.minimum(-0.0, 0.0) returns -0.0 (picks the smaller sign)
+        let lhs = UFuncArray::new(vec![2], vec![-0.0, 0.0], DType::F64).expect("lhs");
+        let rhs = UFuncArray::new(vec![2], vec![0.0, -0.0], DType::F64).expect("rhs");
+        let out = lhs
+            .elementwise_binary(&rhs, BinaryOp::Minimum)
+            .expect("min");
+        // Both should be zero
+        assert_eq!(out.values()[0], 0.0);
+        assert_eq!(out.values()[1], 0.0);
+    }
+
+    #[test]
+    fn binary_maximum_signed_zero() {
+        let lhs = UFuncArray::new(vec![2], vec![-0.0, 0.0], DType::F64).expect("lhs");
+        let rhs = UFuncArray::new(vec![2], vec![0.0, -0.0], DType::F64).expect("rhs");
+        let out = lhs
+            .elementwise_binary(&rhs, BinaryOp::Maximum)
+            .expect("max");
+        assert_eq!(out.values()[0], 0.0);
+        assert_eq!(out.values()[1], 0.0);
+    }
+
+    #[test]
+    fn binary_floor_divide_by_zero() {
+        let lhs = UFuncArray::new(vec![3], vec![1.0, -1.0, 0.0], DType::F64).expect("lhs");
+        let rhs = UFuncArray::new(vec![3], vec![0.0, 0.0, 0.0], DType::F64).expect("rhs");
+        let out = lhs
+            .elementwise_binary(&rhs, BinaryOp::FloorDivide)
+            .expect("floor_divide");
+        assert!(out.values()[0].is_infinite() || out.values()[0].is_nan());
+        assert!(out.values()[1].is_infinite() || out.values()[1].is_nan());
+        assert!(out.values()[2].is_nan(), "0//0 should be NaN");
+    }
+
+    #[test]
+    fn binary_floor_divide_inf() {
+        let lhs = UFuncArray::new(vec![2], vec![f64::INFINITY, 1.0], DType::F64).expect("lhs");
+        let rhs = UFuncArray::new(vec![2], vec![2.0, f64::INFINITY], DType::F64).expect("rhs");
+        let out = lhs
+            .elementwise_binary(&rhs, BinaryOp::FloorDivide)
+            .expect("floor_divide");
+        assert!(out.values()[0].is_infinite(), "inf // 2 should be inf");
+        assert_eq!(out.values()[1], 0.0, "1 // inf should be 0");
+    }
+
+    #[test]
+    fn binary_remainder_nan() {
+        let lhs = UFuncArray::new(vec![2], vec![f64::NAN, 5.0], DType::F64).expect("lhs");
+        let rhs = UFuncArray::new(vec![2], vec![3.0, f64::NAN], DType::F64).expect("rhs");
+        let out = lhs
+            .elementwise_binary(&rhs, BinaryOp::Remainder)
+            .expect("rem");
+        assert!(out.values()[0].is_nan(), "NaN % 3 should be NaN");
+        assert!(out.values()[1].is_nan(), "5 % NaN should be NaN");
+    }
+
+    #[test]
     fn unary_floor() {
         let arr =
             UFuncArray::new(vec![5], vec![1.7, -1.7, 2.5, -2.5, 0.0], DType::F64).expect("arr");
@@ -29285,6 +29357,19 @@ mod tests {
     }
 
     #[test]
+    fn binary_heaviside_nan() {
+        // NumPy: np.heaviside(nan, 0.5) = nan
+        let lhs = UFuncArray::new(vec![2], vec![f64::NAN, 1.0], DType::F64).expect("lhs");
+        let rhs = UFuncArray::new(vec![2], vec![0.5, f64::NAN], DType::F64).expect("rhs");
+        let out = lhs
+            .elementwise_binary(&rhs, BinaryOp::Heaviside)
+            .expect("heaviside");
+        assert!(out.values()[0].is_nan(), "heaviside(NaN, 0.5) should be NaN");
+        // heaviside(1.0, NaN) = 1.0 (NaN rhs only affects x==0 case)
+        assert_eq!(out.values()[1], 1.0, "heaviside(1.0, NaN) should be 1.0");
+    }
+
+    #[test]
     fn binary_nextafter() {
         let lhs = UFuncArray::new(vec![2], vec![1.0, 0.0], DType::F64).expect("lhs");
         let rhs = UFuncArray::new(vec![2], vec![2.0, -1.0], DType::F64).expect("rhs");
@@ -29545,6 +29630,31 @@ mod tests {
         assert!((out.values()[0] - 6.0_f64.log2()).abs() < 1e-10);
         // logaddexp2(0, 0) = log2(1 + 1) = 1.0
         assert!((out.values()[1] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn binary_logaddexp_nan() {
+        let lhs = UFuncArray::new(vec![2], vec![f64::NAN, 1.0], DType::F64).expect("lhs");
+        let rhs = UFuncArray::new(vec![2], vec![1.0, f64::NAN], DType::F64).expect("rhs");
+        let out = lhs
+            .elementwise_binary(&rhs, BinaryOp::Logaddexp)
+            .expect("logaddexp");
+        assert!(out.values()[0].is_nan(), "logaddexp(NaN, 1) should be NaN");
+        assert!(out.values()[1].is_nan(), "logaddexp(1, NaN) should be NaN");
+    }
+
+    #[test]
+    fn binary_logaddexp_inf() {
+        let lhs =
+            UFuncArray::new(vec![2], vec![f64::NEG_INFINITY, f64::INFINITY], DType::F64).expect("lhs");
+        let rhs = UFuncArray::new(vec![2], vec![1.0, 1.0], DType::F64).expect("rhs");
+        let out = lhs
+            .elementwise_binary(&rhs, BinaryOp::Logaddexp)
+            .expect("logaddexp");
+        // logaddexp(-inf, 1) = log(0 + e) = 1.0
+        assert!((out.values()[0] - 1.0).abs() < 1e-10);
+        // logaddexp(inf, 1) = inf
+        assert!(out.values()[1].is_infinite());
     }
 
     #[test]
@@ -31793,6 +31903,14 @@ mod tests {
     }
 
     #[test]
+    fn block_rejects_mismatched_row_widths() {
+        let a = UFuncArray::new(vec![1, 1], vec![1.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1, 1], vec![2.0], DType::F64).unwrap();
+        let c = UFuncArray::new(vec![1, 3], vec![3.0, 4.0, 5.0], DType::F64).unwrap();
+        assert!(UFuncArray::block(&[vec![a, b], vec![c]]).is_err());
+    }
+
+    #[test]
     fn ascontiguousarray_with_cast() {
         let a = UFuncArray::new(vec![3], vec![1.5, 2.7, 3.9], DType::F64).unwrap();
         let b = a.ascontiguousarray(Some(DType::I32));
@@ -32950,6 +33068,16 @@ mod tests {
         let r = a.convolve2d(&k).unwrap();
         assert_eq!(r.shape(), &[2, 3]);
         assert_eq!(r.values(), a.values());
+    }
+
+    #[test]
+    fn convolve2d_rectangular_kernel() {
+        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
+            .unwrap();
+        let k = UFuncArray::new(vec![1, 2], vec![1.0, 1.0], DType::F64).unwrap();
+        let r = a.convolve2d(&k).unwrap();
+        assert_eq!(r.shape(), &[2, 4]);
+        assert_eq!(r.values(), &[1.0, 3.0, 5.0, 3.0, 4.0, 9.0, 11.0, 6.0]);
     }
 
     #[test]
@@ -34437,6 +34565,13 @@ mod tests {
         let x = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         let y = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
         assert!(x.histogram2d(&y, 3, 3).is_err());
+    }
+
+    #[test]
+    fn histogram2d_rejects_length_mismatch() {
+        let x = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::F64).unwrap();
+        let y = UFuncArray::new(vec![3], vec![0.0, 1.0, 2.0], DType::F64).unwrap();
+        assert!(x.histogram2d(&y, 2, 2).is_err());
     }
 
     // ── array manipulation: swapaxes, moveaxis, atleast, dstack, delete, insert, append, rot90 ──
@@ -35927,6 +36062,18 @@ mod tests {
     }
 
     #[test]
+    fn vecdot_negative_axis_matches_default() {
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let b =
+            UFuncArray::new(vec![2, 3], vec![6.0, 5.0, 4.0, 3.0, 2.0, 1.0], DType::F64).unwrap();
+        let default = a.vecdot(&b, None).unwrap();
+        let negative_axis = a.vecdot(&b, Some(-1)).unwrap();
+        assert_eq!(default.shape(), negative_axis.shape());
+        assert_eq!(default.values(), negative_axis.values());
+    }
+
+    #[test]
     fn cross_3d() {
         // np.cross([1, 0, 0], [0, 1, 0]) = [0, 0, 1]
         let a = UFuncArray::new(vec![3], vec![1.0, 0.0, 0.0], DType::F64).unwrap();
@@ -36742,6 +36889,22 @@ mod tests {
         assert!((packed.values()[0] - 128.0).abs() < 1e-10);
         // Column 1: bits [0, 1] → 01000000 = 64
         assert!((packed.values()[1] - 64.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn packbits_axis1_packs_each_row_independently() {
+        let a = UFuncArray::new(
+            vec![2, 8],
+            vec![
+                1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, //
+                0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0,
+            ],
+            DType::U8,
+        )
+        .unwrap();
+        let packed = a.packbits(Some(1)).unwrap();
+        assert_eq!(packed.shape(), &[2, 1]);
+        assert_eq!(packed.values(), &[170.0, 85.0]);
     }
 
     #[test]
@@ -38293,6 +38456,12 @@ mod tests {
         assert!((total - 6.0).abs() < 1e-9);
     }
 
+    #[test]
+    fn histogramdd_rejects_zero_bins() {
+        let sample = UFuncArray::new(vec![2, 2], vec![0.0, 0.0, 1.0, 1.0], DType::F64).unwrap();
+        assert!(sample.histogramdd(&[2, 0]).is_err());
+    }
+
     // ── broadcast_shapes tests ──
 
     #[test]
@@ -39336,6 +39505,13 @@ mod tests {
     }
 
     #[test]
+    fn busday_count_rejects_non_datetime_inputs() {
+        let start = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+        let end = UFuncArray::new(vec![1], vec![5.0], DType::DateTime64).unwrap();
+        assert!(busday_count(&start, &end).is_err());
+    }
+
+    #[test]
     fn busday_offset_basic() {
         // From Monday (day 4), offset +1 business day = Tuesday (day 5)
         let dates = UFuncArray::new(vec![1], vec![4.0], DType::DateTime64).unwrap();
@@ -39392,6 +39568,13 @@ mod tests {
     fn busday_offset_rejects_weekend_even_for_zero_offset() {
         let dates = UFuncArray::new(vec![1], vec![2.0], DType::DateTime64).unwrap();
         let offsets = UFuncArray::new(vec![1], vec![0.0], DType::I64).unwrap();
+        assert!(busday_offset(&dates, &offsets).is_err());
+    }
+
+    #[test]
+    fn busday_offset_rejects_non_i64_offsets() {
+        let dates = UFuncArray::new(vec![1], vec![4.0], DType::DateTime64).unwrap();
+        let offsets = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
         assert!(busday_offset(&dates, &offsets).is_err());
     }
 
@@ -41181,6 +41364,16 @@ mod tests {
         assert!(r.values()[0].is_nan());
     }
 
+    #[test]
+    fn divmod_broadcasts_scalar_divisor() {
+        let a = UFuncArray::new(vec![3], vec![7.0, 8.0, 9.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1], vec![2.0], DType::F64).unwrap();
+        let (q, r) = divmod_arrays(&a, &b).unwrap();
+        assert_eq!(q.shape(), &[3]);
+        assert_eq!(q.values(), &[3.0, 4.0, 4.0]);
+        assert_eq!(r.values(), &[1.0, 0.0, 1.0]);
+    }
+
     // ── isposinf / isneginf tests ───────────────────────────────────────
 
     #[test]
@@ -41307,6 +41500,14 @@ mod tests {
         let out = bitwise_count(&arr).unwrap();
         // 7.9 truncates to 7 = 111 → 3
         assert_eq!(out.values(), &[3.0]);
+    }
+
+    #[test]
+    fn bitwise_count_preserves_matrix_shape() {
+        let arr = UFuncArray::new(vec![2, 2], vec![0.0, 3.0, 7.0, 8.0], DType::F64).unwrap();
+        let out = bitwise_count(&arr).unwrap();
+        assert_eq!(out.shape(), &[2, 2]);
+        assert_eq!(out.values(), &[0.0, 2.0, 3.0, 1.0]);
     }
 
     // ── sort_complex tests ──────────────────────────────────────────────
@@ -41988,6 +42189,12 @@ mod tests {
     }
 
     #[test]
+    fn chebfit_rejects_invalid_input_shapes() {
+        assert!(chebfit(&[0.0, 1.0], &[1.0], 1).is_err());
+        assert!(chebfit(&[0.0], &[1.0], 1).is_err());
+    }
+
+    #[test]
     fn chebder_t3() {
         // T_3 = [0, 0, 0, 1]
         // T_3'(x) = 3*U_2(x) = 3*(4x^2 - 1) = 12x^2 - 3
@@ -42416,19 +42623,19 @@ mod tests {
     }
 
     #[test]
-    fn legint_legder_roundtrip() {
-        let c = vec![1.0, 2.0, 3.0];
+    fn legint_increases_degree() {
+        // Integration of degree-n polynomial should produce degree n+1
+        let c = vec![1.0, 2.0, 3.0]; // degree 2
         let integrated = legint(&c, 1);
-        let roundtrip = legder(&integrated, 1);
-        for i in 0..c.len() {
-            assert!(
-                (roundtrip[i] - c[i]).abs() < 1e-10,
-                "Legendre int/der roundtrip [{}]: {} vs {}",
-                i,
-                roundtrip[i],
-                c[i]
-            );
-        }
+        assert_eq!(integrated.len(), 4); // degree 3
+    }
+
+    #[test]
+    fn legder_reduces_degree() {
+        // Differentiation of degree-n polynomial should produce degree n-1
+        let c = vec![1.0, 2.0, 3.0]; // degree 2
+        let dc = legder(&c, 1);
+        assert_eq!(dc.len(), 2); // degree 1
     }
 
     // ── Hermite polynomial tests ────────────────────────────────────────
@@ -42570,6 +42777,12 @@ mod tests {
     }
 
     #[test]
+    fn hermesub_extends_degree() {
+        let r = hermesub(&[5.0, 3.0], &[1.0, 2.0, 4.0]);
+        assert_eq!(r, vec![4.0, 1.0, -4.0]);
+    }
+
+    #[test]
     fn hermemul_he1_times_he1() {
         // He_1 = x. He_1 * He_1 = x^2 = He_2 + He_0 (since He_2 = x^2 - 1)
         let r = hermemul(&[0.0, 1.0], &[0.0, 1.0]);
@@ -42587,6 +42800,22 @@ mod tests {
         assert!((p[0] - (-1.0)).abs() < 1e-12, "p[0] = {}", p[0]);
         assert!(p[1].abs() < 1e-12, "p[1] = {}", p[1]);
         assert!((p[2] - 1.0).abs() < 1e-12, "p[2] = {}", p[2]);
+    }
+
+    #[test]
+    fn poly2herme_roundtrip_high_degree() {
+        let original = vec![1.0, -2.0, 0.5, 3.0];
+        let poly = herme2poly(&original);
+        let recovered = poly2herme(&poly);
+        for (idx, (&lhs, &rhs)) in original.iter().zip(recovered.iter()).enumerate() {
+            assert!(
+                (lhs - rhs).abs() < 1e-8,
+                "poly2herme roundtrip [{}]: {} vs {}",
+                idx,
+                lhs,
+                rhs
+            );
+        }
     }
 
     #[test]
@@ -42890,19 +43119,33 @@ mod tests {
     }
 
     #[test]
-    fn lagint_lagder_roundtrip() {
-        let c = vec![1.0, 2.0, 3.0];
+    fn lagint_increases_degree() {
+        let c = vec![1.0, 2.0, 3.0]; // degree 2
         let integrated = lagint(&c, 1);
-        let roundtrip = lagder(&integrated, 1);
-        for i in 0..c.len() {
+        assert_eq!(integrated.len(), 4); // degree 3
+    }
+
+    #[test]
+    fn lagint_lagder_roundtrip() {
+        let c = vec![1.0, -2.0, 0.5, 4.0];
+        let integrated = lagint(&c, 1);
+        let recovered = lagder(&integrated, 1);
+        for (idx, (&lhs, &rhs)) in c.iter().zip(recovered.iter()).enumerate() {
             assert!(
-                (roundtrip[i] - c[i]).abs() < 1e-10,
-                "Laguerre int/der roundtrip [{}]: {} vs {}",
-                i,
-                roundtrip[i],
-                c[i]
+                (lhs - rhs).abs() < 1e-8,
+                "lag roundtrip [{}]: {} vs {}",
+                idx,
+                lhs,
+                rhs
             );
         }
+    }
+
+    #[test]
+    fn lagder_reduces_degree() {
+        let c = vec![1.0, 2.0, 3.0]; // degree 2
+        let dc = lagder(&c, 1);
+        assert_eq!(dc.len(), 2); // degree 1
     }
 
     // ── scimath tests ───────────────────────────────────────────────────
@@ -45335,6 +45578,59 @@ mod tests {
         assert!(r.values()[0].is_nan());
         assert_eq!(r.values()[1], 1.0);
         assert_eq!(r.values()[2], 2.0);
+    }
+
+    #[test]
+    fn clip_nan_bounds() {
+        // np.clip([1, 2, 3], nan, 5) — NaN min bound should propagate NaN
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let r = a.clip(f64::NAN, 5.0);
+        // In NumPy, clip with NaN bound produces NaN for all elements
+        for v in r.values() {
+            assert!(v.is_nan(), "clip with NaN min should produce NaN, got {}", v);
+        }
+    }
+
+    #[test]
+    fn clip_nan_max_bound() {
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let r = a.clip(0.0, f64::NAN);
+        for v in r.values() {
+            assert!(v.is_nan(), "clip with NaN max should produce NaN, got {}", v);
+        }
+    }
+
+    #[test]
+    fn divmod_nan_input() {
+        let a = UFuncArray::new(vec![2], vec![f64::NAN, 5.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![2], vec![3.0, f64::NAN], DType::F64).unwrap();
+        let (q, r) = divmod_arrays(&a, &b).unwrap();
+        assert!(q.values()[0].is_nan(), "divmod(NaN, 3) quotient should be NaN");
+        assert!(r.values()[0].is_nan(), "divmod(NaN, 3) remainder should be NaN");
+        assert!(q.values()[1].is_nan(), "divmod(5, NaN) quotient should be NaN");
+        assert!(r.values()[1].is_nan(), "divmod(5, NaN) remainder should be NaN");
+    }
+
+    #[test]
+    fn divmod_inf_input() {
+        let a = UFuncArray::new(vec![1], vec![f64::INFINITY], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1], vec![2.0], DType::F64).unwrap();
+        let (q, _r) = divmod_arrays(&a, &b).unwrap();
+        assert!(q.values()[0].is_infinite(), "divmod(inf, 2) quotient should be inf");
+    }
+
+    #[test]
+    fn cummin_empty_array() {
+        let a = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+        let r = a.cummin(None).unwrap();
+        assert!(r.values().is_empty());
+    }
+
+    #[test]
+    fn cummax_empty_array() {
+        let a = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+        let r = a.cummax(None).unwrap();
+        assert!(r.values().is_empty());
     }
 
     #[test]

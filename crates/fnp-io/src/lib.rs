@@ -1804,11 +1804,17 @@ pub fn genfromtxt(
         if trimmed.is_empty() || trimmed.starts_with(comments) {
             continue;
         }
-        let row_vals: Vec<f64> = trimmed
-            .split(delimiter)
-            .filter(|s| delimiter != ' ' || !s.is_empty())
-            .map(|s| s.trim().parse::<f64>().unwrap_or(filling_values))
-            .collect();
+        let row_vals: Vec<f64> = if delimiter == ' ' {
+            trimmed
+                .split_whitespace()
+                .map(|s| s.trim().parse::<f64>().unwrap_or(filling_values))
+                .collect()
+        } else {
+            trimmed
+                .split(delimiter)
+                .map(|s| s.trim().parse::<f64>().unwrap_or(filling_values))
+                .collect()
+        };
 
         let current_ncols = row_vals.len();
         let target_ncols = ncols.unwrap_or(current_ncols);

@@ -8905,4 +8905,66 @@ mod tests {
         assert!(solved[6].abs() < 1e-12, "X1[1,0]={}", solved[6]);
         assert!((solved[7] - 0.2).abs() < 1e-12, "X1[1,1]={}", solved[7]);
     }
+
+    #[test]
+    fn batch_det_singular_matrix() {
+        // Stack with a singular matrix: [[0,0],[0,0]]
+        let data = vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+        let dets = batch_det(&data, &[2, 2, 2]).unwrap();
+        assert_eq!(dets.len(), 2);
+        assert!((dets[0] - 1.0).abs() < 1e-12); // det(I) = 1
+        assert!(dets[1].abs() < 1e-12); // det(0) = 0
+    }
+
+    #[test]
+    fn batch_inv_identity() {
+        // Invert a batch of identity matrices
+        let data = vec![1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0];
+        let inv = batch_inv(&data, &[2, 2, 2]).unwrap();
+        assert_eq!(inv.len(), 8);
+        // Both should be identity
+        for (i, &v) in inv.iter().enumerate() {
+            let expected = if i % 4 == 0 || i % 4 == 3 { 1.0 } else { 0.0 };
+            assert!(
+                (v - expected).abs() < 1e-12,
+                "batch_inv[{}] = {}, expected {}",
+                i,
+                v,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn batch_trace_basic() {
+        // [[1,2],[3,4]] trace=5, [[5,6],[7,8]] trace=13
+        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let traces = batch_trace(&data, &[2, 2, 2]).unwrap();
+        assert_eq!(traces.len(), 2);
+        assert!((traces[0] - 5.0).abs() < 1e-12);
+        assert!((traces[1] - 13.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn batch_det_shape_mismatch() {
+        // Non-square last two dims
+        assert!(batch_det(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).is_err());
+    }
+
+    #[test]
+    fn batch_inv_inv_roundtrip() {
+        // Inv(Inv(A)) should return A
+        let a = vec![2.0, 1.0, 1.0, 3.0];
+        let inv1 = batch_inv(&a, &[2, 2]).unwrap();
+        let inv2 = batch_inv(&inv1, &[2, 2]).unwrap();
+        for (i, (&orig, &back)) in a.iter().zip(inv2.iter()).enumerate() {
+            assert!(
+                (orig - back).abs() < 1e-10,
+                "inv(inv(A))[{}] = {}, expected {}",
+                i,
+                back,
+                orig
+            );
+        }
+    }
 }

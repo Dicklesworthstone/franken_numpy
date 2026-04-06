@@ -7046,4 +7046,54 @@ mod tests {
             }
         }
     }
+
+    // ── permuted tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn permuted_2d_axis0() {
+        let mut rng = Generator::from_pcg64_dxsm(42).unwrap();
+        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let result = rng.permuted(&data, &[3, 2], 0).unwrap();
+        assert_eq!(result.len(), 6);
+        let col0: Vec<f64> = vec![result[0], result[2], result[4]];
+        let mut sorted0 = col0.clone();
+        sorted0.sort_by(|a, b| a.total_cmp(b));
+        assert_eq!(sorted0, vec![1.0, 3.0, 5.0]);
+        let col1: Vec<f64> = vec![result[1], result[3], result[5]];
+        let mut sorted1 = col1.clone();
+        sorted1.sort_by(|a, b| a.total_cmp(b));
+        assert_eq!(sorted1, vec![2.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn permuted_axis_out_of_bounds() {
+        let mut rng = Generator::from_pcg64_dxsm(42).unwrap();
+        let data = vec![1.0, 2.0, 3.0];
+        assert!(rng.permuted(&data, &[3], 1).is_err());
+    }
+
+    #[test]
+    fn permuted_single_element_axis() {
+        let mut rng = Generator::from_pcg64_dxsm(42).unwrap();
+        let data = vec![1.0, 2.0, 3.0];
+        let result = rng.permuted(&data, &[1, 3], 0).unwrap();
+        assert_eq!(result, data);
+    }
+
+    #[test]
+    fn permuted_deterministic() {
+        let mut rng1 = Generator::from_pcg64_dxsm(999).unwrap();
+        let mut rng2 = Generator::from_pcg64_dxsm(999).unwrap();
+        let data = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+        let r1 = rng1.permuted(&data, &[5], 0).unwrap();
+        let r2 = rng2.permuted(&data, &[5], 0).unwrap();
+        assert_eq!(r1, r2, "Same seed should produce identical permutations");
+    }
+
+    #[test]
+    fn permuted_shape_mismatch() {
+        let mut rng = Generator::from_pcg64_dxsm(42).unwrap();
+        let data = vec![1.0, 2.0, 3.0];
+        assert!(rng.permuted(&data, &[4], 0).is_err());
+    }
 }
