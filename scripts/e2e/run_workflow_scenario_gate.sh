@@ -12,13 +12,23 @@ COVERAGE_FLOOR="${FNP_WORKFLOW_COVERAGE_FLOOR:-1.0}"
 
 cd "$ROOT_DIR"
 
+run_cargo() {
+  if command -v rch >/dev/null 2>&1; then
+    echo "[workflow-scenario-gate] executor=rch"
+    rch exec -- cargo "$@"
+  else
+    echo "[workflow-scenario-gate] executor=cargo"
+    cargo "$@"
+  fi
+}
+
 echo "[workflow-scenario-gate] root=$ROOT_DIR"
 echo "[workflow-scenario-gate] workflow_log=$LOG_PATH"
 echo "[workflow-scenario-gate] reliability_report=$REPORT_PATH"
 echo "[workflow-scenario-gate] artifact_index=$ARTIFACT_INDEX_PATH"
 echo "[workflow-scenario-gate] retries=$RETRIES flake_budget=$FLAKE_BUDGET coverage_floor=$COVERAGE_FLOOR"
 
-rch exec -- cargo run -p fnp-conformance --bin run_workflow_scenario_gate -- \
+run_cargo run -p fnp-conformance --bin run_workflow_scenario_gate -- \
   --log-path "$LOG_PATH" \
   --artifact-index-path "$ARTIFACT_INDEX_PATH" \
   --report-path "$REPORT_PATH" \

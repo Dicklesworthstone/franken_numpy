@@ -11,12 +11,22 @@ COVERAGE_FLOOR="${FNP_TEST_CONTRACT_COVERAGE_FLOOR:-1.0}"
 
 cd "$ROOT_DIR"
 
+run_cargo() {
+  if command -v rch >/dev/null 2>&1; then
+    echo "[test-contract-gate] executor=rch"
+    rch exec -- cargo "$@"
+  else
+    echo "[test-contract-gate] executor=cargo"
+    cargo "$@"
+  fi
+}
+
 echo "[test-contract-gate] root=$ROOT_DIR"
 echo "[test-contract-gate] runtime_policy_log=$LOG_PATH"
 echo "[test-contract-gate] reliability_report=$REPORT_PATH"
 echo "[test-contract-gate] retries=$RETRIES flake_budget=$FLAKE_BUDGET coverage_floor=$COVERAGE_FLOOR"
 
-rch exec -- cargo run -p fnp-conformance --bin run_test_contract_gate -- \
+run_cargo run -p fnp-conformance --bin run_test_contract_gate -- \
   --log-path "$LOG_PATH" \
   --report-path "$REPORT_PATH" \
   --retries "$RETRIES" \

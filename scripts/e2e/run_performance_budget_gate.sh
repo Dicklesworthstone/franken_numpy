@@ -12,6 +12,16 @@ COVERAGE_FLOOR="${FNP_PERF_COVERAGE_FLOOR:-1.0}"
 
 cd "$ROOT_DIR"
 
+run_cargo() {
+  if command -v rch >/dev/null 2>&1; then
+    echo "[performance-budget-gate] executor=rch"
+    rch exec -- cargo "$@"
+  else
+    echo "[performance-budget-gate] executor=cargo"
+    cargo "$@"
+  fi
+}
+
 if [[ ! -f "$REFERENCE_PATH" ]]; then
   echo "[performance-budget-gate] missing reference baseline: $REFERENCE_PATH" >&2
   exit 1
@@ -30,13 +40,13 @@ cp "$REFERENCE_PATH" "$REFERENCE_SNAPSHOT_PATH"
 
 # Generate candidate into the tracked baseline path so rch artifact retrieval
 # reliably materializes it locally, then copy to timestamped candidate output.
-rch exec -- cargo run -p fnp-conformance --bin generate_benchmark_baseline -- \
+run_cargo run -p fnp-conformance --bin generate_benchmark_baseline -- \
   --output-path "$REFERENCE_PATH"
 
 cp "$REFERENCE_PATH" "$CANDIDATE_PATH"
 cp "$REFERENCE_SNAPSHOT_PATH" "$REFERENCE_PATH"
 
-rch exec -- cargo run -p fnp-conformance --bin run_performance_budget_gate -- \
+run_cargo run -p fnp-conformance --bin run_performance_budget_gate -- \
   --reference-path "$REFERENCE_SNAPSHOT_PATH" \
   --candidate-path "$CANDIDATE_PATH" \
   --report-path "$REPORT_PATH" \

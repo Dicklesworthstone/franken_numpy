@@ -5,6 +5,14 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,6 +24,7 @@ jobs:
   g1-fmt-lint:
     name: "G1: fmt + lint"
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -24,12 +33,14 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
+      - run: cargo check --workspace --all-targets
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   g2-unit-property:
     name: "G2: unit + property"
     needs: g1-fmt-lint
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -37,12 +48,13 @@ jobs:
           toolchain: nightly-2026-02-20
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --lib
+      - run: cargo test --workspace
 
   g3-differential:
     name: "G3: differential"
     needs: g2-unit-property
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       FNP_REQUIRE_REAL_NUMPY_ORACLE: "1"
       FNP_ORACLE_PYTHON: "python3"
@@ -79,6 +91,7 @@ jobs:
     name: "G4: adversarial + security"
     needs: g3-differential
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -86,12 +99,13 @@ jobs:
           toolchain: nightly-2026-02-20
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo run -p fnp-conformance --bin run_security_gate
+      - run: bash scripts/e2e/run_security_policy_gate.sh
 
   g5-test-contract:
     name: "G5: test contract"
     needs: g4-adversarial-security
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -99,12 +113,13 @@ jobs:
           toolchain: nightly-2026-02-20
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo run -p fnp-conformance --bin run_test_contract_gate
+      - run: bash scripts/e2e/run_test_contract_gate.sh
 
   g6-workflow-forensics:
     name: "G6: workflow + forensics"
     needs: g5-test-contract
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -112,14 +127,17 @@ jobs:
           toolchain: nightly-2026-02-20
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: >
-          cargo run -p fnp-conformance --bin run_workflow_scenario_gate --
-          --retries 0 --flake-budget 0 --coverage-floor 1.0
+      - env:
+          FNP_WORKFLOW_RETRIES: "0"
+          FNP_WORKFLOW_FLAKE_BUDGET: "0"
+          FNP_WORKFLOW_COVERAGE_FLOOR: "1.0"
+        run: bash scripts/e2e/run_workflow_scenario_gate.sh
 
   g7-performance-budget:
     name: "G7: performance budget"
     needs: g6-workflow-forensics
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -127,22 +145,17 @@ jobs:
           toolchain: nightly-2026-02-20
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Generate candidate baseline
-        run: |
-          cargo run -p fnp-conformance --bin generate_benchmark_baseline -- \
-            --output-path /tmp/perf_candidate.json
-      - name: Run performance budget gate
-        run: |
-          cargo run -p fnp-conformance --bin run_performance_budget_gate -- \
-            --reference-path artifacts/baselines/ufunc_benchmark_baseline.json \
-            --candidate-path /tmp/perf_candidate.json \
-            --max-p99-regression-ratio 0.07 \
-            --coverage-floor 1.0
+      - env:
+          FNP_PERF_CANDIDATE_BASELINE: /tmp/perf_candidate.json
+          FNP_PERF_MAX_P99_REGRESSION_RATIO: "0.07"
+          FNP_PERF_COVERAGE_FLOOR: "1.0"
+        run: bash scripts/e2e/run_performance_budget_gate.sh
 
   g8-durability-decode:
     name: "G8: durability + decode proof"
     needs: g7-performance-budget
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master

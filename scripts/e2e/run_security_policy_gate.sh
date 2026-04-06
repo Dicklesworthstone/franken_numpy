@@ -11,12 +11,22 @@ COVERAGE_FLOOR="${FNP_SECURITY_COVERAGE_FLOOR:-1.0}"
 
 cd "$ROOT_DIR"
 
+run_cargo() {
+  if command -v rch >/dev/null 2>&1; then
+    echo "[security-gate] executor=rch"
+    rch exec -- cargo "$@"
+  else
+    echo "[security-gate] executor=cargo"
+    cargo "$@"
+  fi
+}
+
 echo "[security-gate] root=$ROOT_DIR"
 echo "[security-gate] runtime_policy_log=$LOG_PATH"
 echo "[security-gate] reliability_report=$REPORT_PATH"
 echo "[security-gate] retries=$RETRIES flake_budget=$FLAKE_BUDGET coverage_floor=$COVERAGE_FLOOR"
 
-rch exec -- cargo run -p fnp-conformance --bin run_security_gate -- \
+run_cargo run -p fnp-conformance --bin run_security_gate -- \
   --log-path "$LOG_PATH" \
   --report-path "$REPORT_PATH" \
   --retries "$RETRIES" \
