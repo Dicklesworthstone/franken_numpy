@@ -251,18 +251,22 @@ pub const fn promote(lhs: DType, rhs: DType) -> DType {
         (DateTime64, TimeDelta64) | (TimeDelta64, DateTime64) => DateTime64,
         // DateTime64/TimeDelta64 + numeric: incompatible in NumPy (TypeError).
         // Fail-closed to F64 since promote() returns DType, not Result.
-        (DateTime64,
-            I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 |
-            F16 | F32 | F64 | Complex64 | Complex128)
-        | (I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 |
-            F16 | F32 | F64 | Complex64 | Complex128,
-            DateTime64) => F64,
-        (TimeDelta64,
-            I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 |
-            F16 | F32 | F64 | Complex64 | Complex128)
-        | (I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 |
-            F16 | F32 | F64 | Complex64 | Complex128,
-            TimeDelta64) => F64,
+        (
+            DateTime64,
+            I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | F16 | F32 | F64 | Complex64 | Complex128,
+        )
+        | (
+            I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | F16 | F32 | F64 | Complex64 | Complex128,
+            DateTime64,
+        ) => F64,
+        (
+            TimeDelta64,
+            I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | F16 | F32 | F64 | Complex64 | Complex128,
+        )
+        | (
+            I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | F16 | F32 | F64 | Complex64 | Complex128,
+            TimeDelta64,
+        ) => F64,
 
         // Str: always wins against numeric and temporal types
         (Str, x) | (x, Str) => match x {
@@ -272,7 +276,6 @@ pub const fn promote(lhs: DType, rhs: DType) -> DType {
 
         // Structured: incompatible with everything else (even itself, if different fields)
         (Structured, _) | (_, Structured) => F64,
-
     }
 }
 
@@ -2193,7 +2196,10 @@ mod tests {
         let storage = ArrayStorage::Bool(vec![true, false]);
         let cast = storage.cast_to(DType::Str).unwrap();
         assert_eq!(cast.dtype(), DType::Str);
-        assert!(matches!(&cast, ArrayStorage::String(_)), "expected String storage");
+        assert!(
+            matches!(&cast, ArrayStorage::String(_)),
+            "expected String storage"
+        );
         if let ArrayStorage::String(v) = &cast {
             assert_eq!(v[0], "True");
             assert_eq!(v[1], "False");
@@ -2845,7 +2851,10 @@ mod tests {
         assert_eq!(s.dtype(), DType::Structured);
         assert_eq!(s.len(), 3);
         assert!(!s.is_empty());
-        assert!(matches!(&s, ArrayStorage::Structured(_)), "expected structured storage");
+        assert!(
+            matches!(&s, ArrayStorage::Structured(_)),
+            "expected structured storage"
+        );
         if let ArrayStorage::Structured(storage) = s {
             assert_eq!(storage.len(), 3);
             assert_eq!(storage.num_fields(), 0);
@@ -2927,8 +2936,14 @@ mod tests {
     #[test]
     fn promote_f64_with_all_integers() {
         let ints = [
-            DType::I8, DType::I16, DType::I32, DType::I64,
-            DType::U8, DType::U16, DType::U32, DType::U64,
+            DType::I8,
+            DType::I16,
+            DType::I32,
+            DType::I64,
+            DType::U8,
+            DType::U16,
+            DType::U32,
+            DType::U64,
         ];
         for &i in &ints {
             assert_eq!(promote(DType::F64, i), DType::F64, "F64 + {i:?}");
@@ -2942,14 +2957,31 @@ mod tests {
     fn promote_datetime64_with_numerics_is_f64() {
         // NumPy raises TypeError for these; we fail-closed to F64.
         let numerics = [
-            DType::I8, DType::I16, DType::I32, DType::I64,
-            DType::U8, DType::U16, DType::U32, DType::U64,
-            DType::F16, DType::F32, DType::F64,
-            DType::Complex64, DType::Complex128,
+            DType::I8,
+            DType::I16,
+            DType::I32,
+            DType::I64,
+            DType::U8,
+            DType::U16,
+            DType::U32,
+            DType::U64,
+            DType::F16,
+            DType::F32,
+            DType::F64,
+            DType::Complex64,
+            DType::Complex128,
         ];
         for &n in &numerics {
-            assert_eq!(promote(DType::DateTime64, n), DType::F64, "DateTime64 + {n:?}");
-            assert_eq!(promote(n, DType::DateTime64), DType::F64, "{n:?} + DateTime64");
+            assert_eq!(
+                promote(DType::DateTime64, n),
+                DType::F64,
+                "DateTime64 + {n:?}"
+            );
+            assert_eq!(
+                promote(n, DType::DateTime64),
+                DType::F64,
+                "{n:?} + DateTime64"
+            );
         }
     }
 
@@ -2957,34 +2989,75 @@ mod tests {
     fn promote_timedelta64_with_numerics_is_f64() {
         // NumPy raises TypeError for these; we fail-closed to F64.
         let numerics = [
-            DType::I8, DType::I16, DType::I32, DType::I64,
-            DType::U8, DType::U16, DType::U32, DType::U64,
-            DType::F16, DType::F32, DType::F64,
-            DType::Complex64, DType::Complex128,
+            DType::I8,
+            DType::I16,
+            DType::I32,
+            DType::I64,
+            DType::U8,
+            DType::U16,
+            DType::U32,
+            DType::U64,
+            DType::F16,
+            DType::F32,
+            DType::F64,
+            DType::Complex64,
+            DType::Complex128,
         ];
         for &n in &numerics {
-            assert_eq!(promote(DType::TimeDelta64, n), DType::F64, "TimeDelta64 + {n:?}");
-            assert_eq!(promote(n, DType::TimeDelta64), DType::F64, "{n:?} + TimeDelta64");
+            assert_eq!(
+                promote(DType::TimeDelta64, n),
+                DType::F64,
+                "TimeDelta64 + {n:?}"
+            );
+            assert_eq!(
+                promote(n, DType::TimeDelta64),
+                DType::F64,
+                "{n:?} + TimeDelta64"
+            );
         }
     }
 
     #[test]
     fn promote_datetime_timedelta_same_family() {
-        assert_eq!(promote(DType::DateTime64, DType::DateTime64), DType::DateTime64);
-        assert_eq!(promote(DType::TimeDelta64, DType::TimeDelta64), DType::TimeDelta64);
-        assert_eq!(promote(DType::DateTime64, DType::TimeDelta64), DType::DateTime64);
-        assert_eq!(promote(DType::TimeDelta64, DType::DateTime64), DType::DateTime64);
+        assert_eq!(
+            promote(DType::DateTime64, DType::DateTime64),
+            DType::DateTime64
+        );
+        assert_eq!(
+            promote(DType::TimeDelta64, DType::TimeDelta64),
+            DType::TimeDelta64
+        );
+        assert_eq!(
+            promote(DType::DateTime64, DType::TimeDelta64),
+            DType::DateTime64
+        );
+        assert_eq!(
+            promote(DType::TimeDelta64, DType::DateTime64),
+            DType::DateTime64
+        );
     }
 
     #[test]
     fn promote_structured_with_anything_is_f64() {
         let dtypes = [
-            DType::I8, DType::F64, DType::Complex128,
-            DType::DateTime64, DType::TimeDelta64, DType::Structured,
+            DType::I8,
+            DType::F64,
+            DType::Complex128,
+            DType::DateTime64,
+            DType::TimeDelta64,
+            DType::Structured,
         ];
         for &d in &dtypes {
-            assert_eq!(promote(DType::Structured, d), DType::F64, "Structured + {d:?}");
-            assert_eq!(promote(d, DType::Structured), DType::F64, "{d:?} + Structured");
+            assert_eq!(
+                promote(DType::Structured, d),
+                DType::F64,
+                "Structured + {d:?}"
+            );
+            assert_eq!(
+                promote(d, DType::Structured),
+                DType::F64,
+                "{d:?} + Structured"
+            );
         }
     }
 
@@ -2993,11 +3066,24 @@ mod tests {
         // Exhaustively test all DType pairs to ensure no pair panics
         // and the catch-all is effectively unreachable.
         let all = [
-            DType::Bool, DType::I8, DType::I16, DType::I32, DType::I64,
-            DType::U8, DType::U16, DType::U32, DType::U64,
-            DType::F16, DType::F32, DType::F64,
-            DType::Complex64, DType::Complex128,
-            DType::Str, DType::DateTime64, DType::TimeDelta64, DType::Structured,
+            DType::Bool,
+            DType::I8,
+            DType::I16,
+            DType::I32,
+            DType::I64,
+            DType::U8,
+            DType::U16,
+            DType::U32,
+            DType::U64,
+            DType::F16,
+            DType::F32,
+            DType::F64,
+            DType::Complex64,
+            DType::Complex128,
+            DType::Str,
+            DType::DateTime64,
+            DType::TimeDelta64,
+            DType::Structured,
         ];
         for &lhs in &all {
             for &rhs in &all {

@@ -851,7 +851,10 @@ pub fn write_npy_bytes_with_version(
                 "payload bytes must align with dtype item size",
             ));
         }
-        let value_count = payload.len().checked_div(item_size).unwrap_or(expected_count);
+        let value_count = payload
+            .len()
+            .checked_div(item_size)
+            .unwrap_or(expected_count);
         let _ = validate_write_contract(&header.shape, value_count, header.descr)?;
     }
 
@@ -1454,6 +1457,13 @@ pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
         }
         covered_ranges.push(current_range);
 
+        total_uncompressed_bytes = total_uncompressed_bytes
+            .checked_add(uncompressed_size)
+            .ok_or(IOError::NpzArchiveContractViolation(
+                "npz: decoded archive size overflowed bounded budget",
+            ))?;
+        validate_npz_archive_budget(entry_count, total_uncompressed_bytes, 0)?;
+
         let stored_entry_bytes = &data[data_start..data_end];
         let npy_bytes = match compression {
             0 => {
@@ -1493,12 +1503,6 @@ pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
             ));
         }
 
-        total_uncompressed_bytes = total_uncompressed_bytes
-            .checked_add(uncompressed_size)
-            .ok_or(IOError::NpzArchiveContractViolation(
-                "npz: decoded archive size overflowed bounded budget",
-            ))?;
-        validate_npz_archive_budget(entry_count, total_uncompressed_bytes, 0)?;
         let array = read_npy_bytes(&npy_bytes, false)?;
 
         // Strip .npy suffix from name for user convenience
@@ -2009,9 +2013,8 @@ pub fn fromfile_text(text: &str, sep: &str, count: Option<usize>) -> Result<Vec<
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| {
-            s.parse::<f64>().map_err(|_| {
-                IOError::ReadPayloadIncomplete("fromfile_text: could not parse float")
-            })
+            s.parse::<f64>()
+                .map_err(|_| IOError::ReadPayloadIncomplete("fromfile_text: could not parse float"))
         })
         .collect::<Result<_, _>>()?;
     match count {
@@ -3529,22 +3532,21 @@ mod tests {
     use bytemuck::cast_slice;
 
     use super::{
-        IO_PACKET_ID, IO_PACKET_REASON_CODES, IOError, IOLogRecord, IORuntimeMode,
-        IOSupportedDType, GenFromTxtConfig, LoadDispatch, MAX_ARCHIVE_MEMBERS, MAX_DISPATCH_RETRIES,
+        GenFromTxtConfig, IO_PACKET_ID, IO_PACKET_REASON_CODES, IOError, IOLogRecord,
+        IORuntimeMode, IOSupportedDType, LoadDispatch, MAX_ARCHIVE_MEMBERS, MAX_DISPATCH_RETRIES,
         MAX_HEADER_BYTES, MAX_MEMMAP_VALIDATION_RETRIES, MemmapMode, NPY_MAGIC_PREFIX,
         NPZ_MAGIC_PREFIX, NpyHeader, NpzCompression, SaveTxtConfig, StructuredIODescriptor,
         StructuredIOField, classify_load_dispatch, encode_npy_header_bytes, enforce_pickle_policy,
-        fromfile, fromfile_complex, fromfile_strings, fromfile_structured, fromfile_text, fromstring,
-        genfromtxt, genfromtxt_full,
-        load, load_complex, load_npz, load_strings, load_structured, loadtxt, loadtxt_unpack,
-        loadtxt_usecols,
-        memmap, memmap_npy, parse_structured_descr, read_npy_bytes, read_npz_bytes, save,
-        save_complex, save_strings, save_structured, savetxt, savez, savez_compressed,
-        synthesize_npz_member_names, tobytes, tofile, tofile_complex, tofile_strings, tofile_text,
-        tofile_structured, tostring, validate_descriptor_roundtrip, validate_header_schema,
-        validate_io_policy_metadata, validate_magic_version, validate_memmap_contract,
-        validate_npz_archive_budget, validate_read_payload, validate_write_contract,
-        write_npy_bytes, write_npy_bytes_with_version, write_npy_preamble, write_npz_bytes,
+        fromfile, fromfile_complex, fromfile_strings, fromfile_structured, fromfile_text,
+        fromstring, genfromtxt, genfromtxt_full, load, load_complex, load_npz, load_strings,
+        load_structured, loadtxt, loadtxt_unpack, loadtxt_usecols, memmap, memmap_npy,
+        parse_structured_descr, read_npy_bytes, read_npz_bytes, save, save_complex, save_strings,
+        save_structured, savetxt, savez, savez_compressed, synthesize_npz_member_names, tobytes,
+        tofile, tofile_complex, tofile_strings, tofile_structured, tofile_text, tostring,
+        validate_descriptor_roundtrip, validate_header_schema, validate_io_policy_metadata,
+        validate_magic_version, validate_memmap_contract, validate_npz_archive_budget,
+        validate_read_payload, validate_write_contract, write_npy_bytes,
+        write_npy_bytes_with_version, write_npy_preamble, write_npz_bytes,
         write_npz_bytes_with_compression,
     };
 

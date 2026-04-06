@@ -822,21 +822,33 @@ impl BinaryOp {
             Self::FloorDivide => (lhs / rhs).floor(),
             Self::FloatPower => lhs.powf(rhs),
             Self::BitwiseAnd => {
+                if !lhs.is_finite() || !rhs.is_finite() {
+                    return f64::NAN;
+                }
                 let a = lhs as i64;
                 let b = rhs as i64;
                 (a & b) as f64
             }
             Self::BitwiseOr => {
+                if !lhs.is_finite() || !rhs.is_finite() {
+                    return f64::NAN;
+                }
                 let a = lhs as i64;
                 let b = rhs as i64;
                 (a | b) as f64
             }
             Self::BitwiseXor => {
+                if !lhs.is_finite() || !rhs.is_finite() {
+                    return f64::NAN;
+                }
                 let a = lhs as i64;
                 let b = rhs as i64;
                 (a ^ b) as f64
             }
             Self::LeftShift => {
+                if !lhs.is_finite() || !rhs.is_finite() {
+                    return f64::NAN;
+                }
                 let a = lhs as i64;
                 let b = rhs as i64;
                 if !(0..64).contains(&b) {
@@ -846,6 +858,9 @@ impl BinaryOp {
                 }
             }
             Self::RightShift => {
+                if !lhs.is_finite() || !rhs.is_finite() {
+                    return f64::NAN;
+                }
                 let a = lhs as i64;
                 let b = rhs as i64;
                 if !(0..64).contains(&b) {
@@ -882,17 +897,9 @@ pub enum QuantileInterp {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GridSpec {
     /// Arange-style: `[start, start+step, start+2*step, ...)` while `< stop` (exclusive stop).
-    Arange {
-        start: f64,
-        stop: f64,
-        step: f64,
-    },
+    Arange { start: f64, stop: f64, step: f64 },
     /// Linspace-style: `num` equally-spaced points from `start` to `stop` inclusive.
-    Linspace {
-        start: f64,
-        stop: f64,
-        num: usize,
-    },
+    Linspace { start: f64, stop: f64, num: usize },
 }
 
 impl GridSpec {
@@ -918,7 +925,6 @@ impl GridSpec {
             }
         }
     }
-
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1130,6 +1136,9 @@ impl UnaryOp {
             Self::Arcsinh => x.asinh(),
             Self::Arctanh => x.atanh(),
             Self::Invert => {
+                if !x.is_finite() {
+                    return f64::NAN;
+                }
                 let a = x as i64;
                 (!a) as f64
             }
@@ -2782,7 +2791,9 @@ impl UFuncArray {
         // For I64/U64 with values exceeding f64 exact range, preserve the
         // originals in a sidecar so `to_storage()` can round-trip losslessly.
         let integer_sidecar = match &storage {
-            ArrayStorage::I64(values) if values.iter().any(|v| v.unsigned_abs() > MAX_EXACT_F64_U64) => {
+            ArrayStorage::I64(values)
+                if values.iter().any(|v| v.unsigned_abs() > MAX_EXACT_F64_U64) =>
+            {
                 Some(IntegerSidecar::I64(values.clone()))
             }
             ArrayStorage::U64(values) if values.iter().any(|v| *v > MAX_EXACT_F64_U64) => {
@@ -3235,13 +3246,15 @@ impl UFuncArray {
         if num == 1 {
             return Self::from_values_with_dtype(vec![1], vec![start], dtype);
         }
-        let divisor = if endpoint { (num - 1) as f64 } else { num as f64 };
+        let divisor = if endpoint {
+            (num - 1) as f64
+        } else {
+            num as f64
+        };
         let step = (stop - start) / divisor;
         let mut values: Vec<f64> = (0..num).map(|i| start + step * i as f64).collect();
         // Guarantee exact endpoint when included
-        if endpoint
-            && let Some(last) = values.last_mut()
-        {
+        if endpoint && let Some(last) = values.last_mut() {
             *last = stop;
         }
         Self::from_values_with_dtype(vec![num], values, dtype)
@@ -3262,7 +3275,11 @@ impl UFuncArray {
         let step = if num < 2 {
             f64::NAN
         } else {
-            let divisor = if endpoint { (num - 1) as f64 } else { num as f64 };
+            let divisor = if endpoint {
+                (num - 1) as f64
+            } else {
+                num as f64
+            };
             (stop - start) / divisor
         };
         let arr = Self::linspace_endpoint(start, stop, num, endpoint, dtype)?;
@@ -3322,7 +3339,11 @@ impl UFuncArray {
         if num == 1 {
             return Self::from_values_with_dtype(vec![1], vec![start], dtype);
         }
-        let divisor = if endpoint { (num - 1) as f64 } else { num as f64 };
+        let divisor = if endpoint {
+            (num - 1) as f64
+        } else {
+            num as f64
+        };
         let ratio = (stop / start).powf(1.0 / divisor);
         let values: Vec<f64> = (0..num).map(|i| start * ratio.powi(i as i32)).collect();
         Self::from_values_with_dtype(vec![num], values, dtype)
@@ -4312,8 +4333,12 @@ impl UFuncArray {
                     })
                 } else {
                     source_sidecar.as_ref().map(|s| match s {
-                        IntegerSidecar::I64(v) => IntegerSidecar::I64(vec![v.iter().copied().product()]),
-                        IntegerSidecar::U64(v) => IntegerSidecar::U64(vec![v.iter().copied().product()]),
+                        IntegerSidecar::I64(v) => {
+                            IntegerSidecar::I64(vec![v.iter().copied().product()])
+                        }
+                        IntegerSidecar::U64(v) => {
+                            IntegerSidecar::U64(vec![v.iter().copied().product()])
+                        }
                     })
                 };
                 let shape = if keepdims {
@@ -4379,7 +4404,7 @@ impl UFuncArray {
                     if values.is_empty() {
                         Err(UFuncError::EmptyReduction { op: "min" })
                     } else {
-                        let min = *values.iter().min().expect("non-empty checked");
+                        let min = *values.iter().min().unwrap_or(&0);
                         let shape = if keepdims {
                             vec![1; self.shape.len()]
                         } else {
@@ -4425,7 +4450,7 @@ impl UFuncArray {
                     if values.is_empty() {
                         Err(UFuncError::EmptyReduction { op: "min" })
                     } else {
-                        let min = *values.iter().min().expect("non-empty checked");
+                        let min = *values.iter().min().unwrap_or(&0);
                         let shape = if keepdims {
                             vec![1; self.shape.len()]
                         } else {
@@ -4526,7 +4551,7 @@ impl UFuncArray {
                     if values.is_empty() {
                         Err(UFuncError::EmptyReduction { op: "max" })
                     } else {
-                        let max = *values.iter().max().expect("non-empty checked");
+                        let max = *values.iter().max().unwrap_or(&0);
                         let shape = if keepdims {
                             vec![1; self.shape.len()]
                         } else {
@@ -4572,7 +4597,7 @@ impl UFuncArray {
                     if values.is_empty() {
                         Err(UFuncError::EmptyReduction { op: "max" })
                     } else {
-                        let max = *values.iter().max().expect("non-empty checked");
+                        let max = *values.iter().max().unwrap_or(&0);
                         let shape = if keepdims {
                             vec![1; self.shape.len()]
                         } else {
@@ -5048,7 +5073,8 @@ impl UFuncArray {
     pub fn cumprod(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
         let out_dtype = promote_for_sum_reduction(self.dtype);
         if self.dtype == DType::I64
-            && let Some(IntegerSidecar::I64(values)) = self.synthesized_integer_sidecar("cumprod")?
+            && let Some(IntegerSidecar::I64(values)) =
+                self.synthesized_integer_sidecar("cumprod")?
         {
             return match axis {
                 None => {
@@ -5081,7 +5107,8 @@ impl UFuncArray {
             };
         }
         if self.dtype == DType::U64
-            && let Some(IntegerSidecar::U64(values)) = self.synthesized_integer_sidecar("cumprod")?
+            && let Some(IntegerSidecar::U64(values)) =
+                self.synthesized_integer_sidecar("cumprod")?
         {
             return match axis {
                 None => {
@@ -6279,8 +6306,10 @@ impl UFuncArray {
                     )));
                 }
                 // inner = product of dims after axis
-                let inner: usize = fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
-                let outer: usize = fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
+                let inner: usize =
+                    fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
+                let outer: usize =
+                    fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
 
                 let mut new_shape = self.shape.clone();
                 new_shape[ax] = axis_len + 1;
@@ -6420,9 +6449,7 @@ impl UFuncArray {
         let ax0 = normalize_axis(axes.0, self.shape.len())? as isize;
         let ax1 = normalize_axis(axes.1, self.shape.len())? as isize;
         if ax0 == ax1 {
-            return Err(UFuncError::Msg(
-                "rot90: axes must be different".to_string(),
-            ));
+            return Err(UFuncError::Msg("rot90: axes must be different".to_string()));
         }
         let k = k.rem_euclid(4);
         match k {
@@ -6748,8 +6775,10 @@ impl UFuncArray {
                             return Ok(self.clone());
                         }
 
-                        let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
-                        let outer: usize = fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
+                        let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..])
+                            .map_err(UFuncError::Shape)?;
+                        let outer: usize = fnp_ndarray::element_count(&self.shape[..axis])
+                            .map_err(UFuncError::Shape)?;
                         let mut out_values = vec![0.0f64; self.values.len()];
                         let mut source_indices: Vec<usize> = (0..self.values.len()).collect();
                         let mut lane_indices = vec![0usize; axis_len];
@@ -6798,8 +6827,10 @@ impl UFuncArray {
                             return Ok(self.clone());
                         }
 
-                        let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
-                        let outer: usize = fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
+                        let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..])
+                            .map_err(UFuncError::Shape)?;
+                        let outer: usize = fnp_ndarray::element_count(&self.shape[..axis])
+                            .map_err(UFuncError::Shape)?;
                         let mut out_values = vec![0.0f64; self.values.len()];
                         let mut source_indices: Vec<usize> = (0..self.values.len()).collect();
                         let mut lane_indices = vec![0usize; axis_len];
@@ -6856,8 +6887,10 @@ impl UFuncArray {
                     return Ok(self.clone());
                 }
 
-                let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
-                let outer: usize = fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
+                let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..])
+                    .map_err(UFuncError::Shape)?;
+                let outer: usize =
+                    fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
                 let mut values = self.values.clone();
 
                 let mut lane = vec![0.0f64; axis_len];
@@ -6907,8 +6940,10 @@ impl UFuncArray {
                     Some(axis) => {
                         let axis = normalize_axis(axis, self.shape.len())?;
                         let axis_len = self.shape[axis];
-                        let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
-                        let outer: usize = fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
+                        let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..])
+                            .map_err(UFuncError::Shape)?;
+                        let outer: usize = fnp_ndarray::element_count(&self.shape[..axis])
+                            .map_err(UFuncError::Shape)?;
                         let mut out_values = vec![0.0f64; self.values.len()];
 
                         let mut idx_lane: Vec<usize> = (0..axis_len).collect();
@@ -6952,8 +6987,10 @@ impl UFuncArray {
                     Some(axis) => {
                         let axis = normalize_axis(axis, self.shape.len())?;
                         let axis_len = self.shape[axis];
-                        let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
-                        let outer: usize = fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
+                        let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..])
+                            .map_err(UFuncError::Shape)?;
+                        let outer: usize = fnp_ndarray::element_count(&self.shape[..axis])
+                            .map_err(UFuncError::Shape)?;
                         let mut out_values = vec![0.0f64; self.values.len()];
 
                         let mut idx_lane: Vec<usize> = (0..axis_len).collect();
@@ -7000,8 +7037,10 @@ impl UFuncArray {
             Some(axis) => {
                 let axis = normalize_axis(axis, self.shape.len())?;
                 let axis_len = self.shape[axis];
-                let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
-                let outer: usize = fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
+                let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..])
+                    .map_err(UFuncError::Shape)?;
+                let outer: usize =
+                    fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
                 let mut out_values = vec![0.0f64; self.values.len()];
 
                 let mut idx_lane: Vec<usize> = (0..axis_len).collect();
@@ -7226,8 +7265,10 @@ impl UFuncArray {
                                 "partition: kth out of bounds".to_string(),
                             ));
                         }
-                        let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
-                        let outer: usize = fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
+                        let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..])
+                            .map_err(UFuncError::Shape)?;
+                        let outer: usize = fnp_ndarray::element_count(&self.shape[..axis])
+                            .map_err(UFuncError::Shape)?;
                         let mut out_values = vec![0.0f64; self.values.len()];
                         let mut source_indices: Vec<usize> = (0..self.values.len()).collect();
                         let mut lane_indices = vec![0usize; axis_len];
@@ -7285,8 +7326,10 @@ impl UFuncArray {
                                 "partition: kth out of bounds".to_string(),
                             ));
                         }
-                        let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
-                        let outer: usize = fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
+                        let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..])
+                            .map_err(UFuncError::Shape)?;
+                        let outer: usize = fnp_ndarray::element_count(&self.shape[..axis])
+                            .map_err(UFuncError::Shape)?;
                         let mut out_values = vec![0.0f64; self.values.len()];
                         let mut source_indices: Vec<usize> = (0..self.values.len()).collect();
                         let mut lane_indices = vec![0usize; axis_len];
@@ -7337,8 +7380,10 @@ impl UFuncArray {
                 if kth >= axis_len {
                     return Err(UFuncError::Msg("partition: kth out of bounds".to_string()));
                 }
-                let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
-                let outer: usize = fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
+                let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..])
+                    .map_err(UFuncError::Shape)?;
+                let outer: usize =
+                    fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
                 let mut values = self.values.clone();
                 let mut lane = vec![0.0f64; axis_len];
                 for outer_idx in 0..outer {
@@ -7395,8 +7440,10 @@ impl UFuncArray {
                                 "argpartition: kth out of bounds".to_string(),
                             ));
                         }
-                        let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
-                        let outer: usize = fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
+                        let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..])
+                            .map_err(UFuncError::Shape)?;
+                        let outer: usize = fnp_ndarray::element_count(&self.shape[..axis])
+                            .map_err(UFuncError::Shape)?;
                         let mut result = vec![0.0f64; self.values.len()];
                         let mut indices: Vec<usize> = (0..axis_len).collect();
                         for outer_idx in 0..outer {
@@ -7447,8 +7494,10 @@ impl UFuncArray {
                                 "argpartition: kth out of bounds".to_string(),
                             ));
                         }
-                        let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
-                        let outer: usize = fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
+                        let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..])
+                            .map_err(UFuncError::Shape)?;
+                        let outer: usize = fnp_ndarray::element_count(&self.shape[..axis])
+                            .map_err(UFuncError::Shape)?;
                         let mut result = vec![0.0f64; self.values.len()];
                         let mut indices: Vec<usize> = (0..axis_len).collect();
                         for outer_idx in 0..outer {
@@ -7504,8 +7553,10 @@ impl UFuncArray {
                         "argpartition: kth out of bounds".to_string(),
                     ));
                 }
-                let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
-                let outer: usize = fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
+                let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..])
+                    .map_err(UFuncError::Shape)?;
+                let outer: usize =
+                    fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
                 let mut result = vec![0.0f64; self.values.len()];
                 let mut indices: Vec<usize> = (0..axis_len).collect();
                 for outer_idx in 0..outer {
@@ -7618,8 +7669,10 @@ impl UFuncArray {
         let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
 
         // Build output values
-        let inner: usize = fnp_ndarray::element_count(&first.shape[axis + 1..]).map_err(UFuncError::Shape)?;
-        let outer: usize = fnp_ndarray::element_count(&first.shape[..axis]).map_err(UFuncError::Shape)?;
+        let inner: usize =
+            fnp_ndarray::element_count(&first.shape[axis + 1..]).map_err(UFuncError::Shape)?;
+        let outer: usize =
+            fnp_ndarray::element_count(&first.shape[..axis]).map_err(UFuncError::Shape)?;
         let mut out_values = vec![0.0f64; out_count];
         let out_inner = inner;
 
@@ -7836,8 +7889,10 @@ impl UFuncArray {
         out_shape.remove(axis);
         let out_count: usize = fnp_ndarray::element_count(&out_shape).map_err(UFuncError::Shape)?;
 
-        let outer: usize = fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
-        let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
+        let outer: usize =
+            fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
+        let inner: usize =
+            fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
 
         let mut result = Vec::with_capacity(axis_len);
         for k in 0..axis_len {
@@ -7875,8 +7930,10 @@ impl UFuncArray {
             )));
         }
         let chunk = axis_len / sections;
-        let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
-        let outer: usize = fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
+        let inner: usize =
+            fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
+        let outer: usize =
+            fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
 
         let mut result = Vec::with_capacity(sections);
         for s in 0..sections {
@@ -8018,8 +8075,10 @@ impl UFuncArray {
             }
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
-                let inner: usize = fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
-                let outer: usize = fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
+                let inner: usize =
+                    fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
+                let outer: usize =
+                    fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
                 let axis_len = self.shape[ax];
                 let new_axis_len = axis_len * repeats;
 
@@ -8081,8 +8140,10 @@ impl UFuncArray {
             }
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
-                let inner: usize = fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
-                let outer: usize = fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
+                let inner: usize =
+                    fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
+                let outer: usize =
+                    fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
                 let axis_len = self.shape[ax];
                 if axis_len == 0 {
                     return Ok(self.clone());
@@ -8154,8 +8215,10 @@ impl UFuncArray {
             }
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
-                let inner: usize = fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
-                let outer: usize = fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
+                let inner: usize =
+                    fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
+                let outer: usize =
+                    fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
                 let axis_len = self.shape[ax];
                 let mut values = self.values.clone();
                 let mut sidecar_vals = self.cloned_integer_sidecar();
@@ -8333,8 +8396,10 @@ impl UFuncArray {
         let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
         let mut out_values = vec![0.0f64; out_count];
 
-        let a_batch_count: usize = fnp_ndarray::element_count(a_batch_shape).map_err(UFuncError::Shape)?;
-        let b_prefix_count: usize = fnp_ndarray::element_count(b_prefix_shape).map_err(UFuncError::Shape)?;
+        let a_batch_count: usize =
+            fnp_ndarray::element_count(a_batch_shape).map_err(UFuncError::Shape)?;
+        let b_prefix_count: usize =
+            fnp_ndarray::element_count(b_prefix_shape).map_err(UFuncError::Shape)?;
         let b_matrix_size = k * b_last_dim;
 
         for i in 0..a_batch_count {
@@ -8427,7 +8492,8 @@ impl UFuncArray {
             let mut out_batch_multi = vec![0usize; out_batch.len()];
             let mut a_batch_flat = 0usize;
             let mut b_batch_flat = 0usize;
-            let batch_count: usize = fnp_ndarray::element_count(&out_batch).map_err(UFuncError::Shape)?;
+            let batch_count: usize =
+                fnp_ndarray::element_count(&out_batch).map_err(UFuncError::Shape)?;
 
             for b_idx in 0..batch_count {
                 let a_ptr = a_batch_flat * a_matrix_size;
@@ -8625,9 +8691,12 @@ impl UFuncArray {
                 ));
             }
         }
-        let contract_size: usize = fnp_ndarray::element_count(&self.shape[a_ndim - axes..]).map_err(UFuncError::Shape)?;
-        let a_outer: usize = fnp_ndarray::element_count(&self.shape[..a_ndim - axes]).map_err(UFuncError::Shape)?;
-        let b_outer: usize = fnp_ndarray::element_count(&other.shape[axes..]).map_err(UFuncError::Shape)?;
+        let contract_size: usize =
+            fnp_ndarray::element_count(&self.shape[a_ndim - axes..]).map_err(UFuncError::Shape)?;
+        let a_outer: usize =
+            fnp_ndarray::element_count(&self.shape[..a_ndim - axes]).map_err(UFuncError::Shape)?;
+        let b_outer: usize =
+            fnp_ndarray::element_count(&other.shape[axes..]).map_err(UFuncError::Shape)?;
         let mut values = Vec::with_capacity(a_outer * b_outer);
         for i in 0..a_outer {
             for j in 0..b_outer {
@@ -8693,8 +8762,10 @@ impl UFuncArray {
             None => ndim - 1,
         };
         let axis_len = self.shape[ax];
-        let outer: usize = fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
-        let inner: usize = fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
+        let outer: usize =
+            fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
+        let inner: usize =
+            fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
 
         let mut out_shape: Vec<usize> = self.shape.clone();
         out_shape.remove(ax);
@@ -9797,8 +9868,10 @@ impl UFuncArray {
                 let mut out_shape = self.shape.clone();
                 out_shape[ax] = resolved.len();
 
-                let outer: usize = fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
-                let inner: usize = fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
+                let outer: usize =
+                    fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
+                let inner: usize =
+                    fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
                 let src_stride = self.shape[ax] * inner;
 
                 let mut values = Vec::with_capacity(outer * resolved.len() * inner);
@@ -9972,7 +10045,7 @@ impl UFuncArray {
                     let idx_f = indices.values[flat];
                     if !idx_f.is_finite() {
                         return Err(UFuncError::Msg(
-                            "indices must be finite integers".to_string()
+                            "indices must be finite integers".to_string(),
                         ));
                     }
                     let idx = idx_f as i64;
@@ -10035,7 +10108,7 @@ impl UFuncArray {
                     let idx_f = indices.values[flat];
                     if !idx_f.is_finite() {
                         return Err(UFuncError::Msg(
-                            "indices must be finite integers".to_string()
+                            "indices must be finite integers".to_string(),
                         ));
                     }
                     let idx = idx_f as i64;
@@ -10421,8 +10494,10 @@ impl UFuncArray {
                         integer_sidecar: None,
                     });
                 }
-                let outer: usize = fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
-                let inner: usize = fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
+                let outer: usize =
+                    fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
+                let inner: usize =
+                    fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
                 let mut out_shape = self.shape.clone();
                 out_shape.remove(ax);
                 let mut values = Vec::with_capacity(outer * inner);
@@ -10480,8 +10555,10 @@ impl UFuncArray {
                         integer_sidecar: None,
                     });
                 }
-                let outer: usize = fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
-                let inner: usize = fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
+                let outer: usize =
+                    fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
+                let inner: usize =
+                    fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
                 let mut out_shape = self.shape.clone();
                 out_shape.remove(ax);
                 let mut values = Vec::with_capacity(outer * inner);
@@ -10601,8 +10678,10 @@ impl UFuncArray {
             if axis_len < 1 {
                 break;
             }
-            let outer: usize = fnp_ndarray::element_count(&current.shape[..ax]).map_err(UFuncError::Shape)?;
-            let inner: usize = fnp_ndarray::element_count(&current.shape[ax + 1..]).map_err(UFuncError::Shape)?;
+            let outer: usize =
+                fnp_ndarray::element_count(&current.shape[..ax]).map_err(UFuncError::Shape)?;
+            let inner: usize =
+                fnp_ndarray::element_count(&current.shape[ax + 1..]).map_err(UFuncError::Shape)?;
             let new_axis_len = axis_len.saturating_sub(1);
             let mut out_shape = current.shape.clone();
             out_shape[ax] = new_axis_len;
@@ -10789,8 +10868,10 @@ impl UFuncArray {
                         integer_sidecar: None,
                     });
                 }
-                let outer: usize = fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
-                let inner: usize = fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
+                let outer: usize =
+                    fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
+                let inner: usize =
+                    fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
                 let mut out_shape = self.shape.clone();
                 out_shape.remove(ax);
                 let mut values = Vec::with_capacity(outer * inner);
@@ -10861,8 +10942,10 @@ impl UFuncArray {
                         integer_sidecar: None,
                     });
                 }
-                let outer: usize = fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
-                let inner: usize = fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
+                let outer: usize =
+                    fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
+                let inner: usize =
+                    fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
                 let mut out_shape = self.shape.clone();
                 out_shape.remove(ax);
                 let mut values = Vec::with_capacity(outer * inner);
@@ -10994,8 +11077,10 @@ impl UFuncArray {
                         integer_sidecar: None,
                     });
                 }
-                let outer: usize = fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
-                let inner: usize = fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
+                let outer: usize =
+                    fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
+                let inner: usize =
+                    fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
                 let mut out_shape = self.shape.clone();
                 out_shape.remove(ax);
                 let mut values = Vec::with_capacity(outer * inner);
@@ -11086,7 +11171,8 @@ impl UFuncArray {
             return Err(UFuncError::Msg("mode: empty array".to_string()));
         }
         if self.dtype == DType::I64
-            && let Some(IntegerSidecar::I64(mut values)) = self.synthesized_integer_sidecar("mode")?
+            && let Some(IntegerSidecar::I64(mut values)) =
+                self.synthesized_integer_sidecar("mode")?
         {
             values.sort_unstable();
             let mut best_val = values[0];
@@ -11112,7 +11198,8 @@ impl UFuncArray {
             return Ok((best_val as f64, best_count));
         }
         if self.dtype == DType::U64
-            && let Some(IntegerSidecar::U64(mut values)) = self.synthesized_integer_sidecar("mode")?
+            && let Some(IntegerSidecar::U64(mut values)) =
+                self.synthesized_integer_sidecar("mode")?
         {
             values.sort_unstable();
             let mut best_val = values[0];
@@ -11245,8 +11332,10 @@ impl UFuncArray {
                 if axis_len == 0 {
                     return Ok(self.clone());
                 }
-                let outer: usize = fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
-                let inner: usize = fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
+                let outer: usize =
+                    fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
+                let inner: usize =
+                    fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
                 let mut values = vec![0.0f64; self.values.len()];
                 for o in 0..outer {
                     for i in 0..inner {
@@ -11304,7 +11393,8 @@ impl UFuncArray {
         let mut sidecar_vals = self.constant_integer_sidecar(constant, out_count);
 
         // Copy source values into the padded region
-        let src_count: usize = fnp_ndarray::element_count(&self.shape).map_err(UFuncError::Shape)?;
+        let src_count: usize =
+            fnp_ndarray::element_count(&self.shape).map_err(UFuncError::Shape)?;
         for flat in 0..src_count {
             let mut remainder = flat;
             let mut out_flat = 0;
@@ -11831,7 +11921,10 @@ impl UFuncArray {
             .enumerate()
             .filter(|&(i, _)| i != ax)
             .map(|(_, &d)| d)
-            .try_fold(1usize, |acc, dim| acc.checked_mul(dim).ok_or(UFuncError::Shape(fnp_ndarray::ShapeError::Overflow)))?;
+            .try_fold(1usize, |acc, dim| {
+                acc.checked_mul(dim)
+                    .ok_or(UFuncError::Shape(fnp_ndarray::ShapeError::Overflow))
+            })?;
 
         // Extract the first slice to determine output length. Use dummy if empty.
         let first_slice_vals: Vec<f64> = if self.values.is_empty() {
@@ -11940,11 +12033,11 @@ impl UFuncArray {
                 max = v;
             }
         }
-        let range = if (max - min).abs() < f64::EPSILON {
-            1.0
-        } else {
-            max - min
-        };
+        if (max - min).abs() < f64::EPSILON {
+            min -= 0.5;
+            max += 0.5;
+        }
+        let range = max - min;
         let width = range / bins as f64;
 
         let mut counts = vec![0.0f64; bins];
@@ -12025,14 +12118,14 @@ impl UFuncArray {
                         "ValueError: autodetected range of [{mn}, {mx}] is not finite"
                     )));
                 }
+                if (mx - mn).abs() < f64::EPSILON {
+                    mn -= 0.5;
+                    mx += 0.5;
+                }
                 (mn, mx)
             }
         };
-        let span = if (hi - lo).abs() < f64::EPSILON {
-            1.0
-        } else {
-            hi - lo
-        };
+        let span = hi - lo;
         let width = span / bins as f64;
 
         let mut counts = vec![0.0f64; bins];
@@ -12323,8 +12416,10 @@ impl UFuncArray {
                             });
                         }
                         // Multiply each lane element by its weight, sum, divide by weight total
-                        let inner: usize = fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
-                        let outer: usize = fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
+                        let inner: usize = fnp_ndarray::element_count(&self.shape[ax + 1..])
+                            .map_err(UFuncError::Shape)?;
+                        let outer: usize = fnp_ndarray::element_count(&self.shape[..ax])
+                            .map_err(UFuncError::Shape)?;
                         let wtot: f64 = w.values.iter().sum();
                         let out_shape = reduced_shape(&self.shape, ax, false);
                         let mut values = Vec::with_capacity(outer * inner);
@@ -12514,6 +12609,10 @@ impl UFuncArray {
                 xmax = v;
             }
         }
+        if (xmax - xmin).abs() < f64::EPSILON {
+            xmin -= 0.5;
+            xmax += 0.5;
+        }
         let mut ymin = f64::INFINITY;
         let mut ymax = f64::NEG_INFINITY;
         for &v in &y.values {
@@ -12528,6 +12627,10 @@ impl UFuncArray {
             if v > ymax {
                 ymax = v;
             }
+        }
+        if (ymax - ymin).abs() < f64::EPSILON {
+            ymin -= 0.5;
+            ymax += 0.5;
         }
 
         let xedges = Self::linspace(xmin, xmax, xbins + 1, DType::F64)?;
@@ -12642,6 +12745,13 @@ impl UFuncArray {
             ));
         }
 
+        for d in 0..n_dim {
+            if (maxs[d] - mins[d]).abs() < f64::EPSILON {
+                mins[d] -= 0.5;
+                maxs[d] += 0.5;
+            }
+        }
+
         // Build edges per dimension
         let mut edges_list: Vec<Self> = Vec::with_capacity(n_dim);
         let mut steps: Vec<f64> = Vec::with_capacity(n_dim);
@@ -12657,7 +12767,8 @@ impl UFuncArray {
         }
 
         // Histogram: shape = bins_per_dim
-        let total_bins: usize = fnp_ndarray::element_count(bins_per_dim).map_err(UFuncError::Shape)?;
+        let total_bins: usize =
+            fnp_ndarray::element_count(bins_per_dim).map_err(UFuncError::Shape)?;
         let mut hist = vec![0.0f64; total_bins];
 
         // Compute strides for the N-D histogram array
@@ -14053,7 +14164,8 @@ impl UFuncArray {
         let total_out = outer * output_n;
         let mut re = vec![0.0; total_out];
         let mut im = vec![0.0; total_out];
-        let spatial_total: usize = fnp_ndarray::element_count(spatial_shape).map_err(UFuncError::Shape)?;
+        let spatial_total: usize =
+            fnp_ndarray::element_count(spatial_shape).map_err(UFuncError::Shape)?;
         for o in 0..outer {
             for k in 0..half_n.min(output_n) {
                 let src = o * half_n + k;
@@ -14667,7 +14779,13 @@ impl UFuncArray {
         // Flatten scalars to 1-D, then concatenate along axis 0
         let promoted: Vec<Self> = arrays
             .iter()
-            .map(|a| if a.shape.is_empty() || a.shape == [1] { a.ravel() } else { a.clone() })
+            .map(|a| {
+                if a.shape.is_empty() || a.shape == [1] {
+                    a.ravel()
+                } else {
+                    a.clone()
+                }
+            })
             .collect();
         // If all 1-D, simple concatenation along axis 0
         if promoted.iter().all(|a| a.shape.len() == 1) {
@@ -14921,7 +15039,14 @@ impl UFuncArray {
         out_shape.push(diag_len);
 
         let strides = c_strides_elems(&self.shape);
-        let other_count: usize = other_axes.iter().map(|&a| self.shape[a]).try_fold(1usize, |acc, dim| acc.checked_mul(dim).ok_or(UFuncError::Shape(fnp_ndarray::ShapeError::Overflow)))?;
+        let other_count: usize =
+            other_axes
+                .iter()
+                .map(|&a| self.shape[a])
+                .try_fold(1usize, |acc, dim| {
+                    acc.checked_mul(dim)
+                        .ok_or(UFuncError::Shape(fnp_ndarray::ShapeError::Overflow))
+                })?;
         let other_strides: Vec<usize> = {
             let other_shape: Vec<usize> = other_axes.iter().map(|&a| self.shape[a]).collect();
             c_strides_elems(&other_shape)
@@ -14965,8 +15090,8 @@ impl UFuncArray {
                     if values.is_empty() {
                         return Err(UFuncError::EmptyReduction { op: "ptp" });
                     }
-                    let min = *values.iter().min().expect("non-empty checked");
-                    let max = *values.iter().max().expect("non-empty checked");
+                    let min = *values.iter().min().unwrap_or(&0);
+                    let max = *values.iter().max().unwrap_or(&0);
                     let ptp = apply_binary_op_i64(BinaryOp::Sub, max, min);
                     return Ok(Self {
                         shape: Vec::new(),
@@ -14982,8 +15107,8 @@ impl UFuncArray {
                     if values.is_empty() {
                         return Err(UFuncError::EmptyReduction { op: "ptp" });
                     }
-                    let min = *values.iter().min().expect("non-empty checked");
-                    let max = *values.iter().max().expect("non-empty checked");
+                    let min = *values.iter().min().unwrap_or(&0);
+                    let max = *values.iter().max().unwrap_or(&0);
                     let ptp = apply_binary_op_u64(BinaryOp::Sub, max, min);
                     return Ok(Self {
                         shape: Vec::new(),
@@ -15464,10 +15589,13 @@ impl UFuncArray {
         }
 
         if self.dtype == DType::I64
-            && let Some(IntegerSidecar::I64(values)) = self.synthesized_integer_sidecar("unique_axis")?
+            && let Some(IntegerSidecar::I64(values)) =
+                self.synthesized_integer_sidecar("unique_axis")?
         {
-            let outer: usize = fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
-            let inner: usize = fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
+            let outer: usize =
+                fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
+            let inner: usize =
+                fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
             let mut slices: Vec<(Vec<i64>, usize)> = Vec::with_capacity(axis_len);
             for a in 0..axis_len {
                 let mut slice_vals = Vec::with_capacity(outer * inner);
@@ -15509,10 +15637,13 @@ impl UFuncArray {
         }
 
         if self.dtype == DType::U64
-            && let Some(IntegerSidecar::U64(values)) = self.synthesized_integer_sidecar("unique_axis")?
+            && let Some(IntegerSidecar::U64(values)) =
+                self.synthesized_integer_sidecar("unique_axis")?
         {
-            let outer: usize = fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
-            let inner: usize = fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
+            let outer: usize =
+                fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
+            let inner: usize =
+                fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
             let mut slices: Vec<(Vec<u64>, usize)> = Vec::with_capacity(axis_len);
             for a in 0..axis_len {
                 let mut slice_vals = Vec::with_capacity(outer * inner);
@@ -15554,8 +15685,10 @@ impl UFuncArray {
         }
 
         // Collect each slice as a Vec<f64> for comparison
-        let outer: usize = fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
-        let inner: usize = fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
+        let outer: usize =
+            fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
+        let inner: usize =
+            fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
         let mut slices: Vec<(Vec<f64>, usize)> = Vec::with_capacity(axis_len);
         for a in 0..axis_len {
             let mut slice_vals = Vec::with_capacity(outer * inner);
@@ -16774,8 +16907,10 @@ impl UFuncArray {
         let mut out_shape: Vec<usize> = self.shape.clone();
         out_shape.remove(ax);
 
-        let outer: usize = fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
-        let inner: usize = fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
+        let outer: usize =
+            fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
+        let inner: usize =
+            fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
 
         let out_total = outer * inner;
         let mut out_values = vec![0.0f64; out_total];
@@ -16808,11 +16943,7 @@ impl UFuncArray {
     ///
     /// `x` provides the sample points along the integration axis. Must be 1-D
     /// with the same length as the integration axis.
-    pub fn trapezoid_x(
-        &self,
-        x: &Self,
-        axis: Option<isize>,
-    ) -> Result<Self, UFuncError> {
+    pub fn trapezoid_x(&self, x: &Self, axis: Option<isize>) -> Result<Self, UFuncError> {
         let ndim = self.shape.len();
         if ndim == 0 {
             return Err(UFuncError::Msg(
@@ -16820,9 +16951,7 @@ impl UFuncArray {
             ));
         }
         if x.shape.len() != 1 {
-            return Err(UFuncError::Msg(
-                "trapezoid: x must be 1-D".to_string(),
-            ));
+            return Err(UFuncError::Msg("trapezoid: x must be 1-D".to_string()));
         }
         let ax = match axis {
             Some(a) => normalize_axis(a, ndim)?,
@@ -16852,8 +16981,10 @@ impl UFuncArray {
 
         let mut out_shape: Vec<usize> = self.shape.clone();
         out_shape.remove(ax);
-        let outer: usize = fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
-        let inner: usize = fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
+        let outer: usize =
+            fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
+        let inner: usize =
+            fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
         let out_total = outer * inner;
         let mut out_values = vec![0.0f64; out_total];
 
@@ -17255,7 +17386,8 @@ impl UFuncArray {
         }
         let src_strides = c_strides_elems(&padded);
         let out_strides = c_strides_elems(target_shape);
-        let out_count: usize = fnp_ndarray::element_count(target_shape).map_err(UFuncError::Shape)?;
+        let out_count: usize =
+            fnp_ndarray::element_count(target_shape).map_err(UFuncError::Shape)?;
         let mut values = Vec::with_capacity(out_count);
         let mut source_indices = Vec::with_capacity(out_count);
         for flat in 0..out_count {
@@ -17388,11 +17520,7 @@ impl UFuncArray {
     }
 
     /// Count nonzero over multiple axes simultaneously (np.count_nonzero with axis tuple).
-    pub fn count_nonzero_axes(
-        &self,
-        axes: &[isize],
-        keepdims: bool,
-    ) -> Result<Self, UFuncError> {
+    pub fn count_nonzero_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
         if axes.is_empty() {
             return Ok(self.clone());
         }
@@ -17446,8 +17574,10 @@ impl UFuncArray {
         let view_dims: Vec<usize> = out_shape.clone();
         out_shape.extend_from_slice(window_shape);
 
-        let view_total: usize = fnp_ndarray::element_count(&view_dims).map_err(UFuncError::Shape)?;
-        let window_total: usize = fnp_ndarray::element_count(window_shape).map_err(UFuncError::Shape)?;
+        let view_total: usize =
+            fnp_ndarray::element_count(&view_dims).map_err(UFuncError::Shape)?;
+        let window_total: usize =
+            fnp_ndarray::element_count(window_shape).map_err(UFuncError::Shape)?;
         let total = view_total * window_total;
 
         let src_strides = c_strides_elems(&self.shape);
@@ -17507,7 +17637,7 @@ impl UFuncArray {
 
     /// All N-d indices for a given shape (np.ndindex).
     pub fn ndindex(shape: &[usize]) -> Vec<Vec<usize>> {
-        let total: usize = fnp_ndarray::element_count(shape).unwrap();
+        let total: usize = fnp_ndarray::element_count(shape).unwrap_or(0);
         let strides = c_strides_elems(shape);
         (0..total)
             .map(|flat| {
@@ -17552,8 +17682,10 @@ impl UFuncArray {
                 let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
                 let mut out_values = vec![0.0f64; out_count];
                 let axis_len = self.shape[axis];
-                let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
-                let outer: usize = fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
+                let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..])
+                    .map_err(UFuncError::Shape)?;
+                let outer: usize =
+                    fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
                 let mut out_flat = 0usize;
                 for outer_idx in 0..outer {
                     let base = outer_idx * axis_len * inner;
@@ -17623,8 +17755,10 @@ impl UFuncArray {
                 let axis = normalize_axis(ax, self.shape.len())?;
                 let axis_len = self.shape[axis];
                 let packed_len = axis_len.div_ceil(8);
-                let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
-                let outer: usize = fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
+                let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..])
+                    .map_err(UFuncError::Shape)?;
+                let outer: usize =
+                    fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
                 let mut out_shape = self.shape.clone();
                 out_shape[axis] = packed_len;
                 let total = element_count(&out_shape).map_err(UFuncError::Shape)?;
@@ -17708,8 +17842,10 @@ impl UFuncArray {
                 let axis_len = self.shape[axis];
                 let full_bits = axis_len * 8;
                 let out_bits = count.unwrap_or(full_bits).min(full_bits);
-                let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
-                let outer: usize = fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
+                let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..])
+                    .map_err(UFuncError::Shape)?;
+                let outer: usize =
+                    fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
                 let mut out_shape = self.shape.clone();
                 out_shape[axis] = out_bits;
                 let total = element_count(&out_shape).map_err(UFuncError::Shape)?;
@@ -18154,8 +18290,10 @@ impl UFuncArray {
             return Err(UFuncError::Msg("cannot split scalar array".to_string()));
         }
         let axis_len = self.shape[axis];
-        let inner: usize = fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
-        let outer: usize = fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
+        let inner: usize =
+            fnp_ndarray::element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
+        let outer: usize =
+            fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
 
         // Build boundary pairs: [0, idx0, idx1, ..., axis_len]
         let mut bounds = Vec::with_capacity(indices.len() + 2);
@@ -22378,8 +22516,10 @@ impl MaskedArray {
                     return Ok(self.clone());
                 }
 
-                let inner: usize = fnp_ndarray::element_count(&self.data.shape()[axis + 1..]).map_err(UFuncError::Shape)?;
-                let outer: usize = fnp_ndarray::element_count(&self.data.shape()[..axis]).map_err(UFuncError::Shape)?;
+                let inner: usize = fnp_ndarray::element_count(&self.data.shape()[axis + 1..])
+                    .map_err(UFuncError::Shape)?;
+                let outer: usize = fnp_ndarray::element_count(&self.data.shape()[..axis])
+                    .map_err(UFuncError::Shape)?;
                 let mut out_values = self.data.values().to_vec();
                 let mut out_mask_vals = mask.values().to_vec();
                 let mut source_indices = vec![0usize; self.data.values().len()];
@@ -22462,8 +22602,10 @@ impl MaskedArray {
             Some(axis) => {
                 let axis = normalize_axis(axis, self.data.shape().len())?;
                 let axis_len = self.data.shape()[axis];
-                let inner: usize = fnp_ndarray::element_count(&self.data.shape()[axis + 1..]).map_err(UFuncError::Shape)?;
-                let outer: usize = fnp_ndarray::element_count(&self.data.shape()[..axis]).map_err(UFuncError::Shape)?;
+                let inner: usize = fnp_ndarray::element_count(&self.data.shape()[axis + 1..])
+                    .map_err(UFuncError::Shape)?;
+                let outer: usize = fnp_ndarray::element_count(&self.data.shape()[..axis])
+                    .map_err(UFuncError::Shape)?;
                 let mut out_values = vec![0.0; self.data.values().len()];
                 let mut idx_lane: Vec<usize> = (0..axis_len).collect();
 
@@ -22531,8 +22673,10 @@ impl MaskedArray {
             Some(axis) => {
                 let axis = normalize_axis(axis, self.data.shape().len())?;
                 let axis_len = self.data.shape()[axis];
-                let inner: usize = fnp_ndarray::element_count(&self.data.shape()[axis + 1..]).map_err(UFuncError::Shape)?;
-                let outer: usize = fnp_ndarray::element_count(&self.data.shape()[..axis]).map_err(UFuncError::Shape)?;
+                let inner: usize = fnp_ndarray::element_count(&self.data.shape()[axis + 1..])
+                    .map_err(UFuncError::Shape)?;
+                let outer: usize = fnp_ndarray::element_count(&self.data.shape()[..axis])
+                    .map_err(UFuncError::Shape)?;
                 let out_shape = reduced_shape(self.data.shape(), axis, false);
                 let mut out_values = vec![0.0; outer * inner];
 
@@ -22597,8 +22741,10 @@ impl MaskedArray {
             Some(axis) => {
                 let axis = normalize_axis(axis, self.data.shape().len())?;
                 let axis_len = self.data.shape()[axis];
-                let inner: usize = fnp_ndarray::element_count(&self.data.shape()[axis + 1..]).map_err(UFuncError::Shape)?;
-                let outer: usize = fnp_ndarray::element_count(&self.data.shape()[..axis]).map_err(UFuncError::Shape)?;
+                let inner: usize = fnp_ndarray::element_count(&self.data.shape()[axis + 1..])
+                    .map_err(UFuncError::Shape)?;
+                let outer: usize = fnp_ndarray::element_count(&self.data.shape()[..axis])
+                    .map_err(UFuncError::Shape)?;
                 let out_shape = reduced_shape(self.data.shape(), axis, false);
                 let mut out_values = vec![0.0; outer * inner];
 
@@ -23263,14 +23409,27 @@ pub fn unique_counts(x: &UFuncArray) -> (UFuncArray, UFuncArray) {
     let (values, _, _, counts) = x.unique_with_info(false, false, true);
     (
         values,
-        counts.unwrap_or_else(|| unreachable!("counts requested")),
+        counts.unwrap_or_else(|| UFuncArray {
+            shape: vec![0],
+            values: vec![],
+            dtype: DType::I64,
+            integer_sidecar: None,
+        }),
     )
 }
 
 /// `numpy.unique_inverse(x)` — sorted unique values and indices to reconstruct.
 pub fn unique_inverse(x: &UFuncArray) -> (UFuncArray, UFuncArray) {
     let (values, _, inverse, _) = x.unique_with_info(false, true, false);
-    (values, inverse.expect("inverse requested"))
+    (
+        values,
+        inverse.unwrap_or_else(|| UFuncArray {
+            shape: vec![0],
+            values: vec![],
+            dtype: DType::I64,
+            integer_sidecar: None,
+        }),
+    )
 }
 
 /// `numpy.unique_all(x)` — sorted unique values, first indices, inverse indices, and counts.
@@ -23278,9 +23437,24 @@ pub fn unique_all(x: &UFuncArray) -> (UFuncArray, UFuncArray, UFuncArray, UFuncA
     let (values, indices, inverse, counts) = x.unique_with_info(true, true, true);
     (
         values,
-        indices.expect("indices requested"),
-        inverse.expect("inverse requested"),
-        counts.expect("counts requested"),
+        indices.unwrap_or_else(|| UFuncArray {
+            shape: vec![0],
+            values: vec![],
+            dtype: DType::I64,
+            integer_sidecar: None,
+        }),
+        inverse.unwrap_or_else(|| UFuncArray {
+            shape: vec![0],
+            values: vec![],
+            dtype: DType::I64,
+            integer_sidecar: None,
+        }),
+        counts.unwrap_or_else(|| UFuncArray {
+            shape: vec![0],
+            values: vec![],
+            dtype: DType::I64,
+            integer_sidecar: None,
+        }),
     )
 }
 
@@ -25045,7 +25219,10 @@ pub fn pad_stat(
             return f64::NAN;
         }
         match mode {
-            "maximum" => values.iter().copied().fold(f64::NEG_INFINITY, |a, b| a.max(b)),
+            "maximum" => values
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, |a, b| a.max(b)),
             "minimum" => values.iter().copied().fold(f64::INFINITY, |a, b| a.min(b)),
             "mean" => values.iter().sum::<f64>() / values.len() as f64,
             "median" => {
@@ -25319,7 +25496,13 @@ pub fn isneginf(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
     let values = x
         .values
         .iter()
-        .map(|&v| if v.is_infinite() && v.is_sign_negative() { 1.0 } else { 0.0 })
+        .map(|&v| {
+            if v.is_infinite() && v.is_sign_negative() {
+                1.0
+            } else {
+                0.0
+            }
+        })
         .collect();
     Ok(UFuncArray {
         shape: x.shape.clone(),
@@ -25363,11 +25546,9 @@ pub fn sort_complex(a: &UFuncArray) -> Result<UFuncArray, UFuncError> {
         a.values.iter().map(|&r| (r, 0.0)).collect()
     };
     // Sort by real part first, then imaginary part. NaN sorts to end.
-    pairs.sort_by(|a, b| {
-        match nan_last_cmp(&a.0, &b.0) {
-            std::cmp::Ordering::Equal => nan_last_cmp(&a.1, &b.1),
-            ord => ord,
-        }
+    pairs.sort_by(|a, b| match nan_last_cmp(&a.0, &b.0) {
+        std::cmp::Ordering::Equal => nan_last_cmp(&a.1, &b.1),
+        ord => ord,
     });
     let n = pairs.len();
     let values: Vec<f64> = pairs.into_iter().flat_map(|(r, i)| [r, i]).collect();
@@ -26540,18 +26721,18 @@ mod tests {
         AxisSlice, BinaryDispatchMethod, BinaryOp, FloatErrorKind, FloatErrorMode, GridSpec,
         MAError, MaskedArray, OverrideDispatchDecision, OverrideOperand, OverridePayloadClass,
         PrintOptions, QuantileInterp, StringArray, UFUNC_PACKET_REASON_CODES, UFuncArray,
-        UFuncArrayView,
-        UFuncError, UFuncLogRecord, UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp, bitwise_count,
-        busday_count, busday_offset, cheb2poly, chebadd, chebder, chebdiv, chebfit, chebfromroots, chebint, chebmul, chebroots,
-        chebsub, chebval, divmod_arrays, errstate, financial_fv, financial_ipmt, financial_irr,
-        financial_mirr, financial_nper, financial_npv, financial_pmt, financial_ppmt, financial_pv,
-        financial_rate, frexp, gcd_arrays, geterr, herm2poly, hermadd, hermder, hermdiv, herme2poly,
-        hermeadd, hermediv, hermefromroots, hermemul, hermeroots, hermesub, hermeval, hermfit, hermfromroots,
-        hermint, hermmul, hermroots, hermsub, hermval, is_busday, isneginf, isposinf, lag2poly, lagadd, lagder, lagdiv,
-        lagfit, lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, lcm_arrays, leg2poly, legadd,
-        legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub, legval, ma_is_mask,
-        ma_is_masked, ma_make_mask, ma_mask_or, mediate_ufunc_runtime_policy, modf,
-        normalize_fixed_signature_keywords, normalize_signature_keywords, pad_empty,
+        UFuncArrayView, UFuncError, UFuncLogRecord, UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp,
+        bitwise_count, busday_count, busday_offset, cheb2poly, chebadd, chebder, chebdiv, chebfit,
+        chebfromroots, chebint, chebmul, chebroots, chebsub, chebval, divmod_arrays, errstate,
+        financial_fv, financial_ipmt, financial_irr, financial_mirr, financial_nper, financial_npv,
+        financial_pmt, financial_ppmt, financial_pv, financial_rate, frexp, gcd_arrays, geterr,
+        herm2poly, hermadd, hermder, hermdiv, herme2poly, hermeadd, hermediv, hermefromroots,
+        hermemul, hermeroots, hermesub, hermeval, hermfit, hermfromroots, hermint, hermmul,
+        hermroots, hermsub, hermval, is_busday, isneginf, isposinf, lag2poly, lagadd, lagder,
+        lagdiv, lagfit, lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, lcm_arrays,
+        leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub,
+        legval, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or, mediate_ufunc_runtime_policy,
+        modf, normalize_fixed_signature_keywords, normalize_signature_keywords, pad_empty,
         pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
         plan_binary_dispatch, plan_binary_dispatch_with_registry,
         plan_binary_dispatch_with_signature, poly2cheb, poly2herm, poly2herme, poly2lag, poly2leg,
@@ -26763,7 +26944,10 @@ mod tests {
             .expect("large i64 should be supported via sidecar");
         assert!(arr.has_integer_sidecar());
         let storage = arr.to_storage().expect("to_storage");
-        assert!(matches!(&storage, ArrayStorage::I64(_)), "expected I64 storage");
+        assert!(
+            matches!(&storage, ArrayStorage::I64(_)),
+            "expected I64 storage"
+        );
         if let ArrayStorage::I64(v) = storage {
             assert_eq!(v[0], val);
         }
@@ -26776,7 +26960,10 @@ mod tests {
             .expect("large u64 should be supported via sidecar");
         assert!(arr.has_integer_sidecar());
         let storage = arr.to_storage().expect("to_storage");
-        assert!(matches!(&storage, ArrayStorage::U64(_)), "expected U64 storage");
+        assert!(
+            matches!(&storage, ArrayStorage::U64(_)),
+            "expected U64 storage"
+        );
         if let ArrayStorage::U64(v) = storage {
             assert_eq!(v[0], val);
         }
@@ -27060,7 +27247,10 @@ mod tests {
                 .expect_err("raise mode should surface floating-point error")
         };
 
-        assert!(matches!(err, UFuncError::FloatingPoint { .. }), "unexpected error: {err:?}");
+        assert!(
+            matches!(err, UFuncError::FloatingPoint { .. }),
+            "unexpected error: {err:?}"
+        );
         if let UFuncError::FloatingPoint { kind, detail } = err {
             assert_eq!(kind, FloatErrorKind::Divide);
             assert!(detail.contains("divide by zero"));
@@ -27110,7 +27300,10 @@ mod tests {
                 assert_eq!(kind, FloatErrorKind::Divide);
                 assert!(detail.contains("reciprocal"));
             }
-            other => { let msg = format!("{other:?}"); assert_eq!(msg, "", "unexpected error"); },
+            other => {
+                let msg = format!("{other:?}");
+                assert_eq!(msg, "", "unexpected error");
+            }
         }
     }
 
@@ -28268,7 +28461,10 @@ mod tests {
             "not_implemented",
             "override_result",
         ] {
-            assert!(validate_override_payload_class(class).is_ok(), "'{class}' should be accepted");
+            assert!(
+                validate_override_payload_class(class).is_ok(),
+                "'{class}' should be accepted"
+            );
         }
     }
 
@@ -28711,17 +28907,18 @@ mod tests {
         let arr = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![large, large + 1]))
             .expect("arr");
         let out = arr.reduce_max(None, false).expect("max");
-        assert_eq!(out.to_storage().unwrap(), ArrayStorage::U64(vec![large + 1]));
+        assert_eq!(
+            out.to_storage().unwrap(),
+            ArrayStorage::U64(vec![large + 1])
+        );
     }
 
     #[test]
     fn reduce_min_preserves_exact_large_i64_value_along_axis() {
         let large = 1_i64 << 53;
-        let arr = UFuncArray::from_storage(
-            vec![2, 2],
-            ArrayStorage::I64(vec![large + 1, 7, large, 9]),
-        )
-        .expect("arr");
+        let arr =
+            UFuncArray::from_storage(vec![2, 2], ArrayStorage::I64(vec![large + 1, 7, large, 9]))
+                .expect("arr");
         let out = arr.reduce_min(Some(0), false).expect("min axis=0");
         assert_eq!(out.to_storage().unwrap(), ArrayStorage::I64(vec![large, 7]));
     }
@@ -29364,7 +29561,10 @@ mod tests {
         let out = lhs
             .elementwise_binary(&rhs, BinaryOp::Heaviside)
             .expect("heaviside");
-        assert!(out.values()[0].is_nan(), "heaviside(NaN, 0.5) should be NaN");
+        assert!(
+            out.values()[0].is_nan(),
+            "heaviside(NaN, 0.5) should be NaN"
+        );
         // heaviside(1.0, NaN) = 1.0 (NaN rhs only affects x==0 case)
         assert_eq!(out.values()[1], 1.0, "heaviside(1.0, NaN) should be 1.0");
     }
@@ -29645,8 +29845,8 @@ mod tests {
 
     #[test]
     fn binary_logaddexp_inf() {
-        let lhs =
-            UFuncArray::new(vec![2], vec![f64::NEG_INFINITY, f64::INFINITY], DType::F64).expect("lhs");
+        let lhs = UFuncArray::new(vec![2], vec![f64::NEG_INFINITY, f64::INFINITY], DType::F64)
+            .expect("lhs");
         let rhs = UFuncArray::new(vec![2], vec![1.0, 1.0], DType::F64).expect("rhs");
         let out = lhs
             .elementwise_binary(&rhs, BinaryOp::Logaddexp)
@@ -29789,7 +29989,10 @@ mod tests {
         let large = 1_u64 << 53;
         let arr = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![large, 3])).unwrap();
         let out = arr.cumsum(None).expect("cumsum");
-        assert_eq!(out.to_storage().unwrap(), ArrayStorage::U64(vec![large, large + 3]));
+        assert_eq!(
+            out.to_storage().unwrap(),
+            ArrayStorage::U64(vec![large, large + 3])
+        );
     }
 
     #[test]
@@ -29813,8 +30016,8 @@ mod tests {
     #[test]
     fn cumprod_preserves_exact_large_i64_values_along_axis() {
         let large = 1_i64 << 53;
-        let arr = UFuncArray::from_storage(vec![2, 2], ArrayStorage::I64(vec![large, 2, 3, 4]))
-            .unwrap();
+        let arr =
+            UFuncArray::from_storage(vec![2, 2], ArrayStorage::I64(vec![large, 2, 3, 4])).unwrap();
         let out = arr.cumprod(Some(1)).expect("cumprod axis=1");
         assert_eq!(
             out.to_storage().unwrap(),
@@ -30092,11 +30295,9 @@ mod tests {
     #[test]
     fn reduce_argmin_uses_exact_large_i64_ordering_along_axis() {
         let large = 1_i64 << 53;
-        let arr = UFuncArray::from_storage(
-            vec![2, 2],
-            ArrayStorage::I64(vec![large + 1, 7, large, 9]),
-        )
-        .expect("arr");
+        let arr =
+            UFuncArray::from_storage(vec![2, 2], ArrayStorage::I64(vec![large + 1, 7, large, 9]))
+                .expect("arr");
         let out = arr.reduce_argmin(Some(0)).expect("argmin axis=0");
         assert_eq!(out.values(), &[1.0, 0.0]);
     }
@@ -30164,6 +30365,35 @@ mod tests {
         let out = a.elementwise_binary(&b, BinaryOp::BitwiseAnd).expect("ok");
         assert_eq!(out.shape(), &[2]);
         assert_eq!(out.values(), &[0.0, 3.0]);
+    }
+
+    #[test]
+    fn bitwise_and_rejects_float_dtype() {
+        let a = UFuncArray::new(vec![2], vec![12.0, 5.0], DType::F64).expect("a");
+        let b = UFuncArray::new(vec![2], vec![10.0, 3.0], DType::F64).expect("b");
+        assert!(a.elementwise_binary(&b, BinaryOp::BitwiseAnd).is_err());
+    }
+
+    #[test]
+    fn bitwise_or_rejects_float_dtype() {
+        let a = UFuncArray::new(vec![1], vec![12.0], DType::F64).expect("a");
+        let b = UFuncArray::new(vec![1], vec![10.0], DType::F64).expect("b");
+        assert!(a.elementwise_binary(&b, BinaryOp::BitwiseOr).is_err());
+    }
+
+    #[test]
+    fn left_shift_rejects_float_dtype() {
+        let a = UFuncArray::new(vec![1], vec![1.0], DType::F64).expect("a");
+        let b = UFuncArray::new(vec![1], vec![4.0], DType::F64).expect("b");
+        assert!(a.elementwise_binary(&b, BinaryOp::LeftShift).is_err());
+    }
+
+    #[test]
+    fn invert_nan_returns_nan() {
+        let a = UFuncArray::new(vec![2], vec![f64::NAN, f64::INFINITY], DType::F64).expect("a");
+        let out = a.elementwise_unary(UnaryOp::Invert);
+        assert!(out.values()[0].is_nan(), "invert(NaN) should be NaN");
+        assert!(out.values()[1].is_nan(), "invert(inf) should be NaN");
     }
 
     // ── array manipulation tests ────────────────────────────────────────
@@ -30553,8 +30783,12 @@ mod tests {
     #[test]
     fn squeeze_axes_multi() {
         // Shape [1, 3, 1, 2] → squeeze axes (0, 2) → [3, 2]
-        let arr = UFuncArray::new(vec![1, 3, 1, 2], (1..=6).map(|i| i as f64).collect(), DType::F64)
-            .unwrap();
+        let arr = UFuncArray::new(
+            vec![1, 3, 1, 2],
+            (1..=6).map(|i| i as f64).collect(),
+            DType::F64,
+        )
+        .unwrap();
         let r = arr.squeeze_axes(&[0, 2]).unwrap();
         assert_eq!(r.shape(), &[3, 2]);
         assert_eq!(r.values(), arr.values());
@@ -31510,7 +31744,11 @@ mod tests {
     fn arange_float_precision_0_1_step() {
         // np.arange(0, 1, 0.1) → exactly 10 elements
         let arr = UFuncArray::arange(0.0, 1.0, 0.1, DType::F64).unwrap();
-        assert_eq!(arr.shape(), &[10], "arange(0, 1, 0.1) should produce exactly 10 elements");
+        assert_eq!(
+            arr.shape(),
+            &[10],
+            "arange(0, 1, 0.1) should produce exactly 10 elements"
+        );
     }
 
     #[test]
@@ -31552,7 +31790,8 @@ mod tests {
 
     #[test]
     fn concatenate_flat_single() {
-        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
         let r = UFuncArray::concatenate_flat(&[&a]).unwrap();
         assert_eq!(r.shape(), &[6]);
         assert_eq!(r.values(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
@@ -32862,10 +33101,12 @@ mod tests {
     #[test]
     fn histogram_single_value() {
         let a = UFuncArray::new(vec![3], vec![5.0, 5.0, 5.0], DType::F64).unwrap();
-        let (counts, _) = a.histogram(3).unwrap();
-        // All values in same bin
-        let total: f64 = counts.values().iter().sum();
-        assert_eq!(total, 3.0);
+        let (counts, edges) = a.histogram(3).unwrap();
+        assert_eq!(counts.values(), &[0.0, 3.0, 0.0]);
+        // Edges should be 4.5, 4.833333333333333, 5.166666666666666, 5.5
+        let e = edges.values();
+        assert!((e[0] - 4.5).abs() < 1e-9);
+        assert!((e[3] - 5.5).abs() < 1e-9);
     }
 
     #[test]
@@ -33072,8 +33313,8 @@ mod tests {
 
     #[test]
     fn convolve2d_rectangular_kernel() {
-        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
-            .unwrap();
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
         let k = UFuncArray::new(vec![1, 2], vec![1.0, 1.0], DType::F64).unwrap();
         let r = a.convolve2d(&k).unwrap();
         assert_eq!(r.shape(), &[2, 4]);
@@ -34360,7 +34601,10 @@ mod tests {
                 assert!(values[0] <= values[1]);
                 assert!(values[2] >= values[1]);
             }
-            other => { let msg = format!("{other:?}"); assert_eq!(msg, "", "expected i64 storage"); },
+            other => {
+                let msg = format!("{other:?}");
+                assert_eq!(msg, "", "expected i64 storage");
+            }
         }
     }
 
@@ -34924,8 +35168,8 @@ mod tests {
 
     #[test]
     fn rot90_axes_default_matches_rot90() {
-        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
-            .unwrap();
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
         let default = a.rot90(1).unwrap();
         let explicit = a.rot90_axes(1, (0, 1)).unwrap();
         assert_eq!(default.values(), explicit.values());
@@ -34933,8 +35177,8 @@ mod tests {
 
     #[test]
     fn rot90_axes_same_error() {
-        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
-            .unwrap();
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
         assert!(a.rot90_axes(1, (0, 0)).is_err());
     }
 
@@ -35093,13 +35337,14 @@ mod tests {
     #[test]
     fn nanmax_preserves_exact_large_i64_value_along_axis() {
         let large = 1_i64 << 53;
-        let arr = UFuncArray::from_storage(
-            vec![2, 2],
-            ArrayStorage::I64(vec![large, 7, large + 1, 9]),
-        )
-        .expect("arr");
+        let arr =
+            UFuncArray::from_storage(vec![2, 2], ArrayStorage::I64(vec![large, 7, large + 1, 9]))
+                .expect("arr");
         let out = arr.nanmax(Some(0), false).expect("nanmax axis=0");
-        assert_eq!(out.to_storage().unwrap(), ArrayStorage::I64(vec![large + 1, 9]));
+        assert_eq!(
+            out.to_storage().unwrap(),
+            ArrayStorage::I64(vec![large + 1, 9])
+        );
     }
 
     #[test]
@@ -35159,8 +35404,8 @@ mod tests {
     #[test]
     fn nanargmax_uses_exact_large_u64_ordering() {
         let large = 1_u64 << 53;
-        let a = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![large, large + 1]))
-            .unwrap();
+        let a =
+            UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![large, large + 1])).unwrap();
         let r = a.nanargmax(None).unwrap();
         assert_eq!(r.values(), &[1.0]);
     }
@@ -35168,11 +35413,9 @@ mod tests {
     #[test]
     fn nanargmin_uses_exact_large_i64_ordering_along_axis() {
         let large = 1_i64 << 53;
-        let a = UFuncArray::from_storage(
-            vec![2, 2],
-            ArrayStorage::I64(vec![large + 1, 7, large, 9]),
-        )
-        .unwrap();
+        let a =
+            UFuncArray::from_storage(vec![2, 2], ArrayStorage::I64(vec![large + 1, 7, large, 9]))
+                .unwrap();
         let r = a.nanargmin(Some(0)).unwrap();
         assert_eq!(r.values(), &[1.0, 0.0]);
     }
@@ -35600,7 +35843,10 @@ mod tests {
         let large = 1_u64 << 53;
         let a = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![large, 5])).unwrap();
         let r = a.nancumsum(None).unwrap();
-        assert_eq!(r.to_storage().unwrap(), ArrayStorage::U64(vec![large, large + 5]));
+        assert_eq!(
+            r.to_storage().unwrap(),
+            ArrayStorage::U64(vec![large, large + 5])
+        );
     }
 
     #[test]
@@ -35634,7 +35880,10 @@ mod tests {
         let large = 1_i64 << 53;
         let a = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![large, 3])).unwrap();
         let r = a.nanprod(None, false).unwrap();
-        assert_eq!(r.to_storage().unwrap(), ArrayStorage::I64(vec![large.wrapping_mul(3)]));
+        assert_eq!(
+            r.to_storage().unwrap(),
+            ArrayStorage::I64(vec![large.wrapping_mul(3)])
+        );
     }
 
     // ── pad mode tests ────────
@@ -35736,7 +35985,11 @@ mod tests {
     #[test]
     fn gridspec_arange_basic() {
         // np.mgrid[0:5] → [0, 1, 2, 3, 4]
-        let spec = GridSpec::Arange { start: 0.0, stop: 5.0, step: 1.0 };
+        let spec = GridSpec::Arange {
+            start: 0.0,
+            stop: 5.0,
+            step: 1.0,
+        };
         let vals = spec.generate();
         assert_eq!(vals, vec![0.0, 1.0, 2.0, 3.0, 4.0]);
     }
@@ -35744,7 +35997,11 @@ mod tests {
     #[test]
     fn gridspec_arange_step2() {
         // np.mgrid[0:5:2] → [0, 2, 4]
-        let spec = GridSpec::Arange { start: 0.0, stop: 5.0, step: 2.0 };
+        let spec = GridSpec::Arange {
+            start: 0.0,
+            stop: 5.0,
+            step: 2.0,
+        };
         let vals = spec.generate();
         assert_eq!(vals, vec![0.0, 2.0, 4.0]);
     }
@@ -35752,7 +36009,11 @@ mod tests {
     #[test]
     fn gridspec_arange_fractional_step() {
         // np.mgrid[0:1:0.3] → [0.0, 0.3, 0.6, 0.9]
-        let spec = GridSpec::Arange { start: 0.0, stop: 1.0, step: 0.3 };
+        let spec = GridSpec::Arange {
+            start: 0.0,
+            stop: 1.0,
+            step: 0.3,
+        };
         let vals = spec.generate();
         assert_eq!(vals.len(), 4);
         assert!((vals[0] - 0.0).abs() < 1e-10);
@@ -35764,7 +36025,11 @@ mod tests {
     #[test]
     fn gridspec_arange_negative_step() {
         // np.mgrid[5:0:-1] → [5, 4, 3, 2, 1]
-        let spec = GridSpec::Arange { start: 5.0, stop: 0.0, step: -1.0 };
+        let spec = GridSpec::Arange {
+            start: 5.0,
+            stop: 0.0,
+            step: -1.0,
+        };
         let vals = spec.generate();
         assert_eq!(vals, vec![5.0, 4.0, 3.0, 2.0, 1.0]);
     }
@@ -35772,20 +36037,32 @@ mod tests {
     #[test]
     fn gridspec_arange_empty_wrong_direction() {
         // step positive but stop < start → empty
-        let spec = GridSpec::Arange { start: 5.0, stop: 0.0, step: 1.0 };
+        let spec = GridSpec::Arange {
+            start: 5.0,
+            stop: 0.0,
+            step: 1.0,
+        };
         assert!(spec.generate().is_empty());
     }
 
     #[test]
     fn gridspec_arange_zero_step() {
-        let spec = GridSpec::Arange { start: 0.0, stop: 5.0, step: 0.0 };
+        let spec = GridSpec::Arange {
+            start: 0.0,
+            stop: 5.0,
+            step: 0.0,
+        };
         assert!(spec.generate().is_empty());
     }
 
     #[test]
     fn gridspec_linspace_basic() {
         // np.mgrid[0:1:5j] → [0.0, 0.25, 0.5, 0.75, 1.0]
-        let spec = GridSpec::Linspace { start: 0.0, stop: 1.0, num: 5 };
+        let spec = GridSpec::Linspace {
+            start: 0.0,
+            stop: 1.0,
+            num: 5,
+        };
         let vals = spec.generate();
         assert_eq!(vals.len(), 5);
         assert!((vals[0] - 0.0).abs() < 1e-10);
@@ -35797,13 +36074,21 @@ mod tests {
 
     #[test]
     fn gridspec_linspace_single() {
-        let spec = GridSpec::Linspace { start: 3.0, stop: 7.0, num: 1 };
+        let spec = GridSpec::Linspace {
+            start: 3.0,
+            stop: 7.0,
+            num: 1,
+        };
         assert_eq!(spec.generate(), vec![3.0]);
     }
 
     #[test]
     fn gridspec_linspace_empty() {
-        let spec = GridSpec::Linspace { start: 0.0, stop: 1.0, num: 0 };
+        let spec = GridSpec::Linspace {
+            start: 0.0,
+            stop: 1.0,
+            num: 0,
+        };
         assert!(spec.generate().is_empty());
     }
 
@@ -35811,8 +36096,16 @@ mod tests {
     fn mgrid_spec_arange_2d() {
         // np.mgrid[0:3, 0:4] — arange mode, exclusive stop, step=1
         let grids = UFuncArray::mgrid_spec(&[
-            GridSpec::Arange { start: 0.0, stop: 3.0, step: 1.0 },
-            GridSpec::Arange { start: 0.0, stop: 4.0, step: 1.0 },
+            GridSpec::Arange {
+                start: 0.0,
+                stop: 3.0,
+                step: 1.0,
+            },
+            GridSpec::Arange {
+                start: 0.0,
+                stop: 4.0,
+                step: 1.0,
+            },
         ]);
         assert_eq!(grids.len(), 2);
         assert_eq!(grids[0].shape(), &[3, 4]);
@@ -35833,8 +36126,16 @@ mod tests {
     fn mgrid_spec_linspace_2d() {
         // np.mgrid[0:1:3j, 0:1:3j] — linspace mode: 3 points from 0 to 1 inclusive
         let grids = UFuncArray::mgrid_spec(&[
-            GridSpec::Linspace { start: 0.0, stop: 1.0, num: 3 },
-            GridSpec::Linspace { start: 0.0, stop: 1.0, num: 3 },
+            GridSpec::Linspace {
+                start: 0.0,
+                stop: 1.0,
+                num: 3,
+            },
+            GridSpec::Linspace {
+                start: 0.0,
+                stop: 1.0,
+                num: 3,
+            },
         ]);
         assert_eq!(grids[0].shape(), &[3, 3]);
         assert_eq!(
@@ -35851,8 +36152,16 @@ mod tests {
     fn mgrid_spec_mixed_modes() {
         // Mix arange (axis 0) and linspace (axis 1)
         let grids = UFuncArray::mgrid_spec(&[
-            GridSpec::Arange { start: 0.0, stop: 2.0, step: 1.0 },
-            GridSpec::Linspace { start: 0.0, stop: 1.0, num: 3 },
+            GridSpec::Arange {
+                start: 0.0,
+                stop: 2.0,
+                step: 1.0,
+            },
+            GridSpec::Linspace {
+                start: 0.0,
+                stop: 1.0,
+                num: 3,
+            },
         ]);
         assert_eq!(grids[0].shape(), &[2, 3]);
         assert_eq!(grids[1].shape(), &[2, 3]);
@@ -35864,8 +36173,16 @@ mod tests {
     fn ogrid_spec_arange_2d() {
         // np.ogrid[0:3, 0:4] — sparse, arange mode
         let grids = UFuncArray::ogrid_spec(&[
-            GridSpec::Arange { start: 0.0, stop: 3.0, step: 1.0 },
-            GridSpec::Arange { start: 0.0, stop: 4.0, step: 1.0 },
+            GridSpec::Arange {
+                start: 0.0,
+                stop: 3.0,
+                step: 1.0,
+            },
+            GridSpec::Arange {
+                start: 0.0,
+                stop: 4.0,
+                step: 1.0,
+            },
         ]);
         assert_eq!(grids.len(), 2);
         assert_eq!(grids[0].shape(), &[3, 1]);
@@ -35878,8 +36195,16 @@ mod tests {
     fn ogrid_spec_linspace() {
         // np.ogrid[0:1:5j, 0:2:3j]
         let grids = UFuncArray::ogrid_spec(&[
-            GridSpec::Linspace { start: 0.0, stop: 1.0, num: 5 },
-            GridSpec::Linspace { start: 0.0, stop: 2.0, num: 3 },
+            GridSpec::Linspace {
+                start: 0.0,
+                stop: 1.0,
+                num: 5,
+            },
+            GridSpec::Linspace {
+                start: 0.0,
+                stop: 2.0,
+                num: 3,
+            },
         ]);
         assert_eq!(grids[0].shape(), &[5, 1]);
         assert_eq!(grids[1].shape(), &[1, 3]);
@@ -35891,9 +36216,21 @@ mod tests {
     fn mgrid_spec_3d() {
         // 3-D grid: 2x3x2
         let grids = UFuncArray::mgrid_spec(&[
-            GridSpec::Arange { start: 0.0, stop: 2.0, step: 1.0 },
-            GridSpec::Arange { start: 0.0, stop: 3.0, step: 1.0 },
-            GridSpec::Arange { start: 0.0, stop: 2.0, step: 1.0 },
+            GridSpec::Arange {
+                start: 0.0,
+                stop: 2.0,
+                step: 1.0,
+            },
+            GridSpec::Arange {
+                start: 0.0,
+                stop: 3.0,
+                step: 1.0,
+            },
+            GridSpec::Arange {
+                start: 0.0,
+                stop: 2.0,
+                step: 1.0,
+            },
         ]);
         assert_eq!(grids.len(), 3);
         for g in &grids {
@@ -35909,9 +36246,11 @@ mod tests {
     #[test]
     fn mgrid_spec_1d() {
         // 1-D case: just arange
-        let grids = UFuncArray::mgrid_spec(&[
-            GridSpec::Arange { start: 0.0, stop: 5.0, step: 1.0 },
-        ]);
+        let grids = UFuncArray::mgrid_spec(&[GridSpec::Arange {
+            start: 0.0,
+            stop: 5.0,
+            step: 1.0,
+        }]);
         assert_eq!(grids.len(), 1);
         assert_eq!(grids[0].shape(), &[5]);
         assert_eq!(grids[0].values(), &[0.0, 1.0, 2.0, 3.0, 4.0]);
@@ -35921,8 +36260,16 @@ mod tests {
     fn mgrid_spec_empty_axis() {
         // One axis generates empty → all outputs empty
         let grids = UFuncArray::mgrid_spec(&[
-            GridSpec::Arange { start: 5.0, stop: 0.0, step: 1.0 },
-            GridSpec::Arange { start: 0.0, stop: 3.0, step: 1.0 },
+            GridSpec::Arange {
+                start: 5.0,
+                stop: 0.0,
+                step: 1.0,
+            },
+            GridSpec::Arange {
+                start: 0.0,
+                stop: 3.0,
+                step: 1.0,
+            },
         ]);
         assert_eq!(grids.len(), 2);
         assert_eq!(grids[0].shape(), &[0, 3]);
@@ -36563,12 +36910,7 @@ mod tests {
     #[test]
     fn unwrap_period_360() {
         // Unwrap degrees: period=360
-        let a = UFuncArray::new(
-            vec![4],
-            vec![0.0, 90.0, 180.0, -90.0],
-            DType::F64,
-        )
-        .unwrap();
+        let a = UFuncArray::new(vec![4], vec![0.0, 90.0, 180.0, -90.0], DType::F64).unwrap();
         let r = a.unwrap_period(None, Some(360.0)).unwrap();
         assert!((r.values()[0]).abs() < 1e-10);
         assert!((r.values()[1] - 90.0).abs() < 1e-10);
@@ -36984,12 +37326,19 @@ mod tests {
     fn mode_distinguishes_adjacent_f64_values() {
         let a = UFuncArray::new(
             vec![3],
-            vec![1.0, f64::from_bits(1.0f64.to_bits() + 1), f64::from_bits(1.0f64.to_bits() + 1)],
+            vec![
+                1.0,
+                f64::from_bits(1.0f64.to_bits() + 1),
+                f64::from_bits(1.0f64.to_bits() + 1),
+            ],
             DType::F64,
         )
         .unwrap();
         let (val, count) = a.mode().unwrap();
-        assert_eq!(val.to_bits(), f64::from_bits(1.0f64.to_bits() + 1).to_bits());
+        assert_eq!(
+            val.to_bits(),
+            f64::from_bits(1.0f64.to_bits() + 1).to_bits()
+        );
         assert_eq!(count, 2);
     }
 
@@ -38257,8 +38606,8 @@ mod tests {
 
     #[test]
     fn reduce_var_axes_empty_is_noop() {
-        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
-            .unwrap();
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
         let r = a.reduce_var_axes(&[], false, 0).unwrap();
         assert_eq!(r.values(), a.values());
     }
@@ -38275,8 +38624,8 @@ mod tests {
     #[test]
     fn any_axes_basic() {
         // np.any([[0,0],[1,0],[0,0]], axis=(0,1)) → True
-        let a = UFuncArray::new(vec![3, 2], vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.0], DType::F64)
-            .unwrap();
+        let a =
+            UFuncArray::new(vec![3, 2], vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.0], DType::F64).unwrap();
         let r = a.any_axes(&[0, 1]).unwrap();
         assert_eq!(r.values(), &[1.0]);
     }
@@ -42907,11 +43256,7 @@ mod tests {
         let c = hermefromroots(&[1.0, -1.0]);
         let roots = hermeroots(&c).unwrap();
         assert_eq!(roots.len(), 2);
-        assert!(
-            (roots[0] - (-1.0)).abs() < 1e-8,
-            "root[0] = {}",
-            roots[0]
-        );
+        assert!((roots[0] - (-1.0)).abs() < 1e-8, "root[0] = {}", roots[0]);
         assert!((roots[1] - 1.0).abs() < 1e-8, "root[1] = {}", roots[1]);
     }
 
@@ -44662,6 +45007,169 @@ mod tests {
         assert!((a2.values()[3] - 1.0).abs() < 1e-12);
     }
 
+    // ── Real-world workflow integration tests ──────────────────
+
+    #[test]
+    fn workflow_solve_and_verify() {
+        // Solve Ax = b, then verify A @ x ≈ b
+        let a = UFuncArray::new(
+            vec![3, 3],
+            vec![3.0, 1.0, 0.0, 1.0, 4.0, 1.0, 0.0, 1.0, 3.0],
+            DType::F64,
+        )
+        .unwrap();
+        let b = UFuncArray::new(vec![3], vec![10.0, 20.0, 14.0], DType::F64).unwrap();
+        let x = a.solve(&b).unwrap();
+        let reconstructed = a.matmul(&x.reshape(&[3, 1]).unwrap()).unwrap();
+        for i in 0..3 {
+            assert!(
+                (reconstructed.values()[i] - b.values()[i]).abs() < 1e-10,
+                "A@x[{}] = {}, expected {}",
+                i,
+                reconstructed.values()[i],
+                b.values()[i]
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_svd_orthogonality() {
+        // SVD: verify U is orthogonal (U^T @ U = I)
+        let a = UFuncArray::new(vec![2, 2], vec![3.0, 1.0, 1.0, 3.0], DType::F64).unwrap();
+        let (u, s, _vt) = a.svd().unwrap();
+        let mut sv = s.values().to_vec();
+        sv.sort_by(|a, b| b.total_cmp(a));
+        assert!((sv[0] - 4.0).abs() < 1e-10, "s[0] = {}", sv[0]);
+        assert!((sv[1] - 2.0).abs() < 1e-10, "s[1] = {}", sv[1]);
+        let utu = u.transpose(None).unwrap().matmul(&u).unwrap();
+        for i in 0..2 {
+            for j in 0..2 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                let val = utu.values()[i * 2 + j];
+                assert!(
+                    (val - expected).abs() < 1e-10,
+                    "U^T @ U [{},{}] = {}, expected {}",
+                    i,
+                    j,
+                    val,
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn workflow_polynomial_regression() {
+        let x = UFuncArray::new(vec![5], vec![0.0, 1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let y = UFuncArray::new(vec![5], vec![1.0, 3.0, 9.0, 19.0, 33.0], DType::F64).unwrap();
+        let coeffs = UFuncArray::polyfit(&x, &y, 2).unwrap();
+        assert!(coeffs.values().len() >= 3);
+        let fitted = UFuncArray::polyval(&coeffs, &x).unwrap();
+        for i in 0..5 {
+            assert!(
+                (fitted.values()[i] - y.values()[i]).abs() < 1e-6,
+                "polyval at x={}: {} vs {}",
+                x.values()[i],
+                fitted.values()[i],
+                y.values()[i]
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_histogram_density() {
+        let data = UFuncArray::new(
+            vec![10],
+            vec![0.1, 0.5, 1.2, 1.8, 2.5, 3.0, 3.5, 4.1, 4.7, 4.9],
+            DType::F64,
+        )
+        .unwrap();
+        let (counts, edges) = data.histogram(5).unwrap();
+        let total: f64 = counts.values().iter().sum();
+        assert_eq!(total, 10.0, "histogram bin counts should sum to data length");
+        assert_eq!(edges.values().len(), 6);
+        for w in edges.values().windows(2) {
+            assert!(w[0] <= w[1]);
+        }
+    }
+
+    #[test]
+    fn workflow_normalize_clip_sort() {
+        let data =
+            UFuncArray::new(vec![6], vec![-1.0, 0.5, 2.0, 0.0, 3.0, 1.0], DType::F64).unwrap();
+        let min_v = data.reduce_min(None, false).unwrap();
+        let max_v = data.reduce_max(None, false).unwrap();
+        let range = max_v
+            .elementwise_binary(&min_v, BinaryOp::Sub)
+            .unwrap();
+        let shifted = data
+            .elementwise_binary(&min_v.broadcast_to(&[6]).unwrap(), BinaryOp::Sub)
+            .unwrap();
+        let normalized = shifted
+            .elementwise_binary(&range.broadcast_to(&[6]).unwrap(), BinaryOp::Div)
+            .unwrap();
+        let clipped = normalized.clip(0.1, 0.9);
+        for &v in clipped.values() {
+            assert!(
+                (0.1 - 1e-10..=0.9 + 1e-10).contains(&v),
+                "clipped value {} out of range",
+                v
+            );
+        }
+        let sorted = clipped.sort(None, None).unwrap();
+        for w in sorted.values().windows(2) {
+            assert!(w[0] <= w[1]);
+        }
+    }
+
+    #[test]
+    fn workflow_det_inv_product_is_identity() {
+        let a = UFuncArray::new(vec![2, 2], vec![4.0, 7.0, 2.0, 6.0], DType::F64).unwrap();
+        let det_val = a.det().unwrap();
+        assert!((det_val - 10.0).abs() < 1e-10);
+        let a_inv = a.inv().unwrap();
+        let product = a.matmul(&a_inv).unwrap();
+        let identity = [1.0, 0.0, 0.0, 1.0];
+        for (i, (&got, &expected)) in product.values().iter().zip(identity.iter()).enumerate() {
+            assert!(
+                (got - expected).abs() < 1e-10,
+                "A@A^-1 [{}] = {}, expected {}",
+                i,
+                got,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_covariance_matrix_properties() {
+        // Covariance matrix should be symmetric and PSD
+        let x = UFuncArray::new(vec![3, 4], vec![
+            1.0, 2.0, 3.0, 4.0,
+            2.0, 3.0, 4.0, 5.0,
+            5.0, 6.0, 7.0, 8.0,
+        ], DType::F64).unwrap();
+        let cov = x.cov().unwrap();
+        // 3x3 covariance matrix
+        assert_eq!(cov.shape(), &[3, 3]);
+        // Verify symmetry
+        for i in 0..3 {
+            for j in 0..3 {
+                let cij = cov.values()[i * 3 + j];
+                let cji = cov.values()[j * 3 + i];
+                assert!(
+                    (cij - cji).abs() < 1e-10,
+                    "cov not symmetric: [{},{}]={} vs [{},{}]={}",
+                    i, j, cij, j, i, cji
+                );
+            }
+        }
+        // Diagonal should be non-negative (variances)
+        for i in 0..3 {
+            assert!(cov.values()[i * 3 + i] >= 0.0, "negative variance at [{},{}]", i, i);
+        }
+    }
+
     // ── Polynomial fitting parity (br-8mz) ─────────────────────
 
     #[test]
@@ -45190,11 +45698,9 @@ mod tests {
     #[test]
     fn unique_axis_rows_distinguish_large_u64_values_that_alias_in_f64() {
         let large = 1_u64 << 53;
-        let a = UFuncArray::from_storage(
-            vec![2, 2],
-            ArrayStorage::U64(vec![large, 1, large + 1, 1]),
-        )
-        .unwrap();
+        let a =
+            UFuncArray::from_storage(vec![2, 2], ArrayStorage::U64(vec![large, 1, large + 1, 1]))
+                .unwrap();
 
         let r = a.unique_axis(0).unwrap();
 
@@ -45208,11 +45714,9 @@ mod tests {
     #[test]
     fn unique_axis_cols_distinguish_large_i64_values_that_alias_in_f64() {
         let large = 1_i64 << 53;
-        let a = UFuncArray::from_storage(
-            vec![2, 2],
-            ArrayStorage::I64(vec![large, large + 1, 7, 7]),
-        )
-        .unwrap();
+        let a =
+            UFuncArray::from_storage(vec![2, 2], ArrayStorage::I64(vec![large, large + 1, 7, 7]))
+                .unwrap();
 
         let r = a.unique_axis(1).unwrap();
 
@@ -45233,8 +45737,8 @@ mod tests {
 
     #[test]
     fn unique_axis_cols_preserve_first_signed_zero_representative() {
-        let a = UFuncArray::new(vec![2, 3], vec![1.0, 0.0, -0.0, 2.0, 1.0, 1.0], DType::F64)
-            .unwrap();
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 0.0, -0.0, 2.0, 1.0, 1.0], DType::F64).unwrap();
         let r = a.unique_axis(1).unwrap();
         assert_eq!(r.shape(), &[2, 2]);
         assert_eq!(r.values(), &[0.0, 1.0, 1.0, 2.0]);
@@ -45350,7 +45854,8 @@ mod tests {
     #[test]
     fn einsum_transpose_via_subscript() {
         // np.einsum('ij->ji', A) = A.T
-        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
         let r = UFuncArray::einsum("ij->ji", &[&a]).unwrap();
         assert_eq!(r.shape(), &[3, 2]);
         assert_eq!(r.values(), &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
@@ -45359,7 +45864,12 @@ mod tests {
     #[test]
     fn einsum_diagonal_extraction() {
         // np.einsum('ii->i', A) = diagonal
-        let a = UFuncArray::new(vec![3, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], DType::F64).unwrap();
+        let a = UFuncArray::new(
+            vec![3, 3],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+            DType::F64,
+        )
+        .unwrap();
         let r = UFuncArray::einsum("ii->i", &[&a]).unwrap();
         assert_eq!(r.shape(), &[3]);
         assert_eq!(r.values(), &[1.0, 5.0, 9.0]);
@@ -45378,7 +45888,8 @@ mod tests {
     #[test]
     fn einsum_row_sum() {
         // np.einsum('ij->i', A) = sum over axis 1
-        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
         let r = UFuncArray::einsum("ij->i", &[&a]).unwrap();
         assert_eq!(r.shape(), &[2]);
         assert_eq!(r.values(), &[6.0, 15.0]);
@@ -45407,7 +45918,8 @@ mod tests {
     #[test]
     fn einsum_total_sum() {
         // np.einsum('ij->', A) = total sum
-        let a = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
         let r = UFuncArray::einsum("ij->", &[&a]).unwrap();
         assert_eq!(r.values(), &[21.0]);
     }
@@ -45433,7 +45945,10 @@ mod tests {
     fn einsum_operand_count_error() {
         let a = UFuncArray::new(vec![2, 2], vec![1.0; 4], DType::F64).unwrap();
         let err = UFuncArray::einsum("ij,jk->ik", &[&a]).unwrap_err();
-        assert!(err.to_string().contains("2 input subscripts but 1 operands"));
+        assert!(
+            err.to_string()
+                .contains("2 input subscripts but 1 operands")
+        );
     }
 
     // ── NumPy behavioral edge-case parity tests ────────
@@ -45500,8 +46015,12 @@ mod tests {
     fn where_scalar_broadcast() {
         // np.where([True, False, True], 1, 0) → [1, 0, 1]
         let cond = UFuncArray::new(vec![3], vec![1.0, 0.0, 1.0], DType::F64).unwrap();
-        let x = UFuncArray::scalar(1.0, DType::F64).broadcast_to(&[3]).unwrap();
-        let y = UFuncArray::scalar(0.0, DType::F64).broadcast_to(&[3]).unwrap();
+        let x = UFuncArray::scalar(1.0, DType::F64)
+            .broadcast_to(&[3])
+            .unwrap();
+        let y = UFuncArray::scalar(0.0, DType::F64)
+            .broadcast_to(&[3])
+            .unwrap();
         let r = UFuncArray::where_select(&cond, &x, &y).unwrap();
         assert_eq!(r.values(), &[1.0, 0.0, 1.0]);
     }
@@ -45512,8 +46031,14 @@ mod tests {
         let a = UFuncArray::new(vec![2], vec![1.0, 1.0], DType::F64).unwrap();
         let b = UFuncArray::new(vec![2], vec![-0.0, 0.0], DType::F64).unwrap();
         let r = a.elementwise_binary(&b, BinaryOp::Copysign).unwrap();
-        assert!(r.values()[0].is_sign_negative(), "copysign(1, -0) should be -1");
-        assert!(r.values()[1].is_sign_positive(), "copysign(1, +0) should be +1");
+        assert!(
+            r.values()[0].is_sign_negative(),
+            "copysign(1, -0) should be -1"
+        );
+        assert!(
+            r.values()[1].is_sign_positive(),
+            "copysign(1, +0) should be +1"
+        );
     }
 
     #[test]
@@ -45587,7 +46112,11 @@ mod tests {
         let r = a.clip(f64::NAN, 5.0);
         // In NumPy, clip with NaN bound produces NaN for all elements
         for v in r.values() {
-            assert!(v.is_nan(), "clip with NaN min should produce NaN, got {}", v);
+            assert!(
+                v.is_nan(),
+                "clip with NaN min should produce NaN, got {}",
+                v
+            );
         }
     }
 
@@ -45596,7 +46125,11 @@ mod tests {
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         let r = a.clip(0.0, f64::NAN);
         for v in r.values() {
-            assert!(v.is_nan(), "clip with NaN max should produce NaN, got {}", v);
+            assert!(
+                v.is_nan(),
+                "clip with NaN max should produce NaN, got {}",
+                v
+            );
         }
     }
 
@@ -45605,10 +46138,22 @@ mod tests {
         let a = UFuncArray::new(vec![2], vec![f64::NAN, 5.0], DType::F64).unwrap();
         let b = UFuncArray::new(vec![2], vec![3.0, f64::NAN], DType::F64).unwrap();
         let (q, r) = divmod_arrays(&a, &b).unwrap();
-        assert!(q.values()[0].is_nan(), "divmod(NaN, 3) quotient should be NaN");
-        assert!(r.values()[0].is_nan(), "divmod(NaN, 3) remainder should be NaN");
-        assert!(q.values()[1].is_nan(), "divmod(5, NaN) quotient should be NaN");
-        assert!(r.values()[1].is_nan(), "divmod(5, NaN) remainder should be NaN");
+        assert!(
+            q.values()[0].is_nan(),
+            "divmod(NaN, 3) quotient should be NaN"
+        );
+        assert!(
+            r.values()[0].is_nan(),
+            "divmod(NaN, 3) remainder should be NaN"
+        );
+        assert!(
+            q.values()[1].is_nan(),
+            "divmod(5, NaN) quotient should be NaN"
+        );
+        assert!(
+            r.values()[1].is_nan(),
+            "divmod(5, NaN) remainder should be NaN"
+        );
     }
 
     #[test]
@@ -45616,7 +46161,10 @@ mod tests {
         let a = UFuncArray::new(vec![1], vec![f64::INFINITY], DType::F64).unwrap();
         let b = UFuncArray::new(vec![1], vec![2.0], DType::F64).unwrap();
         let (q, _r) = divmod_arrays(&a, &b).unwrap();
-        assert!(q.values()[0].is_infinite(), "divmod(inf, 2) quotient should be inf");
+        assert!(
+            q.values()[0].is_infinite(),
+            "divmod(inf, 2) quotient should be inf"
+        );
     }
 
     #[test]
@@ -45636,7 +46184,8 @@ mod tests {
     #[test]
     fn sort_nan_goes_to_end() {
         // np.sort([3, nan, 1, nan, 2]) → [1, 2, 3, nan, nan]
-        let a = UFuncArray::new(vec![5], vec![3.0, f64::NAN, 1.0, f64::NAN, 2.0], DType::F64).unwrap();
+        let a =
+            UFuncArray::new(vec![5], vec![3.0, f64::NAN, 1.0, f64::NAN, 2.0], DType::F64).unwrap();
         let r = a.sort(None, None).unwrap();
         assert_eq!(r.values()[0], 1.0);
         assert_eq!(r.values()[1], 2.0);

@@ -421,7 +421,9 @@ impl NdLayout {
         if self.shape.contains(&0) {
             return true;
         }
-        let mut expected_stride = isize::try_from(self.item_size).unwrap_or(isize::MAX);
+        let Ok(mut expected_stride) = isize::try_from(self.item_size) else {
+            return false;
+        };
         for (&dim, &stride) in self.shape.iter().zip(&self.strides).rev() {
             if dim == 1 {
                 // Dimensions of size 1 don't constrain the stride
@@ -430,8 +432,13 @@ impl NdLayout {
             if stride != expected_stride {
                 return false;
             }
-            let dim_isize = isize::try_from(dim).unwrap_or(isize::MAX);
-            expected_stride = expected_stride.checked_mul(dim_isize).unwrap_or(isize::MAX);
+            let Ok(dim_isize) = isize::try_from(dim) else {
+                return false;
+            };
+            expected_stride = match expected_stride.checked_mul(dim_isize) {
+                Some(s) => s,
+                None => return false,
+            };
         }
         true
     }
@@ -547,8 +554,12 @@ fn detect_internal_overlap(
             return Ok(true);
         }
         let dim_minus_1 = isize::try_from(dim - 1).map_err(|_| ShapeError::Overflow)?;
-        let span = stride.checked_mul(dim_minus_1).ok_or(ShapeError::Overflow)?;
-        required_stride = required_stride.checked_add(span).ok_or(ShapeError::Overflow)?;
+        let span = stride
+            .checked_mul(dim_minus_1)
+            .ok_or(ShapeError::Overflow)?;
+        required_stride = required_stride
+            .checked_add(span)
+            .ok_or(ShapeError::Overflow)?;
     }
 
     Ok(false)

@@ -2375,7 +2375,7 @@ pub fn execute_input_case(case: &UFuncInputCase) -> Result<(Vec<usize>, Vec<f64>
                 UFuncOperation::BitwiseAnd => BinaryOp::BitwiseAnd,
                 UFuncOperation::BitwiseOr => BinaryOp::BitwiseOr,
                 UFuncOperation::BitwiseXor => BinaryOp::BitwiseXor,
-                _ => unreachable!("handled above"),
+                _ => return Err(format!("Unsupported binary op: {:?}", case.op)),
             };
 
             lhs.elementwise_binary(&rhs, op)

@@ -9313,13 +9313,9 @@ fn generate_rng_samples(
             map_fallible_random_values(generator.uniform(case.param_a, case.param_b, draws))
         }
         "standard_normal" => Ok(generator.standard_normal(draws)),
-        "normal" => {
-            map_fallible_random_values(generator.normal(case.param_a, case.param_b, draws))
-        }
+        "normal" => map_fallible_random_values(generator.normal(case.param_a, case.param_b, draws)),
         "standard_exponential" => Ok(generator.standard_exponential(draws)),
-        "exponential" => {
-            map_fallible_random_values(generator.exponential(case.param_a, draws))
-        }
+        "exponential" => map_fallible_random_values(generator.exponential(case.param_a, draws)),
         "standard_gamma" => {
             map_fallible_random_values(generator.standard_gamma(case.param_a, draws))
         }
@@ -9353,15 +9349,16 @@ fn generate_rng_samples(
         }
         "chisquare" => map_fallible_random_values(generator.chisquare(case.param_a, draws)),
         "standard_cauchy" => Ok(generator.standard_cauchy(draws)),
-        "triangular" => map_fallible_random_values(
-            generator.triangular(case.param_a, case.param_b, case.param_c, draws),
-        ),
+        "triangular" => map_fallible_random_values(generator.triangular(
+            case.param_a,
+            case.param_b,
+            case.param_c,
+            draws,
+        )),
         "laplace" => {
             map_fallible_random_values(generator.laplace(case.param_a, case.param_b, draws))
         }
-        "gumbel" => {
-            map_fallible_random_values(generator.gumbel(case.param_a, case.param_b, draws))
-        }
+        "gumbel" => map_fallible_random_values(generator.gumbel(case.param_a, case.param_b, draws)),
         "weibull" => map_fallible_random_values(generator.weibull(case.param_a, draws)),
         "negative_binomial" => generator
             .negative_binomial(case.param_a, case.param_b, draws)

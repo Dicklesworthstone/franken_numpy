@@ -1004,13 +1004,15 @@ pub fn tensorsolve(
 
     // x_shape is the trailing dims of a after b_shape
     let x_shape = &a_shape[b_ndim..];
-    let n: usize = fnp_ndarray::element_count(b_shape).map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?;
+    let n: usize = fnp_ndarray::element_count(b_shape)
+        .map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?;
     if b_data.len() != n {
         return Err(LinAlgError::ShapeContractViolation(
             "tensorsolve: b_data length must equal product of b_shape",
         ));
     }
-    let m: usize = fnp_ndarray::element_count(x_shape).map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?; // product of x_shape
+    let m: usize = fnp_ndarray::element_count(x_shape)
+        .map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?; // product of x_shape
 
     if n != m {
         return Err(LinAlgError::ShapeContractViolation(
@@ -1045,8 +1047,10 @@ pub fn tensorinv(
     }
     let output_shape = &a_shape[..ind];
     let input_shape = &a_shape[ind..];
-    let n: usize = fnp_ndarray::element_count(output_shape).map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?;
-    let m: usize = fnp_ndarray::element_count(input_shape).map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?;
+    let n: usize = fnp_ndarray::element_count(output_shape)
+        .map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?;
+    let m: usize = fnp_ndarray::element_count(input_shape)
+        .map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?;
 
     if n != m {
         return Err(LinAlgError::ShapeContractViolation(
@@ -4009,7 +4013,8 @@ fn batch_count(shape: &[usize]) -> Result<usize, LinAlgError> {
     if shape.len() <= 2 {
         Ok(1)
     } else {
-        fnp_ndarray::element_count(&shape[..shape.len() - 2]).map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))
+        fnp_ndarray::element_count(&shape[..shape.len() - 2])
+            .map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))
     }
 }
 
@@ -4116,7 +4121,8 @@ pub fn batch_solve(
         let b_batch = if b_shape.len() <= 1 {
             1
         } else {
-            fnp_ndarray::element_count(&b_shape[..b_shape.len() - 1]).map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?
+            fnp_ndarray::element_count(&b_shape[..b_shape.len() - 1])
+                .map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?
         };
         (b_batch, 1, n)
     } else {
@@ -4134,7 +4140,8 @@ pub fn batch_solve(
         let b_batch = if b_shape.len() <= 2 {
             1
         } else {
-            fnp_ndarray::element_count(&b_shape[..b_shape.len() - 2]).map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?
+            fnp_ndarray::element_count(&b_shape[..b_shape.len() - 2])
+                .map_err(|_| LinAlgError::ShapeContractViolation("product overflow"))?
         };
         (b_batch, rhs_cols, rhs_width)
     };
@@ -4862,6 +4869,17 @@ pub fn complex_conjugate_transpose(a: &[f64], m: usize, n: usize) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::{
+        LINALG_PACKET_ID,
+        LINALG_PACKET_REASON_CODES,
+        LinAlgError,
+        LinAlgLogRecord,
+        LinAlgRuntimeMode,
+        MAX_BACKEND_REVALIDATION_ATTEMPTS,
+        MAX_BATCH_SHAPE_CHECKS,
+        MAX_TOLERANCE_SEARCH_DEPTH,
+        MatrixNormOrder,
+        QrMode,
+        VectorNormOrder,
         // Batched linalg
         batch_cholesky,
         batch_det,
@@ -4950,17 +4968,6 @@ mod tests {
         validate_square_matrix,
         validate_tolerance_policy,
         vector_norm,
-        LinAlgError,
-        LinAlgLogRecord,
-        LinAlgRuntimeMode,
-        MatrixNormOrder,
-        QrMode,
-        VectorNormOrder,
-        LINALG_PACKET_ID,
-        LINALG_PACKET_REASON_CODES,
-        MAX_BACKEND_REVALIDATION_ATTEMPTS,
-        MAX_BATCH_SHAPE_CHECKS,
-        MAX_TOLERANCE_SEARCH_DEPTH,
     };
 
     fn packet008_artifacts() -> Vec<String> {
@@ -5362,30 +5369,42 @@ mod tests {
 
     #[test]
     fn vector_norm_matches_numpy_non_finite_semantics() {
-        assert!(vector_norm(&[f64::NAN, 1.0], None)
-            .expect("vector nan default")
-            .is_nan());
-        assert!(vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::One))
-            .expect("vector nan l1")
-            .is_nan());
-        assert!(vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::Two))
-            .expect("vector nan l2")
-            .is_nan());
-        assert!(vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::Inf))
-            .expect("vector nan inf")
-            .is_nan());
-        assert!(vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::NegInf))
-            .expect("vector nan neginf")
-            .is_nan());
+        assert!(
+            vector_norm(&[f64::NAN, 1.0], None)
+                .expect("vector nan default")
+                .is_nan()
+        );
+        assert!(
+            vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::One))
+                .expect("vector nan l1")
+                .is_nan()
+        );
+        assert!(
+            vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::Two))
+                .expect("vector nan l2")
+                .is_nan()
+        );
+        assert!(
+            vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::Inf))
+                .expect("vector nan inf")
+                .is_nan()
+        );
+        assert!(
+            vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::NegInf))
+                .expect("vector nan neginf")
+                .is_nan()
+        );
         assert!(approx_equal(
             vector_norm(&[f64::NAN, 1.0], Some(VectorNormOrder::Zero)).expect("vector nan zero"),
             2.0,
             1e-12
         ));
 
-        assert!(vector_norm(&[f64::INFINITY, 1.0], None)
-            .expect("vector inf default")
-            .is_infinite());
+        assert!(
+            vector_norm(&[f64::INFINITY, 1.0], None)
+                .expect("vector inf default")
+                .is_infinite()
+        );
         assert!(
             vector_norm(&[f64::INFINITY, 1.0], Some(VectorNormOrder::One))
                 .expect("vector inf l1")
@@ -5419,18 +5438,26 @@ mod tests {
     fn matrix_norm_matches_numpy_non_finite_semantics() {
         let nan_matrix = [[f64::NAN, 1.0], [2.0, 3.0]];
         assert!(matrix_norm_2x2(nan_matrix, None).expect("nan fro").is_nan());
-        assert!(matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::One))
-            .expect("nan one")
-            .is_nan());
-        assert!(matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::NegOne))
-            .expect("nan neg one")
-            .is_nan());
-        assert!(matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::Inf))
-            .expect("nan inf")
-            .is_nan());
-        assert!(matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::NegInf))
-            .expect("nan neg inf")
-            .is_nan());
+        assert!(
+            matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::One))
+                .expect("nan one")
+                .is_nan()
+        );
+        assert!(
+            matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::NegOne))
+                .expect("nan neg one")
+                .is_nan()
+        );
+        assert!(
+            matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::Inf))
+                .expect("nan inf")
+                .is_nan()
+        );
+        assert!(
+            matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::NegInf))
+                .expect("nan neg inf")
+                .is_nan()
+        );
         let err = matrix_norm_2x2(nan_matrix, Some(MatrixNormOrder::Two)).expect_err("nan two");
         assert_eq!(err.reason_code(), "linalg_svd_nonconvergence");
         let err =
@@ -5438,88 +5465,122 @@ mod tests {
         assert_eq!(err.reason_code(), "linalg_svd_nonconvergence");
 
         let inf_matrix = [[f64::INFINITY, 1.0], [2.0, 3.0]];
-        assert!(matrix_norm_2x2(inf_matrix, None)
-            .expect("inf fro")
-            .is_infinite());
-        assert!(matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::One))
-            .expect("inf one")
-            .is_infinite());
+        assert!(
+            matrix_norm_2x2(inf_matrix, None)
+                .expect("inf fro")
+                .is_infinite()
+        );
+        assert!(
+            matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::One))
+                .expect("inf one")
+                .is_infinite()
+        );
         assert!(approx_equal(
             matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::NegOne)).expect("inf neg one"),
             4.0,
             1e-12
         ));
-        assert!(matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::Inf))
-            .expect("inf inf")
-            .is_infinite());
+        assert!(
+            matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::Inf))
+                .expect("inf inf")
+                .is_infinite()
+        );
         assert!(approx_equal(
             matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::NegInf)).expect("inf neg inf"),
             5.0,
             1e-12
         ));
-        assert!(matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::Two))
-            .expect("inf two")
-            .is_nan());
-        assert!(matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::NegTwo))
-            .expect("inf neg two")
-            .is_nan());
-        assert!(matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::Nuclear))
-            .expect("inf nuclear")
-            .is_nan());
+        assert!(
+            matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::Two))
+                .expect("inf two")
+                .is_nan()
+        );
+        assert!(
+            matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::NegTwo))
+                .expect("inf neg two")
+                .is_nan()
+        );
+        assert!(
+            matrix_norm_2x2(inf_matrix, Some(MatrixNormOrder::Nuclear))
+                .expect("inf nuclear")
+                .is_nan()
+        );
     }
 
     #[test]
     fn matrix_norm_nxn_matches_numpy_non_finite_semantics() {
         let nan_matrix = [f64::NAN, 1.0, 2.0, 3.0];
-        assert!(matrix_norm_nxn(&nan_matrix, 2, 2, "fro")
-            .expect("nan fro")
-            .is_nan());
-        assert!(matrix_norm_nxn(&nan_matrix, 2, 2, "1")
-            .expect("nan one")
-            .is_nan());
-        assert!(matrix_norm_nxn(&nan_matrix, 2, 2, "-1")
-            .expect("nan neg one")
-            .is_nan());
-        assert!(matrix_norm_nxn(&nan_matrix, 2, 2, "inf")
-            .expect("nan inf")
-            .is_nan());
-        assert!(matrix_norm_nxn(&nan_matrix, 2, 2, "-inf")
-            .expect("nan neg inf")
-            .is_nan());
+        assert!(
+            matrix_norm_nxn(&nan_matrix, 2, 2, "fro")
+                .expect("nan fro")
+                .is_nan()
+        );
+        assert!(
+            matrix_norm_nxn(&nan_matrix, 2, 2, "1")
+                .expect("nan one")
+                .is_nan()
+        );
+        assert!(
+            matrix_norm_nxn(&nan_matrix, 2, 2, "-1")
+                .expect("nan neg one")
+                .is_nan()
+        );
+        assert!(
+            matrix_norm_nxn(&nan_matrix, 2, 2, "inf")
+                .expect("nan inf")
+                .is_nan()
+        );
+        assert!(
+            matrix_norm_nxn(&nan_matrix, 2, 2, "-inf")
+                .expect("nan neg inf")
+                .is_nan()
+        );
         let err = matrix_norm_nxn(&nan_matrix, 2, 2, "2").expect_err("nan two");
         assert_eq!(err.reason_code(), "linalg_svd_nonconvergence");
         let err = matrix_norm_nxn(&nan_matrix, 2, 2, "nuc").expect_err("nan nuclear");
         assert_eq!(err.reason_code(), "linalg_svd_nonconvergence");
 
         let inf_matrix = [f64::INFINITY, 1.0, 2.0, 3.0];
-        assert!(matrix_norm_nxn(&inf_matrix, 2, 2, "fro")
-            .expect("inf fro")
-            .is_infinite());
-        assert!(matrix_norm_nxn(&inf_matrix, 2, 2, "1")
-            .expect("inf one")
-            .is_infinite());
+        assert!(
+            matrix_norm_nxn(&inf_matrix, 2, 2, "fro")
+                .expect("inf fro")
+                .is_infinite()
+        );
+        assert!(
+            matrix_norm_nxn(&inf_matrix, 2, 2, "1")
+                .expect("inf one")
+                .is_infinite()
+        );
         assert!(approx_equal(
             matrix_norm_nxn(&inf_matrix, 2, 2, "-1").expect("inf neg one"),
             4.0,
             1e-12
         ));
-        assert!(matrix_norm_nxn(&inf_matrix, 2, 2, "inf")
-            .expect("inf inf")
-            .is_infinite());
+        assert!(
+            matrix_norm_nxn(&inf_matrix, 2, 2, "inf")
+                .expect("inf inf")
+                .is_infinite()
+        );
         assert!(approx_equal(
             matrix_norm_nxn(&inf_matrix, 2, 2, "-inf").expect("inf neg inf"),
             5.0,
             1e-12
         ));
-        assert!(matrix_norm_nxn(&inf_matrix, 2, 2, "2")
-            .expect("inf two")
-            .is_nan());
-        assert!(matrix_norm_nxn(&inf_matrix, 2, 2, "-2")
-            .expect("inf neg two")
-            .is_nan());
-        assert!(matrix_norm_nxn(&inf_matrix, 2, 2, "nuc")
-            .expect("inf nuclear")
-            .is_nan());
+        assert!(
+            matrix_norm_nxn(&inf_matrix, 2, 2, "2")
+                .expect("inf two")
+                .is_nan()
+        );
+        assert!(
+            matrix_norm_nxn(&inf_matrix, 2, 2, "-2")
+                .expect("inf neg two")
+                .is_nan()
+        );
+        assert!(
+            matrix_norm_nxn(&inf_matrix, 2, 2, "nuc")
+                .expect("inf nuclear")
+                .is_nan()
+        );
     }
 
     #[test]
@@ -6392,7 +6453,7 @@ mod tests {
         let a = [c, -s, s, c];
         let eigs = eig_nxn(&a, 2).expect("eig rotation");
         assert_eq!(eigs.len(), 4); // 2 eigenvalues × (re, im)
-                                   // Both real parts should be cos(θ)
+        // Both real parts should be cos(θ)
         assert!((eigs[0] - c).abs() < 1e-10, "re0={}, expected {c}", eigs[0]);
         assert!((eigs[2] - c).abs() < 1e-10, "re1={}, expected {c}", eigs[2]);
         // Imaginary parts should be ±sin(θ)
@@ -6849,7 +6910,7 @@ mod tests {
         for col in 0..2 {
             let lam_re = eigs[col * 2];
             let v_re = [vecs[col * 4], vecs[col * 4 + 2]]; // row 0, row 1 real parts
-                                                           // A*v
+            // A*v
             let av0 = a[0] * v_re[0] + a[1] * v_re[1];
             let av1 = a[2] * v_re[0] + a[3] * v_re[1];
             assert!(
@@ -7249,15 +7310,21 @@ mod tests {
     #[test]
     fn cond_p_spectral_infinite_orders_match_numpy() {
         let a = [f64::INFINITY, 1.0, 2.0, 3.0];
-        assert!(cond_p_nxn(&a, 2, None)
-            .expect("default cond on inf")
-            .is_infinite());
-        assert!(cond_p_nxn(&a, 2, Some("2"))
-            .expect("2-norm cond on inf")
-            .is_infinite());
-        assert!(cond_p_nxn(&a, 2, Some("-2"))
-            .expect("-2 cond on inf")
-            .is_infinite());
+        assert!(
+            cond_p_nxn(&a, 2, None)
+                .expect("default cond on inf")
+                .is_infinite()
+        );
+        assert!(
+            cond_p_nxn(&a, 2, Some("2"))
+                .expect("2-norm cond on inf")
+                .is_infinite()
+        );
+        assert!(
+            cond_p_nxn(&a, 2, Some("-2"))
+                .expect("-2 cond on inf")
+                .is_infinite()
+        );
     }
 
     // ── Kronecker product tests ──
@@ -8301,7 +8368,7 @@ mod tests {
         let shape = [2, 3, 3];
         let eigvals = batch_eigvalsh(&data, &shape).expect("batch_eigvalsh");
         assert_eq!(eigvals.len(), 6); // 2 × 3
-                                      // First matrix: sorted ascending [2, 3, 5] (NumPy convention)
+        // First matrix: sorted ascending [2, 3, 5] (NumPy convention)
         assert!((eigvals[0] - 2.0).abs() < 1e-10);
         assert!((eigvals[1] - 3.0).abs() < 1e-10);
         assert!((eigvals[2] - 5.0).abs() < 1e-10);
@@ -8322,7 +8389,7 @@ mod tests {
         let shape = [2, 3, 2];
         let sigmas = batch_svd(&data, &shape).expect("batch_svd");
         assert_eq!(sigmas.len(), 4); // 2 × min(3,2)
-                                     // First: [1, 1] (sorted descending)
+        // First: [1, 1] (sorted descending)
         assert!((sigmas[0] - 1.0).abs() < 1e-10);
         assert!((sigmas[1] - 1.0).abs() < 1e-10);
         // Second: [4, 3]
@@ -8378,7 +8445,7 @@ mod tests {
         let shape = [2, 2, 2];
         let chol = batch_cholesky(&data, &shape).expect("batch_cholesky");
         assert_eq!(chol.len(), 8); // 2 × 2 × 2
-                                   // Verify L*L^T ≈ A for each
+        // Verify L*L^T ≈ A for each
         for b in 0..2 {
             let l = &chol[b * 4..(b + 1) * 4];
             let a_sub = &data[b * 4..(b + 1) * 4];

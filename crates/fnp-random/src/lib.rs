@@ -3241,7 +3241,12 @@ impl Generator {
     }
 
     /// Log-normal distribution.
-    pub fn lognormal(&mut self, mean: f64, sigma: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+    pub fn lognormal(
+        &mut self,
+        mean: f64,
+        sigma: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, RandomError> {
         if sigma < 0.0 || sigma.is_nan() {
             return Err(RandomError::InvalidParameter);
         }
@@ -3488,7 +3493,8 @@ impl Generator {
         if shape.is_empty() || axis >= shape.len() {
             return Err(RandomError::InvalidUpperBound);
         }
-        let total: usize = fnp_ndarray::element_count(shape).map_err(|_| RandomError::InvalidParameter)?;
+        let total: usize =
+            fnp_ndarray::element_count(shape).map_err(|_| RandomError::InvalidParameter)?;
         if x.len() != total {
             return Err(RandomError::InvalidUpperBound);
         }
@@ -3645,8 +3651,7 @@ impl Generator {
         if kappa < 0.0 || kappa.is_nan() {
             return Err(RandomError::InvalidParameter);
         }
-        Ok(
-        (0..size)
+        Ok((0..size)
             .map(|_| {
                 if kappa < 1e-6 {
                     return mu + std::f64::consts::PI * (2.0 * self.next_f64() - 1.0);
