@@ -2856,8 +2856,9 @@ fn compare_arrays(
 mod tests {
     use super::{
         UFuncInputCase, UFuncOperation, UFuncOracleCapture, UFuncOracleCase, canonical_dtype_name,
-        capture_numpy_oracle_with_python, compare_against_oracle, compare_arrays,
-        execute_input_case, load_input_cases, load_oracle_capture, write_differential_report,
+        capture_numpy_oracle_with_python, classify_reason_code, compare_against_oracle,
+        compare_arrays, execute_input_case, load_input_cases, load_oracle_capture,
+        resolve_expected_reason_code, write_differential_report,
     };
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -4106,6 +4107,118 @@ mod tests {
                 pass,
                 "{case_id} mismatch max_abs_error={max_abs_error} reason={reason:?}"
             );
+        }
+    }
+
+    #[test]
+    fn differential_broadcast_corner_cases_match_oracle() {
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let inputs =
+            load_input_cases(&fixture_root.join("ufunc_input_cases.json")).expect("load inputs");
+        let oracle =
+            load_oracle_capture(&fixture_root.join("oracle_outputs/ufunc_oracle_output.json"))
+                .expect("load oracle");
+        let case_ids = [
+            "add_scalar_lhs_0d_plus_2x3",
+            "mul_vector3_by_2x1",
+            "add_zero_broadcast_1x3x1_plus_2x1x4",
+            "sub_zero_extent_0x3_minus_3",
+            "add_len1_to_len3",
+            "mul_1x1x1_by_5",
+            "add_scalar_0d_plus_scalar_0d",
+            "power_broadcast_2x2_by_len1",
+            "div_outer_broadcast_3x1_by_1x4",
+            "add_shape_mismatch_2x1x3_vs_4x2",
+            "add_value_broadcast_1x3x1_plus_2x1x4",
+        ];
+
+        for case_id in case_ids {
+            let input = inputs.iter().find(|case| case.id == case_id);
+            assert!(input.is_some(), "missing input fixture {case_id}");
+            let Some(input) = input else {
+                continue;
+            };
+
+            let oracle_case = oracle.cases.iter().find(|case| case.id == case_id);
+            assert!(oracle_case.is_some(), "missing oracle fixture {case_id}");
+            let Some(oracle_case) = oracle_case else {
+                continue;
+            };
+
+            assert!(
+                matches!(oracle_case.status.as_str(), "ok" | "error"),
+                "{case_id} has unsupported oracle status {}",
+                oracle_case.status
+            );
+
+            let outcome = execute_input_case(input);
+            match oracle_case.status.as_str() {
+                "ok" => {
+                    assert!(outcome.is_ok(), "execute_input_case failed for {case_id}");
+                    let Ok((actual_shape, actual_values, actual_dtype)) = outcome else {
+                        continue;
+                    };
+                    let expected_dtype = canonical_dtype_name(&oracle_case.dtype);
+                    let actual_dtype = canonical_dtype_name(&actual_dtype);
+                    let (pass, max_abs_error, reason) = compare_arrays(
+                        &oracle_case.shape,
+                        &oracle_case.values,
+                        &actual_shape,
+                        &actual_values,
+                        1e-12,
+                        1e-12,
+                    );
+
+                    eprintln!(
+                        "{case_id}: pass={pass} expected_shape={:?} expected_values={:?} actual_shape={:?} actual_values={:?}",
+                        oracle_case.shape, oracle_case.values, actual_shape, actual_values
+                    );
+
+                    assert_eq!(
+                        expected_dtype, actual_dtype,
+                        "{case_id} dtype mismatch expected={} actual={}",
+                        oracle_case.dtype, actual_dtype
+                    );
+                    assert!(
+                        pass,
+                        "{case_id} mismatch max_abs_error={max_abs_error} reason={reason:?}"
+                    );
+                }
+                "error" => {
+                    assert!(outcome.is_err(), "expected broadcast error for {case_id}");
+                    let Err(err) = outcome else {
+                        continue;
+                    };
+                    let oracle_error = oracle_case.error.clone();
+                    assert!(oracle_error.is_some(), "missing oracle error for {case_id}");
+                    let Some(oracle_error) = oracle_error else {
+                        continue;
+                    };
+                    let expected_error_contains =
+                        input.expected_error_contains.trim().to_lowercase();
+                    if !expected_error_contains.is_empty() {
+                        assert!(
+                            err.to_lowercase().contains(&expected_error_contains),
+                            "{case_id} expected error containing '{expected_error_contains}', got '{err}'"
+                        );
+                    }
+                    let expected_reason_code = resolve_expected_reason_code(
+                        input,
+                        &classify_reason_code(input.op, &oracle_error),
+                    );
+                    let actual_reason_code = classify_reason_code(input.op, &err);
+
+                    eprintln!(
+                        "{case_id}: expected_error={oracle_error:?} actual_error={err:?} expected_reason_code={expected_reason_code} actual_reason_code={actual_reason_code}"
+                    );
+
+                    assert_eq!(
+                        expected_reason_code, actual_reason_code,
+                        "{case_id} reason-code mismatch oracle_error={oracle_error} actual_error={err}"
+                    );
+                }
+                _ => {}
+            }
         }
     }
 

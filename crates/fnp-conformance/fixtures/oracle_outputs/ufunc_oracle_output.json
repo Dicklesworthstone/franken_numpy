@@ -3234,6 +3234,217 @@
         15.5
       ],
       "dtype": "float64"
+    },
+    {
+      "id": "add_scalar_lhs_0d_plus_2x3",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        5.0,
+        6.0,
+        7.0,
+        8.0,
+        9.0,
+        10.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "mul_vector3_by_2x1",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        10.0,
+        20.0,
+        30.0,
+        20.0,
+        40.0,
+        60.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "add_zero_broadcast_1x3x1_plus_2x1x4",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3,
+        4
+      ],
+      "values": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "sub_zero_extent_0x3_minus_3",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        0,
+        3
+      ],
+      "values": [],
+      "dtype": "float64"
+    },
+    {
+      "id": "add_len1_to_len3",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        3
+      ],
+      "values": [
+        3.0,
+        4.0,
+        5.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "mul_1x1x1_by_5",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1,
+        1,
+        5
+      ],
+      "values": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "add_scalar_0d_plus_scalar_0d",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        3.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "power_broadcast_2x2_by_len1",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        2
+      ],
+      "values": [
+        0.0,
+        1.0,
+        4.0,
+        9.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "div_outer_broadcast_3x1_by_1x4",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        3,
+        4
+      ],
+      "values": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "add_shape_mismatch_2x1x3_vs_4x2",
+      "status": "error",
+      "error": "operands could not be broadcast together with shapes (2,1,3) (4,2) ",
+      "shape": [],
+      "values": [],
+      "dtype": "unknown"
+    },
+    {
+      "id": "add_value_broadcast_1x3x1_plus_2x1x4",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3,
+        4
+      ],
+      "values": [
+        11.0,
+        21.0,
+        31.0,
+        41.0,
+        12.0,
+        22.0,
+        32.0,
+        42.0,
+        13.0,
+        23.0,
+        33.0,
+        43.0,
+        101.0,
+        201.0,
+        301.0,
+        401.0,
+        102.0,
+        202.0,
+        302.0,
+        402.0,
+        103.0,
+        203.0,
+        303.0,
+        403.0
+      ],
+      "dtype": "float64"
     }
   ]
 }

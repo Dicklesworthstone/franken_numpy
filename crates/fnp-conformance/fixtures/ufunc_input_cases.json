@@ -6421,5 +6421,390 @@
     ],
     "reason_code": "ufunc_reduction_contract_violation",
     "expected_reason_code": "ufunc_reduction_contract_violation"
+  },
+  {
+    "id": "add_scalar_lhs_0d_plus_2x3",
+    "op": "add",
+    "lhs_shape": [],
+    "lhs_values": [
+      5.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [
+      2,
+      3
+    ],
+    "rhs_values": [
+      0.0,
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6401,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "mul_vector3_by_2x1",
+    "op": "mul",
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [
+      2,
+      1
+    ],
+    "rhs_values": [
+      10.0,
+      20.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6402,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "add_zero_broadcast_1x3x1_plus_2x1x4",
+    "op": "add",
+    "lhs_shape": [
+      1,
+      3,
+      1
+    ],
+    "lhs_values": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [
+      2,
+      1,
+      4
+    ],
+    "rhs_values": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6403,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "sub_zero_extent_0x3_minus_3",
+    "op": "sub",
+    "lhs_shape": [
+      0,
+      3
+    ],
+    "lhs_values": [],
+    "lhs_dtype": "f64",
+    "rhs_shape": [
+      3
+    ],
+    "rhs_values": [
+      10.0,
+      20.0,
+      30.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6404,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "add_len1_to_len3",
+    "op": "add",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [
+      3
+    ],
+    "rhs_values": [
+      2.0,
+      3.0,
+      4.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6405,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "mul_1x1x1_by_5",
+    "op": "mul",
+    "lhs_shape": [
+      1,
+      1,
+      1
+    ],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [
+      5
+    ],
+    "rhs_values": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6406,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "add_scalar_0d_plus_scalar_0d",
+    "op": "add",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      2.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6407,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "power_broadcast_2x2_by_len1",
+    "op": "power",
+    "lhs_shape": [
+      2,
+      2
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      2.0,
+      3.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [
+      1
+    ],
+    "rhs_values": [
+      2.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6408,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "div_outer_broadcast_3x1_by_1x4",
+    "op": "div",
+    "lhs_shape": [
+      3,
+      1
+    ],
+    "lhs_values": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [
+      1,
+      4
+    ],
+    "rhs_values": [
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6409,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "add_shape_mismatch_2x1x3_vs_4x2",
+    "op": "add",
+    "lhs_shape": [
+      2,
+      1,
+      3
+    ],
+    "lhs_values": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [
+      4,
+      2
+    ],
+    "rhs_values": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6410,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_error_contains": "broadcast"
+  },
+  {
+    "id": "add_value_broadcast_1x3x1_plus_2x1x4",
+    "op": "add",
+    "lhs_shape": [
+      1,
+      3,
+      1
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [
+      2,
+      1,
+      4
+    ],
+    "rhs_values": [
+      10.0,
+      20.0,
+      30.0,
+      40.0,
+      100.0,
+      200.0,
+      300.0,
+      400.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6411,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
   }
 ]
