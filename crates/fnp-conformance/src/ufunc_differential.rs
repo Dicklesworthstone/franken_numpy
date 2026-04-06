@@ -2,7 +2,7 @@
 
 use fnp_dtype::DType;
 use fnp_ufunc::{BinaryOp, UFuncArray, UnaryOp, parse_fixed_signature_string};
-use serde::{Deserialize, Serialize, Serializer, de::Error as _, ser::SerializeSeq};
+use serde::{Deserialize, Serialize, Serializer, ser::SerializeSeq};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -256,6 +256,31 @@ def py_reduced_shape(shape, axis, keepdims):
         return [1 if i == axis else dim for i, dim in enumerate(shape)]
     return [dim for i, dim in enumerate(shape) if i != axis]
 
+def normalize_axis_spec(axis, axes=None):
+    if axes is not None:
+        if axis is not None:
+            raise ValueError("cannot specify both 'axis' and 'axes'")
+        axis = axes
+    if axis is None:
+        return None
+    if isinstance(axis, (list, tuple)):
+        return tuple(int(item) for item in axis)
+    return int(axis)
+
+def normalize_multi_axes(shape, axes):
+    ndim = len(shape)
+    norm_axes = []
+    for raw_axis in axes:
+        axis = int(raw_axis)
+        if axis < 0:
+            axis += ndim
+        if axis < 0 or axis >= ndim:
+            raise ValueError(f'axis {raw_axis} out of bounds for shape {shape}')
+        if axis not in norm_axes:
+            norm_axes.append(axis)
+    norm_axes.sort(reverse=True)
+    return tuple(norm_axes)
+
 def py_nan_aware_min(lhs, rhs):
     if math.isnan(lhs) or math.isnan(rhs):
         return float('nan')
@@ -306,6 +331,20 @@ def py_sum(vals, shape, axis, keepdims):
         out_flat = py_ravel(out_multi, out_strides) if out_multi else 0
         out[out_flat] += vals[flat]
     return out_shape, out
+
+def py_reduce_axes(vals, shape, axes, keepdims, op):
+    norm_axes = normalize_multi_axes(shape, axes)
+    if not norm_axes:
+        return list(shape), list(vals)
+
+    out_shape = list(shape)
+    out_vals = list(vals)
+    for axis in norm_axes:
+        if op == 'sum':
+            out_shape, out_vals = py_sum(out_vals, out_shape, axis, keepdims)
+        else:
+            out_shape, out_vals = py_reduce(out_vals, out_shape, axis, keepdims, op)
+    return out_shape, out_vals
 
 def py_reduce(vals, shape, axis, keepdims, op):
     if axis is None:
@@ -616,6 +655,43 @@ def py_var_std(vals, shape, axis, keepdims, ddof, emit_std):
 
     return out_shape, out
 
+def py_var_std_axes(vals, shape, axes, keepdims, ddof, emit_std):
+    ddof = int(ddof)
+    norm_axes = normalize_multi_axes(shape, axes)
+    if not norm_axes:
+        out = [0.0] * len(vals)
+        return list(shape), out
+
+    mean_shape, mean_vals = py_reduce_axes(vals, shape, norm_axes, True, 'mean')
+    in_strides = py_strides(shape)
+    mean_strides = py_strides(mean_shape)
+    reduced_axes = set(norm_axes)
+
+    sq_vals = []
+    for flat, value in enumerate(vals):
+        multi = py_unravel(flat, shape, in_strides)
+        mean_multi = [0 if i in reduced_axes else idx for i, idx in enumerate(multi)]
+        mean_flat = py_ravel(mean_multi, mean_strides) if mean_multi else 0
+        diff = value - mean_vals[mean_flat]
+        sq_vals.append(diff * diff)
+
+    out_shape, out_vals = py_reduce_axes(sq_vals, shape, norm_axes, keepdims, 'sum')
+
+    count = 1
+    for axis in norm_axes:
+        count *= shape[axis]
+    if count - ddof <= 0:
+        raise ValueError(f'ddof {ddof} >= reduction size {count}')
+
+    denom = count - ddof
+    out = []
+    for value in out_vals:
+        var = value / denom
+        if var < 0.0 and abs(var) < 1e-15:
+            var = 0.0
+        out.append(math.sqrt(var) if emit_std else var)
+    return out_shape, out
+
 def py_arg_reduce(vals, shape, axis, find_min):
     if axis is None:
         if not vals:
@@ -845,32 +921,32 @@ for case in cases:
                 rhs = np.array(case['rhs_values'], dtype=rhs_dtype).reshape(tuple(case['rhs_shape']))
                 out = np.matmul(lhs, rhs)
             elif op == 'sum':
-                axis = case.get('axis')
+                axis = normalize_axis_spec(case.get('axis'), case.get('axes'))
                 keepdims = bool(case.get('keepdims', False))
                 out = lhs.sum(axis=axis, keepdims=keepdims)
             elif op == 'prod':
-                axis = case.get('axis')
+                axis = normalize_axis_spec(case.get('axis'), case.get('axes'))
                 keepdims = bool(case.get('keepdims', False))
                 out = lhs.prod(axis=axis, keepdims=keepdims)
             elif op == 'min':
-                axis = case.get('axis')
+                axis = normalize_axis_spec(case.get('axis'), case.get('axes'))
                 keepdims = bool(case.get('keepdims', False))
                 out = lhs.min(axis=axis, keepdims=keepdims)
             elif op == 'max':
-                axis = case.get('axis')
+                axis = normalize_axis_spec(case.get('axis'), case.get('axes'))
                 keepdims = bool(case.get('keepdims', False))
                 out = lhs.max(axis=axis, keepdims=keepdims)
             elif op == 'mean':
-                axis = case.get('axis')
+                axis = normalize_axis_spec(case.get('axis'), case.get('axes'))
                 keepdims = bool(case.get('keepdims', False))
                 out = lhs.mean(axis=axis, keepdims=keepdims)
             elif op == 'var':
-                axis = case.get('axis')
+                axis = normalize_axis_spec(case.get('axis'), case.get('axes'))
                 keepdims = bool(case.get('keepdims', False))
                 ddof = int(case.get('ddof', 0) or 0)
                 out = lhs.var(axis=axis, keepdims=keepdims, ddof=ddof)
             elif op == 'std':
-                axis = case.get('axis')
+                axis = normalize_axis_spec(case.get('axis'), case.get('axes'))
                 keepdims = bool(case.get('keepdims', False))
                 ddof = int(case.get('ddof', 0) or 0)
                 out = lhs.std(axis=axis, keepdims=keepdims, ddof=ddof)
@@ -1016,36 +1092,54 @@ for case in cases:
                 shape, values = py_binary(lhs_vals, lhs_shape, rhs_vals, rhs_shape, op)
                 dtype = 'bool' if op in ('logical_and', 'logical_or', 'logical_xor', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal') else fallback_promote(lhs_dtype, rhs_dtype)
             elif op == 'sum':
-                axis = case.get('axis')
+                axis = normalize_axis_spec(case.get('axis'), case.get('axes'))
                 keepdims = bool(case.get('keepdims', False))
-                shape, values = py_sum(lhs_vals, lhs_shape, axis, keepdims)
+                if isinstance(axis, tuple):
+                    shape, values = py_reduce_axes(lhs_vals, lhs_shape, axis, keepdims, 'sum')
+                else:
+                    shape, values = py_sum(lhs_vals, lhs_shape, axis, keepdims)
                 dtype = fallback_sum_prod_dtype(lhs_dtype)
             elif op == 'prod':
-                axis = case.get('axis')
+                axis = normalize_axis_spec(case.get('axis'), case.get('axes'))
                 keepdims = bool(case.get('keepdims', False))
-                shape, values = py_reduce(lhs_vals, lhs_shape, axis, keepdims, op)
+                if isinstance(axis, tuple):
+                    shape, values = py_reduce_axes(lhs_vals, lhs_shape, axis, keepdims, op)
+                else:
+                    shape, values = py_reduce(lhs_vals, lhs_shape, axis, keepdims, op)
                 dtype = fallback_sum_prod_dtype(lhs_dtype)
             elif op in ('min', 'max'):
-                axis = case.get('axis')
+                axis = normalize_axis_spec(case.get('axis'), case.get('axes'))
                 keepdims = bool(case.get('keepdims', False))
-                shape, values = py_reduce(lhs_vals, lhs_shape, axis, keepdims, op)
+                if isinstance(axis, tuple):
+                    shape, values = py_reduce_axes(lhs_vals, lhs_shape, axis, keepdims, op)
+                else:
+                    shape, values = py_reduce(lhs_vals, lhs_shape, axis, keepdims, op)
                 dtype = lhs_dtype
             elif op == 'mean':
-                axis = case.get('axis')
+                axis = normalize_axis_spec(case.get('axis'), case.get('axes'))
                 keepdims = bool(case.get('keepdims', False))
-                shape, values = py_reduce(lhs_vals, lhs_shape, axis, keepdims, op)
+                if isinstance(axis, tuple):
+                    shape, values = py_reduce_axes(lhs_vals, lhs_shape, axis, keepdims, op)
+                else:
+                    shape, values = py_reduce(lhs_vals, lhs_shape, axis, keepdims, op)
                 dtype = fallback_mean_dtype(lhs_dtype)
             elif op == 'var':
-                axis = case.get('axis')
+                axis = normalize_axis_spec(case.get('axis'), case.get('axes'))
                 keepdims = bool(case.get('keepdims', False))
                 ddof = int(case.get('ddof', 0) or 0)
-                shape, values = py_var_std(lhs_vals, lhs_shape, axis, keepdims, ddof, False)
+                if isinstance(axis, tuple):
+                    shape, values = py_var_std_axes(lhs_vals, lhs_shape, axis, keepdims, ddof, False)
+                else:
+                    shape, values = py_var_std(lhs_vals, lhs_shape, axis, keepdims, ddof, False)
                 dtype = 'f64'
             elif op == 'std':
-                axis = case.get('axis')
+                axis = normalize_axis_spec(case.get('axis'), case.get('axes'))
                 keepdims = bool(case.get('keepdims', False))
                 ddof = int(case.get('ddof', 0) or 0)
-                shape, values = py_var_std(lhs_vals, lhs_shape, axis, keepdims, ddof, True)
+                if isinstance(axis, tuple):
+                    shape, values = py_var_std_axes(lhs_vals, lhs_shape, axis, keepdims, ddof, True)
+                else:
+                    shape, values = py_var_std(lhs_vals, lhs_shape, axis, keepdims, ddof, True)
                 dtype = 'f64'
             elif op == 'argmin':
                 axis = case.get('axis')
@@ -1412,18 +1506,34 @@ pub struct UFuncInputCase {
     pub id: String,
     pub op: UFuncOperation,
     pub lhs_shape: Vec<usize>,
+    #[serde(
+        serialize_with = "serialize_oracle_values",
+        deserialize_with = "deserialize_oracle_values"
+    )]
     pub lhs_values: Vec<f64>,
     #[serde(default = "default_f64_dtype")]
     pub lhs_dtype: String,
     pub rhs_shape: Option<Vec<usize>>,
+    #[serde(
+        default,
+        serialize_with = "serialize_optional_oracle_values",
+        deserialize_with = "deserialize_optional_oracle_values"
+    )]
     pub rhs_values: Option<Vec<f64>>,
     pub rhs_dtype: Option<String>,
     pub axis: Option<isize>,
+    #[serde(default)]
+    pub axes: Option<Vec<isize>>,
     pub keepdims: Option<bool>,
     pub ddof: Option<usize>,
     pub clip_min: Option<f64>,
     pub clip_max: Option<f64>,
     pub third_shape: Option<Vec<usize>>,
+    #[serde(
+        default,
+        serialize_with = "serialize_optional_oracle_values",
+        deserialize_with = "deserialize_optional_oracle_values"
+    )]
     pub third_values: Option<Vec<f64>>,
     pub third_dtype: Option<String>,
     #[serde(default)]
@@ -1462,6 +1572,17 @@ pub struct UFuncOracleCase {
     pub dtype: String,
 }
 
+fn resolve_multi_axes(case: &UFuncInputCase) -> Result<Option<&[isize]>, String> {
+    match (case.axis, case.axes.as_deref()) {
+        (Some(_), Some(_)) => Err(format!(
+            "case {} cannot specify both axis and axes",
+            case.id
+        )),
+        (_, Some(axes)) => Ok(Some(axes)),
+        _ => Ok(None),
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum OracleJsonFloat {
@@ -1490,24 +1611,58 @@ where
     seq.end()
 }
 
+fn serialize_optional_oracle_values<S>(
+    values: &Option<Vec<f64>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match values {
+        Some(values) => serialize_oracle_values(values, serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn decode_oracle_json_float<E>(value: OracleJsonFloat) -> Result<f64, E>
+where
+    E: serde::de::Error,
+{
+    match value {
+        OracleJsonFloat::Number(value) => Ok(value),
+        OracleJsonFloat::String(value) => match value.as_str() {
+            "NaN" => Ok(f64::NAN),
+            "Infinity" => Ok(f64::INFINITY),
+            "-Infinity" => Ok(f64::NEG_INFINITY),
+            _ => Err(E::custom(format!(
+                "invalid non-finite float sentinel: {value}"
+            ))),
+        },
+    }
+}
+
 fn deserialize_oracle_values<'de, D>(deserializer: D) -> Result<Vec<f64>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let raw = Vec::<OracleJsonFloat>::deserialize(deserializer)?;
     raw.into_iter()
-        .map(|value| match value {
-            OracleJsonFloat::Number(value) => Ok(value),
-            OracleJsonFloat::String(value) => match value.as_str() {
-                "NaN" => Ok(f64::NAN),
-                "Infinity" => Ok(f64::INFINITY),
-                "-Infinity" => Ok(f64::NEG_INFINITY),
-                _ => Err(D::Error::custom(format!(
-                    "invalid non-finite float sentinel: {value}"
-                ))),
-            },
-        })
+        .map(decode_oracle_json_float::<D::Error>)
         .collect()
+}
+
+fn deserialize_optional_oracle_values<'de, D>(deserializer: D) -> Result<Option<Vec<f64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<Vec<OracleJsonFloat>>::deserialize(deserializer)?;
+    raw.map(|values| {
+        values
+            .into_iter()
+            .map(decode_oracle_json_float::<D::Error>)
+            .collect()
+    })
+    .transpose()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2293,6 +2448,7 @@ pub fn execute_input_case(case: &UFuncInputCase) -> Result<(Vec<usize>, Vec<f64>
     let lhs_dtype = parse_dtype(&case.lhs_dtype)?;
     let lhs = UFuncArray::new(case.lhs_shape.clone(), case.lhs_values.clone(), lhs_dtype)
         .map_err(|err| format!("lhs array error: {err}"))?;
+    let multi_axes = resolve_multi_axes(case)?;
 
     let out = match case.op {
         UFuncOperation::Add
@@ -2383,40 +2539,75 @@ pub fn execute_input_case(case: &UFuncInputCase) -> Result<(Vec<usize>, Vec<f64>
         }
         UFuncOperation::Sum => {
             let keepdims = case.keepdims.unwrap_or(false);
-            lhs.reduce_sum(case.axis, keepdims)
-                .map_err(|err| format!("reduce sum error: {err}"))?
+            if let Some(axes) = multi_axes {
+                lhs.reduce_sum_axes(axes, keepdims)
+                    .map_err(|err| format!("reduce sum error: {err}"))?
+            } else {
+                lhs.reduce_sum(case.axis, keepdims)
+                    .map_err(|err| format!("reduce sum error: {err}"))?
+            }
         }
         UFuncOperation::Prod => {
             let keepdims = case.keepdims.unwrap_or(false);
-            lhs.reduce_prod(case.axis, keepdims)
-                .map_err(|err| format!("reduce prod error: {err}"))?
+            if let Some(axes) = multi_axes {
+                lhs.reduce_prod_axes(axes, keepdims)
+                    .map_err(|err| format!("reduce prod error: {err}"))?
+            } else {
+                lhs.reduce_prod(case.axis, keepdims)
+                    .map_err(|err| format!("reduce prod error: {err}"))?
+            }
         }
         UFuncOperation::Min => {
             let keepdims = case.keepdims.unwrap_or(false);
-            lhs.reduce_min(case.axis, keepdims)
-                .map_err(|err| format!("reduce min error: {err}"))?
+            if let Some(axes) = multi_axes {
+                lhs.reduce_min_axes(axes, keepdims)
+                    .map_err(|err| format!("reduce min error: {err}"))?
+            } else {
+                lhs.reduce_min(case.axis, keepdims)
+                    .map_err(|err| format!("reduce min error: {err}"))?
+            }
         }
         UFuncOperation::Max => {
             let keepdims = case.keepdims.unwrap_or(false);
-            lhs.reduce_max(case.axis, keepdims)
-                .map_err(|err| format!("reduce max error: {err}"))?
+            if let Some(axes) = multi_axes {
+                lhs.reduce_max_axes(axes, keepdims)
+                    .map_err(|err| format!("reduce max error: {err}"))?
+            } else {
+                lhs.reduce_max(case.axis, keepdims)
+                    .map_err(|err| format!("reduce max error: {err}"))?
+            }
         }
         UFuncOperation::Mean => {
             let keepdims = case.keepdims.unwrap_or(false);
-            lhs.reduce_mean(case.axis, keepdims)
-                .map_err(|err| format!("reduce mean error: {err}"))?
+            if let Some(axes) = multi_axes {
+                lhs.reduce_mean_axes(axes, keepdims)
+                    .map_err(|err| format!("reduce mean error: {err}"))?
+            } else {
+                lhs.reduce_mean(case.axis, keepdims)
+                    .map_err(|err| format!("reduce mean error: {err}"))?
+            }
         }
         UFuncOperation::Var => {
             let keepdims = case.keepdims.unwrap_or(false);
             let ddof = case.ddof.unwrap_or(0);
-            lhs.reduce_var(case.axis, keepdims, ddof)
-                .map_err(|err| format!("reduce var error: {err}"))?
+            if let Some(axes) = multi_axes {
+                lhs.reduce_var_axes(axes, keepdims, ddof)
+                    .map_err(|err| format!("reduce var error: {err}"))?
+            } else {
+                lhs.reduce_var(case.axis, keepdims, ddof)
+                    .map_err(|err| format!("reduce var error: {err}"))?
+            }
         }
         UFuncOperation::Std => {
             let keepdims = case.keepdims.unwrap_or(false);
             let ddof = case.ddof.unwrap_or(0);
-            lhs.reduce_std(case.axis, keepdims, ddof)
-                .map_err(|err| format!("reduce std error: {err}"))?
+            if let Some(axes) = multi_axes {
+                lhs.reduce_std_axes(axes, keepdims, ddof)
+                    .map_err(|err| format!("reduce std error: {err}"))?
+            } else {
+                lhs.reduce_std(case.axis, keepdims, ddof)
+                    .map_err(|err| format!("reduce std error: {err}"))?
+            }
         }
         UFuncOperation::Argmin => lhs
             .reduce_argmin(case.axis)
@@ -2664,9 +2855,9 @@ fn compare_arrays(
 #[cfg(test)]
 mod tests {
     use super::{
-        UFuncInputCase, UFuncOperation, UFuncOracleCapture, UFuncOracleCase,
-        capture_numpy_oracle_with_python, compare_against_oracle, execute_input_case,
-        load_oracle_capture, write_differential_report,
+        UFuncInputCase, UFuncOperation, UFuncOracleCapture, UFuncOracleCase, canonical_dtype_name,
+        capture_numpy_oracle_with_python, compare_against_oracle, compare_arrays,
+        execute_input_case, load_input_cases, load_oracle_capture, write_differential_report,
     };
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -2751,6 +2942,7 @@ mod tests {
             rhs_values: None,
             rhs_dtype: None,
             axis: Some(-1),
+            axes: None,
             keepdims: Some(false),
             ddof: None,
             clip_min: None,
@@ -2788,6 +2980,7 @@ mod tests {
             rhs_values: None,
             rhs_dtype: None,
             axis: Some(-3),
+            axes: None,
             keepdims: Some(false),
             ddof: None,
             clip_min: None,
@@ -3146,6 +3339,66 @@ mod tests {
         let _ = fs::remove_file(python_wrapper);
     }
 
+    #[test]
+    fn capture_fallback_sum_reduction_supports_axes_field() {
+        let input_path = temp_file("fallback_multi_axis_sum_input");
+        let output_path = temp_file("fallback_multi_axis_sum_output");
+        let python_wrapper = temp_script("fallback_multi_axis_sum_python");
+
+        fs::write(
+            &input_path,
+            r#"[
+  {
+    "id": "sum_axes_case",
+    "op": "sum",
+    "lhs_shape": [2, 3, 4],
+    "lhs_values": [
+      0.0, 1.0, 2.0, 3.0,
+      4.0, 5.0, 6.0, 7.0,
+      8.0, 9.0, 10.0, 11.0,
+      12.0, 13.0, 14.0, 15.0,
+      16.0, 17.0, 18.0, 19.0,
+      20.0, 21.0, 22.0, 23.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "axes": [0, 2],
+    "keepdims": false
+  }
+]"#,
+        )
+        .expect("write input");
+        fs::write(&python_wrapper, "#!/bin/sh\nexec python3 -S \"$@\"\n").expect("write wrapper");
+        let mut perms = fs::metadata(&python_wrapper)
+            .expect("wrapper metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&python_wrapper, perms).expect("chmod wrapper");
+
+        let legacy_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("legacy_numpy_code");
+        let capture = capture_numpy_oracle_with_python(
+            &input_path,
+            &output_path,
+            &legacy_root,
+            python_wrapper.to_str().expect("utf-8 wrapper path"),
+        )
+        .expect("capture should succeed");
+
+        assert_eq!(capture.oracle_source, "pure_python_fallback");
+        assert_eq!(capture.cases.len(), 1);
+        assert_eq!(capture.cases[0].shape, vec![3]);
+        assert_eq!(capture.cases[0].values, vec![60.0, 92.0, 124.0]);
+
+        let _ = fs::remove_file(input_path);
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(python_wrapper);
+    }
+
     // Helper to make a unary input case
     fn make_unary_case(
         id: &str,
@@ -3163,6 +3416,7 @@ mod tests {
             rhs_values: None,
             rhs_dtype: None,
             axis: None,
+            axes: None,
             keepdims: None,
             ddof: None,
             clip_min: None,
@@ -3201,6 +3455,7 @@ mod tests {
             rhs_values: Some(rhs_values.to_vec()),
             rhs_dtype: Some("f64".to_string()),
             axis: None,
+            axes: None,
             keepdims: None,
             ddof: None,
             clip_min: None,
@@ -3621,6 +3876,7 @@ mod tests {
                 rhs_values: None,
                 rhs_dtype: None,
                 axis: None,
+                axes: None,
                 keepdims: None,
                 ddof: None,
                 clip_min: None,
@@ -3702,6 +3958,7 @@ mod tests {
                 rhs_values: Some(rhs.clone()),
                 rhs_dtype: Some("f64".to_string()),
                 axis: None,
+                axes: None,
                 keepdims: None,
                 ddof: None,
                 clip_min: None,
@@ -3752,6 +4009,7 @@ mod tests {
                         rhs_values: None,
                         rhs_dtype: None,
                         axis,
+                        axes: None,
                         keepdims: Some(keepdims),
                         ddof: None,
                         clip_min: None,
@@ -3782,6 +4040,76 @@ mod tests {
     }
 
     #[test]
+    fn differential_reduction_edge_cases_match_oracle() {
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let inputs =
+            load_input_cases(&fixture_root.join("ufunc_input_cases.json")).expect("load inputs");
+        let oracle =
+            load_oracle_capture(&fixture_root.join("oracle_outputs/ufunc_oracle_output.json"))
+                .expect("load oracle");
+        let case_ids = [
+            "sum_empty_f64_scalar",
+            "prod_empty_f64_scalar",
+            "mean_empty_f64_scalar",
+            "min_singleton_f64_scalar",
+            "max_singleton_f64_scalar",
+            "mean_all_nan_f64_scalar",
+            "var_all_nan_f64_scalar",
+            "std_all_nan_f64_ddof1",
+            "sum_axes_0_2_rank3",
+            "prod_axes_0_2_rank3_ones",
+            "sum_overflow_to_inf",
+            "sum_cancellation_to_zero",
+            "mean_axes_0_2_keepdims_rank3",
+        ];
+
+        for case_id in case_ids {
+            let input = inputs.iter().find(|case| case.id == case_id);
+            assert!(input.is_some(), "missing input fixture {case_id}");
+            let Some(input) = input else {
+                continue;
+            };
+
+            let oracle_case = oracle.cases.iter().find(|case| case.id == case_id);
+            assert!(oracle_case.is_some(), "missing oracle fixture {case_id}");
+            let Some(oracle_case) = oracle_case else {
+                continue;
+            };
+
+            let outcome = execute_input_case(input);
+            assert!(outcome.is_ok(), "execute_input_case failed for {case_id}");
+            let Ok((actual_shape, actual_values, actual_dtype)) = outcome else {
+                continue;
+            };
+            let expected_dtype = canonical_dtype_name(&oracle_case.dtype);
+            let actual_dtype = canonical_dtype_name(&actual_dtype);
+            let (pass, max_abs_error, reason) = compare_arrays(
+                &oracle_case.shape,
+                &oracle_case.values,
+                &actual_shape,
+                &actual_values,
+                1e-12,
+                1e-12,
+            );
+
+            eprintln!(
+                "{case_id}: pass={pass} expected_shape={:?} expected_values={:?} actual_shape={:?} actual_values={:?}",
+                oracle_case.shape, oracle_case.values, actual_shape, actual_values
+            );
+
+            assert_eq!(
+                expected_dtype, actual_dtype,
+                "{case_id} dtype mismatch expected={} actual={}",
+                oracle_case.dtype, actual_dtype
+            );
+            assert!(
+                pass,
+                "{case_id} mismatch max_abs_error={max_abs_error} reason={reason:?}"
+            );
+        }
+    }
+
+    #[test]
     fn differential_broadcast_edge_cases() {
         // Scalar vs array broadcast: [1] + [3]
         let case = UFuncInputCase {
@@ -3794,6 +4122,7 @@ mod tests {
             rhs_values: Some(vec![1.0, 2.0, 3.0]),
             rhs_dtype: Some("f64".to_string()),
             axis: None,
+            axes: None,
             keepdims: None,
             ddof: None,
             clip_min: None,
@@ -3827,6 +4156,7 @@ mod tests {
             rhs_values: Some(vec![10.0, 20.0, 30.0, 40.0]),
             rhs_dtype: Some("f64".to_string()),
             axis: None,
+            axes: None,
             keepdims: None,
             ddof: None,
             clip_min: None,
@@ -3873,6 +4203,7 @@ mod tests {
             rhs_values: None,
             rhs_dtype: None,
             axis: None,
+            axes: None,
             keepdims: Some(false),
             ddof: None,
             clip_min: None,
