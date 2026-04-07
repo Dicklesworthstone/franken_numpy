@@ -3791,6 +3791,306 @@
         4.0
       ],
       "dtype": "float32"
+    },
+    {
+      "id": "left_shift_i32_by_4",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        16.0
+      ],
+      "dtype": "int32"
+    },
+    {
+      "id": "left_shift_i64_by_62",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        4.611686018427388e+18
+      ],
+      "dtype": "int64"
+    },
+    {
+      "id": "left_shift_uint8_by_7",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        128.0
+      ],
+      "dtype": "uint8"
+    },
+    {
+      "id": "left_shift_uint16_by_4",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        4080.0
+      ],
+      "dtype": "uint16"
+    },
+    {
+      "id": "left_shift_int8_by_6",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        64.0
+      ],
+      "dtype": "int8"
+    },
+    {
+      "id": "left_shift_uint32_by_31",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        2147483648.0
+      ],
+      "dtype": "uint32"
+    },
+    {
+      "id": "left_shift_uint8_by_i32",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        48.0
+      ],
+      "dtype": "int32"
+    },
+    {
+      "id": "left_shift_zero_i32",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        0.0
+      ],
+      "dtype": "int32"
+    },
+    {
+      "id": "left_shift_uint64_by_63",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        9.223372036854776e+18
+      ],
+      "dtype": "uint64"
+    },
+    {
+      "id": "right_shift_i32_by_4",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        16.0
+      ],
+      "dtype": "int32"
+    },
+    {
+      "id": "right_shift_i64_neg_by_2",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        -32.0
+      ],
+      "dtype": "int64"
+    },
+    {
+      "id": "right_shift_uint8_by_4",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        15.0
+      ],
+      "dtype": "uint8"
+    },
+    {
+      "id": "right_shift_uint32_by_16",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        65535.0
+      ],
+      "dtype": "uint32"
+    },
+    {
+      "id": "right_shift_int8_neg1_by_1",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        -1.0
+      ],
+      "dtype": "int8"
+    },
+    {
+      "id": "right_shift_zero_i32",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        0.0
+      ],
+      "dtype": "int32"
+    },
+    {
+      "id": "equal_i32_true",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "equal_i32_false",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        0.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "less_i64_true",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "less_i64_false",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        0.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "greater_equal_u8",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "equal_i32_f64",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "less_u8_i16",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "not_equal_f32_i64",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "equal_nan_nan",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        0.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "not_equal_nan_nan",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "less_inf_neg_inf",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "less_equal_neg_zero",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "equal_bool_true",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "greater_bool",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "less_equal_bool_f64",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "bool_"
     }
   ]
 }

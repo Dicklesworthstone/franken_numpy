@@ -1510,6 +1510,8 @@ pub enum UFuncOperation {
     BitwiseAnd,
     BitwiseOr,
     BitwiseXor,
+    LeftShift,
+    RightShift,
     Where,
     Sort,
     Argsort,
@@ -1849,7 +1851,9 @@ fn operation_arity(op: UFuncOperation) -> Option<(usize, usize)> {
         | UFuncOperation::FloatPower
         | UFuncOperation::BitwiseAnd
         | UFuncOperation::BitwiseOr
-        | UFuncOperation::BitwiseXor => Some((2, 1)),
+        | UFuncOperation::BitwiseXor
+        | UFuncOperation::LeftShift
+        | UFuncOperation::RightShift => Some((2, 1)),
         UFuncOperation::Abs
         | UFuncOperation::Negative
         | UFuncOperation::Sign
@@ -2576,7 +2580,9 @@ pub fn execute_input_case(case: &UFuncInputCase) -> Result<(Vec<usize>, Vec<f64>
         | UFuncOperation::FloatPower
         | UFuncOperation::BitwiseAnd
         | UFuncOperation::BitwiseOr
-        | UFuncOperation::BitwiseXor => {
+        | UFuncOperation::BitwiseXor
+        | UFuncOperation::LeftShift
+        | UFuncOperation::RightShift => {
             let rhs_shape = case
                 .rhs_shape
                 .clone()
@@ -2624,6 +2630,8 @@ pub fn execute_input_case(case: &UFuncInputCase) -> Result<(Vec<usize>, Vec<f64>
                 UFuncOperation::BitwiseAnd => BinaryOp::BitwiseAnd,
                 UFuncOperation::BitwiseOr => BinaryOp::BitwiseOr,
                 UFuncOperation::BitwiseXor => BinaryOp::BitwiseXor,
+                UFuncOperation::LeftShift => BinaryOp::LeftShift,
+                UFuncOperation::RightShift => BinaryOp::RightShift,
                 _ => return Err(format!("Unsupported binary op: {:?}", case.op)),
             };
 
@@ -2960,6 +2968,7 @@ mod tests {
         compare_arrays, execute_input_case, load_input_cases, load_oracle_capture,
         resolve_expected_reason_code, validate_capture_case_ids, write_differential_report,
     };
+    use std::collections::BTreeMap;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
@@ -3465,7 +3474,7 @@ mod tests {
 
         fs::write(
             &input_path,
-            r#"[{"id":"min_nan_case","op":"min","lhs_shape":[2],"lhs_values":[NaN,1.0],"lhs_dtype":"f64","rhs_shape":null,"rhs_values":null,"rhs_dtype":null,"axis":null,"keepdims":false}]"#,
+            r#"[{"id":"min_nan_case","op":"min","lhs_shape":[2],"lhs_values":["NaN",1.0],"lhs_dtype":"f64","rhs_shape":null,"rhs_values":null,"rhs_dtype":null,"axis":null,"keepdims":false}]"#,
         )
         .expect("write input");
         fs::write(&python_wrapper, "#!/bin/sh\nexec python3 -S \"$@\"\n").expect("write wrapper");
@@ -4378,61 +4387,38 @@ mod tests {
     }
 
     #[test]
-    fn differential_cross_dtype_binary_cases_match_oracle() {
+    fn differential_mixed_dtype_cases_match_oracle() {
         let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
         let inputs =
             load_input_cases(&fixture_root.join("ufunc_input_cases.json")).expect("load inputs");
         let oracle =
             load_oracle_capture(&fixture_root.join("oracle_outputs/ufunc_oracle_output.json"))
                 .expect("load oracle");
+        let oracle_by_id = oracle
+            .cases
+            .iter()
+            .map(|case| (case.id.as_str(), case))
+            .collect::<BTreeMap<_, _>>();
+        let mut mixed_dtype_inputs = inputs
+            .iter()
+            .filter(|case| {
+                case.rhs_dtype.as_deref().is_some_and(|rhs_dtype| {
+                    canonical_dtype_name(&case.lhs_dtype) != canonical_dtype_name(rhs_dtype)
+                        && oracle_by_id
+                            .get(case.id.as_str())
+                            .is_some_and(|oracle_case| oracle_case.status == "ok")
+                })
+            })
+            .collect::<Vec<_>>();
+        mixed_dtype_inputs.sort_by(|lhs, rhs| lhs.id.cmp(&rhs.id));
+        assert!(
+            !mixed_dtype_inputs.is_empty(),
+            "expected at least one oracle-backed mixed-dtype fixture"
+        );
         let mut failures = Vec::new();
-        let case_ids = [
-            // Original 17 cross-dtype cases
-            "add_scalar_i32_plus_f16",
-            "mul_scalar_u64_by_i8",
-            "sub_scalar_f32_minus_i64",
-            "mul_scalar_u16_by_i16",
-            "add_scalar_f16_plus_i16",
-            "div_scalar_i32_by_i32",
-            "floor_divide_scalar_i32_by_i32",
-            "mul_scalar_f64_by_bool",
-            "add_scalar_f64_plus_f32",
-            "add_scalar_u16_plus_i32",
-            "minimum_scalar_f32_with_u16",
-            "add_scalar_i32_plus_f64",
-            "sub_scalar_u64_minus_i32",
-            "div_scalar_bool_by_i64",
-            "floor_divide_scalar_f64_by_i32",
-            "power_scalar_f64_to_i32",
-            "mul_scalar_f32_by_u64",
-            // New 17 cases: expanded cross-dtype promotion coverage (br-x6kc)
-            "add_scalar_bool_plus_complex128", // Bool + Complex128 → Complex128
-            "add_scalar_u8_plus_i8",           // U8 + I8 → I16 (non-obvious promotion)
-            "add_scalar_complex64_plus_i32",   // Complex64 + I32 → Complex128
-            "add_scalar_u8_overflow_wrap",     // U8 + U8 overflow wraps to 0
-            "add_scalar_i8_overflow_wrap",     // I8 + I8 overflow wraps to -128
-            "power_scalar_i64_overflow_wrap",  // I64 ** I64 overflow wraps
-            "add_scalar_u32_plus_i8",          // U32 + I8 → I64
-            "add_scalar_u8_plus_i16",          // U8 + I16 → I16
-            "add_scalar_f16_plus_u8",          // F16 + U8 → F16 (mantissa sufficient)
-            "mul_scalar_f32_by_i16",           // F32 * I16 → F32
-            "add_scalar_u64_plus_i64",         // U64 + I64 → F64
-            "add_scalar_f16_plus_i32",         // F16 + I32 → F64
-            "sub_scalar_i16_minus_u16",        // I16 - U16 → I32
-            "add_scalar_f32_plus_u32",         // F32 + U32 → F64
-            "add_scalar_bool_plus_i64",        // Bool + I64 → I64
-            "add_scalar_u32_plus_i32",         // U32 + I32 → I64
-            "add_scalar_f16_plus_f32",         // F16 + F32 → F32
-        ];
-
-        for case_id in case_ids {
-            let input = inputs.iter().find(|case| case.id == case_id);
-            assert!(input.is_some(), "missing input fixture {case_id}");
-            let Some(input) = input else {
-                continue;
-            };
-
-            let oracle_case = oracle.cases.iter().find(|case| case.id == case_id);
+        for input in mixed_dtype_inputs {
+            let case_id = &input.id;
+            let oracle_case = oracle_by_id.get(case_id.as_str());
             assert!(oracle_case.is_some(), "missing oracle fixture {case_id}");
             let Some(oracle_case) = oracle_case else {
                 continue;
@@ -4476,7 +4462,7 @@ mod tests {
             }
         }
 
-        assert!(failures.is_empty(), "cross-dtype failures: {failures:?}");
+        assert!(failures.is_empty(), "mixed-dtype failures: {failures:?}");
     }
 
     #[test]
@@ -4610,6 +4596,164 @@ mod tests {
                 "sin(arcsin({orig})) = {recovered} at {i}"
             );
         }
+    }
+
+    #[test]
+    fn differential_shift_operations_match_oracle() {
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let inputs =
+            load_input_cases(&fixture_root.join("ufunc_input_cases.json")).expect("load inputs");
+        let oracle =
+            load_oracle_capture(&fixture_root.join("oracle_outputs/ufunc_oracle_output.json"))
+                .expect("load oracle");
+        let mut failures = Vec::new();
+        let case_ids = [
+            // LeftShift: same-type integer operations
+            "left_shift_i32_by_4",
+            "left_shift_i64_by_62",
+            "left_shift_uint8_by_7",
+            "left_shift_uint16_by_4",
+            "left_shift_int8_by_6",
+            "left_shift_uint32_by_31",
+            // LeftShift: cross-dtype
+            "left_shift_uint8_by_i32",
+            // LeftShift: edge cases
+            "left_shift_zero_i32",
+            "left_shift_uint64_by_63",
+            // RightShift: same-type
+            "right_shift_i32_by_4",
+            "right_shift_i64_neg_by_2",
+            "right_shift_uint8_by_4",
+            "right_shift_uint32_by_16",
+            "right_shift_int8_neg1_by_1",
+            // RightShift: edge cases
+            "right_shift_zero_i32",
+        ];
+
+        for case_id in case_ids {
+            let input = inputs.iter().find(|case| case.id == case_id);
+            assert!(input.is_some(), "missing input fixture {case_id}");
+            let Some(input) = input else { continue };
+
+            let oracle_case = oracle.cases.iter().find(|case| case.id == case_id);
+            assert!(oracle_case.is_some(), "missing oracle fixture {case_id}");
+            let Some(oracle_case) = oracle_case else { continue };
+
+            let outcome = execute_input_case(input);
+            if outcome.is_err() {
+                let err = outcome.err().unwrap_or_else(|| "unknown error".to_string());
+                failures.push(format!("{case_id} execution failed: {err}"));
+                continue;
+            }
+            let Ok((actual_shape, actual_values, actual_dtype)) = outcome else { continue };
+            let expected_dtype = canonical_dtype_name(&oracle_case.dtype);
+            let actual_dtype = canonical_dtype_name(&actual_dtype);
+            let (pass, max_abs_error, reason) = compare_arrays(
+                &oracle_case.shape,
+                &oracle_case.values,
+                &actual_shape,
+                &actual_values,
+                1e-12,
+                1e-12,
+            );
+
+            eprintln!(
+                "{case_id}: pass={pass} expected_dtype={} actual_dtype={} expected={:?} actual={:?}",
+                oracle_case.dtype, actual_dtype, oracle_case.values, actual_values
+            );
+
+            if expected_dtype != actual_dtype {
+                failures.push(format!(
+                    "{case_id} dtype mismatch expected={} actual={}",
+                    oracle_case.dtype, actual_dtype
+                ));
+            }
+            if !pass {
+                failures.push(format!(
+                    "{case_id} mismatch max_abs_error={max_abs_error} reason={reason:?}"
+                ));
+            }
+        }
+
+        assert!(failures.is_empty(), "shift op failures: {failures:?}");
+    }
+
+    #[test]
+    fn differential_comparison_ops_cross_dtype_match_oracle() {
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let inputs =
+            load_input_cases(&fixture_root.join("ufunc_input_cases.json")).expect("load inputs");
+        let oracle =
+            load_oracle_capture(&fixture_root.join("oracle_outputs/ufunc_oracle_output.json"))
+                .expect("load oracle");
+        let mut failures = Vec::new();
+        let case_ids = [
+            // Integer comparisons
+            "equal_i32_true",
+            "equal_i32_false",
+            "less_i64_true",
+            "less_i64_false",
+            "greater_equal_u8",
+            // Cross-dtype comparisons
+            "equal_i32_f64",
+            "less_u8_i16",
+            "not_equal_f32_i64",
+            // Float special values: NaN, Inf, -0
+            "equal_nan_nan",
+            "not_equal_nan_nan",
+            "less_inf_neg_inf",
+            "less_equal_neg_zero",
+            // Bool comparisons
+            "equal_bool_true",
+            "greater_bool",
+            "less_equal_bool_f64",
+        ];
+
+        for case_id in case_ids {
+            let input = inputs.iter().find(|case| case.id == case_id);
+            assert!(input.is_some(), "missing input fixture {case_id}");
+            let Some(input) = input else { continue };
+
+            let oracle_case = oracle.cases.iter().find(|case| case.id == case_id);
+            assert!(oracle_case.is_some(), "missing oracle fixture {case_id}");
+            let Some(oracle_case) = oracle_case else { continue };
+
+            let outcome = execute_input_case(input);
+            if outcome.is_err() {
+                let err = outcome.err().unwrap_or_else(|| "unknown error".to_string());
+                failures.push(format!("{case_id} execution failed: {err}"));
+                continue;
+            }
+            let Ok((actual_shape, actual_values, actual_dtype)) = outcome else { continue };
+            let expected_dtype = canonical_dtype_name(&oracle_case.dtype);
+            let actual_dtype = canonical_dtype_name(&actual_dtype);
+            let (pass, max_abs_error, reason) = compare_arrays(
+                &oracle_case.shape,
+                &oracle_case.values,
+                &actual_shape,
+                &actual_values,
+                1e-12,
+                1e-12,
+            );
+
+            eprintln!(
+                "{case_id}: pass={pass} expected_dtype={expected_dtype} actual_dtype={actual_dtype} expected={:?} actual={:?}",
+                oracle_case.values, actual_values
+            );
+
+            if expected_dtype != actual_dtype {
+                failures.push(format!(
+                    "{case_id} dtype mismatch expected={expected_dtype} actual={actual_dtype}",
+                ));
+            }
+            if !pass {
+                failures.push(format!(
+                    "{case_id} mismatch max_abs_error={max_abs_error} reason={reason:?}"
+                ));
+            }
+        }
+
+        assert!(failures.is_empty(), "comparison op failures: {failures:?}");
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────

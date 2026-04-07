@@ -68,6 +68,11 @@ impl DType {
     }
 
     #[must_use]
+    /// Parse a dtype name string into a `DType` variant.
+    ///
+    /// Accepts NumPy-compatible descriptor strings where the digit after `i`/`u`/`f`
+    /// denotes **byte size**, not bit width: `"i8"` = 8-byte int = `I64`, not `I8`.
+    /// Use `"int8"` / `"uint8"` for the 8-bit integer types.
     pub fn parse(name: &str) -> Option<Self> {
         match name {
             "bool" => Some(Self::Bool),
