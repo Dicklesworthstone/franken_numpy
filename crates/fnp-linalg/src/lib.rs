@@ -541,6 +541,45 @@ fn lu_forward_back(lu: &[f64], perm: &[usize], b: &[f64], n: usize) -> Vec<f64> 
     x
 }
 
+/// Forward-substitution then back-substitution for multiple right-hand sides.
+fn lu_forward_back_multi(lu: &[f64], perm: &[usize], b: &[f64], n: usize, m: usize) -> Vec<f64> {
+    let mut x = vec![0.0; n * m];
+
+    // Apply permutation (Pb)
+    for i in 0..n {
+        let p_i = perm[i];
+        for col in 0..m {
+            x[i * m + col] = b[p_i * m + col];
+        }
+    }
+
+    // Forward substitution (L has unit diagonal): Lx = Pb
+    for i in 1..n {
+        for j in 0..i {
+            let l_ij = lu[i * n + j];
+            for col in 0..m {
+                x[i * m + col] -= l_ij * x[j * m + col];
+            }
+        }
+    }
+
+    // Back substitution: Ux = y
+    for i in (0..n).rev() {
+        for j in (i + 1)..n {
+            let u_ij = lu[i * n + j];
+            for col in 0..m {
+                x[i * m + col] -= u_ij * x[j * m + col];
+            }
+        }
+        let u_ii = lu[i * n + i];
+        for col in 0..m {
+            x[i * m + col] /= u_ii;
+        }
+    }
+
+    x
+}
+
 /// Solve Ax = b for an NxN system via LU decomposition with partial pivoting.
 /// `a` is n*n row-major, `b` has length n.
 pub fn solve_nxn(a: &[f64], b: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
@@ -759,16 +798,7 @@ pub fn solve_nxn_multi(a: &[f64], b: &[f64], n: usize, m: usize) -> Result<Vec<f
     }
     let (lu, perm, _) = lu_decompose_for_det(a, n)?;
 
-    let mut result = vec![0.0; n * m];
-    for col in 0..m {
-        let b_col: Vec<f64> = (0..n).map(|row| b[row * m + col]).collect();
-        let x_col = lu_forward_back(&lu, &perm, &b_col, n);
-        for (row, &val) in x_col.iter().enumerate() {
-            result[row * m + col] = val;
-        }
-    }
-
-    Ok(result)
+    Ok(lu_forward_back_multi(&lu, &perm, b, n, m))
 }
 
 /// Solve a triangular linear system.
@@ -941,28 +971,33 @@ pub fn cholesky_solve_multi(
         ));
     }
 
-    let mut x = vec![0.0; n * m];
+    let mut x = b.to_vec();
 
-    // Process each column of B
-    for col in 0..m {
-        // Forward substitution: L*y = b
-        // Store y temporarily in x
-        for i in 0..n {
-            let mut sum = b[i * m + col];
-            for j in 0..i {
-                sum -= l[i * n + j] * x[j * m + col];
+    // Forward substitution: L*Y = B
+    for i in 0..n {
+        for j in 0..i {
+            let l_ij = l[i * n + j];
+            for col in 0..m {
+                x[i * m + col] -= l_ij * x[j * m + col];
             }
-            x[i * m + col] = sum / l[i * n + i];
         }
+        let l_ii = l[i * n + i];
+        for col in 0..m {
+            x[i * m + col] /= l_ii;
+        }
+    }
 
-        // Backward substitution: L^T*x = y
-        // We read the 'y' values from x and overwrite them with 'x' values
-        for i in (0..n).rev() {
-            let mut sum = x[i * m + col];
-            for j in (i + 1)..n {
-                sum -= l[j * n + i] * x[j * m + col]; // L^T[i,j] = L[j,i]
+    // Backward substitution: L^T*X = Y
+    for i in (0..n).rev() {
+        for j in (i + 1)..n {
+            let l_ji = l[j * n + i];
+            for col in 0..m {
+                x[i * m + col] -= l_ji * x[j * m + col]; // L^T[i,j] = L[j,i]
             }
-            x[i * m + col] = sum / l[i * n + i];
+        }
+        let l_ii = l[i * n + i];
+        for col in 0..m {
+            x[i * m + col] /= l_ii;
         }
     }
 

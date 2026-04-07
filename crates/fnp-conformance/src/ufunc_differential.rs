@@ -4599,6 +4599,178 @@ mod tests {
     }
 
     #[test]
+    fn differential_bitwise_ops_cross_dtype_match_oracle() {
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let inputs =
+            load_input_cases(&fixture_root.join("ufunc_input_cases.json")).expect("load inputs");
+        let oracle =
+            load_oracle_capture(&fixture_root.join("oracle_outputs/ufunc_oracle_output.json"))
+                .expect("load oracle");
+        let mut failures = Vec::new();
+        let case_ids = [
+            "bitwise_and_u8_mask",
+            "bitwise_and_i32",
+            "bitwise_and_bool",
+            "bitwise_and_bool_false",
+            "bitwise_and_cross_u8_i32",
+            "bitwise_or_u8",
+            "bitwise_or_i32",
+            "bitwise_or_bool",
+            "bitwise_or_bool_false",
+            "bitwise_xor_u8",
+            "bitwise_xor_i32_self",
+            "bitwise_xor_bool",
+            "bitwise_xor_bool_same",
+            "bitwise_xor_all_ones_u8",
+            "bitwise_or_u8_u16",
+            "bitwise_and_i8_neg1",
+        ];
+
+        for case_id in case_ids {
+            let input = inputs.iter().find(|case| case.id == case_id);
+            assert!(input.is_some(), "missing input fixture {case_id}");
+            let Some(input) = input else { continue };
+
+            let oracle_case = oracle.cases.iter().find(|case| case.id == case_id);
+            assert!(oracle_case.is_some(), "missing oracle fixture {case_id}");
+            let Some(oracle_case) = oracle_case else {
+                continue;
+            };
+
+            let outcome = execute_input_case(input);
+            if outcome.is_err() {
+                let err = outcome.err().unwrap_or_else(|| "unknown error".to_string());
+                failures.push(format!("{case_id} execution failed: {err}"));
+                continue;
+            }
+            let Ok((actual_shape, actual_values, actual_dtype)) = outcome else {
+                continue;
+            };
+            let expected_dtype = canonical_dtype_name(&oracle_case.dtype);
+            let actual_dtype = canonical_dtype_name(&actual_dtype);
+            let (pass, max_abs_error, reason) = compare_arrays(
+                &oracle_case.shape,
+                &oracle_case.values,
+                &actual_shape,
+                &actual_values,
+                1e-12,
+                1e-12,
+            );
+
+            eprintln!(
+                "{case_id}: pass={pass} expected={:?} actual={:?} dtype={actual_dtype}",
+                oracle_case.values, actual_values
+            );
+
+            if expected_dtype != actual_dtype {
+                failures.push(format!(
+                    "{case_id} dtype mismatch expected={expected_dtype} actual={actual_dtype}",
+                ));
+            }
+            if !pass {
+                failures.push(format!(
+                    "{case_id} mismatch max_abs_error={max_abs_error} reason={reason:?}"
+                ));
+            }
+        }
+
+        assert!(failures.is_empty(), "bitwise op failures: {failures:?}");
+    }
+
+    #[test]
+    fn differential_arithmetic_edge_cases_match_oracle() {
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let inputs =
+            load_input_cases(&fixture_root.join("ufunc_input_cases.json")).expect("load inputs");
+        let oracle =
+            load_oracle_capture(&fixture_root.join("oracle_outputs/ufunc_oracle_output.json"))
+                .expect("load oracle");
+        let mut failures = Vec::new();
+        let case_ids = [
+            // floor_divide with negative numbers (rounds toward -inf)
+            "floor_divide_pos_neg",
+            "floor_divide_neg_pos",
+            "floor_divide_neg_neg",
+            "floor_divide_exact",
+            // remainder (Python-style: result sign matches divisor)
+            "remainder_pos_neg",
+            "remainder_neg_pos",
+            "remainder_neg_neg",
+            "remainder_exact",
+            // power edge cases
+            "power_zero_zero",
+            "power_neg_fractional",
+            "power_zero_negative",
+            // float_power
+            "float_power_neg_fractional",
+            "float_power_int_base",
+            // division by zero
+            "div_pos_by_zero",
+            "div_neg_by_zero",
+            "div_zero_by_zero",
+            "floor_divide_by_zero",
+            "remainder_by_zero",
+            // ldexp
+            "ldexp_normal",
+            "ldexp_negative_exp",
+            "ldexp_overflow",
+        ];
+
+        for case_id in case_ids {
+            let input = inputs.iter().find(|case| case.id == case_id);
+            assert!(input.is_some(), "missing input fixture {case_id}");
+            let Some(input) = input else { continue };
+
+            let oracle_case = oracle.cases.iter().find(|case| case.id == case_id);
+            assert!(oracle_case.is_some(), "missing oracle fixture {case_id}");
+            let Some(oracle_case) = oracle_case else {
+                continue;
+            };
+
+            let outcome = execute_input_case(input);
+            if outcome.is_err() {
+                let err = outcome.err().unwrap_or_else(|| "unknown error".to_string());
+                failures.push(format!("{case_id} execution failed: {err}"));
+                continue;
+            }
+            let Ok((actual_shape, actual_values, actual_dtype)) = outcome else {
+                continue;
+            };
+            let expected_dtype = canonical_dtype_name(&oracle_case.dtype);
+            let actual_dtype = canonical_dtype_name(&actual_dtype);
+            let (pass, max_abs_error, reason) = compare_arrays(
+                &oracle_case.shape,
+                &oracle_case.values,
+                &actual_shape,
+                &actual_values,
+                1e-12,
+                1e-12,
+            );
+
+            eprintln!(
+                "{case_id}: pass={pass} expected={:?} actual={:?}",
+                oracle_case.values, actual_values
+            );
+
+            if expected_dtype != actual_dtype {
+                failures.push(format!(
+                    "{case_id} dtype mismatch expected={expected_dtype} actual={actual_dtype}",
+                ));
+            }
+            if !pass {
+                failures.push(format!(
+                    "{case_id} mismatch max_abs_error={max_abs_error} reason={reason:?}"
+                ));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "arithmetic edge case failures: {failures:?}"
+        );
+    }
+
+    #[test]
     fn differential_unary_ops_cross_dtype_match_oracle() {
         let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
         let inputs =

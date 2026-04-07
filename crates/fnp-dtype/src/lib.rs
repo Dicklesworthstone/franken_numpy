@@ -1104,23 +1104,27 @@ impl ArrayStorage {
         let n = self.len();
         // String target: convert all elements to string representation
         if target == DType::Str {
-            let strings: Vec<std::string::String> = (0..n)
-                .map(|i| match self {
-                    Self::Bool(v) => {
-                        if v[i] {
-                            "True".into()
-                        } else {
-                            "False".into()
-                        }
-                    }
-                    Self::String(v) => v[i].clone(),
-                    _ => {
-                        // Use get_f64 for numeric types (lossy for large ints but ok for strings)
-                        let val = self.get_f64(i).unwrap_or(f64::NAN);
-                        format!("{val}")
-                    }
-                })
-                .collect();
+            let strings: Vec<std::string::String> = match self {
+                Self::Bool(v) => v
+                    .iter()
+                    .map(|&b| if b { "True".into() } else { "False".into() })
+                    .collect(),
+                Self::I8(v) => v.iter().map(|x| x.to_string()).collect(),
+                Self::I16(v) => v.iter().map(|x| x.to_string()).collect(),
+                Self::I32(v) => v.iter().map(|x| x.to_string()).collect(),
+                Self::I64(v) => v.iter().map(|x| x.to_string()).collect(),
+                Self::U8(v) => v.iter().map(|x| x.to_string()).collect(),
+                Self::U16(v) => v.iter().map(|x| x.to_string()).collect(),
+                Self::U32(v) => v.iter().map(|x| x.to_string()).collect(),
+                Self::U64(v) => v.iter().map(|x| x.to_string()).collect(),
+                Self::F16(v) => v.iter().map(|x| f32::from(*x).to_string()).collect(),
+                Self::F32(v) => v.iter().map(|x| x.to_string()).collect(),
+                Self::F64(v) => v.iter().map(|x| x.to_string()).collect(),
+                Self::Complex64(v) => v.iter().map(|&(re, im)| format!("({re}+{im}j)")).collect(),
+                Self::Complex128(v) => v.iter().map(|&(re, im)| format!("({re}+{im}j)")).collect(),
+                Self::String(v) => v.clone(),
+                Self::Structured(_) => vec!["NaN".to_string(); n],
+            };
             return Ok(Self::String(strings));
         }
         // String source: cannot cast to numeric

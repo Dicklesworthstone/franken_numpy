@@ -13118,74 +13118,22 @@ impl UFuncArray {
         }
         let m = deg + 1; // number of coefficients
         // Build Vandermonde matrix X: X[i][j] = x_i^(deg-j) (descending powers)
-        // Then solve normal equations: (X^T X) c = X^T y
-        // Build X^T X (m x m) and X^T y (m)
-        let mut xtx = vec![0.0; m * m];
-        let mut xty = vec![0.0; m];
+        let mut x_mat = vec![0.0; n * m];
         for i in 0..n {
             let xi = x.values[i];
-            let yi = y.values[i];
-            // Compute powers: xi^deg, xi^(deg-1), ..., xi^0
             let mut powers = vec![1.0f64; m];
             for j in (0..deg).rev() {
                 powers[j] = powers[j + 1] * xi;
             }
-            for r in 0..m {
-                xty[r] += powers[r] * yi;
-                for c in 0..m {
-                    xtx[r * m + c] += powers[r] * powers[c];
-                }
+            for j in 0..m {
+                x_mat[i * m + j] = powers[j];
             }
         }
-        // Solve via Gaussian elimination with partial pivoting
-        let mut aug = vec![0.0; m * (m + 1)];
-        for r in 0..m {
-            for c in 0..m {
-                aug[r * (m + 1) + c] = xtx[r * m + c];
-            }
-            aug[r * (m + 1) + m] = xty[r];
-        }
-        // Overall matrix scale for relative singularity detection.
-        let aug_scale = aug
-            .iter()
-            .map(|v| v.abs())
-            .fold(0.0f64, f64::max)
-            .max(f64::MIN_POSITIVE);
-        for col in 0..m {
-            // Partial pivoting
-            let mut max_row = col;
-            let mut max_val = aug[col * (m + 1) + col].abs();
-            for row in (col + 1)..m {
-                let val = aug[row * (m + 1) + col].abs();
-                if val > max_val {
-                    max_val = val;
-                    max_row = row;
-                }
-            }
-            if max_row != col {
-                for c in 0..=m {
-                    aug.swap(col * (m + 1) + c, max_row * (m + 1) + c);
-                }
-            }
-            let pivot = aug[col * (m + 1) + col];
-            // Scale-relative singularity check: pivot negligible vs initial matrix scale
-            if pivot.abs() < f64::EPSILON * aug_scale {
-                return Err(UFuncError::Msg("polyfit: singular matrix".to_string()));
-            }
-            for c in col..=m {
-                aug[col * (m + 1) + c] /= pivot;
-            }
-            for row in 0..m {
-                if row == col {
-                    continue;
-                }
-                let factor = aug[row * (m + 1) + col];
-                for c in col..=m {
-                    aug[row * (m + 1) + c] -= factor * aug[col * (m + 1) + c];
-                }
-            }
-        }
-        let coeffs: Vec<f64> = (0..m).map(|r| aug[r * (m + 1) + m]).collect();
+        
+        let rcond = (x.values.len() as f64) * f64::EPSILON; // Match numpy default rcond
+        let (coeffs, _, _, _) = fnp_linalg::lstsq_svd(&x_mat, &y.values, n, m, rcond)
+            .map_err(|e| UFuncError::Msg(format!("polyfit: {}", e)))?;
+        
         Ok(Self {
             shape: vec![m],
             values: coeffs,
