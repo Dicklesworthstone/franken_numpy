@@ -2224,7 +2224,7 @@
       ],
       "values": [
         2.220446049250313e-16,
-        1.9073486328125e-6,
+        1.9073486328125e-06,
         1.2924697071141056e-26,
         5e-324
       ],
@@ -3462,7 +3462,7 @@
       "error": null,
       "shape": [],
       "values": [
-        -1.152921504606847e18
+        -1.152921504606847e+18
       ],
       "dtype": "float64"
     },
@@ -3477,14 +3477,14 @@
       "dtype": "float64"
     },
     {
-      "id": "add_scalar_u8_plus_i8",
+      "id": "add_scalar_i32_plus_f64",
       "status": "ok",
       "error": null,
       "shape": [],
       "values": [
-        150.0
+        5.25
       ],
-      "dtype": "int16"
+      "dtype": "float64"
     },
     {
       "id": "mul_scalar_u16_by_i16",
@@ -3537,34 +3537,34 @@
       "dtype": "float64"
     },
     {
-      "id": "add_scalar_u8_plus_u8_wrap",
+      "id": "sub_scalar_u64_minus_i32",
       "status": "ok",
       "error": null,
       "shape": [],
       "values": [
-        0.0
+        93.0
       ],
-      "dtype": "uint8"
+      "dtype": "float64"
     },
     {
-      "id": "add_scalar_i8_plus_i8_wrap",
+      "id": "div_scalar_bool_by_i64",
       "status": "ok",
       "error": null,
       "shape": [],
       "values": [
-        -128.0
+        0.5
       ],
-      "dtype": "int8"
+      "dtype": "float64"
     },
     {
-      "id": "power_scalar_i64_to_i64_wrap",
+      "id": "floor_divide_scalar_f64_by_i32",
       "status": "ok",
       "error": null,
       "shape": [],
       "values": [
-        -9.223372036854776e18
+        3.0
       ],
-      "dtype": "int64"
+      "dtype": "float64"
     },
     {
       "id": "add_scalar_f64_plus_f32",
@@ -3587,24 +3587,24 @@
       "dtype": "int32"
     },
     {
-      "id": "sub_scalar_bool_minus_u8_wrap",
+      "id": "power_scalar_f64_to_i32",
       "status": "ok",
       "error": null,
       "shape": [],
       "values": [
-        255.0
+        8.0
       ],
-      "dtype": "uint8"
+      "dtype": "float64"
     },
     {
-      "id": "maximum_scalar_i16_with_u8",
+      "id": "mul_scalar_f32_by_u64",
       "status": "ok",
       "error": null,
       "shape": [],
       "values": [
-        250.0
+        6.0
       ],
-      "dtype": "int16"
+      "dtype": "float64"
     },
     {
       "id": "minimum_scalar_f32_with_u16",
@@ -3613,6 +3613,182 @@
       "shape": [],
       "values": [
         2.0
+      ],
+      "dtype": "float32"
+    },
+    {
+      "id": "add_scalar_bool_plus_complex128",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2
+      ],
+      "values": [
+        2.0,
+        2.0
+      ],
+      "dtype": "complex128"
+    },
+    {
+      "id": "add_scalar_u8_plus_i8",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        150.0
+      ],
+      "dtype": "int16"
+    },
+    {
+      "id": "add_scalar_complex64_plus_i32",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2
+      ],
+      "values": [
+        2.0,
+        0.0
+      ],
+      "dtype": "complex128"
+    },
+    {
+      "id": "add_scalar_u8_overflow_wrap",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        0.0
+      ],
+      "dtype": "uint8"
+    },
+    {
+      "id": "add_scalar_i8_overflow_wrap",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        -128.0
+      ],
+      "dtype": "int8"
+    },
+    {
+      "id": "power_scalar_i64_overflow_wrap",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        -9.223372036854776e+18
+      ],
+      "dtype": "int64"
+    },
+    {
+      "id": "add_scalar_u32_plus_i8",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        2999999999.0
+      ],
+      "dtype": "int64"
+    },
+    {
+      "id": "add_scalar_u8_plus_i16",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1200.0
+      ],
+      "dtype": "int16"
+    },
+    {
+      "id": "add_scalar_f16_plus_u8",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        101.5
+      ],
+      "dtype": "float16"
+    },
+    {
+      "id": "mul_scalar_f32_by_i16",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        250.0
+      ],
+      "dtype": "float32"
+    },
+    {
+      "id": "add_scalar_u64_plus_i64",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        500000.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "add_scalar_f16_plus_i32",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        100000.5
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "sub_scalar_i16_minus_u16",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        -59900.0
+      ],
+      "dtype": "int32"
+    },
+    {
+      "id": "add_scalar_f32_plus_u32",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        3000000001.5
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "add_scalar_bool_plus_i64",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        43.0
+      ],
+      "dtype": "int64"
+    },
+    {
+      "id": "add_scalar_u32_plus_i32",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1000000000.0
+      ],
+      "dtype": "int64"
+    },
+    {
+      "id": "add_scalar_f16_plus_f32",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        4.0
       ],
       "dtype": "float32"
     }
