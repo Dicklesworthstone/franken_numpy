@@ -4425,19 +4425,6 @@ mod tests {
             "add_scalar_f16_plus_f32",         // F16 + F32 → F32
         ];
 
-        // Known parity gaps: FrankenNumPy computes through f64 internally, so integer
-        // overflow wrapping does not occur. Tracked as parity debt (br-jkuy), not
-        // accepted feature cuts. (br-x6kc)
-        let known_dtype_gap_ids: &[&str] = &[];
-        let known_overflow_gap_ids: &[&str] = &[
-            "add_scalar_u8_overflow_wrap", // NumPy wraps U8 255+1→0; FNP: 256 (no wrap in f64)
-            "add_scalar_i8_overflow_wrap", // NumPy wraps I8 127+1→-128; FNP: 128 (no wrap)
-            "power_scalar_i64_overflow_wrap", // NumPy wraps I64 2^63; FNP: +2^63 via f64
-        ];
-
-        let mut known_gap_notes = Vec::new();
-        let mut passed = 0usize;
-
         for case_id in case_ids {
             let input = inputs.iter().find(|case| case.id == case_id);
             assert!(input.is_some(), "missing input fixture {case_id}");
@@ -4476,28 +4463,6 @@ mod tests {
                 oracle_case.dtype, actual_dtype, oracle_case.values, actual_values
             );
 
-            let is_dtype_gap = known_dtype_gap_ids.contains(&case_id);
-            let is_overflow_gap = known_overflow_gap_ids.contains(&case_id);
-
-            if is_dtype_gap && expected_dtype != actual_dtype {
-                known_gap_notes.push(format!(
-                    "{case_id} KNOWN dtype gap: NumPy={}, FNP={} (f64 internal storage)",
-                    oracle_case.dtype, actual_dtype
-                ));
-                // Values should still match even if dtype is wider
-                if pass {
-                    passed += 1;
-                }
-                continue;
-            }
-
-            if is_overflow_gap && !pass {
-                known_gap_notes.push(format!(
-                    "{case_id} KNOWN overflow gap: NumPy wraps integers, FNP computes via f64"
-                ));
-                continue;
-            }
-
             if expected_dtype != actual_dtype {
                 failures.push(format!(
                     "{case_id} dtype mismatch expected={} actual={}",
@@ -4509,26 +4474,7 @@ mod tests {
                     "{case_id} mismatch max_abs_error={max_abs_error} reason={reason:?}"
                 ));
             }
-            if pass && expected_dtype == actual_dtype {
-                passed += 1;
-            }
         }
-
-        // Report known gaps for visibility
-        if !known_gap_notes.is_empty() {
-            eprintln!(
-                "--- Known parity gaps ({} cases, documented as debt) ---",
-                known_gap_notes.len()
-            );
-            for note in &known_gap_notes {
-                eprintln!("  {note}");
-            }
-        }
-
-        eprintln!(
-            "--- Cross-dtype results: {passed}/{} exact match ---",
-            case_ids.len()
-        );
 
         assert!(failures.is_empty(), "cross-dtype failures: {failures:?}");
     }
