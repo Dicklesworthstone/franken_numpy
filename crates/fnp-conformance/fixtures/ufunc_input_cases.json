@@ -8322,5 +8322,607 @@
     "artifact_refs": [],
     "reason_code": "ufunc_dispatch_resolution_failed",
     "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "sum_axes_02_keepdims_rank3",
+    "op": "sum",
+    "lhs_shape": [
+      2,
+      3,
+      4
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0,
+      16.0,
+      17.0,
+      18.0,
+      19.0,
+      20.0,
+      21.0,
+      22.0,
+      23.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": true,
+    "seed": 6505,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-reductions",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed",
+    "axes": [
+      0,
+      2
+    ]
+  },
+  {
+    "id": "prod_axes_12_rank3",
+    "op": "prod",
+    "lhs_shape": [
+      2,
+      3,
+      4
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0,
+      16.0,
+      17.0,
+      18.0,
+      19.0,
+      20.0,
+      21.0,
+      22.0,
+      23.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6505,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-reductions",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed",
+    "axes": [
+      1,
+      2
+    ]
+  },
+  {
+    "id": "min_axes_01_rank3",
+    "op": "min",
+    "lhs_shape": [
+      2,
+      3,
+      4
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0,
+      16.0,
+      17.0,
+      18.0,
+      19.0,
+      20.0,
+      21.0,
+      22.0,
+      23.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6505,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-reductions",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed",
+    "axes": [
+      0,
+      1
+    ]
+  },
+  {
+    "id": "max_axes_02_rank3",
+    "op": "max",
+    "lhs_shape": [
+      2,
+      3,
+      4
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0,
+      16.0,
+      17.0,
+      18.0,
+      19.0,
+      20.0,
+      21.0,
+      22.0,
+      23.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6505,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-reductions",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed",
+    "axes": [
+      0,
+      2
+    ]
+  },
+  {
+    "id": "mean_axes_02_rank3",
+    "op": "mean",
+    "lhs_shape": [
+      2,
+      3,
+      4
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0,
+      16.0,
+      17.0,
+      18.0,
+      19.0,
+      20.0,
+      21.0,
+      22.0,
+      23.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6505,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-reductions",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed",
+    "axes": [
+      0,
+      2
+    ]
+  },
+  {
+    "id": "sum_int8_promotes_to_i64",
+    "op": "sum",
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      100.0,
+      120.0,
+      -50.0
+    ],
+    "lhs_dtype": "int8",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6505,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-reductions",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "sum_uint8_promotes_to_u64",
+    "op": "sum",
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      200.0,
+      100.0,
+      50.0
+    ],
+    "lhs_dtype": "uint8",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6505,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-reductions",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "sum_bool_promotes_to_i64",
+    "op": "sum",
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      0.0,
+      1.0,
+      1.0
+    ],
+    "lhs_dtype": "bool",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6505,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-reductions",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "prod_bool_promotes_to_i64",
+    "op": "prod",
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      0.0,
+      1.0,
+      1.0
+    ],
+    "lhs_dtype": "bool",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6505,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-reductions",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "sum_int32_promotes_to_i64",
+    "op": "sum",
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      1000000.0,
+      2000000.0,
+      3000000.0
+    ],
+    "lhs_dtype": "int32",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6505,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-reductions",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "mean_int32_returns_f64",
+    "op": "mean",
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      1000000.0,
+      2000000.0,
+      3000000.0
+    ],
+    "lhs_dtype": "int32",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6505,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-reductions",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "min_bool_array",
+    "op": "min",
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      0.0,
+      1.0,
+      1.0
+    ],
+    "lhs_dtype": "bool",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6505,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-reductions",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "max_bool_array",
+    "op": "max",
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      0.0,
+      1.0,
+      1.0
+    ],
+    "lhs_dtype": "bool",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6505,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-reductions",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "sum_with_nan_propagates",
+    "op": "sum",
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      "NaN",
+      3.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6505,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-reductions",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "min_with_nan_propagates",
+    "op": "min",
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      "NaN",
+      3.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6505,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-reductions",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "mean_with_nan_propagates",
+    "op": "mean",
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      "NaN",
+      3.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6505,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-reductions",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "var_int32_returns_f64",
+    "op": "var",
+    "lhs_shape": [
+      5
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0
+    ],
+    "lhs_dtype": "int32",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6505,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-reductions",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "std_int32_returns_f64",
+    "op": "std",
+    "lhs_shape": [
+      5
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0
+    ],
+    "lhs_dtype": "int32",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6505,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-reductions",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "var_int32_ddof1",
+    "op": "var",
+    "lhs_shape": [
+      5
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0
+    ],
+    "lhs_dtype": "int32",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6505,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-reductions",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed",
+    "ddof": 1
   }
 ]

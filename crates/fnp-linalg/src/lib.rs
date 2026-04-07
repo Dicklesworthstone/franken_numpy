@@ -3232,12 +3232,11 @@ fn sqrtm_non_finite_compat(a: &[f64], n: usize) -> Option<Vec<f64>> {
 fn mat_mul_rect(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
     let mut c = vec![0.0; m * n];
     for i in 0..m {
-        for j in 0..n {
-            let mut sum = 0.0;
-            for p in 0..k {
-                sum += a[i * k + p] * b[p * n + j];
+        for p in 0..k {
+            let a_ip = a[i * k + p];
+            for j in 0..n {
+                c[i * n + j] += a_ip * b[p * n + j];
             }
-            c[i * n + j] = sum;
         }
     }
     c

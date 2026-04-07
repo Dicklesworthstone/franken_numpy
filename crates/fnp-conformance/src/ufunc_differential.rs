@@ -4679,6 +4679,89 @@ mod tests {
     }
 
     #[test]
+    fn differential_reduction_cross_dtype_and_multi_axis_match_oracle() {
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let inputs =
+            load_input_cases(&fixture_root.join("ufunc_input_cases.json")).expect("load inputs");
+        let oracle =
+            load_oracle_capture(&fixture_root.join("oracle_outputs/ufunc_oracle_output.json"))
+                .expect("load oracle");
+        let mut failures = Vec::new();
+        let case_ids = [
+            // Multi-axis reductions on 2x3x4 array
+            "sum_axes_02_keepdims_rank3",
+            "prod_axes_12_rank3",
+            "min_axes_01_rank3",
+            "max_axes_02_rank3",
+            "mean_axes_02_rank3",
+            // Cross-dtype promotion: small int → wide accumulator
+            "sum_int8_promotes_to_i64",
+            "sum_uint8_promotes_to_u64",
+            "sum_bool_promotes_to_i64",
+            "prod_bool_promotes_to_i64",
+            "sum_int32_promotes_to_i64",
+            "mean_int32_returns_f64",
+            // Bool min/max
+            "min_bool_array",
+            "max_bool_array",
+            // NaN propagation
+            "sum_with_nan_propagates",
+            "min_with_nan_propagates",
+            "mean_with_nan_propagates",
+            // Var/Std with integer dtype
+            "var_int32_returns_f64",
+            "std_int32_returns_f64",
+            "var_int32_ddof1",
+        ];
+
+        for case_id in case_ids {
+            let input = inputs.iter().find(|case| case.id == case_id);
+            assert!(input.is_some(), "missing input fixture {case_id}");
+            let Some(input) = input else { continue };
+
+            let oracle_case = oracle.cases.iter().find(|case| case.id == case_id);
+            assert!(oracle_case.is_some(), "missing oracle fixture {case_id}");
+            let Some(oracle_case) = oracle_case else { continue };
+
+            let outcome = execute_input_case(input);
+            if outcome.is_err() {
+                let err = outcome.err().unwrap_or_else(|| "unknown error".to_string());
+                failures.push(format!("{case_id} execution failed: {err}"));
+                continue;
+            }
+            let Ok((actual_shape, actual_values, actual_dtype)) = outcome else { continue };
+            let expected_dtype = canonical_dtype_name(&oracle_case.dtype);
+            let actual_dtype_str = canonical_dtype_name(&actual_dtype);
+            let (pass, max_abs_error, reason) = compare_arrays(
+                &oracle_case.shape,
+                &oracle_case.values,
+                &actual_shape,
+                &actual_values,
+                1e-10,
+                1e-10,
+            );
+
+            eprintln!(
+                "{case_id}: pass={pass} expected_dtype={expected_dtype} actual_dtype={actual_dtype_str} expected_shape={:?} actual_shape={:?}",
+                oracle_case.shape, actual_shape
+            );
+
+            if expected_dtype != actual_dtype_str {
+                failures.push(format!(
+                    "{case_id} dtype mismatch expected={expected_dtype} actual={actual_dtype_str}",
+                ));
+            }
+            if !pass {
+                failures.push(format!(
+                    "{case_id} mismatch max_abs_error={max_abs_error} reason={reason:?}"
+                ));
+            }
+        }
+
+        assert!(failures.is_empty(), "reduction failures: {failures:?}");
+    }
+
+    #[test]
     fn differential_comparison_ops_cross_dtype_match_oracle() {
         let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
         let inputs =
