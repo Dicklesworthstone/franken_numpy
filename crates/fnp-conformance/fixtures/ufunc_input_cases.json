@@ -8924,5 +8924,1061 @@
     "reason_code": "ufunc_dispatch_resolution_failed",
     "expected_reason_code": "ufunc_dispatch_resolution_failed",
     "ddof": 1
+  },
+  {
+    "id": "logaddexp_same",
+    "op": "logaddexp",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      1.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "logaddexp_large_diff",
+    "op": "logaddexp",
+    "lhs_shape": [],
+    "lhs_values": [
+      100.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      0.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "logaddexp_neg_inf",
+    "op": "logaddexp",
+    "lhs_shape": [],
+    "lhs_values": [
+      "-Infinity"
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      0.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "logaddexp_both_neg_inf",
+    "op": "logaddexp",
+    "lhs_shape": [],
+    "lhs_values": [
+      "-Infinity"
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      "-Infinity"
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "logaddexp_nan",
+    "op": "logaddexp",
+    "lhs_shape": [],
+    "lhs_values": [
+      "NaN"
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      1.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "logaddexp2_same",
+    "op": "logaddexp2",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      1.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "logaddexp2_large_diff",
+    "op": "logaddexp2",
+    "lhs_shape": [],
+    "lhs_values": [
+      50.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      0.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "logaddexp2_neg_inf",
+    "op": "logaddexp2",
+    "lhs_shape": [],
+    "lhs_values": [
+      "-Infinity"
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      0.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "nextafter_zero_up",
+    "op": "nextafter",
+    "lhs_shape": [],
+    "lhs_values": [
+      0.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      1.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "nextafter_zero_down",
+    "op": "nextafter",
+    "lhs_shape": [],
+    "lhs_values": [
+      0.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      -1.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "nextafter_one_up",
+    "op": "nextafter",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      2.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "nextafter_inf",
+    "op": "nextafter",
+    "lhs_shape": [],
+    "lhs_values": [
+      "Infinity"
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      0.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "fmod_positive",
+    "op": "fmod",
+    "lhs_shape": [],
+    "lhs_values": [
+      7.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      3.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "fmod_negative_dividend",
+    "op": "fmod",
+    "lhs_shape": [],
+    "lhs_values": [
+      -7.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      3.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "fmod_negative_divisor",
+    "op": "fmod",
+    "lhs_shape": [],
+    "lhs_values": [
+      7.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      -3.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "fmod_zero_dividend",
+    "op": "fmod",
+    "lhs_shape": [],
+    "lhs_values": [
+      0.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      3.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "fmod_nan_input",
+    "op": "fmod",
+    "lhs_shape": [],
+    "lhs_values": [
+      "NaN"
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      3.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "heaviside_positive",
+    "op": "heaviside",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      0.5
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "heaviside_negative",
+    "op": "heaviside",
+    "lhs_shape": [],
+    "lhs_values": [
+      -1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      0.5
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "heaviside_zero",
+    "op": "heaviside",
+    "lhs_shape": [],
+    "lhs_values": [
+      0.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      0.5
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "heaviside_nan",
+    "op": "heaviside",
+    "lhs_shape": [],
+    "lhs_values": [
+      "NaN"
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      0.5
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "copysign_pos_neg",
+    "op": "copysign",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      -1.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "copysign_neg_pos",
+    "op": "copysign",
+    "lhs_shape": [],
+    "lhs_values": [
+      -1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      1.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "copysign_zero_neg",
+    "op": "copysign",
+    "lhs_shape": [],
+    "lhs_values": [
+      0.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      -1.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-advanced-binary",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "abs_int8_negative",
+    "op": "abs",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      -50.0
+    ],
+    "lhs_dtype": "int8",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "abs_int32_negative",
+    "op": "abs",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      -100000.0
+    ],
+    "lhs_dtype": "int32",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "abs_int64_negative",
+    "op": "abs",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      -999999999.0
+    ],
+    "lhs_dtype": "int64",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "abs_uint8_noop",
+    "op": "abs",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      200.0
+    ],
+    "lhs_dtype": "uint8",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "abs_f32_negative",
+    "op": "abs",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      -3.14
+    ],
+    "lhs_dtype": "f32",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "sign_int8_negative",
+    "op": "sign",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      -50.0
+    ],
+    "lhs_dtype": "int8",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "sign_int8_positive",
+    "op": "sign",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      50.0
+    ],
+    "lhs_dtype": "int8",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "sign_int8_zero",
+    "op": "sign",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      0.0
+    ],
+    "lhs_dtype": "int8",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "sign_int32_negative",
+    "op": "sign",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      -100.0
+    ],
+    "lhs_dtype": "int32",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "sign_f64_nan",
+    "op": "sign",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      "NaN"
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "square_int8",
+    "op": "square",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      10.0
+    ],
+    "lhs_dtype": "int8",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "square_int32",
+    "op": "square",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      1000.0
+    ],
+    "lhs_dtype": "int32",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "square_uint8",
+    "op": "square",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      15.0
+    ],
+    "lhs_dtype": "uint8",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "square_f32",
+    "op": "square",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      2.5
+    ],
+    "lhs_dtype": "f32",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "negative_int8",
+    "op": "negative",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      50.0
+    ],
+    "lhs_dtype": "int8",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "negative_int32",
+    "op": "negative",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      100000.0
+    ],
+    "lhs_dtype": "int32",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "negative_uint8",
+    "op": "negative",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      200.0
+    ],
+    "lhs_dtype": "uint8",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "isnan_f64_nan",
+    "op": "isnan",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      "NaN"
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "isnan_f64_normal",
+    "op": "isnan",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "isinf_f64_inf",
+    "op": "isinf",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      "Infinity"
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "isinf_f64_normal",
+    "op": "isinf",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "isfinite_f64_nan",
+    "op": "isfinite",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      "NaN"
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "isfinite_f64_inf",
+    "op": "isfinite",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      "Infinity"
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "isfinite_f64_normal",
+    "op": "isfinite",
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": null,
+    "rhs_values": null,
+    "rhs_dtype": null,
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-unary-dtypes",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
   }
 ]

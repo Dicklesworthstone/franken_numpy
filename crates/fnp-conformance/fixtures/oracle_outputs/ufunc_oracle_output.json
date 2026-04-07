@@ -4303,6 +4303,534 @@
         2.5
       ],
       "dtype": "float64"
+    },
+    {
+      "id": "logaddexp_same",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.6931471805599454
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "logaddexp_large_diff",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        100.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "logaddexp_neg_inf",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        0.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "logaddexp_both_neg_inf",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        "-Infinity"
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "logaddexp_nan",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        "NaN"
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "logaddexp2_same",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        2.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "logaddexp2_large_diff",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        50.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "logaddexp2_neg_inf",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        0.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "nextafter_zero_up",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        5e-324
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "nextafter_zero_down",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        -5e-324
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "nextafter_one_up",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0000000000000002
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "nextafter_inf",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.7976931348623157e+308
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "fmod_positive",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "fmod_negative_dividend",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        -1.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "fmod_negative_divisor",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "fmod_zero_dividend",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        0.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "fmod_nan_input",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        "NaN"
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "heaviside_positive",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "heaviside_negative",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        0.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "heaviside_zero",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        0.5
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "heaviside_nan",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        "NaN"
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "copysign_pos_neg",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        -1.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "copysign_neg_pos",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "copysign_zero_neg",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        -0.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "abs_int8_negative",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        50.0
+      ],
+      "dtype": "int8"
+    },
+    {
+      "id": "abs_int32_negative",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        100000.0
+      ],
+      "dtype": "int32"
+    },
+    {
+      "id": "abs_int64_negative",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        999999999.0
+      ],
+      "dtype": "int64"
+    },
+    {
+      "id": "abs_uint8_noop",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        200.0
+      ],
+      "dtype": "uint8"
+    },
+    {
+      "id": "abs_f32_negative",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        3.140000104904175
+      ],
+      "dtype": "float32"
+    },
+    {
+      "id": "sign_int8_negative",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        -1.0
+      ],
+      "dtype": "int8"
+    },
+    {
+      "id": "sign_int8_positive",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        1.0
+      ],
+      "dtype": "int8"
+    },
+    {
+      "id": "sign_int8_zero",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        0.0
+      ],
+      "dtype": "int8"
+    },
+    {
+      "id": "sign_int32_negative",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        -1.0
+      ],
+      "dtype": "int32"
+    },
+    {
+      "id": "sign_f64_nan",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        "NaN"
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "square_int8",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        100.0
+      ],
+      "dtype": "int8"
+    },
+    {
+      "id": "square_int32",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        1000000.0
+      ],
+      "dtype": "int32"
+    },
+    {
+      "id": "square_uint8",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        225.0
+      ],
+      "dtype": "uint8"
+    },
+    {
+      "id": "square_f32",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        6.25
+      ],
+      "dtype": "float32"
+    },
+    {
+      "id": "negative_int8",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        -50.0
+      ],
+      "dtype": "int8"
+    },
+    {
+      "id": "negative_int32",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        -100000.0
+      ],
+      "dtype": "int32"
+    },
+    {
+      "id": "negative_uint8",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        56.0
+      ],
+      "dtype": "uint8"
+    },
+    {
+      "id": "isnan_f64_nan",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        1.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "isnan_f64_normal",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        0.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "isinf_f64_inf",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        1.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "isinf_f64_normal",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        0.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "isfinite_f64_nan",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        0.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "isfinite_f64_inf",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        0.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "isfinite_f64_normal",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        1
+      ],
+      "values": [
+        1.0
+      ],
+      "dtype": "bool_"
     }
   ]
 }

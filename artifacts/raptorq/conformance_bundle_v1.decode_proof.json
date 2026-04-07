@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "bundle_id": "conformance_bundle_v1",
-  "generated_at_unix_ms": 1775587573164,
+  "generated_at_unix_ms": 1775587953104,
   "dropped_symbol": "sbn=0 esi=0 kind=source",
-  "recovery_symbols_used": 2044,
+  "recovery_symbols_used": 2259,
   "recovery_success": true,
-  "expected_hash": "eef7b47586a7883ae15dab20cfcbd1223e054b447440910c15de877c843fa0ac",
-  "recovered_hash": "eef7b47586a7883ae15dab20cfcbd1223e054b447440910c15de877c843fa0ac",
+  "expected_hash": "3af817c67d63d3331b6514fd81488b734bf28bd74be5c2a5a50c2d3bea2ab9ae",
+  "recovered_hash": "3af817c67d63d3331b6514fd81488b734bf28bd74be5c2a5a50c2d3bea2ab9ae",
   "error": null
 }

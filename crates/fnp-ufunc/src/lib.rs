@@ -12556,10 +12556,10 @@ impl UFuncArray {
                 } else {
                     // Decreasing bins: reverse the logic
                     if right {
-                        let idx = b.partition_point(|&probe| probe > v);
+                        let idx = b.partition_point(|&probe| probe >= v);
                         idx as f64
                     } else {
-                        let idx = b.partition_point(|&probe| probe >= v);
+                        let idx = b.partition_point(|&probe| probe > v);
                         idx as f64
                     }
                 }
