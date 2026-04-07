@@ -221,7 +221,7 @@ The SCE owns all shape transformation rules and is the correctness backbone of t
 
 ### Dual-Mode Runtime (`fnp-runtime`)
 
-The runtime implements a Bayesian decision engine that chooses between three actions for each compatibility check:
+The runtime implements a risk-aware decision engine with posterior probability estimation that chooses between three actions for each compatibility check:
 
 | Action | When Used |
 |--------|-----------|
@@ -229,7 +229,7 @@ The runtime implements a Bayesian decision engine that chooses between three act
 | **FullValidate** | Hardened mode with elevated risk, or malformed metadata (NaN/out-of-range inputs) |
 | **FailClosed** | Unknown semantics or KnownIncompatible in any mode |
 
-**Bayesian risk scoring.** Each decision starts with class-specific prior odds (1% incompatibility for KnownCompatible, 99% for KnownIncompatible, 50% for Unknown). A risk score is computed as the log-likelihood ratio of the evidence against a threshold. The posterior incompatibility probability determines the action via a loss model.
+**Risk scoring with posterior estimation.** Each decision starts with class-specific prior odds (1% incompatibility for KnownCompatible, 99% for KnownIncompatible, 50% for Unknown). A risk score is computed as the log-likelihood ratio of the evidence against a threshold. The posterior incompatibility probability determines the action via a loss model.
 
 The loss model encodes the asymmetric costs:
 
@@ -287,7 +287,7 @@ The RNG crate achieves bit-exact parity with NumPy by porting every algorithm fr
 
 ### Linear Algebra (`fnp-linalg`)
 
-93 public functions organized into three tiers:
+92 public functions organized into three tiers:
 
 **2x2 fast paths.** `solve_2x2`, `det_2x2`, `inv_2x2`, `qr_2x2`, `svd_2x2`, `eigh_2x2`, `cholesky_2x2` avoid the overhead of general NxN algorithms for the smallest matrix size.
 
@@ -304,7 +304,7 @@ The RNG crate achieves bit-exact parity with NumPy by porting every algorithm fr
 
 **Batch operations.** 14 batch functions (`batch_inv`, `batch_det`, `batch_solve`, `batch_svd`, `batch_qr`, `batch_cholesky`, `batch_eig`, `batch_eigvalsh`, `batch_eigh`, `batch_slogdet`, `batch_svd_full`, `batch_matrix_norm`, `batch_matrix_rank`, `batch_trace`) operate on stacked matrices with leading batch dimensions, matching NumPy's broadcasting semantics for linear algebra.
 
-**Complex number support.** 15+ functions for complex-valued matrices: `complex_solve_nxn`, `complex_det_nxn`, `complex_inv_nxn`, `complex_cholesky_nxn`, `complex_qr_mxn`, `complex_matmul`, `complex_matvec`, `complex_conjugate_transpose`, `complex_matrix_norm_frobenius`, `complex_trace_nxn`.
+**Complex number support.** 10 functions for complex-valued matrices: `complex_solve_nxn`, `complex_det_nxn`, `complex_inv_nxn`, `complex_cholesky_nxn`, `complex_qr_mxn`, `complex_matmul`, `complex_matvec`, `complex_conjugate_transpose`, `complex_matrix_norm_frobenius`, `complex_trace_nxn`.
 
 ### I/O Format Handling (`fnp-io`)
 
@@ -448,12 +448,12 @@ Five complete polynomial families, each with evaluation, arithmetic, calculus, a
 |--------|-------|----------------|
 | Power series | `x^n` | `polyval`, `polyder`, `polyint`, `polyfit`, `polymul`, `polyadd`, `polysub`, `polydiv`, `polyroots` |
 | Chebyshev | `T_n(x)` | `chebval`, `chebadd`, `chebsub`, `chebmul`, `chebdiv`, `chebder`, `chebint`, `chebroots`, `chebfromroots`, `chebfit`, `cheb2poly`, `poly2cheb` |
-| Legendre | `P_n(x)` | `legval`, `legder`, `legint`, `legfit` |
-| Hermite (physicist) | `H_n(x)` | `hermval`, `hermder`, `hermint` |
-| Hermite (probabilist) | `He_n(x)` | `hermeval` |
-| Laguerre | `L_n(x)` | `lagval`, `lagder`, `lagint` |
+| Legendre | `P_n(x)` | `legval`, `legadd`, `legsub`, `legmul`, `legdiv`, `legder`, `legint`, `legroots`, `legfromroots`, `legfit`, `leg2poly`, `poly2leg` |
+| Hermite (physicist) | `H_n(x)` | `hermval`, `hermadd`, `hermsub`, `hermmul`, `hermdiv`, `hermder`, `hermint`, `hermroots`, `hermfromroots`, `hermfit`, `herm2poly`, `poly2herm` |
+| Hermite (probabilist) | `He_n(x)` | `hermeval`, `hermeadd`, `hermesub`, `hermemul`, `hermediv`, `hermeroots`, `hermefromroots`, `herme2poly`, `poly2herme` |
+| Laguerre | `L_n(x)` | `lagval`, `lagadd`, `lagsub`, `lagmul`, `lagdiv`, `lagder`, `lagint`, `lagroots`, `lagfromroots`, `lagfit`, `lag2poly`, `poly2lag` |
 
-Chebyshev has the fullest support because its numerical conditioning makes it the recommended basis for most practical problems.
+All five polynomial families support the full suite of evaluation, arithmetic, calculus, root-finding, basis conversion, and fitting operations.
 
 ### Masked Arrays
 
@@ -775,7 +775,7 @@ Current per-crate counts move over time; see `FEATURE_PARITY.md` for the live in
 | `fnp-conformance` | Differential parity, metamorphic identities, adversarial fuzzing, witness stability, and matmul conformance |
 | `fnp-ndarray` | Shape legality, stride calculus, broadcast contracts, overlap detection, multi-axis negative strides, F-order, and edge cases |
 | `fnp-iter` | Transfer-loop selection, NDIter traversal/broadcast/overlap contracts, flatiter indexing/assignment, and enumeration helpers |
-| `fnp-runtime` | Mode split, fail-closed decoding, override-audit gates, Bayesian decisions, and evidence-ledger behavior |
+| `fnp-runtime` | Mode split, fail-closed decoding, override-audit gates, risk-aware decisions, and evidence-ledger behavior |
 
 ### Oracle Test Strategy
 
@@ -942,7 +942,8 @@ What works and what doesn't:
 - **Complex elementwise arithmetic uses interleaved storage.** Complex64/Complex128 dtypes store real/imaginary parts as interleaved floats with a trailing dimension of 2. Elementwise `multiply` and `divide` apply true complex arithmetic `(a+bi)(c+di) = (ac-bd)+(ad+bc)i`, but the interleaved representation adds overhead compared to native complex types.
 - **`multivariate_normal` uses Cholesky.** NumPy defaults to SVD. Adding SVD would require `fnp-linalg` as a dependency of `fnp-random` (currently zero-dependency).
 - **`multivariate_hypergeometric` uses sequential draws.** NumPy uses the `random_mvhg_marginals` algorithm.
-- **`frompyfunc` and `nditer`** require Python callable protocol (N/A for Rust).
+- **`frompyfunc`** requires Python callable protocol (N/A for Rust).
+- **No Python-facing `nditer` object wrapper yet.** The Python iterator protocol is not exposed, but the underlying nditer planning, broadcast, flag-validation, and overlap-policy semantics already live in `fnp-iter`.
 - **Single-threaded.** All operations are single-threaded. The `asupersync` async runtime integration is optional and used only for conformance pipeline orchestration, not for parallel array computation.
 - **f64 internal representation.** `UFuncArray` stores numeric values as `Vec<f64>` internally for arithmetic. For i64/u64 values > 2^53, an `IntegerSidecar` preserves exact integer values through storage round-trips (`from_storage` / `to_storage`). Arithmetic on large integers still uses f64 approximation.
 

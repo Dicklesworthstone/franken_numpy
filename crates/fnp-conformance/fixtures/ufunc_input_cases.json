@@ -6806,5 +6806,430 @@
     ],
     "reason_code": "ufunc_dispatch_resolution_failed",
     "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "add_scalar_i32_plus_f16",
+    "op": "add",
+    "lhs_shape": [],
+    "lhs_values": [
+      100.0
+    ],
+    "lhs_dtype": "i32",
+    "rhs_shape": [],
+    "rhs_values": [
+      1.5
+    ],
+    "rhs_dtype": "f16",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6501,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "mul_scalar_u64_by_i8",
+    "op": "mul",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.152921504606847e18
+    ],
+    "lhs_dtype": "u64",
+    "rhs_shape": [],
+    "rhs_values": [
+      -1.0
+    ],
+    "rhs_dtype": "i8",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6502,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "sub_scalar_f32_minus_i64",
+    "op": "sub",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "f32",
+    "rhs_shape": [],
+    "rhs_values": [
+      1.0
+    ],
+    "rhs_dtype": "i64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6503,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "mul_scalar_u16_by_i16",
+    "op": "mul",
+    "lhs_shape": [],
+    "lhs_values": [
+      60000.0
+    ],
+    "lhs_dtype": "u16",
+    "rhs_shape": [],
+    "rhs_values": [
+      -1.0
+    ],
+    "rhs_dtype": "i16",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6505,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "add_scalar_f16_plus_i16",
+    "op": "add",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "f16",
+    "rhs_shape": [],
+    "rhs_values": [
+      1000.0
+    ],
+    "rhs_dtype": "i16",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6506,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "div_scalar_i32_by_i32",
+    "op": "div",
+    "lhs_shape": [],
+    "lhs_values": [
+      7.0
+    ],
+    "lhs_dtype": "i32",
+    "rhs_shape": [],
+    "rhs_values": [
+      2.0
+    ],
+    "rhs_dtype": "i32",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "floor_divide_scalar_i32_by_i32",
+    "op": "floor_divide",
+    "lhs_shape": [],
+    "lhs_values": [
+      7.0
+    ],
+    "lhs_dtype": "i32",
+    "rhs_shape": [],
+    "rhs_values": [
+      2.0
+    ],
+    "rhs_dtype": "i32",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "mul_scalar_f64_by_bool",
+    "op": "mul",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.5
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      1.0
+    ],
+    "rhs_dtype": "bool",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6509,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "add_scalar_f64_plus_f32",
+    "op": "add",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      1.0
+    ],
+    "rhs_dtype": "f32",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6513,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "add_scalar_u16_plus_i32",
+    "op": "add",
+    "lhs_shape": [],
+    "lhs_values": [
+      65000.0
+    ],
+    "lhs_dtype": "u16",
+    "rhs_shape": [],
+    "rhs_values": [
+      -10.0
+    ],
+    "rhs_dtype": "i32",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6514,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "minimum_scalar_f32_with_u16",
+    "op": "minimum",
+    "lhs_shape": [],
+    "lhs_values": [
+      3.5
+    ],
+    "lhs_dtype": "f32",
+    "rhs_shape": [],
+    "rhs_values": [
+      2.0
+    ],
+    "rhs_dtype": "u16",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6517,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "add_scalar_i32_plus_f64",
+    "op": "add",
+    "lhs_shape": [],
+    "lhs_values": [
+      5.0
+    ],
+    "lhs_dtype": "i32",
+    "rhs_shape": [],
+    "rhs_values": [
+      0.25
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6518,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "sub_scalar_u64_minus_i32",
+    "op": "sub",
+    "lhs_shape": [],
+    "lhs_values": [
+      100.0
+    ],
+    "lhs_dtype": "u64",
+    "rhs_shape": [],
+    "rhs_values": [
+      7.0
+    ],
+    "rhs_dtype": "i32",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6519,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "div_scalar_bool_by_i64",
+    "op": "div",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "bool",
+    "rhs_shape": [],
+    "rhs_values": [
+      2.0
+    ],
+    "rhs_dtype": "i64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6520,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "floor_divide_scalar_f64_by_i32",
+    "op": "floor_divide",
+    "lhs_shape": [],
+    "lhs_values": [
+      7.5
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      2.0
+    ],
+    "rhs_dtype": "i32",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6521,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "power_scalar_f64_to_i32",
+    "op": "power",
+    "lhs_shape": [],
+    "lhs_values": [
+      2.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      3.0
+    ],
+    "rhs_dtype": "i32",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6522,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "mul_scalar_f32_by_u64",
+    "op": "mul",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.5
+    ],
+    "lhs_dtype": "f32",
+    "rhs_shape": [],
+    "rhs_values": [
+      4.0
+    ],
+    "rhs_dtype": "u64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6523,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
   }
 ]

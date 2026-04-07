@@ -2,10 +2,10 @@
 
 ## Status Legend
 
-- `not_started`
-- `in_progress`
-- `parity_green`
-- `parity_gap`
+- `not_started` — No implementation exists
+- `in_progress` — Partial implementation, actively being worked on
+- `parity_green` — Feature is implemented, has passing tests in the Rust test suite, and core behavior matches NumPy semantics. Note: this means "implemented and tested" — it does NOT guarantee bit-for-bit oracle verification against NumPy for every edge case. Features with oracle-verified differential coverage are noted in the Evidence column.
+- `parity_gap` — Known behavioral divergence from NumPy that needs to be closed
 
 ## Parity Matrix
 
@@ -21,9 +21,9 @@
 | Indexing | parity_green | take, put, choose, compress, diagonal, triu/tril, indices, nonzero, flatnonzero, unravel_index, ravel_multi_index | — |
 | Polynomial: power series | parity_green | polyval, polyder, polyint, polyfit, polymul, polyadd, polysub, polydiv, polyroots | — |
 | Polynomial: Chebyshev | parity_green | chebval, chebadd, chebsub, chebmul, chebdiv, chebder, chebint, chebroots, chebfromroots, chebfit, cheb2poly, poly2cheb | — |
-| Polynomial: Legendre | parity_green | legval, legder, legint, legfit | — |
-| Polynomial: Hermite | parity_green | hermval (physicist), hermeval (probabilist), hermder, hermint | — |
-| Polynomial: Laguerre | parity_green | lagval, lagder, lagint | — |
+| Polynomial: Legendre | parity_green | legval, legadd, legsub, legmul, legdiv, legder, legint, legroots, legfromroots, legfit, leg2poly, poly2leg | — |
+| Polynomial: Hermite | parity_green | hermval, hermadd, hermsub, hermmul, hermdiv, hermder, hermint, hermroots, hermfromroots, hermfit, herm2poly, poly2herm (physicist); hermeval, hermeadd, hermesub, hermemul, hermediv, hermeroots, hermefromroots, herme2poly, poly2herme (probabilist) | — |
+| Polynomial: Laguerre | parity_green | lagval, lagadd, lagsub, lagmul, lagdiv, lagder, lagint, lagroots, lagfromroots, lagfit, lag2poly, poly2lag | — |
 | Pad modes | parity_green | constant, edge, reflect, symmetric, wrap, linear_ramp, maximum, minimum, mean, median, empty | — |
 | Financial | parity_green | fv, pv, pmt, ppmt, ipmt, nper, rate, npv, irr, mirr | — |
 | Statistics | parity_green | histogram, histogram_bin_edges, bincount, digitize, percentile, quantile, median, average, corrcoef, cov | — |
@@ -57,13 +57,13 @@
 | fnp-io | 176 | NPY/NPZ read/write, text formats, compression, 7 format oracle tests, genfromtxt_full, fromfile_text/tofile_text |
 | fnp-conformance | 119 | Differential parity, metamorphic identities, adversarial fuzzing, witness stability, matmul conformance |
 | fnp-dtype | 124 | Dtype taxonomy, promotion table (all 324 pairs explicit), cast policy primitives, NumPy byte-width parsing |
-| fnp-runtime | 54 | Mode split, fail-closed decoding, override-audit gate, Bayesian decision engine, evidence ledger |
+| fnp-runtime | 54 | Mode split, fail-closed decoding, override-audit gate, risk-aware decision engine, evidence ledger |
 | **Total** | **2,878** | |
 
 ## Remaining Gaps (Python-specific, low priority)
 
 1. `frompyfunc` — requires Python callable protocol (N/A for Rust)
-2. `nditer` — Python-level iterator protocol (N/A for Rust)
+2. Python-facing `nditer` object wrapper — low-level planning, broadcast, and overlap-policy semantics are implemented in `fnp-iter`, but the Python iterator protocol itself is not exposed
 3. Expanded CI matrix for alternate oracle environments and longer-horizon benchmark trend regression
 
 ## Intentional Design Decisions

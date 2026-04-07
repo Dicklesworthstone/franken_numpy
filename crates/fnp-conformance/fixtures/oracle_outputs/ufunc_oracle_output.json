@@ -3445,6 +3445,176 @@
         403.0
       ],
       "dtype": "float64"
+    },
+    {
+      "id": "add_scalar_i32_plus_f16",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        101.5
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "mul_scalar_u64_by_i8",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        -1.152921504606847e18
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "sub_scalar_f32_minus_i64",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        0.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "add_scalar_u8_plus_i8",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        150.0
+      ],
+      "dtype": "int16"
+    },
+    {
+      "id": "mul_scalar_u16_by_i16",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        -60000.0
+      ],
+      "dtype": "int32"
+    },
+    {
+      "id": "add_scalar_f16_plus_i16",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1001.0
+      ],
+      "dtype": "float32"
+    },
+    {
+      "id": "div_scalar_i32_by_i32",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        3.5
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "floor_divide_scalar_i32_by_i32",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        3.0
+      ],
+      "dtype": "int32"
+    },
+    {
+      "id": "mul_scalar_f64_by_bool",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.5
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "add_scalar_u8_plus_u8_wrap",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        0.0
+      ],
+      "dtype": "uint8"
+    },
+    {
+      "id": "add_scalar_i8_plus_i8_wrap",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        -128.0
+      ],
+      "dtype": "int8"
+    },
+    {
+      "id": "power_scalar_i64_to_i64_wrap",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        -9.223372036854776e18
+      ],
+      "dtype": "int64"
+    },
+    {
+      "id": "add_scalar_f64_plus_f32",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        2.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "add_scalar_u16_plus_i32",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        64990.0
+      ],
+      "dtype": "int32"
+    },
+    {
+      "id": "sub_scalar_bool_minus_u8_wrap",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        255.0
+      ],
+      "dtype": "uint8"
+    },
+    {
+      "id": "maximum_scalar_i16_with_u8",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        250.0
+      ],
+      "dtype": "int16"
+    },
+    {
+      "id": "minimum_scalar_f32_with_u16",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        2.0
+      ],
+      "dtype": "float32"
     }
   ]
 }

@@ -10472,31 +10472,44 @@ fn validate_runtime_policy_log_fields(
 #[cfg(test)]
 mod tests {
     use super::{
-        AsStridedFixtureCase, HarnessConfig, IterFlatIndexFixtureInput, RngStatisticalCase,
-        ShapeStrideFixtureCase, default_rng_mean_abs_tol, default_rng_variance_abs_tol,
-        evaluate_shape_stride_case, generate_rng_samples, infer_flatiter_len, run_all_core_suites,
-        run_crash_signature_regression_suite, run_datetime_differential_suite,
-        run_dtype_adversarial_suite, run_dtype_differential_suite, run_dtype_metamorphic_suite,
-        run_dtype_promotion_suite, run_fft_differential_suite, run_io_adversarial_suite,
-        run_io_differential_suite, run_io_metamorphic_suite, run_iter_adversarial_suite,
-        run_iter_differential_suite, run_iter_metamorphic_suite, run_linalg_adversarial_suite,
-        run_linalg_differential_suite, run_linalg_metamorphic_suite, run_masked_differential_suite,
-        run_polynomial_differential_suite, run_rng_adversarial_suite, run_rng_differential_suite,
-        run_rng_metamorphic_suite, run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
+        AsStridedFixtureCase, BinaryOp, DType, HarnessConfig, IterFlatIndexFixtureInput,
+        RngStatisticalCase, ShapeStrideFixtureCase, UFuncArray, default_rng_mean_abs_tol,
+        default_rng_variance_abs_tol, evaluate_shape_stride_case, generate_rng_samples,
+        infer_flatiter_len, run_all_core_suites, run_crash_signature_regression_suite,
+        run_datetime_differential_suite, run_dtype_adversarial_suite, run_dtype_differential_suite,
+        run_dtype_metamorphic_suite, run_dtype_promotion_suite, run_fft_differential_suite,
+        run_io_adversarial_suite, run_io_differential_suite, run_io_metamorphic_suite,
+        run_iter_adversarial_suite, run_iter_differential_suite, run_iter_metamorphic_suite,
+        run_linalg_adversarial_suite, run_linalg_differential_suite, run_linalg_metamorphic_suite,
+        run_masked_differential_suite, run_polynomial_differential_suite,
+        run_rng_adversarial_suite, run_rng_differential_suite, run_rng_metamorphic_suite,
+        run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
         run_shape_stride_adversarial_suite, run_shape_stride_differential_suite,
         run_shape_stride_metamorphic_suite, run_shape_stride_suite, run_smoke,
         run_string_differential_suite, run_ufunc_adversarial_suite, run_ufunc_differential_suite,
         run_ufunc_metamorphic_suite, set_dtype_promotion_log_path, set_shape_stride_log_path,
     };
+    use fnp_io::{IOSupportedDType, load as load_npy, save as save_npy};
     use fnp_iter::{
         RuntimeMode as IterRuntimeMode, TRANSFER_PACKET_REASON_CODES, TransferContext,
         TransferDtypeRelation, TransferLogRecord, TransferLoopClass, select_transfer_loop,
         validate_subarray_transfer, validate_where_mask,
     };
+    use fnp_random::Generator;
     use serde_json::Value;
+    use std::fmt::Display;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn step_ok(step: usize, description: &str) {
+        eprintln!("Step {step}: {description} ... OK");
+    }
+
+    fn step_fail(step: usize, description: &str, details: impl Display) -> ! {
+        eprintln!("Step {step}: {description} ... FAILED: {details}");
+        panic!("Step {step}: {description} failed: {details}");
+    }
 
     #[test]
     fn smoke_harness_finds_oracle_and_fixtures() {
@@ -10505,6 +10518,211 @@ mod tests {
         assert!(report.oracle_present, "oracle repo should be present");
         assert!(report.fixture_count >= 1, "expected at least one fixture");
         assert!(report.strict_mode);
+    }
+
+    #[test]
+    fn cross_crate_workflow_smoke_test() {
+        const MATMUL_TOL: f64 = 1e-10;
+        const STD_TOL: f64 = 1e-12;
+        const RNG_SIGMA_TOL: f64 = 0.3;
+
+        let created = UFuncArray::arange(0.0, 12.0, 1.0, DType::F64)
+            .expect("Step 1: arange should succeed")
+            .reshape(&[3, 4])
+            .expect("Step 1: reshape should succeed");
+        let expected_created = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0];
+        if created.shape() != [3, 4] || created.values() != expected_created {
+            step_fail(
+                1,
+                "CREATE arange(0, 12) -> reshape(3, 4)",
+                format!(
+                    "shape={:?} values={:?}, expected shape [3, 4] values {:?}",
+                    created.shape(),
+                    created.values(),
+                    expected_created
+                ),
+            );
+        }
+        step_ok(1, "CREATE arange(0, 12) -> reshape(3, 4)");
+
+        let scalar_two =
+            UFuncArray::new(vec![], vec![2.0], DType::F64).expect("Step 2: scalar construction");
+        let doubled = created
+            .elementwise_binary(&scalar_two, BinaryOp::Mul)
+            .expect("Step 2: multiply should succeed");
+        let expected_doubled = [
+            0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0,
+        ];
+        if doubled.shape() != [3, 4]
+            || doubled.dtype() != DType::F64
+            || doubled.values() != expected_doubled
+        {
+            step_fail(
+                2,
+                "MATH elementwise multiply by scalar(2.0)",
+                format!(
+                    "shape={:?} dtype={:?} values={:?}, expected shape [3, 4], dtype F64, values {:?}",
+                    doubled.shape(),
+                    doubled.dtype(),
+                    doubled.values(),
+                    expected_doubled
+                ),
+            );
+        }
+        step_ok(2, "MATH elementwise multiply by scalar(2.0)");
+
+        let reduced = doubled
+            .reduce_sum(Some(1), false)
+            .expect("Step 3: reduce_sum should succeed");
+        let expected_reduced = [12.0, 44.0, 76.0];
+        if reduced.shape() != [3]
+            || reduced.dtype() != DType::F64
+            || reduced.values() != expected_reduced
+        {
+            step_fail(
+                3,
+                "REDUCE sum over axis=1",
+                format!(
+                    "shape={:?} dtype={:?} values={:?}, expected shape [3], dtype F64, values {:?}",
+                    reduced.shape(),
+                    reduced.dtype(),
+                    reduced.values(),
+                    expected_reduced
+                ),
+            );
+        }
+        step_ok(3, "REDUCE sum over axis=1");
+
+        let a = UFuncArray::new(
+            vec![3, 3],
+            vec![
+                4.0, 1.0, 1.0, //
+                1.0, 3.0, 0.0, //
+                1.0, 0.0, 2.0,
+            ],
+            DType::F64,
+        )
+        .expect("Step 4: matrix construction");
+        let b = UFuncArray::new(vec![3], vec![9.0, 7.0, 7.0], DType::F64)
+            .expect("Step 4: rhs construction");
+        let solution = a.solve(&b).expect("Step 4: solve should succeed");
+        let reconstructed = a.matmul(&solution).expect("Step 4: matmul should succeed");
+        let expected_solution = [1.0, 2.0, 3.0];
+        let solution_ok = solution.shape() == [3]
+            && crate::approx_equal_values(solution.values(), &expected_solution, 1e-12, 1e-12);
+        let reconstructed_ok = reconstructed.shape() == [3]
+            && crate::approx_equal_values(
+                reconstructed.values(),
+                b.values(),
+                MATMUL_TOL,
+                MATMUL_TOL,
+            );
+        if !solution_ok || !reconstructed_ok {
+            step_fail(
+                4,
+                "LINALG solve SPD system and verify A@x ~= b",
+                format!(
+                    "solution shape={:?} values={:?}, reconstructed shape={:?} values={:?}, expected solution {:?}, rhs {:?}",
+                    solution.shape(),
+                    solution.values(),
+                    reconstructed.shape(),
+                    reconstructed.values(),
+                    expected_solution,
+                    b.values()
+                ),
+            );
+        }
+        step_ok(4, "LINALG solve SPD system and verify A@x ~= b");
+
+        let sorted = solution
+            .sort(None, None)
+            .expect("Step 5: sort should succeed");
+        let monotonic = sorted.values().windows(2).all(|pair| pair[0] <= pair[1]);
+        if sorted.shape() != [3]
+            || !monotonic
+            || !crate::approx_equal_values(sorted.values(), &expected_solution, 1e-12, 1e-12)
+        {
+            step_fail(
+                5,
+                "SORT solution vector",
+                format!(
+                    "shape={:?} values={:?}, expected monotonic values {:?}",
+                    sorted.shape(),
+                    sorted.values(),
+                    expected_solution
+                ),
+            );
+        }
+        step_ok(5, "SORT solution vector");
+
+        let mean = sorted
+            .reduce_mean(None, false)
+            .expect("Step 6: reduce_mean should succeed");
+        let std = sorted
+            .reduce_std(None, false, 0)
+            .expect("Step 6: reduce_std should succeed");
+        let expected_mean = 2.0;
+        let expected_std = (2.0_f64 / 3.0).sqrt();
+        let mean_ok =
+            mean.shape().is_empty() && (mean.values()[0] - expected_mean).abs() <= STD_TOL;
+        let std_ok = std.shape().is_empty() && (std.values()[0] - expected_std).abs() <= STD_TOL;
+        if !mean_ok || !std_ok {
+            step_fail(
+                6,
+                "STATS mean/std of sorted vector",
+                format!(
+                    "mean shape={:?} value={}, std shape={:?} value={}, expected mean {}, expected std {}",
+                    mean.shape(),
+                    mean.values()[0],
+                    std.shape(),
+                    std.values()[0],
+                    expected_mean,
+                    expected_std
+                ),
+            );
+        }
+        step_ok(6, "STATS mean/std of sorted vector");
+
+        let npy_bytes =
+            save_npy(sorted.shape(), sorted.values(), IOSupportedDType::F64).expect("Step 7: save");
+        let (loaded_shape, loaded_values, loaded_dtype) =
+            load_npy(&npy_bytes).expect("Step 7: load should succeed");
+        if loaded_shape != sorted.shape()
+            || loaded_dtype != IOSupportedDType::F64
+            || loaded_values != sorted.values()
+        {
+            step_fail(
+                7,
+                "IO in-memory NPY roundtrip",
+                format!(
+                    "loaded shape={:?} dtype={:?} values={:?}, expected shape={:?} dtype={:?} values={:?}",
+                    loaded_shape,
+                    loaded_dtype,
+                    loaded_values,
+                    sorted.shape(),
+                    IOSupportedDType::F64,
+                    sorted.values()
+                ),
+            );
+        }
+        step_ok(7, "IO in-memory NPY roundtrip");
+
+        let mut rng = Generator::from_pcg64_dxsm(12345).expect("Step 8: generator construction");
+        let samples = rng.standard_normal(100);
+        let sample_mean = samples.iter().copied().sum::<f64>() / samples.len() as f64;
+        if samples.len() != 100 || sample_mean.abs() > RNG_SIGMA_TOL {
+            step_fail(
+                8,
+                "RANDOM seeded standard_normal mean within 3 sigma",
+                format!(
+                    "len={} mean={}, expected len 100 and |mean| <= {}",
+                    samples.len(),
+                    sample_mean,
+                    RNG_SIGMA_TOL
+                ),
+            );
+        }
+        step_ok(8, "RANDOM seeded standard_normal mean within 3 sigma");
     }
 
     #[test]

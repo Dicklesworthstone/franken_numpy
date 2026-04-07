@@ -17434,10 +17434,9 @@ impl UFuncArray {
             return Ok(());
         }
         let n = self.values.len();
-        let mut vi = 0;
         for i in 0..n {
             if mask.values[i] != 0.0 {
-                let src_index = vi % values.values.len();
+                let src_index = i % values.values.len();
                 let value = values.values[src_index];
                 self.values[i] = value;
                 self.write_integer_mutation(
@@ -17447,7 +17446,6 @@ impl UFuncArray {
                     src_index,
                     "putmask",
                 )?;
-                vi += 1;
             }
         }
         Ok(())
@@ -38838,7 +38836,7 @@ mod tests {
         let mask = UFuncArray::new(vec![4], vec![1.0, 0.0, 1.0, 0.0], DType::F64).unwrap();
         let vals = UFuncArray::new(vec![2], vec![10.0, 20.0], DType::F64).unwrap();
         a.putmask(&mask, &vals).unwrap();
-        assert_eq!(a.values(), &[10.0, 2.0, 20.0, 4.0]);
+        assert_eq!(a.values(), &[10.0, 2.0, 10.0, 4.0]);
     }
 
     #[test]
@@ -45086,7 +45084,10 @@ mod tests {
         .unwrap();
         let (counts, edges) = data.histogram(5).unwrap();
         let total: f64 = counts.values().iter().sum();
-        assert_eq!(total, 10.0, "histogram bin counts should sum to data length");
+        assert_eq!(
+            total, 10.0,
+            "histogram bin counts should sum to data length"
+        );
         assert_eq!(edges.values().len(), 6);
         for w in edges.values().windows(2) {
             assert!(w[0] <= w[1]);
@@ -45099,9 +45100,7 @@ mod tests {
             UFuncArray::new(vec![6], vec![-1.0, 0.5, 2.0, 0.0, 3.0, 1.0], DType::F64).unwrap();
         let min_v = data.reduce_min(None, false).unwrap();
         let max_v = data.reduce_max(None, false).unwrap();
-        let range = max_v
-            .elementwise_binary(&min_v, BinaryOp::Sub)
-            .unwrap();
+        let range = max_v.elementwise_binary(&min_v, BinaryOp::Sub).unwrap();
         let shifted = data
             .elementwise_binary(&min_v.broadcast_to(&[6]).unwrap(), BinaryOp::Sub)
             .unwrap();
@@ -45144,11 +45143,12 @@ mod tests {
     #[test]
     fn workflow_covariance_matrix_properties() {
         // Covariance matrix should be symmetric and PSD
-        let x = UFuncArray::new(vec![3, 4], vec![
-            1.0, 2.0, 3.0, 4.0,
-            2.0, 3.0, 4.0, 5.0,
-            5.0, 6.0, 7.0, 8.0,
-        ], DType::F64).unwrap();
+        let x = UFuncArray::new(
+            vec![3, 4],
+            vec![1.0, 2.0, 3.0, 4.0, 2.0, 3.0, 4.0, 5.0, 5.0, 6.0, 7.0, 8.0],
+            DType::F64,
+        )
+        .unwrap();
         let cov = x.cov().unwrap();
         // 3x3 covariance matrix
         assert_eq!(cov.shape(), &[3, 3]);
@@ -45160,13 +45160,23 @@ mod tests {
                 assert!(
                     (cij - cji).abs() < 1e-10,
                     "cov not symmetric: [{},{}]={} vs [{},{}]={}",
-                    i, j, cij, j, i, cji
+                    i,
+                    j,
+                    cij,
+                    j,
+                    i,
+                    cji
                 );
             }
         }
         // Diagonal should be non-negative (variances)
         for i in 0..3 {
-            assert!(cov.values()[i * 3 + i] >= 0.0, "negative variance at [{},{}]", i, i);
+            assert!(
+                cov.values()[i * 3 + i] >= 0.0,
+                "negative variance at [{},{}]",
+                i,
+                i
+            );
         }
     }
 

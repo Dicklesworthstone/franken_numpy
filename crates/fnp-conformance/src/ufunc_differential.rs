@@ -738,13 +738,34 @@ def py_arg_reduce(vals, shape, axis, find_min):
 
 def normalize_dtype_name(name):
     aliases = {
+        'f16': 'float16',
+        'float16': 'float16',
         'f64': 'float64',
+        'float64': 'float64',
         'f32': 'float32',
+        'float32': 'float32',
+        'i8': 'int8',
+        'int8': 'int8',
+        'i16': 'int16',
+        'int16': 'int16',
         'i64': 'int64',
+        'int64': 'int64',
         'i32': 'int32',
+        'int32': 'int32',
+        'u8': 'uint8',
+        'uint8': 'uint8',
+        'u16': 'uint16',
+        'uint16': 'uint16',
         'u64': 'uint64',
+        'uint64': 'uint64',
         'u32': 'uint32',
+        'uint32': 'uint32',
         'bool': 'bool_',
+        'bool_': 'bool_',
+        'c8': 'complex64',
+        'complex64': 'complex64',
+        'c16': 'complex128',
+        'complex128': 'complex128',
     }
     if name is None:
         return 'float64'
@@ -2775,13 +2796,20 @@ fn parse_dtype(name: &str) -> Result<DType, String> {
 
 fn canonical_dtype_name(name: &str) -> String {
     match name.trim().to_ascii_lowercase().as_str() {
+        "f16" | "float16" => "float16".to_string(),
         "f64" | "float64" => "float64".to_string(),
         "f32" | "float32" => "float32".to_string(),
+        "i8" | "int8" => "int8".to_string(),
+        "i16" | "int16" => "int16".to_string(),
         "i64" | "int64" => "int64".to_string(),
         "i32" | "int32" => "int32".to_string(),
+        "u8" | "uint8" => "uint8".to_string(),
+        "u16" | "uint16" => "uint16".to_string(),
         "u64" | "uint64" => "uint64".to_string(),
         "u32" | "uint32" => "uint32".to_string(),
         "bool" | "bool_" => "bool_".to_string(),
+        "c8" | "complex64" => "complex64".to_string(),
+        "c16" | "complex128" => "complex128".to_string(),
         other => other.to_string(),
     }
 }
@@ -4220,6 +4248,91 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    #[test]
+    fn differential_cross_dtype_binary_cases_match_oracle() {
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let inputs =
+            load_input_cases(&fixture_root.join("ufunc_input_cases.json")).expect("load inputs");
+        let oracle =
+            load_oracle_capture(&fixture_root.join("oracle_outputs/ufunc_oracle_output.json"))
+                .expect("load oracle");
+        let mut failures = Vec::new();
+        let case_ids = [
+            "add_scalar_i32_plus_f16",
+            "mul_scalar_u64_by_i8",
+            "sub_scalar_f32_minus_i64",
+            "mul_scalar_u16_by_i16",
+            "add_scalar_f16_plus_i16",
+            "div_scalar_i32_by_i32",
+            "floor_divide_scalar_i32_by_i32",
+            "mul_scalar_f64_by_bool",
+            "add_scalar_f64_plus_f32",
+            "add_scalar_u16_plus_i32",
+            "minimum_scalar_f32_with_u16",
+            "add_scalar_i32_plus_f64",
+            "sub_scalar_u64_minus_i32",
+            "div_scalar_bool_by_i64",
+            "floor_divide_scalar_f64_by_i32",
+            "power_scalar_f64_to_i32",
+            "mul_scalar_f32_by_u64",
+        ];
+
+        for case_id in case_ids {
+            let input = inputs.iter().find(|case| case.id == case_id);
+            assert!(input.is_some(), "missing input fixture {case_id}");
+            let Some(input) = input else {
+                continue;
+            };
+
+            let oracle_case = oracle.cases.iter().find(|case| case.id == case_id);
+            assert!(oracle_case.is_some(), "missing oracle fixture {case_id}");
+            let Some(oracle_case) = oracle_case else {
+                continue;
+            };
+
+            let outcome = execute_input_case(input);
+            if outcome.is_err() {
+                failures.push(format!(
+                    "{case_id} execution failed: {}",
+                    outcome.err().unwrap_or_else(|| "unknown error".to_string())
+                ));
+                continue;
+            };
+            let Ok((actual_shape, actual_values, actual_dtype)) = outcome else {
+                continue;
+            };
+            let expected_dtype = canonical_dtype_name(&oracle_case.dtype);
+            let actual_dtype = canonical_dtype_name(&actual_dtype);
+            let (pass, max_abs_error, reason) = compare_arrays(
+                &oracle_case.shape,
+                &oracle_case.values,
+                &actual_shape,
+                &actual_values,
+                1e-12,
+                1e-12,
+            );
+
+            eprintln!(
+                "{case_id}: pass={pass} expected_dtype={} actual_dtype={} expected_values={:?} actual_values={:?}",
+                oracle_case.dtype, actual_dtype, oracle_case.values, actual_values
+            );
+
+            if expected_dtype != actual_dtype {
+                failures.push(format!(
+                    "{case_id} dtype mismatch expected={} actual={}",
+                    oracle_case.dtype, actual_dtype
+                ));
+            }
+            if !pass {
+                failures.push(format!(
+                    "{case_id} mismatch max_abs_error={max_abs_error} reason={reason:?}"
+                ));
+            }
+        }
+
+        assert!(failures.is_empty(), "cross-dtype failures: {failures:?}");
     }
 
     #[test]
