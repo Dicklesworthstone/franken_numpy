@@ -2847,7 +2847,7 @@ pub fn logm_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
     // Inverse scaling: compute A^{1/2^s} until close to identity
     let mut m = a.to_vec();
     let mut s = 0u32;
-    let max_s = LOGM_MAX_SCALING_ITERATIONS as u32;
+    let max_s = u32::try_from(LOGM_MAX_SCALING_ITERATIONS).unwrap_or(100);
 
     let mut identity = vec![0.0; n * n];
     for i in 0..n {
@@ -9034,4 +9034,5 @@ mod tests {
             );
         }
     }
+
 }

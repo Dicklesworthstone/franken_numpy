@@ -402,21 +402,51 @@ pub fn ndenumerate<T: Copy>(
 }
 
 fn count_selected_indices(len: usize, index: &FlatIterIndex) -> Result<usize, TransferError> {
-    if let FlatIterIndex::BoolMask(mask) = index {
-        if mask.len() != len {
-            return Err(TransferError::FlatiterReadViolation(
-                "bool mask length must equal flatiter length",
-            ));
+    match index {
+        FlatIterIndex::BoolMask(mask) => {
+            if mask.len() != len {
+                return Err(TransferError::FlatiterReadViolation(
+                    "bool mask length must equal flatiter length",
+                ));
+            }
+            Ok(count_true_mask(mask))
         }
-        return Ok(count_true_mask(mask));
+        FlatIterIndex::Single(i) => {
+            if *i >= len {
+                Err(TransferError::FlatiterReadViolation(
+                    "single index out of bounds",
+                ))
+            } else {
+                Ok(1)
+            }
+        }
+        FlatIterIndex::Slice { start, stop, step } => {
+            if *step == 0 {
+                return Err(TransferError::FlatiterReadViolation(
+                    "slice step must be > 0",
+                ));
+            }
+            if *start > *stop || *stop > len {
+                return Err(TransferError::FlatiterReadViolation(
+                    "slice bounds are invalid for flatiter",
+                ));
+            }
+            if *start == *stop {
+                Ok(0)
+            } else {
+                Ok((*stop - *start - 1) / *step + 1)
+            }
+        }
+        FlatIterIndex::Fancy(indices) => {
+            if indices.iter().any(|idx| *idx >= len) {
+                Err(TransferError::FlatiterReadViolation(
+                    "fancy index out of bounds",
+                ))
+            } else {
+                Ok(indices.len())
+            }
+        }
     }
-    resolve_flatiter_indices(len, index)
-        .map(|indices| indices.len())
-        .map_err(|err| {
-            TransferError::FlatiterReadViolation(match err {
-                FlatIterContractError::IndexingViolation(msg) => msg,
-            })
-        })
 }
 
 #[must_use]
