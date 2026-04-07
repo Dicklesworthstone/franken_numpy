@@ -7267,12 +7267,12 @@
     "lhs_values": [
       200.0
     ],
-    "lhs_dtype": "u8",
+    "lhs_dtype": "uint8",
     "rhs_shape": [],
     "rhs_values": [
       -50.0
     ],
-    "rhs_dtype": "i8",
+    "rhs_dtype": "int8",
     "axis": null,
     "keepdims": false,
     "seed": 6502,
@@ -7320,12 +7320,12 @@
     "lhs_values": [
       255.0
     ],
-    "lhs_dtype": "u8",
+    "lhs_dtype": "uint8",
     "rhs_shape": [],
     "rhs_values": [
       1.0
     ],
-    "rhs_dtype": "u8",
+    "rhs_dtype": "uint8",
     "axis": null,
     "keepdims": false,
     "seed": 6502,
@@ -7345,12 +7345,12 @@
     "lhs_values": [
       127.0
     ],
-    "lhs_dtype": "i8",
+    "lhs_dtype": "int8",
     "rhs_shape": [],
     "rhs_values": [
       1.0
     ],
-    "rhs_dtype": "i8",
+    "rhs_dtype": "int8",
     "axis": null,
     "keepdims": false,
     "seed": 6502,
@@ -7400,7 +7400,7 @@
     "rhs_values": [
       -1.0
     ],
-    "rhs_dtype": "i8",
+    "rhs_dtype": "int8",
     "axis": null,
     "keepdims": false,
     "seed": 6502,
@@ -7420,7 +7420,7 @@
     "lhs_values": [
       200.0
     ],
-    "lhs_dtype": "u8",
+    "lhs_dtype": "uint8",
     "rhs_shape": [],
     "rhs_values": [
       1000.0
@@ -7450,7 +7450,7 @@
     "rhs_values": [
       100.0
     ],
-    "rhs_dtype": "u8",
+    "rhs_dtype": "uint8",
     "axis": null,
     "keepdims": false,
     "seed": 6502,

@@ -1994,7 +1994,8 @@ fn validate_capture_case_ids(
         .collect::<Vec<_>>();
     let duplicates = actual_counts
         .iter()
-        .filter_map(|(id, count)| (*count > 1).then(|| format!("{id} x{count}")))
+        .filter(|(_, count)| **count > 1)
+        .map(|(id, count)| format!("{id} x{count}"))
         .collect::<Vec<_>>();
 
     if missing.is_empty() && extra.is_empty() && duplicates.is_empty() {
@@ -4424,15 +4425,10 @@ mod tests {
             "add_scalar_f16_plus_f32",         // F16 + F32 → F32
         ];
 
-        // Known parity gaps: FrankenNumPy routes all values through f64 internally,
-        // so narrow output dtypes (int8, uint8, int16, float16) are reported as wider
-        // types, and integer overflow wrapping does not occur. These are tracked as
-        // parity debt, not accepted feature cuts. (br-x6kc)
-        let known_dtype_gap_ids: &[&str] = &[
-            "add_scalar_u8_plus_i8",  // NumPy: int16, FNP: float64 (f64 storage)
-            "add_scalar_u8_plus_i16", // NumPy: int16, FNP: float64 (f64 storage)
-            "add_scalar_f16_plus_u8", // NumPy: float16, FNP: float64 (f64 storage)
-        ];
+        // Known parity gaps: FrankenNumPy computes through f64 internally, so integer
+        // overflow wrapping does not occur. Tracked as parity debt (br-jkuy), not
+        // accepted feature cuts. (br-x6kc)
+        let known_dtype_gap_ids: &[&str] = &[];
         let known_overflow_gap_ids: &[&str] = &[
             "add_scalar_u8_overflow_wrap", // NumPy wraps U8 255+1→0; FNP: 256 (no wrap in f64)
             "add_scalar_i8_overflow_wrap", // NumPy wraps I8 127+1→-128; FNP: 128 (no wrap)

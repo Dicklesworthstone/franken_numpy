@@ -825,6 +825,20 @@ pub enum ArrayStorage {
     Structured(StructuredStorage),
 }
 
+/// Convert f64 to i128 with NumPy-compatible semantics: truncate toward zero,
+/// then allow integer wrapping via `as` casts. NaN and infinity map to 0,
+/// matching `numpy`'s behavior for integer casts of non-finite floats.
+fn f64_to_wrapping_i128(val: f64) -> i128 {
+    if val.is_nan() || val.is_infinite() {
+        return 0;
+    }
+    let truncated = val.trunc();
+    // i128 range: roughly ±1.7e38, covering all practical integer results.
+    // Values outside i128 range saturate, which is acceptable since they
+    // exceed any integer dtype's range and will wrap anyway.
+    truncated as i128
+}
+
 /// Error type for storage operations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StorageError {
@@ -945,16 +959,20 @@ impl ArrayStorage {
         if index >= n {
             return Err(StorageError::IndexOutOfBounds { index, len: n });
         }
+        // NumPy-compatible wrapping: float→int casts truncate toward zero then
+        // wrap via two's-complement, matching C semantics. Rust's `f64 as u8`
+        // saturates, so we route through i128 (integer→integer `as` wraps).
+        // NaN and infinity map to 0 (matching NumPy's integer cast behavior).
         match self {
             Self::Bool(v) => v[index] = val != 0.0,
-            Self::I8(v) => v[index] = val as i8,
-            Self::I16(v) => v[index] = val as i16,
-            Self::I32(v) => v[index] = val as i32,
-            Self::I64(v) => v[index] = val as i64,
-            Self::U8(v) => v[index] = val as u8,
-            Self::U16(v) => v[index] = val as u16,
-            Self::U32(v) => v[index] = val as u32,
-            Self::U64(v) => v[index] = val as u64,
+            Self::I8(v) => v[index] = f64_to_wrapping_i128(val) as i8,
+            Self::I16(v) => v[index] = f64_to_wrapping_i128(val) as i16,
+            Self::I32(v) => v[index] = f64_to_wrapping_i128(val) as i32,
+            Self::I64(v) => v[index] = f64_to_wrapping_i128(val) as i64,
+            Self::U8(v) => v[index] = f64_to_wrapping_i128(val) as u8,
+            Self::U16(v) => v[index] = f64_to_wrapping_i128(val) as u16,
+            Self::U32(v) => v[index] = f64_to_wrapping_i128(val) as u32,
+            Self::U64(v) => v[index] = f64_to_wrapping_i128(val) as u64,
             Self::F16(v) => v[index] = f16::from_f64(val),
             Self::F32(v) => v[index] = val as f32,
             Self::F64(v) => v[index] = val,
