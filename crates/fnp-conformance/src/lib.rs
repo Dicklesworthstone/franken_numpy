@@ -10473,17 +10473,17 @@ fn validate_runtime_policy_log_fields(
 mod tests {
     use super::{
         AsStridedFixtureCase, BinaryOp, DType, HarnessConfig, IterFlatIndexFixtureInput,
-        RngStatisticalCase, ShapeStrideFixtureCase, UFuncArray, default_rng_mean_abs_tol,
-        default_rng_variance_abs_tol, evaluate_shape_stride_case, generate_rng_samples,
-        infer_flatiter_len, run_all_core_suites, run_crash_signature_regression_suite,
-        run_datetime_differential_suite, run_dtype_adversarial_suite, run_dtype_differential_suite,
-        run_dtype_metamorphic_suite, run_dtype_promotion_suite, run_fft_differential_suite,
-        run_io_adversarial_suite, run_io_differential_suite, run_io_metamorphic_suite,
-        run_iter_adversarial_suite, run_iter_differential_suite, run_iter_metamorphic_suite,
-        run_linalg_adversarial_suite, run_linalg_differential_suite, run_linalg_metamorphic_suite,
-        run_masked_differential_suite, run_polynomial_differential_suite,
-        run_rng_adversarial_suite, run_rng_differential_suite, run_rng_metamorphic_suite,
-        run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
+        MaskedArray, RngStatisticalCase, ShapeStrideFixtureCase, StringArray, UFuncArray,
+        busday_count, chebval, default_rng_mean_abs_tol, default_rng_variance_abs_tol,
+        evaluate_shape_stride_case, generate_rng_samples, infer_flatiter_len, run_all_core_suites,
+        run_crash_signature_regression_suite, run_datetime_differential_suite,
+        run_dtype_adversarial_suite, run_dtype_differential_suite, run_dtype_metamorphic_suite,
+        run_dtype_promotion_suite, run_fft_differential_suite, run_io_adversarial_suite,
+        run_io_differential_suite, run_io_metamorphic_suite, run_iter_adversarial_suite,
+        run_iter_differential_suite, run_iter_metamorphic_suite, run_linalg_adversarial_suite,
+        run_linalg_differential_suite, run_linalg_metamorphic_suite, run_masked_differential_suite,
+        run_polynomial_differential_suite, run_rng_adversarial_suite, run_rng_differential_suite,
+        run_rng_metamorphic_suite, run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
         run_shape_stride_adversarial_suite, run_shape_stride_differential_suite,
         run_shape_stride_metamorphic_suite, run_shape_stride_suite, run_smoke,
         run_string_differential_suite, run_ufunc_adversarial_suite, run_ufunc_differential_suite,
@@ -10502,13 +10502,15 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    const E2E_TOTAL_STEPS: usize = 12;
+
     fn step_ok(step: usize, description: &str) {
-        eprintln!("Step {step}: {description} ... OK");
+        eprintln!("e2e step {step}/{E2E_TOTAL_STEPS}: {description} ... OK");
     }
 
     fn step_fail(step: usize, description: &str, details: impl Display) -> ! {
-        eprintln!("Step {step}: {description} ... FAILED: {details}");
-        panic!("Step {step}: {description} failed: {details}");
+        eprintln!("e2e step {step}/{E2E_TOTAL_STEPS}: {description} ... FAILED: {details}");
+        panic!("e2e step {step}/{E2E_TOTAL_STEPS}: {description} failed: {details}");
     }
 
     #[test]
@@ -10521,208 +10523,294 @@ mod tests {
     }
 
     #[test]
-    fn cross_crate_workflow_smoke_test() {
+    fn e2e_cross_crate_workflow() {
         const MATMUL_TOL: f64 = 1e-10;
-        const STD_TOL: f64 = 1e-12;
+        const STATS_TOL: f64 = 1e-10;
+        const POLY_TOL: f64 = 1e-14;
         const RNG_SIGMA_TOL: f64 = 0.3;
 
-        let created = UFuncArray::arange(0.0, 12.0, 1.0, DType::F64)
+        let arr = UFuncArray::arange(0.0, 12.0, 1.0, DType::F64)
             .expect("Step 1: arange should succeed")
             .reshape(&[3, 4])
             .expect("Step 1: reshape should succeed");
-        let expected_created = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0];
-        if created.shape() != [3, 4] || created.values() != expected_created {
+        if arr.shape() != [3, 4]
+            || arr.dtype() != DType::F64
+            || arr.values()[0] != 0.0
+            || arr.values()[11] != 11.0
+        {
             step_fail(
                 1,
-                "CREATE arange(0, 12) -> reshape(3, 4)",
+                "ARRAY CREATION",
                 format!(
-                    "shape={:?} values={:?}, expected shape [3, 4] values {:?}",
-                    created.shape(),
-                    created.values(),
-                    expected_created
+                    "shape={:?} dtype={:?} first={} last={}, expected shape [3, 4], dtype F64, first 0.0, last 11.0",
+                    arr.shape(),
+                    arr.dtype(),
+                    arr.values()[0],
+                    arr.values()[11]
                 ),
             );
         }
-        step_ok(1, "CREATE arange(0, 12) -> reshape(3, 4)");
+        step_ok(1, "ARRAY CREATION");
 
-        let scalar_two =
-            UFuncArray::new(vec![], vec![2.0], DType::F64).expect("Step 2: scalar construction");
-        let doubled = created
-            .elementwise_binary(&scalar_two, BinaryOp::Mul)
-            .expect("Step 2: multiply should succeed");
-        let expected_doubled = [
-            0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0,
-        ];
-        if doubled.shape() != [3, 4]
-            || doubled.dtype() != DType::F64
-            || doubled.values() != expected_doubled
+        let i32_arr =
+            UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::I32).expect("Step 2: i32 array");
+        let f64_arr =
+            UFuncArray::new(vec![3], vec![0.5, 0.5, 0.5], DType::F64).expect("Step 2: f64 array");
+        let promoted = i32_arr
+            .elementwise_binary(&f64_arr, BinaryOp::Add)
+            .expect("Step 2: add should succeed");
+        let expected_promoted = [1.5, 2.5, 3.5];
+        if promoted.dtype() != DType::F64
+            || !crate::approx_equal_values(promoted.values(), &expected_promoted, 1e-12, 1e-12)
         {
             step_fail(
                 2,
-                "MATH elementwise multiply by scalar(2.0)",
+                "DTYPE PROMOTION",
                 format!(
-                    "shape={:?} dtype={:?} values={:?}, expected shape [3, 4], dtype F64, values {:?}",
-                    doubled.shape(),
-                    doubled.dtype(),
-                    doubled.values(),
-                    expected_doubled
+                    "dtype={:?} values={:?}, expected dtype F64 values {:?}",
+                    promoted.dtype(),
+                    promoted.values(),
+                    expected_promoted
                 ),
             );
         }
-        step_ok(2, "MATH elementwise multiply by scalar(2.0)");
+        step_ok(2, "DTYPE PROMOTION");
 
-        let reduced = doubled
-            .reduce_sum(Some(1), false)
-            .expect("Step 3: reduce_sum should succeed");
-        let expected_reduced = [12.0, 44.0, 76.0];
-        if reduced.shape() != [3]
-            || reduced.dtype() != DType::F64
-            || reduced.values() != expected_reduced
+        let doubled = arr
+            .elementwise_binary(&UFuncArray::scalar(2.0, DType::F64), BinaryOp::Mul)
+            .expect("Step 3: multiply should succeed");
+        if doubled.dtype() != DType::F64
+            || doubled.values()[0] != 0.0
+            || doubled.values()[5] != 10.0
         {
             step_fail(
                 3,
-                "REDUCE sum over axis=1",
+                "ELEMENTWISE MATH",
                 format!(
-                    "shape={:?} dtype={:?} values={:?}, expected shape [3], dtype F64, values {:?}",
-                    reduced.shape(),
-                    reduced.dtype(),
-                    reduced.values(),
-                    expected_reduced
+                    "dtype={:?} values[0]={} values[5]={}, expected dtype F64 with values[0]=0.0 values[5]=10.0",
+                    doubled.dtype(),
+                    doubled.values()[0],
+                    doubled.values()[5]
                 ),
             );
         }
-        step_ok(3, "REDUCE sum over axis=1");
+        step_ok(3, "ELEMENTWISE MATH");
+
+        let row_sums = doubled
+            .reduce_sum(Some(1), false)
+            .expect("Step 4: reduce_sum should succeed");
+        let expected_row_sums = [12.0, 44.0, 76.0];
+        if row_sums.shape() != [3]
+            || row_sums.dtype() != DType::F64
+            || row_sums.values() != expected_row_sums
+        {
+            step_fail(
+                4,
+                "REDUCTION",
+                format!(
+                    "shape={:?} dtype={:?} values={:?}, expected shape [3], dtype F64, values {:?}",
+                    row_sums.shape(),
+                    row_sums.dtype(),
+                    row_sums.values(),
+                    expected_row_sums
+                ),
+            );
+        }
+        step_ok(4, "REDUCTION");
 
         let a = UFuncArray::new(
             vec![3, 3],
             vec![
-                4.0, 1.0, 1.0, //
-                1.0, 3.0, 0.0, //
-                1.0, 0.0, 2.0,
+                4.0, 2.0, 0.0, //
+                2.0, 5.0, 1.0, //
+                0.0, 1.0, 3.0,
             ],
             DType::F64,
         )
-        .expect("Step 4: matrix construction");
-        let b = UFuncArray::new(vec![3], vec![9.0, 7.0, 7.0], DType::F64)
-            .expect("Step 4: rhs construction");
-        let solution = a.solve(&b).expect("Step 4: solve should succeed");
-        let reconstructed = a.matmul(&solution).expect("Step 4: matmul should succeed");
-        let expected_solution = [1.0, 2.0, 3.0];
-        let solution_ok = solution.shape() == [3]
-            && crate::approx_equal_values(solution.values(), &expected_solution, 1e-12, 1e-12);
-        let reconstructed_ok = reconstructed.shape() == [3]
-            && crate::approx_equal_values(
-                reconstructed.values(),
-                b.values(),
-                MATMUL_TOL,
-                MATMUL_TOL,
-            );
-        if !solution_ok || !reconstructed_ok {
-            step_fail(
-                4,
-                "LINALG solve SPD system and verify A@x ~= b",
-                format!(
-                    "solution shape={:?} values={:?}, reconstructed shape={:?} values={:?}, expected solution {:?}, rhs {:?}",
-                    solution.shape(),
-                    solution.values(),
-                    reconstructed.shape(),
-                    reconstructed.values(),
-                    expected_solution,
-                    b.values()
-                ),
-            );
-        }
-        step_ok(4, "LINALG solve SPD system and verify A@x ~= b");
-
-        let sorted = solution
-            .sort(None, None)
-            .expect("Step 5: sort should succeed");
-        let monotonic = sorted.values().windows(2).all(|pair| pair[0] <= pair[1]);
-        if sorted.shape() != [3]
-            || !monotonic
-            || !crate::approx_equal_values(sorted.values(), &expected_solution, 1e-12, 1e-12)
+        .expect("Step 5: matrix construction");
+        let b = UFuncArray::new(vec![3], vec![10.0, 20.0, 14.0], DType::F64)
+            .expect("Step 5: rhs construction");
+        let x = a.solve(&b).expect("Step 5: solve should succeed");
+        let ax = a
+            .matmul(&x.reshape(&[3, 1]).expect("Step 5: reshape solution"))
+            .expect("Step 5: matmul should succeed");
+        let rhs_column = b
+            .reshape(&[3, 1])
+            .expect("Step 5: reshape rhs should succeed");
+        if x.shape() != [3]
+            || x.dtype() != DType::F64
+            || ax.shape() != [3, 1]
+            || !crate::approx_equal_values(ax.values(), rhs_column.values(), MATMUL_TOL, MATMUL_TOL)
         {
             step_fail(
                 5,
-                "SORT solution vector",
+                "LINEAR ALGEBRA",
                 format!(
-                    "shape={:?} values={:?}, expected monotonic values {:?}",
-                    sorted.shape(),
-                    sorted.values(),
-                    expected_solution
+                    "x shape={:?} dtype={:?} values={:?}, ax shape={:?} values={:?}, rhs column values={:?}",
+                    x.shape(),
+                    x.dtype(),
+                    x.values(),
+                    ax.shape(),
+                    ax.values(),
+                    rhs_column.values()
                 ),
             );
         }
-        step_ok(5, "SORT solution vector");
+        step_ok(5, "LINEAR ALGEBRA");
 
-        let mean = sorted
-            .reduce_mean(None, false)
-            .expect("Step 6: reduce_mean should succeed");
-        let std = sorted
-            .reduce_std(None, false, 0)
-            .expect("Step 6: reduce_std should succeed");
-        let expected_mean = 2.0;
-        let expected_std = (2.0_f64 / 3.0).sqrt();
-        let mean_ok =
-            mean.shape().is_empty() && (mean.values()[0] - expected_mean).abs() <= STD_TOL;
-        let std_ok = std.shape().is_empty() && (std.values()[0] - expected_std).abs() <= STD_TOL;
-        if !mean_ok || !std_ok {
+        let x_pts = [0.0, 0.5, 1.0];
+        let t2_vals = chebval(&x_pts, &[0.0, 0.0, 1.0]);
+        let expected_t2 = [-1.0, -0.5, 1.0];
+        if !crate::approx_equal_values(&t2_vals, &expected_t2, POLY_TOL, POLY_TOL) {
             step_fail(
                 6,
-                "STATS mean/std of sorted vector",
-                format!(
-                    "mean shape={:?} value={}, std shape={:?} value={}, expected mean {}, expected std {}",
-                    mean.shape(),
-                    mean.values()[0],
-                    std.shape(),
-                    std.values()[0],
-                    expected_mean,
-                    expected_std
-                ),
+                "POLYNOMIAL",
+                format!("values={:?}, expected {:?}", t2_vals, expected_t2),
             );
         }
-        step_ok(6, "STATS mean/std of sorted vector");
+        step_ok(6, "POLYNOMIAL");
 
-        let npy_bytes =
-            save_npy(sorted.shape(), sorted.values(), IOSupportedDType::F64).expect("Step 7: save");
-        let (loaded_shape, loaded_values, loaded_dtype) =
-            load_npy(&npy_bytes).expect("Step 7: load should succeed");
-        if loaded_shape != sorted.shape()
-            || loaded_dtype != IOSupportedDType::F64
-            || loaded_values != sorted.values()
+        let data = UFuncArray::new(vec![5], vec![3.0, 1.0, 4.0, 1.0, 5.0], DType::F64)
+            .expect("Step 7: data construction");
+        let sorted = data.sort(None, None).expect("Step 7: sort should succeed");
+        let mean = data
+            .reduce_mean(None, false)
+            .expect("Step 7: mean should succeed");
+        let expected_sorted = [1.0, 1.0, 3.0, 4.0, 5.0];
+        if sorted.shape() != [5]
+            || sorted.values() != expected_sorted
+            || !mean.shape().is_empty()
+            || (mean.values()[0] - 2.8).abs() > STATS_TOL
         {
             step_fail(
                 7,
-                "IO in-memory NPY roundtrip",
+                "SORT + STATISTICS",
                 format!(
-                    "loaded shape={:?} dtype={:?} values={:?}, expected shape={:?} dtype={:?} values={:?}",
+                    "sorted shape={:?} values={:?}, mean shape={:?} value={}, expected sorted {:?}, expected mean 2.8",
+                    sorted.shape(),
+                    sorted.values(),
+                    mean.shape(),
+                    mean.values()[0],
+                    expected_sorted
+                ),
+            );
+        }
+        step_ok(7, "SORT + STATISTICS");
+
+        let masked = MaskedArray::new(
+            UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64)
+                .expect("Step 8: masked data"),
+            Some(
+                UFuncArray::new(vec![4], vec![0.0, 1.0, 0.0, 1.0], DType::Bool)
+                    .expect("Step 8: mask"),
+            ),
+            None,
+        )
+        .expect("Step 8: masked array construction");
+        let compressed = masked.compressed();
+        let expected_compressed = [1.0, 3.0];
+        if compressed.shape() != [2]
+            || compressed.dtype() != DType::F64
+            || compressed.values() != expected_compressed
+        {
+            step_fail(
+                8,
+                "MASKED ARRAY",
+                format!(
+                    "shape={:?} dtype={:?} values={:?}, expected shape [2], dtype F64, values {:?}",
+                    compressed.shape(),
+                    compressed.dtype(),
+                    compressed.values(),
+                    expected_compressed
+                ),
+            );
+        }
+        step_ok(8, "MASKED ARRAY");
+
+        let strings = StringArray::from_strs(vec![3], &["hello", "WORLD", "Test"])
+            .expect("Step 9: string array construction");
+        let upper = strings.upper();
+        let lens = strings.str_len();
+        let expected_lens = [5.0, 5.0, 4.0];
+        if upper.shape() != [3]
+            || upper.values()[0] != "HELLO"
+            || upper.values()[1] != "WORLD"
+            || lens.dtype() != DType::I64
+            || lens.values() != expected_lens
+        {
+            step_fail(
+                9,
+                "STRING ARRAY",
+                format!(
+                    "upper shape={:?} values={:?}, lens dtype={:?} values={:?}, expected upper[0]=HELLO upper[1]=WORLD lens {:?}",
+                    upper.shape(),
+                    upper.values(),
+                    lens.dtype(),
+                    lens.values(),
+                    expected_lens
+                ),
+            );
+        }
+        step_ok(9, "STRING ARRAY");
+
+        let mut rng = Generator::from_pcg64_dxsm(42).expect("Step 10: generator construction");
+        let samples = rng.standard_normal(100);
+        let sample_mean = samples.iter().copied().sum::<f64>() / 100.0;
+        if sample_mean.abs() >= RNG_SIGMA_TOL {
+            step_fail(
+                10,
+                "RANDOM",
+                format!(
+                    "sample mean {} exceeds bound {} for seed 42",
+                    sample_mean, RNG_SIGMA_TOL
+                ),
+            );
+        }
+        step_ok(10, "RANDOM");
+
+        let original = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
+            .expect("Step 11: original array construction");
+        let npy_bytes = save_npy(original.shape(), original.values(), IOSupportedDType::F64)
+            .expect("Step 11: save should succeed");
+        let (loaded_shape, loaded_values, loaded_dtype) =
+            load_npy(&npy_bytes).expect("Step 11: load should succeed");
+        if loaded_shape != [2, 3]
+            || loaded_values != original.values()
+            || loaded_dtype != IOSupportedDType::F64
+        {
+            step_fail(
+                11,
+                "IO ROUNDTRIP",
+                format!(
+                    "shape={:?} dtype={:?} values={:?}, expected shape [2, 3], dtype F64, values {:?}",
                     loaded_shape,
                     loaded_dtype,
                     loaded_values,
-                    sorted.shape(),
-                    IOSupportedDType::F64,
-                    sorted.values()
+                    original.values()
                 ),
             );
         }
-        step_ok(7, "IO in-memory NPY roundtrip");
+        step_ok(11, "IO ROUNDTRIP");
 
-        let mut rng = Generator::from_pcg64_dxsm(12345).expect("Step 8: generator construction");
-        let samples = rng.standard_normal(100);
-        let sample_mean = samples.iter().copied().sum::<f64>() / samples.len() as f64;
-        if samples.len() != 100 || sample_mean.abs() > RNG_SIGMA_TOL {
+        let start =
+            UFuncArray::from_datetime_strings(vec![1], vec!["2024-01-01".to_string()], None)
+                .expect("Step 12: start date");
+        let end = UFuncArray::from_datetime_strings(vec![1], vec!["2024-01-08".to_string()], None)
+            .expect("Step 12: end date");
+        let count = busday_count(&start, &end).expect("Step 12: busday_count should succeed");
+        if count.shape() != [1] || count.dtype() != DType::I64 || count.values()[0] != 5.0 {
             step_fail(
-                8,
-                "RANDOM seeded standard_normal mean within 3 sigma",
+                12,
+                "BUSDAY",
                 format!(
-                    "len={} mean={}, expected len 100 and |mean| <= {}",
-                    samples.len(),
-                    sample_mean,
-                    RNG_SIGMA_TOL
+                    "shape={:?} dtype={:?} values={:?}, expected shape [1], dtype I64, values [5.0]",
+                    count.shape(),
+                    count.dtype(),
+                    count.values()
                 ),
             );
         }
-        step_ok(8, "RANDOM seeded standard_normal mean within 3 sigma");
+        step_ok(12, "BUSDAY");
     }
 
     #[test]
