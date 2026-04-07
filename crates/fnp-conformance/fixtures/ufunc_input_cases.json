@@ -9980,5 +9980,819 @@
     "artifact_refs": [],
     "reason_code": "ufunc_dispatch_resolution_failed",
     "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "ldexp_normal",
+    "op": "ldexp",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.5
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      3.0
+    ],
+    "rhs_dtype": "int32",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-edge-cases",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "ldexp_negative_exp",
+    "op": "ldexp",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      -1.0
+    ],
+    "rhs_dtype": "int32",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-edge-cases",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "ldexp_overflow",
+    "op": "ldexp",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      1024.0
+    ],
+    "rhs_dtype": "int32",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-edge-cases",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "floor_divide_pos_neg",
+    "op": "floor_divide",
+    "lhs_shape": [],
+    "lhs_values": [
+      7.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      -2.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-edge-cases",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "floor_divide_neg_pos",
+    "op": "floor_divide",
+    "lhs_shape": [],
+    "lhs_values": [
+      -7.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      2.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-edge-cases",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "floor_divide_neg_neg",
+    "op": "floor_divide",
+    "lhs_shape": [],
+    "lhs_values": [
+      -7.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      -2.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-edge-cases",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "floor_divide_exact",
+    "op": "floor_divide",
+    "lhs_shape": [],
+    "lhs_values": [
+      6.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      3.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-edge-cases",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "remainder_pos_neg",
+    "op": "remainder",
+    "lhs_shape": [],
+    "lhs_values": [
+      7.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      -2.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-edge-cases",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "remainder_neg_pos",
+    "op": "remainder",
+    "lhs_shape": [],
+    "lhs_values": [
+      -7.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      2.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-edge-cases",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "remainder_neg_neg",
+    "op": "remainder",
+    "lhs_shape": [],
+    "lhs_values": [
+      -7.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      -2.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-edge-cases",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "remainder_exact",
+    "op": "remainder",
+    "lhs_shape": [],
+    "lhs_values": [
+      6.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      3.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-edge-cases",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "power_zero_zero",
+    "op": "power",
+    "lhs_shape": [],
+    "lhs_values": [
+      0.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      0.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-edge-cases",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "power_neg_fractional",
+    "op": "power",
+    "lhs_shape": [],
+    "lhs_values": [
+      -1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      0.5
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-edge-cases",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "power_zero_negative",
+    "op": "power",
+    "lhs_shape": [],
+    "lhs_values": [
+      0.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      -1.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-edge-cases",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "float_power_neg_fractional",
+    "op": "float_power",
+    "lhs_shape": [],
+    "lhs_values": [
+      -1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      0.5
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-edge-cases",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "float_power_int_base",
+    "op": "float_power",
+    "lhs_shape": [],
+    "lhs_values": [
+      2.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      10.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-edge-cases",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "div_pos_by_zero",
+    "op": "div",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      0.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-edge-cases",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "div_neg_by_zero",
+    "op": "div",
+    "lhs_shape": [],
+    "lhs_values": [
+      -1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      0.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-edge-cases",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "div_zero_by_zero",
+    "op": "div",
+    "lhs_shape": [],
+    "lhs_values": [
+      0.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      0.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-edge-cases",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "floor_divide_by_zero",
+    "op": "floor_divide",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      0.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-edge-cases",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "remainder_by_zero",
+    "op": "remainder",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [
+      0.0
+    ],
+    "rhs_dtype": "f64",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-edge-cases",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "bitwise_and_u8_mask",
+    "op": "bitwise_and",
+    "lhs_shape": [],
+    "lhs_values": [
+      255.0
+    ],
+    "lhs_dtype": "uint8",
+    "rhs_shape": [],
+    "rhs_values": [
+      15.0
+    ],
+    "rhs_dtype": "uint8",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6509,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-bitwise",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "bitwise_and_i32",
+    "op": "bitwise_and",
+    "lhs_shape": [],
+    "lhs_values": [
+      4660.0
+    ],
+    "lhs_dtype": "int32",
+    "rhs_shape": [],
+    "rhs_values": [
+      65280.0
+    ],
+    "rhs_dtype": "int32",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6509,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-bitwise",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "bitwise_and_bool",
+    "op": "bitwise_and",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "bool",
+    "rhs_shape": [],
+    "rhs_values": [
+      1.0
+    ],
+    "rhs_dtype": "bool",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6509,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-bitwise",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "bitwise_and_bool_false",
+    "op": "bitwise_and",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "bool",
+    "rhs_shape": [],
+    "rhs_values": [
+      0.0
+    ],
+    "rhs_dtype": "bool",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6509,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-bitwise",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "bitwise_and_cross_u8_i32",
+    "op": "bitwise_and",
+    "lhs_shape": [],
+    "lhs_values": [
+      255.0
+    ],
+    "lhs_dtype": "uint8",
+    "rhs_shape": [],
+    "rhs_values": [
+      3855.0
+    ],
+    "rhs_dtype": "int32",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6509,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-bitwise",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "bitwise_or_u8",
+    "op": "bitwise_or",
+    "lhs_shape": [],
+    "lhs_values": [
+      240.0
+    ],
+    "lhs_dtype": "uint8",
+    "rhs_shape": [],
+    "rhs_values": [
+      15.0
+    ],
+    "rhs_dtype": "uint8",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6509,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-bitwise",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "bitwise_or_i32",
+    "op": "bitwise_or",
+    "lhs_shape": [],
+    "lhs_values": [
+      255.0
+    ],
+    "lhs_dtype": "int32",
+    "rhs_shape": [],
+    "rhs_values": [
+      65280.0
+    ],
+    "rhs_dtype": "int32",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6509,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-bitwise",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "bitwise_or_bool",
+    "op": "bitwise_or",
+    "lhs_shape": [],
+    "lhs_values": [
+      0.0
+    ],
+    "lhs_dtype": "bool",
+    "rhs_shape": [],
+    "rhs_values": [
+      1.0
+    ],
+    "rhs_dtype": "bool",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6509,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-bitwise",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "bitwise_or_bool_false",
+    "op": "bitwise_or",
+    "lhs_shape": [],
+    "lhs_values": [
+      0.0
+    ],
+    "lhs_dtype": "bool",
+    "rhs_shape": [],
+    "rhs_values": [
+      0.0
+    ],
+    "rhs_dtype": "bool",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6509,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-bitwise",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "bitwise_xor_u8",
+    "op": "bitwise_xor",
+    "lhs_shape": [],
+    "lhs_values": [
+      255.0
+    ],
+    "lhs_dtype": "uint8",
+    "rhs_shape": [],
+    "rhs_values": [
+      15.0
+    ],
+    "rhs_dtype": "uint8",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6509,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-bitwise",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "bitwise_xor_i32_self",
+    "op": "bitwise_xor",
+    "lhs_shape": [],
+    "lhs_values": [
+      12345.0
+    ],
+    "lhs_dtype": "int32",
+    "rhs_shape": [],
+    "rhs_values": [
+      12345.0
+    ],
+    "rhs_dtype": "int32",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6509,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-bitwise",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "bitwise_xor_bool",
+    "op": "bitwise_xor",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "bool",
+    "rhs_shape": [],
+    "rhs_values": [
+      0.0
+    ],
+    "rhs_dtype": "bool",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6509,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-bitwise",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "bitwise_xor_bool_same",
+    "op": "bitwise_xor",
+    "lhs_shape": [],
+    "lhs_values": [
+      1.0
+    ],
+    "lhs_dtype": "bool",
+    "rhs_shape": [],
+    "rhs_values": [
+      1.0
+    ],
+    "rhs_dtype": "bool",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6509,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-bitwise",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "bitwise_xor_all_ones_u8",
+    "op": "bitwise_xor",
+    "lhs_shape": [],
+    "lhs_values": [
+      255.0
+    ],
+    "lhs_dtype": "uint8",
+    "rhs_shape": [],
+    "rhs_values": [
+      255.0
+    ],
+    "rhs_dtype": "uint8",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6509,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-bitwise",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "bitwise_or_u8_u16",
+    "op": "bitwise_or",
+    "lhs_shape": [],
+    "lhs_values": [
+      255.0
+    ],
+    "lhs_dtype": "uint8",
+    "rhs_shape": [],
+    "rhs_values": [
+      65280.0
+    ],
+    "rhs_dtype": "uint16",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6509,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-bitwise",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "bitwise_and_i8_neg1",
+    "op": "bitwise_and",
+    "lhs_shape": [],
+    "lhs_values": [
+      -1.0
+    ],
+    "lhs_dtype": "int8",
+    "rhs_shape": [],
+    "rhs_values": [
+      127.0
+    ],
+    "rhs_dtype": "int8",
+    "axis": null,
+    "keepdims": false,
+    "seed": 6509,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-bitwise",
+    "artifact_refs": [],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
   }
 ]

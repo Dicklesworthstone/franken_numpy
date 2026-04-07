@@ -4831,6 +4831,376 @@
         1.0
       ],
       "dtype": "bool_"
+    },
+    {
+      "id": "ldexp_normal",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        12.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "ldexp_negative_exp",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        0.5
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "ldexp_overflow",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        "Infinity"
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "floor_divide_pos_neg",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        -4.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "floor_divide_neg_pos",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        -4.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "floor_divide_neg_neg",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        3.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "floor_divide_exact",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        2.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "remainder_pos_neg",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        -1.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "remainder_neg_pos",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "remainder_neg_neg",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        -1.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "remainder_exact",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        0.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "power_zero_zero",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "power_neg_fractional",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        "NaN"
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "power_zero_negative",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        "Infinity"
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "float_power_neg_fractional",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        "NaN"
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "float_power_int_base",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1024.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "div_pos_by_zero",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        "Infinity"
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "div_neg_by_zero",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        "-Infinity"
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "div_zero_by_zero",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        "NaN"
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "floor_divide_by_zero",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        "Infinity"
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "remainder_by_zero",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        "NaN"
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "bitwise_and_u8_mask",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        15.0
+      ],
+      "dtype": "uint8"
+    },
+    {
+      "id": "bitwise_and_i32",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        4608.0
+      ],
+      "dtype": "int32"
+    },
+    {
+      "id": "bitwise_and_bool",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "bitwise_and_bool_false",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        0.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "bitwise_and_cross_u8_i32",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        15.0
+      ],
+      "dtype": "int32"
+    },
+    {
+      "id": "bitwise_or_u8",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        255.0
+      ],
+      "dtype": "uint8"
+    },
+    {
+      "id": "bitwise_or_i32",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        65535.0
+      ],
+      "dtype": "int32"
+    },
+    {
+      "id": "bitwise_or_bool",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "bitwise_or_bool_false",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        0.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "bitwise_xor_u8",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        240.0
+      ],
+      "dtype": "uint8"
+    },
+    {
+      "id": "bitwise_xor_i32_self",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        0.0
+      ],
+      "dtype": "int32"
+    },
+    {
+      "id": "bitwise_xor_bool",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        1.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "bitwise_xor_bool_same",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        0.0
+      ],
+      "dtype": "bool_"
+    },
+    {
+      "id": "bitwise_xor_all_ones_u8",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        0.0
+      ],
+      "dtype": "uint8"
+    },
+    {
+      "id": "bitwise_or_u8_u16",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        65535.0
+      ],
+      "dtype": "uint16"
+    },
+    {
+      "id": "bitwise_and_i8_neg1",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        127.0
+      ],
+      "dtype": "int8"
     }
   ]
 }
