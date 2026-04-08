@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
-use fnp_conformance::benchmark::{BenchmarkBaseline, BenchmarkWorkload};
+use fnp_conformance::benchmark::{BenchmarkBaseline, BenchmarkWorkload, REQUIRED_SLO_PATHS};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -121,12 +121,6 @@ const WORKLOAD_BUDGETS: &[WorkloadBudget] = &[
     },
 ];
 
-const UNINSTRUMENTED_BUDGET_PATHS: &[&str] = &[
-    "memory footprint",
-    "allocation churn",
-    "allocator fragmentation under adversarial workloads",
-];
-
 fn main() {
     if let Err(err) = run() {
         eprintln!("run_performance_budget_gate failed: {err}");
@@ -193,7 +187,8 @@ fn run() -> Result<(), String> {
         });
     }
 
-    let warnings = UNINSTRUMENTED_BUDGET_PATHS
+    let uninstrumented_budget_paths = missing_slo_paths(&candidate);
+    let warnings = uninstrumented_budget_paths
         .iter()
         .map(|path| ReliabilityDiagnostic {
             subsystem: "performance_budget".to_string(),
@@ -225,10 +220,7 @@ fn run() -> Result<(), String> {
         reference_environment_fingerprint: reference.environment_fingerprint,
         candidate_environment_fingerprint: candidate.environment_fingerprint,
         workloads: workload_summaries,
-        uninstrumented_budget_paths: UNINSTRUMENTED_BUDGET_PATHS
-            .iter()
-            .map(|path| (*path).to_string())
-            .collect(),
+        uninstrumented_budget_paths,
         reliability: ReliabilitySummary {
             coverage_floor: options.coverage_floor,
             coverage_ratio,
@@ -476,6 +468,19 @@ fn evaluate_budget(
     )
 }
 
+fn missing_slo_paths(candidate: &BenchmarkBaseline) -> Vec<String> {
+    let covered_paths: BTreeSet<&'static str> = candidate
+        .workloads
+        .iter()
+        .flat_map(|workload| workload.telemetry.covered_slo_paths())
+        .collect();
+    REQUIRED_SLO_PATHS
+        .iter()
+        .filter(|path| !covered_paths.contains(**path))
+        .map(|path| (*path).to_string())
+        .collect()
+}
+
 fn regression_ratio(reference: f64, candidate: f64) -> Option<f64> {
     if reference <= 0.0 {
         return None;
@@ -489,9 +494,11 @@ fn percent_delta(reference: f64, candidate: f64) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkloadBudget, evaluate_budget};
+    use super::{WorkloadBudget, evaluate_budget, missing_slo_paths};
     use fnp_conformance::benchmark::{
-        BenchmarkWorkload, PercentileSummary, ReproMetadata, WorkloadTelemetry,
+        ALLOCATION_CHURN_SLO_PATH, ALLOCATOR_FRAGMENTATION_SLO_PATH, AllocatorStressLevel,
+        BenchmarkBaseline, BenchmarkWorkload, MEMORY_FOOTPRINT_SLO_PATH, PercentileSummary,
+        ReproMetadata, WorkloadTelemetry,
     };
 
     fn workload(name: &str, p95_ms: f64, p99_ms: f64) -> BenchmarkWorkload {
@@ -507,6 +514,30 @@ mod tests {
                 max_ms: p99_ms,
             },
             telemetry: WorkloadTelemetry::default(),
+        }
+    }
+
+    fn baseline_with_telemetry(telemetry: WorkloadTelemetry) -> BenchmarkBaseline {
+        BenchmarkBaseline {
+            schema_version: 1,
+            generated_at_unix_ms: 0,
+            git_commit: "test".to_string(),
+            workloads: vec![BenchmarkWorkload {
+                name: "coverage".to_string(),
+                runs: 1,
+                samples_ms: vec![1.0],
+                percentiles: PercentileSummary {
+                    p50_ms: 1.0,
+                    p95_ms: 1.0,
+                    p99_ms: 1.0,
+                    min_ms: 1.0,
+                    max_ms: 1.0,
+                },
+                telemetry,
+            }],
+            environment_fingerprint: "test-env".to_string(),
+            reproducibility: ReproMetadata::default(),
+            evidence_log_refs: Vec::new(),
         }
     }
 
@@ -585,7 +616,37 @@ mod tests {
     }
 
     #[test]
+    fn missing_slo_paths_are_derived_from_workload_telemetry() {
+        let baseline = baseline_with_telemetry(WorkloadTelemetry {
+            peak_live_bytes_per_run: 4096,
+            heap_allocations_per_run: 3,
+            allocator_stress: AllocatorStressLevel::Steady,
+            ..WorkloadTelemetry::default()
+        });
+
+        let missing = missing_slo_paths(&baseline);
+
+        assert_eq!(missing, vec![ALLOCATOR_FRAGMENTATION_SLO_PATH.to_string()]);
+    }
+
+    #[test]
+    fn adversarial_allocator_workload_clears_all_slo_paths() {
+        let baseline = baseline_with_telemetry(WorkloadTelemetry {
+            peak_live_bytes_per_run: 4096,
+            heap_allocations_per_run: 3,
+            allocator_stress: AllocatorStressLevel::Adversarial,
+            ..WorkloadTelemetry::default()
+        });
+
+        let missing = missing_slo_paths(&baseline);
+
+        assert!(missing.is_empty());
+    }
+
+    #[test]
     fn build_baseline_types_for_bin_tests() {
         let _ = ReproMetadata::default();
+        let _ = MEMORY_FOOTPRINT_SLO_PATH;
+        let _ = ALLOCATION_CHURN_SLO_PATH;
     }
 }

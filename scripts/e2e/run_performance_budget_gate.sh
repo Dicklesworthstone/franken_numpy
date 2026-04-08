@@ -22,6 +22,38 @@ run_cargo() {
   fi
 }
 
+run_rch_build_and_select_worker() {
+  local output=""
+  local status=0
+  local worker=""
+
+  set +e
+  output="$(
+    rch exec -- cargo build -p fnp-conformance \
+      --bin generate_benchmark_baseline \
+      --bin run_performance_budget_gate 2>&1
+  )"
+  status=$?
+  set -e
+
+  printf '%s\n' "$output"
+  if [[ $status -ne 0 ]]; then
+    return "$status"
+  fi
+
+  worker="$(
+    printf '%s\n' "$output" \
+      | sed -n 's/.*Selected worker: \([^ ]*\) at .*/\1/p' \
+      | head -n 1
+  )"
+  if [[ -z "$worker" ]]; then
+    echo "[performance-budget-gate] unable to determine rch worker from build output" >&2
+    return 1
+  fi
+
+  RCH_SELECTED_WORKER="$worker"
+}
+
 if [[ ! -f "$REFERENCE_PATH" ]]; then
   echo "[performance-budget-gate] missing reference baseline: $REFERENCE_PATH" >&2
   exit 1
@@ -36,21 +68,45 @@ echo "[performance-budget-gate] max_p99_regression_ratio=$MAX_P99_REGRESSION_RAT
 
 mkdir -p "$(dirname "$REFERENCE_SNAPSHOT_PATH")"
 mkdir -p "$(dirname "$CANDIDATE_PATH")"
+mkdir -p "$(dirname "$REPORT_PATH")"
+
 cp "$REFERENCE_PATH" "$REFERENCE_SNAPSHOT_PATH"
 
-# Generate candidate into the tracked baseline path so rch artifact retrieval
-# reliably materializes it locally, then copy to timestamped candidate output.
-run_cargo run -p fnp-conformance --bin generate_benchmark_baseline -- \
-  --output-path "$REFERENCE_PATH"
+if command -v rch >/dev/null 2>&1; then
+  run_rch_build_and_select_worker
+  echo "[performance-budget-gate] worker=$RCH_SELECTED_WORKER"
 
-cp "$REFERENCE_PATH" "$CANDIDATE_PATH"
-cp "$REFERENCE_SNAPSHOT_PATH" "$REFERENCE_PATH"
+  ssh "$RCH_SELECTED_WORKER" \
+    "cd '$ROOT_DIR' && \
+     /data/tmp/cargo-target/debug/generate_benchmark_baseline --output-path '$CANDIDATE_PATH'"
+  scp -q "$RCH_SELECTED_WORKER:$CANDIDATE_PATH" "$CANDIDATE_PATH"
 
-run_cargo run -p fnp-conformance --bin run_performance_budget_gate -- \
-  --reference-path "$REFERENCE_SNAPSHOT_PATH" \
-  --candidate-path "$CANDIDATE_PATH" \
-  --report-path "$REPORT_PATH" \
-  --max-p99-regression-ratio "$MAX_P99_REGRESSION_RATIO" \
-  --coverage-floor "$COVERAGE_FLOOR"
+  ssh "$RCH_SELECTED_WORKER" \
+    "cd '$ROOT_DIR' && \
+     /data/tmp/cargo-target/debug/run_performance_budget_gate \
+       --reference-path '$REFERENCE_SNAPSHOT_PATH' \
+       --candidate-path '$CANDIDATE_PATH' \
+       --report-path '$REPORT_PATH' \
+       --max-p99-regression-ratio '$MAX_P99_REGRESSION_RATIO' \
+       --coverage-floor '$COVERAGE_FLOOR'"
+  if [[ ! -f "$CANDIDATE_PATH" ]]; then
+    echo "[performance-budget-gate] missing copied candidate: $CANDIDATE_PATH" >&2
+    exit 1
+  fi
+  scp -q "$RCH_SELECTED_WORKER:$REPORT_PATH" "$REPORT_PATH"
+  if [[ ! -f "$REPORT_PATH" ]]; then
+    echo "[performance-budget-gate] missing copied report: $REPORT_PATH" >&2
+    exit 1
+  fi
+else
+  run_cargo run -p fnp-conformance --bin generate_benchmark_baseline -- \
+    --output-path "$CANDIDATE_PATH"
+  run_cargo run -p fnp-conformance --bin run_performance_budget_gate -- \
+    --reference-path "$REFERENCE_SNAPSHOT_PATH" \
+    --candidate-path "$CANDIDATE_PATH" \
+    --report-path "$REPORT_PATH" \
+    --max-p99-regression-ratio "$MAX_P99_REGRESSION_RATIO" \
+    --coverage-floor "$COVERAGE_FLOOR"
+fi
 
 echo "[performance-budget-gate] completed"

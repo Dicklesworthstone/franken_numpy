@@ -1574,24 +1574,53 @@ fn load_iter_adversarial_cases(fixture_root: &Path) -> Result<Vec<IterAdversaria
     serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
 }
 
+fn resolve_packet_fixture_path(fixture_root: &Path, packet_dir: &str, file_name: &str) -> PathBuf {
+    let direct_path = fixture_root.join(file_name);
+    if direct_path.exists() {
+        return direct_path;
+    }
+
+    let packet_path = fixture_root.join(packet_dir).join(file_name);
+    if packet_path.exists() {
+        return packet_path;
+    }
+
+    match fixture_root.file_name().and_then(std::ffi::OsStr::to_str) {
+        Some(dir_name) if dir_name == packet_dir => direct_path,
+        _ => packet_path,
+    }
+}
+
 fn load_dtype_differential_cases(
     fixture_root: &Path,
 ) -> Result<Vec<DTypeDifferentialCase>, String> {
-    let path = fixture_root.join("dtype_differential_cases.json");
+    let path = resolve_packet_fixture_path(
+        fixture_root,
+        "packet002_dtype",
+        "dtype_differential_cases.json",
+    );
     let raw = fs::read_to_string(&path)
         .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
     serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
 }
 
 fn load_dtype_metamorphic_cases(fixture_root: &Path) -> Result<Vec<DTypeMetamorphicCase>, String> {
-    let path = fixture_root.join("dtype_metamorphic_cases.json");
+    let path = resolve_packet_fixture_path(
+        fixture_root,
+        "packet002_dtype",
+        "dtype_metamorphic_cases.json",
+    );
     let raw = fs::read_to_string(&path)
         .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
     serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
 }
 
 fn load_dtype_adversarial_cases(fixture_root: &Path) -> Result<Vec<DTypeAdversarialCase>, String> {
-    let path = fixture_root.join("dtype_adversarial_cases.json");
+    let path = resolve_packet_fixture_path(
+        fixture_root,
+        "packet002_dtype",
+        "dtype_adversarial_cases.json",
+    );
     let raw = fs::read_to_string(&path)
         .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
     serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))

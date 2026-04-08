@@ -10,6 +10,15 @@ use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const REPRO_COMMAND: &str = "cargo run -p fnp-conformance --bin generate_benchmark_baseline";
+pub const MEMORY_FOOTPRINT_SLO_PATH: &str = "memory footprint";
+pub const ALLOCATION_CHURN_SLO_PATH: &str = "allocation churn";
+pub const ALLOCATOR_FRAGMENTATION_SLO_PATH: &str =
+    "allocator fragmentation under adversarial workloads";
+pub const REQUIRED_SLO_PATHS: &[&str] = &[
+    MEMORY_FOOTPRINT_SLO_PATH,
+    ALLOCATION_CHURN_SLO_PATH,
+    ALLOCATOR_FRAGMENTATION_SLO_PATH,
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PercentileSummary {
@@ -30,6 +39,15 @@ pub struct BenchmarkWorkload {
     pub telemetry: WorkloadTelemetry,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AllocatorStressLevel {
+    #[default]
+    None,
+    Steady,
+    Adversarial,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkloadTelemetry {
     pub elements_per_run: usize,
@@ -38,6 +56,28 @@ pub struct WorkloadTelemetry {
     pub throughput_elements_per_sec_p95: f64,
     pub bandwidth_mib_per_sec_p50: f64,
     pub bandwidth_mib_per_sec_p95: f64,
+    #[serde(default)]
+    pub peak_live_bytes_per_run: usize,
+    #[serde(default)]
+    pub heap_allocations_per_run: usize,
+    #[serde(default)]
+    pub allocator_stress: AllocatorStressLevel,
+}
+
+impl WorkloadTelemetry {
+    pub fn covered_slo_paths(&self) -> Vec<&'static str> {
+        let mut covered = Vec::with_capacity(3);
+        if self.peak_live_bytes_per_run > 0 {
+            covered.push(MEMORY_FOOTPRINT_SLO_PATH);
+        }
+        if self.heap_allocations_per_run > 0 {
+            covered.push(ALLOCATION_CHURN_SLO_PATH);
+        }
+        if self.allocator_stress == AllocatorStressLevel::Adversarial {
+            covered.push(ALLOCATOR_FRAGMENTATION_SLO_PATH);
+        }
+        covered
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -179,11 +219,19 @@ fn summarize_samples(samples: &[f64]) -> PercentileSummary {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct WorkloadInstrumentation {
+    elements_per_run: usize,
+    bytes_processed_per_run: usize,
+    peak_live_bytes_per_run: usize,
+    heap_allocations_per_run: usize,
+    allocator_stress: AllocatorStressLevel,
+}
+
 fn time_workload<F>(
     name: &str,
     runs: usize,
-    elements_per_run: usize,
-    bytes_processed_per_run: usize,
+    instrumentation: WorkloadInstrumentation,
     mut run_fn: F,
 ) -> Result<BenchmarkWorkload, String>
 where
@@ -199,20 +247,23 @@ where
     }
 
     let percentiles = summarize_samples(&samples_ms);
-    let bytes_per_run_mib = bytes_processed_per_run as f64 / (1024.0 * 1024.0);
+    let bytes_per_run_mib = instrumentation.bytes_processed_per_run as f64 / (1024.0 * 1024.0);
     let telemetry = WorkloadTelemetry {
-        elements_per_run,
-        bytes_processed_per_run,
+        elements_per_run: instrumentation.elements_per_run,
+        bytes_processed_per_run: instrumentation.bytes_processed_per_run,
         throughput_elements_per_sec_p50: compute_per_second(
-            elements_per_run as f64,
+            instrumentation.elements_per_run as f64,
             percentiles.p50_ms,
         ),
         throughput_elements_per_sec_p95: compute_per_second(
-            elements_per_run as f64,
+            instrumentation.elements_per_run as f64,
             percentiles.p95_ms,
         ),
         bandwidth_mib_per_sec_p50: compute_per_second(bytes_per_run_mib, percentiles.p50_ms),
         bandwidth_mib_per_sec_p95: compute_per_second(bytes_per_run_mib, percentiles.p95_ms),
+        peak_live_bytes_per_run: instrumentation.peak_live_bytes_per_run,
+        heap_allocations_per_run: instrumentation.heap_allocations_per_run,
+        allocator_stress: instrumentation.allocator_stress,
     };
 
     Ok(BenchmarkWorkload {
@@ -256,8 +307,13 @@ pub fn generate_benchmark_baseline(
     let add_workload = time_workload(
         "ufunc_add_broadcast_256x256_by_256",
         20,
-        add_elements_per_run,
-        add_bytes_per_run,
+        WorkloadInstrumentation {
+            elements_per_run: add_elements_per_run,
+            bytes_processed_per_run: add_bytes_per_run,
+            peak_live_bytes_per_run: add_bytes_per_run,
+            heap_allocations_per_run: 1,
+            allocator_stress: AllocatorStressLevel::Steady,
+        },
         || {
             let out = lhs_add
                 .elementwise_binary(&rhs_add, BinaryOp::Add)
@@ -272,8 +328,13 @@ pub fn generate_benchmark_baseline(
     let reduce_axis1 = time_workload(
         "reduce_sum_axis1_keepdims_false_256x256",
         20,
-        reduce_axis1_elements_per_run,
-        reduce_axis1_bytes_per_run,
+        WorkloadInstrumentation {
+            elements_per_run: reduce_axis1_elements_per_run,
+            bytes_processed_per_run: reduce_axis1_bytes_per_run,
+            peak_live_bytes_per_run: reduce_axis1_bytes_per_run,
+            heap_allocations_per_run: 1,
+            allocator_stress: AllocatorStressLevel::Steady,
+        },
         || {
             let out = reduce_in
                 .reduce_sum(Some(1), false)
@@ -288,8 +349,13 @@ pub fn generate_benchmark_baseline(
     let reduce_all = time_workload(
         "reduce_sum_all_keepdims_false_256x256",
         20,
-        reduce_all_elements_per_run,
-        reduce_all_bytes_per_run,
+        WorkloadInstrumentation {
+            elements_per_run: reduce_all_elements_per_run,
+            bytes_processed_per_run: reduce_all_bytes_per_run,
+            peak_live_bytes_per_run: reduce_all_bytes_per_run,
+            heap_allocations_per_run: 1,
+            allocator_stress: AllocatorStressLevel::Steady,
+        },
         || {
             let out = reduce_in
                 .reduce_sum(None, false)
@@ -321,8 +387,13 @@ pub fn generate_benchmark_baseline(
     let add_large_workload = time_workload(
         "ufunc_add_broadcast_1024x1024_by_1024",
         8,
-        large_add_elements_per_run,
-        add_large_bytes_per_run,
+        WorkloadInstrumentation {
+            elements_per_run: large_add_elements_per_run,
+            bytes_processed_per_run: add_large_bytes_per_run,
+            peak_live_bytes_per_run: add_large_bytes_per_run,
+            heap_allocations_per_run: 1,
+            allocator_stress: AllocatorStressLevel::Steady,
+        },
         || {
             let out = lhs_add_large
                 .elementwise_binary(&rhs_add_large, BinaryOp::Add)
@@ -354,8 +425,13 @@ pub fn generate_benchmark_baseline(
     let matmul_workload = time_workload(
         "matmul_256x256_by_256x256",
         6,
-        matmul_elements,
-        matmul_bytes_per_run,
+        WorkloadInstrumentation {
+            elements_per_run: matmul_elements,
+            bytes_processed_per_run: matmul_bytes_per_run,
+            peak_live_bytes_per_run: matmul_bytes_per_run,
+            heap_allocations_per_run: 1,
+            allocator_stress: AllocatorStressLevel::Steady,
+        },
         || {
             let out = matmul_lhs
                 .matmul(&matmul_rhs)
@@ -375,14 +451,24 @@ pub fn generate_benchmark_baseline(
     )
     .map_err(|err| format!("benchmark sort input init failed: {err}"))?;
     let sort_bytes_per_run = sort_len * item_size * 2;
-    let sort_workload =
-        time_workload("sort_quicksort_1m", 8, sort_len, sort_bytes_per_run, || {
+    let sort_workload = time_workload(
+        "sort_quicksort_1m",
+        8,
+        WorkloadInstrumentation {
+            elements_per_run: sort_len,
+            bytes_processed_per_run: sort_bytes_per_run,
+            peak_live_bytes_per_run: sort_bytes_per_run,
+            heap_allocations_per_run: 1,
+            allocator_stress: AllocatorStressLevel::Steady,
+        },
+        || {
             let out = sort_in
                 .sort(None, Some("quicksort"))
                 .map_err(|err| format!("sort workload failed: {err}"))?;
             std::hint::black_box(out.values()[0]);
             Ok(())
-        })?;
+        },
+    )?;
 
     let fft_len = 65_536usize;
     let fft_in = UFuncArray::new(
@@ -398,13 +484,24 @@ pub fn generate_benchmark_baseline(
     )
     .map_err(|err| format!("benchmark fft input init failed: {err}"))?;
     let fft_bytes_per_run = fft_len * item_size * 3;
-    let fft_workload = time_workload("fft_65536", 8, fft_len, fft_bytes_per_run, || {
-        let out = fft_in
-            .fft(None)
-            .map_err(|err| format!("fft workload failed: {err}"))?;
-        std::hint::black_box(out.values()[0]);
-        Ok(())
-    })?;
+    let fft_workload = time_workload(
+        "fft_65536",
+        8,
+        WorkloadInstrumentation {
+            elements_per_run: fft_len,
+            bytes_processed_per_run: fft_bytes_per_run,
+            peak_live_bytes_per_run: fft_bytes_per_run,
+            heap_allocations_per_run: 1,
+            allocator_stress: AllocatorStressLevel::Steady,
+        },
+        || {
+            let out = fft_in
+                .fft(None)
+                .map_err(|err| format!("fft workload failed: {err}"))?;
+            std::hint::black_box(out.values()[0]);
+            Ok(())
+        },
+    )?;
 
     let astype_in = UFuncArray::new(
         vec![large_add_dim, large_add_dim],
@@ -419,8 +516,13 @@ pub fn generate_benchmark_baseline(
     let astype_workload = time_workload(
         "astype_f64_to_i32_1024x1024",
         10,
-        large_add_elements_per_run,
-        astype_bytes_per_run,
+        WorkloadInstrumentation {
+            elements_per_run: large_add_elements_per_run,
+            bytes_processed_per_run: astype_bytes_per_run,
+            peak_live_bytes_per_run: astype_bytes_per_run,
+            heap_allocations_per_run: 1,
+            allocator_stress: AllocatorStressLevel::Steady,
+        },
         || {
             let out = astype_in.astype(DType::I32);
             std::hint::black_box(out.values()[0]);
@@ -431,8 +533,13 @@ pub fn generate_benchmark_baseline(
     let reshape_workload = time_workload(
         "reshape_1024x1024_to_2048x512",
         20,
-        large_add_elements_per_run,
-        large_add_elements_per_run * item_size,
+        WorkloadInstrumentation {
+            elements_per_run: large_add_elements_per_run,
+            bytes_processed_per_run: large_add_elements_per_run * item_size,
+            peak_live_bytes_per_run: large_add_elements_per_run * item_size,
+            heap_allocations_per_run: 0,
+            allocator_stress: AllocatorStressLevel::None,
+        },
         || {
             let out = astype_in
                 .reshape(&[2048, 512])
@@ -447,11 +554,25 @@ pub fn generate_benchmark_baseline(
     let io_values: Vec<f64> = (0..io_elements)
         .map(|i| f64::from(((i * 29) % 65_537) as u32) / 11.0)
         .collect();
+    let fragmentation_lengths = [257usize, 8_192, 521, 16_384, 1_031, 32_768, 2_053, 4_096];
+    let fragmentation_inputs: Vec<Vec<f64>> = fragmentation_lengths
+        .iter()
+        .map(|&len| {
+            (0..len)
+                .map(|i| f64::from(((i * 37 + len) % 65_537) as u32) / 13.0)
+                .collect()
+        })
+        .collect();
     let io_npy_workload = time_workload(
         "io_npy_save_load_512x512_f64",
         8,
-        io_elements,
-        io_elements * item_size * 2,
+        WorkloadInstrumentation {
+            elements_per_run: io_elements,
+            bytes_processed_per_run: io_elements * item_size * 2,
+            peak_live_bytes_per_run: io_elements * item_size * 3,
+            heap_allocations_per_run: 3,
+            allocator_stress: AllocatorStressLevel::Steady,
+        },
         || {
             let payload = save(&[io_dim, io_dim], &io_values, IOSupportedDType::F64)
                 .map_err(|err| format!("io save workload failed: {err}"))?;
@@ -468,6 +589,44 @@ pub fn generate_benchmark_baseline(
                 ));
             }
             std::hint::black_box(values[0]);
+            Ok(())
+        },
+    )?;
+    let fragmentation_elements_per_run = fragmentation_lengths.iter().sum::<usize>();
+    let fragmentation_peak_len = fragmentation_lengths.iter().copied().max().unwrap_or(0);
+    let fragmentation_workload = time_workload(
+        "allocator_fragmentation_adversarial_save_load_mix",
+        6,
+        WorkloadInstrumentation {
+            elements_per_run: fragmentation_elements_per_run,
+            bytes_processed_per_run: fragmentation_elements_per_run * item_size * 2,
+            peak_live_bytes_per_run: fragmentation_peak_len * item_size * 3,
+            heap_allocations_per_run: fragmentation_lengths.len() * 3,
+            allocator_stress: AllocatorStressLevel::Adversarial,
+        },
+        || {
+            let mut checksum = 0.0f64;
+            for (&len, values) in fragmentation_lengths
+                .iter()
+                .zip(fragmentation_inputs.iter())
+            {
+                let payload = save(&[len], values, IOSupportedDType::F64)
+                    .map_err(|err| format!("fragmentation save workload failed: {err}"))?;
+                let (shape, decoded, dtype) = load(&payload)
+                    .map_err(|err| format!("fragmentation load workload failed: {err}"))?;
+                if shape != vec![len] {
+                    return Err(format!(
+                        "fragmentation workload shape mismatch expected=[{len}] actual={shape:?}"
+                    ));
+                }
+                if dtype != IOSupportedDType::F64 {
+                    return Err(format!(
+                        "fragmentation workload dtype mismatch expected=F64 actual={dtype:?}"
+                    ));
+                }
+                checksum += decoded.first().copied().unwrap_or(0.0);
+            }
+            std::hint::black_box(checksum);
             Ok(())
         },
     )?;
@@ -503,6 +662,7 @@ pub fn generate_benchmark_baseline(
             astype_workload,
             reshape_workload,
             io_npy_workload,
+            fragmentation_workload,
         ],
         environment_fingerprint,
         reproducibility,
@@ -524,7 +684,8 @@ pub fn generate_benchmark_baseline(
 
 #[cfg(test)]
 mod tests {
-    use super::{BenchmarkBaseline, generate_benchmark_baseline};
+    use super::{BenchmarkBaseline, REQUIRED_SLO_PATHS, generate_benchmark_baseline};
+    use std::collections::BTreeSet;
     use std::fs;
 
     fn temp_file(name: &str) -> std::path::PathBuf {
@@ -556,6 +717,14 @@ mod tests {
             assert!(workload.telemetry.bandwidth_mib_per_sec_p50 > 0.0);
             assert!(workload.telemetry.throughput_elements_per_sec_p50 > 0.0);
         }
+        let observed_slo_paths: BTreeSet<&'static str> = baseline
+            .workloads
+            .iter()
+            .flat_map(|workload| workload.telemetry.covered_slo_paths())
+            .collect();
+        let required_slo_paths: BTreeSet<&'static str> =
+            REQUIRED_SLO_PATHS.iter().copied().collect();
+        assert_eq!(observed_slo_paths, required_slo_paths);
 
         let raw = fs::read_to_string(&output_path).expect("baseline file readable");
         let parsed: BenchmarkBaseline = serde_json::from_str(&raw).expect("baseline json parse");
@@ -564,6 +733,12 @@ mod tests {
             parsed.reproducibility.command,
             baseline.reproducibility.command
         );
+        let parsed_slo_paths: BTreeSet<&'static str> = parsed
+            .workloads
+            .iter()
+            .flat_map(|workload| workload.telemetry.covered_slo_paths())
+            .collect();
+        assert_eq!(parsed_slo_paths, required_slo_paths);
 
         let _ = fs::remove_file(output_path);
     }
