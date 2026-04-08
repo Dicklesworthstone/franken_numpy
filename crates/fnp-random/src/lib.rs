@@ -3578,17 +3578,13 @@ impl Generator {
         }
         Ok((0..size)
             .map(|_| {
-                if df >= 1.0 {
+                if df > 1.0 {
                     // X ~ chi²(df-1) + (Z + sqrt(nonc))²
-                    let chi2_part = if df > 1.0 {
-                        self.sample_gamma((df - 1.0) / 2.0) * 2.0
-                    } else {
-                        0.0
-                    };
+                    let chi2_part = self.sample_gamma((df - 1.0) / 2.0) * 2.0;
                     let z = self.sample_standard_normal_single() + nonc.sqrt();
                     chi2_part + z * z
                 } else {
-                    // df < 1: use Poisson mixture
+                    // df <= 1.0: use Poisson mixture
                     let i = self.sample_poisson_single(nonc / 2.0);
                     self.sample_gamma(df / 2.0 + i as f64) * 2.0
                 }
@@ -3613,12 +3609,8 @@ impl Generator {
         Ok((0..size)
             .map(|_| {
                 let nc_chi2 = {
-                    if dfnum >= 1.0 {
-                        let chi2_part = if dfnum > 1.0 {
-                            self.sample_gamma((dfnum - 1.0) / 2.0) * 2.0
-                        } else {
-                            0.0
-                        };
+                    if dfnum > 1.0 {
+                        let chi2_part = self.sample_gamma((dfnum - 1.0) / 2.0) * 2.0;
                         let z = self.sample_standard_normal_single() + nonc.sqrt();
                         chi2_part + z * z
                     } else {
