@@ -2274,6 +2274,14 @@ impl UFuncArrayView {
                 .map_err(|_| UFuncError::Msg("shared view: read lock poisoned".to_string()))?
                 .clone();
             self.buffer = Arc::new(RwLock::new(cloned));
+
+            if let Some(ref sidecar) = self.integer_sidecar {
+                let cloned_sidecar = sidecar
+                    .read()
+                    .map_err(|_| UFuncError::Msg("shared view: sidecar lock poisoned".to_string()))?
+                    .clone();
+                self.integer_sidecar = Some(Arc::new(RwLock::new(cloned_sidecar)));
+            }
         }
 
         self.itemset(index, value)
@@ -13129,11 +13137,11 @@ impl UFuncArray {
                 x_mat[i * m + j] = powers[j];
             }
         }
-        
+
         let rcond = (x.values.len() as f64) * f64::EPSILON; // Match numpy default rcond
         let (coeffs, _, _, _) = fnp_linalg::lstsq_svd(&x_mat, &y.values, n, m, rcond)
             .map_err(|e| UFuncError::Msg(format!("polyfit: {}", e)))?;
-        
+
         Ok(Self {
             shape: vec![m],
             values: coeffs,
@@ -45784,6 +45792,25 @@ mod tests {
         } else {
             assert_eq!(storage.dtype(), DType::I64, "Expected I64 storage");
         }
+    }
+
+    #[test]
+    fn test_itemset_cow_clones_sidecar() {
+        use crate::IntegerSidecar;
+        let arr = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::I64).unwrap();
+
+        let mut view = arr.shared_view().unwrap();
+        // Trigger CoW mutation
+        view.itemset_cow(&[0], 99.0).unwrap();
+
+        // original array should still have 1.0 in its sidecar
+        if let Some(sidecar) = arr.integer_sidecar.as_ref() {
+            match sidecar {
+                IntegerSidecar::I64(v) => assert_eq!(v[0], 1),
+                _ => panic!("Expected I64 sidecar"),
+            }
+        }
+        assert_eq!(arr.item(&[0]).unwrap(), 1.0);
     }
 
     #[test]
