@@ -1858,11 +1858,14 @@ pub fn genfromtxt_full(
     text: &str,
     config: &GenFromTxtConfig<'_>,
 ) -> Result<TextArrayData, IOError> {
+    let lines: Vec<&str> = text.lines().collect();
+    let end_idx = lines.len().saturating_sub(config.skip_footer);
+
     // First, collect all non-skipped content lines
-    let all_lines: Vec<&str> = text
-        .lines()
+    let all_lines: Vec<&str> = lines[..end_idx]
+        .iter()
         .enumerate()
-        .filter_map(|(i, line)| {
+        .filter_map(|(i, &line)| {
             if i < config.skip_header {
                 return None;
             }
@@ -1874,9 +1877,8 @@ pub fn genfromtxt_full(
         })
         .collect();
 
-    // Apply skip_footer
-    let effective_len = all_lines.len().saturating_sub(config.skip_footer);
-    let effective_len = effective_len.min(config.max_rows);
+    // Apply max_rows
+    let effective_len = all_lines.len().min(config.max_rows);
 
     let mut values = Vec::new();
     let mut ncols: Option<usize> = None;
