@@ -10102,6 +10102,9 @@ impl UFuncArray {
                 )));
             }
         }
+        
+        let values_bcast = values.broadcast_to(&indices.shape)?;
+        
         let axis_len = self.shape[ax];
         let strides = c_strides_elems(&self.shape);
         let idx_strides = c_strides_elems(&indices.shape);
@@ -10132,12 +10135,12 @@ impl UFuncArray {
                     dst_flat += c * strides[d];
                 }
             }
-            let val = values.values[flat];
+            let val = values_bcast.values[flat];
             self.values[dst_flat] = val;
             self.write_integer_mutation(
                 dst_flat,
                 val,
-                values.integer_sidecar.as_ref(),
+                values_bcast.integer_sidecar.as_ref(),
                 flat,
                 "put_along_axis",
             )?;
@@ -12459,20 +12462,27 @@ impl UFuncArray {
     /// Mimics `np.cov(m)` where m is 2-D with each row as a variable.
     /// Returns the sample covariance matrix (ddof=1).
     pub fn cov(&self) -> Result<Self, UFuncError> {
-        if self.shape.len() != 2 {
-            return Err(UFuncError::Msg("cov: input must be 2-D".to_string()));
-        }
-        let (nvars, nobs) = (self.shape[0], self.shape[1]);
-        if nobs < 2 {
-            return Err(UFuncError::Msg(
-                "cov: need at least 2 observations".to_string(),
-            ));
-        }
+        let (nvars, nobs) = match self.shape.len() {
+            1 => (1, self.shape[0]),
+            2 => (self.shape[0], self.shape[1]),
+            _ => return Err(UFuncError::Msg("cov: input must be 1-D or 2-D".to_string())),
+        };
+
+        let fact = if nobs < 2 {
+            0.0
+        } else {
+            (nobs - 1) as f64
+        };
+
         // Compute means per row
         let means: Vec<f64> = (0..nvars)
             .map(|r| {
                 let row = &self.values[r * nobs..(r + 1) * nobs];
-                row.iter().sum::<f64>() / nobs as f64
+                if nobs == 0 {
+                    f64::NAN
+                } else {
+                    row.iter().sum::<f64>() / nobs as f64
+                }
             })
             .collect();
 
@@ -12485,13 +12495,20 @@ impl UFuncArray {
                     s += (self.values[i * nobs + k] - means[i])
                         * (self.values[j * nobs + k] - means[j]);
                 }
-                let c = s / (nobs - 1) as f64;
+                let c = if fact == 0.0 { f64::NAN } else { s / fact };
                 cov_values[i * nvars + j] = c;
                 cov_values[j * nvars + i] = c;
             }
         }
+
+        let out_shape = if self.shape.len() == 1 {
+            vec![]
+        } else {
+            vec![nvars, nvars]
+        };
+
         Ok(Self {
-            shape: vec![nvars, nvars],
+            shape: out_shape,
             values: cov_values,
             dtype: DType::F64,
             integer_sidecar: None,
@@ -12500,9 +12517,25 @@ impl UFuncArray {
 
     /// Compute the Pearson correlation coefficient matrix.
     ///
-    /// Mimics `np.corrcoef(x)` where x is 2-D with each row as a variable.
+    /// Mimics `np.corrcoef(x)` where x is 1-D or 2-D.
     pub fn corrcoef(&self) -> Result<Self, UFuncError> {
         let c = self.cov()?;
+        
+        if c.shape.is_empty() {
+            let cov_val = c.values[0];
+            let corr = if cov_val.is_nan() || cov_val == 0.0 {
+                f64::NAN
+            } else {
+                1.0
+            };
+            return Ok(Self {
+                shape: vec![],
+                values: vec![corr],
+                dtype: DType::F64,
+                integer_sidecar: None,
+            });
+        }
+        
         let nvars = c.shape[0];
         let mut values = c.values.clone();
         // Normalize: corrcoef[i,j] = cov[i,j] / sqrt(cov[i,i] * cov[j,j])
@@ -12510,7 +12543,15 @@ impl UFuncArray {
             for j in 0..nvars {
                 let denom = (c.values[i * nvars + i] * c.values[j * nvars + j]).sqrt();
                 values[i * nvars + j] = if denom > 0.0 {
-                    c.values[i * nvars + j] / denom
+                    let mut val = c.values[i * nvars + j] / denom;
+                    if i == j && !val.is_nan() {
+                        val = 1.0;
+                    } else if val > 1.0 {
+                        val = 1.0;
+                    } else if val < -1.0 {
+                        val = -1.0;
+                    }
+                    val
                 } else {
                     f64::NAN
                 };
@@ -18864,7 +18905,7 @@ fn interpolate_percentile_method(sorted: &[f64], fraction: f64, method: Quantile
         QuantileInterp::Lower => sorted[lo],
         QuantileInterp::Higher => sorted[hi],
         QuantileInterp::Nearest => {
-            if frac <= 0.5 {
+            if frac < 0.5 || (frac == 0.5 && lo % 2 == 0) {
                 sorted[lo]
             } else {
                 sorted[hi]
