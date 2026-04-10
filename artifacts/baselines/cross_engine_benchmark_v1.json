@@ -1,0 +1,1405 @@
+{
+  "version": "1.0.0",
+  "generated_at": "2026-04-10T02:20:00Z",
+  "git_sha": "eebce5243deba26b7db28c412dc0e22d4f37ba75",
+  "env_fingerprint": {
+    "rust_version": "rustc 1.96.0-nightly (80d0e4be6 2026-03-25)",
+    "numpy_version": "2.4.3",
+    "blas_backend": "{\n  \"Compilers\": {\n    \"c\": {\n      \"name\": \"gcc\",\n      \"linker\": \"ld.bfd\",\n      \"version\": \"14.2.1\",\n      \"commands\": \"cc\"\n    },\n    \"cython\": {\n      \"name\": \"cython\",\n      \"linker\": \"cython\",\n      \"version\": \"3.2.4\",\n      \"commands\": \"cython\"\n    },\n    \"c++\": {\n      \"name\": \"gcc\",\n      \"linker\": \"ld.bfd\",\n      \"version\": \"14.2.1\",\n      \"commands\": \"c++\"\n    }\n  },\n  \"Machine Information\": {\n    \"host\": {\n      \"cpu\": \"x86_64\",\n      \"family\": \"x86_64\",\n      \"endian\": \"little\",\n      \"system\": \"linux\"\n    },\n    \"build\": {\n      \"cpu\": \"x86_64\",\n      \"family\": \"x86_64\",\n      \"endian\": \"little\",\n      \"system\": \"linux\"\n    }\n  },\n  \"Build Dependencies\": {\n    \"blas\": {\n      \"name\": \"scipy-openblas\",\n      \"found\": true,\n      \"version\": \"0.3.31.dev\",\n      \"detection method\": \"pkgconfig\",\n      \"include directory\": \"/opt/_internal/cpython-3.14.0/lib/python3.14/site-packages/scipy_openblas64/include\",\n      \"lib directory\": \"/opt/_internal/cpython-3.14.0/lib/python3.14/site-packages/scipy_openblas64/lib\",\n      \"openblas configuration\": \"OpenBLAS 0.3.31.dev  USE64BITINT DYNAMIC_ARCH NO_AFFINITY Haswell MAX_THREADS=64\",\n      \"pc file directory\": \"/project/.openblas\"\n    },\n    \"lapack\": {\n      \"name\": \"scipy-openblas\",\n      \"found\": true,\n      \"version\": \"0.3.31.dev\",\n      \"detection method\": \"pkgconfig\",\n      \"include directory\": \"/opt/_internal/cpython-3.14.0/lib/python3.14/site-packages/scipy_openblas64/include\",\n      \"lib directory\": \"/opt/_internal/cpython-3.14.0/lib/python3.14/site-packages/scipy_openblas64/lib\",\n      \"openblas configuration\": \"OpenBLAS 0.3.31.dev  USE64BITINT DYNAMIC_ARCH NO_AFFINITY Haswell MAX_THREADS=64\",\n      \"pc file directory\": \"/project/.openblas\"\n    }\n  },\n  \"Python Information\": {\n    \"path\": \"/tmp/build-env-eaz9oo7u/bin/python\",\n    \"version\": \"3.14\"\n  },\n  \"SIMD Extensions\": {\n    \"baseline\": [\n      \"X86_V2\"\n    ],\n    \"found\": [\n      \"X86_V3\"\n    ],\n    \"not found\": [\n      \"X86_V4\",\n      \"AVX512_ICL\",\n      \"AVX512_SPR\"\n    ]\n  }\n}",
+    "cpu": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "os": "Linux-6.17.0-14-generic-x86_64-with-glibc2.42",
+    "python_executable": "/data/projects/franken_numpy/.venv-numpy314/bin/python3"
+  },
+  "workloads": [
+    {
+      "family": "ufunc-elementwise",
+      "name": "add_f64_small",
+      "size_tier": "small",
+      "operation": "binary_add",
+      "shape": [
+        100
+      ],
+      "rhs_shape": [
+        100
+      ],
+      "element_count": 100,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 942,
+        "p95_ns": 962,
+        "p99_ns": 1152,
+        "mean_ns": 946.0,
+        "stddev_ns": 31.096623610932426,
+        "min_ns": 931,
+        "max_ns": 1152,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 450,
+        "p95_ns": 611,
+        "p99_ns": 832,
+        "mean_ns": 472.26,
+        "stddev_ns": 77.82154200476884,
+        "min_ns": 430,
+        "max_ns": 832,
+        "sample_count": 50
+      },
+      "ratio": 2.0933333333333333,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "yellow"
+    },
+    {
+      "family": "ufunc-elementwise",
+      "name": "add_f64_medium",
+      "size_tier": "medium",
+      "operation": "binary_add",
+      "shape": [
+        10000
+      ],
+      "rhs_shape": [
+        10000
+      ],
+      "element_count": 10000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 115259,
+        "p95_ns": 224025,
+        "p99_ns": 274951,
+        "mean_ns": 133649.0,
+        "stddev_ns": 35831.041083954005,
+        "min_ns": 107543,
+        "max_ns": 274951,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 2425,
+        "p95_ns": 2615,
+        "p99_ns": 2895,
+        "mean_ns": 2455.04,
+        "stddev_ns": 97.61740828356385,
+        "min_ns": 2385,
+        "max_ns": 2895,
+        "sample_count": 50
+      },
+      "ratio": 47.52948453608247,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "red"
+    },
+    {
+      "family": "ufunc-elementwise",
+      "name": "add_f64_large",
+      "size_tier": "large",
+      "operation": "binary_add",
+      "shape": [
+        1000000
+      ],
+      "rhs_shape": [
+        1000000
+      ],
+      "element_count": 1000000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 20788557,
+        "p95_ns": 25130092,
+        "p99_ns": 25342214,
+        "mean_ns": 21279132.62,
+        "stddev_ns": 1951127.332019127,
+        "min_ns": 17970169,
+        "max_ns": 25342214,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 675830,
+        "p95_ns": 1385855,
+        "p99_ns": 1782476,
+        "mean_ns": 783997.1,
+        "stddev_ns": 332843.4364655701,
+        "min_ns": 337550,
+        "max_ns": 1782476,
+        "sample_count": 50
+      },
+      "ratio": 30.760038767145584,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "red"
+    },
+    {
+      "family": "ufunc-elementwise",
+      "name": "mul_f64_small",
+      "size_tier": "small",
+      "operation": "binary_mul",
+      "shape": [
+        100
+      ],
+      "rhs_shape": [
+        100
+      ],
+      "element_count": 100,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 1403,
+        "p95_ns": 1573,
+        "p99_ns": 21911,
+        "mean_ns": 1826.38,
+        "stddev_ns": 2869.4654267999117,
+        "min_ns": 1392,
+        "max_ns": 21911,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 571,
+        "p95_ns": 752,
+        "p99_ns": 1032,
+        "mean_ns": 595.4,
+        "stddev_ns": 96.19168363221428,
+        "min_ns": 531,
+        "max_ns": 1032,
+        "sample_count": 50
+      },
+      "ratio": 2.457092819614711,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "yellow"
+    },
+    {
+      "family": "ufunc-elementwise",
+      "name": "mul_f64_medium",
+      "size_tier": "medium",
+      "operation": "binary_mul",
+      "shape": [
+        10000
+      ],
+      "rhs_shape": [
+        10000
+      ],
+      "element_count": 10000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 97926,
+        "p95_ns": 194418,
+        "p99_ns": 201241,
+        "mean_ns": 110532.76,
+        "stddev_ns": 28178.09312537667,
+        "min_ns": 89519,
+        "max_ns": 201241,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 3076,
+        "p95_ns": 3337,
+        "p99_ns": 3728,
+        "mean_ns": 3107.38,
+        "stddev_ns": 137.87354931240438,
+        "min_ns": 3005,
+        "max_ns": 3728,
+        "sample_count": 50
+      },
+      "ratio": 31.83550065019506,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "red"
+    },
+    {
+      "family": "ufunc-elementwise",
+      "name": "mul_f64_large",
+      "size_tier": "large",
+      "operation": "binary_mul",
+      "shape": [
+        1000000
+      ],
+      "rhs_shape": [
+        1000000
+      ],
+      "element_count": 1000000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 21442576,
+        "p95_ns": 25581436,
+        "p99_ns": 26319254,
+        "mean_ns": 21994015.9,
+        "stddev_ns": 2022431.5006960337,
+        "min_ns": 19019687,
+        "max_ns": 26319254,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 523091,
+        "p95_ns": 1040962,
+        "p99_ns": 1273602,
+        "mean_ns": 563558.42,
+        "stddev_ns": 193274.1011662028,
+        "min_ns": 323352,
+        "max_ns": 1273602,
+        "sample_count": 50
+      },
+      "ratio": 40.992056831411745,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "red"
+    },
+    {
+      "family": "ufunc-elementwise",
+      "name": "div_f64_small",
+      "size_tier": "small",
+      "operation": "binary_div",
+      "shape": [
+        100
+      ],
+      "rhs_shape": [
+        100
+      ],
+      "element_count": 100,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 1513,
+        "p95_ns": 1553,
+        "p99_ns": 1683,
+        "mean_ns": 1516.46,
+        "stddev_ns": 26.611433632933046,
+        "min_ns": 1502,
+        "max_ns": 1683,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 722,
+        "p95_ns": 1032,
+        "p99_ns": 1252,
+        "mean_ns": 752.64,
+        "stddev_ns": 111.45470111215587,
+        "min_ns": 661,
+        "max_ns": 1252,
+        "sample_count": 50
+      },
+      "ratio": 2.095567867036011,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "yellow"
+    },
+    {
+      "family": "ufunc-elementwise",
+      "name": "div_f64_medium",
+      "size_tier": "medium",
+      "operation": "binary_div",
+      "shape": [
+        10000
+      ],
+      "rhs_shape": [
+        10000
+      ],
+      "element_count": 10000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 74561,
+        "p95_ns": 137601,
+        "p99_ns": 279219,
+        "mean_ns": 97239.36,
+        "stddev_ns": 35439.91180449523,
+        "min_ns": 73799,
+        "max_ns": 279219,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 3186,
+        "p95_ns": 3386,
+        "p99_ns": 3677,
+        "mean_ns": 3214.6,
+        "stddev_ns": 98.51334934921256,
+        "min_ns": 3146,
+        "max_ns": 3677,
+        "sample_count": 50
+      },
+      "ratio": 23.40269930947897,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "red"
+    },
+    {
+      "family": "ufunc-elementwise",
+      "name": "div_f64_large",
+      "size_tier": "large",
+      "operation": "binary_div",
+      "shape": [
+        1000000
+      ],
+      "rhs_shape": [
+        1000000
+      ],
+      "element_count": 1000000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 22953649,
+        "p95_ns": 25577328,
+        "p99_ns": 27351670,
+        "mean_ns": 22841387.64,
+        "stddev_ns": 1820402.4771402807,
+        "min_ns": 19046227,
+        "max_ns": 27351670,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 428222,
+        "p95_ns": 589967,
+        "p99_ns": 866842,
+        "mean_ns": 449974.54,
+        "stddev_ns": 91368.62156500119,
+        "min_ns": 361665,
+        "max_ns": 866842,
+        "sample_count": 50
+      },
+      "ratio": 53.602218008416195,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "red"
+    },
+    {
+      "family": "ufunc-broadcast",
+      "name": "broadcast_add_small",
+      "size_tier": "small",
+      "operation": "binary_add",
+      "shape": [
+        10,
+        10
+      ],
+      "rhs_shape": [
+        10
+      ],
+      "element_count": 100,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 732,
+        "p95_ns": 771,
+        "p99_ns": 891,
+        "mean_ns": 739.96,
+        "stddev_ns": 24.707861097229763,
+        "min_ns": 721,
+        "max_ns": 891,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 1342,
+        "p95_ns": 1553,
+        "p99_ns": 1954,
+        "mean_ns": 1373.4,
+        "stddev_ns": 113.76765797009271,
+        "min_ns": 1302,
+        "max_ns": 1954,
+        "sample_count": 50
+      },
+      "ratio": 0.5454545454545454,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "green"
+    },
+    {
+      "family": "ufunc-broadcast",
+      "name": "broadcast_add_medium",
+      "size_tier": "medium",
+      "operation": "binary_add",
+      "shape": [
+        100,
+        100
+      ],
+      "rhs_shape": [
+        100
+      ],
+      "element_count": 10000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 52510,
+        "p95_ns": 78840,
+        "p99_ns": 227421,
+        "mean_ns": 58718.64,
+        "stddev_ns": 25069.002441070526,
+        "min_ns": 52399,
+        "max_ns": 227421,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 4358,
+        "p95_ns": 4699,
+        "p99_ns": 4909,
+        "mean_ns": 4383.7,
+        "stddev_ns": 119.75896626140357,
+        "min_ns": 4288,
+        "max_ns": 4909,
+        "sample_count": 50
+      },
+      "ratio": 12.049105094079852,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "red"
+    },
+    {
+      "family": "ufunc-broadcast",
+      "name": "broadcast_add_large",
+      "size_tier": "large",
+      "operation": "binary_add",
+      "shape": [
+        1000,
+        1000
+      ],
+      "rhs_shape": [
+        1000
+      ],
+      "element_count": 1000000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 20855044,
+        "p95_ns": 25205164,
+        "p99_ns": 25605983,
+        "mean_ns": 21085216.86,
+        "stddev_ns": 1986102.6773187032,
+        "min_ns": 17615367,
+        "max_ns": 25605983,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 409355,
+        "p95_ns": 1306305,
+        "p99_ns": 1420591,
+        "mean_ns": 575763.72,
+        "stddev_ns": 316080.92017596,
+        "min_ns": 319304,
+        "max_ns": 1420591,
+        "sample_count": 50
+      },
+      "ratio": 50.94610790145473,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "red"
+    },
+    {
+      "family": "ufunc-broadcast",
+      "name": "broadcast_mul_small",
+      "size_tier": "small",
+      "operation": "binary_mul",
+      "shape": [
+        10,
+        10
+      ],
+      "rhs_shape": [
+        10
+      ],
+      "element_count": 100,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 912,
+        "p95_ns": 942,
+        "p99_ns": 1032,
+        "mean_ns": 916.74,
+        "stddev_ns": 18.638465602082164,
+        "min_ns": 901,
+        "max_ns": 1032,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 1833,
+        "p95_ns": 1974,
+        "p99_ns": 2846,
+        "mean_ns": 1864.14,
+        "stddev_ns": 165.58792347269772,
+        "min_ns": 1733,
+        "max_ns": 2846,
+        "sample_count": 50
+      },
+      "ratio": 0.49754500818330605,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "green"
+    },
+    {
+      "family": "ufunc-broadcast",
+      "name": "broadcast_mul_medium",
+      "size_tier": "medium",
+      "operation": "binary_mul",
+      "shape": [
+        100,
+        100
+      ],
+      "rhs_shape": [
+        100
+      ],
+      "element_count": 10000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 72778,
+        "p95_ns": 90982,
+        "p99_ns": 105890,
+        "mean_ns": 77364.56,
+        "stddev_ns": 8062.752545278814,
+        "min_ns": 72627,
+        "max_ns": 105890,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 5380,
+        "p95_ns": 5731,
+        "p99_ns": 6032,
+        "mean_ns": 5397.48,
+        "stddev_ns": 137.52821383265328,
+        "min_ns": 5250,
+        "max_ns": 6032,
+        "sample_count": 50
+      },
+      "ratio": 13.527509293680298,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "red"
+    },
+    {
+      "family": "ufunc-broadcast",
+      "name": "broadcast_mul_large",
+      "size_tier": "large",
+      "operation": "binary_mul",
+      "shape": [
+        1000,
+        1000
+      ],
+      "rhs_shape": [
+        1000
+      ],
+      "element_count": 1000000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 21506287,
+        "p95_ns": 25217777,
+        "p99_ns": 26102854,
+        "mean_ns": 21886086.84,
+        "stddev_ns": 1653234.0301883984,
+        "min_ns": 19383436,
+        "max_ns": 26102854,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 461945,
+        "p95_ns": 1112828,
+        "p99_ns": 1386977,
+        "mean_ns": 560907.38,
+        "stddev_ns": 254518.2710801635,
+        "min_ns": 343451,
+        "max_ns": 1386977,
+        "sample_count": 50
+      },
+      "ratio": 46.55594713656388,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "red"
+    },
+    {
+      "family": "reductions",
+      "name": "reduce_sum_medium",
+      "size_tier": "medium",
+      "operation": "reduce_sum",
+      "shape": [
+        100,
+        100
+      ],
+      "rhs_shape": [],
+      "element_count": 10000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 6172,
+        "p95_ns": 6292,
+        "p99_ns": 6994,
+        "mean_ns": 6046.06,
+        "stddev_ns": 466.31531864179647,
+        "min_ns": 4699,
+        "max_ns": 6994,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 5230,
+        "p95_ns": 5490,
+        "p99_ns": 5961,
+        "mean_ns": 5272.78,
+        "stddev_ns": 145.10414053361814,
+        "min_ns": 5130,
+        "max_ns": 5961,
+        "sample_count": 50
+      },
+      "ratio": 1.1801147227533462,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "green"
+    },
+    {
+      "family": "reductions",
+      "name": "reduce_sum_large",
+      "size_tier": "large",
+      "operation": "reduce_sum",
+      "shape": [
+        1000,
+        1000
+      ],
+      "rhs_shape": [],
+      "element_count": 1000000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 672925,
+        "p95_ns": 1077080,
+        "p99_ns": 1446219,
+        "mean_ns": 751176.7,
+        "stddev_ns": 154888.58562531325,
+        "min_ns": 658066,
+        "max_ns": 1446219,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 201171,
+        "p95_ns": 240706,
+        "p99_ns": 261095,
+        "mean_ns": 207860.32,
+        "stddev_ns": 13756.90756157066,
+        "min_ns": 198566,
+        "max_ns": 261095,
+        "sample_count": 50
+      },
+      "ratio": 3.345039792017736,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "yellow"
+    },
+    {
+      "family": "reductions",
+      "name": "reduce_mean_medium",
+      "size_tier": "medium",
+      "operation": "reduce_mean",
+      "shape": [
+        100,
+        100
+      ],
+      "rhs_shape": [],
+      "element_count": 10000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 4058,
+        "p95_ns": 4329,
+        "p99_ns": 5020,
+        "mean_ns": 3919.0,
+        "stddev_ns": 412.27777044124025,
+        "min_ns": 3456,
+        "max_ns": 5020,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 6873,
+        "p95_ns": 8667,
+        "p99_ns": 16261,
+        "mean_ns": 7256.82,
+        "stddev_ns": 1414.9658609309272,
+        "min_ns": 6752,
+        "max_ns": 16261,
+        "sample_count": 50
+      },
+      "ratio": 0.5904263058344246,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "green"
+    },
+    {
+      "family": "reductions",
+      "name": "reduce_mean_large",
+      "size_tier": "large",
+      "operation": "reduce_mean",
+      "shape": [
+        1000,
+        1000
+      ],
+      "rhs_shape": [],
+      "element_count": 1000000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 841033,
+        "p95_ns": 1044398,
+        "p99_ns": 1202137,
+        "mean_ns": 810688.06,
+        "stddev_ns": 128583.53280267424,
+        "min_ns": 658337,
+        "max_ns": 1202137,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 172677,
+        "p95_ns": 382415,
+        "p99_ns": 674477,
+        "mean_ns": 196672.6,
+        "stddev_ns": 82373.7189037863,
+        "min_ns": 169762,
+        "max_ns": 674477,
+        "sample_count": 50
+      },
+      "ratio": 4.870556009196361,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "yellow"
+    },
+    {
+      "family": "reductions",
+      "name": "reduce_std_medium",
+      "size_tier": "medium",
+      "operation": "reduce_std",
+      "shape": [
+        100,
+        100
+      ],
+      "rhs_shape": [],
+      "element_count": 10000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 12203,
+        "p95_ns": 12344,
+        "p99_ns": 41549,
+        "mean_ns": 13077.2,
+        "stddev_ns": 4564.625951816863,
+        "min_ns": 12133,
+        "max_ns": 41549,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 26400,
+        "p95_ns": 33945,
+        "p99_ns": 74231,
+        "mean_ns": 27982.58,
+        "stddev_ns": 6919.729573010783,
+        "min_ns": 25969,
+        "max_ns": 74231,
+        "sample_count": 50
+      },
+      "ratio": 0.46223484848484847,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "green"
+    },
+    {
+      "family": "reductions",
+      "name": "reduce_std_large",
+      "size_tier": "large",
+      "operation": "reduce_std",
+      "shape": [
+        1000,
+        1000
+      ],
+      "rhs_shape": [],
+      "element_count": 1000000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 1432603,
+        "p95_ns": 2054793,
+        "p99_ns": 2369979,
+        "mean_ns": 1554954.12,
+        "stddev_ns": 247274.40293840686,
+        "min_ns": 1361719,
+        "max_ns": 2369979,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 1445848,
+        "p95_ns": 3318536,
+        "p99_ns": 3796962,
+        "mean_ns": 1700953.12,
+        "stddev_ns": 795905.3645169542,
+        "min_ns": 846904,
+        "max_ns": 3796962,
+        "sample_count": 50
+      },
+      "ratio": 0.990839286010701,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "green"
+    },
+    {
+      "family": "reductions",
+      "name": "reduce_argmax_medium",
+      "size_tier": "medium",
+      "operation": "reduce_argmax",
+      "shape": [
+        100,
+        100
+      ],
+      "rhs_shape": [],
+      "element_count": 10000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 6763,
+        "p95_ns": 8787,
+        "p99_ns": 9769,
+        "mean_ns": 7007.5,
+        "stddev_ns": 687.6506162289103,
+        "min_ns": 6752,
+        "max_ns": 9769,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 2946,
+        "p95_ns": 3647,
+        "p99_ns": 5781,
+        "mean_ns": 3096.46,
+        "stddev_ns": 550.9230149485498,
+        "min_ns": 2885,
+        "max_ns": 5781,
+        "sample_count": 50
+      },
+      "ratio": 2.295655125594026,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "yellow"
+    },
+    {
+      "family": "sorting",
+      "name": "sort_medium",
+      "size_tier": "medium",
+      "operation": "sort",
+      "shape": [
+        10000
+      ],
+      "rhs_shape": [],
+      "element_count": 10000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 75453,
+        "p95_ns": 89029,
+        "p99_ns": 95461,
+        "mean_ns": 77111.1,
+        "stddev_ns": 4567.260562963317,
+        "min_ns": 75102,
+        "max_ns": 95461,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 49443,
+        "p95_ns": 74330,
+        "p99_ns": 75964,
+        "mean_ns": 52932.04,
+        "stddev_ns": 7319.594138912348,
+        "min_ns": 49213,
+        "max_ns": 75964,
+        "sample_count": 50
+      },
+      "ratio": 1.5260603118742795,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "green"
+    },
+    {
+      "family": "sorting",
+      "name": "sort_large",
+      "size_tier": "large",
+      "operation": "sort",
+      "shape": [
+        1000000
+      ],
+      "rhs_shape": [],
+      "element_count": 1000000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 8573049,
+        "p95_ns": 11310874,
+        "p99_ns": 11826522,
+        "mean_ns": 8922003.34,
+        "stddev_ns": 1268095.0158054659,
+        "min_ns": 7086073,
+        "max_ns": 11826522,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 4510294,
+        "p95_ns": 6795252,
+        "p99_ns": 7219104,
+        "mean_ns": 4826811.92,
+        "stddev_ns": 888091.4813311034,
+        "min_ns": 3735917,
+        "max_ns": 7219104,
+        "sample_count": 50
+      },
+      "ratio": 1.9007738741643005,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "green"
+    },
+    {
+      "family": "statistics",
+      "name": "percentile_medium",
+      "size_tier": "medium",
+      "operation": "percentile",
+      "shape": [
+        10000
+      ],
+      "rhs_shape": [],
+      "element_count": 10000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 203195,
+        "p95_ns": 309466,
+        "p99_ns": 439322,
+        "mean_ns": 208933.6,
+        "stddev_ns": 53739.67029001946,
+        "min_ns": 162448,
+        "max_ns": 439322,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 72747,
+        "p95_ns": 120658,
+        "p99_ns": 423302,
+        "mean_ns": 84778.74,
+        "stddev_ns": 50259.10502379047,
+        "min_ns": 69732,
+        "max_ns": 423302,
+        "sample_count": 50
+      },
+      "ratio": 2.7931736016605497,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "yellow"
+    },
+    {
+      "family": "matmul",
+      "name": "matmul_small",
+      "size_tier": "small",
+      "operation": "matmul",
+      "shape": [
+        16,
+        16
+      ],
+      "rhs_shape": [
+        16,
+        16
+      ],
+      "element_count": 256,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 1172,
+        "p95_ns": 6853,
+        "p99_ns": 41488,
+        "mean_ns": 2587.44,
+        "stddev_ns": 6352.4379923301885,
+        "min_ns": 1092,
+        "max_ns": 41488,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 1363,
+        "p95_ns": 1613,
+        "p99_ns": 3407,
+        "mean_ns": 1434.76,
+        "stddev_ns": 315.5231566779212,
+        "min_ns": 1322,
+        "max_ns": 3407,
+        "sample_count": 50
+      },
+      "ratio": 0.8598679383712399,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "green"
+    },
+    {
+      "family": "matmul",
+      "name": "matmul_medium",
+      "size_tier": "medium",
+      "operation": "matmul",
+      "shape": [
+        64,
+        64
+      ],
+      "rhs_shape": [
+        64,
+        64
+      ],
+      "element_count": 4096,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 39434,
+        "p95_ns": 40196,
+        "p99_ns": 60485,
+        "mean_ns": 40006.42,
+        "stddev_ns": 3078.9416499180365,
+        "min_ns": 39355,
+        "max_ns": 60485,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 11602,
+        "p95_ns": 12224,
+        "p99_ns": 25659,
+        "mean_ns": 11923.92,
+        "stddev_ns": 1969.3143866838527,
+        "min_ns": 11442,
+        "max_ns": 25659,
+        "sample_count": 50
+      },
+      "ratio": 3.3988967419410447,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "yellow"
+    },
+    {
+      "family": "linalg",
+      "name": "solve_small",
+      "size_tier": "small",
+      "operation": "solve",
+      "shape": [
+        16,
+        16
+      ],
+      "rhs_shape": [
+        16
+      ],
+      "element_count": 256,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 2124,
+        "p95_ns": 2265,
+        "p99_ns": 21200,
+        "mean_ns": 2518.98,
+        "stddev_ns": 2669.0495648451342,
+        "min_ns": 2114,
+        "max_ns": 21200,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 4859,
+        "p95_ns": 6713,
+        "p99_ns": 9568,
+        "mean_ns": 5117.24,
+        "stddev_ns": 793.9412713796909,
+        "min_ns": 4729,
+        "max_ns": 9568,
+        "sample_count": 50
+      },
+      "ratio": 0.4371269808602593,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "green"
+    },
+    {
+      "family": "linalg",
+      "name": "svd_medium",
+      "size_tier": "medium",
+      "operation": "svd",
+      "shape": [
+        48,
+        32
+      ],
+      "rhs_shape": [],
+      "element_count": 1536,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 174020,
+        "p95_ns": 236097,
+        "p99_ns": 243621,
+        "mean_ns": 191239.44,
+        "stddev_ns": 23698.373753622847,
+        "min_ns": 172997,
+        "max_ns": 243621,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 62499,
+        "p95_ns": 161997,
+        "p99_ns": 255304,
+        "mean_ns": 87416.02,
+        "stddev_ns": 40754.317282216856,
+        "min_ns": 60013,
+        "max_ns": 255304,
+        "sample_count": 50
+      },
+      "ratio": 2.784364549832797,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "yellow"
+    },
+    {
+      "family": "linalg",
+      "name": "eig_medium",
+      "size_tier": "medium",
+      "operation": "eig",
+      "shape": [
+        24,
+        24
+      ],
+      "rhs_shape": [],
+      "element_count": 576,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 92556,
+        "p95_ns": 123674,
+        "p99_ns": 126700,
+        "mean_ns": 93846.56,
+        "stddev_ns": 9799.780706036232,
+        "min_ns": 83177,
+        "max_ns": 126700,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 90411,
+        "p95_ns": 174270,
+        "p99_ns": 217873,
+        "mean_ns": 102653.78,
+        "stddev_ns": 30628.85974716656,
+        "min_ns": 86514,
+        "max_ns": 217873,
+        "sample_count": 50
+      },
+      "ratio": 1.023724989215914,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "green"
+    },
+    {
+      "family": "fft",
+      "name": "fft_power2_medium",
+      "size_tier": "medium",
+      "operation": "fft",
+      "shape": [
+        8192
+      ],
+      "rhs_shape": [],
+      "element_count": 8192,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 135898,
+        "p95_ns": 173840,
+        "p99_ns": 202514,
+        "mean_ns": 141175.82,
+        "stddev_ns": 13129.45959846025,
+        "min_ns": 135466,
+        "max_ns": 202514,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 271554,
+        "p95_ns": 402853,
+        "p99_ns": 509255,
+        "mean_ns": 281156.36,
+        "stddev_ns": 60922.93394732726,
+        "min_ns": 198626,
+        "max_ns": 509255,
+        "sample_count": 50
+      },
+      "ratio": 0.5004455835671726,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "green"
+    },
+    {
+      "family": "fft",
+      "name": "fft_non_power2_medium",
+      "size_tier": "medium",
+      "operation": "fft",
+      "shape": [
+        6000
+      ],
+      "rhs_shape": [],
+      "element_count": 6000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 1049508,
+        "p95_ns": 1753261,
+        "p99_ns": 2171093,
+        "mean_ns": 1221197.28,
+        "stddev_ns": 269592.42699653417,
+        "min_ns": 1023378,
+        "max_ns": 2171093,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 50876,
+        "p95_ns": 59964,
+        "p99_ns": 66005,
+        "mean_ns": 51945.96,
+        "stddev_ns": 3020.444139261642,
+        "min_ns": 50305,
+        "max_ns": 66005,
+        "sample_count": 50
+      },
+      "ratio": 20.62874439814451,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "red"
+    },
+    {
+      "family": "random",
+      "name": "standard_normal_large",
+      "size_tier": "large",
+      "operation": "standard_normal",
+      "shape": [
+        100000
+      ],
+      "rhs_shape": [],
+      "element_count": 100000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 795637,
+        "p95_ns": 1312967,
+        "p99_ns": 1441630,
+        "mean_ns": 931064.82,
+        "stddev_ns": 193094.50584226265,
+        "min_ns": 774938,
+        "max_ns": 1441630,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 793343,
+        "p95_ns": 953887,
+        "p99_ns": 1104222,
+        "mean_ns": 813018.16,
+        "stddev_ns": 58824.49544207243,
+        "min_ns": 779366,
+        "max_ns": 1104222,
+        "sample_count": 50
+      },
+      "ratio": 1.0028915614053442,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "green"
+    },
+    {
+      "family": "random",
+      "name": "binomial_large",
+      "size_tier": "large",
+      "operation": "binomial",
+      "shape": [
+        100000
+      ],
+      "rhs_shape": [],
+      "element_count": 100000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 3026903,
+        "p95_ns": 3781432,
+        "p99_ns": 4632324,
+        "mean_ns": 3196572.22,
+        "stddev_ns": 329177.3773856454,
+        "min_ns": 2953765,
+        "max_ns": 4632324,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 4357363,
+        "p95_ns": 5630956,
+        "p99_ns": 5696470,
+        "mean_ns": 4558537.06,
+        "stddev_ns": 398180.9235245411,
+        "min_ns": 4256272,
+        "max_ns": 5696470,
+        "sample_count": 50
+      },
+      "ratio": 0.6946639515688732,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "green"
+    },
+    {
+      "family": "random",
+      "name": "poisson_large",
+      "size_tier": "large",
+      "operation": "poisson",
+      "shape": [
+        100000
+      ],
+      "rhs_shape": [],
+      "element_count": 100000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 5759669,
+        "p95_ns": 7320116,
+        "p99_ns": 7703813,
+        "mean_ns": 6120285.36,
+        "stddev_ns": 586884.9598008373,
+        "min_ns": 5678085,
+        "max_ns": 7703813,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 4811564,
+        "p95_ns": 6513418,
+        "p99_ns": 7100018,
+        "mean_ns": 5069136.5,
+        "stddev_ns": 791545.562806545,
+        "min_ns": 4260820,
+        "max_ns": 7100018,
+        "sample_count": 50
+      },
+      "ratio": 1.197047155561061,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "green"
+    },
+    {
+      "family": "io",
+      "name": "npy_roundtrip_medium",
+      "size_tier": "medium",
+      "operation": "npy_roundtrip",
+      "shape": [
+        100,
+        100
+      ],
+      "rhs_shape": [],
+      "element_count": 10000,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 6843,
+        "p95_ns": 10991,
+        "p99_ns": 71666,
+        "mean_ns": 8767.08,
+        "stddev_ns": 9716.776240790976,
+        "min_ns": 6753,
+        "max_ns": 71666,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 67117,
+        "p95_ns": 246918,
+        "p99_ns": 264291,
+        "mean_ns": 86871.14,
+        "stddev_ns": 49038.06802516184,
+        "min_ns": 52780,
+        "max_ns": 264291,
+        "sample_count": 50
+      },
+      "ratio": 0.10195628529284682,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "green"
+    },
+    {
+      "family": "io",
+      "name": "genfromtxt_medium",
+      "size_tier": "medium",
+      "operation": "gen_from_txt",
+      "shape": [
+        400,
+        8
+      ],
+      "rhs_shape": [],
+      "element_count": 3200,
+      "warmup": 5,
+      "samples": 50,
+      "fnp": {
+        "p50_ns": 122983,
+        "p95_ns": 289398,
+        "p99_ns": 701249,
+        "mean_ns": 168794.18,
+        "stddev_ns": 98220.75351832525,
+        "min_ns": 119537,
+        "max_ns": 701249,
+        "sample_count": 50
+      },
+      "numpy": {
+        "p50_ns": 850922,
+        "p95_ns": 1758691,
+        "p99_ns": 1937370,
+        "mean_ns": 1007286.02,
+        "stddev_ns": 311325.6934910763,
+        "min_ns": 747516,
+        "max_ns": 1937370,
+        "sample_count": 50
+      },
+      "ratio": 0.14452911077631087,
+      "ratio_direction": "fnp_p50 / numpy_p50 (>1 means FNP is slower)",
+      "band": "green"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "bundle_id": "cross_engine_benchmark_v1",
+  "generated_at_unix_ms": 1775787600951,
+  "dropped_symbol": "sbn=0 esi=0 kind=source",
+  "recovery_symbols_used": 321,
+  "recovery_success": true,
+  "expected_hash": "4fd7c1a6791dce0042d747fc3399a4b1f50acb0b5df38e011f2a76f1154b38a4",
+  "recovered_hash": "4fd7c1a6791dce0042d747fc3399a4b1f50acb0b5df38e011f2a76f1154b38a4",
+  "error": null
+}
