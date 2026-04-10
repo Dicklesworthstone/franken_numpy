@@ -1453,6 +1453,16 @@ pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
                 "npz: entry data extends beyond archive",
             ));
         }
+        if local_offset >= cd_offset {
+            return Err(IOError::NpzArchiveContractViolation(
+                "npz: local header offset overlaps central directory",
+            ));
+        }
+        if data_end > cd_offset {
+            return Err(IOError::NpzArchiveContractViolation(
+                "npz: entry data overlaps central directory",
+            ));
+        }
 
         // Check for overlapping entries
         let current_range = (local_offset, data_end);
@@ -4624,6 +4634,37 @@ mod tests {
         // Truncate
         let truncated = &npz[..npz.len() / 2];
         assert!(read_npz_bytes(truncated).is_err());
+    }
+
+    #[test]
+    fn npz_rejects_entry_overlapping_central_directory() {
+        let h = NpyHeader {
+            shape: vec![1],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let p: Vec<u8> = 1.0_f64.to_le_bytes().to_vec();
+        let mut npz = write_npz_bytes(&[("a", &h, &p)]).expect("write");
+
+        let cd_pos = npz
+            .windows(4)
+            .position(|window| window == [0x50, 0x4B, 0x01, 0x02])
+            .expect("central directory signature");
+        let local_fname_len = u16::from_le_bytes([npz[26], npz[27]]) as usize;
+        let local_extra_len = u16::from_le_bytes([npz[28], npz[29]]) as usize;
+        let data_start = 30 + local_fname_len + local_extra_len;
+        let new_size = cd_pos.saturating_sub(data_start) + 1;
+        let new_size_u32 = u32::try_from(new_size).expect("size fits u32");
+
+        npz[cd_pos + 20..cd_pos + 24].copy_from_slice(&new_size_u32.to_le_bytes());
+        npz[cd_pos + 24..cd_pos + 28].copy_from_slice(&new_size_u32.to_le_bytes());
+
+        let err = read_npz_bytes(&npz).expect_err("overlapping entry must be rejected");
+        assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
+        assert!(
+            err.to_string().contains("central directory"),
+            "unexpected error: {err}"
+        );
     }
 
     // ── fromfile / tofile tests ──
