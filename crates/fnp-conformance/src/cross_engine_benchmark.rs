@@ -108,7 +108,9 @@ def main():
     for _ in range(samples):
         start = time.perf_counter_ns()
         runner()
-        timings.append(time.perf_counter_ns() - start)
+        elapsed = time.perf_counter_ns() - start
+        # Clamp to 1ns to avoid zero-duration samples that break JSON serialization.
+        timings.append(max(1, elapsed))
 
     print(json.dumps({"timings_ns": timings}))
 
@@ -740,7 +742,8 @@ where
         op()?;
         let nanos = started.elapsed().as_nanos();
         let sample = u64::try_from(nanos).unwrap_or(u64::MAX);
-        timings.push(sample);
+        // Clamp to 1ns to avoid zero-duration samples that could produce non-finite ratios.
+        timings.push(sample.max(1));
     }
     Ok(timings)
 }
@@ -1006,7 +1009,7 @@ fn percentile_index(len: usize, percentile: usize) -> usize {
     if len <= 1 {
         return 0;
     }
-    (((len * percentile) + 99) / 100)
+    (len.saturating_mul(percentile).div_ceil(100))
         .saturating_sub(1)
         .min(len - 1)
 }

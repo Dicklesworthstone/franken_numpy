@@ -12540,12 +12540,12 @@ impl UFuncArray {
                 let denom = (c.values[i * nvars + i] * c.values[j * nvars + j]).sqrt();
                 values[i * nvars + j] = if denom > 0.0 {
                     let mut val = c.values[i * nvars + j] / denom;
-                    if i == j && !val.is_nan() {
-                        val = 1.0;
-                    } else if val > 1.0 {
-                        val = 1.0;
-                    } else if val < -1.0 {
-                        val = -1.0;
+                    if i == j {
+                        if !val.is_nan() {
+                            val = 1.0;
+                        }
+                    } else {
+                        val = val.clamp(-1.0, 1.0);
                     }
                     val
                 } else {
@@ -18901,7 +18901,7 @@ fn interpolate_percentile_method(sorted: &[f64], fraction: f64, method: Quantile
         QuantileInterp::Lower => sorted[lo],
         QuantileInterp::Higher => sorted[hi],
         QuantileInterp::Nearest => {
-            if frac < 0.5 || (frac == 0.5 && lo % 2 == 0) {
+            if frac < 0.5 || (frac == 0.5 && lo.is_multiple_of(2)) {
                 sorted[lo]
             } else {
                 sorted[hi]
