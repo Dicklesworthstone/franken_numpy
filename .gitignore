@@ -30,6 +30,21 @@ a.out
 --graph-format.svg
 target-codex*/
 
+# Agent session tool outputs
+.ntm/
+clippy_*.txt
+deep_clippy.txt
+rust-bug-scan.txt
+ubs_out.txt
+
+# Root-level compiled test binaries (keep source files)
+/patch_oracle
+/test_*
+!/test_*.rs
+!/test_*.py
+!/test_*.c
+!/test_*.csv
+
 # Local logs and profiling artifacts
 *.log
 *.profraw
