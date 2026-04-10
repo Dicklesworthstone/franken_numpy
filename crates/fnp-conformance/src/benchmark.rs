@@ -129,6 +129,8 @@ fn rustc_version() -> String {
     }
 }
 
+const MIN_SAMPLE_MS: f64 = 1.0e-6;
+
 fn compute_per_second(units_per_run: f64, sample_ms: f64) -> f64 {
     if sample_ms <= 0.0 {
         return 0.0;
@@ -243,7 +245,7 @@ where
         let start = Instant::now();
         run_fn()?;
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-        samples_ms.push(elapsed_ms);
+        samples_ms.push(elapsed_ms.max(MIN_SAMPLE_MS));
     }
 
     let percentiles = summarize_samples(&samples_ms);
@@ -684,7 +686,10 @@ pub fn generate_benchmark_baseline(
 
 #[cfg(test)]
 mod tests {
-    use super::{BenchmarkBaseline, REQUIRED_SLO_PATHS, generate_benchmark_baseline};
+    use super::{
+        AllocatorStressLevel, BenchmarkBaseline, MIN_SAMPLE_MS, REQUIRED_SLO_PATHS,
+        WorkloadInstrumentation, generate_benchmark_baseline, time_workload,
+    };
     use std::collections::BTreeSet;
     use std::fs;
 
@@ -741,5 +746,30 @@ mod tests {
         assert_eq!(parsed_slo_paths, required_slo_paths);
 
         let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn time_workload_clamps_zero_duration_samples() {
+        let workload = time_workload(
+            "noop",
+            3,
+            WorkloadInstrumentation {
+                elements_per_run: 1,
+                bytes_processed_per_run: 1,
+                peak_live_bytes_per_run: 1,
+                heap_allocations_per_run: 0,
+                allocator_stress: AllocatorStressLevel::None,
+            },
+            || Ok(()),
+        )
+        .expect("time workload");
+
+        assert!(
+            workload
+                .samples_ms
+                .iter()
+                .all(|sample| *sample >= MIN_SAMPLE_MS),
+            "samples must be clamped to a positive minimum"
+        );
     }
 }
