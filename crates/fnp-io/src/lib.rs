@@ -2026,19 +2026,32 @@ pub fn tofile(values: &[f64], dtype: IOSupportedDType) -> Result<Vec<u8>, IOErro
 /// When `sep` is non-empty, `fromfile` treats the data as text rather than binary.
 /// Elements are separated by `sep` and parsed as f64.
 pub fn fromfile_text(text: &str, sep: &str, count: Option<usize>) -> Result<Vec<f64>, IOError> {
-    let values: Vec<f64> = text
-        .split(sep)
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            s.parse::<f64>()
-                .map_err(|_| IOError::ReadPayloadIncomplete("fromfile_text: could not parse float"))
-        })
-        .collect::<Result<_, _>>()?;
-    match count {
-        Some(c) => Ok(values.into_iter().take(c).collect()),
-        None => Ok(values),
+    if sep.is_empty() {
+        return Err(IOError::ReadPayloadIncomplete(
+            "fromfile_text: empty separator is invalid for text parsing",
+        ));
     }
+
+    let max = count.unwrap_or(usize::MAX);
+    let mut values = Vec::new();
+
+    let iter: Box<dyn Iterator<Item = &str>> = if sep.trim().is_empty() {
+        Box::new(text.split_whitespace())
+    } else {
+        Box::new(text.split(sep).map(|s| s.trim()).filter(|s| !s.is_empty()))
+    };
+
+    for token in iter {
+        if values.len() >= max {
+            break;
+        }
+        let parsed = token
+            .parse::<f64>()
+            .map_err(|_| IOError::ReadPayloadIncomplete("fromfile_text: could not parse float"))?;
+        values.push(parsed);
+    }
+
+    Ok(values)
 }
 
 /// Write array values as text with a separator (np.ndarray.tofile with sep parameter).
@@ -4264,6 +4277,19 @@ mod tests {
         let text = "1 2 3 4 5";
         let result = fromfile_text(text, " ", Some(3)).unwrap();
         assert_eq!(result, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn fromfile_text_whitespace_delimiters() {
+        let text = "1 2\n3\t4";
+        let result = fromfile_text(text, " ", None).unwrap();
+        assert_eq!(result, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn fromfile_text_rejects_empty_separator() {
+        let err = fromfile_text("1 2 3", "", None).expect_err("empty separator");
+        assert_eq!(err.reason_code(), "io_read_payload_incomplete");
     }
 
     #[test]
