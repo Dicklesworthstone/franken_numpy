@@ -1,0 +1,333 @@
+version: "1.0.0"
+workloads:
+  - family: ufunc-elementwise
+    name: add_f64_small
+    size_tier: small
+    operation: binary_add
+    shape: [100]
+    rhs_shape: [100]
+    warmup: 5
+    samples: 50
+
+  - family: ufunc-elementwise
+    name: add_f64_medium
+    size_tier: medium
+    operation: binary_add
+    shape: [10000]
+    rhs_shape: [10000]
+    warmup: 5
+    samples: 50
+    quick: true
+
+  - family: ufunc-elementwise
+    name: add_f64_large
+    size_tier: large
+    operation: binary_add
+    shape: [1000000]
+    rhs_shape: [1000000]
+    warmup: 5
+    samples: 50
+
+  - family: ufunc-elementwise
+    name: mul_f64_small
+    size_tier: small
+    operation: binary_mul
+    shape: [100]
+    rhs_shape: [100]
+    warmup: 5
+    samples: 50
+
+  - family: ufunc-elementwise
+    name: mul_f64_medium
+    size_tier: medium
+    operation: binary_mul
+    shape: [10000]
+    rhs_shape: [10000]
+    warmup: 5
+    samples: 50
+
+  - family: ufunc-elementwise
+    name: mul_f64_large
+    size_tier: large
+    operation: binary_mul
+    shape: [1000000]
+    rhs_shape: [1000000]
+    warmup: 5
+    samples: 50
+
+  - family: ufunc-elementwise
+    name: div_f64_small
+    size_tier: small
+    operation: binary_div
+    shape: [100]
+    rhs_shape: [100]
+    warmup: 5
+    samples: 50
+
+  - family: ufunc-elementwise
+    name: div_f64_medium
+    size_tier: medium
+    operation: binary_div
+    shape: [10000]
+    rhs_shape: [10000]
+    warmup: 5
+    samples: 50
+
+  - family: ufunc-elementwise
+    name: div_f64_large
+    size_tier: large
+    operation: binary_div
+    shape: [1000000]
+    rhs_shape: [1000000]
+    warmup: 5
+    samples: 50
+
+  - family: ufunc-broadcast
+    name: broadcast_add_small
+    size_tier: small
+    operation: binary_add
+    shape: [10, 10]
+    rhs_shape: [10]
+    warmup: 5
+    samples: 50
+
+  - family: ufunc-broadcast
+    name: broadcast_add_medium
+    size_tier: medium
+    operation: binary_add
+    shape: [100, 100]
+    rhs_shape: [100]
+    warmup: 5
+    samples: 50
+    quick: true
+
+  - family: ufunc-broadcast
+    name: broadcast_add_large
+    size_tier: large
+    operation: binary_add
+    shape: [1000, 1000]
+    rhs_shape: [1000]
+    warmup: 5
+    samples: 50
+
+  - family: ufunc-broadcast
+    name: broadcast_mul_small
+    size_tier: small
+    operation: binary_mul
+    shape: [10, 10]
+    rhs_shape: [10]
+    warmup: 5
+    samples: 50
+
+  - family: ufunc-broadcast
+    name: broadcast_mul_medium
+    size_tier: medium
+    operation: binary_mul
+    shape: [100, 100]
+    rhs_shape: [100]
+    warmup: 5
+    samples: 50
+
+  - family: ufunc-broadcast
+    name: broadcast_mul_large
+    size_tier: large
+    operation: binary_mul
+    shape: [1000, 1000]
+    rhs_shape: [1000]
+    warmup: 5
+    samples: 50
+
+  - family: reductions
+    name: reduce_sum_medium
+    size_tier: medium
+    operation: reduce_sum
+    shape: [100, 100]
+    axis: 1
+    warmup: 5
+    samples: 50
+    quick: true
+
+  - family: reductions
+    name: reduce_sum_large
+    size_tier: large
+    operation: reduce_sum
+    shape: [1000, 1000]
+    axis: 1
+    warmup: 5
+    samples: 50
+
+  - family: reductions
+    name: reduce_mean_medium
+    size_tier: medium
+    operation: reduce_mean
+    shape: [100, 100]
+    axis: 1
+    warmup: 5
+    samples: 50
+
+  - family: reductions
+    name: reduce_mean_large
+    size_tier: large
+    operation: reduce_mean
+    shape: [1000, 1000]
+    axis: 1
+    warmup: 5
+    samples: 50
+
+  - family: reductions
+    name: reduce_std_medium
+    size_tier: medium
+    operation: reduce_std
+    shape: [100, 100]
+    axis: 1
+    warmup: 5
+    samples: 50
+
+  - family: reductions
+    name: reduce_std_large
+    size_tier: large
+    operation: reduce_std
+    shape: [1000, 1000]
+    axis: 1
+    warmup: 5
+    samples: 50
+
+  - family: reductions
+    name: reduce_argmax_medium
+    size_tier: medium
+    operation: reduce_argmax
+    shape: [100, 100]
+    axis: 1
+    warmup: 5
+    samples: 50
+
+  - family: sorting
+    name: sort_medium
+    size_tier: medium
+    operation: sort
+    shape: [10000]
+    warmup: 5
+    samples: 50
+
+  - family: sorting
+    name: sort_large
+    size_tier: large
+    operation: sort
+    shape: [1000000]
+    warmup: 5
+    samples: 50
+
+  - family: statistics
+    name: percentile_medium
+    size_tier: medium
+    operation: percentile
+    shape: [10000]
+    percentile_q: 95.0
+    warmup: 5
+    samples: 50
+
+  - family: matmul
+    name: matmul_small
+    size_tier: small
+    operation: matmul
+    shape: [16, 16]
+    rhs_shape: [16, 16]
+    warmup: 5
+    samples: 50
+    quick: true
+
+  - family: matmul
+    name: matmul_medium
+    size_tier: medium
+    operation: matmul
+    shape: [64, 64]
+    rhs_shape: [64, 64]
+    warmup: 5
+    samples: 50
+
+  - family: linalg
+    name: solve_small
+    size_tier: small
+    operation: solve
+    shape: [16, 16]
+    rhs_shape: [16]
+    warmup: 5
+    samples: 50
+
+  - family: linalg
+    name: svd_medium
+    size_tier: medium
+    operation: svd
+    shape: [48, 32]
+    warmup: 5
+    samples: 50
+
+  - family: linalg
+    name: eig_medium
+    size_tier: medium
+    operation: eig
+    shape: [24, 24]
+    warmup: 5
+    samples: 50
+
+  - family: fft
+    name: fft_power2_medium
+    size_tier: medium
+    operation: fft
+    shape: [8192]
+    warmup: 5
+    samples: 50
+    quick: true
+
+  - family: fft
+    name: fft_non_power2_medium
+    size_tier: medium
+    operation: fft
+    shape: [6000]
+    warmup: 5
+    samples: 50
+
+  - family: random
+    name: standard_normal_large
+    size_tier: large
+    operation: standard_normal
+    shape: [100000]
+    warmup: 5
+    samples: 50
+    quick: true
+
+  - family: random
+    name: binomial_large
+    size_tier: large
+    operation: binomial
+    shape: [100000]
+    binomial_n: 20
+    binomial_p: 0.35
+    warmup: 5
+    samples: 50
+
+  - family: random
+    name: poisson_large
+    size_tier: large
+    operation: poisson
+    shape: [100000]
+    poisson_lambda: 7.0
+    warmup: 5
+    samples: 50
+
+  - family: io
+    name: npy_roundtrip_medium
+    size_tier: medium
+    operation: npy_roundtrip
+    shape: [100, 100]
+    warmup: 5
+    samples: 50
+    quick: true
+
+  - family: io
+    name: genfromtxt_medium
+    size_tier: medium
+    operation: gen_from_txt
+    shape: [400, 8]
+    warmup: 5
+    samples: 50

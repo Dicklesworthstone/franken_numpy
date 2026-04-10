@@ -10102,9 +10102,9 @@ impl UFuncArray {
                 )));
             }
         }
-        
+
         let values_bcast = values.broadcast_to(&indices.shape)?;
-        
+
         let axis_len = self.shape[ax];
         let strides = c_strides_elems(&self.shape);
         let idx_strides = c_strides_elems(&indices.shape);
@@ -12468,11 +12468,7 @@ impl UFuncArray {
             _ => return Err(UFuncError::Msg("cov: input must be 1-D or 2-D".to_string())),
         };
 
-        let fact = if nobs < 2 {
-            0.0
-        } else {
-            (nobs - 1) as f64
-        };
+        let fact = if nobs < 2 { 0.0 } else { (nobs - 1) as f64 };
 
         // Compute means per row
         let means: Vec<f64> = (0..nvars)
@@ -12520,7 +12516,7 @@ impl UFuncArray {
     /// Mimics `np.corrcoef(x)` where x is 1-D or 2-D.
     pub fn corrcoef(&self) -> Result<Self, UFuncError> {
         let c = self.cov()?;
-        
+
         if c.shape.is_empty() {
             let cov_val = c.values[0];
             let corr = if cov_val.is_nan() || cov_val == 0.0 {
@@ -12535,7 +12531,7 @@ impl UFuncArray {
                 integer_sidecar: None,
             });
         }
-        
+
         let nvars = c.shape[0];
         let mut values = c.values.clone();
         // Normalize: corrcoef[i,j] = cov[i,j] / sqrt(cov[i,i] * cov[j,j])
@@ -45848,7 +45844,7 @@ mod tests {
         if let Some(sidecar) = arr.integer_sidecar.as_ref() {
             match sidecar {
                 IntegerSidecar::I64(v) => assert_eq!(v[0], 1),
-                _ => panic!("Expected I64 sidecar"),
+                _ => unreachable!("Expected I64 sidecar"),
             }
         }
         assert_eq!(arr.item(&[0]).unwrap(), 1.0);

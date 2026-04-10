@@ -2,6 +2,7 @@
 
 pub mod benchmark;
 pub mod contract_schema;
+pub mod cross_engine_benchmark;
 pub mod raptorq_artifacts;
 pub mod security_contracts;
 pub mod test_contracts;
