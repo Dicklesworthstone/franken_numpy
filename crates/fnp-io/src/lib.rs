@@ -1651,12 +1651,18 @@ pub fn loadtxt_usecols(
         if max_rows > 0 && nrows >= max_rows {
             break;
         }
-        let all_vals: Vec<f64> = trimmed
-            .split(delimiter)
-            .filter(|s| delimiter != ' ' || !s.is_empty())
-            .map(|s| s.trim().parse::<f64>())
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))?;
+        let all_vals: Vec<f64> = if delimiter == ' ' {
+            trimmed
+                .split_whitespace()
+                .map(|s| s.parse::<f64>())
+                .collect::<Result<Vec<_>, _>>()
+        } else {
+            trimmed
+                .split(delimiter)
+                .map(|s| s.trim().parse::<f64>())
+                .collect::<Result<Vec<_>, _>>()
+        }
+        .map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))?;
 
         let row_vals = if let Some(cols) = usecols {
             let mut selected = Vec::with_capacity(cols.len());
@@ -4084,6 +4090,15 @@ mod tests {
     #[test]
     fn loadtxt_basic() {
         let text = "1.0 2.0 3.0\n4.0 5.0 6.0\n";
+        let result = loadtxt(text, ' ', '#', 0, 0).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 3);
+        assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn loadtxt_space_delimiter_accepts_mixed_whitespace() {
+        let text = "1 2\t3\n4\t5 6\n";
         let result = loadtxt(text, ' ', '#', 0, 0).unwrap();
         assert_eq!(result.nrows, 2);
         assert_eq!(result.ncols, 3);
