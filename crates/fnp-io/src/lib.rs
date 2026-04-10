@@ -2067,7 +2067,11 @@ pub fn tofile_text(values: &[f64], sep: &str) -> String {
     values
         .iter()
         .map(|v| {
-            if v.fract() == 0.0 && v.is_finite() && v.abs() < 1e15 {
+            if v.fract() == 0.0
+                && v.is_finite()
+                && v.abs() < 1e15
+                && !(*v == 0.0 && v.is_sign_negative())
+            {
                 format!("{}", *v as i64)
             } else {
                 format!("{v}")
@@ -4311,6 +4315,12 @@ mod tests {
     fn tofile_text_basic() {
         let result = tofile_text(&[1.0, 2.0, 3.5], " ");
         assert_eq!(result, "1 2 3.5");
+    }
+
+    #[test]
+    fn tofile_text_preserves_negative_zero() {
+        let result = tofile_text(&[-0.0, 0.0, -1.0], " ");
+        assert_eq!(result, "-0 0 -1");
     }
 
     #[test]
