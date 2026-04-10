@@ -1388,6 +1388,17 @@ pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
                 "npz: filename extends beyond data",
             ));
         }
+        let entry_end = fname_end
+            .checked_add(extra_len)
+            .and_then(|end| end.checked_add(comment_len))
+            .ok_or(IOError::NpzArchiveContractViolation(
+                "npz: central directory entry length overflow",
+            ))?;
+        if entry_end > cd_end {
+            return Err(IOError::NpzArchiveContractViolation(
+                "npz: central directory entry extends beyond bounds",
+            ));
+        }
         let file_name = String::from_utf8_lossy(&data[fname_start..fname_end]).into_owned();
         // Prevent directory traversal
         if file_name.contains("..") || file_name.starts_with('/') {
@@ -1516,12 +1527,7 @@ pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
             array,
         });
 
-        pos = fname_end
-            .checked_add(extra_len)
-            .and_then(|p| p.checked_add(comment_len))
-            .ok_or(IOError::NpzArchiveContractViolation(
-                "npz: central directory position overflow",
-            ))?;
+        pos = entry_end;
     }
 
     Ok(entries)
