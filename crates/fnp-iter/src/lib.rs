@@ -786,7 +786,7 @@ pub fn plan_nditer_broadcast(
                 continue;
             }
 
-            if operand_dim == 1 && broadcast_dim > 1 {
+            if operand_dim == 1 && broadcast_dim != 1 {
                 if operand.no_broadcast {
                     return Err(NditerError::NoBroadcastViolation(
                         "no_broadcast operand would need axis expansion",
@@ -1725,6 +1725,28 @@ mod tests {
         )
         .expect_err("protected operand should reject broadcast expansion");
         assert_eq!(err.reason_code(), "nditer_no_broadcast_violation");
+    }
+
+    #[test]
+    fn nditer_broadcast_plan_allows_zero_extent_broadcast() {
+        let plan = plan_nditer_broadcast(
+            &[
+                NditerOperandSpec {
+                    shape: vec![1, 3],
+                    no_broadcast: false,
+                },
+                NditerOperandSpec {
+                    shape: vec![0, 3],
+                    no_broadcast: false,
+                },
+            ],
+            8,
+            NditerOrder::C,
+        )
+        .expect("broadcast plan should accept zero-extent dimension");
+        assert_eq!(plan.broadcast_shape, vec![0, 3]);
+        assert_eq!(plan.operands[0].broadcast_strides, vec![0, 8]);
+        assert_eq!(plan.operands[1].broadcast_strides, vec![24, 8]);
     }
 
     #[test]
