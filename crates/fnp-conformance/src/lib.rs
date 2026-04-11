@@ -10538,9 +10538,10 @@ mod tests {
         eprintln!("e2e step {step}/{E2E_TOTAL_STEPS}: {description} ... OK");
     }
 
-    fn step_fail(step: usize, description: &str, details: impl Display) -> ! {
+    fn step_fail(step: usize, description: &str, details: impl Display) -> Result<(), String> {
+        let message = format!("e2e step {step}/{E2E_TOTAL_STEPS}: {description} failed: {details}");
         eprintln!("e2e step {step}/{E2E_TOTAL_STEPS}: {description} ... FAILED: {details}");
-        panic!("e2e step {step}/{E2E_TOTAL_STEPS}: {description} failed: {details}");
+        Err(message)
     }
 
     #[test]
@@ -10553,7 +10554,7 @@ mod tests {
     }
 
     #[test]
-    fn e2e_cross_crate_workflow() {
+    fn e2e_cross_crate_workflow() -> Result<(), String> {
         const MATMUL_TOL: f64 = 1e-10;
         const STATS_TOL: f64 = 1e-10;
         const POLY_TOL: f64 = 1e-14;
@@ -10568,7 +10569,7 @@ mod tests {
             || arr.values()[0] != 0.0
             || arr.values()[11] != 11.0
         {
-            step_fail(
+            return step_fail(
                 1,
                 "ARRAY CREATION",
                 format!(
@@ -10593,7 +10594,7 @@ mod tests {
         if promoted.dtype() != DType::F64
             || !crate::approx_equal_values(promoted.values(), &expected_promoted, 1e-12, 1e-12)
         {
-            step_fail(
+            return step_fail(
                 2,
                 "DTYPE PROMOTION",
                 format!(
@@ -10613,7 +10614,7 @@ mod tests {
             || doubled.values()[0] != 0.0
             || doubled.values()[5] != 10.0
         {
-            step_fail(
+            return step_fail(
                 3,
                 "ELEMENTWISE MATH",
                 format!(
@@ -10634,7 +10635,7 @@ mod tests {
             || row_sums.dtype() != DType::F64
             || row_sums.values() != expected_row_sums
         {
-            step_fail(
+            return step_fail(
                 4,
                 "REDUCTION",
                 format!(
@@ -10672,7 +10673,7 @@ mod tests {
             || ax.shape() != [3, 1]
             || !crate::approx_equal_values(ax.values(), rhs_column.values(), MATMUL_TOL, MATMUL_TOL)
         {
-            step_fail(
+            return step_fail(
                 5,
                 "LINEAR ALGEBRA",
                 format!(
@@ -10692,7 +10693,7 @@ mod tests {
         let t2_vals = chebval(&x_pts, &[0.0, 0.0, 1.0]);
         let expected_t2 = [-1.0, -0.5, 1.0];
         if !crate::approx_equal_values(&t2_vals, &expected_t2, POLY_TOL, POLY_TOL) {
-            step_fail(
+            return step_fail(
                 6,
                 "POLYNOMIAL",
                 format!("values={:?}, expected {:?}", t2_vals, expected_t2),
@@ -10712,7 +10713,7 @@ mod tests {
             || !mean.shape().is_empty()
             || (mean.values()[0] - 2.8).abs() > STATS_TOL
         {
-            step_fail(
+            return step_fail(
                 7,
                 "SORT + STATISTICS",
                 format!(
@@ -10743,7 +10744,7 @@ mod tests {
             || compressed.dtype() != DType::F64
             || compressed.values() != expected_compressed
         {
-            step_fail(
+            return step_fail(
                 8,
                 "MASKED ARRAY",
                 format!(
@@ -10768,7 +10769,7 @@ mod tests {
             || lens.dtype() != DType::I64
             || lens.values() != expected_lens
         {
-            step_fail(
+            return step_fail(
                 9,
                 "STRING ARRAY",
                 format!(
@@ -10787,7 +10788,7 @@ mod tests {
         let samples = rng.standard_normal(100);
         let sample_mean = samples.iter().copied().sum::<f64>() / 100.0;
         if sample_mean.abs() >= RNG_SIGMA_TOL {
-            step_fail(
+            return step_fail(
                 10,
                 "RANDOM",
                 format!(
@@ -10808,7 +10809,7 @@ mod tests {
             || loaded_values != original.values()
             || loaded_dtype != IOSupportedDType::F64
         {
-            step_fail(
+            return step_fail(
                 11,
                 "IO ROUNDTRIP",
                 format!(
@@ -10829,7 +10830,7 @@ mod tests {
             .expect("Step 12: end date");
         let count = busday_count(&start, &end).expect("Step 12: busday_count should succeed");
         if count.shape() != [1] || count.dtype() != DType::I64 || count.values()[0] != 5.0 {
-            step_fail(
+            return step_fail(
                 12,
                 "BUSDAY",
                 format!(
@@ -10841,6 +10842,7 @@ mod tests {
             );
         }
         step_ok(12, "BUSDAY");
+        Ok(())
     }
 
     #[test]
@@ -12071,6 +12073,8 @@ mod tests {
         TransferContext {
             src_stride: 8,
             dst_stride: 8,
+            src_offset: 0,
+            dst_offset: 0,
             item_size: 8,
             element_count: 64,
             aligned: true,

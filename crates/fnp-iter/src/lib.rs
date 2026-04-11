@@ -1079,6 +1079,8 @@ impl FpeStatus {
 pub struct TransferContext {
     pub src_stride: isize,
     pub dst_stride: isize,
+    pub src_offset: usize,
+    pub dst_offset: usize,
     pub item_size: usize,
     pub element_count: usize,
     pub aligned: bool,
@@ -1154,11 +1156,7 @@ pub fn select_transfer_loop(ctx: TransferContext) -> Result<TransferLoopDecision
             let same_sign = (ctx.dst_stride >= 0 && ctx.src_stride >= 0)
                 || (ctx.dst_stride <= 0 && ctx.src_stride <= 0);
             if same_sign {
-                if ctx.dst_stride.unsigned_abs() > ctx.src_stride.unsigned_abs() {
-                    OverlapAction::BackwardCopy
-                } else {
-                    OverlapAction::ForwardCopy
-                }
+                overlap_copy_policy(ctx.src_offset, ctx.dst_offset, byte_len)?
             } else {
                 // Mixed signs - crossing overlap is unsafe for simple loops.
                 return Err(TransferError::OverlapPolicyTriggered(
@@ -1829,6 +1827,8 @@ mod tests {
         TransferContext {
             src_stride: 8,
             dst_stride: 8,
+            src_offset: 0,
+            dst_offset: 0,
             item_size: 8,
             element_count: 16,
             aligned: true,
@@ -1941,6 +1941,8 @@ mod tests {
         let ctx = TransferContext {
             has_overlap: true,
             dst_stride: 16,
+            src_offset: 0,
+            dst_offset: 8,
             ..base_transfer_ctx()
         };
         let decision = select_transfer_loop(ctx).expect("should resolve with overlap");
@@ -2815,12 +2817,13 @@ mod tests {
 
     #[test]
     fn transfer_loop_overlap_negative_strides_clobber_check() {
-        // Case: dst_stride = -16, src_stride = -8, both negative.
-        // |dst_stride| > |src_stride|, so forward copy should clobber.
-        // It now correctly returns BackwardCopy.
+        // Overlap with negative strides still needs offset-aware copy direction.
+        // dst_offset > src_offset should trigger BackwardCopy to avoid clobbering.
         let ctx = TransferContext {
             src_stride: -8,
             dst_stride: -16,
+            src_offset: 0,
+            dst_offset: 8,
             item_size: 8,
             element_count: 4,
             aligned: true,
@@ -2840,6 +2843,8 @@ mod tests {
         let ctx = TransferContext {
             src_stride: 8,
             dst_stride: -8,
+            src_offset: 0,
+            dst_offset: 8,
             item_size: 8,
             element_count: 4,
             aligned: true,
