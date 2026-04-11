@@ -2294,6 +2294,15 @@ pub fn tofile(values: &[f64], dtype: IOSupportedDType) -> Result<Vec<u8>, IOErro
 /// When `sep` is non-empty, `fromfile` treats the data as text rather than binary.
 /// Elements are separated by `sep` and parsed as f64.
 pub fn fromfile_text(text: &str, sep: &str, count: Option<usize>) -> Result<Vec<f64>, IOError> {
+    fromfile_text_with_budget(text, sep, count, MAX_TEXT_ELEMENTS)
+}
+
+fn fromfile_text_with_budget(
+    text: &str,
+    sep: &str,
+    count: Option<usize>,
+    max_elements: usize,
+) -> Result<Vec<f64>, IOError> {
     if sep.is_empty() {
         return Err(IOError::ReadPayloadIncomplete(
             "fromfile_text: empty separator is invalid for text parsing",
@@ -2307,6 +2316,11 @@ pub fn fromfile_text(text: &str, sep: &str, count: Option<usize>) -> Result<Vec<
     while let Some(field) = iter.next() {
         if values.len() >= max {
             break;
+        }
+        if values.len() >= max_elements {
+            return Err(IOError::ReadPayloadIncomplete(
+                "fromfile_text: text exceeds MAX_TEXT_ELEMENTS budget",
+            ));
         }
         let field = field.trim();
         if field.is_empty() {
@@ -3796,10 +3810,11 @@ mod tests {
         NPZ_MAGIC_PREFIX, NpyHeader, NpzCompression, SaveTxtConfig, StructuredIODescriptor,
         StructuredIOField, classify_load_dispatch, crc32_ieee, encode_npy_header_bytes,
         enforce_pickle_policy, fromfile, fromfile_complex, fromfile_strings, fromfile_structured,
-        fromfile_text, fromstring, genfromtxt, genfromtxt_full, load, load_complex, load_npz,
-        load_strings, load_structured, loadtxt, loadtxt_unpack, loadtxt_usecols, memmap,
-        memmap_npy, parse_structured_descr, read_npy_bytes, read_npz_bytes, save, save_complex,
-        save_strings, save_structured, savetxt, savez, savez_compressed,
+        fromfile_text, fromfile_text_with_budget, fromstring, genfromtxt, genfromtxt_full, load,
+        load_complex, load_npz, load_strings, load_structured, loadtxt, loadtxt_unpack,
+        loadtxt_usecols, memmap, memmap_npy, parse_structured_descr, read_npy_bytes,
+        read_npz_bytes, save, save_complex, save_strings, save_structured, savetxt, savez,
+        savez_compressed,
         synthesize_npz_member_names, tobytes, tofile, tofile_complex, tofile_strings,
         tofile_structured, tofile_text, tostring, validate_descriptor_roundtrip,
         validate_header_schema, validate_io_policy_metadata, validate_magic_version,
@@ -4580,6 +4595,14 @@ mod tests {
         let text = "1 2 3 4 5";
         let result = fromfile_text(text, " ", Some(3)).unwrap();
         assert_eq!(result, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn fromfile_text_enforces_max_text_elements_budget() {
+        let text = "1 2 3 4 5";
+        let err = fromfile_text_with_budget(text, " ", None, 3)
+            .expect_err("budget should reject oversized text");
+        assert_eq!(err.reason_code(), "io_read_payload_incomplete");
     }
 
     #[test]
