@@ -1651,32 +1651,10 @@ pub fn loadtxt_usecols(
         if max_rows > 0 && nrows >= max_rows {
             break;
         }
-        let all_vals: Vec<f64> = if delimiter == ' ' {
-            trimmed
-                .split_whitespace()
-                .map(|s| s.parse::<f64>())
-                .collect::<Result<Vec<_>, _>>()
-        } else {
-            trimmed
-                .split(delimiter)
-                .map(|s| s.trim().parse::<f64>())
-                .collect::<Result<Vec<_>, _>>()
-        }
-        .map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))?;
-
         let row_vals = if let Some(cols) = usecols {
-            let mut selected = Vec::with_capacity(cols.len());
-            for &col in cols {
-                if col >= all_vals.len() {
-                    return Err(IOError::ReadPayloadIncomplete(
-                        "loadtxt: usecols index out of bounds",
-                    ));
-                }
-                selected.push(all_vals[col]);
-            }
-            selected
+            parse_loadtxt_row_usecols(trimmed, delimiter, cols)?
         } else {
-            all_vals
+            parse_loadtxt_row(trimmed, delimiter)?
         };
 
         match ncols {
@@ -1701,6 +1679,87 @@ pub fn loadtxt_usecols(
         nrows,
         ncols: ncols.unwrap_or(0),
     })
+}
+
+fn parse_loadtxt_row(trimmed: &str, delimiter: char) -> Result<Vec<f64>, IOError> {
+    let parsed: Result<Vec<f64>, _> = if delimiter == ' ' {
+        trimmed
+            .split_whitespace()
+            .map(|s| s.parse::<f64>())
+            .collect()
+    } else {
+        trimmed
+            .split(delimiter)
+            .map(|s| s.trim().parse::<f64>())
+            .collect()
+    };
+    parsed.map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))
+}
+
+fn parse_loadtxt_row_usecols(
+    trimmed: &str,
+    delimiter: char,
+    cols: &[usize],
+) -> Result<Vec<f64>, IOError> {
+    if cols.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut max_col = 0usize;
+    for &col in cols {
+        if col > max_col {
+            max_col = col;
+        }
+    }
+
+    let mut positions = vec![Vec::new(); max_col + 1];
+    for (pos, &col) in cols.iter().enumerate() {
+        positions[col].push(pos);
+    }
+
+    let mut selected = vec![0.0; cols.len()];
+    let mut col_idx = 0usize;
+
+    if delimiter == ' ' {
+        for token in trimmed.split_whitespace() {
+            if col_idx > max_col {
+                break;
+            }
+            if !positions[col_idx].is_empty() {
+                let value = token
+                    .parse::<f64>()
+                    .map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))?;
+                for &pos in &positions[col_idx] {
+                    selected[pos] = value;
+                }
+            }
+            col_idx += 1;
+        }
+    } else {
+        for token in trimmed.split(delimiter) {
+            if col_idx > max_col {
+                break;
+            }
+            if !positions[col_idx].is_empty() {
+                let value = token
+                    .trim()
+                    .parse::<f64>()
+                    .map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))?;
+                for &pos in &positions[col_idx] {
+                    selected[pos] = value;
+                }
+            }
+            col_idx += 1;
+        }
+    }
+
+    if col_idx <= max_col {
+        return Err(IOError::ReadPayloadIncomplete(
+            "loadtxt: usecols index out of bounds",
+        ));
+    }
+
+    Ok(selected)
 }
 
 /// Extended `np.loadtxt` with `unpack` parameter.
@@ -4485,6 +4544,15 @@ mod tests {
         assert_eq!(result.nrows, 2);
         assert_eq!(result.ncols, 1);
         assert_eq!(result.values, vec![20.0, 50.0]);
+    }
+
+    #[test]
+    fn loadtxt_usecols_ignores_unselected_non_numeric_columns() {
+        let text = "1,foo,3\n4,bar,6\n";
+        let result = loadtxt_usecols(text, ',', '#', 0, 0, Some(&[0, 2])).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 2);
+        assert_eq!(result.values, vec![1.0, 3.0, 4.0, 6.0]);
     }
 
     #[test]
