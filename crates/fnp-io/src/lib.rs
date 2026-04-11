@@ -2118,11 +2118,11 @@ enum SepToken {
 }
 
 fn sep_is_only_spaces(sep: &str) -> bool {
-    !sep.is_empty() && sep.chars().all(|c| c == ' ')
+    !sep.is_empty() && sep.chars().all(|c| c.is_whitespace())
 }
 
 fn sep_has_space(sep: &str) -> bool {
-    sep.chars().any(|c| c == ' ')
+    sep.chars().any(|c| c.is_whitespace())
 }
 
 fn split_text_with_sep<'a>(text: &'a str, sep: &str) -> Vec<&'a str> {
@@ -2139,7 +2139,7 @@ fn split_with_space_wildcards<'a>(text: &'a str, sep: &str) -> Vec<&'a str> {
     let tokens: Vec<SepToken> = sep
         .chars()
         .map(|c| {
-            if c == ' ' {
+            if c.is_whitespace() {
                 SepToken::SpaceWildcard
             } else {
                 SepToken::Literal(c)
@@ -4519,6 +4519,13 @@ mod tests {
     }
 
     #[test]
+    fn fromfile_text_tab_separator_matches_whitespace() {
+        let text = "1\t2\n3 4";
+        let result = fromfile_text(text, "\t", None).unwrap();
+        assert_eq!(result, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
     fn fromfile_text_rejects_empty_separator() {
         let err = fromfile_text("1 2 3", "", None).expect_err("empty separator");
         assert_eq!(err.reason_code(), "io_read_payload_incomplete");
@@ -5258,6 +5265,13 @@ mod tests {
         let data = b"1.0\n2.5\t3.7  4.0";
         let vals = fromstring(data, IOSupportedDType::F64, " ").unwrap();
         assert_eq!(vals, vec![1.0, 2.5, 3.7, 4.0]);
+    }
+
+    #[test]
+    fn fromstring_text_mode_tab_separator_accepts_mixed_whitespace() {
+        let data = b"1\t2\n3 4";
+        let vals = fromstring(data, IOSupportedDType::F64, "\t").unwrap();
+        assert_eq!(vals, vec![1.0, 2.0, 3.0, 4.0]);
     }
 
     #[test]
