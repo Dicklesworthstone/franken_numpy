@@ -12787,17 +12787,27 @@ impl UFuncArray {
             }
         }
 
-        // Compute min/max per dimension
+        // Compute min/max per dimension (NumPy defaults to 0..1 for empty data)
         let mut mins = vec![f64::INFINITY; n_dim];
         let mut maxs = vec![f64::NEG_INFINITY; n_dim];
-        for i in 0..n_obs {
-            for d in 0..n_dim {
-                let v = self.values[i * n_dim + d];
-                if v < mins[d] {
-                    mins[d] = v;
-                }
-                if v > maxs[d] {
-                    maxs[d] = v;
+        if n_obs == 0 {
+            mins.fill(0.0);
+            maxs.fill(1.0);
+        } else {
+            for i in 0..n_obs {
+                for d in 0..n_dim {
+                    let v = self.values[i * n_dim + d];
+                    if !v.is_finite() {
+                        return Err(UFuncError::Msg(format!(
+                            "ValueError: autodetected range of [{v}, {v}] is not finite"
+                        )));
+                    }
+                    if v < mins[d] {
+                        mins[d] = v;
+                    }
+                    if v > maxs[d] {
+                        maxs[d] = v;
+                    }
                 }
             }
         }
@@ -38863,6 +38873,28 @@ mod tests {
         assert_eq!(edges.len(), 3);
         let total: f64 = hist.values().iter().sum();
         assert!((total - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn histogramdd_empty_defaults_range() {
+        let sample = UFuncArray::new(vec![0, 2], vec![], DType::F64).unwrap();
+        let (hist, edges) = sample.histogramdd(&[3, 2]).unwrap();
+        assert_eq!(hist.shape(), &[3, 2]);
+        assert!(hist.values().iter().all(|&v| v == 0.0));
+        assert_eq!(edges.len(), 2);
+        assert_eq!(edges[0].shape(), &[4]);
+        assert_eq!(edges[1].shape(), &[3]);
+        assert!((edges[0].values()[0] - 0.0).abs() < 1e-9);
+        assert!((edges[0].values()[3] - 1.0).abs() < 1e-9);
+        assert!((edges[1].values()[0] - 0.0).abs() < 1e-9);
+        assert!((edges[1].values()[2] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn histogramdd_rejects_non_finite() {
+        let sample =
+            UFuncArray::new(vec![2, 2], vec![0.0, f64::NAN, 1.0, 2.0], DType::F64).unwrap();
+        assert!(sample.histogramdd(&[2, 2]).is_err());
     }
 
     #[test]
