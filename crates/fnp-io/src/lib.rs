@@ -1340,9 +1340,14 @@ pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
         ));
     }
 
-    // Find End of Central Directory (scan backwards for signature)
+    // Find End of Central Directory (scan backwards for signature).
+    // ZIP spec bounds the comment length to 65535 bytes, so the EOCD must
+    // be within the last 22 + 65535 bytes.
+    let max_comment_len = 65_535usize;
+    let search_start = data.len().saturating_sub(22 + max_comment_len);
+    let search_end = data.len().saturating_sub(22);
     let mut eocd_pos = None;
-    for i in (0..data.len().saturating_sub(21)).rev() {
+    for i in (search_start..=search_end).rev() {
         if data[i..i + 4] == [0x50, 0x4B, 0x05, 0x06] {
             eocd_pos = Some(i);
             break;
@@ -4950,6 +4955,20 @@ mod tests {
         // Truncate
         let truncated = &npz[..npz.len() / 2];
         assert!(read_npz_bytes(truncated).is_err());
+    }
+
+    #[test]
+    fn npz_eocd_beyond_comment_limit_rejected() {
+        let h = NpyHeader {
+            shape: vec![1],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let p: Vec<u8> = 1.0_f64.to_le_bytes().to_vec();
+        let mut npz = write_npz_bytes(&[("a", &h, &p)]).expect("write");
+        npz.extend(std::iter::repeat_n(0u8, 70_000));
+        let err = read_npz_bytes(&npz).expect_err("oversized trailing data should fail");
+        assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
     }
 
     #[test]
