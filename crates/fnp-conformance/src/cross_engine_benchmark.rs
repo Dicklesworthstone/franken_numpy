@@ -33,6 +33,12 @@ def load_array(path_value):
         return None
     return np.load(path_value, allow_pickle=False)
 
+def shape_count(shape):
+    total = 1
+    for dim in shape:
+        total *= dim
+    return total
+
 def build_runner(request):
     spec = request["spec"]
     op = spec["operation"]
@@ -72,13 +78,16 @@ def build_runner(request):
         return lambda: np.fft.fft(lhs)
     if op == "standard_normal":
         rng = np.random.Generator(np.random.PCG64DXSM(12345))
-        return lambda: rng.standard_normal(shape[0])
+        size = shape_count(shape)
+        return lambda: rng.standard_normal(size)
     if op == "binomial":
         rng = np.random.Generator(np.random.PCG64DXSM(12345))
-        return lambda: rng.binomial(spec["binomial_n"], spec["binomial_p"], shape[0])
+        size = shape_count(shape)
+        return lambda: rng.binomial(spec["binomial_n"], spec["binomial_p"], size)
     if op == "poisson":
         rng = np.random.Generator(np.random.PCG64DXSM(12345))
-        return lambda: rng.poisson(spec["poisson_lambda"], shape[0])
+        size = shape_count(shape)
+        return lambda: rng.poisson(spec["poisson_lambda"], size)
     if op == "npy_roundtrip":
         def run_npy_roundtrip():
             buf = io.BytesIO()
@@ -209,13 +218,7 @@ impl WorkloadSpec {
     }
 
     fn element_count(&self) -> Result<usize, String> {
-        if self.shape.is_empty() {
-            return Ok(0);
-        }
-        self.shape.iter().try_fold(1usize, |acc, &dim| {
-            acc.checked_mul(dim)
-                .ok_or_else(|| format!("{}: shape product overflow", self.name))
-        })
+        element_count(&self.shape).map_err(|err| format!("{}: {err}", self.name))
     }
 }
 
@@ -673,7 +676,7 @@ fn run_fnp_workload(spec: &WorkloadSpec, fixtures: &BenchmarkFixtures) -> Result
             })
         }
         WorkloadOperation::StandardNormal => {
-            let size = first_dim(spec)?;
+            let size = spec.element_count()?;
             let mut rng = Generator::from_pcg64_dxsm(12345).map_err(to_string)?;
             time_operation(spec.warmup, spec.samples, || {
                 black_box(rng.standard_normal(size));
@@ -681,7 +684,7 @@ fn run_fnp_workload(spec: &WorkloadSpec, fixtures: &BenchmarkFixtures) -> Result
             })
         }
         WorkloadOperation::Binomial => {
-            let size = first_dim(spec)?;
+            let size = spec.element_count()?;
             let n = spec
                 .binomial_n
                 .ok_or_else(|| format!("{} missing binomial_n", spec.name))?;
@@ -695,7 +698,7 @@ fn run_fnp_workload(spec: &WorkloadSpec, fixtures: &BenchmarkFixtures) -> Result
             })
         }
         WorkloadOperation::Poisson => {
-            let size = first_dim(spec)?;
+            let size = spec.element_count()?;
             let lam = spec
                 .poisson_lambda
                 .ok_or_else(|| format!("{} missing poisson_lambda", spec.name))?;
@@ -1186,7 +1189,7 @@ fn make_symmetric_matrix(shape: &[usize]) -> Result<Vec<f64>, String> {
 }
 
 fn make_fft_values(shape: &[usize]) -> Result<Vec<f64>, String> {
-    let len = first_shape_dim(shape)?;
+    let len = element_count(shape)?;
     Ok((0..len)
         .map(|index| ((index as f64) * 0.013).sin() + ((index as f64) * 0.007).cos() * 0.5)
         .collect())
@@ -1221,17 +1224,6 @@ fn element_count(shape: &[usize]) -> Result<usize, String> {
         acc.checked_mul(dim)
             .ok_or_else(|| "shape element_count overflow".to_string())
     })
-}
-
-fn first_shape_dim(shape: &[usize]) -> Result<usize, String> {
-    shape
-        .first()
-        .copied()
-        .ok_or_else(|| "shape must not be empty".to_string())
-}
-
-fn first_dim(spec: &WorkloadSpec) -> Result<usize, String> {
-    first_shape_dim(&spec.shape).map_err(|_| format!("{}: shape must not be empty", spec.name))
 }
 
 fn git_sha(repo_root: &Path) -> String {
@@ -1472,7 +1464,7 @@ fn to_string(err: impl std::fmt::Display) -> String {
 mod tests {
     use super::{
         CROSS_ENGINE_RATIO_DIRECTION, CrossEngineBenchmarkReport, EnvironmentFingerprint,
-        TimingStats, WorkloadOperation, compute_ratio, compute_timing_stats,
+        TimingStats, WorkloadOperation, WorkloadSpec, compute_ratio, compute_timing_stats,
         generate_markdown_report, parse_manifest, ratio_band,
     };
     use crate::raptorq_artifacts::generate_bundle_sidecar_and_reports;
@@ -1672,6 +1664,33 @@ workloads:
         assert_eq!(loaded_shape, shape);
         assert_eq!(loaded_values, values);
         assert_eq!(dtype, fnp_io::IOSupportedDType::F64);
+    }
+
+    #[test]
+    fn workload_element_count_matches_shape_product() {
+        let spec = WorkloadSpec {
+            family: "random".to_string(),
+            name: "rng_shape_product".to_string(),
+            size_tier: "tiny".to_string(),
+            operation: WorkloadOperation::StandardNormal,
+            shape: vec![2, 3],
+            rhs_shape: Vec::new(),
+            axis: None,
+            percentile_q: None,
+            warmup: 1,
+            samples: 1,
+            quick: false,
+            binomial_n: None,
+            binomial_p: None,
+            poisson_lambda: None,
+        };
+        assert_eq!(spec.element_count().expect("element count"), 6);
+    }
+
+    #[test]
+    fn fft_values_match_shape_product() {
+        let values = super::make_fft_values(&[2, 3]).expect("fft values");
+        assert_eq!(values.len(), 6);
     }
 
     #[test]

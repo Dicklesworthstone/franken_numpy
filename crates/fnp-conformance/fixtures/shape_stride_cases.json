@@ -132,7 +132,7 @@
       "expected_error_contains": "cannot broadcast"
     },
     "sliding_window": {
-      "window_shape": [0, 3],
+      "window_shape": [5, 3],
       "expected_error_contains": "invalid sliding window"
     },
     "seed": 106,
