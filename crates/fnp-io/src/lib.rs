@@ -3796,22 +3796,22 @@ mod tests {
     use std::io::Write;
 
     use super::{
-        GenFromTxtConfig, IO_PACKET_ID, IO_PACKET_REASON_CODES, IOError, IOLogRecord, crc32_ieee,
+        GenFromTxtConfig, IO_PACKET_ID, IO_PACKET_REASON_CODES, IOError, IOLogRecord,
         IORuntimeMode, IOSupportedDType, LoadDispatch, MAX_ARCHIVE_MEMBERS, MAX_DISPATCH_RETRIES,
         MAX_HEADER_BYTES, MAX_MEMMAP_VALIDATION_RETRIES, MemmapMode, NPY_MAGIC_PREFIX,
         NPZ_MAGIC_PREFIX, NpyHeader, NpzCompression, SaveTxtConfig, StructuredIODescriptor,
-        StructuredIOField, classify_load_dispatch, encode_npy_header_bytes, enforce_pickle_policy,
-        fromfile, fromfile_complex, fromfile_strings, fromfile_structured, fromfile_text,
-        fromstring, genfromtxt, genfromtxt_full, load, load_complex, load_npz, load_strings,
-        load_structured, loadtxt, loadtxt_unpack, loadtxt_usecols, memmap, memmap_npy,
-        parse_structured_descr, read_npy_bytes, read_npz_bytes, save, save_complex, save_strings,
-        save_structured, savetxt, savez, savez_compressed, synthesize_npz_member_names, tobytes,
-        tofile, tofile_complex, tofile_strings, tofile_structured, tofile_text, tostring,
-        validate_descriptor_roundtrip, validate_header_schema, validate_io_policy_metadata,
-        validate_magic_version, validate_memmap_contract, validate_npz_archive_budget,
-        validate_read_payload, validate_write_contract, write_npy_bytes,
-        write_npy_bytes_with_version, write_npy_preamble, write_npz_bytes,
-        write_npz_bytes_with_compression,
+        StructuredIOField, classify_load_dispatch, crc32_ieee, encode_npy_header_bytes,
+        enforce_pickle_policy, fromfile, fromfile_complex, fromfile_strings, fromfile_structured,
+        fromfile_text, fromstring, genfromtxt, genfromtxt_full, load, load_complex, load_npz,
+        load_strings, load_structured, loadtxt, loadtxt_unpack, loadtxt_usecols, memmap,
+        memmap_npy, parse_structured_descr, read_npy_bytes, read_npz_bytes, save, save_complex,
+        save_strings, save_structured, savetxt, savez, savez_compressed,
+        synthesize_npz_member_names, tobytes, tofile, tofile_complex, tofile_strings,
+        tofile_structured, tofile_text, tostring, validate_descriptor_roundtrip,
+        validate_header_schema, validate_io_policy_metadata, validate_magic_version,
+        validate_memmap_contract, validate_npz_archive_budget, validate_read_payload,
+        validate_write_contract, write_npy_bytes, write_npy_bytes_with_version, write_npy_preamble,
+        write_npz_bytes, write_npz_bytes_with_compression,
     };
 
     fn packet009_artifacts() -> Vec<String> {

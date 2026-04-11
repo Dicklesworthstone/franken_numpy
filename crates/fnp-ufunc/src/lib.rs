@@ -2508,7 +2508,7 @@ impl UFuncArrayView {
 
         let mut out_shape = Vec::with_capacity(ndim * 2);
         for (axis, (&dim, &win)) in self.shape.iter().zip(window_shape).enumerate() {
-            if win == 0 || win > dim {
+            if win > dim {
                 return Err(UFuncError::Msg(format!(
                     "sliding_window_view: window size {win} invalid for axis {axis} with size {dim}"
                 )));
@@ -17556,7 +17556,7 @@ impl UFuncArray {
             )));
         }
         for (d, (&s, &w)) in self.shape.iter().zip(window_shape.iter()).enumerate() {
-            if w == 0 || w > s {
+            if w > s {
                 return Err(UFuncError::Msg(format!(
                     "sliding_window_view: window size {} is invalid for axis {} of size {}",
                     w, d, s
@@ -38952,10 +38952,17 @@ mod tests {
     }
 
     #[test]
+    fn sliding_window_view_zero_window() {
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let r = a.sliding_window_view(&[0]).unwrap();
+        assert_eq!(r.shape(), &[4, 0]);
+        assert!(r.values().is_empty());
+    }
+
+    #[test]
     fn sliding_window_view_invalid_window() {
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         assert!(a.sliding_window_view(&[4]).is_err()); // window > array
-        assert!(a.sliding_window_view(&[0]).is_err()); // zero window
     }
 
     // ── MaskedArray tests ──────────────────────────────────────────
@@ -44556,10 +44563,18 @@ mod tests {
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         // Window larger than axis.
         assert!(a.sliding_window_shared_view(&[4]).is_err());
-        // Zero window.
-        assert!(a.sliding_window_shared_view(&[0]).is_err());
         // Wrong rank.
         assert!(a.sliding_window_shared_view(&[2, 2]).is_err());
+    }
+
+    #[test]
+    fn test_sliding_window_shared_view_zero_window() {
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let view = a.sliding_window_shared_view(&[0]).unwrap();
+        assert_eq!(view.shape(), &[4, 0]);
+        assert!(!view.is_writable());
+        let mat = UFuncArray::from_shared_view(&view).unwrap();
+        assert!(mat.values().is_empty());
     }
 
     #[test]

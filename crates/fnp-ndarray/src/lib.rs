@@ -490,7 +490,7 @@ impl NdLayout {
 
         let mut shape = Vec::with_capacity(self.shape.len() * 2);
         for (axis, (&dim, &window)) in self.shape.iter().zip(window_shape).enumerate() {
-            if window == 0 || window > dim {
+            if window > dim {
                 return Err(ShapeError::InvalidWindowDimension { axis, window, dim });
             }
             shape.push(dim - window + 1);
@@ -852,16 +852,27 @@ mod tests {
     fn sliding_window_view_rejects_invalid_window_size() {
         let base = NdLayout::contiguous(vec![4, 5], 8, MemoryOrder::C).expect("layout");
         let err = base
-            .sliding_window_view(&[0, 3])
-            .expect_err("window size zero should fail");
+            .sliding_window_view(&[5, 3])
+            .expect_err("window larger than axis should fail");
         assert!(matches!(
             err,
             ShapeError::InvalidWindowDimension {
                 axis: 0,
-                window: 0,
+                window: 5,
                 dim: 4
             }
         ));
+    }
+
+    #[test]
+    fn sliding_window_view_allows_zero_window() {
+        let base = NdLayout::contiguous(vec![2, 3], 8, MemoryOrder::C).expect("layout");
+        let view = base
+            .sliding_window_view(&[0, 0])
+            .expect("zero-sized windows are valid");
+        assert_eq!(view.shape, vec![3, 4, 0, 0]);
+        assert_eq!(view.strides, vec![24, 8, 24, 8]);
+        assert!(!view.is_writeable());
     }
 
     #[test]
