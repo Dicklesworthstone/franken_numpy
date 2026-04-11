@@ -1974,6 +1974,93 @@ fn strip_text_comment(line: &str, comments: char) -> &str {
     line.split_once(comments).map_or(line, |(prefix, _)| prefix)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SepToken {
+    SpaceWildcard,
+    Literal(char),
+}
+
+fn sep_is_only_spaces(sep: &str) -> bool {
+    !sep.is_empty() && sep.chars().all(|c| c == ' ')
+}
+
+fn sep_has_space(sep: &str) -> bool {
+    sep.chars().any(|c| c == ' ')
+}
+
+fn split_text_with_sep<'a>(text: &'a str, sep: &str) -> Vec<&'a str> {
+    if sep_is_only_spaces(sep) {
+        return text.split_whitespace().collect();
+    }
+    if sep_has_space(sep) {
+        return split_with_space_wildcards(text, sep);
+    }
+    text.split(sep).collect()
+}
+
+fn split_with_space_wildcards<'a>(text: &'a str, sep: &str) -> Vec<&'a str> {
+    let tokens: Vec<SepToken> = sep
+        .chars()
+        .map(|c| {
+            if c == ' ' {
+                SepToken::SpaceWildcard
+            } else {
+                SepToken::Literal(c)
+            }
+        })
+        .collect();
+    if tokens.is_empty() {
+        return vec![text];
+    }
+
+    let mut parts = Vec::new();
+    let mut field_start = 0usize;
+    let mut idx = 0usize;
+
+    while idx <= text.len() {
+        if let Some(end) = match_space_wildcard_sep(text, idx, &tokens) {
+            parts.push(&text[field_start..idx]);
+            field_start = end;
+            idx = end;
+            continue;
+        }
+        if idx == text.len() {
+            break;
+        }
+        let ch = text[idx..].chars().next().expect("valid utf-8");
+        idx += ch.len_utf8();
+    }
+
+    parts.push(&text[field_start..]);
+    parts
+}
+
+fn match_space_wildcard_sep(text: &str, start: usize, tokens: &[SepToken]) -> Option<usize> {
+    let mut offset = 0usize;
+    let mut iter = text[start..].chars().peekable();
+    for token in tokens {
+        match token {
+            SepToken::SpaceWildcard => {
+                while let Some(&ch) = iter.peek() {
+                    if ch.is_whitespace() {
+                        iter.next();
+                        offset += ch.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            SepToken::Literal(expected) => match iter.next() {
+                Some(ch) if ch == *expected => {
+                    offset += ch.len_utf8();
+                }
+                _ => return None,
+            },
+        }
+    }
+    Some(start + offset)
+}
+
 /// Read raw binary data from bytes into a flat array of f64 values (np.fromfile).
 ///
 /// Interprets `data` as a sequence of elements of the given `dtype`.
@@ -2051,17 +2138,16 @@ pub fn fromfile_text(text: &str, sep: &str, count: Option<usize>) -> Result<Vec<
     let max = count.unwrap_or(usize::MAX);
     let mut values = Vec::new();
 
-    let iter: Box<dyn Iterator<Item = &str>> = if sep.trim().is_empty() {
-        Box::new(text.split_whitespace())
-    } else {
-        Box::new(text.split(sep).map(|s| s.trim()).filter(|s| !s.is_empty()))
-    };
-
-    for token in iter {
+    let tokens = split_text_with_sep(text, sep);
+    for field in tokens {
+        let field = field.trim();
+        if field.is_empty() {
+            continue;
+        }
         if values.len() >= max {
             break;
         }
-        let parsed = token
+        let parsed = field
             .parse::<f64>()
             .map_err(|_| IOError::ReadPayloadIncomplete("fromfile_text: could not parse float"))?;
         values.push(parsed);
@@ -2394,7 +2480,7 @@ pub fn fromstring(data: &[u8], dtype: IOSupportedDType, sep: &str) -> Result<Vec
 
         let mut values = Vec::new();
 
-        if sep.chars().all(char::is_whitespace) {
+        if sep_is_only_spaces(sep) {
             for token in text.split_whitespace() {
                 if values.len() >= MAX_TEXT_ELEMENTS {
                     return Err(IOError::ReadPayloadIncomplete(
@@ -2407,9 +2493,9 @@ pub fn fromstring(data: &[u8], dtype: IOSupportedDType, sep: &str) -> Result<Vec
                 );
             }
         } else {
-            let mut iter = text.split(sep).peekable();
-            while let Some(token) = iter.next() {
-                if token.trim().is_empty() {
+            let mut iter = split_text_with_sep(text, sep).into_iter().peekable();
+            while let Some(field) = iter.next() {
+                if field.trim().is_empty() {
                     if iter.peek().is_none() {
                         continue;
                     }
@@ -2421,7 +2507,7 @@ pub fn fromstring(data: &[u8], dtype: IOSupportedDType, sep: &str) -> Result<Vec
                     ));
                 }
                 values.push(
-                    parse_text_element_for_dtype(token.trim(), dtype)
+                    parse_text_element_for_dtype(field.trim(), dtype)
                         .map_err(|_| IOError::ReadPayloadIncomplete("fromstring: parse error"))?,
                 );
             }
@@ -4331,6 +4417,13 @@ mod tests {
     }
 
     #[test]
+    fn fromfile_text_space_in_separator_allows_optional_whitespace() {
+        let text = "1,2, 3,   4";
+        let result = fromfile_text(text, ", ", None).unwrap();
+        assert_eq!(result, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
     fn fromfile_text_with_count() {
         let text = "1 2 3 4 5";
         let result = fromfile_text(text, " ", Some(3)).unwrap();
@@ -4873,6 +4966,13 @@ mod tests {
         let data = b"10, 20, 30";
         let vals = fromstring(data, IOSupportedDType::F64, ",").unwrap();
         assert_eq!(vals, vec![10.0, 20.0, 30.0]);
+    }
+
+    #[test]
+    fn fromstring_text_mode_space_in_separator_allows_optional_whitespace() {
+        let data = b"1,2, 3,   4";
+        let vals = fromstring(data, IOSupportedDType::F64, ", ").unwrap();
+        assert_eq!(vals, vec![1.0, 2.0, 3.0, 4.0]);
     }
 
     #[test]
