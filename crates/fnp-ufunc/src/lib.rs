@@ -17578,7 +17578,7 @@ impl UFuncArray {
             fnp_ndarray::element_count(&view_dims).map_err(UFuncError::Shape)?;
         let window_total: usize =
             fnp_ndarray::element_count(window_shape).map_err(UFuncError::Shape)?;
-        let total = view_total * window_total;
+        let total = checked_window_total(view_total, window_total)?;
 
         let src_strides = c_strides_elems(&self.shape);
         let view_strides = c_strides_elems(&view_dims);
@@ -19209,6 +19209,12 @@ fn c_strides_elems(shape: &[usize]) -> Vec<usize> {
         strides[i] = strides[i + 1] * shape[i + 1];
     }
     strides
+}
+
+fn checked_window_total(view_total: usize, window_total: usize) -> Result<usize, UFuncError> {
+    view_total
+        .checked_mul(window_total)
+        .ok_or(UFuncError::Shape(ShapeError::Overflow))
 }
 
 const MAX_EXACT_F64_U64: u64 = 9_007_199_254_740_992;
@@ -26720,27 +26726,27 @@ mod tests {
     use super::{
         AxisSlice, BinaryDispatchMethod, BinaryOp, FloatErrorKind, FloatErrorMode, GridSpec,
         MAError, MaskedArray, OverrideDispatchDecision, OverrideOperand, OverridePayloadClass,
-        PrintOptions, QuantileInterp, StringArray, UFUNC_PACKET_REASON_CODES, UFuncArray,
-        UFuncArrayView, UFuncError, UFuncLogRecord, UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp,
-        bitwise_count, busday_count, busday_offset, cheb2poly, chebadd, chebder, chebdiv, chebfit,
-        chebfromroots, chebint, chebmul, chebroots, chebsub, chebval, divmod_arrays, errstate,
-        financial_fv, financial_ipmt, financial_irr, financial_mirr, financial_nper, financial_npv,
-        financial_pmt, financial_ppmt, financial_pv, financial_rate, frexp, gcd_arrays, geterr,
-        herm2poly, hermadd, hermder, hermdiv, herme2poly, hermeadd, hermediv, hermefromroots,
-        hermemul, hermeroots, hermesub, hermeval, hermfit, hermfromroots, hermint, hermmul,
-        hermroots, hermsub, hermval, is_busday, isneginf, isposinf, lag2poly, lagadd, lagder,
-        lagdiv, lagfit, lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, lcm_arrays,
-        leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub,
-        legval, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or, mediate_ufunc_runtime_policy,
-        modf, normalize_fixed_signature_keywords, normalize_signature_keywords, pad_empty,
-        pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
-        plan_binary_dispatch, plan_binary_dispatch_with_registry,
-        plan_binary_dispatch_with_signature, poly2cheb, poly2herm, poly2herme, poly2lag, poly2leg,
-        register_custom_loop, resolve_override_dispatch, scimath_arccos, scimath_arcsin,
-        scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_power, scimath_sqrt,
-        seterr, seterr_state, seterrcall, sort_complex, take_float_error_events, unique_all,
-        unique_counts, unique_inverse, unique_values, validate_override_payload_class,
-        where_nonzero,
+        PrintOptions, QuantileInterp, ShapeError, StringArray, UFUNC_PACKET_REASON_CODES,
+        UFuncArray, UFuncArrayView, UFuncError, UFuncLogRecord, UFuncLoopRegistry,
+        UFuncRuntimeMode, UnaryOp, bitwise_count, busday_count, busday_offset, cheb2poly, chebadd,
+        chebder, chebdiv, chebfit, chebfromroots, chebint, chebmul, chebroots, chebsub, chebval,
+        checked_window_total, divmod_arrays, errstate, financial_fv, financial_ipmt, financial_irr,
+        financial_mirr, financial_nper, financial_npv, financial_pmt, financial_ppmt, financial_pv,
+        financial_rate, frexp, gcd_arrays, geterr, herm2poly, hermadd, hermder, hermdiv,
+        herme2poly, hermeadd, hermediv, hermefromroots, hermemul, hermeroots, hermesub, hermeval,
+        hermfit, hermfromroots, hermint, hermmul, hermroots, hermsub, hermval, is_busday, isneginf,
+        isposinf, lag2poly, lagadd, lagder, lagdiv, lagfit, lagfromroots, lagint, lagmul, lagroots,
+        lagsub, lagval, lcm_arrays, leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint,
+        legmul, legroots, legsub, legval, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or,
+        mediate_ufunc_runtime_policy, modf, normalize_fixed_signature_keywords,
+        normalize_signature_keywords, pad_empty, pad_linear_ramp, pad_stat,
+        parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch,
+        plan_binary_dispatch_with_registry, plan_binary_dispatch_with_signature, poly2cheb,
+        poly2herm, poly2herme, poly2lag, poly2leg, register_custom_loop, resolve_override_dispatch,
+        scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log, scimath_log2, scimath_log10,
+        scimath_power, scimath_sqrt, seterr, seterr_state, seterrcall, sort_complex,
+        take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
+        validate_override_payload_class, where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
@@ -38963,6 +38969,12 @@ mod tests {
     fn sliding_window_view_invalid_window() {
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         assert!(a.sliding_window_view(&[4]).is_err()); // window > array
+    }
+
+    #[test]
+    fn sliding_window_view_total_overflow_is_rejected() {
+        let err = checked_window_total(usize::MAX, 2).expect_err("overflow should error");
+        assert!(matches!(err, UFuncError::Shape(ShapeError::Overflow)));
     }
 
     // ── MaskedArray tests ──────────────────────────────────────────
