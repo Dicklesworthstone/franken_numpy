@@ -12617,8 +12617,24 @@ impl UFuncArray {
         if bins.shape.len() != 1 {
             return Err(UFuncError::Msg("digitize: bins must be 1-D".to_string()));
         }
+        if matches!(self.dtype, DType::Complex64 | DType::Complex128) {
+            return Err(UFuncError::Msg(
+                "digitize: x may not be complex".to_string(),
+            ));
+        }
+        if matches!(bins.dtype, DType::Complex64 | DType::Complex128) {
+            return Err(UFuncError::Msg(
+                "digitize: bins may not be complex".to_string(),
+            ));
+        }
         let b = &bins.values;
         let is_increasing = b.windows(2).all(|w| w[0] <= w[1]);
+        let is_decreasing = b.windows(2).all(|w| w[0] >= w[1]);
+        if !(is_increasing || is_decreasing) {
+            return Err(UFuncError::Msg(
+                "digitize: bins must be monotonically increasing or decreasing".to_string(),
+            ));
+        }
         let values: Vec<f64> = self
             .values
             .iter()
@@ -34857,6 +34873,27 @@ mod tests {
         let default = x.digitize(&bins).unwrap();
         let explicit = x.digitize_right(&bins, false).unwrap();
         assert_eq!(default.values(), explicit.values());
+    }
+
+    #[test]
+    fn digitize_rejects_non_monotonic_bins() {
+        let x = UFuncArray::new(vec![2], vec![0.5, 1.5], DType::F64).unwrap();
+        let bins = UFuncArray::new(vec![3], vec![0.0, 2.0, 1.0], DType::F64).unwrap();
+        assert!(x.digitize(&bins).is_err());
+    }
+
+    #[test]
+    fn digitize_rejects_complex_input() {
+        let x = UFuncArray::new(vec![1, 2], vec![1.0, 2.0], DType::Complex128).unwrap();
+        let bins = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::F64).unwrap();
+        assert!(x.digitize(&bins).is_err());
+    }
+
+    #[test]
+    fn digitize_rejects_complex_bins() {
+        let x = UFuncArray::new(vec![2], vec![0.5, 1.5], DType::F64).unwrap();
+        let bins = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::Complex128).unwrap();
+        assert!(x.digitize(&bins).is_err());
     }
 
     #[test]
