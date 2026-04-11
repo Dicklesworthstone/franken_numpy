@@ -2216,17 +2216,7 @@ pub fn fromfile(
         return Ok(Vec::new());
     }
     let max_elems = data.len() / item_size;
-    let n = match count {
-        Some(c) => {
-            if c > max_elems {
-                return Err(IOError::ReadPayloadIncomplete(
-                    "insufficient data for requested element count",
-                ));
-            }
-            c
-        }
-        None => max_elems,
-    };
+    let n = clamp_count(count, max_elems);
 
     if dtype_is_native_endian_f64(dtype) {
         return fromfile_native_endian_f64(data, count);
@@ -2240,6 +2230,10 @@ pub fn fromfile(
         values.push(v);
     }
     Ok(values)
+}
+
+fn clamp_count(count: Option<usize>, max: usize) -> usize {
+    count.map_or(max, |c| c.min(max))
 }
 
 /// Write array values to raw binary bytes (np.ndarray.tofile).
@@ -2446,17 +2440,7 @@ fn write_native_endian_f64_npy_bytes(
 fn fromfile_native_endian_f64(data: &[u8], count: Option<usize>) -> Result<Vec<f64>, IOError> {
     let item_size = core::mem::size_of::<f64>();
     let max_elems = data.len() / item_size;
-    let n = match count {
-        Some(c) => {
-            if c > max_elems {
-                return Err(IOError::ReadPayloadIncomplete(
-                    "insufficient data for requested element count",
-                ));
-            }
-            c
-        }
-        None => max_elems,
-    };
+    let n = clamp_count(count, max_elems);
     let payload = &data[..n * item_size];
     if let Ok(values) = try_cast_slice::<u8, f64>(payload) {
         return Ok(values.to_vec());
@@ -2485,17 +2469,7 @@ pub fn fromfile_complex(
     }
     let item_size = dtype.item_size().ok_or(IOError::DTypeDescriptorInvalid)?;
     let max_elems = data.len() / item_size;
-    let n = match count {
-        Some(c) => {
-            if c > max_elems {
-                return Err(IOError::ReadPayloadIncomplete(
-                    "insufficient data for requested element count",
-                ));
-            }
-            c
-        }
-        None => max_elems,
-    };
+    let n = clamp_count(count, max_elems);
 
     let mut values = Vec::with_capacity(n);
     for i in 0..n {
@@ -3389,17 +3363,7 @@ pub fn fromfile_structured(
         return Err(IOError::DTypeDescriptorInvalid);
     }
     let max_records = data.len() / record_size;
-    let n = match count {
-        Some(c) => {
-            if c > max_records {
-                return Err(IOError::ReadPayloadIncomplete(
-                    "insufficient data for requested structured record count",
-                ));
-            }
-            c
-        }
-        None => max_records,
-    };
+    let n = clamp_count(count, max_records);
 
     let offsets = descriptor.field_offsets()?;
     let mut columns: Vec<Vec<u8>> = descriptor
@@ -3702,17 +3666,7 @@ pub fn fromfile_strings(
         return Ok(Vec::new());
     }
     let max_elems = data.len() / item_size;
-    let n = match count {
-        Some(c) => {
-            if c > max_elems {
-                return Err(IOError::ReadPayloadIncomplete(
-                    "insufficient data for requested element count",
-                ));
-            }
-            c
-        }
-        None => max_elems,
-    };
+    let n = clamp_count(count, max_elems);
 
     let mut strings = Vec::with_capacity(n);
     for i in 0..n {
@@ -5140,6 +5094,20 @@ mod tests {
     }
 
     #[test]
+    fn fromfile_count_exceeds_available_clamps() {
+        let data: Vec<u8> = [1u16, 2, 3].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let vals = fromfile(&data, IOSupportedDType::U16, Some(10)).unwrap();
+        assert_eq!(vals, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn fromfile_f64_count_exceeds_available_clamps() {
+        let data: Vec<u8> = [1.0f64, 2.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let vals = fromfile(&data, IOSupportedDType::F64, Some(5)).unwrap();
+        assert_eq!(vals, vec![1.0, 2.0]);
+    }
+
+    #[test]
     fn fromfile_bool() {
         let data = vec![1u8, 0, 1, 1, 0];
         let vals = fromfile(&data, IOSupportedDType::Bool, None).unwrap();
@@ -5184,6 +5152,14 @@ mod tests {
         let encoded = tofile_complex(&original, IOSupportedDType::Complex128).unwrap();
         let decoded = fromfile_complex(&encoded, IOSupportedDType::Complex128, None).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn fromfile_complex_count_exceeds_available_clamps() {
+        let original = vec![(1.25, -2.5), (0.0, 3.5)];
+        let encoded = tofile_complex(&original, IOSupportedDType::Complex128).unwrap();
+        let decoded = fromfile_complex(&encoded, IOSupportedDType::Complex128, Some(10)).unwrap();
+        assert_eq!(decoded, original);
     }
 
     #[test]
@@ -5536,6 +5512,15 @@ mod tests {
     }
 
     #[test]
+    fn fromfile_strings_count_exceeds_available_clamps() {
+        let strings = vec!["hello".to_string(), "world".to_string()];
+        let dtype = IOSupportedDType::Bytes(8);
+        let encoded = tofile_strings(&strings, dtype).unwrap();
+        let decoded = fromfile_strings(&encoded, dtype, Some(10)).unwrap();
+        assert_eq!(decoded, strings);
+    }
+
+    #[test]
     fn bytes_truncation_on_encode() {
         let strings = vec!["toolongstring".to_string()];
         let dtype = IOSupportedDType::Bytes(5);
@@ -5825,6 +5810,19 @@ mod tests {
         // Only first 2 records decoded
         assert_eq!(result.columns[0].len(), 16); // 2 * 8 bytes
         assert_eq!(result.columns[1].len(), 8); // 2 * 4 bytes
+    }
+
+    #[test]
+    fn fromfile_structured_count_exceeds_available_clamps() {
+        let desc = make_test_descriptor();
+        let col_x: Vec<u8> = [1.5f64.to_le_bytes(), 2.75f64.to_le_bytes()].concat();
+        let col_y: Vec<u8> = [10i32.to_le_bytes(), 20i32.to_le_bytes()].concat();
+        let encoded = tofile_structured(&desc, &[col_x.clone(), col_y.clone()]).unwrap();
+
+        let result = fromfile_structured(&encoded, &desc, Some(10)).unwrap();
+        assert_eq!(result.shape, vec![2]);
+        assert_eq!(result.columns[0], col_x);
+        assert_eq!(result.columns[1], col_y);
     }
 
     #[test]
