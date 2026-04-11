@@ -1899,8 +1899,12 @@ pub fn genfromtxt_full(
         })
         .collect();
 
-    // Apply max_rows
-    let effective_len = all_lines.len().min(config.max_rows);
+    // Apply max_rows (0 = no limit for consistency with loadtxt)
+    let effective_len = if config.max_rows == 0 {
+        all_lines.len()
+    } else {
+        all_lines.len().min(config.max_rows)
+    };
 
     let mut values = Vec::new();
     let mut ncols: Option<usize> = None;
@@ -4258,6 +4262,21 @@ mod tests {
         let result = genfromtxt_full(text, &config).unwrap();
         assert_eq!(result.nrows, 2);
         assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn genfromtxt_full_max_rows_zero_means_no_limit() {
+        let text = "1,2\n3,4\n5,6\n";
+        let config = GenFromTxtConfig {
+            delimiter: ',',
+            comments: '#',
+            filling_values: 0.0,
+            max_rows: 0,
+            ..GenFromTxtConfig::default()
+        };
+        let result = genfromtxt_full(text, &config).unwrap();
+        assert_eq!(result.nrows, 3);
+        assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
     }
 
     #[test]
