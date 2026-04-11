@@ -12388,6 +12388,12 @@ impl UFuncArray {
             .iter()
             .map(|&xi| {
                 if n == 1 {
+                    if xi < xp.values[0] {
+                        return left_val;
+                    }
+                    if xi > xp.values[0] {
+                        return right_val;
+                    }
                     return fp.values[0];
                 }
                 if xi <= xp.values[0] {
@@ -33291,6 +33297,15 @@ mod tests {
         assert!(r.values()[0].is_nan());
         assert!((r.values()[1] - 15.0).abs() < 1e-10);
         assert!(r.values()[2].is_nan());
+    }
+
+    #[test]
+    fn interp_lr_single_point_respects_left_right() {
+        let x = UFuncArray::new(vec![3], vec![-1.0, 1.0, 2.0], DType::F64).unwrap();
+        let xp = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
+        let fp = UFuncArray::new(vec![1], vec![5.0], DType::F64).unwrap();
+        let r = UFuncArray::interp_lr(&x, &xp, &fp, Some(7.0), Some(9.0)).unwrap();
+        assert_eq!(r.values(), &[7.0, 5.0, 9.0]);
     }
 
     // ── convolve / correlate / polyval / cross / vstack / hstack ─────
