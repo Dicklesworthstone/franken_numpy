@@ -12739,6 +12739,9 @@ impl UFuncArray {
                 "histogram_bin_edges: bins must be > 0".to_string(),
             ));
         }
+        if self.values.is_empty() {
+            return Self::linspace(0.0, 1.0, bins + 1, DType::F64);
+        }
         let mut min_val = f64::INFINITY;
         let mut max_val = f64::NEG_INFINITY;
         for &v in &self.values {
@@ -38814,6 +38817,15 @@ mod tests {
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         let edges = a.histogram_bin_edges(1).unwrap();
         assert_eq!(edges.shape(), &[2]);
+    }
+
+    #[test]
+    fn histogram_bin_edges_empty_defaults_range() {
+        let a = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+        let edges = a.histogram_bin_edges(3).unwrap();
+        assert_eq!(edges.shape(), &[4]);
+        assert!((edges.values()[0] - 0.0).abs() < 1e-9);
+        assert!((edges.values()[3] - 1.0).abs() < 1e-9);
     }
 
     // ── histogramdd tests ──
