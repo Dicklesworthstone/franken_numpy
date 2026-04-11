@@ -2294,21 +2294,24 @@ pub fn fromfile_text(text: &str, sep: &str, count: Option<usize>) -> Result<Vec<
 ///
 /// When `sep` is non-empty, `tofile` writes elements as text separated by `sep`.
 pub fn tofile_text(values: &[f64], sep: &str) -> String {
-    values
-        .iter()
-        .map(|v| {
-            if v.fract() == 0.0
-                && v.is_finite()
-                && v.abs() < 1e15
-                && !(*v == 0.0 && v.is_sign_negative())
-            {
-                format!("{}", *v as i64)
-            } else {
-                format!("{v}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(sep)
+    use std::fmt::Write;
+
+    let mut out = String::new();
+    for (idx, v) in values.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(sep);
+        }
+        if v.fract() == 0.0
+            && v.is_finite()
+            && v.abs() < 1e15
+            && !(*v == 0.0 && v.is_sign_negative())
+        {
+            let _ = write!(&mut out, "{}", *v as i64);
+        } else {
+            let _ = write!(&mut out, "{v}");
+        }
+    }
+    out
 }
 
 /// Decode a single element from raw bytes to f64.
