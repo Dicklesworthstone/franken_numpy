@@ -18932,16 +18932,18 @@ fn format_value(v: f64, opts: &PrintOptions) -> String {
 
 fn format_1d(values: &[f64], opts: &PrintOptions, total: usize) -> String {
     let mut parts = Vec::new();
-    if total <= opts.threshold {
+    let edge = opts.edgeitems.min(values.len());
+    let show_all = total <= opts.threshold || edge.saturating_mul(2) >= values.len();
+    if show_all {
         for v in values {
             parts.push(format_value(*v, opts));
         }
     } else {
-        for v in &values[..opts.edgeitems] {
+        for v in &values[..edge] {
             parts.push(format_value(*v, opts));
         }
         parts.push("...".to_string());
-        for v in &values[values.len() - opts.edgeitems..] {
+        for v in &values[values.len() - edge..] {
             parts.push(format_value(*v, opts));
         }
     }
@@ -18957,16 +18959,18 @@ fn format_nd(arr: &UFuncArray, opts: &PrintOptions, axis: usize, offset: usize) 
     let inner_size: usize = fnp_ndarray::element_count(&arr.shape[axis + 1..]).unwrap_or(0);
     let n = arr.shape[axis];
     let mut parts = Vec::new();
-    if n <= opts.threshold {
+    let edge = opts.edgeitems.min(n);
+    let show_all = n <= opts.threshold || edge.saturating_mul(2) >= n;
+    if show_all {
         for i in 0..n {
             parts.push(format_nd(arr, opts, axis + 1, offset + i * inner_size));
         }
     } else {
-        for i in 0..opts.edgeitems {
+        for i in 0..edge {
             parts.push(format_nd(arr, opts, axis + 1, offset + i * inner_size));
         }
         parts.push("...".to_string());
-        for i in (n - opts.edgeitems)..n {
+        for i in (n - edge)..n {
             parts.push(format_nd(arr, opts, axis + 1, offset + i * inner_size));
         }
     }
@@ -36853,6 +36857,20 @@ mod tests {
         };
         let s = a.array2string(&opts);
         assert!(s.contains("..."));
+    }
+
+    #[test]
+    fn array2string_edgeitems_exceed_length_shows_all_values() {
+        let a = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        let opts = PrintOptions {
+            threshold: 1,
+            edgeitems: 5,
+            ..PrintOptions::default()
+        };
+        let s = a.array2string(&opts);
+        assert!(s.contains("1."));
+        assert!(s.contains("2."));
+        assert!(!s.contains("..."));
     }
 
     #[test]
