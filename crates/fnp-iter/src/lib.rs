@@ -280,12 +280,12 @@ pub fn resolve_flatiter_indices(
                     "slice step must be > 0",
                 ));
             }
-            if *start > *stop || *stop > len {
-                return Err(FlatIterContractError::IndexingViolation(
-                    "slice bounds are invalid for flatiter",
-                ));
+            let start = (*start).min(len);
+            let stop = (*stop).min(len);
+            if start >= stop {
+                return Ok(Vec::new());
             }
-            Ok((*start..*stop).step_by(*step).collect())
+            Ok((start..stop).step_by(*step).collect())
         }
         FlatIterIndex::Fancy(indices) => {
             if indices.iter().any(|idx| *idx >= len) {
@@ -426,15 +426,12 @@ fn count_selected_indices(len: usize, index: &FlatIterIndex) -> Result<usize, Tr
                     "slice step must be > 0",
                 ));
             }
-            if *start > *stop || *stop > len {
-                return Err(TransferError::FlatiterReadViolation(
-                    "slice bounds are invalid for flatiter",
-                ));
-            }
-            if *start == *stop {
+            let start = (*start).min(len);
+            let stop = (*stop).min(len);
+            if start >= stop {
                 Ok(0)
             } else {
-                Ok((*stop - *start - 1) / *step + 1)
+                Ok((stop - start - 1) / *step + 1)
             }
         }
         FlatIterIndex::Fancy(indices) => {
@@ -2396,25 +2393,23 @@ mod tests {
     }
 
     #[test]
-    fn flatiter_slice_start_exceeds_stop_rejected() {
+    fn flatiter_slice_start_exceeds_stop_is_empty() {
         let idx = FlatIterIndex::Slice {
             start: 5,
             stop: 3,
             step: 1,
         };
-        let err = validate_flatiter_read(10, &idx).expect_err("start > stop should fail");
-        assert_eq!(err.reason_code(), "flatiter_transfer_read_violation");
+        assert_eq!(validate_flatiter_read(10, &idx).unwrap(), 0);
     }
 
     #[test]
-    fn flatiter_slice_stop_exceeds_length_rejected() {
+    fn flatiter_slice_stop_exceeds_length_is_clamped() {
         let idx = FlatIterIndex::Slice {
             start: 0,
             stop: 11,
             step: 1,
         };
-        let err = validate_flatiter_read(10, &idx).expect_err("stop > length should fail");
-        assert_eq!(err.reason_code(), "flatiter_transfer_read_violation");
+        assert_eq!(validate_flatiter_read(10, &idx).unwrap(), 10);
     }
 
     #[test]
