@@ -18886,7 +18886,7 @@ impl UFuncArray {
         if self.shape.len() == 1 {
             return format_1d(&self.values, opts, total);
         }
-        format_nd(self, opts, 0, 0)
+        format_nd(self, opts, 0, 0, total)
     }
 
     /// Return a string representation like NumPy's repr (np.array_repr).
@@ -18950,28 +18950,52 @@ fn format_1d(values: &[f64], opts: &PrintOptions, total: usize) -> String {
     format!("[{}]", parts.join(&format!(",{}", opts.separator)))
 }
 
-fn format_nd(arr: &UFuncArray, opts: &PrintOptions, axis: usize, offset: usize) -> String {
+fn format_nd(
+    arr: &UFuncArray,
+    opts: &PrintOptions,
+    axis: usize,
+    offset: usize,
+    total: usize,
+) -> String {
     if axis == arr.shape.len() - 1 {
         let n = arr.shape[axis];
         let values = &arr.values[offset..offset + n];
-        return format_1d(values, opts, n);
+        return format_1d(values, opts, total);
     }
     let inner_size: usize = fnp_ndarray::element_count(&arr.shape[axis + 1..]).unwrap_or(0);
     let n = arr.shape[axis];
     let mut parts = Vec::new();
     let edge = opts.edgeitems.min(n);
-    let show_all = n <= opts.threshold || edge.saturating_mul(2) >= n;
+    let show_all = total <= opts.threshold || edge.saturating_mul(2) >= n;
     if show_all {
         for i in 0..n {
-            parts.push(format_nd(arr, opts, axis + 1, offset + i * inner_size));
+            parts.push(format_nd(
+                arr,
+                opts,
+                axis + 1,
+                offset + i * inner_size,
+                total,
+            ));
         }
     } else {
         for i in 0..edge {
-            parts.push(format_nd(arr, opts, axis + 1, offset + i * inner_size));
+            parts.push(format_nd(
+                arr,
+                opts,
+                axis + 1,
+                offset + i * inner_size,
+                total,
+            ));
         }
         parts.push("...".to_string());
         for i in (n - edge)..n {
-            parts.push(format_nd(arr, opts, axis + 1, offset + i * inner_size));
+            parts.push(format_nd(
+                arr,
+                opts,
+                axis + 1,
+                offset + i * inner_size,
+                total,
+            ));
         }
     }
     let sep = format!(",\n{}", " ".repeat(axis + 1));
@@ -36871,6 +36895,19 @@ mod tests {
         assert!(s.contains("1."));
         assert!(s.contains("2."));
         assert!(!s.contains("..."));
+    }
+
+    #[test]
+    fn array2string_nd_threshold_uses_total_elements() {
+        let vals: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let a = UFuncArray::new(vec![2, 10], vals, DType::F64).unwrap();
+        let opts = PrintOptions {
+            threshold: 10,
+            edgeitems: 1,
+            ..PrintOptions::default()
+        };
+        let s = a.array2string(&opts);
+        assert!(s.contains("..."));
     }
 
     #[test]
