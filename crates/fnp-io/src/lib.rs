@@ -1891,6 +1891,37 @@ impl Default for SaveTxtConfig<'_> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveTxtFormat {
+    Default,
+    Int,
+    Exp(usize),
+    Fixed(usize),
+}
+
+fn parse_savetxt_format(fmt: &str) -> SaveTxtFormat {
+    match fmt {
+        "%d" | "%i" => SaveTxtFormat::Int,
+        "%e" => SaveTxtFormat::Exp(6),
+        "%f" => SaveTxtFormat::Fixed(6),
+        _ => {
+            if let Some(prec) = parse_savetxt_precision(fmt, 'e') {
+                SaveTxtFormat::Exp(prec)
+            } else if let Some(prec) = parse_savetxt_precision(fmt, 'f') {
+                SaveTxtFormat::Fixed(prec)
+            } else {
+                SaveTxtFormat::Default
+            }
+        }
+    }
+}
+
+fn parse_savetxt_precision(fmt: &str, spec: char) -> Option<usize> {
+    let fmt = fmt.strip_prefix("%.")?;
+    let digits = fmt.strip_suffix(spec)?;
+    digits.parse::<usize>().ok()
+}
+
 /// Save data to a text string (np.savetxt equivalent).
 /// Writes row-major `values` with shape `(nrows, ncols)`.
 pub fn savetxt(
@@ -1904,6 +1935,7 @@ pub fn savetxt(
             "savetxt: values length != nrows * ncols",
         ));
     }
+    let fmt = parse_savetxt_format(config.fmt);
     // Pre-allocate approximately (15 chars per float + delimiter) * total
     let mut output = String::with_capacity(values.len() * 16);
     if !config.header.is_empty() {
@@ -1912,29 +1944,31 @@ pub fn savetxt(
         output.push_str(config.header);
         output.push('\n');
     }
+    use std::fmt::Write;
     for r in 0..nrows {
         for c in 0..ncols {
             if c > 0 {
                 output.push_str(config.delimiter);
             }
             let v = values[r * ncols + c];
-            match config.fmt {
-                "%.18e" | "%e" => {
-                    use std::fmt::Write;
-                    write!(output, "{v:e}")
+            match fmt {
+                SaveTxtFormat::Exp(prec) => {
+                    write!(output, "{v:.prec$e}")
                         .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
                 }
-                "%d" | "%i" => {
-                    use std::fmt::Write;
+                SaveTxtFormat::Fixed(prec) => {
+                    write!(output, "{v:.prec$}")
+                        .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
+                }
+                SaveTxtFormat::Int => {
                     write!(output, "{}", v as i64)
                         .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
                 }
-                _ => {
-                    use std::fmt::Write;
+                SaveTxtFormat::Default => {
                     write!(output, "{v}")
                         .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
                 }
-            }
+            };
         }
         output.push('\n');
     }
@@ -4338,6 +4372,24 @@ mod tests {
         assert!(output.contains('1'));
         assert!(output.contains('6'));
         assert_eq!(output.lines().count(), 2);
+    }
+
+    #[test]
+    fn savetxt_respects_exp_precision() {
+        let values = vec![1.5];
+        let cfg = SaveTxtConfig {
+            fmt: "%.18e",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 1, &cfg).unwrap();
+        let line = output.trim();
+        let mut parts = line.split('e');
+        let mantissa = parts.next().expect("mantissa");
+        let exponent = parts.next().expect("exponent");
+        assert!(!exponent.is_empty());
+        assert!(parts.next().is_none());
+        let frac = mantissa.split('.').nth(1).unwrap_or("");
+        assert_eq!(frac.len(), 18);
     }
 
     #[test]
