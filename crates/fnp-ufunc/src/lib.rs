@@ -2745,8 +2745,10 @@ impl UFuncArrayView {
             if dim <= 1 {
                 continue;
             }
+            let dim_minus_1 = isize::try_from(dim - 1)
+                .map_err(|_| UFuncError::Msg("shared view: dimension overflow".to_string()))?;
             let span = stride
-                .checked_mul((dim - 1) as isize)
+                .checked_mul(dim_minus_1)
                 .ok_or_else(|| UFuncError::Msg("shared view: stride span overflow".to_string()))?;
             if span >= 0 {
                 max_offset = max_offset.checked_add(span).ok_or_else(|| {
@@ -44535,6 +44537,18 @@ mod tests {
         let a = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
         let err = a
             .as_strided_view(vec![usize::MAX], vec![1])
+            .expect_err("overflowing dimension must be rejected");
+        assert!(
+            err.to_string().contains("dimension overflow"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_shared_view_rejects_dimension_overflow() {
+        let buffer = Arc::new(RwLock::new(vec![0.0]));
+        let dim = (isize::MAX as usize).saturating_add(2);
+        let err = UFuncArrayView::new(vec![dim], buffer, None, 0, vec![1], DType::F64)
             .expect_err("overflowing dimension must be rejected");
         assert!(
             err.to_string().contains("dimension overflow"),
