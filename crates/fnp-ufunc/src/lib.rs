@@ -11608,6 +11608,13 @@ impl UFuncArray {
                 ndim
             )));
         }
+        for (d, (&s, &(b, a))) in self.shape.iter().zip(pad_width).enumerate() {
+            if s == 0 && (b > 0 || a > 0) {
+                return Err(UFuncError::Msg(format!(
+                    "pad_symmetric: axis {d} has size {s}, cannot reflect"
+                )));
+            }
+        }
         let out_shape: Vec<usize> = self
             .shape
             .iter()
@@ -35935,6 +35942,13 @@ mod tests {
         let r = a.pad_symmetric(&[(2, 2)]).unwrap();
         // symmetric (edge dup): [2, 1, 1, 2, 3, 3, 2]
         assert_eq!(r.values(), &[2.0, 1.0, 1.0, 2.0, 3.0, 3.0, 2.0]);
+    }
+
+    #[test]
+    fn pad_symmetric_empty_axis_rejects() {
+        let a = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+        let err = a.pad_symmetric(&[(1, 1)]).unwrap_err();
+        assert!(matches!(err, UFuncError::Msg(msg) if msg.contains("axis 0")));
     }
 
     // ── index utility tests ────────
