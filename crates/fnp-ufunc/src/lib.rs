@@ -11446,6 +11446,13 @@ impl UFuncArray {
                 ndim
             )));
         }
+        for (d, (&s, &(b, a))) in self.shape.iter().zip(pad_width).enumerate() {
+            if s == 0 && (b > 0 || a > 0) {
+                return Err(UFuncError::Msg(format!(
+                    "pad_edge: axis {d} has size {s}, cannot extend"
+                )));
+            }
+        }
         let out_shape: Vec<usize> = self
             .shape
             .iter()
@@ -35908,6 +35915,13 @@ mod tests {
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         let r = a.pad_edge(&[(2, 2)]).unwrap();
         assert_eq!(r.values(), &[1.0, 1.0, 1.0, 2.0, 3.0, 3.0, 3.0]);
+    }
+
+    #[test]
+    fn pad_edge_empty_axis_rejects() {
+        let a = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+        let err = a.pad_edge(&[(1, 1)]).unwrap_err();
+        assert!(matches!(err, UFuncError::Msg(msg) if msg.contains("axis 0")));
     }
 
     #[test]
