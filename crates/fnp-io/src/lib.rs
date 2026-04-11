@@ -1180,6 +1180,9 @@ pub fn write_npz_bytes_with_compression(
             format!("{name}.npy")
         };
         let fname_bytes = file_name.as_bytes();
+        let fname_len = u16::try_from(fname_bytes.len()).map_err(|_| {
+            IOError::NpzArchiveContractViolation("npz: member name exceeds 64KB zip limit")
+        })?;
 
         let local_offset = u32::try_from(buf.len()).map_err(|_| {
             IOError::NpzArchiveContractViolation("npz: file offset exceeds 4GB limits")
@@ -1205,8 +1208,12 @@ pub fn write_npz_bytes_with_compression(
             NpzCompression::Store => 0_u16,
             NpzCompression::Deflate => 8_u16,
         };
-        let compressed_size = encoded_data.len() as u32;
-        let uncompressed_size = npy_data.len() as u32;
+        let compressed_size = u32::try_from(encoded_data.len()).map_err(|_| {
+            IOError::NpzArchiveContractViolation("npz: entry payload exceeds 4GB zip limit")
+        })?;
+        let uncompressed_size = u32::try_from(npy_data.len()).map_err(|_| {
+            IOError::NpzArchiveContractViolation("npz: entry payload exceeds 4GB zip limit")
+        })?;
 
         // Local file header (30 bytes + filename)
         buf.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // signature
@@ -1218,7 +1225,7 @@ pub fn write_npz_bytes_with_compression(
         buf.extend_from_slice(&crc.to_le_bytes()); // crc-32
         buf.extend_from_slice(&compressed_size.to_le_bytes());
         buf.extend_from_slice(&uncompressed_size.to_le_bytes());
-        buf.extend_from_slice(&(fname_bytes.len() as u16).to_le_bytes()); // filename len
+        buf.extend_from_slice(&fname_len.to_le_bytes()); // filename len
         buf.extend_from_slice(&0_u16.to_le_bytes()); // extra field len
         buf.extend_from_slice(fname_bytes);
         buf.extend_from_slice(&encoded_data);
@@ -1234,7 +1241,7 @@ pub fn write_npz_bytes_with_compression(
         central_directory.extend_from_slice(&crc.to_le_bytes()); // crc-32
         central_directory.extend_from_slice(&compressed_size.to_le_bytes());
         central_directory.extend_from_slice(&uncompressed_size.to_le_bytes());
-        central_directory.extend_from_slice(&(fname_bytes.len() as u16).to_le_bytes());
+        central_directory.extend_from_slice(&fname_len.to_le_bytes());
         central_directory.extend_from_slice(&0_u16.to_le_bytes()); // extra field len
         central_directory.extend_from_slice(&0_u16.to_le_bytes()); // comment len
         central_directory.extend_from_slice(&0_u16.to_le_bytes()); // disk number
@@ -1246,9 +1253,19 @@ pub fn write_npz_bytes_with_compression(
         entry_count += 1;
     }
 
-    let cd_offset = buf.len() as u32;
+    let cd_offset = u32::try_from(buf.len()).map_err(|_| {
+        IOError::NpzArchiveContractViolation("npz: central directory offset exceeds 4GB limits")
+    })?;
     buf.extend_from_slice(&central_directory);
-    let cd_size = central_directory.len() as u32;
+    let cd_size = u32::try_from(central_directory.len()).map_err(|_| {
+        IOError::NpzArchiveContractViolation("npz: central directory size exceeds 4GB limits")
+    })?;
+    cd_offset
+        .checked_add(cd_size)
+        .and_then(|sum| sum.checked_add(22))
+        .ok_or(IOError::NpzArchiveContractViolation(
+            "npz: archive size exceeds 4GB limits",
+        ))?;
 
     // End of central directory record (22 bytes)
     buf.extend_from_slice(&[0x50, 0x4B, 0x05, 0x06]); // signature
@@ -4834,6 +4851,25 @@ mod tests {
 
         let err = read_npz_bytes(&npz).expect_err("corrupted deflate payload must fail");
         assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
+    }
+
+    #[test]
+    fn npz_member_name_too_long_rejected() {
+        let header = NpyHeader {
+            shape: vec![1],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let payload: Vec<u8> = 1.0_f64.to_le_bytes().to_vec();
+        let long_name = "a".repeat(u16::MAX as usize + 1);
+
+        let err = write_npz_bytes(&[(long_name.as_str(), &header, &payload)])
+            .expect_err("member name should exceed zip limit");
+        assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
+        assert!(
+            err.to_string().contains("member name"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
