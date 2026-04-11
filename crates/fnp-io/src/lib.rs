@@ -2269,14 +2269,17 @@ pub fn fromfile_text(text: &str, sep: &str, count: Option<usize>) -> Result<Vec<
     let max = count.unwrap_or(usize::MAX);
     let mut values = Vec::new();
 
-    let tokens = split_text_with_sep(text, sep);
-    for field in tokens {
-        let field = field.trim();
-        if field.is_empty() {
-            continue;
-        }
+    let mut iter = split_text_with_sep(text, sep).into_iter().peekable();
+    while let Some(field) = iter.next() {
         if values.len() >= max {
             break;
+        }
+        let field = field.trim();
+        if field.is_empty() {
+            if iter.peek().is_none() {
+                continue;
+            }
+            return Err(IOError::ReadPayloadIncomplete("fromfile_text: parse error"));
         }
         let parsed = field
             .parse::<f64>()
@@ -4495,6 +4498,19 @@ mod tests {
         let text = "1,2,3";
         let result = fromfile_text(text, ",", None).unwrap();
         assert_eq!(result, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn fromfile_text_rejects_internal_empty_fields() {
+        let err = fromfile_text("1,,2", ",", None).expect_err("empty field should fail");
+        assert_eq!(err.reason_code(), "io_read_payload_incomplete");
+    }
+
+    #[test]
+    fn fromfile_text_allows_trailing_separator() {
+        let text = "1,2,";
+        let result = fromfile_text(text, ",", None).unwrap();
+        assert_eq!(result, vec![1.0, 2.0]);
     }
 
     #[test]
