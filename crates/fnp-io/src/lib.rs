@@ -1907,11 +1907,17 @@ pub fn genfromtxt_full(
     let mut nrows = 0usize;
 
     for &trimmed in all_lines.iter().take(effective_len) {
-        let row_vals: Vec<f64> = trimmed
-            .split(config.delimiter)
-            .filter(|s| config.delimiter != ' ' || !s.is_empty())
-            .map(|s| s.trim().parse::<f64>().unwrap_or(config.filling_values))
-            .collect();
+        let row_vals: Vec<f64> = if config.delimiter == ' ' {
+            trimmed
+                .split_whitespace()
+                .map(|s| s.parse::<f64>().unwrap_or(config.filling_values))
+                .collect()
+        } else {
+            trimmed
+                .split(config.delimiter)
+                .map(|s| s.trim().parse::<f64>().unwrap_or(config.filling_values))
+                .collect()
+        };
 
         // Apply usecols filter
         let row_vals = if let Some(cols) = config.usecols {
@@ -4252,6 +4258,20 @@ mod tests {
         let result = genfromtxt_full(text, &config).unwrap();
         assert_eq!(result.nrows, 2);
         assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn genfromtxt_full_space_delimiter_accepts_mixed_whitespace() {
+        let text = "1 2\t3\n4\t5 6\n";
+        let config = GenFromTxtConfig {
+            delimiter: ' ',
+            comments: '#',
+            ..GenFromTxtConfig::default()
+        };
+        let result = genfromtxt_full(text, &config).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 3);
+        assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
     }
 
     #[test]
