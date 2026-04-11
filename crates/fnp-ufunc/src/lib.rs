@@ -2543,8 +2543,10 @@ impl UFuncArrayView {
             if dim <= 1 {
                 continue;
             }
+            let dim_minus_1 = isize::try_from(dim - 1)
+                .map_err(|_| UFuncError::Msg("as_strided: dimension overflow".to_string()))?;
             let end = stride
-                .checked_mul((dim - 1) as isize)
+                .checked_mul(dim_minus_1)
                 .ok_or_else(|| UFuncError::Msg("as_strided: stride overflow".to_string()))?;
             if end >= 0 {
                 max_off = max_off
@@ -44488,6 +44490,18 @@ mod tests {
         let a = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
         let res = a.as_strided_view(vec![2, 2], vec![1]);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_as_strided_view_dimension_overflow_rejected() {
+        let a = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
+        let err = a
+            .as_strided_view(vec![usize::MAX], vec![1])
+            .expect_err("overflowing dimension must be rejected");
+        assert!(
+            err.to_string().contains("dimension overflow"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
