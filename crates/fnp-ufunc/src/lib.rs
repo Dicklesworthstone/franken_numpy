@@ -12121,36 +12121,52 @@ impl UFuncArray {
             ));
         }
 
-        let (lo, hi) = match range {
-            Some((a, b)) => (a, b),
-            None => {
-                let mut mn = f64::INFINITY;
-                let mut mx = f64::NEG_INFINITY;
-                for &v in &self.values {
-                    if !v.is_finite() {
-                        return Err(UFuncError::Msg(format!(
-                            "ValueError: autodetected range of [{v}, {v}] is not finite"
-                        )));
-                    }
-                    if v < mn {
-                        mn = v;
-                    }
-                    if v > mx {
-                        mx = v;
-                    }
+        let (mut lo, mut hi) = match range {
+            Some((a, b)) => {
+                if a > b {
+                    return Err(UFuncError::Msg(
+                        "ValueError: max must be larger than min in range parameter.".to_string(),
+                    ));
                 }
-                if !mn.is_finite() || !mx.is_finite() {
+                if !a.is_finite() || !b.is_finite() {
                     return Err(UFuncError::Msg(format!(
-                        "ValueError: autodetected range of [{mn}, {mx}] is not finite"
+                        "ValueError: supplied range of [{a}, {b}] is not finite"
                     )));
                 }
-                if (mx - mn).abs() < f64::EPSILON {
-                    mn -= 0.5;
-                    mx += 0.5;
+                (a, b)
+            }
+            None => {
+                if self.values.is_empty() {
+                    (0.0, 1.0)
+                } else {
+                    let mut mn = f64::INFINITY;
+                    let mut mx = f64::NEG_INFINITY;
+                    for &v in &self.values {
+                        if !v.is_finite() {
+                            return Err(UFuncError::Msg(format!(
+                                "ValueError: autodetected range of [{v}, {v}] is not finite"
+                            )));
+                        }
+                        if v < mn {
+                            mn = v;
+                        }
+                        if v > mx {
+                            mx = v;
+                        }
+                    }
+                    if !mn.is_finite() || !mx.is_finite() {
+                        return Err(UFuncError::Msg(format!(
+                            "ValueError: autodetected range of [{mn}, {mx}] is not finite"
+                        )));
+                    }
+                    (mn, mx)
                 }
-                (mn, mx)
             }
         };
+        if (hi - lo).abs() < f64::EPSILON {
+            lo -= 0.5;
+            hi += 0.5;
+        }
         let span = hi - lo;
         let width = span / bins as f64;
 
@@ -12167,10 +12183,9 @@ impl UFuncArray {
 
         if density {
             let total: f64 = counts.iter().sum();
-            if total > 0.0 {
-                for c in &mut counts {
-                    *c /= total * width;
-                }
+            let denom = total * width;
+            for c in &mut counts {
+                *c /= denom;
             }
         }
 
@@ -45728,6 +45743,39 @@ mod tests {
             );
         }
         assert_eq!(edges.shape(), &[5]);
+    }
+
+    #[test]
+    fn histogram_full_empty_defaults_range() {
+        let a = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+        let (counts, edges) = a.histogram_full(3, None, None, false).unwrap();
+        assert_eq!(counts.shape(), &[3]);
+        assert!(counts.values().iter().all(|&v| v == 0.0));
+        assert_eq!(edges.shape(), &[4]);
+        assert!((edges.values()[0] - 0.0).abs() < 1e-9);
+        assert!((edges.values()[3] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn histogram_full_empty_density_nan() {
+        let a = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+        let (counts, _) = a.histogram_full(3, None, None, true).unwrap();
+        assert!(counts.values().iter().all(|v| v.is_nan()));
+    }
+
+    #[test]
+    fn histogram_full_range_equal_expands() {
+        let a = UFuncArray::new(vec![1], vec![2.0], DType::F64).unwrap();
+        let (_, edges) = a.histogram_full(2, Some((2.0, 2.0)), None, false).unwrap();
+        assert_eq!(edges.shape(), &[3]);
+        assert!((edges.values()[0] - 1.5).abs() < 1e-9);
+        assert!((edges.values()[2] - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn histogram_full_range_invalid_rejected() {
+        let a = UFuncArray::new(vec![1], vec![2.0], DType::F64).unwrap();
+        assert!(a.histogram_full(2, Some((4.0, 2.0)), None, false).is_err());
     }
 
     #[test]
