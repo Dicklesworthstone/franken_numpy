@@ -197,7 +197,7 @@ impl IOSupportedDType {
             | Self::Complex64Be => Some(8),
             Self::Complex128 | Self::Complex128Be => Some(16),
             Self::Bytes(n) => Some(n),
-            Self::Unicode(n) | Self::UnicodeBe(n) => Some(n * 4),
+            Self::Unicode(n) | Self::UnicodeBe(n) => n.checked_mul(4),
             Self::Object => None,
         }
     }
@@ -4723,7 +4723,17 @@ mod tests {
         assert_eq!(IOSupportedDType::Complex64Be.item_size(), Some(8));
         assert_eq!(IOSupportedDType::Complex128.item_size(), Some(16));
         assert_eq!(IOSupportedDType::Complex128Be.item_size(), Some(16));
+        assert_eq!(IOSupportedDType::Bytes(5).item_size(), Some(5));
+        assert_eq!(IOSupportedDType::Unicode(5).item_size(), Some(20));
+        assert_eq!(IOSupportedDType::UnicodeBe(5).item_size(), Some(20));
         assert_eq!(IOSupportedDType::Object.item_size(), None);
+    }
+
+    #[test]
+    fn unicode_item_size_overflow_is_rejected() {
+        let width = usize::MAX / 4 + 1;
+        assert_eq!(IOSupportedDType::Unicode(width).item_size(), None);
+        assert_eq!(IOSupportedDType::UnicodeBe(width).item_size(), None);
     }
 
     fn build_single_deflate_npz(
