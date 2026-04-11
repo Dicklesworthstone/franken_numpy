@@ -4877,9 +4877,6 @@ impl UFuncArray {
         keepdims: bool,
         ddof: usize,
     ) -> Result<Self, UFuncError> {
-        if axes.is_empty() {
-            return Ok(self.clone());
-        }
         // Compute mean with keepdims=true so we can broadcast-subtract
         let mean = self.reduce_mean_axes(axes, true)?;
         let mean_broadcast = mean.broadcast_to(&self.shape)?;
@@ -17515,7 +17512,17 @@ impl UFuncArray {
     /// Count nonzero over multiple axes simultaneously (np.count_nonzero with axis tuple).
     pub fn count_nonzero_axes(&self, axes: &[isize], keepdims: bool) -> Result<Self, UFuncError> {
         if axes.is_empty() {
-            return Ok(self.clone());
+            let values = self
+                .values
+                .iter()
+                .map(|&v| if v != 0.0 { 1.0 } else { 0.0 })
+                .collect();
+            return Ok(Self {
+                shape: self.shape.clone(),
+                values,
+                dtype: DType::I64,
+                integer_sidecar: None,
+            });
         }
         // Convert to boolean (0/1), then sum over the axes
         let bool_vals: Vec<f64> = self
@@ -38602,7 +38609,10 @@ mod tests {
         let a =
             UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
         let r = a.reduce_var_axes(&[], false, 0).unwrap();
-        assert_eq!(r.values(), a.values());
+        assert_eq!(r.shape(), a.shape());
+        assert!(r.values().iter().all(|&v| v == 0.0));
+        let r_ddof = a.reduce_var_axes(&[], false, 1).unwrap();
+        assert!(r_ddof.values().iter().all(|v| v.is_nan()));
     }
 
     #[test]
@@ -38612,6 +38622,15 @@ mod tests {
             UFuncArray::new(vec![2, 3], vec![1.0, 0.0, 3.0, 0.0, 5.0, 0.0], DType::F64).unwrap();
         let r = a.count_nonzero_axes(&[0, 1], false).unwrap();
         assert_eq!(r.values(), &[3.0]);
+    }
+
+    #[test]
+    fn count_nonzero_axes_empty_tuple_returns_mask() {
+        let a = UFuncArray::new(vec![2, 2], vec![1.0, 0.0, 2.0, -0.0], DType::F64).unwrap();
+        let r = a.count_nonzero_axes(&[], false).unwrap();
+        assert_eq!(r.shape(), &[2, 2]);
+        assert_eq!(r.dtype(), DType::I64);
+        assert_eq!(r.values(), &[1.0, 0.0, 1.0, 0.0]);
     }
 
     #[test]
