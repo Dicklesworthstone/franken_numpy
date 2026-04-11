@@ -522,6 +522,50 @@ fn read_header_span(payload: &[u8], version: (u8, u8)) -> Result<(usize, usize),
     Ok((header_offset, header_len))
 }
 
+fn read_npy_header_from_file(path: &std::path::Path) -> Result<(NpyHeader, usize), IOError> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|_| IOError::MemmapContractViolation("failed to open NPY file for header"))?;
+    let mut magic_and_version = [0u8; 8];
+    file.read_exact(&mut magic_and_version).map_err(|_| {
+        IOError::HeaderSchemaInvalid("payload truncated before magic/version bytes")
+    })?;
+    let version = validate_magic_version(&magic_and_version)?;
+    let length_field_size = npy_length_field_size(version)?;
+    let mut length_bytes = [0u8; 4];
+    file.read_exact(&mut length_bytes[..length_field_size])
+        .map_err(|_| {
+            IOError::HeaderSchemaInvalid("payload truncated before header length field")
+        })?;
+
+    let header_len = match version {
+        (1, 0) => usize::from(u16::from_le_bytes([length_bytes[0], length_bytes[1]])),
+        (2, 0) | (3, 0) => {
+            let raw = u32::from_le_bytes(length_bytes);
+            usize::try_from(raw).map_err(|_| {
+                IOError::HeaderSchemaInvalid("header length exceeds platform usize boundary")
+            })?
+        }
+        _ => return Err(IOError::MagicInvalid),
+    };
+
+    if header_len == 0 || header_len > MAX_HEADER_BYTES {
+        return Err(IOError::HeaderSchemaInvalid(
+            "header bytes must be within bounded budget",
+        ));
+    }
+
+    let mut header_bytes = vec![0u8; header_len];
+    file.read_exact(&mut header_bytes)
+        .map_err(|_| IOError::HeaderSchemaInvalid("payload truncated before end of header"))?;
+    let header = parse_header_dictionary(&header_bytes, header_len)?;
+    let header_offset = NPY_MAGIC_PREFIX.len() + 2 + length_field_size;
+    let header_end = header_offset
+        .checked_add(header_len)
+        .ok_or(IOError::HeaderSchemaInvalid("header length overflow"))?;
+
+    Ok((header, header_end))
+}
+
 fn parse_quoted_value(value: &str) -> Result<String, IOError> {
     let bytes = value.as_bytes();
     if bytes.len() < 2 {
@@ -3102,20 +3146,8 @@ pub fn memmap_npy(path: &std::path::Path, mode: MemmapMode) -> Result<MemmapArra
             "write mode is invalid for existing npy-backed memmap",
         ));
     }
-    // Read the header to determine shape/dtype/offset
-    let header_bytes = std::fs::read(path)
-        .map_err(|_| IOError::MemmapContractViolation("failed to read NPY file for header"))?;
-    let version = validate_magic_version(&header_bytes)?;
-    let (header_offset, header_len) = read_header_span(&header_bytes, version)?;
-    let header_end = header_offset
-        .checked_add(header_len)
-        .ok_or(IOError::HeaderSchemaInvalid("header length overflow"))?;
-    if header_end > header_bytes.len() {
-        return Err(IOError::HeaderSchemaInvalid(
-            "payload truncated before end of header",
-        ));
-    }
-    let header = parse_header_dictionary(&header_bytes[header_offset..header_end], header_len)?;
+    // Read only the header to determine shape/dtype/offset.
+    let (header, header_end) = read_npy_header_from_file(path)?;
     let mut mapped = memmap(path, header.descr, mode, header_end, &header.shape)?;
     mapped.fortran_order = header.fortran_order;
     Ok(mapped)
