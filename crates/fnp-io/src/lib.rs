@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use core::fmt;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
@@ -1705,16 +1705,13 @@ fn parse_loadtxt_row_usecols(
         return Ok(Vec::new());
     }
 
+    let mut positions: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     let mut max_col = 0usize;
-    for &col in cols {
+    for (pos, &col) in cols.iter().enumerate() {
+        positions.entry(col).or_default().push(pos);
         if col > max_col {
             max_col = col;
         }
-    }
-
-    let mut positions = vec![Vec::new(); max_col + 1];
-    for (pos, &col) in cols.iter().enumerate() {
-        positions[col].push(pos);
     }
 
     let mut selected = vec![0.0; cols.len()];
@@ -1725,11 +1722,11 @@ fn parse_loadtxt_row_usecols(
             if col_idx > max_col {
                 break;
             }
-            if !positions[col_idx].is_empty() {
+            if let Some(pos_list) = positions.get(&col_idx) {
                 let value = token
                     .parse::<f64>()
                     .map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))?;
-                for &pos in &positions[col_idx] {
+                for &pos in pos_list {
                     selected[pos] = value;
                 }
             }
@@ -1740,12 +1737,12 @@ fn parse_loadtxt_row_usecols(
             if col_idx > max_col {
                 break;
             }
-            if !positions[col_idx].is_empty() {
+            if let Some(pos_list) = positions.get(&col_idx) {
                 let value = token
                     .trim()
                     .parse::<f64>()
                     .map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))?;
-                for &pos in &positions[col_idx] {
+                for &pos in pos_list {
                     selected[pos] = value;
                 }
             }
