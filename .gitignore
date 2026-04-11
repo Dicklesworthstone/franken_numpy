@@ -45,6 +45,12 @@ ubs_out.txt
 !/test_*.c
 !/test_*.csv
 
+# Root-level agent scratch / one-off fix scripts
+/apply_fixes.py
+/fix_*.py
+/get_context.py
+/patch_oracle.rs
+
 # Local logs and profiling artifacts
 *.log
 *.profraw
