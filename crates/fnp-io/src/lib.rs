@@ -1562,15 +1562,30 @@ pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
                 stored_entry_bytes.to_vec()
             }
             8 => {
-                // Limit the amount of data we read to uncompressed_size to prevent zip bombs
-                let mut decoder =
-                    DeflateDecoder::new(stored_entry_bytes).take(uncompressed_size as u64);
-                let mut decoded = Vec::with_capacity(uncompressed_size);
-                decoder.read_to_end(&mut decoded).map_err(|_| {
-                    IOError::NpzArchiveContractViolation(
-                        "npz: failed to inflate DEFLATE entry payload",
-                    )
-                })?;
+                // Decode exactly uncompressed_size bytes and ensure the stream ends there.
+                let mut decoder = DeflateDecoder::new(stored_entry_bytes);
+                let mut decoded = vec![0u8; uncompressed_size];
+                if !decoded.is_empty() {
+                    decoder.read_exact(&mut decoded).map_err(|_| {
+                        IOError::NpzArchiveContractViolation(
+                            "npz: decoded entry length does not match declared uncompressed size",
+                        )
+                    })?;
+                }
+                let mut extra = [0u8; 1];
+                match decoder.read(&mut extra) {
+                    Ok(0) => {}
+                    Ok(_) => {
+                        return Err(IOError::NpzArchiveContractViolation(
+                            "npz: decoded entry exceeds declared uncompressed size",
+                        ));
+                    }
+                    Err(_) => {
+                        return Err(IOError::NpzArchiveContractViolation(
+                            "npz: failed to inflate DEFLATE entry payload",
+                        ));
+                    }
+                }
                 decoded
             }
             _ => {
@@ -3777,9 +3792,11 @@ pub fn load_strings(data: &[u8]) -> Result<NpyLoadedStrings, IOError> {
 #[cfg(test)]
 mod tests {
     use bytemuck::cast_slice;
+    use flate2::{Compression, write::DeflateEncoder};
+    use std::io::Write;
 
     use super::{
-        GenFromTxtConfig, IO_PACKET_ID, IO_PACKET_REASON_CODES, IOError, IOLogRecord,
+        GenFromTxtConfig, IO_PACKET_ID, IO_PACKET_REASON_CODES, IOError, IOLogRecord, crc32_ieee,
         IORuntimeMode, IOSupportedDType, LoadDispatch, MAX_ARCHIVE_MEMBERS, MAX_DISPATCH_RETRIES,
         MAX_HEADER_BYTES, MAX_MEMMAP_VALIDATION_RETRIES, MemmapMode, NPY_MAGIC_PREFIX,
         NPZ_MAGIC_PREFIX, NpyHeader, NpzCompression, SaveTxtConfig, StructuredIODescriptor,
@@ -4755,6 +4772,70 @@ mod tests {
         assert_eq!(IOSupportedDType::Object.item_size(), None);
     }
 
+    fn build_single_deflate_npz(
+        name: &str,
+        compressed: &[u8],
+        crc: u32,
+        declared_uncompressed_size: u32,
+    ) -> Vec<u8> {
+        let fname_bytes = name.as_bytes();
+        let fname_len = u16::try_from(fname_bytes.len()).expect("fname len");
+        let compressed_size = u32::try_from(compressed.len()).expect("compressed size");
+
+        let mut buf = Vec::new();
+        // Local file header (30 bytes + filename)
+        buf.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // signature
+        buf.extend_from_slice(&20_u16.to_le_bytes()); // version needed (2.0)
+        buf.extend_from_slice(&0_u16.to_le_bytes()); // flags
+        buf.extend_from_slice(&8_u16.to_le_bytes()); // deflate
+        buf.extend_from_slice(&0_u16.to_le_bytes()); // mod time
+        buf.extend_from_slice(&0_u16.to_le_bytes()); // mod date
+        buf.extend_from_slice(&crc.to_le_bytes()); // crc-32
+        buf.extend_from_slice(&compressed_size.to_le_bytes());
+        buf.extend_from_slice(&declared_uncompressed_size.to_le_bytes());
+        buf.extend_from_slice(&fname_len.to_le_bytes());
+        buf.extend_from_slice(&0_u16.to_le_bytes()); // extra field len
+        buf.extend_from_slice(fname_bytes);
+        buf.extend_from_slice(compressed);
+
+        let cd_offset = u32::try_from(buf.len()).expect("cd offset");
+        let mut central = Vec::new();
+        // Central directory entry (46 bytes + filename)
+        central.extend_from_slice(&[0x50, 0x4B, 0x01, 0x02]); // signature
+        central.extend_from_slice(&20_u16.to_le_bytes()); // version made by
+        central.extend_from_slice(&20_u16.to_le_bytes()); // version needed
+        central.extend_from_slice(&0_u16.to_le_bytes()); // flags
+        central.extend_from_slice(&8_u16.to_le_bytes()); // deflate
+        central.extend_from_slice(&0_u16.to_le_bytes()); // mod time
+        central.extend_from_slice(&0_u16.to_le_bytes()); // mod date
+        central.extend_from_slice(&crc.to_le_bytes());
+        central.extend_from_slice(&compressed_size.to_le_bytes());
+        central.extend_from_slice(&declared_uncompressed_size.to_le_bytes());
+        central.extend_from_slice(&fname_len.to_le_bytes());
+        central.extend_from_slice(&0_u16.to_le_bytes()); // extra field len
+        central.extend_from_slice(&0_u16.to_le_bytes()); // comment len
+        central.extend_from_slice(&0_u16.to_le_bytes()); // disk number
+        central.extend_from_slice(&0_u16.to_le_bytes()); // internal attrs
+        central.extend_from_slice(&0_u32.to_le_bytes()); // external attrs
+        central.extend_from_slice(&0_u32.to_le_bytes()); // local header offset
+        central.extend_from_slice(fname_bytes);
+
+        let cd_size = u32::try_from(central.len()).expect("cd size");
+        buf.extend_from_slice(&central);
+
+        // End of central directory record (22 bytes)
+        buf.extend_from_slice(&[0x50, 0x4B, 0x05, 0x06]); // signature
+        buf.extend_from_slice(&0_u16.to_le_bytes()); // disk number
+        buf.extend_from_slice(&0_u16.to_le_bytes()); // disk with CD
+        buf.extend_from_slice(&1_u16.to_le_bytes()); // entries on disk
+        buf.extend_from_slice(&1_u16.to_le_bytes()); // total entries
+        buf.extend_from_slice(&cd_size.to_le_bytes()); // CD size
+        buf.extend_from_slice(&cd_offset.to_le_bytes()); // CD offset
+        buf.extend_from_slice(&0_u16.to_le_bytes()); // comment length
+
+        buf
+    }
+
     // ── NPZ tests ──
 
     #[test]
@@ -4887,6 +4968,33 @@ mod tests {
         npz[data_start] ^= 0xFF;
 
         let err = read_npz_bytes(&npz).expect_err("corrupted deflate payload must fail");
+        assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
+    }
+
+    #[test]
+    fn npz_deflate_rejects_extra_uncompressed_bytes() {
+        let header = NpyHeader {
+            shape: vec![2],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let payload: Vec<u8> = [1.0_f64, 2.0]
+            .into_iter()
+            .flat_map(f64::to_le_bytes)
+            .collect();
+        let npy_data = write_npy_bytes(&header, &payload, false).expect("write npy");
+        let mut inflated = npy_data.clone();
+        inflated.extend_from_slice(b"EXTRA");
+
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&inflated).expect("deflate");
+        let compressed = encoder.finish().expect("finish deflate");
+
+        let crc = crc32_ieee(&npy_data);
+        let declared = u32::try_from(npy_data.len()).expect("declared size");
+        let npz = build_single_deflate_npz("arr0.npy", &compressed, crc, declared);
+
+        let err = read_npz_bytes(&npz).expect_err("extra bytes must be rejected");
         assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
     }
 
