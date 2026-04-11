@@ -12223,9 +12223,19 @@ impl UFuncArray {
                 "histogram_edges: bin_edges must be 1-D with at least 2 elements".to_string(),
             ));
         }
+        if bin_edges.values.windows(2).any(|pair| pair[0] > pair[1]) {
+            return Err(UFuncError::Msg(
+                "histogram_edges: bin_edges must increase monotonically".to_string(),
+            ));
+        }
         let n_bins = bin_edges.values.len() - 1;
         let mut counts = vec![0.0f64; n_bins];
+        let last_edge = bin_edges.values[n_bins];
         for &v in &self.values {
+            if v == last_edge {
+                counts[n_bins - 1] += 1.0;
+                continue;
+            }
             // Binary search for bin
             let mut lo = 0;
             let mut hi = n_bins;
@@ -12663,11 +12673,25 @@ impl UFuncArray {
                 "histogram2d: x and y must be 1-D".to_string(),
             ));
         }
+        if xbins == 0 || ybins == 0 {
+            return Err(UFuncError::Msg("histogram2d: bins must be > 0".to_string()));
+        }
         if self.values.len() != y.values.len() {
             return Err(UFuncError::InvalidInputLength {
                 expected: self.values.len(),
                 actual: y.values.len(),
             });
+        }
+        if self.values.is_empty() {
+            let xedges = Self::linspace(0.0, 1.0, xbins + 1, DType::F64)?;
+            let yedges = Self::linspace(0.0, 1.0, ybins + 1, DType::F64)?;
+            let h = Self {
+                shape: vec![xbins, ybins],
+                values: vec![0.0f64; xbins * ybins],
+                dtype: DType::I64,
+                integer_sidecar: None,
+            };
+            return Ok((h, xedges, yedges));
         }
         let mut xmin = f64::INFINITY;
         let mut xmax = f64::NEG_INFINITY;
@@ -34848,6 +34872,25 @@ mod tests {
     }
 
     #[test]
+    fn histogram2d_empty_defaults_range() {
+        let x = UFuncArray::new(vec![0], Vec::new(), DType::F64).unwrap();
+        let y = UFuncArray::new(vec![0], Vec::new(), DType::F64).unwrap();
+        let (h, xe, ye) = x.histogram2d(&y, 2, 3).unwrap();
+        assert_eq!(h.shape(), &[2, 3]);
+        assert_eq!(h.values(), &[0.0; 6]);
+        assert_eq!(xe.values(), &[0.0, 0.5, 1.0]);
+        assert_eq!(ye.values(), &[0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0]);
+    }
+
+    #[test]
+    fn histogram2d_rejects_zero_bins() {
+        let x = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+        let y = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+        assert!(x.histogram2d(&y, 0, 2).is_err());
+        assert!(x.histogram2d(&y, 2, 0).is_err());
+    }
+
+    #[test]
     fn histogram2d_rejects_nan_in_x() {
         let x = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
         let y = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
@@ -37015,6 +37058,21 @@ mod tests {
         let edges = UFuncArray::new(vec![3], vec![0.0, 2.0, 10.0], DType::F64).unwrap();
         let (counts, _) = data.histogram_edges(&edges).unwrap();
         assert_eq!(counts.values(), &[2.0, 2.0]);
+    }
+
+    #[test]
+    fn histogram_edges_rightmost_inclusive() {
+        let data = UFuncArray::new(vec![3], vec![0.0, 1.0, 2.0], DType::F64).unwrap();
+        let edges = UFuncArray::new(vec![3], vec![0.0, 1.0, 2.0], DType::F64).unwrap();
+        let (counts, _) = data.histogram_edges(&edges).unwrap();
+        assert_eq!(counts.values(), &[1.0, 2.0]);
+    }
+
+    #[test]
+    fn histogram_edges_rejects_non_monotonic() {
+        let data = UFuncArray::new(vec![2], vec![0.5, 1.5], DType::F64).unwrap();
+        let edges = UFuncArray::new(vec![3], vec![0.0, 2.0, 1.0], DType::F64).unwrap();
+        assert!(data.histogram_edges(&edges).is_err());
     }
 
     #[test]
