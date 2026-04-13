@@ -1699,51 +1699,36 @@ pub fn matrix_norm_nxn(a: &[f64], m: usize, n: usize, ord: &str) -> Result<f64, 
             Ok(min_row)
         }
         "2" => {
-            // Spectral norm = largest singular value
-            if m != n {
-                return Err(LinAlgError::ShapeContractViolation(
-                    "spectral norm requires square matrix",
-                ));
-            }
+            // Spectral norm = largest singular value (works on MxN)
             if has_nan {
                 return Err(LinAlgError::SvdNonConvergence);
             }
             if has_inf {
                 return Ok(f64::NAN);
             }
-            let sigmas = svd_nxn(a, n)?;
+            let sigmas = svd_mxn(a, m, n)?;
             Ok(sigmas.first().copied().unwrap_or(0.0))
         }
         "-2" => {
-            // Smallest singular value
-            if m != n {
-                return Err(LinAlgError::ShapeContractViolation(
-                    "spectral norm requires square matrix",
-                ));
-            }
+            // Smallest singular value (works on MxN)
             if has_nan {
                 return Err(LinAlgError::SvdNonConvergence);
             }
             if has_inf {
                 return Ok(f64::NAN);
             }
-            let sigmas = svd_nxn(a, n)?;
+            let sigmas = svd_mxn(a, m, n)?;
             Ok(sigmas.last().copied().unwrap_or(0.0))
         }
         "nuc" => {
-            // Nuclear norm = sum of singular values
-            if m != n {
-                return Err(LinAlgError::ShapeContractViolation(
-                    "nuclear norm requires square matrix",
-                ));
-            }
+            // Nuclear norm = sum of singular values (works on MxN)
             if has_nan {
                 return Err(LinAlgError::SvdNonConvergence);
             }
             if has_inf {
                 return Ok(f64::NAN);
             }
-            let sigmas = svd_nxn(a, n)?;
+            let sigmas = svd_mxn(a, m, n)?;
             Ok(sigmas.iter().sum())
         }
         _ => Err(LinAlgError::NormDetRankPolicyViolation(
@@ -2641,6 +2626,33 @@ pub fn cond_nxn(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
     cond_p_nxn(a, n, None)
 }
 
+/// Condition number for rectangular MxN matrices (np.linalg.cond).
+/// Only the 2-norm is supported for non-square matrices.
+/// Returns sigma_max / sigma_min from SVD.
+pub fn cond_mxn(a: &[f64], m: usize, n: usize) -> Result<f64, LinAlgError> {
+    if m == 0 || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "cond is not defined on empty arrays",
+        ));
+    }
+    if Some(a.len()) != m.checked_mul(n) {
+        return Err(LinAlgError::ShapeContractViolation(
+            "cond_mxn: input must be m*n",
+        ));
+    }
+    let has_inf = a.iter().any(|value| value.is_infinite());
+    if has_inf {
+        return Ok(f64::INFINITY);
+    }
+    let sigmas = svd_mxn(a, m, n)?;
+    let sigma_max = sigmas.first().copied().unwrap_or(0.0);
+    let sigma_min = sigmas.last().copied().unwrap_or(0.0);
+    if sigma_min == 0.0 {
+        return Ok(f64::INFINITY);
+    }
+    Ok(sigma_max / sigma_min)
+}
+
 /// Condition number with explicit norm order (np.linalg.cond with p parameter).
 ///
 /// `p`: `None` defaults to 2-norm. Supported: `"1"`, `"-1"`, `"2"`, `"-2"`,
@@ -2656,6 +2668,45 @@ pub fn cond_p_nxn(a: &[f64], n: usize, p: Option<&str>) -> Result<f64, LinAlgErr
     let ord = p.unwrap_or("2");
     let has_nan = a.iter().any(|value| value.is_nan());
     let has_inf = a.iter().any(|value| value.is_infinite());
+    if Some(a.len()) != n.checked_mul(n) {
+        if n == 0 {
+            return Err(LinAlgError::ShapeContractViolation(
+                "cond is not defined on empty arrays",
+            ));
+        }
+        if a.len() % n != 0 {
+            return Err(LinAlgError::ShapeContractViolation(
+                "cond_p_nxn: input must be n*n or m*n with n > 0",
+            ));
+        }
+        let m = a.len() / n;
+        if m == 0 {
+            return Err(LinAlgError::ShapeContractViolation(
+                "cond is not defined on empty arrays",
+            ));
+        }
+        if ord != "2" && ord != "-2" {
+            return Err(LinAlgError::ShapeContractViolation(
+                "cond: non-square matrices only support p=None, '2', or '-2'",
+            ));
+        }
+        if has_inf {
+            return Ok(f64::INFINITY);
+        }
+        let sigmas = svd_mxn(a, m, n)?;
+        let sigma_max = sigmas.first().copied().unwrap_or(0.0);
+        let sigma_min = sigmas.last().copied().unwrap_or(0.0);
+        if ord == "-2" {
+            if sigma_max == 0.0 {
+                return Ok(f64::INFINITY);
+            }
+            return Ok(sigma_min / sigma_max);
+        }
+        if sigma_min == 0.0 {
+            return Ok(f64::INFINITY);
+        }
+        return Ok(sigma_max / sigma_min);
+    }
     match ord {
         "2" => {
             if has_inf {
@@ -4939,6 +4990,7 @@ mod tests {
         complex_qr_mxn,
         complex_solve_nxn,
         complex_trace_nxn,
+        cond_mxn,
         cond_nxn,
         cond_p_nxn,
         cross_product,
@@ -6702,6 +6754,18 @@ mod tests {
     }
 
     #[test]
+    fn cond_mxn_rectangular() {
+        // 2x3 matrix [[1,2,3],[4,5,6]]
+        // np.linalg.cond(a) = 12.302245504069202
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let c = cond_mxn(&a, 2, 3).expect("cond 2x3");
+        assert!(
+            (c - 12.302245504069202).abs() < 1e-6,
+            "cond(2x3)={c}, expected 12.302245"
+        );
+    }
+
+    #[test]
     fn matrix_power_nxn_identity() {
         let eye = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
         // I^5 = I
@@ -6862,6 +6926,42 @@ mod tests {
         let eye = [1.0, 0.0, 0.0, 1.0];
         let s = matrix_norm_nxn(&eye, 2, 2, "-2").unwrap();
         assert!((s - 1.0).abs() < 1e-6, "-2-norm(I)={s}");
+    }
+
+    #[test]
+    fn matrix_norm_nxn_rectangular_spectral() {
+        // 2x3 matrix [[1,2,3],[4,5,6]] - works in NumPy
+        // np.linalg.norm(a, 2) = 9.508032000695724
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let s2 = matrix_norm_nxn(&a, 2, 3, "2").unwrap();
+        assert!(
+            (s2 - 9.508032000695724).abs() < 1e-6,
+            "2-norm(2x3)={s2}, expected 9.508032"
+        );
+    }
+
+    #[test]
+    fn matrix_norm_nxn_rectangular_nuclear() {
+        // 2x3 matrix [[1,2,3],[4,5,6]]
+        // np.linalg.norm(a, 'nuc') = 10.280901636369208
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let nuc = matrix_norm_nxn(&a, 2, 3, "nuc").unwrap();
+        assert!(
+            (nuc - 10.280901636369208).abs() < 1e-6,
+            "nuc-norm(2x3)={nuc}, expected 10.280901"
+        );
+    }
+
+    #[test]
+    fn matrix_norm_nxn_rectangular_neg_two() {
+        // 2x3 matrix [[1,2,3],[4,5,6]]
+        // np.linalg.norm(a, -2) = 0.7728696356734838
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let s_neg2 = matrix_norm_nxn(&a, 2, 3, "-2").unwrap();
+        assert!(
+            (s_neg2 - 0.7728696356734838).abs() < 1e-6,
+            "-2-norm(2x3)={s_neg2}, expected 0.772869"
+        );
     }
 
     #[test]
