@@ -25748,7 +25748,10 @@ pub fn ldexp(mantissa: &UFuncArray, exponent: &UFuncArray) -> Result<UFuncArray,
                 m
             } else {
                 // m * 2^e using powi for integer exponents
-                m * 2.0_f64.powi(e as i32)
+                // Clamp exponent to i32 range to avoid UB on cast
+                // Exponents beyond +/-2048 will overflow/underflow anyway
+                let exp_clamped = e.clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+                m * 2.0_f64.powi(exp_clamped)
             }
         })
         .collect();
