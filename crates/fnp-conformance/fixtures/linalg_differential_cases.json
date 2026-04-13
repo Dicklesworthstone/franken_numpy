@@ -757,5 +757,39 @@
     "rhs": [5.0, 7.0, 3.0, 3.0],
     "expected_solution": [5.0, 7.0, 1.0, 1.0],
     "expected_tolerance": 1e-12
+  },
+  {
+    "id": "linalg_cond_mxn_rectangular_2x3",
+    "operation": "cond_mxn",
+    "seed": 8250,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [2, 3],
+    "matrix": [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
+    "expected_solution": [12.302245504069202],
+    "expected_tolerance": 1e-6
+  },
+  {
+    "id": "linalg_cond_mxn_tall_3x2",
+    "operation": "cond_mxn",
+    "seed": 8251,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [3, 2],
+    "matrix": [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
+    "expected_solution": [18.521305341258135],
+    "expected_tolerance": 1e-6
   }
 ]

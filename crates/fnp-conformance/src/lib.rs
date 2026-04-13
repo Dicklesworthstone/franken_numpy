@@ -23,10 +23,10 @@ use fnp_iter::{
     validate_flatiter_write, validate_nditer_flags,
 };
 use fnp_linalg::{
-    LinAlgError, QrMode, batch_det, batch_inv, batch_solve, batch_trace, lstsq_output_shapes,
-    qr_2x2, qr_output_shapes, solve_2x2, svd_2x2, svd_output_shapes, validate_backend_bridge,
-    validate_policy_metadata as validate_linalg_policy_metadata, validate_spectral_branch,
-    validate_tolerance_policy,
+    LinAlgError, QrMode, batch_det, batch_inv, batch_solve, batch_trace, cond_mxn,
+    lstsq_output_shapes, qr_2x2, qr_output_shapes, solve_2x2, svd_2x2, svd_output_shapes,
+    validate_backend_bridge, validate_policy_metadata as validate_linalg_policy_metadata,
+    validate_spectral_branch, validate_tolerance_policy,
 };
 use fnp_ndarray::{MemoryOrder, NdLayout, broadcast_shape, contiguous_strides};
 use fnp_random::{
@@ -9029,6 +9029,13 @@ fn execute_linalg_operation(
             validate_linalg_policy_metadata(input.mode_raw, input.class_raw)?;
             Ok(LinalgOperationOutcome::Unit)
         }
+        "cond_mxn" => {
+            let data = flatten_matrix_fixture(input.matrix)?;
+            let m = input.shape.first().copied().unwrap_or(0);
+            let n = input.shape.get(1).copied().unwrap_or(0);
+            let cond = cond_mxn(&data, m, n)?;
+            Ok(LinalgOperationOutcome::SolveVector(vec![cond]))
+        }
         _ => Err(LinAlgError::PolicyUnknownMetadata(
             "unsupported linalg operation",
         )),
@@ -9057,7 +9064,7 @@ fn validate_linalg_differential_expectation(
             Ok(())
         }
         (
-            "batch_det" | "batch_trace" | "batch_inv" | "batch_solve",
+            "batch_det" | "batch_trace" | "batch_inv" | "batch_solve" | "cond_mxn",
             LinalgOperationOutcome::SolveVector(actual),
         ) => {
             if case.expected_solution.len() != actual.len() {
