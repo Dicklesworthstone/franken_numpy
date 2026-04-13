@@ -571,5 +571,137 @@
     "lhs_strings": ["a", "b"],
     "rhs_strings": ["a", "b"],
     "cmp": "??"
+  },
+  {
+    "id": "slice_basic_golden",
+    "operation": "slice",
+    "seed": 9995,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["hello", "world"],
+    "slice_start": 1,
+    "slice_stop": 3,
+    "expected_strings": ["el", "or"]
+  },
+  {
+    "id": "slice_from_start_golden",
+    "operation": "slice",
+    "seed": 9996,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["hello", "world"],
+    "slice_stop": 2,
+    "expected_strings": ["he", "wo"]
+  },
+  {
+    "id": "slice_to_end_golden",
+    "operation": "slice",
+    "seed": 9997,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["hello", "world"],
+    "slice_start": 2,
+    "expected_strings": ["llo", "rld"]
+  },
+  {
+    "id": "slice_negative_indices_golden",
+    "operation": "slice",
+    "seed": 9998,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["hello", "world"],
+    "slice_start": -3,
+    "slice_stop": -1,
+    "expected_strings": ["ll", "rl"]
+  },
+  {
+    "id": "slice_with_step_golden",
+    "operation": "slice",
+    "seed": 9999,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["hello", "world"],
+    "slice_start": 0,
+    "slice_step": 2,
+    "expected_strings": ["hlo", "wrd"]
+  },
+  {
+    "id": "slice_reverse_golden",
+    "operation": "slice",
+    "seed": 10000,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["hello", "world"],
+    "slice_step": -1,
+    "expected_strings": ["olleh", "dlrow"]
+  },
+  {
+    "id": "slice_reverse_step2_golden",
+    "operation": "slice",
+    "seed": 10001,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["hello", "world"],
+    "slice_step": -2,
+    "expected_strings": ["olh", "drw"]
+  },
+  {
+    "id": "slice_unicode_golden",
+    "operation": "slice",
+    "seed": 10002,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["café", "漢字"],
+    "slice_start": 1,
+    "slice_stop": 3,
+    "expected_strings": ["af", "字"]
   }
 ]

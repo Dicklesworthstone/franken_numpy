@@ -27145,29 +27145,32 @@ impl StringArray {
                     }
                 };
 
-                // Resolve stop index (default: len for positive step, -len-1 for negative)
-                let stop_idx = match stop {
+                // Resolve stop index (default: len for positive step, None for negative)
+                // For negative step, None means "iterate to the beginning (index 0 inclusive)"
+                let stop_idx: Option<usize> = match stop {
                     Some(i) => {
-                        if i < 0 {
+                        let idx = if i < 0 {
                             (len + i).max(0) as usize
                         } else {
                             i.min(len) as usize
-                        }
+                        };
+                        Some(idx)
                     }
                     None => {
                         if step > 0 {
-                            len as usize
+                            Some(len as usize)
                         } else {
-                            0 // effectively -len-1 after bounds check
+                            None // iterate to beginning (index 0 inclusive)
                         }
                     }
                 };
 
                 if step > 0 {
-                    if start_idx >= stop_idx {
+                    let stop_usize = stop_idx.unwrap_or(len as usize);
+                    if start_idx >= stop_usize {
                         String::new()
                     } else {
-                        chars[start_idx..stop_idx]
+                        chars[start_idx..stop_usize]
                             .iter()
                             .step_by(step as usize)
                             .collect()
@@ -27175,20 +27178,20 @@ impl StringArray {
                 } else {
                     // Negative step: reverse iteration
                     let abs_step = (-step) as usize;
-                    if start_idx <= stop_idx {
-                        String::new()
-                    } else {
-                        // Iterate from start_idx down to (but not including) stop_idx
-                        let mut result = String::new();
-                        let mut i = start_idx;
-                        while i > stop_idx {
-                            result.push(chars[i]);
-                            if i < abs_step {
-                                break;
+                    match stop_idx {
+                        Some(stop_usize) if start_idx <= stop_usize => String::new(),
+                        _ => {
+                            // Iterate from start_idx down to (but not including) stop_idx
+                            // If stop_idx is None, iterate all the way to index 0 inclusive
+                            let mut result = String::new();
+                            let mut i = start_idx as isize;
+                            let stop_bound = stop_idx.map(|s| s as isize).unwrap_or(-1);
+                            while i > stop_bound {
+                                result.push(chars[i as usize]);
+                                i -= abs_step as isize;
                             }
-                            i -= abs_step;
+                            result
                         }
-                        result
                     }
                 }
             })
@@ -47197,5 +47200,21 @@ mod tests {
         let arr = StringArray::new(vec![2], vec!["hello".into(), "world".into()]).unwrap();
         let r = arr.slice(Some(0), None, Some(2));
         assert_eq!(r.values, vec!["hlo", "wrd"]);
+    }
+
+    #[test]
+    fn string_slice_reverse() {
+        // np.strings.slice(['hello', 'world'], None, None, -1) → ['olleh', 'dlrow']
+        let arr = StringArray::new(vec![2], vec!["hello".into(), "world".into()]).unwrap();
+        let r = arr.slice(None, None, Some(-1));
+        assert_eq!(r.values, vec!["olleh", "dlrow"]);
+    }
+
+    #[test]
+    fn string_slice_reverse_step2() {
+        // np.strings.slice(['hello', 'world'], None, None, -2) → ['olh', 'drw']
+        let arr = StringArray::new(vec![2], vec!["hello".into(), "world".into()]).unwrap();
+        let r = arr.slice(None, None, Some(-2));
+        assert_eq!(r.values, vec!["olh", "drw"]);
     }
 }

@@ -916,6 +916,12 @@ struct StringDifferentialCase {
     #[serde(default)]
     repeat: Option<usize>,
     #[serde(default)]
+    slice_start: Option<isize>,
+    #[serde(default)]
+    slice_stop: Option<isize>,
+    #[serde(default)]
+    slice_step: Option<isize>,
+    #[serde(default)]
     expected_values: Vec<f64>,
     #[serde(default)]
     expected_strings: Vec<String>,
@@ -6739,6 +6745,10 @@ fn execute_string_differential_operation(
                     .values()
                     .to_vec(),
             ))
+        }
+        "slice" => {
+            let result = lhs.slice(case.slice_start, case.slice_stop, case.slice_step);
+            Ok(as_text(result.values().to_vec()))
         }
         other => Err(StringSuiteError::new(
             "string_policy_unknown_operation",
