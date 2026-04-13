@@ -27287,6 +27287,11 @@ impl StringArray {
                     }
                 };
 
+                // Handle empty string early - no characters to slice
+                if chars.is_empty() {
+                    return String::new();
+                }
+
                 if step > 0 {
                     let stop_usize = stop_idx.unwrap_or(len as usize);
                     if start_idx >= stop_usize {

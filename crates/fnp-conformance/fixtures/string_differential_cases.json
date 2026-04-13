@@ -705,6 +705,22 @@
     "expected_strings": ["af", "字"]
   },
   {
+    "id": "slice_empty_string_reverse_golden",
+    "operation": "slice",
+    "seed": 10003,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["", "a", ""],
+    "slice_step": -1,
+    "expected_strings": ["", "a", ""]
+  },
+  {
     "id": "center_basic_golden",
     "operation": "center",
     "seed": 10010,
