@@ -13287,6 +13287,235 @@ impl UFuncArray {
         })
     }
 
+    /// Vandermonde matrix of given degree (np.polynomial.polynomial.polyvander).
+    ///
+    /// Returns the Vandermonde matrix of degree `deg` and sample points `x`.
+    /// V[i, j] = x[i]^j for 0 <= j <= deg.
+    /// Output shape is (len(x), deg + 1).
+    pub fn polyvander(&self, deg: usize) -> Result<Self, UFuncError> {
+        if self.shape.len() != 1 {
+            return Err(UFuncError::Msg("polyvander: x must be 1-D".to_string()));
+        }
+        let n = self.values.len();
+        let cols = deg + 1;
+        let mut v = vec![0.0; n * cols];
+
+        for i in 0..n {
+            let x = self.values[i];
+            let mut power = 1.0;
+            for j in 0..cols {
+                v[i * cols + j] = power;
+                power *= x;
+            }
+        }
+
+        Ok(Self {
+            shape: vec![n, cols],
+            values: v,
+            dtype: self.dtype,
+            integer_sidecar: None,
+        })
+    }
+
+    /// Evaluate polynomial from roots (np.polynomial.polynomial.polyvalfromroots).
+    ///
+    /// Given roots r, evaluates prod(x - r[i]) at each point in x.
+    /// This is more numerically stable than converting roots to coefficients
+    /// and then evaluating.
+    pub fn polyvalfromroots(&self, roots: &Self) -> Result<Self, UFuncError> {
+        if roots.shape.len() != 1 {
+            return Err(UFuncError::Msg(
+                "polyvalfromroots: roots must be 1-D".to_string(),
+            ));
+        }
+        let result_vals: Vec<f64> = self
+            .values
+            .iter()
+            .map(|&x| roots.values.iter().fold(1.0, |acc, &r| acc * (x - r)))
+            .collect();
+
+        Ok(Self {
+            shape: self.shape.clone(),
+            values: result_vals,
+            dtype: self.dtype,
+            integer_sidecar: None,
+        })
+    }
+
+    /// Evaluate 2-D polynomial on Cartesian product of x and y (np.polynomial.polynomial.polyval2d).
+    ///
+    /// Given coefficients c of shape (deg_x + 1, deg_y + 1) and sample points x, y,
+    /// evaluates sum_i,j c[i,j] * x^i * y^j at each point (x_k, y_k).
+    /// x and y must be broadcastable.
+    pub fn polyval2d(x: &Self, y: &Self, c: &Self) -> Result<Self, UFuncError> {
+        if c.shape.len() != 2 {
+            return Err(UFuncError::Msg(
+                "polyval2d: coefficients must be 2-D".to_string(),
+            ));
+        }
+        if x.shape != y.shape {
+            return Err(UFuncError::Msg(
+                "polyval2d: x and y must have the same shape".to_string(),
+            ));
+        }
+        let deg_x = c.shape[0];
+        let deg_y = c.shape[1];
+
+        let result_vals: Vec<f64> = x
+            .values
+            .iter()
+            .zip(y.values.iter())
+            .map(|(&xi, &yi)| {
+                let mut result = 0.0;
+                let mut x_power = 1.0;
+                for i in 0..deg_x {
+                    let mut y_power = 1.0;
+                    for j in 0..deg_y {
+                        result += c.values[i * deg_y + j] * x_power * y_power;
+                        y_power *= yi;
+                    }
+                    x_power *= xi;
+                }
+                result
+            })
+            .collect();
+
+        Ok(Self {
+            shape: x.shape.clone(),
+            values: result_vals,
+            dtype: x.dtype,
+            integer_sidecar: None,
+        })
+    }
+
+    /// Evaluate 3-D polynomial (np.polynomial.polynomial.polyval3d).
+    ///
+    /// Given coefficients c of shape (deg_x + 1, deg_y + 1, deg_z + 1) and sample points x, y, z,
+    /// evaluates sum_i,j,k c[i,j,k] * x^i * y^j * z^k.
+    pub fn polyval3d(x: &Self, y: &Self, z: &Self, c: &Self) -> Result<Self, UFuncError> {
+        if c.shape.len() != 3 {
+            return Err(UFuncError::Msg(
+                "polyval3d: coefficients must be 3-D".to_string(),
+            ));
+        }
+        if x.shape != y.shape || y.shape != z.shape {
+            return Err(UFuncError::Msg(
+                "polyval3d: x, y, z must have the same shape".to_string(),
+            ));
+        }
+        let deg_x = c.shape[0];
+        let deg_y = c.shape[1];
+        let deg_z = c.shape[2];
+
+        let result_vals: Vec<f64> = x
+            .values
+            .iter()
+            .zip(y.values.iter())
+            .zip(z.values.iter())
+            .map(|((&xi, &yi), &zi)| {
+                let mut result = 0.0;
+                let mut x_power = 1.0;
+                for i in 0..deg_x {
+                    let mut y_power = 1.0;
+                    for j in 0..deg_y {
+                        let mut z_power = 1.0;
+                        for k in 0..deg_z {
+                            let idx = i * deg_y * deg_z + j * deg_z + k;
+                            result += c.values[idx] * x_power * y_power * z_power;
+                            z_power *= zi;
+                        }
+                        y_power *= yi;
+                    }
+                    x_power *= xi;
+                }
+                result
+            })
+            .collect();
+
+        Ok(Self {
+            shape: x.shape.clone(),
+            values: result_vals,
+            dtype: x.dtype,
+            integer_sidecar: None,
+        })
+    }
+
+    /// Multiply polynomial by x (np.polynomial.polynomial.polymulx).
+    ///
+    /// Coefficients are in ascending order (constant term first).
+    /// Result is c * x, i.e. [0, c[0], c[1], ..., c[n-1]].
+    pub fn polymulx(&self) -> Result<Self, UFuncError> {
+        if self.shape.len() != 1 {
+            return Err(UFuncError::Msg(
+                "polymulx: coefficients must be 1-D".to_string(),
+            ));
+        }
+        let n = self.values.len();
+        let mut result = vec![0.0; n + 1];
+        for (i, &c) in self.values.iter().enumerate() {
+            result[i + 1] = c;
+        }
+        Ok(Self {
+            shape: vec![n + 1],
+            values: result,
+            dtype: self.dtype,
+            integer_sidecar: None,
+        })
+    }
+
+    /// Raise polynomial to a power (np.polynomial.polynomial.polypow).
+    ///
+    /// Coefficients are in ascending order (constant term first).
+    /// Returns c ** power by repeated convolution (polynomial multiplication).
+    pub fn polypow(&self, power: usize) -> Result<Self, UFuncError> {
+        if self.shape.len() != 1 {
+            return Err(UFuncError::Msg(
+                "polypow: coefficients must be 1-D".to_string(),
+            ));
+        }
+        if power == 0 {
+            return Ok(Self {
+                shape: vec![1],
+                values: vec![1.0],
+                dtype: self.dtype,
+                integer_sidecar: None,
+            });
+        }
+        // Start with the polynomial itself
+        let mut result = self.values.clone();
+        for _ in 1..power {
+            result = convolve_polys(&result, &self.values);
+        }
+        Ok(Self {
+            shape: vec![result.len()],
+            values: result,
+            dtype: self.dtype,
+            integer_sidecar: None,
+        })
+    }
+
+    /// Remove small trailing coefficients (np.polynomial.polynomial.polytrim).
+    ///
+    /// Coefficients are in ascending order. Removes trailing values
+    /// whose absolute value is <= tol. Always keeps at least one element.
+    pub fn polytrim(&self, tol: f64) -> Result<Self, UFuncError> {
+        if self.shape.len() != 1 {
+            return Err(UFuncError::Msg(
+                "polytrim: coefficients must be 1-D".to_string(),
+            ));
+        }
+        let mut end = self.values.len();
+        while end > 1 && self.values[end - 1].abs() <= tol {
+            end -= 1;
+        }
+        Ok(Self {
+            shape: vec![end],
+            values: self.values[..end].to_vec(),
+            dtype: self.dtype,
+            integer_sidecar: None,
+        })
+    }
+
     /// Compute the derivative of a polynomial.
     ///
     /// Mimics `np.polyder(p)`. Coefficients in descending degree order.
@@ -15050,6 +15279,16 @@ impl UFuncArray {
     #[must_use]
     pub fn tobytes_array(&self) -> Vec<u8> {
         self.values.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    /// Deprecated alias for tobytes_array (np.ndarray.tostring).
+    ///
+    /// NumPy deprecated tostring in favor of tobytes, but many legacy codebases
+    /// still use it. This method provides identical behavior to tobytes_array.
+    #[deprecated(since = "0.1.0", note = "Use tobytes_array instead")]
+    #[must_use]
+    pub fn tostring(&self) -> Vec<u8> {
+        self.tobytes_array()
     }
 
     /// Swap byte order of each element in-place (np.ndarray.byteswap).
@@ -23857,6 +24096,24 @@ pub fn chebfit(x: &[f64], y: &[f64], deg: usize) -> Result<Vec<f64>, UFuncError>
     // Solve via Gaussian elimination
     let coeffs = solve_linear_system(&vtv, &vty, ncols)?;
     Ok(coeffs)
+}
+
+/// Convolve two polynomial coefficient arrays (polynomial multiplication).
+///
+/// Coefficients are in ascending order (constant term first).
+/// Result has length len(a) + len(b) - 1.
+fn convolve_polys(a: &[f64], b: &[f64]) -> Vec<f64> {
+    if a.is_empty() || b.is_empty() {
+        return Vec::new();
+    }
+    let n = a.len() + b.len() - 1;
+    let mut result = vec![0.0; n];
+    for (i, &ai) in a.iter().enumerate() {
+        for (j, &bj) in b.iter().enumerate() {
+            result[i + j] += ai * bj;
+        }
+    }
+    result
 }
 
 /// Convert Chebyshev coefficients to power series (standard polynomial) coefficients.
@@ -35159,6 +35416,16 @@ mod tests {
         // Verify first value
         let first = f64::from_le_bytes(bytes[0..8].try_into().unwrap());
         assert_eq!(first, 1.0);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn tostring_alias_matches_tobytes() {
+        // np.ndarray.tostring is deprecated alias for tobytes
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.5, -3.0], DType::F64).unwrap();
+        let tostring_result = a.tostring();
+        let tobytes_result = a.tobytes_array();
+        assert_eq!(tostring_result, tobytes_result);
     }
 
     #[test]
@@ -46689,5 +46956,112 @@ mod tests {
         let a = UFuncArray::new(vec![5], vec![3.0, 1.0, 2.0, 1.0, 3.0], DType::F64).unwrap();
         let r = a.unique();
         assert_eq!(r.values(), &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn polyvander_matches_numpy() {
+        // np.polynomial.polynomial.polyvander([1,2,3], 2) →
+        // [[1, 1, 1], [1, 2, 4], [1, 3, 9]]
+        let x = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let v = x.polyvander(2).unwrap();
+        assert_eq!(v.shape(), &[3, 3]);
+        assert_eq!(v.values(), &[1.0, 1.0, 1.0, 1.0, 2.0, 4.0, 1.0, 3.0, 9.0]);
+    }
+
+    #[test]
+    fn polyvalfromroots_matches_numpy() {
+        // np.polynomial.polynomial.polyvalfromroots([1,2,3], [0,1]) →
+        // [0, 2, 6] (evaluates (x-0)(x-1) at each point)
+        let x = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let roots = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::F64).unwrap();
+        let r = x.polyvalfromroots(&roots).unwrap();
+        assert_eq!(r.shape(), &[3]);
+        assert_eq!(r.values(), &[0.0, 2.0, 6.0]);
+    }
+
+    #[test]
+    fn polyval2d_matches_numpy() {
+        // np.polynomial.polynomial.polyval2d([1,2], [0.5,1], [[1,2],[3,4]]) →
+        // [7, 17] (evaluates 1 + 2y + 3x + 4xy at (1,0.5) and (2,1))
+        let x = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        let y = UFuncArray::new(vec![2], vec![0.5, 1.0], DType::F64).unwrap();
+        let c = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let r = UFuncArray::polyval2d(&x, &y, &c).unwrap();
+        assert_eq!(r.shape(), &[2]);
+        assert_eq!(r.values(), &[7.0, 17.0]);
+    }
+
+    #[test]
+    fn polyval3d_matches_numpy() {
+        // np.polynomial.polynomial.polyval3d([1,2], [0.5,1], [0.25,0.5], [[[1,2],[3,4]],[[5,6],[7,8]]]) →
+        // [14.5, 45.0]
+        let x = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        let y = UFuncArray::new(vec![2], vec![0.5, 1.0], DType::F64).unwrap();
+        let z = UFuncArray::new(vec![2], vec![0.25, 0.5], DType::F64).unwrap();
+        let c = UFuncArray::new(
+            vec![2, 2, 2],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            DType::F64,
+        )
+        .unwrap();
+        let r = UFuncArray::polyval3d(&x, &y, &z, &c).unwrap();
+        assert_eq!(r.shape(), &[2]);
+        assert_eq!(r.values(), &[14.5, 45.0]);
+    }
+
+    #[test]
+    fn polymulx_matches_numpy() {
+        // np.polynomial.polynomial.polymulx([1, 2, 3]) → [0, 1, 2, 3]
+        // (1 + 2x + 3x²) * x = x + 2x² + 3x³
+        let c = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let r = c.polymulx().unwrap();
+        assert_eq!(r.shape(), &[4]);
+        assert_eq!(r.values(), &[0.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn polypow_matches_numpy() {
+        // np.polynomial.polynomial.polypow([1, 1], 3) → [1, 3, 3, 1]
+        // (1 + x)³ = 1 + 3x + 3x² + x³
+        let c = UFuncArray::new(vec![2], vec![1.0, 1.0], DType::F64).unwrap();
+        let r = c.polypow(3).unwrap();
+        assert_eq!(r.shape(), &[4]);
+        assert_eq!(r.values(), &[1.0, 3.0, 3.0, 1.0]);
+    }
+
+    #[test]
+    fn polypow_zero_returns_one() {
+        // Any polynomial^0 = 1
+        let c = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let r = c.polypow(0).unwrap();
+        assert_eq!(r.shape(), &[1]);
+        assert_eq!(r.values(), &[1.0]);
+    }
+
+    #[test]
+    fn polytrim_matches_numpy() {
+        // np.polynomial.polynomial.polytrim([1, 2, 0, 0]) → [1, 2]
+        let c = UFuncArray::new(vec![4], vec![1.0, 2.0, 0.0, 0.0], DType::F64).unwrap();
+        let r = c.polytrim(0.0).unwrap();
+        assert_eq!(r.shape(), &[2]);
+        assert_eq!(r.values(), &[1.0, 2.0]);
+    }
+
+    #[test]
+    fn polytrim_with_tolerance() {
+        // np.polynomial.polynomial.polytrim([1, 2, 1e-16, 0], tol=1e-10) → [1, 2]
+        let c = UFuncArray::new(vec![4], vec![1.0, 2.0, 1e-16, 0.0], DType::F64).unwrap();
+        let r = c.polytrim(1e-10).unwrap();
+        assert_eq!(r.shape(), &[2]);
+        assert_eq!(r.values(), &[1.0, 2.0]);
+    }
+
+    #[test]
+    fn polytrim_keeps_at_least_one() {
+        // Should never trim to empty
+        let c = UFuncArray::new(vec![3], vec![0.0, 0.0, 0.0], DType::F64).unwrap();
+        let r = c.polytrim(0.0).unwrap();
+        assert_eq!(r.shape(), &[1]);
+        assert_eq!(r.values(), &[0.0]);
     }
 }
