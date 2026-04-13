@@ -25814,12 +25814,24 @@ pub fn nextafter(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncEr
                 let result_bits = if a == 0.0 {
                     // Zero: return smallest subnormal towards b
                     if b > 0.0 { 1 } else { 0x8000_0000_0000_0001 }
-                } else if (a > 0.0 && b > a) || (a < 0.0 && b > a) {
-                    // Moving towards positive infinity
-                    bits.wrapping_add(1)
+                } else if b > a {
+                    // Moving towards positive infinity (larger value)
+                    // For positive a: add 1 to bits (next larger float)
+                    // For negative a: subtract 1 from bits (closer to zero)
+                    if a > 0.0 {
+                        bits.wrapping_add(1)
+                    } else {
+                        bits.wrapping_sub(1)
+                    }
                 } else {
-                    // Moving towards negative infinity
-                    bits.wrapping_sub(1)
+                    // Moving towards negative infinity (smaller value)
+                    // For positive a: subtract 1 from bits (closer to zero)
+                    // For negative a: add 1 to bits (next more negative float)
+                    if a > 0.0 {
+                        bits.wrapping_sub(1)
+                    } else {
+                        bits.wrapping_add(1)
+                    }
                 };
                 f64::from_bits(result_bits)
             }
@@ -42424,6 +42436,28 @@ mod tests {
         let x2 = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
         let result = nextafter(&x1, &x2).unwrap();
         assert!(result.values()[0].is_nan());
+    }
+
+    #[test]
+    fn nextafter_negative_towards_zero() {
+        // nextafter(-1.0, 0.0) should return value closer to zero
+        let x1 = UFuncArray::new(vec![1], vec![-1.0], DType::F64).unwrap();
+        let x2 = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+        let result = nextafter(&x1, &x2).unwrap();
+        // Should be slightly larger than -1.0 (closer to zero)
+        assert!(result.values()[0] > -1.0);
+        assert!(result.values()[0] < -0.999999);
+    }
+
+    #[test]
+    fn nextafter_negative_away_from_zero() {
+        // nextafter(-1.0, -2.0) should return value further from zero
+        let x1 = UFuncArray::new(vec![1], vec![-1.0], DType::F64).unwrap();
+        let x2 = UFuncArray::new(vec![1], vec![-2.0], DType::F64).unwrap();
+        let result = nextafter(&x1, &x2).unwrap();
+        // Should be slightly smaller than -1.0 (further from zero)
+        assert!(result.values()[0] < -1.0);
+        assert!(result.values()[0] > -1.000001);
     }
 
     // ── spacing tests ──────────────────────────────────────────────────
