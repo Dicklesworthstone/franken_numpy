@@ -477,5 +477,297 @@
     "expected_reason_code": "io_policy_metadata_contract",
     "mode_raw": "hardened",
     "class_raw": "known_incompatible_semantics"
+  },
+  {
+    "id": "io_header_schema_rejects_zero_header_len",
+    "operation": "header_schema",
+    "seed": 9940,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_header_schema_invalid",
+    "expected_reason_code": "io_header_schema_invalid",
+    "expected_error_contains": "header bytes must be within bounded budget",
+    "shape": [2, 2],
+    "fortran_order": false,
+    "dtype_descr": "<f8",
+    "header_len": 0
+  },
+  {
+    "id": "io_header_schema_rejects_rank_overflow",
+    "operation": "header_schema",
+    "seed": 9941,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_header_schema_invalid",
+    "expected_reason_code": "io_header_schema_invalid",
+    "expected_error_contains": "shape rank exceeds packet validation budget",
+    "shape": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    "fortran_order": false,
+    "dtype_descr": "<i4",
+    "header_len": 128
+  },
+  {
+    "id": "io_dtype_decode_rejects_zero_width_unicode",
+    "operation": "dtype_decode",
+    "seed": 9942,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_dtype_descriptor_invalid",
+    "expected_reason_code": "io_dtype_descriptor_invalid",
+    "expected_error_contains": "dtype descriptor is invalid",
+    "dtype_descr": "<U0"
+  },
+  {
+    "id": "io_read_payload_rejects_byte_mismatch",
+    "operation": "read_payload",
+    "seed": 9943,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_read_payload_incomplete",
+    "expected_reason_code": "io_read_payload_incomplete",
+    "expected_error_contains": "payload bytes must exactly match expected shape/dtype footprint",
+    "shape": [2, 3],
+    "dtype_descr": "<f8",
+    "payload_len_bytes": 40
+  },
+  {
+    "id": "io_load_dispatch_pickle_disallowed_rejected",
+    "operation": "load_dispatch",
+    "seed": 9944,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_load_dispatch_invalid",
+    "expected_reason_code": "io_load_dispatch_invalid",
+    "expected_error_contains": "payload prefix does not map to allowed npy/npz/pickle branch",
+    "payload_prefix": [128, 4, 149],
+    "allow_pickle": false
+  },
+  {
+    "id": "io_memmap_contract_rejects_object_dtype",
+    "operation": "memmap_contract",
+    "seed": 9945,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_memmap_contract_violation",
+    "expected_reason_code": "io_memmap_contract_violation",
+    "expected_error_contains": "object dtype is invalid for memmap path",
+    "memmap_mode": "r",
+    "dtype_descr": "|O",
+    "file_len_bytes": 1024,
+    "expected_bytes": 128,
+    "validation_retries": 0
+  },
+  {
+    "id": "io_npz_archive_budget_rejects_zero_members",
+    "operation": "npz_archive_budget",
+    "seed": 9946,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_npz_archive_contract_violation",
+    "expected_reason_code": "io_npz_archive_contract_violation",
+    "expected_error_contains": "archive member count is outside bounded limits",
+    "member_count": 0,
+    "uncompressed_bytes": 0,
+    "dispatch_retries": 0
+  },
+  {
+    "id": "io_magic_version_rejects_short_prefix",
+    "operation": "magic_version",
+    "seed": 9947,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_magic_invalid",
+    "expected_reason_code": "io_magic_invalid",
+    "expected_error_contains": "invalid or unsupported",
+    "payload_prefix": [147, 78, 85, 77]
+  },
+  {
+    "id": "io_dtype_decode_bytes_width_golden",
+    "operation": "dtype_decode",
+    "seed": 9948,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_dtype_descriptor_contract",
+    "expected_reason_code": "io_dtype_descriptor_contract",
+    "dtype_descr": "|S4"
+  },
+  {
+    "id": "io_dtype_decode_unicode_be_golden",
+    "operation": "dtype_decode",
+    "seed": 9949,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_dtype_descriptor_contract",
+    "expected_reason_code": "io_dtype_descriptor_contract",
+    "dtype_descr": ">U2"
+  },
+  {
+    "id": "io_read_payload_bytes_vector_golden",
+    "operation": "read_payload",
+    "seed": 9950,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_read_payload_contract",
+    "expected_reason_code": "io_read_payload_contract",
+    "shape": [2],
+    "dtype_descr": "|S3",
+    "payload_len_bytes": 6,
+    "expected_count": 2
+  },
+  {
+    "id": "io_memmap_contract_rejects_small_file",
+    "operation": "memmap_contract",
+    "seed": 9951,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_memmap_contract_violation",
+    "expected_reason_code": "io_memmap_contract_violation",
+    "expected_error_contains": "backing file is too small",
+    "memmap_mode": "r",
+    "dtype_descr": "<f8",
+    "file_len_bytes": 128,
+    "expected_bytes": 256,
+    "validation_retries": 0
+  },
+  {
+    "id": "io_read_payload_zero_length_golden",
+    "operation": "read_payload",
+    "seed": 9952,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_read_payload_contract",
+    "expected_reason_code": "io_read_payload_contract",
+    "shape": [0, 4],
+    "dtype_descr": "<f8",
+    "payload_len_bytes": 0,
+    "expected_count": 0
+  },
+  {
+    "id": "io_dtype_decode_complex128_be_golden",
+    "operation": "dtype_decode",
+    "seed": 9953,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_dtype_descriptor_contract",
+    "expected_reason_code": "io_dtype_descriptor_contract",
+    "dtype_descr": ">c16"
+  },
+  {
+    "id": "io_npz_archive_budget_max_members_golden",
+    "operation": "npz_archive_budget",
+    "seed": 9954,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_npz_archive_contract",
+    "expected_reason_code": "io_npz_archive_contract",
+    "member_count": 4096,
+    "uncompressed_bytes": 1024,
+    "dispatch_retries": 0
+  },
+  {
+    "id": "io_npz_archive_budget_max_bytes_golden",
+    "operation": "npz_archive_budget",
+    "seed": 9955,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_npz_archive_contract",
+    "expected_reason_code": "io_npz_archive_contract",
+    "member_count": 1,
+    "uncompressed_bytes": 2147483648,
+    "dispatch_retries": 0
+  },
+  {
+    "id": "io_policy_metadata_legacy_known_compatible_golden",
+    "operation": "policy_metadata",
+    "seed": 9956,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_policy_metadata_contract",
+    "expected_reason_code": "io_policy_metadata_contract",
+    "mode_raw": "strict",
+    "class_raw": "known_compatible"
+  },
+  {
+    "id": "io_policy_metadata_unknown_semantics_golden",
+    "operation": "policy_metadata",
+    "seed": 9957,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_policy_metadata_contract",
+    "expected_reason_code": "io_policy_metadata_contract",
+    "mode_raw": "hardened",
+    "class_raw": "unknown_semantics"
   }
 ]

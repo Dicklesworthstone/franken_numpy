@@ -2769,26 +2769,12 @@ pub fn tobytes(values: &[f64], dtype: IOSupportedDType) -> Result<Vec<u8>, IOErr
     tofile(values, dtype)
 }
 
-/// Serialize array values to a text string with a separator.
+/// Deprecated alias for `np.ndarray.tobytes()` (binary).
 ///
-/// Note: NumPy's `ndarray.tostring()` is a deprecated alias for `tobytes()` (binary).
-/// This function is a text formatter analogous to `np.array2string` / `savetxt`.
-pub fn tostring(values: &[f64], sep: &str) -> String {
-    values
-        .iter()
-        .map(|v| {
-            if v.fract() == 0.0
-                && v.is_finite()
-                && v.abs() < 1e15
-                && !(*v == 0.0 && v.is_sign_negative())
-            {
-                format!("{}", *v as i64)
-            } else {
-                format!("{v}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(sep)
+/// NumPy's `ndarray.tostring()` is a deprecated alias for `tobytes()`.
+/// Use `tofile_text` or `savetxt` for text formatting.
+pub fn tostring(values: &[f64], dtype: IOSupportedDType) -> Result<Vec<u8>, IOError> {
+    tobytes(values, dtype)
 }
 
 // ── High-level convenience functions (np.save, np.load, np.savez, np.savez_compressed) ──
@@ -5437,24 +5423,19 @@ mod tests {
     }
 
     #[test]
-    fn tostring_basic() {
-        let vals = vec![1.0, 2.0, 3.0];
-        let text = tostring(&vals, ", ");
-        assert_eq!(text, "1, 2, 3");
+    fn tostring_aliases_tobytes_f64() {
+        let vals = vec![1.0, 2.0, 3.5];
+        let direct = tobytes(&vals, IOSupportedDType::F64).unwrap();
+        let alias = tostring(&vals, IOSupportedDType::F64).unwrap();
+        assert_eq!(alias, direct);
     }
 
     #[test]
-    fn tostring_float_values() {
-        let vals = vec![1.5, 2.7, 3.25];
-        let text = tostring(&vals, " ");
-        assert_eq!(text, "1.5 2.7 3.25");
-    }
-
-    #[test]
-    fn tostring_preserves_negative_zero() {
-        let vals = vec![-0.0, 0.0, -1.0];
-        let text = tostring(&vals, " ");
-        assert_eq!(text, "-0 0 -1");
+    fn tostring_aliases_tobytes_i32() {
+        let vals = vec![1.0, -2.0, 7.0];
+        let direct = tobytes(&vals, IOSupportedDType::I32).unwrap();
+        let alias = tostring(&vals, IOSupportedDType::I32).unwrap();
+        assert_eq!(alias, direct);
     }
 
     // ── High-level convenience function tests ──
