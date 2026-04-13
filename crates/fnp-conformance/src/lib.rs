@@ -6238,6 +6238,95 @@ fn execute_polynomial_differential_operation(
         )),
         "herme2poly" => Ok(as_array(herme2poly(&case.lhs_values))),
         "poly2herme" => Ok(as_array(poly2herme(&case.lhs_values))),
+        "polymulx" => {
+            let lhs = lhs.ok_or_else(|| {
+                PolynomialSuiteError::new(
+                    "polynomial_input_contract_violation",
+                    "polymulx requires lhs_values",
+                )
+            })?;
+            Ok(as_array(
+                lhs.polymulx()
+                    .map_err(map_ufunc_error_to_polynomial_suite)?
+                    .values()
+                    .to_vec(),
+            ))
+        }
+        "polypow" => {
+            let lhs = lhs.ok_or_else(|| {
+                PolynomialSuiteError::new(
+                    "polynomial_input_contract_violation",
+                    "polypow requires lhs_values",
+                )
+            })?;
+            let deg = case.deg.ok_or_else(|| {
+                PolynomialSuiteError::new(
+                    "polynomial_input_contract_violation",
+                    "polypow requires 'deg' (power)",
+                )
+            })?;
+            Ok(as_array(
+                lhs.polypow(deg)
+                    .map_err(map_ufunc_error_to_polynomial_suite)?
+                    .values()
+                    .to_vec(),
+            ))
+        }
+        "polytrim" => {
+            let lhs = lhs.ok_or_else(|| {
+                PolynomialSuiteError::new(
+                    "polynomial_input_contract_violation",
+                    "polytrim requires lhs_values",
+                )
+            })?;
+            let tol = case.abs_tol;
+            Ok(as_array(
+                lhs.polytrim(tol)
+                    .map_err(map_ufunc_error_to_polynomial_suite)?
+                    .values()
+                    .to_vec(),
+            ))
+        }
+        "polyvander" => {
+            let lhs = lhs.ok_or_else(|| {
+                PolynomialSuiteError::new(
+                    "polynomial_input_contract_violation",
+                    "polyvander requires lhs_values (x points)",
+                )
+            })?;
+            let deg = case.deg.ok_or_else(|| {
+                PolynomialSuiteError::new(
+                    "polynomial_input_contract_violation",
+                    "polyvander requires 'deg'",
+                )
+            })?;
+            Ok(as_array(
+                lhs.polyvander(deg)
+                    .map_err(map_ufunc_error_to_polynomial_suite)?
+                    .values()
+                    .to_vec(),
+            ))
+        }
+        "polyvalfromroots" => {
+            let lhs = lhs.ok_or_else(|| {
+                PolynomialSuiteError::new(
+                    "polynomial_input_contract_violation",
+                    "polyvalfromroots requires lhs_values (x points)",
+                )
+            })?;
+            let rhs = rhs.ok_or_else(|| {
+                PolynomialSuiteError::new(
+                    "polynomial_input_contract_violation",
+                    "polyvalfromroots requires rhs_values (roots)",
+                )
+            })?;
+            Ok(as_array(
+                lhs.polyvalfromroots(&rhs)
+                    .map_err(map_ufunc_error_to_polynomial_suite)?
+                    .values()
+                    .to_vec(),
+            ))
+        }
         other => Err(PolynomialSuiteError::new(
             "polynomial_policy_unknown_operation",
             format!("unsupported polynomial differential operation {other}"),
@@ -7177,11 +7266,9 @@ fn validate_masked_differential_expectation(
                     ));
                 }
                 let actual = values[0];
-                let diff = (expected_scalar - actual).abs();
-                let bound = abs_tol + rel_tol * expected_scalar.abs();
-                if diff > bound {
+                if !approx_equal_values(&[expected_scalar], &[actual], abs_tol, rel_tol) {
                     return Err(format!(
-                        "scalar mismatch expected={expected_scalar} actual={actual} diff={diff}"
+                        "scalar mismatch expected={expected_scalar} actual={actual} abs_tol={abs_tol} rel_tol={rel_tol}"
                     ));
                 }
                 return Ok(());
@@ -9129,7 +9216,11 @@ fn execute_linalg_operation(
         }
         "cholesky_2x2" => {
             let matrix = decode_matrix_2x2(input.matrix)?;
-            let uplo = if input.uplo.is_empty() { "L" } else { input.uplo };
+            let uplo = if input.uplo.is_empty() {
+                "L"
+            } else {
+                input.uplo
+            };
             let l = cholesky_2x2(matrix, uplo)?;
             Ok(LinalgOperationOutcome::SolveVector(vec![
                 l[0][0], l[0][1], l[1][0], l[1][1],
