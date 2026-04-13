@@ -170,6 +170,7 @@ fn run() -> Result<(), String> {
 
     let cfg = HarnessConfig::default_paths();
     let mut attempts = Vec::new();
+    let mut final_log_validation_error: Option<String> = None;
 
     for attempt in 0..=options.retries {
         let attempt_log_path = derive_attempt_log_path(&options.log_path, attempt);
@@ -178,9 +179,12 @@ fn run() -> Result<(), String> {
         let suite = run_user_workflow_scenario_suite(&cfg)?;
         let mut suite_summary = summarize_suite(suite);
         if let Err(err) = validate_workflow_log_coverage(&attempt_log_path, &cfg.fixture_root) {
+            final_log_validation_error = Some(err.clone());
             suite_summary
                 .failures
                 .push(format!("workflow_log_validation: {err}"));
+        } else {
+            final_log_validation_error = None;
         }
 
         let attempt_status = if suite_summary.pass_count == suite_summary.case_count
@@ -243,6 +247,14 @@ fn run() -> Result<(), String> {
                 "coverage ratio {:.6} is below floor {:.6}",
                 coverage_ratio, options.coverage_floor
             ),
+            evidence_refs: vec![workflow_log.clone()],
+        });
+    }
+    if let Some(error) = final_log_validation_error.clone() {
+        diagnostics.push(ReliabilityDiagnostic {
+            subsystem: "workflow_scenarios".to_string(),
+            reason_code: "workflow_log_validation_failure".to_string(),
+            message: format!("workflow log validation failed: {error}"),
             evidence_refs: vec![workflow_log.clone()],
         });
     }
@@ -1080,6 +1092,10 @@ mod tests {
         assert_eq!(
             failure_class_from_reason_code("coverage_floor_breach"),
             "coverage_floor"
+        );
+        assert_eq!(
+            failure_class_from_reason_code("workflow_log_validation_failure"),
+            "artifact_log_validation"
         );
         assert_eq!(
             failure_class_from_reason_code("unknown_reason"),

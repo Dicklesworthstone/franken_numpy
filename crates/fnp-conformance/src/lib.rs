@@ -9064,7 +9064,7 @@ fn validate_linalg_differential_expectation(
             Ok(())
         }
         (
-            "batch_det" | "batch_trace" | "batch_inv" | "batch_solve" | "cond_mxn",
+            "batch_det" | "batch_trace" | "batch_inv" | "batch_solve",
             LinalgOperationOutcome::SolveVector(actual),
         ) => {
             if case.expected_solution.len() != actual.len() {
@@ -9259,6 +9259,32 @@ fn validate_linalg_differential_expectation(
             "spectral_branch" | "tolerance_policy" | "backend_bridge" | "policy_metadata",
             LinalgOperationOutcome::Unit,
         ) => Ok(()),
+        ("cond_mxn", LinalgOperationOutcome::SolveVector(actual)) => {
+            if case.expected_solution.len() != actual.len() {
+                return Err(format!(
+                    "cond_mxn expected vector length {} but got {}",
+                    case.expected_solution.len(),
+                    actual.len()
+                ));
+            }
+            let tolerance = if case.expected_tolerance > 0.0 {
+                case.expected_tolerance
+            } else {
+                1e-9
+            };
+            if !approx_equal_values(
+                &case.expected_solution,
+                actual.as_slice(),
+                tolerance,
+                tolerance,
+            ) {
+                return Err(format!(
+                    "cond_mxn mismatch expected={:?} actual={actual:?}",
+                    case.expected_solution
+                ));
+            }
+            Ok(())
+        }
         (operation, actual) => Err(format!(
             "operation {operation} produced unexpected outcome {actual:?}"
         )),

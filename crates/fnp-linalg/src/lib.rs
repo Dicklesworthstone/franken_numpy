@@ -2679,7 +2679,7 @@ pub fn cond_p_nxn(a: &[f64], n: usize, p: Option<&str>) -> Result<f64, LinAlgErr
                 "cond is not defined on empty arrays",
             ));
         }
-        if a.len() % n != 0 {
+        if !a.len().is_multiple_of(n) {
             return Err(LinAlgError::ShapeContractViolation(
                 "cond_p_nxn: input must be n*n or m*n with n > 0",
             ));

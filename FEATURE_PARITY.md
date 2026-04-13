@@ -49,16 +49,16 @@
 
 | Crate | Tests | Description |
 |---|---|---|
-| fnp-ufunc | 1,767 | Core array operations, math, sorting, polynomials (Chebyshev div/roots/fromroots, Legendre/Hermite/Laguerre div/roots/fromroots edge cases), reductions, oracle tests, linalg bridge, FFT (hfft/ihfft), hermfit/lagfit, masked cov/corrcoef, datetime parsing, gufunc validation, parameter parity (equal_nan, bitorder, mode, endpoint, trim, period, axes, prepend/append, left/right), r_/c_ concat helpers, GridSpec mgrid/ogrid, linspace_retstep, concatenate_flat, einsum coverage, NaN/Inf/signed-zero edge cases (maximum, heaviside, logaddexp, floor_divide, remainder, clip, divmod, cummin/cummax), NaN set-op parity, behavioral edge cases |
+| fnp-ufunc | 1,794 | Core array operations, math, sorting, polynomials (Chebyshev div/roots/fromroots, Legendre/Hermite/Laguerre div/roots/fromroots edge cases), reductions, oracle tests, linalg bridge, FFT (hfft/ihfft), hermfit/lagfit, masked cov/corrcoef, datetime parsing, gufunc validation, parameter parity (equal_nan, bitorder, mode, endpoint, trim, period, axes, prepend/append, left/right), r_/c_ concat helpers, GridSpec mgrid/ogrid, linspace_retstep, concatenate_flat, einsum coverage, NaN/Inf/signed-zero edge cases (maximum, heaviside, logaddexp, floor_divide, remainder, clip, divmod, cummin/cummax), NaN set-op parity, behavioral edge cases |
 | fnp-ndarray | 87 | Shape legality, stride calculus, broadcast contracts, overlap detection, multi-axis negative strides, broadcast/reshape/stride edge cases, F-order, required_view_nbytes |
-| fnp-linalg | 234 | Linear algebra decompositions, solvers, norms, batch ops (det/inv/solve/trace), 16 NumPy oracle tests, extreme-scale regression, non-finite parity (cond_p, cross_product 2D, NaN/Inf propagation), rectangular MxN norm/cond support |
+| fnp-linalg | 235 | Linear algebra decompositions, solvers, norms, batch ops (det/inv/solve/trace), 16 NumPy oracle tests, extreme-scale regression, non-finite parity (cond_p, cross_product 2D, NaN/Inf propagation), rectangular MxN norm/cond support, cond_mxn NaN handling |
 | fnp-random | 196 | RNG distributions with statistical conformance coverage, permuted (1D/2D/axis/deterministic), seeding, reproducibility, large-n binomial/multinomial |
-| fnp-iter | 103 | Transfer-loop selector, NDIter traversal/broadcast/overlap contracts, flatiter indexing/assignment, ndindex/ndenumerate iterators |
+| fnp-iter | 104 | Transfer-loop selector, NDIter traversal/broadcast/overlap contracts, flatiter indexing/assignment, ndindex/ndenumerate iterators |
 | fnp-io | 176 | NPY/NPZ read/write, text formats, compression, 7 format oracle tests, genfromtxt_full, fromfile_text/tofile_text |
-| fnp-conformance | 119 | Differential parity, metamorphic identities, adversarial fuzzing, witness stability, matmul conformance |
+| fnp-conformance | 144 | Differential parity, metamorphic identities, adversarial fuzzing, witness stability, matmul conformance |
 | fnp-dtype | 124 | Dtype taxonomy, promotion table (all 324 pairs explicit), cast policy primitives, NumPy byte-width parsing |
 | fnp-runtime | 54 | Mode split, fail-closed decoding, override-audit gate, risk-aware decision engine, evidence ledger |
-| **Total** | **2,882** | |
+| **Total** | **2,914** | |
 
 ## Remaining Gaps (Python-specific, low priority)
 
