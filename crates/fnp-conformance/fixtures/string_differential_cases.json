@@ -703,5 +703,157 @@
     "slice_start": 1,
     "slice_stop": 3,
     "expected_strings": ["af", "字"]
+  },
+  {
+    "id": "center_basic_golden",
+    "operation": "center",
+    "seed": 10010,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["hi", "abc", "x"],
+    "width": 6,
+    "fillchar": " ",
+    "expected_strings": ["  hi  ", " abc  ", "  x   "]
+  },
+  {
+    "id": "center_custom_fill_golden",
+    "operation": "center",
+    "seed": 10011,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["ab", "x"],
+    "width": 5,
+    "fillchar": "*",
+    "expected_strings": ["**ab*", "**x**"]
+  },
+  {
+    "id": "ljust_basic_golden",
+    "operation": "ljust",
+    "seed": 10012,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["hi", "abc"],
+    "width": 5,
+    "fillchar": " ",
+    "expected_strings": ["hi   ", "abc  "]
+  },
+  {
+    "id": "rjust_basic_golden",
+    "operation": "rjust",
+    "seed": 10013,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["hi", "abc"],
+    "width": 5,
+    "fillchar": "-",
+    "expected_strings": ["---hi", "--abc"]
+  },
+  {
+    "id": "zfill_basic_golden",
+    "operation": "zfill",
+    "seed": 10014,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["42", "-3", "+7"],
+    "width": 5,
+    "expected_strings": ["00042", "-0003", "+0007"]
+  },
+  {
+    "id": "join_basic_golden",
+    "operation": "join",
+    "seed": 10015,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["abc", "xy"],
+    "arg_string": "-",
+    "expected_strings": ["a-b-c", "x-y"]
+  },
+  {
+    "id": "expandtabs_basic_golden",
+    "operation": "expandtabs",
+    "seed": 10016,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["a\tb", "xy\tz"],
+    "tabsize": 4,
+    "expected_strings": ["a   b", "xy  z"]
+  },
+  {
+    "id": "index_found_golden",
+    "operation": "index",
+    "seed": 10017,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["hello", "world"],
+    "arg_string": "l",
+    "expected_values": [2.0, 3.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "rindex_found_golden",
+    "operation": "rindex",
+    "seed": 10018,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["hello", "world"],
+    "arg_string": "l",
+    "expected_values": [3.0, 3.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
   }
 ]

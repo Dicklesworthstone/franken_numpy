@@ -26337,6 +26337,10 @@ impl StringArray {
     }
 
     /// `np.char.center(a, width, fillchar=' ')` — center-justify.
+    ///
+    /// Follows Python's str.center behavior: when padding is odd, extra
+    /// padding goes on the right UNLESS both margin and width are odd,
+    /// in which case extra padding goes on the left.
     #[must_use]
     pub fn center(&self, width: usize, fillchar: char) -> Self {
         Self {
@@ -26349,9 +26353,10 @@ impl StringArray {
                     if char_len >= width {
                         s.clone()
                     } else {
-                        let pad = width - char_len;
-                        let left = pad / 2;
-                        let right = pad - left;
+                        let marg = width - char_len;
+                        // Python formula: left = marg / 2 + (marg & width & 1)
+                        let left = marg / 2 + (marg & width & 1);
+                        let right = marg - left;
                         let mut r = String::new();
                         for _ in 0..left {
                             r.push(fillchar);

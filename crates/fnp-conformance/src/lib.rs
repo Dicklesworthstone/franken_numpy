@@ -922,6 +922,12 @@ struct StringDifferentialCase {
     #[serde(default)]
     slice_step: Option<isize>,
     #[serde(default)]
+    width: Option<usize>,
+    #[serde(default)]
+    fillchar: Option<String>,
+    #[serde(default)]
+    tabsize: Option<usize>,
+    #[serde(default)]
     expected_values: Vec<f64>,
     #[serde(default)]
     expected_strings: Vec<String>,
@@ -6749,6 +6755,71 @@ fn execute_string_differential_operation(
         "slice" => {
             let result = lhs.slice(case.slice_start, case.slice_stop, case.slice_step);
             Ok(as_text(result.values().to_vec()))
+        }
+        "center" => {
+            let width = case.width.ok_or_else(|| {
+                StringSuiteError::new("string_input_contract_violation", "center requires width")
+            })?;
+            let fillchar = case
+                .fillchar
+                .as_ref()
+                .and_then(|s| s.chars().next())
+                .unwrap_or(' ');
+            Ok(as_text(lhs.center(width, fillchar).values().to_vec()))
+        }
+        "ljust" => {
+            let width = case.width.ok_or_else(|| {
+                StringSuiteError::new("string_input_contract_violation", "ljust requires width")
+            })?;
+            let fillchar = case
+                .fillchar
+                .as_ref()
+                .and_then(|s| s.chars().next())
+                .unwrap_or(' ');
+            Ok(as_text(lhs.ljust(width, fillchar).values().to_vec()))
+        }
+        "rjust" => {
+            let width = case.width.ok_or_else(|| {
+                StringSuiteError::new("string_input_contract_violation", "rjust requires width")
+            })?;
+            let fillchar = case
+                .fillchar
+                .as_ref()
+                .and_then(|s| s.chars().next())
+                .unwrap_or(' ');
+            Ok(as_text(lhs.rjust(width, fillchar).values().to_vec()))
+        }
+        "zfill" => {
+            let width = case.width.ok_or_else(|| {
+                StringSuiteError::new("string_input_contract_violation", "zfill requires width")
+            })?;
+            Ok(as_text(lhs.zfill(width).values().to_vec()))
+        }
+        "join" => {
+            let sep = &case.arg_string;
+            Ok(as_text(lhs.join(sep).values().to_vec()))
+        }
+        "expandtabs" => {
+            let tabsize = case.tabsize.unwrap_or(8);
+            Ok(as_text(lhs.expandtabs(tabsize).values().to_vec()))
+        }
+        "index" => {
+            let sub = &case.arg_string;
+            Ok(as_numeric(
+                lhs.index(sub)
+                    .map_err(map_ufunc_error_to_string_suite)?
+                    .values()
+                    .to_vec(),
+            ))
+        }
+        "rindex" => {
+            let sub = &case.arg_string;
+            Ok(as_numeric(
+                lhs.rindex(sub)
+                    .map_err(map_ufunc_error_to_string_suite)?
+                    .values()
+                    .to_vec(),
+            ))
         }
         other => Err(StringSuiteError::new(
             "string_policy_unknown_operation",
