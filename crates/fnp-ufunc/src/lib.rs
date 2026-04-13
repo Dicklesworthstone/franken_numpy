@@ -9665,13 +9665,17 @@ impl UFuncArray {
 
     /// Condition number (np.linalg.cond).
     pub fn cond(&self) -> Result<f64, UFuncError> {
-        if self.shape.len() != 2 || self.shape[0] != self.shape[1] {
-            return Err(UFuncError::Msg(
-                "cond: input must be a square 2-D array".into(),
-            ));
+        if self.shape.len() != 2 {
+            return Err(UFuncError::Msg("cond: input must be a 2-D array".into()));
         }
-        fnp_linalg::cond_nxn(&self.values, self.shape[0])
-            .map_err(|e| UFuncError::Msg(format!("{e}")))
+        let m = self.shape[0];
+        let n = self.shape[1];
+        let result = if m == n {
+            fnp_linalg::cond_nxn(&self.values, n)
+        } else {
+            fnp_linalg::cond_mxn(&self.values, m, n)
+        };
+        result.map_err(|e| UFuncError::Msg(format!("{e}")))
     }
 
     /// LU factorization (scipy.linalg.lu_factor equivalent).
@@ -41417,6 +41421,14 @@ mod tests {
         .unwrap();
         let c = a.cond().unwrap();
         assert!((c - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cond_rectangular_2x3() {
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let c = a.cond().unwrap();
+        assert!((c - 12.302245504069202).abs() < 1e-6, "cond(2x3)={c}");
     }
 
     #[test]

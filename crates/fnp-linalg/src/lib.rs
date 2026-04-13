@@ -2640,6 +2640,11 @@ pub fn cond_mxn(a: &[f64], m: usize, n: usize) -> Result<f64, LinAlgError> {
             "cond_mxn: input must be m*n",
         ));
     }
+    let has_nan = a.iter().any(|value| value.is_nan());
+    if has_nan {
+        // NumPy raises "SVD did not converge" for NaN inputs
+        return Err(LinAlgError::SvdNonConvergence);
+    }
     let has_inf = a.iter().any(|value| value.is_infinite());
     if has_inf {
         return Ok(f64::INFINITY);
@@ -6763,6 +6768,14 @@ mod tests {
             (c - 12.302245504069202).abs() < 1e-6,
             "cond(2x3)={c}, expected 12.302245"
         );
+    }
+
+    #[test]
+    fn cond_mxn_nan_raises_svd_error() {
+        // NumPy raises LinAlgError: SVD did not converge for NaN inputs
+        let a = [1.0, 2.0, f64::NAN, 4.0, 5.0, 6.0];
+        let err = cond_mxn(&a, 2, 3).expect_err("NaN should fail");
+        assert_eq!(err.reason_code(), "linalg_svd_nonconvergence");
     }
 
     #[test]
