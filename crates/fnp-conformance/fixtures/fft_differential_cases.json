@@ -456,5 +456,43 @@
     "expected_values": [36.0, 0.0, -4.0, 0.0, -8.0, 0.0, 0.0, 0.0, -16.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     "abs_tol": 1e-10,
     "rel_tol": 1e-10
+  },
+  {
+    "id": "irfft2_2x2_roundtrip_golden",
+    "operation": "irfft2",
+    "seed": 8822,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [2, 2, 2],
+    "input_values": [10.0, 0.0, -2.0, 0.0, -4.0, 0.0, 0.0, 0.0],
+    "expected_shape": [2, 2],
+    "expected_values": [1.0, 2.0, 3.0, 4.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "irfftn_2x2x2_roundtrip_golden",
+    "operation": "irfftn",
+    "seed": 8823,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [2, 2, 2, 2],
+    "input_values": [36.0, 0.0, -4.0, 0.0, -8.0, 0.0, 0.0, 0.0, -16.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "expected_shape": [2, 2, 2],
+    "expected_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
   }
 ]
