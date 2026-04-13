@@ -470,6 +470,76 @@ def py_cumprod(vals, shape, axis):
                 offset += inner
     return list(shape), out
 
+def py_cummin(vals, shape, axis):
+    if axis is None:
+        out = []
+        acc = float('inf')
+        for v in vals:
+            if v != v:  # NaN check
+                acc = float('nan')
+            elif acc == acc:
+                acc = min(acc, v)
+            out.append(acc)
+        return [len(out)], out
+    raw_axis = axis
+    if axis < 0:
+        axis += len(shape)
+    if axis < 0 or axis >= len(shape):
+        raise ValueError(f'axis {raw_axis} out of bounds for shape {shape}')
+    axis_len = shape[axis]
+    inner = math.prod(shape[axis+1:]) if axis+1 < len(shape) else 1
+    outer = math.prod(shape[:axis]) if axis > 0 else 1
+    out = list(vals)
+    for oi in range(outer):
+        base = oi * axis_len * inner
+        for ii in range(inner):
+            acc = float('inf')
+            offset = base + ii
+            for _ in range(axis_len):
+                v = out[offset]
+                if v != v:
+                    acc = float('nan')
+                elif acc == acc:
+                    acc = min(acc, v)
+                out[offset] = acc
+                offset += inner
+    return list(shape), out
+
+def py_cummax(vals, shape, axis):
+    if axis is None:
+        out = []
+        acc = float('-inf')
+        for v in vals:
+            if v != v:  # NaN check
+                acc = float('nan')
+            elif acc == acc:
+                acc = max(acc, v)
+            out.append(acc)
+        return [len(out)], out
+    raw_axis = axis
+    if axis < 0:
+        axis += len(shape)
+    if axis < 0 or axis >= len(shape):
+        raise ValueError(f'axis {raw_axis} out of bounds for shape {shape}')
+    axis_len = shape[axis]
+    inner = math.prod(shape[axis+1:]) if axis+1 < len(shape) else 1
+    outer = math.prod(shape[:axis]) if axis > 0 else 1
+    out = list(vals)
+    for oi in range(outer):
+        base = oi * axis_len * inner
+        for ii in range(inner):
+            acc = float('-inf')
+            offset = base + ii
+            for _ in range(axis_len):
+                v = out[offset]
+                if v != v:
+                    acc = float('nan')
+                elif acc == acc:
+                    acc = max(acc, v)
+                out[offset] = acc
+                offset += inner
+    return list(shape), out
+
 def py_where(cond_vals, cond_shape, x_vals, x_shape, y_vals, y_shape):
     out_shape = py_broadcast_shape(cond_shape, x_shape)
     out_shape = py_broadcast_shape(out_shape, y_shape)
@@ -983,6 +1053,18 @@ for case in cases:
             elif op == 'cumprod':
                 axis = case.get('axis')
                 out = np.cumprod(lhs, axis=axis)
+            elif op == 'cummin':
+                axis = case.get('axis')
+                if axis is None:
+                    out = np.minimum.accumulate(lhs.flatten())
+                else:
+                    out = np.minimum.accumulate(lhs, axis=axis)
+            elif op == 'cummax':
+                axis = case.get('axis')
+                if axis is None:
+                    out = np.maximum.accumulate(lhs.flatten())
+                else:
+                    out = np.maximum.accumulate(lhs, axis=axis)
             elif op == 'clip':
                 clip_min = case.get('clip_min')
                 clip_max = case.get('clip_max')
@@ -1347,6 +1429,14 @@ for case in cases:
                 axis = case.get('axis')
                 shape, values = py_cumprod(lhs_vals, lhs_shape, axis)
                 dtype = lhs_dtype
+            elif op == 'cummin':
+                axis = case.get('axis')
+                shape, values = py_cummin(lhs_vals, lhs_shape, axis)
+                dtype = lhs_dtype
+            elif op == 'cummax':
+                axis = case.get('axis')
+                shape, values = py_cummax(lhs_vals, lhs_shape, axis)
+                dtype = lhs_dtype
             elif op == 'clip':
                 clip_min = case.get('clip_min')
                 clip_max = case.get('clip_max')
@@ -1520,6 +1610,8 @@ pub enum UFuncOperation {
     Stack,
     Cumsum,
     Cumprod,
+    Cummin,
+    Cummax,
     Clip,
     Matmul,
 }
@@ -2722,6 +2814,12 @@ pub fn execute_input_case(case: &UFuncInputCase) -> Result<(Vec<usize>, Vec<f64>
         UFuncOperation::Cumprod => lhs
             .cumprod(case.axis)
             .map_err(|err| format!("cumprod error: {err}"))?,
+        UFuncOperation::Cummin => lhs
+            .cummin(case.axis)
+            .map_err(|err| format!("cummin error: {err}"))?,
+        UFuncOperation::Cummax => lhs
+            .cummax(case.axis)
+            .map_err(|err| format!("cummax error: {err}"))?,
         UFuncOperation::Clip => {
             let min_val = case.clip_min.unwrap_or(f64::NEG_INFINITY);
             let max_val = case.clip_max.unwrap_or(f64::INFINITY);
@@ -4226,6 +4324,69 @@ mod tests {
             "sum_overflow_to_inf",
             "sum_cancellation_to_zero",
             "mean_axes_0_2_keepdims_rank3",
+        ];
+
+        for case_id in case_ids {
+            let input = inputs.iter().find(|case| case.id == case_id);
+            assert!(input.is_some(), "missing input fixture {case_id}");
+            let Some(input) = input else {
+                continue;
+            };
+
+            let oracle_case = oracle.cases.iter().find(|case| case.id == case_id);
+            assert!(oracle_case.is_some(), "missing oracle fixture {case_id}");
+            let Some(oracle_case) = oracle_case else {
+                continue;
+            };
+
+            let outcome = execute_input_case(input);
+            assert!(outcome.is_ok(), "execute_input_case failed for {case_id}");
+            let Ok((actual_shape, actual_values, actual_dtype)) = outcome else {
+                continue;
+            };
+            let expected_dtype = canonical_dtype_name(&oracle_case.dtype);
+            let actual_dtype = canonical_dtype_name(&actual_dtype);
+            let (pass, max_abs_error, reason) = compare_arrays(
+                &oracle_case.shape,
+                &oracle_case.values,
+                &actual_shape,
+                &actual_values,
+                1e-12,
+                1e-12,
+            );
+
+            eprintln!(
+                "{case_id}: pass={pass} expected_shape={:?} expected_values={:?} actual_shape={:?} actual_values={:?}",
+                oracle_case.shape, oracle_case.values, actual_shape, actual_values
+            );
+
+            assert_eq!(
+                expected_dtype, actual_dtype,
+                "{case_id} dtype mismatch expected={} actual={}",
+                oracle_case.dtype, actual_dtype
+            );
+            assert!(
+                pass,
+                "{case_id} mismatch max_abs_error={max_abs_error} reason={reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn differential_cumulative_minmax_match_oracle() {
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let inputs =
+            load_input_cases(&fixture_root.join("ufunc_input_cases.json")).expect("load inputs");
+        let oracle =
+            load_oracle_capture(&fixture_root.join("oracle_outputs/ufunc_oracle_output.json"))
+                .expect("load oracle");
+        let case_ids = [
+            "cummin_axis_none_flat",
+            "cummin_axis_0_2x3",
+            "cummax_axis_none_flat",
+            "cummax_axis_1_2x3",
+            "cummin_with_nan",
+            "cummax_with_nan",
         ];
 
         for case_id in case_ids {

@@ -2839,6 +2839,106 @@
       "dtype": "float64"
     },
     {
+      "id": "cummin_axis_none_flat",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        6
+      ],
+      "values": [
+        3.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "cummin_axis_0_2x3",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        3.0,
+        1.0,
+        4.0,
+        1.0,
+        1.0,
+        2.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "cummax_axis_none_flat",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        6
+      ],
+      "values": [
+        3.0,
+        3.0,
+        4.0,
+        4.0,
+        5.0,
+        5.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "cummax_axis_1_2x3",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        3.0,
+        3.0,
+        4.0,
+        1.0,
+        5.0,
+        5.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "cummin_with_nan",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        4
+      ],
+      "values": [
+        3.0,
+        "NaN",
+        "NaN",
+        "NaN"
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "cummax_with_nan",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        4
+      ],
+      "values": [
+        3.0,
+        "NaN",
+        "NaN",
+        "NaN"
+      ],
+      "dtype": "float64"
+    },
+    {
       "id": "clip_basic_bounds",
       "status": "ok",
       "error": null,

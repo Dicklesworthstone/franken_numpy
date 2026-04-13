@@ -11326,7 +11326,13 @@ impl UFuncArray {
         match axis {
             None => {
                 if self.values.is_empty() {
-                    return Ok(self.clone());
+                    // axis=None on empty returns 1D empty (NumPy behavior)
+                    return Ok(Self {
+                        shape: vec![0],
+                        values: vec![],
+                        dtype: self.dtype,
+                        integer_sidecar: None,
+                    });
                 }
                 let mut values = Vec::with_capacity(self.values.len());
                 let mut acc = self.values[0];
@@ -11335,8 +11341,9 @@ impl UFuncArray {
                     acc = op(acc, v);
                     values.push(acc);
                 }
+                // axis=None returns a flattened 1D output (NumPy behavior)
                 Ok(Self {
-                    shape: self.shape.clone(),
+                    shape: vec![values.len()],
                     values,
                     dtype: self.dtype,
                     integer_sidecar: None,
