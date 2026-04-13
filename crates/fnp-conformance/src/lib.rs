@@ -23,10 +23,11 @@ use fnp_iter::{
     validate_flatiter_write, validate_nditer_flags,
 };
 use fnp_linalg::{
-    LinAlgError, QrMode, batch_det, batch_inv, batch_solve, batch_trace, cond_mxn,
-    lstsq_output_shapes, qr_2x2, qr_output_shapes, solve_2x2, svd_2x2, svd_output_shapes,
-    validate_backend_bridge, validate_policy_metadata as validate_linalg_policy_metadata,
-    validate_spectral_branch, validate_tolerance_policy,
+    LinAlgError, QrMode, batch_det, batch_inv, batch_solve, batch_trace, cholesky_2x2, cond_mxn,
+    eigvals_2x2, lstsq_output_shapes, matrix_power_nxn, pinv_2x2, qr_2x2, qr_output_shapes,
+    slogdet_2x2, solve_2x2, svd_2x2, svd_output_shapes, validate_backend_bridge,
+    validate_policy_metadata as validate_linalg_policy_metadata, validate_spectral_branch,
+    validate_tolerance_policy,
 };
 use fnp_ndarray::{MemoryOrder, NdLayout, broadcast_shape, contiguous_strides};
 use fnp_random::{
@@ -959,6 +960,8 @@ struct MaskedDifferentialCase {
     #[serde(default)]
     axis: Option<isize>,
     #[serde(default)]
+    ddof: Option<usize>,
+    #[serde(default)]
     reshape_shape: Vec<isize>,
     #[serde(default)]
     nan_indices: Vec<usize>,
@@ -972,6 +975,8 @@ struct MaskedDifferentialCase {
     expected_mask: Vec<f64>,
     #[serde(default)]
     expect_mask_none: bool,
+    #[serde(default)]
+    expected_scalar: Option<f64>,
     #[serde(default)]
     abs_tol: f64,
     #[serde(default)]
@@ -5654,10 +5659,16 @@ fn execute_fft_differential_operation(
                 "ifft" => input.ifft(),
                 "rfft" => input.rfft(case.n),
                 "irfft" => input.irfft(case.output_n),
+                "hfft" => input.hfft(case.n),
+                "ihfft" => input.ihfft(case.n),
                 "fft2" => input.fft2(),
                 "ifft2" => input.ifft2(),
+                "rfft2" => input.rfft2(),
+                "irfft2" => input.irfft2(case.output_n),
                 "fftn" => input.fftn(),
                 "ifftn" => input.ifftn(),
+                "rfftn" => input.rfftn(),
+                "irfftn" => input.irfftn(case.output_n),
                 "fftshift" => input.fftshift(),
                 "ifftshift" => input.ifftshift(),
                 other => {
@@ -6973,6 +6984,18 @@ fn execute_masked_differential_operation(
                 .map_err(map_ma_error_to_masked_suite)?;
             Ok(masked_array_to_outcome(&result))
         }
+        "multiply" => {
+            let rhs = rhs.ok_or_else(|| {
+                MaskedSuiteError::new(
+                    "masked_input_contract_violation",
+                    "multiply requires rhs_values",
+                )
+            })?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::Mul)
+                .map_err(map_ma_error_to_masked_suite)?;
+            Ok(masked_array_to_outcome(&result))
+        }
         "equal" => {
             let rhs = rhs.ok_or_else(|| {
                 MaskedSuiteError::new(
@@ -7040,6 +7063,50 @@ fn execute_masked_differential_operation(
             let result = lhs.anom().map_err(map_ma_error_to_masked_suite)?;
             Ok(masked_array_to_outcome(&result))
         }
+        "sum" => {
+            let result = lhs
+                .sum(case.axis, false)
+                .map_err(map_ma_error_to_masked_suite)?;
+            Ok(masked_array_to_outcome(&result))
+        }
+        "mean" => {
+            let result = lhs
+                .mean(case.axis, false)
+                .map_err(map_ma_error_to_masked_suite)?;
+            Ok(masked_array_to_outcome(&result))
+        }
+        "min" => {
+            let result = lhs
+                .min(case.axis, false)
+                .map_err(map_ma_error_to_masked_suite)?;
+            Ok(masked_array_to_outcome(&result))
+        }
+        "max" => {
+            let result = lhs
+                .max(case.axis, false)
+                .map_err(map_ma_error_to_masked_suite)?;
+            Ok(masked_array_to_outcome(&result))
+        }
+        "prod" => {
+            let result = lhs
+                .prod(case.axis, false)
+                .map_err(map_ma_error_to_masked_suite)?;
+            Ok(masked_array_to_outcome(&result))
+        }
+        "var" => {
+            let ddof = case.ddof.unwrap_or(0);
+            let result = lhs
+                .var(case.axis, false, ddof)
+                .map_err(map_ma_error_to_masked_suite)?;
+            Ok(masked_array_to_outcome(&result))
+        }
+        "std" => {
+            let ddof = case.ddof.unwrap_or(0);
+            let result = lhs
+                .std(case.axis, false, ddof)
+                .map_err(map_ma_error_to_masked_suite)?;
+            Ok(masked_array_to_outcome(&result))
+        }
         "fix_invalid" => {
             lhs.fix_invalid();
             Ok(masked_array_to_outcome(&lhs))
@@ -7097,6 +7164,30 @@ fn validate_masked_differential_expectation(
         }
         Ok(())
     };
+
+    // Handle scalar expectation (reduction results)
+    if let Some(expected_scalar) = case.expected_scalar {
+        match outcome {
+            MaskedOperationOutcome::Array { values, .. }
+            | MaskedOperationOutcome::Masked { values, .. } => {
+                if values.len() != 1 {
+                    return Err(format!(
+                        "expected scalar but got array of length {}",
+                        values.len()
+                    ));
+                }
+                let actual = values[0];
+                let diff = (expected_scalar - actual).abs();
+                let bound = abs_tol + rel_tol * expected_scalar.abs();
+                if diff > bound {
+                    return Err(format!(
+                        "scalar mismatch expected={expected_scalar} actual={actual} diff={diff}"
+                    ));
+                }
+                return Ok(());
+            }
+        }
+    }
 
     match outcome {
         MaskedOperationOutcome::Array { shape, values } => {
@@ -9036,6 +9127,43 @@ fn execute_linalg_operation(
             let cond = cond_mxn(&data, m, n)?;
             Ok(LinalgOperationOutcome::SolveVector(vec![cond]))
         }
+        "cholesky_2x2" => {
+            let matrix = decode_matrix_2x2(input.matrix)?;
+            let uplo = if input.uplo.is_empty() { "L" } else { input.uplo };
+            let l = cholesky_2x2(matrix, uplo)?;
+            Ok(LinalgOperationOutcome::SolveVector(vec![
+                l[0][0], l[0][1], l[1][0], l[1][1],
+            ]))
+        }
+        "slogdet_2x2" => {
+            let matrix = decode_matrix_2x2(input.matrix)?;
+            let (sign, logabsdet) = slogdet_2x2(matrix)?;
+            Ok(LinalgOperationOutcome::SolveVector(vec![sign, logabsdet]))
+        }
+        "eigvals_2x2" => {
+            let matrix = decode_matrix_2x2(input.matrix)?;
+            let eigvals = eigvals_2x2(matrix, input.converged)?;
+            Ok(LinalgOperationOutcome::SolveVector(eigvals.to_vec()))
+        }
+        "matrix_power" => {
+            let data = flatten_matrix_fixture(input.matrix)?;
+            let n = input.shape.first().copied().unwrap_or(0);
+            let power = input.rhs.first().copied().unwrap_or(1.0) as i64;
+            let result = matrix_power_nxn(&data, n, power)?;
+            Ok(LinalgOperationOutcome::SolveVector(result))
+        }
+        "pinv_2x2" => {
+            let matrix = decode_matrix_2x2(input.matrix)?;
+            let rcond_val = if input.rcond > 0.0 {
+                input.rcond
+            } else {
+                1e-15
+            };
+            let pinv = pinv_2x2(matrix, rcond_val)?;
+            Ok(LinalgOperationOutcome::SolveVector(vec![
+                pinv[0][0], pinv[0][1], pinv[1][0], pinv[1][1],
+            ]))
+        }
         _ => Err(LinAlgError::PolicyUnknownMetadata(
             "unsupported linalg operation",
         )),
@@ -9281,6 +9409,36 @@ fn validate_linalg_differential_expectation(
                 return Err(format!(
                     "cond_mxn mismatch expected={:?} actual={actual:?}",
                     case.expected_solution
+                ));
+            }
+            Ok(())
+        }
+        (
+            "cholesky_2x2" | "slogdet_2x2" | "eigvals_2x2" | "matrix_power" | "pinv_2x2",
+            LinalgOperationOutcome::SolveVector(actual),
+        ) => {
+            if case.expected_solution.len() != actual.len() {
+                return Err(format!(
+                    "{} expected vector length {} but got {}",
+                    case.operation,
+                    case.expected_solution.len(),
+                    actual.len()
+                ));
+            }
+            let tolerance = if case.expected_tolerance > 0.0 {
+                case.expected_tolerance
+            } else {
+                1e-9
+            };
+            if !approx_equal_values(
+                &case.expected_solution,
+                actual.as_slice(),
+                tolerance,
+                tolerance,
+            ) {
+                return Err(format!(
+                    "{} mismatch expected={:?} actual={actual:?}",
+                    case.operation, case.expected_solution
                 ));
             }
             Ok(())

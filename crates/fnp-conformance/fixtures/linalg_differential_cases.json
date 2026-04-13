@@ -791,5 +791,134 @@
     "matrix": [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]],
     "expected_solution": [18.521305341258135],
     "expected_tolerance": 1e-6
+  },
+  {
+    "id": "linalg_cond_mxn_shape_mismatch_error",
+    "operation": "cond_mxn",
+    "seed": 8252,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_error",
+    "expected_reason_code": "linalg_shape_contract_violation",
+    "expected_error_contains": "cond_mxn: input must be m*n",
+    "shape": [2, 3],
+    "matrix": [[1.0, 2.0, 3.0, 4.0, 5.0]]
+  },
+  {
+    "id": "linalg_cond_mxn_zero_dim_error",
+    "operation": "cond_mxn",
+    "seed": 8253,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_error",
+    "expected_reason_code": "linalg_shape_contract_violation",
+    "expected_error_contains": "cond is not defined on empty arrays",
+    "shape": [0, 3],
+    "matrix": [[1.0]]
+  },
+  {
+    "id": "linalg_cholesky_2x2_positive_definite",
+    "operation": "cholesky_2x2",
+    "seed": 8260,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "matrix": [
+      [4.0, 2.0],
+      [2.0, 5.0]
+    ],
+    "uplo": "L",
+    "expected_solution": [2.0, 0.0, 1.0, 2.0],
+    "expected_tolerance": 1e-12
+  },
+  {
+    "id": "linalg_slogdet_2x2_positive",
+    "operation": "slogdet_2x2",
+    "seed": 8261,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "matrix": [
+      [4.0, 2.0],
+      [2.0, 5.0]
+    ],
+    "expected_solution": [1.0, 2.772588722239781],
+    "expected_tolerance": 1e-12
+  },
+  {
+    "id": "linalg_eigvals_2x2_symmetric",
+    "operation": "eigvals_2x2",
+    "seed": 8262,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "matrix": [
+      [3.0, 1.0],
+      [1.0, 3.0]
+    ],
+    "converged": true,
+    "expected_solution": [4.0, 2.0],
+    "expected_tolerance": 1e-12
+  },
+  {
+    "id": "linalg_matrix_power_identity_squared",
+    "operation": "matrix_power",
+    "seed": 8263,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [2],
+    "matrix": [[1.0, 0.0, 0.0, 1.0]],
+    "rhs": [2.0],
+    "expected_solution": [1.0, 0.0, 0.0, 1.0],
+    "expected_tolerance": 1e-12
+  },
+  {
+    "id": "linalg_pinv_2x2_invertible",
+    "operation": "pinv_2x2",
+    "seed": 8264,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "matrix": [
+      [1.0, 2.0],
+      [3.0, 4.0]
+    ],
+    "rcond": 1e-15,
+    "expected_solution": [-2.0, 1.0, 1.5, -0.5],
+    "expected_tolerance": 1e-10
   }
 ]
