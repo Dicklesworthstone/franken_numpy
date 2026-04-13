@@ -742,13 +742,10 @@ const MT_UPPER_MASK: u32 = 0x8000_0000;
 const MT_LOWER_MASK: u32 = 0x7fff_ffff;
 const MT_INIT_MULT: u32 = 1_812_433_253;
 
-/// NumPy-compatible MT19937 (Mersenne Twister) PRNG.
+/// NumPy-compatible Philox 4x64 counter-based PRNG.
 ///
-/// Supports two seeding modes:
-/// - **Classic** (`from_u32_seed`): NumPy's `RandomState(seed)` — `init_genrand(seed)`
-/// - **Modern** (`from_seed_sequence`): NumPy's `MT19937(seed)` — SeedSequence-based
-///
-/// Produces the same u32 stream as NumPy for both modes.
+/// Philox is a cryptographically-secure PRNG that uses 10 rounds of the Philox
+/// permutation. It produces the same u64 stream as NumPy's `Philox` generator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PhiloxRng {
     ctr: [u64; 4],
@@ -964,6 +961,13 @@ impl Sfc64Rng {
     }
 }
 
+/// NumPy-compatible MT19937 (Mersenne Twister) PRNG.
+///
+/// Supports two seeding modes:
+/// - **Classic** (`from_u32_seed`): NumPy's `RandomState(seed)` — `init_genrand(seed)`
+/// - **Modern** (`from_seed_sequence`): NumPy's `MT19937(seed)` — SeedSequence-based
+///
+/// Produces the same u32 stream as NumPy for both modes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mt19937Rng {
     mt: Vec<u32>,
