@@ -1290,5 +1290,133 @@
     "rhs_dtype": "f64",
     "expect_success": true,
     "expected_shape": [1, 1, 1, 1, 1, 1, 1, 1]
+  },
+  {
+    "id": "ldexp_extreme_exponent_overflow",
+    "seed": 455,
+    "severity": "high",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-g",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "ufunc_ldexp_overflow_contract",
+    "expected_reason_code": "ufunc_ldexp_overflow_contract",
+    "op": "ldexp",
+    "lhs_shape": [3],
+    "lhs_values": [1.0, 1.0, 1.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [3],
+    "rhs_values": [1024.0, 2000.0, -2000.0],
+    "rhs_dtype": "f64",
+    "expect_success": true,
+    "expected_shape": [3]
+  },
+  {
+    "id": "ldexp_preserve_zero_sign",
+    "seed": 456,
+    "severity": "medium",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-g",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "ufunc_ldexp_zero_contract",
+    "expected_reason_code": "ufunc_ldexp_zero_contract",
+    "op": "ldexp",
+    "lhs_shape": [3],
+    "lhs_values": [0.0, 0.0, 0.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [3],
+    "rhs_values": [0.0, 100.0, -100.0],
+    "rhs_dtype": "f64",
+    "expect_success": true,
+    "expected_shape": [3],
+    "expected_all_zero": true
+  },
+  {
+    "id": "nextafter_zero_direction",
+    "seed": 457,
+    "severity": "high",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-g",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "ufunc_nextafter_zero_contract",
+    "expected_reason_code": "ufunc_nextafter_zero_contract",
+    "op": "nextafter",
+    "lhs_shape": [4],
+    "lhs_values": [0.0, 0.0, 0.0, 0.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [4],
+    "rhs_values": [1.0, -1.0, 0.5, -0.5],
+    "rhs_dtype": "f64",
+    "expect_success": true,
+    "expected_shape": [4]
+  },
+  {
+    "id": "nextafter_identical_values",
+    "seed": 458,
+    "severity": "medium",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-g",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "ufunc_nextafter_identity_contract",
+    "expected_reason_code": "ufunc_nextafter_identity_contract",
+    "op": "nextafter",
+    "lhs_shape": [3],
+    "lhs_values": [1.0, -5.5, 0.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [3],
+    "rhs_values": [1.0, -5.5, 0.0],
+    "rhs_dtype": "f64",
+    "expect_success": true,
+    "expected_shape": [3],
+    "expected_values": [1.0, -5.5, 0.0]
+  },
+  {
+    "id": "spacing_normal_values",
+    "seed": 459,
+    "severity": "high",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-g",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "ufunc_spacing_normal_contract",
+    "expected_reason_code": "ufunc_spacing_normal_contract",
+    "op": "spacing",
+    "lhs_shape": [3],
+    "lhs_values": [1.0, 2.0, 1e10],
+    "lhs_dtype": "f64",
+    "expect_success": true,
+    "expected_shape": [3]
+  },
+  {
+    "id": "spacing_zero_value",
+    "seed": 460,
+    "severity": "medium",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-g",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "ufunc_spacing_zero_contract",
+    "expected_reason_code": "ufunc_spacing_zero_contract",
+    "op": "spacing",
+    "lhs_shape": [2],
+    "lhs_values": [0.0, 0.0],
+    "lhs_dtype": "f64",
+    "expect_success": true,
+    "expected_shape": [2]
   }
 ]
