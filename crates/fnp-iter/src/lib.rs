@@ -280,6 +280,13 @@ pub fn resolve_flatiter_indices(
                     "slice step must be > 0",
                 ));
             }
+            // Reject inverted bounds (start > stop) per P2C004-R10 hardened policy
+            if *start > *stop {
+                return Err(FlatIterContractError::IndexingViolation(
+                    "slice bounds are invalid (start > stop)",
+                ));
+            }
+            // Clamp to available length
             let start = (*start).min(len);
             let stop = (*stop).min(len);
             if start >= stop {
@@ -426,6 +433,13 @@ fn count_selected_indices(len: usize, index: &FlatIterIndex) -> Result<usize, Tr
                     "slice step must be > 0",
                 ));
             }
+            // Reject inverted bounds (start > stop) per P2C004-R10 hardened policy
+            if *start > *stop {
+                return Err(TransferError::FlatiterReadViolation(
+                    "slice bounds are invalid (start > stop)",
+                ));
+            }
+            // Clamp to available length
             let start = (*start).min(len);
             let stop = (*stop).min(len);
             if start >= stop {
@@ -2393,13 +2407,15 @@ mod tests {
     }
 
     #[test]
-    fn flatiter_slice_start_exceeds_stop_is_empty() {
+    fn flatiter_slice_start_exceeds_stop_is_rejected() {
         let idx = FlatIterIndex::Slice {
             start: 5,
             stop: 3,
             step: 1,
         };
-        assert_eq!(validate_flatiter_read(10, &idx).unwrap(), 0);
+        let err = validate_flatiter_read(10, &idx).expect_err("inverted bounds should fail");
+        assert_eq!(err.reason_code(), "flatiter_transfer_read_violation");
+        assert!(err.to_string().contains("bounds are invalid"));
     }
 
     #[test]

@@ -409,5 +409,48 @@
       "indices": [7, 6, 5, 4, 3, 2, 1, 0]
     },
     "expected_selected": 8
+  },
+  {
+    "id": "iter_flatiter_slice_inverted_read",
+    "operation": "validate_flatiter_read",
+    "seed": 4121,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "flatiter_indexing_contract_violation",
+    "expected_reason_code": "flatiter_indexing_contract_violation",
+    "expected_error_contains": "bounds are invalid",
+    "len": 10,
+    "flat_index": {
+      "kind": "slice",
+      "start": 7,
+      "stop": 3,
+      "step": 1
+    }
+  },
+  {
+    "id": "iter_flatiter_slice_inverted_write",
+    "operation": "validate_flatiter_write",
+    "seed": 4122,
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "flatiter_indexing_contract_violation",
+    "expected_reason_code": "flatiter_indexing_contract_violation",
+    "expected_error_contains": "bounds are invalid",
+    "len": 12,
+    "values_len": 1,
+    "flat_index": {
+      "kind": "slice",
+      "start": 9,
+      "stop": 2,
+      "step": 1
+    }
   }
 ]
