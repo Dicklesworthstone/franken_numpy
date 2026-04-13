@@ -27105,6 +27105,100 @@ impl StringArray {
             ))),
         }
     }
+
+    /// Slice each element from start to stop indices (np.strings.slice).
+    ///
+    /// Performs Python-style slicing on each string element. Indices are
+    /// character-based (not byte-based). Negative indices wrap from end.
+    /// If `step` is None, defaults to 1.
+    pub fn slice(&self, start: Option<isize>, stop: Option<isize>, step: Option<isize>) -> Self {
+        let step = step.unwrap_or(1);
+        if step == 0 {
+            // Python raises ValueError for step=0, return empty strings
+            return Self {
+                shape: self.shape.clone(),
+                values: self.values.iter().map(|_| String::new()).collect(),
+            };
+        }
+        let values: Vec<String> = self
+            .values
+            .iter()
+            .map(|s| {
+                let chars: Vec<char> = s.chars().collect();
+                let len = chars.len() as isize;
+
+                // Resolve start index (default: 0 for positive step, -1 for negative)
+                let start_idx = match start {
+                    Some(i) => {
+                        if i < 0 {
+                            (len + i).max(0) as usize
+                        } else {
+                            i.min(len) as usize
+                        }
+                    }
+                    None => {
+                        if step > 0 {
+                            0
+                        } else {
+                            (len - 1).max(0) as usize
+                        }
+                    }
+                };
+
+                // Resolve stop index (default: len for positive step, -len-1 for negative)
+                let stop_idx = match stop {
+                    Some(i) => {
+                        if i < 0 {
+                            (len + i).max(0) as usize
+                        } else {
+                            i.min(len) as usize
+                        }
+                    }
+                    None => {
+                        if step > 0 {
+                            len as usize
+                        } else {
+                            0 // effectively -len-1 after bounds check
+                        }
+                    }
+                };
+
+                if step > 0 {
+                    if start_idx >= stop_idx {
+                        String::new()
+                    } else {
+                        chars[start_idx..stop_idx]
+                            .iter()
+                            .step_by(step as usize)
+                            .collect()
+                    }
+                } else {
+                    // Negative step: reverse iteration
+                    let abs_step = (-step) as usize;
+                    if start_idx <= stop_idx {
+                        String::new()
+                    } else {
+                        // Iterate from start_idx down to (but not including) stop_idx
+                        let mut result = String::new();
+                        let mut i = start_idx;
+                        while i > stop_idx {
+                            result.push(chars[i]);
+                            if i < abs_step {
+                                break;
+                            }
+                            i -= abs_step;
+                        }
+                        result
+                    }
+                }
+            })
+            .collect();
+
+        Self {
+            shape: self.shape.clone(),
+            values,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -47063,5 +47157,45 @@ mod tests {
         let r = c.polytrim(0.0).unwrap();
         assert_eq!(r.shape(), &[1]);
         assert_eq!(r.values(), &[0.0]);
+    }
+
+    #[test]
+    fn string_slice_basic() {
+        // np.strings.slice(['hello', 'world'], 1, 3) → ['el', 'or']
+        let arr = StringArray::new(vec![2], vec!["hello".into(), "world".into()]).unwrap();
+        let r = arr.slice(Some(1), Some(3), None);
+        assert_eq!(r.values, vec!["el", "or"]);
+    }
+
+    #[test]
+    fn string_slice_from_start() {
+        // np.strings.slice(['hello', 'world'], None, 2) → ['he', 'wo']
+        let arr = StringArray::new(vec![2], vec!["hello".into(), "world".into()]).unwrap();
+        let r = arr.slice(None, Some(2), None);
+        assert_eq!(r.values, vec!["he", "wo"]);
+    }
+
+    #[test]
+    fn string_slice_to_end() {
+        // np.strings.slice(['hello', 'world'], 2, None) → ['llo', 'rld']
+        let arr = StringArray::new(vec![2], vec!["hello".into(), "world".into()]).unwrap();
+        let r = arr.slice(Some(2), None, None);
+        assert_eq!(r.values, vec!["llo", "rld"]);
+    }
+
+    #[test]
+    fn string_slice_negative_indices() {
+        // np.strings.slice(['hello', 'world'], -3, -1) → ['ll', 'rl']
+        let arr = StringArray::new(vec![2], vec!["hello".into(), "world".into()]).unwrap();
+        let r = arr.slice(Some(-3), Some(-1), None);
+        assert_eq!(r.values, vec!["ll", "rl"]);
+    }
+
+    #[test]
+    fn string_slice_with_step() {
+        // np.strings.slice(['hello', 'world'], 0, None, 2) → ['hlo', 'wrd']
+        let arr = StringArray::new(vec![2], vec!["hello".into(), "world".into()]).unwrap();
+        let r = arr.slice(Some(0), None, Some(2));
+        assert_eq!(r.values, vec!["hlo", "wrd"]);
     }
 }
