@@ -25727,6 +25727,39 @@ pub fn frexp(x: &UFuncArray) -> Result<(UFuncArray, UFuncArray), UFuncError> {
     Ok((m_arr, e_arr))
 }
 
+/// Multiply mantissa by 2 raised to the exponent power.
+///
+/// Returns `mantissa * 2^exponent`. This is the inverse of `frexp`.
+/// NumPy equivalent: `np.ldexp(mantissa, exponent)`.
+pub fn ldexp(mantissa: &UFuncArray, exponent: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let bc = UFuncArray::broadcast_arrays(&[mantissa, exponent])?;
+    let (m_bc, e_bc) = (&bc[0], &bc[1]);
+    let values: Vec<f64> = m_bc
+        .values
+        .iter()
+        .zip(e_bc.values.iter())
+        .map(|(&m, &e)| {
+            if m.is_nan() || e.is_nan() {
+                f64::NAN
+            } else if m == 0.0 {
+                // Preserve sign of zero
+                m
+            } else if m.is_infinite() {
+                m
+            } else {
+                // m * 2^e using powi for integer exponents
+                m * 2.0_f64.powi(e as i32)
+            }
+        })
+        .collect();
+    Ok(UFuncArray {
+        shape: m_bc.shape.clone(),
+        values,
+        dtype: DType::F64,
+        integer_sidecar: None,
+    })
+}
+
 /// Return the fractional and integral parts of each element.
 ///
 /// Both outputs have the same sign as the input.
@@ -25758,6 +25791,78 @@ pub fn modf(x: &UFuncArray) -> Result<(UFuncArray, UFuncArray), UFuncError> {
         integer_sidecar: None,
     };
     Ok((frac_arr, int_arr))
+}
+
+/// Return the next representable floating-point value after x1 towards x2.
+///
+/// NumPy equivalent: `np.nextafter(x1, x2)`.
+pub fn nextafter(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
+    let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
+    let values: Vec<f64> = x1_bc
+        .values
+        .iter()
+        .zip(x2_bc.values.iter())
+        .map(|(&a, &b)| {
+            if a.is_nan() || b.is_nan() {
+                f64::NAN
+            } else if a == b {
+                b
+            } else {
+                // Get the bits of a
+                let bits = a.to_bits();
+                let result_bits = if a == 0.0 {
+                    // Zero: return smallest subnormal towards b
+                    if b > 0.0 { 1 } else { 0x8000_0000_0000_0001 }
+                } else if (a > 0.0 && b > a) || (a < 0.0 && b > a) {
+                    // Moving towards positive infinity
+                    bits.wrapping_add(1)
+                } else {
+                    // Moving towards negative infinity
+                    bits.wrapping_sub(1)
+                };
+                f64::from_bits(result_bits)
+            }
+        })
+        .collect();
+    Ok(UFuncArray {
+        shape: x1_bc.shape.clone(),
+        values,
+        dtype: DType::F64,
+        integer_sidecar: None,
+    })
+}
+
+/// Return the distance between x and the next representable floating-point value.
+///
+/// This is equivalent to `nextafter(x, inf) - x` for positive x.
+/// NumPy equivalent: `np.spacing(x)`.
+pub fn spacing(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let values: Vec<f64> = x
+        .values
+        .iter()
+        .map(|&v| {
+            if v.is_nan() {
+                f64::NAN
+            } else if v.is_infinite() {
+                f64::NAN
+            } else if v == 0.0 {
+                // Smallest positive subnormal
+                f64::from_bits(1)
+            } else {
+                let abs_v = v.abs();
+                let bits = abs_v.to_bits();
+                let next_bits = bits.wrapping_add(1);
+                f64::from_bits(next_bits) - abs_v
+            }
+        })
+        .collect();
+    Ok(UFuncArray {
+        shape: x.shape.clone(),
+        values,
+        dtype: DType::F64,
+        integer_sidecar: None,
+    })
 }
 
 /// Element-wise greatest common divisor.
@@ -27215,19 +27320,19 @@ mod tests {
         chebder, chebdiv, chebfit, chebfromroots, chebint, chebmul, chebroots, chebsub, chebval,
         checked_window_total, divmod_arrays, errstate, financial_fv, financial_ipmt, financial_irr,
         financial_mirr, financial_nper, financial_npv, financial_pmt, financial_ppmt, financial_pv,
-        financial_rate, frexp, gcd_arrays, geterr, herm2poly, hermadd, hermder, hermdiv,
+        financial_rate, frexp, gcd_arrays, geterr, herm2poly, hermadd, hermder, hermdiv, ldexp,
         herme2poly, hermeadd, hermediv, hermefromroots, hermemul, hermeroots, hermesub, hermeval,
         hermfit, hermfromroots, hermint, hermmul, hermroots, hermsub, hermval, is_busday, isneginf,
         isposinf, lag2poly, lagadd, lagder, lagdiv, lagfit, lagfromroots, lagint, lagmul, lagroots,
         lagsub, lagval, lcm_arrays, leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint,
         legmul, legroots, legsub, legval, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or,
-        mediate_ufunc_runtime_policy, modf, normalize_fixed_signature_keywords,
+        mediate_ufunc_runtime_policy, modf, nextafter, normalize_fixed_signature_keywords,
         normalize_signature_keywords, pad_empty, pad_linear_ramp, pad_stat,
         parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch,
         plan_binary_dispatch_with_registry, plan_binary_dispatch_with_signature, poly2cheb,
         poly2herm, poly2herme, poly2lag, poly2leg, register_custom_loop, resolve_override_dispatch,
         scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log, scimath_log2, scimath_log10,
-        scimath_power, scimath_sqrt, seterr, seterr_state, seterrcall, sort_complex,
+        scimath_power, scimath_sqrt, seterr, seterr_state, seterrcall, sort_complex, spacing,
         take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
         validate_override_payload_class, where_nonzero,
     };
@@ -42130,6 +42235,76 @@ mod tests {
         assert!((reconstructed - 1e300).abs() / 1e300 < 1e-10);
     }
 
+    // ── ldexp tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn ldexp_basic() {
+        let m = UFuncArray::new(vec![3], vec![0.5, 0.75, 0.625], DType::F64).unwrap();
+        let e = UFuncArray::new(vec![3], vec![1.0, 2.0, 4.0], DType::F64).unwrap();
+        let result = ldexp(&m, &e).unwrap();
+        // 0.5 * 2^1 = 1.0, 0.75 * 2^2 = 3.0, 0.625 * 2^4 = 10.0
+        assert_eq!(result.values(), &[1.0, 3.0, 10.0]);
+    }
+
+    #[test]
+    fn ldexp_negative_exponent() {
+        let m = UFuncArray::new(vec![2], vec![4.0, 8.0], DType::F64).unwrap();
+        let e = UFuncArray::new(vec![2], vec![-1.0, -3.0], DType::F64).unwrap();
+        let result = ldexp(&m, &e).unwrap();
+        // 4.0 * 2^-1 = 2.0, 8.0 * 2^-3 = 1.0
+        assert_eq!(result.values(), &[2.0, 1.0]);
+    }
+
+    #[test]
+    fn ldexp_zero() {
+        let m = UFuncArray::new(vec![2], vec![0.0, -0.0], DType::F64).unwrap();
+        let e = UFuncArray::new(vec![2], vec![10.0, 10.0], DType::F64).unwrap();
+        let result = ldexp(&m, &e).unwrap();
+        assert!(result.values()[0] == 0.0 && !result.values()[0].is_sign_negative());
+        assert!(result.values()[1] == 0.0 && result.values()[1].is_sign_negative());
+    }
+
+    #[test]
+    fn ldexp_inf() {
+        let m = UFuncArray::new(vec![2], vec![f64::INFINITY, f64::NEG_INFINITY], DType::F64).unwrap();
+        let e = UFuncArray::new(vec![2], vec![5.0, 5.0], DType::F64).unwrap();
+        let result = ldexp(&m, &e).unwrap();
+        assert!(result.values()[0].is_infinite() && result.values()[0] > 0.0);
+        assert!(result.values()[1].is_infinite() && result.values()[1] < 0.0);
+    }
+
+    #[test]
+    fn ldexp_nan() {
+        let m = UFuncArray::new(vec![1], vec![f64::NAN], DType::F64).unwrap();
+        let e = UFuncArray::new(vec![1], vec![5.0], DType::F64).unwrap();
+        let result = ldexp(&m, &e).unwrap();
+        assert!(result.values()[0].is_nan());
+    }
+
+    #[test]
+    fn ldexp_frexp_roundtrip() {
+        let vals: Vec<f64> = vec![1.5, 3.25, 100.0, 0.125, -7.75, 1e10];
+        let arr = UFuncArray::new(vec![vals.len()], vals.clone(), DType::F64).unwrap();
+        let (m, e) = frexp(&arr).unwrap();
+        let reconstructed = ldexp(&m, &e).unwrap();
+        for (i, &v) in vals.iter().enumerate() {
+            assert!(
+                (reconstructed.values()[i] - v).abs() < 1e-12,
+                "ldexp roundtrip failed for {}",
+                v
+            );
+        }
+    }
+
+    #[test]
+    fn ldexp_broadcasts() {
+        let m = UFuncArray::new(vec![3], vec![0.5, 0.75, 0.625], DType::F64).unwrap();
+        let e = UFuncArray::new(vec![1], vec![2.0], DType::F64).unwrap();
+        let result = ldexp(&m, &e).unwrap();
+        // All multiplied by 2^2 = 4
+        assert_eq!(result.values(), &[2.0, 3.0, 2.5]);
+    }
+
     // ── modf tests ──────────────────────────────────────────────────────
 
     #[test]
@@ -42201,6 +42376,108 @@ mod tests {
         let (frac, int) = modf(&arr).unwrap();
         assert!((frac.values()[0] - 1e-300).abs() < 1e-310);
         assert_eq!(int.values()[0], 0.0);
+    }
+
+    // ── nextafter tests ────────────────────────────────────────────────
+
+    #[test]
+    fn nextafter_basic() {
+        let x1 = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
+        let x2 = UFuncArray::new(vec![1], vec![2.0], DType::F64).unwrap();
+        let result = nextafter(&x1, &x2).unwrap();
+        // nextafter(1.0, 2.0) should be slightly greater than 1.0
+        assert!(result.values()[0] > 1.0);
+        assert!(result.values()[0] < 1.0 + 1e-15);
+    }
+
+    #[test]
+    fn nextafter_negative_direction() {
+        let x1 = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
+        let x2 = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+        let result = nextafter(&x1, &x2).unwrap();
+        // nextafter(1.0, 0.0) should be slightly less than 1.0
+        assert!(result.values()[0] < 1.0);
+        assert!(result.values()[0] > 1.0 - 1e-15);
+    }
+
+    #[test]
+    fn nextafter_equal() {
+        let x1 = UFuncArray::new(vec![1], vec![1.5], DType::F64).unwrap();
+        let x2 = UFuncArray::new(vec![1], vec![1.5], DType::F64).unwrap();
+        let result = nextafter(&x1, &x2).unwrap();
+        assert_eq!(result.values()[0], 1.5);
+    }
+
+    #[test]
+    fn nextafter_zero_towards_positive() {
+        let x1 = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+        let x2 = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
+        let result = nextafter(&x1, &x2).unwrap();
+        // Should be smallest positive subnormal
+        assert!(result.values()[0] > 0.0);
+        assert!(result.values()[0] < f64::MIN_POSITIVE);
+    }
+
+    #[test]
+    fn nextafter_nan() {
+        let x1 = UFuncArray::new(vec![1], vec![f64::NAN], DType::F64).unwrap();
+        let x2 = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
+        let result = nextafter(&x1, &x2).unwrap();
+        assert!(result.values()[0].is_nan());
+    }
+
+    // ── spacing tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn spacing_basic() {
+        let arr = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
+        let result = spacing(&arr).unwrap();
+        // spacing(1.0) should be the ULP at 1.0
+        // For f64, this is 2^-52 ≈ 2.22e-16
+        let expected = f64::EPSILON; // This is 2^-52 in Rust
+        assert!(
+            (result.values()[0] - expected).abs() < 1e-30,
+            "spacing(1.0) = {}, expected {}",
+            result.values()[0],
+            expected
+        );
+    }
+
+    #[test]
+    fn spacing_larger_value() {
+        let arr = UFuncArray::new(vec![1], vec![2.0], DType::F64).unwrap();
+        let result = spacing(&arr).unwrap();
+        // spacing(2.0) should be 2 * spacing(1.0) = 2 * EPSILON
+        let expected = 2.0 * f64::EPSILON;
+        assert!(
+            (result.values()[0] - expected).abs() < 1e-30,
+            "spacing(2.0) = {}, expected {}",
+            result.values()[0],
+            expected
+        );
+    }
+
+    #[test]
+    fn spacing_zero() {
+        let arr = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+        let result = spacing(&arr).unwrap();
+        // spacing(0.0) should be smallest positive subnormal
+        assert!(result.values()[0] > 0.0);
+        assert!(result.values()[0] < f64::MIN_POSITIVE);
+    }
+
+    #[test]
+    fn spacing_infinity() {
+        let arr = UFuncArray::new(vec![1], vec![f64::INFINITY], DType::F64).unwrap();
+        let result = spacing(&arr).unwrap();
+        assert!(result.values()[0].is_nan());
+    }
+
+    #[test]
+    fn spacing_nan() {
+        let arr = UFuncArray::new(vec![1], vec![f64::NAN], DType::F64).unwrap();
+        let result = spacing(&arr).unwrap();
+        assert!(result.values()[0].is_nan());
     }
 
     // ── gcd / lcm tests ────────────────────────────────────────────────
