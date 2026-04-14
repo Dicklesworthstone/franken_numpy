@@ -8600,6 +8600,38 @@ impl UFuncArray {
         Ok(Self::scalar(sum, self.dtype))
     }
 
+    /// Compute trace along specified axes (np.ndarray.trace with axis1/axis2).
+    ///
+    /// For N-D arrays, extracts diagonal along `axis1` and `axis2`, then sums
+    /// along the diagonal axis. Output shape is the input shape with `axis1`
+    /// and `axis2` removed.
+    pub fn trace_axis(
+        &self,
+        offset: i64,
+        axis1: isize,
+        axis2: isize,
+    ) -> Result<Self, UFuncError> {
+        let ndim = self.shape.len();
+        if ndim < 2 {
+            return Err(UFuncError::Msg(
+                "trace_axis requires at least a 2-D array".to_string(),
+            ));
+        }
+
+        // For 2-D arrays, just use the simple trace
+        if ndim == 2 {
+            return self.trace(offset);
+        }
+
+        // Get the diagonal with axis1/axis2 specification
+        let diag = self.diagonal(offset, axis1, axis2)?;
+
+        // The diagonal output has shape: [other_axes..., diag_len]
+        // Sum along the last axis (the diagonal axis)
+        let last_axis = (diag.shape.len() - 1) as isize;
+        diag.reduce_sum(Some(last_axis), false)
+    }
+
     // ── tensor operations ────────
 
     /// Kronecker product of two arrays (np.kron).
@@ -33062,6 +33094,31 @@ mod tests {
         assert_eq!(a.trace(0).unwrap().values(), &[15.0]); // 1+5+9
         assert_eq!(a.trace(1).unwrap().values(), &[8.0]); // 2+6
         assert_eq!(a.trace(-1).unwrap().values(), &[12.0]); // 4+8
+    }
+
+    #[test]
+    fn trace_axis_3d_matches_numpy() {
+        // np.arange(8).reshape((2, 2, 2)) → [[[0,1],[2,3]], [[4,5],[6,7]]]
+        // trace(axis1=0, axis2=1) → [6, 8]
+        //   diagonal = [[0,6], [1,7]], sum along last axis = [6, 8]
+        let a = UFuncArray::new(
+            vec![2, 2, 2],
+            vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+            DType::F64,
+        )
+        .unwrap();
+        let t = a.trace_axis(0, 0, 1).unwrap();
+        assert_eq!(t.shape(), &[2]);
+        assert_eq!(t.values(), &[6.0, 8.0]);
+    }
+
+    #[test]
+    fn trace_axis_2d_falls_back_to_simple_trace() {
+        let a = UFuncArray::new(vec![3, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], DType::F64)
+            .unwrap();
+        let t = a.trace_axis(0, 0, 1).unwrap();
+        assert_eq!(t.shape(), &[]);
+        assert_eq!(t.values(), &[15.0]);
     }
 
     #[test]
