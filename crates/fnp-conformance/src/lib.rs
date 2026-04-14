@@ -895,6 +895,17 @@ struct SignalDifferentialCase {
     abs_tol: f64,
     #[serde(default)]
     rel_tol: f64,
+    // norm-related fields
+    #[serde(default)]
+    ord_float: Option<f64>,
+    #[serde(default)]
+    ord_str: Option<String>,
+    #[serde(default)]
+    ord_inf: Option<String>,
+    #[serde(default)]
+    axis: Option<isize>,
+    #[serde(default)]
+    keepdims: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6096,6 +6107,40 @@ fn execute_signal_differential_operation(
             .map_err(map_ufunc_error_to_signal_suite)?;
             let dx = case.dx.unwrap_or(1.0);
             let result = input.trapezoid(dx, None).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "vector_norm" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let ord = if let Some(ref inf_str) = case.ord_inf {
+                match inf_str.as_str() {
+                    "inf" | "+inf" | "Infinity" => Some(f64::INFINITY),
+                    "-inf" | "-Infinity" => Some(f64::NEG_INFINITY),
+                    _ => case.ord_float,
+                }
+            } else {
+                case.ord_float
+            };
+            let result = input
+                .vector_norm(ord, case.axis, case.keepdims)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "matrix_norm" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let ord_str = case.ord_str.as_deref();
+            let result = input
+                .matrix_norm(ord_str, case.keepdims)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             Ok(to_outcome(result))
         }
         op => Err(SignalSuiteError::new(

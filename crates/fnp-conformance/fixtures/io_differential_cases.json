@@ -103,6 +103,23 @@
     "expected_dispatch": "npz"
   },
   {
+    "id": "io_load_dispatch_empty_npz_golden",
+    "operation": "load_dispatch",
+    "seed": 9971,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "artifacts/phase2c/FNP-P2C-009/unit_property_evidence.json",
+      "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
+    ],
+    "reason_code": "io_load_dispatch_contract",
+    "expected_reason_code": "io_load_dispatch_contract",
+    "payload_prefix": [80, 75, 5, 6],
+    "allow_pickle": false,
+    "expected_dispatch": "npz"
+  },
+  {
     "id": "io_npz_archive_budget_golden",
     "operation": "npz_archive_budget",
     "seed": 9907,
@@ -982,5 +999,59 @@
     "reason_code": "io_dtype_descriptor_contract",
     "expected_reason_code": "io_dtype_descriptor_contract",
     "dtype_descr": "|S1"
+  },
+  {
+    "id": "io_structured_load_golden",
+    "operation": "structured_load",
+    "seed": 9971,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_structured_load_contract",
+    "expected_reason_code": "io_structured_load_contract",
+    "shape": [2],
+    "fortran_order": false,
+    "dtype_descr": "[('x', '<f8'), ('y', '<i4')]",
+    "payload_len_bytes": 24
+  },
+  {
+    "id": "io_structured_load_missing_fortran_order_rejected",
+    "operation": "structured_load",
+    "seed": 9972,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_header_schema_invalid",
+    "expected_reason_code": "io_header_schema_invalid",
+    "expected_error_contains": "header dictionary must contain at least descr/fortran_order/shape keys",
+    "shape": [1],
+    "fortran_order": false,
+    "include_fortran_order": false,
+    "dtype_descr": "[('x', '<f8'), ('y', '<i4')]",
+    "payload_len_bytes": 12
+  },
+  {
+    "id": "io_structured_load_truncated_payload_rejected",
+    "operation": "structured_load",
+    "seed": 9973,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_read_payload_incomplete",
+    "expected_reason_code": "io_read_payload_incomplete",
+    "expected_error_contains": "structured payload bytes must match expected record footprint",
+    "shape": [2],
+    "fortran_order": false,
+    "dtype_descr": "[('x', '<f8'), ('y', '<i4')]",
+    "payload_len_bytes": 23
   }
 ]

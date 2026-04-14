@@ -267,5 +267,225 @@
     "expected_values": [15.0],
     "abs_tol": 1e-7,
     "rel_tol": 1e-7
+  },
+  {
+    "id": "vector_norm_l2_default_golden",
+    "operation": "vector_norm",
+    "seed": 9101,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [2],
+    "input_values": [3.0, 4.0],
+    "expected_shape": [],
+    "expected_values": [5.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "vector_norm_l1_golden",
+    "operation": "vector_norm",
+    "seed": 9102,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [3],
+    "input_values": [1.0, -2.0, 3.0],
+    "ord_float": 1.0,
+    "expected_shape": [],
+    "expected_values": [6.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "vector_norm_linf_golden",
+    "operation": "vector_norm",
+    "seed": 9103,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [3],
+    "input_values": [1.0, -5.0, 2.0],
+    "ord_inf": "inf",
+    "expected_shape": [],
+    "expected_values": [5.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "vector_norm_l0_golden",
+    "operation": "vector_norm",
+    "seed": 9104,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [5],
+    "input_values": [0.0, 1.0, 0.0, 2.0, 3.0],
+    "ord_float": 0.0,
+    "expected_shape": [],
+    "expected_values": [3.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "vector_norm_l3_golden",
+    "operation": "vector_norm",
+    "seed": 9105,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [3],
+    "input_values": [1.0, 2.0, 2.0],
+    "ord_float": 3.0,
+    "expected_shape": [],
+    "expected_values": [2.5712815906582356],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "vector_norm_neg_inf_golden",
+    "operation": "vector_norm",
+    "seed": 9106,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [4],
+    "input_values": [1.0, 2.0, 0.5, 3.0],
+    "ord_inf": "-inf",
+    "expected_shape": [],
+    "expected_values": [0.5],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "vector_norm_2d_axis0_golden",
+    "operation": "vector_norm",
+    "seed": 9107,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [2, 3],
+    "input_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "axis": 0,
+    "expected_shape": [3],
+    "expected_values": [4.123105625617661, 5.385164807134504, 6.708203932499369],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "vector_norm_2d_axis1_keepdims_golden",
+    "operation": "vector_norm",
+    "seed": 9108,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [2, 3],
+    "input_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "axis": 1,
+    "keepdims": true,
+    "expected_shape": [2, 1],
+    "expected_values": [3.7416573867739413, 8.774964387392123],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "matrix_norm_fro_golden",
+    "operation": "matrix_norm",
+    "seed": 9109,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [2, 2],
+    "input_values": [1.0, 2.0, 3.0, 4.0],
+    "ord_str": "fro",
+    "expected_shape": [],
+    "expected_values": [5.477225575051661],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "matrix_norm_default_golden",
+    "operation": "matrix_norm",
+    "seed": 9110,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [2, 2],
+    "input_values": [1.0, 2.0, 3.0, 4.0],
+    "expected_shape": [],
+    "expected_values": [5.477225575051661],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "matrix_norm_keepdims_golden",
+    "operation": "matrix_norm",
+    "seed": 9111,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [2, 2],
+    "input_values": [1.0, 2.0, 3.0, 4.0],
+    "ord_str": "fro",
+    "keepdims": true,
+    "expected_shape": [1, 1],
+    "expected_values": [5.477225575051661],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
   }
 ]

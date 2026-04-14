@@ -11,6 +11,7 @@ use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
 pub const IO_PACKET_ID: &str = "FNP-P2C-009";
 pub const NPY_MAGIC_PREFIX: [u8; 6] = [0x93, b'N', b'U', b'M', b'P', b'Y'];
 pub const NPZ_MAGIC_PREFIX: [u8; 4] = [b'P', b'K', 0x03, 0x04];
+pub const NPZ_EMPTY_PREFIX: [u8; 4] = [b'P', b'K', 0x05, 0x06];
 
 /// Maximum NPY header size in bytes. Defends against allocation bombs from crafted
 /// `.npy` files. NumPy v1.0 uses a 2-byte header length field (max 65535); v2.0 uses 4 bytes
@@ -243,6 +244,13 @@ pub enum LoadDispatch {
     Npy,
     Npz,
     Pickle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadBytes {
+    Npy(NpyArrayBytes),
+    Npz(Vec<NpzEntry>),
+    Pickle(Vec<u8>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1090,7 +1098,9 @@ pub fn classify_load_dispatch(
     payload_prefix: &[u8],
     allow_pickle: bool,
 ) -> Result<LoadDispatch, IOError> {
-    if payload_prefix.len() >= 4 && payload_prefix[..4] == NPZ_MAGIC_PREFIX {
+    if payload_prefix.len() >= 4
+        && (payload_prefix[..4] == NPZ_MAGIC_PREFIX || payload_prefix[..4] == NPZ_EMPTY_PREFIX)
+    {
         return Ok(LoadDispatch::Npz);
     }
 
@@ -1334,6 +1344,37 @@ pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, 
         return Err(IOError::NpzArchiveContractViolation(
             "npz: data too short for a ZIP archive",
         ));
+    }
+    if data[..4] == NPZ_EMPTY_PREFIX {
+        let comment_len = u16::from_le_bytes([data[20], data[21]]) as usize;
+        let expected_len = 22usize
+            .checked_add(comment_len)
+            .ok_or(IOError::NpzArchiveContractViolation(
+                "npz: empty archive comment length overflow",
+            ))?;
+        if data.len() != expected_len {
+            return Err(IOError::NpzArchiveContractViolation(
+                "npz: empty archive length mismatch",
+            ));
+        }
+        let disk_no = u16::from_le_bytes([data[4], data[5]]);
+        let cd_disk = u16::from_le_bytes([data[6], data[7]]);
+        let entries_on_disk = u16::from_le_bytes([data[8], data[9]]);
+        let total_entries = u16::from_le_bytes([data[10], data[11]]);
+        let cd_size = u32::from_le_bytes([data[12], data[13], data[14], data[15]]);
+        let cd_offset = u32::from_le_bytes([data[16], data[17], data[18], data[19]]);
+        if disk_no != 0
+            || cd_disk != 0
+            || entries_on_disk != 0
+            || total_entries != 0
+            || cd_size != 0
+            || cd_offset != 0
+        {
+            return Err(IOError::NpzArchiveContractViolation(
+                "npz: empty archive metadata must be zeroed",
+            ));
+        }
+        return Ok(Vec::new());
     }
     if data[..4] != NPZ_MAGIC_PREFIX {
         return Err(IOError::NpzArchiveContractViolation(
@@ -2812,6 +2853,18 @@ pub fn load(data: &[u8]) -> Result<(Vec<usize>, Vec<f64>, IOSupportedDType), IOE
     Ok((shape, values, dtype))
 }
 
+/// High-level load with auto-dispatch across NPY/NPZ/pickle payloads (np.load equivalent).
+///
+/// Returns raw decoded NPY/NPZ byte structures or the pickle payload bytes.
+pub fn load_auto(data: &[u8], allow_pickle: bool) -> Result<LoadBytes, IOError> {
+    let dispatch = classify_load_dispatch(data, allow_pickle)?;
+    match dispatch {
+        LoadDispatch::Npy => Ok(LoadBytes::Npy(read_npy_bytes(data, allow_pickle)?)),
+        LoadDispatch::Npz => Ok(LoadBytes::Npz(read_npz_bytes(data, allow_pickle)?)),
+        LoadDispatch::Pickle => Ok(LoadBytes::Pickle(data.to_vec())),
+    }
+}
+
 pub type ComplexValue = (f64, f64);
 pub type NpyLoadedComplex = (Vec<usize>, Vec<ComplexValue>, IOSupportedDType);
 
@@ -3384,6 +3437,8 @@ fn encode_structured_header_dict(
 pub struct StructuredNpyData {
     /// Array shape (excluding the structured field dimension).
     pub shape: Vec<usize>,
+    /// Whether the structured array is stored in Fortran order.
+    pub fortran_order: bool,
     /// Structured dtype descriptor (field names, types).
     pub descriptor: StructuredIODescriptor,
     /// Per-field raw bytes. Each entry corresponds to a field; the bytes
@@ -3437,6 +3492,7 @@ pub fn fromfile_structured(
 
     Ok(StructuredNpyData {
         shape: vec![n],
+        fortran_order: false,
         descriptor: descriptor.clone(),
         columns,
     })
@@ -3607,7 +3663,7 @@ pub fn load_structured(data: &[u8]) -> Result<StructuredNpyData, IOError> {
         map.get("shape")
             .ok_or(IOError::HeaderSchemaInvalid("shape missing"))?,
     )?;
-    let _fortran_order = parse_fortran_order_value(
+    let fortran_order = parse_fortran_order_value(
         map.get("fortran_order")
             .ok_or(IOError::HeaderSchemaInvalid("fortran_order missing"))?,
     )?;
@@ -3636,6 +3692,7 @@ pub fn load_structured(data: &[u8]) -> Result<StructuredNpyData, IOError> {
     }
     let mut result = fromfile_structured(body, &descriptor, Some(expected_records))?;
     result.shape = shape;
+    result.fortran_order = fortran_order;
     Ok(result)
 }
 
@@ -3804,13 +3861,14 @@ mod tests {
 
     use super::{
         GenFromTxtConfig, IO_PACKET_ID, IO_PACKET_REASON_CODES, IOError, IOLogRecord,
-        IORuntimeMode, IOSupportedDType, LoadDispatch, MAX_ARCHIVE_MEMBERS, MAX_DISPATCH_RETRIES,
-        MAX_HEADER_BYTES, MAX_MEMMAP_VALIDATION_RETRIES, MemmapMode, NPY_MAGIC_PREFIX,
-        NPZ_MAGIC_PREFIX, NpyHeader, NpzCompression, SaveTxtConfig, StructuredIODescriptor,
+        IORuntimeMode, IOSupportedDType, LoadBytes, LoadDispatch, MAX_ARCHIVE_MEMBERS,
+        MAX_DISPATCH_RETRIES, MAX_HEADER_BYTES, MAX_MEMMAP_VALIDATION_RETRIES, MemmapMode,
+        NPY_MAGIC_PREFIX, NPZ_EMPTY_PREFIX, NPZ_MAGIC_PREFIX, NpyHeader, NpzCompression,
+        SaveTxtConfig, StructuredIODescriptor,
         StructuredIOField, classify_load_dispatch, crc32_ieee, encode_npy_header_bytes,
         enforce_pickle_policy, fromfile, fromfile_complex, fromfile_strings, fromfile_structured,
         fromfile_text, fromfile_text_with_budget, fromstring, genfromtxt, genfromtxt_full, load,
-        load_complex, load_npz, load_strings, load_structured, loadtxt, loadtxt_unpack,
+        load_auto, load_complex, load_npz, load_strings, load_structured, loadtxt, loadtxt_unpack,
         loadtxt_usecols, memmap, memmap_npy, parse_structured_descr, read_npy_bytes,
         read_npz_bytes, save, save_complex, save_strings, save_structured, savetxt, savez,
         savez_compressed, synthesize_npz_member_names, tobytes, tofile, tofile_complex,
@@ -4184,6 +4242,10 @@ mod tests {
         let npz = classify_load_dispatch(&NPZ_MAGIC_PREFIX, false).expect("npz branch");
         assert_eq!(npz, LoadDispatch::Npz);
 
+        let npz_empty =
+            classify_load_dispatch(&NPZ_EMPTY_PREFIX, false).expect("npz empty branch");
+        assert_eq!(npz_empty, LoadDispatch::Npz);
+
         let npy = classify_load_dispatch(&NPY_MAGIC_PREFIX, false).expect("npy branch");
         assert_eq!(npy, LoadDispatch::Npy);
 
@@ -4192,6 +4254,56 @@ mod tests {
 
         let err = classify_load_dispatch(&[0x80, 0x05, 0x95], false).expect_err("policy reject");
         assert_eq!(err.reason_code(), "io_load_dispatch_invalid");
+    }
+
+    #[test]
+    fn load_auto_dispatches_npy_npz_pickle() {
+        let npy = save(&[2], &[1.0, 2.0], IOSupportedDType::F64).expect("save npy");
+        match load_auto(&npy, false).expect("auto npy") {
+            LoadBytes::Npy(array) => {
+                assert_eq!(array.header.shape, vec![2]);
+                assert_eq!(array.header.descr, IOSupportedDType::F64);
+            }
+            other => panic!("expected npy dispatch, got {other:?}"),
+        }
+
+        let npz = savez(&[("arr", &[2], &[1.0, 2.0], IOSupportedDType::F64)])
+            .expect("savez npz");
+        match load_auto(&npz, false).expect("auto npz") {
+            LoadBytes::Npz(entries) => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].name, "arr");
+            }
+            other => panic!("expected npz dispatch, got {other:?}"),
+        }
+
+        let pickle = vec![0x80, 0x05, 0x95, 0x00];
+        match load_auto(&pickle, true).expect("auto pickle") {
+            LoadBytes::Pickle(bytes) => assert_eq!(bytes, pickle),
+            other => panic!("expected pickle dispatch, got {other:?}"),
+        }
+
+        let err = load_auto(&pickle, false).expect_err("pickle gated");
+        assert_eq!(err.reason_code(), "io_load_dispatch_invalid");
+    }
+
+    #[test]
+    fn load_auto_accepts_empty_npz() {
+        let empty_npz = vec![
+            0x50, 0x4B, 0x05, 0x06, // EOCD signature
+            0x00, 0x00, // disk number
+            0x00, 0x00, // disk with CD
+            0x00, 0x00, // entries on disk
+            0x00, 0x00, // total entries
+            0x00, 0x00, 0x00, 0x00, // CD size
+            0x00, 0x00, 0x00, 0x00, // CD offset
+            0x00, 0x00, // comment length
+        ];
+
+        match load_auto(&empty_npz, false).expect("empty npz") {
+            LoadBytes::Npz(entries) => assert!(entries.is_empty()),
+            other => panic!("expected empty npz dispatch, got {other:?}"),
+        }
     }
 
     #[test]
@@ -6179,6 +6291,24 @@ mod tests {
         let payload = make_manual_npy_payload(header_literal, &body);
         let data = load_structured(&payload).expect("extra keys must be allowed");
         assert_eq!(data.shape, vec![1]);
+    }
+
+    #[test]
+    fn load_structured_preserves_fortran_order_flag() {
+        let desc = make_test_descriptor();
+        let body = tofile_structured(
+            &desc,
+            &[
+                [1.5f64.to_le_bytes(), 2.5f64.to_le_bytes()].concat(),
+                [10i32.to_le_bytes(), 20i32.to_le_bytes()].concat(),
+            ],
+        )
+        .unwrap();
+        let header_literal =
+            "{'descr': [('x', '<f8'), ('y', '<i4')], 'fortran_order': True, 'shape': (2,), }";
+        let payload = make_manual_npy_payload(header_literal, &body);
+        let data = load_structured(&payload).expect("fortran_order true must be preserved");
+        assert!(data.fortran_order);
     }
 
     #[test]

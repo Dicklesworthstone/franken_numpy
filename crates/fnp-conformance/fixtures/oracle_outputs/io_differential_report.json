@@ -1,7 +1,7 @@
 {
   "suite": "io_differential",
-  "total_cases": 60,
-  "passed_cases": 60,
+  "total_cases": 64,
+  "passed_cases": 64,
   "failed_cases": 0,
   "mismatches": []
 }

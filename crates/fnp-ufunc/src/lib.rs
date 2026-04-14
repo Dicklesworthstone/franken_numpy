@@ -9082,14 +9082,16 @@ impl UFuncArray {
                     for inner in 0..inner_count {
                         let mut slice = Vec::with_capacity(axis_len);
                         for k in 0..axis_len {
-                            let idx = outer * strides[norm_axis.saturating_sub(1).max(0)]
-                                * (if norm_axis > 0 {
-                                    self.shape[norm_axis]
-                                } else {
-                                    1
-                                })
-                                + k * strides[norm_axis]
-                                + inner;
+                            // Correct index formula for C-order:
+                            // outer selects position in axes before norm_axis
+                            // k iterates along norm_axis
+                            // inner selects position in axes after norm_axis
+                            let outer_base = if norm_axis > 0 {
+                                outer * strides[norm_axis - 1]
+                            } else {
+                                0
+                            };
+                            let idx = outer_base + k * strides[norm_axis] + inner;
                             if idx < self.values.len() {
                                 slice.push(self.values[idx]);
                             }
