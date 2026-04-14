@@ -47903,4 +47903,51 @@ mod tests {
         let arr = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         assert!(arr.matrix_norm(None, false).is_err());
     }
+
+    #[test]
+    fn vector_norm_2d_axis0() {
+        // np.linalg.vector_norm([[1, 2, 3], [4, 5, 6]], axis=0)
+        // = [sqrt(1+16), sqrt(4+25), sqrt(9+36)] = [sqrt(17), sqrt(29), sqrt(45)]
+        let arr =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = arr.vector_norm(None, Some(0), false).unwrap();
+        assert_eq!(r.shape(), &[3]);
+        assert!((r.values()[0] - 17.0_f64.sqrt()).abs() < 1e-10);
+        assert!((r.values()[1] - 29.0_f64.sqrt()).abs() < 1e-10);
+        assert!((r.values()[2] - 45.0_f64.sqrt()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn vector_norm_2d_axis1() {
+        // np.linalg.vector_norm([[1, 2, 3], [4, 5, 6]], axis=1)
+        // = [sqrt(1+4+9), sqrt(16+25+36)] = [sqrt(14), sqrt(77)]
+        let arr =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = arr.vector_norm(None, Some(1), false).unwrap();
+        assert_eq!(r.shape(), &[2]);
+        assert!((r.values()[0] - 14.0_f64.sqrt()).abs() < 1e-10);
+        assert!((r.values()[1] - 77.0_f64.sqrt()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn vector_norm_3d_axis1() {
+        // 3D array [2, 2, 2] with values 0-7
+        // axis=1 reduces shape to [2, 2]
+        let arr = UFuncArray::new(
+            vec![2, 2, 2],
+            vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+            DType::F64,
+        )
+        .unwrap();
+        let r = arr.vector_norm(None, Some(1), false).unwrap();
+        assert_eq!(r.shape(), &[2, 2]);
+        // [0,1] and [2,3] along axis 1 for first "batch"
+        // sqrt(0+4) = 2, sqrt(1+9) = sqrt(10)
+        assert!((r.values()[0] - 2.0).abs() < 1e-10);
+        assert!((r.values()[1] - 10.0_f64.sqrt()).abs() < 1e-10);
+        // [4,5] and [6,7] along axis 1 for second "batch"
+        // sqrt(16+36) = sqrt(52), sqrt(25+49) = sqrt(74)
+        assert!((r.values()[2] - 52.0_f64.sqrt()).abs() < 1e-10);
+        assert!((r.values()[3] - 74.0_f64.sqrt()).abs() < 1e-10);
+    }
 }
