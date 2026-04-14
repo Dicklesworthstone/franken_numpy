@@ -12,10 +12,10 @@ pub mod workflow_scenarios;
 use crate::ufunc_differential::{UFuncInputCase, UFuncOperation};
 use fnp_dtype::{DType, can_cast, can_cast_lossless, promote};
 use fnp_io::{
-    IOError, IOSupportedDType, LoadDispatch, MemmapMode, classify_load_dispatch,
-    validate_descriptor_roundtrip, validate_header_schema, validate_io_policy_metadata,
-    validate_magic_version, validate_memmap_contract, validate_npz_archive_budget,
-    validate_read_payload,
+    IOError, IOSupportedDType, LoadDispatch, MemmapMode, NPY_MAGIC_PREFIX,
+    classify_load_dispatch, load_structured, validate_descriptor_roundtrip, validate_header_schema,
+    validate_io_policy_metadata, validate_magic_version, validate_memmap_contract,
+    validate_npz_archive_budget, validate_read_payload,
 };
 use fnp_iter::{
     FlatIterIndex, NditerTransferFlags, OverlapAction, TransferClass, TransferError,
@@ -437,6 +437,8 @@ struct IoDifferentialCase {
     shape: Vec<usize>,
     #[serde(default)]
     fortran_order: bool,
+    #[serde(default)]
+    include_fortran_order: Option<bool>,
     #[serde(default)]
     dtype_descr: String,
     #[serde(default)]
@@ -5865,7 +5867,7 @@ pub fn run_signal_differential_suite(config: &HarnessConfig) -> Result<SuiteRepo
 
     for case in cases {
         let mode = resolve_case_mode(&case.mode, config.strict_mode);
-        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let _env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
         let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
         let reason_code = normalize_reason_code(&case.reason_code);
         let expected_reason_code = if case.expected_reason_code.trim().is_empty() {
@@ -10830,6 +10832,60 @@ fn load_dispatch_label(dispatch: LoadDispatch) -> String {
     .to_string()
 }
 
+fn format_shape_tuple_literal(shape: &[usize]) -> String {
+    if shape.is_empty() {
+        return "()".to_string();
+    }
+    if shape.len() == 1 {
+        return format!("({},)", shape[0]);
+    }
+    let dims = shape
+        .iter()
+        .map(|dim| dim.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("({dims})")
+}
+
+fn build_structured_header_literal(
+    dtype_descr: &str,
+    shape: &[usize],
+    fortran_order: bool,
+    include_fortran_order: bool,
+) -> String {
+    let mut parts = Vec::with_capacity(3);
+    parts.push(format!("'descr': {}", dtype_descr.trim()));
+    if include_fortran_order {
+        let literal = if fortran_order { "True" } else { "False" };
+        parts.push(format!("'fortran_order': {literal}"));
+    }
+    parts.push(format!("'shape': {}", format_shape_tuple_literal(shape)));
+    format!("{{{}, }}", parts.join(", "))
+}
+
+fn write_manual_npy_preamble(
+    buffer: &mut Vec<u8>,
+    header_len: usize,
+) -> Result<(), IoSuiteError> {
+    if header_len == 0 {
+        return Err(IoSuiteError::new(
+            "io_header_schema_invalid",
+            "header length must be non-zero",
+        ));
+    }
+    let header_len = u16::try_from(header_len).map_err(|_| {
+        IoSuiteError::new(
+            "io_header_schema_invalid",
+            "version 1.0 header length exceeds u16 boundary",
+        )
+    })?;
+    buffer.extend_from_slice(&NPY_MAGIC_PREFIX);
+    buffer.push(1);
+    buffer.push(0);
+    buffer.extend_from_slice(&header_len.to_le_bytes());
+    Ok(())
+}
+
 fn execute_io_differential_operation(
     case: &IoDifferentialCase,
 ) -> Result<IoOperationOutcome, IoSuiteError> {
@@ -10872,6 +10928,26 @@ fn execute_io_differential_operation(
         "load_dispatch" => classify_load_dispatch(&case.payload_prefix, case.allow_pickle)
             .map(|dispatch| IoOperationOutcome::Dispatch(load_dispatch_label(dispatch)))
             .map_err(map_io_error_to_suite),
+        "structured_load" => {
+            let include_fortran = case.include_fortran_order.unwrap_or(true);
+            let header_literal = build_structured_header_literal(
+                &case.dtype_descr,
+                &case.shape,
+                case.fortran_order,
+                include_fortran,
+            );
+            let mut header_bytes = header_literal.into_bytes();
+            if !header_bytes.ends_with(b"\n") {
+                header_bytes.push(b'\n');
+            }
+            let mut data = Vec::with_capacity(header_bytes.len() + case.payload_len_bytes + 16);
+            write_manual_npy_preamble(&mut data, header_bytes.len())?;
+            data.extend_from_slice(&header_bytes);
+            data.extend(std::iter::repeat_n(0u8, case.payload_len_bytes));
+            load_structured(&data)
+                .map(|_| IoOperationOutcome::Unit)
+                .map_err(map_io_error_to_suite)
+        }
         "npz_archive_budget" => validate_npz_archive_budget(
             case.member_count,
             case.uncompressed_bytes,
@@ -11050,6 +11126,7 @@ fn execute_io_adversarial_operation(case: &IoAdversarialCase) -> Result<(), IoSu
         payload_prefix: case.payload_prefix.clone(),
         shape: case.shape.clone(),
         fortran_order: case.fortran_order,
+        include_fortran_order: None,
         dtype_descr: case.dtype_descr.clone(),
         header_len: case.header_len,
         payload_len_bytes: case.payload_len_bytes,
@@ -12730,7 +12807,7 @@ mod tests {
 
         // multivariate_hypergeometric(colors=[10,20,30], nsample=25)
         let mut g = Generator::from_pcg64_dxsm(SEED).unwrap();
-        let mv_hyper = g.multivariate_hypergeometric(&[10, 20, 30], 25, 3);
+        let mv_hyper = g.multivariate_hypergeometric(&[10, 20, 30], 25, 3).unwrap();
         assert_eq!(
             mv_hyper,
             vec![vec![4, 6, 15], vec![3, 8, 14], vec![3, 12, 10]],

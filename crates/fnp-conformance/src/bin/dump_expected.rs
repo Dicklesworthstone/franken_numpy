@@ -45,6 +45,6 @@ fn main() {
     let mut g = Generator::from_pcg64_dxsm(seed).unwrap();
     println!(
         "multivariate_hypergeometric: {:?}",
-        g.multivariate_hypergeometric(&[10, 20, 30], 5, 2)
+        g.multivariate_hypergeometric(&[10, 20, 30], 5, 2).unwrap()
     );
 }
