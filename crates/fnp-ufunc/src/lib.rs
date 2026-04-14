@@ -9017,6 +9017,177 @@ impl UFuncArray {
         }
     }
 
+    /// Compute the vector norm of an array (np.linalg.vector_norm, NumPy 2.0+).
+    ///
+    /// This is the NumPy 2.0 API for vector norms, providing a cleaner interface
+    /// than the old `norm` function. Works on arrays of any dimension.
+    ///
+    /// - `ord`: Norm order. Default is 2 (Euclidean norm).
+    ///   - `None` or 2: L2 (Euclidean) norm
+    ///   - 1: L1 (sum of absolute values)
+    ///   - inf: max(|x|)
+    ///   - -inf: min(|x|)
+    ///   - 0: count of non-zero elements
+    ///   - Other: p-norm
+    /// - `axis`: Axis or axes along which to compute the norm. Default is all axes (flatten).
+    /// - `keepdims`: If true, reduced axes are left with size 1.
+    pub fn vector_norm(
+        &self,
+        ord: Option<f64>,
+        axis: Option<isize>,
+        keepdims: bool,
+    ) -> Result<Self, UFuncError> {
+        let ord_val = ord.unwrap_or(2.0);
+
+        match axis {
+            None => {
+                // Flatten and compute norm over all elements
+                let norm_val = compute_vector_norm(&self.values, ord_val)?;
+                let out_shape = if keepdims {
+                    vec![1; self.shape.len()]
+                } else {
+                    vec![]
+                };
+                Ok(Self {
+                    shape: out_shape,
+                    values: vec![norm_val],
+                    dtype: DType::F64,
+                    integer_sidecar: None,
+                })
+            }
+            Some(ax) => {
+                let ndim = self.shape.len();
+                let norm_axis = normalize_axis(ax, ndim)?;
+
+                // Compute norm along the specified axis
+                let axis_len = self.shape[norm_axis];
+                let strides = c_strides_elems(&self.shape);
+
+                // Calculate output shape
+                let mut out_shape: Vec<usize> = self.shape.clone();
+                if keepdims {
+                    out_shape[norm_axis] = 1;
+                } else {
+                    out_shape.remove(norm_axis);
+                }
+
+                let out_size = out_shape.iter().product::<usize>().max(1);
+                let mut out_values = Vec::with_capacity(out_size);
+
+                // Iterate over all positions except the norm axis
+                let outer_count: usize = self.shape[..norm_axis].iter().product();
+                let inner_count: usize = self.shape[norm_axis + 1..].iter().product();
+
+                for outer in 0..outer_count {
+                    for inner in 0..inner_count {
+                        let mut slice = Vec::with_capacity(axis_len);
+                        for k in 0..axis_len {
+                            let idx = outer * strides[norm_axis.saturating_sub(1).max(0)]
+                                * (if norm_axis > 0 {
+                                    self.shape[norm_axis]
+                                } else {
+                                    1
+                                })
+                                + k * strides[norm_axis]
+                                + inner;
+                            if idx < self.values.len() {
+                                slice.push(self.values[idx]);
+                            }
+                        }
+                        out_values.push(compute_vector_norm(&slice, ord_val)?);
+                    }
+                }
+
+                // Handle edge case where computation didn't work correctly
+                if out_values.len() != out_size {
+                    // Fallback: use simpler iteration
+                    out_values.clear();
+                    let flat_idx_to_coords = |flat: usize| -> Vec<usize> {
+                        let mut coords = Vec::with_capacity(ndim);
+                        let mut rem = flat;
+                        for &s in strides.iter() {
+                            coords.push(rem / s);
+                            rem %= s;
+                        }
+                        coords
+                    };
+
+                    let total = self.values.len();
+                    let mut processed = std::collections::HashSet::new();
+
+                    for flat in 0..total {
+                        let coords = flat_idx_to_coords(flat);
+                        let mut out_coords = coords.clone();
+                        out_coords[norm_axis] = 0;
+
+                        if processed.contains(&out_coords) {
+                            continue;
+                        }
+                        processed.insert(out_coords.clone());
+
+                        let mut slice = Vec::with_capacity(axis_len);
+                        for k in 0..axis_len {
+                            let mut idx_coords = coords.clone();
+                            idx_coords[norm_axis] = k;
+                            let idx: usize = idx_coords
+                                .iter()
+                                .zip(strides.iter())
+                                .map(|(&c, &s)| c * s)
+                                .sum();
+                            if idx < self.values.len() {
+                                slice.push(self.values[idx]);
+                            }
+                        }
+                        out_values.push(compute_vector_norm(&slice, ord_val)?);
+                    }
+                }
+
+                Ok(Self {
+                    shape: out_shape,
+                    values: out_values,
+                    dtype: DType::F64,
+                    integer_sidecar: None,
+                })
+            }
+        }
+    }
+
+    /// Compute the matrix norm of a 2-D array (np.linalg.matrix_norm, NumPy 2.0+).
+    ///
+    /// This is the NumPy 2.0 API for matrix norms. The input must be 2-D.
+    ///
+    /// - `ord`: Norm order. Default is "fro" (Frobenius norm).
+    ///   - "fro" or None: Frobenius norm (sqrt of sum of squares)
+    ///   - "nuc": nuclear norm (sum of singular values)
+    ///   - 1: max column sum
+    ///   - -1: min column sum
+    ///   - 2: spectral norm (largest singular value)
+    ///   - -2: smallest singular value
+    ///   - inf: max row sum
+    ///   - -inf: min row sum
+    /// - `keepdims`: If true, output has shape (1, 1) instead of scalar.
+    pub fn matrix_norm(&self, ord: Option<&str>, keepdims: bool) -> Result<Self, UFuncError> {
+        if self.shape.len() != 2 {
+            return Err(UFuncError::Msg(
+                "matrix_norm: input must be a 2-D array".into(),
+            ));
+        }
+
+        let ord_str = ord.unwrap_or("fro");
+        let norm_val =
+            fnp_linalg::matrix_norm_nxn(&self.values, self.shape[0], self.shape[1], ord_str)
+                .map_err(|e| UFuncError::Msg(format!("{e}")))?;
+
+        let out_shape = if keepdims { vec![1, 1] } else { vec![] };
+
+        Ok(Self {
+            shape: out_shape,
+            values: vec![norm_val],
+            dtype: DType::F64,
+            integer_sidecar: None,
+        })
+    }
+
     /// Solve a linear system (np.linalg.lstsq) using least-squares.
     /// `self` is the coefficient matrix A, `b` is the RHS.
     /// Returns the least-squares solution x.
@@ -19609,6 +19780,41 @@ fn c_strides_elems(shape: &[usize]) -> Vec<usize> {
         strides[i] = strides[i + 1] * shape[i + 1];
     }
     strides
+}
+
+/// Compute vector norm with the given order.
+/// Handles: 0, 1, 2, inf, -inf, and arbitrary p-norms.
+fn compute_vector_norm(values: &[f64], ord: f64) -> Result<f64, UFuncError> {
+    if values.is_empty() {
+        return Ok(0.0);
+    }
+
+    if ord == 0.0 {
+        // Count of non-zero elements
+        Ok(values.iter().filter(|&&v| v != 0.0).count() as f64)
+    } else if ord == 1.0 {
+        // L1 norm: sum of absolute values
+        Ok(values.iter().map(|v| v.abs()).sum())
+    } else if ord == 2.0 {
+        // L2 norm: Euclidean norm
+        Ok(values.iter().map(|v| v * v).sum::<f64>().sqrt())
+    } else if ord == f64::INFINITY {
+        // Max absolute value
+        Ok(values
+            .iter()
+            .map(|v| v.abs())
+            .fold(f64::NEG_INFINITY, f64::max))
+    } else if ord == f64::NEG_INFINITY {
+        // Min absolute value
+        Ok(values
+            .iter()
+            .map(|v| v.abs())
+            .fold(f64::INFINITY, f64::min))
+    } else {
+        // General p-norm: (sum |x_i|^p)^(1/p)
+        let sum: f64 = values.iter().map(|v| v.abs().powf(ord)).sum();
+        Ok(sum.powf(1.0 / ord))
+    }
 }
 
 fn checked_window_total(view_total: usize, window_total: usize) -> Result<usize, UFuncError> {
@@ -47597,5 +47803,102 @@ mod tests {
         let arr = StringArray::new(vec![2], vec!["hello".into(), "world".into()]).unwrap();
         let r = arr.slice(None, None, Some(-2));
         assert_eq!(r.values, vec!["olh", "drw"]);
+    }
+
+    #[test]
+    fn vector_norm_l2_default() {
+        // np.linalg.vector_norm([1, 2, 3]) = sqrt(1 + 4 + 9) = sqrt(14)
+        let arr = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let r = arr.vector_norm(None, None, false).unwrap();
+        assert_eq!(r.shape(), &[]);
+        assert!((r.values()[0] - 14.0_f64.sqrt()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn vector_norm_l1() {
+        // np.linalg.vector_norm([1, -2, 3], ord=1) = 1 + 2 + 3 = 6
+        let arr = UFuncArray::new(vec![3], vec![1.0, -2.0, 3.0], DType::F64).unwrap();
+        let r = arr.vector_norm(Some(1.0), None, false).unwrap();
+        assert_eq!(r.shape(), &[]);
+        assert!((r.values()[0] - 6.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn vector_norm_inf() {
+        // np.linalg.vector_norm([1, -2, 3], ord=inf) = max(|1|, |2|, |3|) = 3
+        let arr = UFuncArray::new(vec![3], vec![1.0, -2.0, 3.0], DType::F64).unwrap();
+        let r = arr.vector_norm(Some(f64::INFINITY), None, false).unwrap();
+        assert_eq!(r.shape(), &[]);
+        assert!((r.values()[0] - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn vector_norm_neg_inf() {
+        // np.linalg.vector_norm([1, -2, 3], ord=-inf) = min(|1|, |2|, |3|) = 1
+        let arr = UFuncArray::new(vec![3], vec![1.0, -2.0, 3.0], DType::F64).unwrap();
+        let r = arr.vector_norm(Some(f64::NEG_INFINITY), None, false).unwrap();
+        assert_eq!(r.shape(), &[]);
+        assert!((r.values()[0] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn vector_norm_ord0_count_nonzero() {
+        // np.linalg.vector_norm([1, 0, 3, 0, 5], ord=0) = 3 (count of non-zeros)
+        let arr = UFuncArray::new(vec![5], vec![1.0, 0.0, 3.0, 0.0, 5.0], DType::F64).unwrap();
+        let r = arr.vector_norm(Some(0.0), None, false).unwrap();
+        assert_eq!(r.shape(), &[]);
+        assert!((r.values()[0] - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn vector_norm_keepdims() {
+        // np.linalg.vector_norm([1, 2, 3], keepdims=True) has shape (1,)
+        let arr = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let r = arr.vector_norm(None, None, true).unwrap();
+        assert_eq!(r.shape(), &[1]);
+        assert!((r.values()[0] - 14.0_f64.sqrt()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn matrix_norm_frobenius_default() {
+        // np.linalg.matrix_norm([[1, 2], [3, 4]]) = sqrt(1 + 4 + 9 + 16) = sqrt(30)
+        let arr = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let r = arr.matrix_norm(None, false).unwrap();
+        assert_eq!(r.shape(), &[]);
+        assert!((r.values()[0] - 30.0_f64.sqrt()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn matrix_norm_1_max_col_sum() {
+        // np.linalg.matrix_norm([[1, 2], [3, 4]], ord=1) = max(|1|+|3|, |2|+|4|) = max(4, 6) = 6
+        let arr = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let r = arr.matrix_norm(Some("1"), false).unwrap();
+        assert_eq!(r.shape(), &[]);
+        assert!((r.values()[0] - 6.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn matrix_norm_inf_max_row_sum() {
+        // np.linalg.matrix_norm([[1, 2], [3, 4]], ord=inf) = max(|1|+|2|, |3|+|4|) = max(3, 7) = 7
+        let arr = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let r = arr.matrix_norm(Some("inf"), false).unwrap();
+        assert_eq!(r.shape(), &[]);
+        assert!((r.values()[0] - 7.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn matrix_norm_keepdims() {
+        // np.linalg.matrix_norm([[1, 2], [3, 4]], keepdims=True) has shape (1, 1)
+        let arr = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let r = arr.matrix_norm(None, true).unwrap();
+        assert_eq!(r.shape(), &[1, 1]);
+        assert!((r.values()[0] - 30.0_f64.sqrt()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn matrix_norm_rejects_1d() {
+        // matrix_norm requires 2-D input
+        let arr = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        assert!(arr.matrix_norm(None, false).is_err());
     }
 }
