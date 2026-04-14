@@ -1328,7 +1328,8 @@ pub fn write_npz_bytes_with_compression(
 ///
 /// Supports uncompressed STORE (method 0) and DEFLATE-compressed (method 8)
 /// entries. Each entry must decode to a valid `.npy` file.
-pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
+/// `allow_pickle` controls whether object dtype payloads are permitted.
+pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, IOError> {
     if data.len() < 22 {
         return Err(IOError::NpzArchiveContractViolation(
             "npz: data too short for a ZIP archive",
@@ -1605,7 +1606,7 @@ pub fn read_npz_bytes(data: &[u8]) -> Result<Vec<NpzEntry>, IOError> {
             ));
         }
 
-        let array = read_npy_bytes(&npy_bytes, false)?;
+        let array = read_npy_bytes(&npy_bytes, allow_pickle)?;
 
         // Strip .npy suffix from name for user convenience
         let clean_name = file_name
@@ -2850,8 +2851,9 @@ pub type NpzLoadedEntry = (String, Vec<usize>, Vec<f64>, IOSupportedDType);
 /// High-level load for NPZ archives (np.load equivalent for .npz).
 ///
 /// Returns a vector of `NpzLoadedEntry` tuples.
-pub fn load_npz(data: &[u8]) -> Result<Vec<NpzLoadedEntry>, IOError> {
-    let entries = read_npz_bytes(data)?;
+/// `allow_pickle` controls whether object dtype payloads are permitted.
+pub fn load_npz(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzLoadedEntry>, IOError> {
+    let entries = read_npz_bytes(data, allow_pickle)?;
     let mut results = Vec::with_capacity(entries.len());
     for entry in entries {
         let dtype = entry.array.header.descr;
@@ -3621,6 +3623,17 @@ pub fn load_structured(data: &[u8]) -> Result<StructuredNpyData, IOError> {
 
     let body = &data[header_end..];
     let expected_records = element_count(&shape)?;
+    let record_size = descriptor.record_size()?;
+    let expected_bytes = expected_records
+        .checked_mul(record_size)
+        .ok_or(IOError::ReadPayloadIncomplete(
+            "structured payload byte count overflowed",
+        ))?;
+    if body.len() != expected_bytes {
+        return Err(IOError::ReadPayloadIncomplete(
+            "structured payload bytes must match expected record footprint",
+        ));
+    }
     let mut result = fromfile_structured(body, &descriptor, Some(expected_records))?;
     result.shape = shape;
     Ok(result)
@@ -4886,6 +4899,66 @@ mod tests {
         buf
     }
 
+    fn build_single_store_npz(name: &str, payload: &[u8]) -> Vec<u8> {
+        let fname_bytes = name.as_bytes();
+        let fname_len = u16::try_from(fname_bytes.len()).expect("fname len");
+        let size = u32::try_from(payload.len()).expect("payload size");
+        let crc = crc32_ieee(payload);
+
+        let mut buf = Vec::new();
+        // Local file header (30 bytes + filename)
+        buf.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // signature
+        buf.extend_from_slice(&20_u16.to_le_bytes()); // version needed (2.0)
+        buf.extend_from_slice(&0_u16.to_le_bytes()); // flags
+        buf.extend_from_slice(&0_u16.to_le_bytes()); // store
+        buf.extend_from_slice(&0_u16.to_le_bytes()); // mod time
+        buf.extend_from_slice(&0_u16.to_le_bytes()); // mod date
+        buf.extend_from_slice(&crc.to_le_bytes()); // crc-32
+        buf.extend_from_slice(&size.to_le_bytes());
+        buf.extend_from_slice(&size.to_le_bytes());
+        buf.extend_from_slice(&fname_len.to_le_bytes());
+        buf.extend_from_slice(&0_u16.to_le_bytes()); // extra field len
+        buf.extend_from_slice(fname_bytes);
+        buf.extend_from_slice(payload);
+
+        let cd_offset = u32::try_from(buf.len()).expect("cd offset");
+        let mut central = Vec::new();
+        // Central directory entry (46 bytes + filename)
+        central.extend_from_slice(&[0x50, 0x4B, 0x01, 0x02]); // signature
+        central.extend_from_slice(&20_u16.to_le_bytes()); // version made by
+        central.extend_from_slice(&20_u16.to_le_bytes()); // version needed
+        central.extend_from_slice(&0_u16.to_le_bytes()); // flags
+        central.extend_from_slice(&0_u16.to_le_bytes()); // store
+        central.extend_from_slice(&0_u16.to_le_bytes()); // mod time
+        central.extend_from_slice(&0_u16.to_le_bytes()); // mod date
+        central.extend_from_slice(&crc.to_le_bytes());
+        central.extend_from_slice(&size.to_le_bytes());
+        central.extend_from_slice(&size.to_le_bytes());
+        central.extend_from_slice(&fname_len.to_le_bytes());
+        central.extend_from_slice(&0_u16.to_le_bytes()); // extra field len
+        central.extend_from_slice(&0_u16.to_le_bytes()); // comment len
+        central.extend_from_slice(&0_u16.to_le_bytes()); // disk number
+        central.extend_from_slice(&0_u16.to_le_bytes()); // internal attrs
+        central.extend_from_slice(&0_u32.to_le_bytes()); // external attrs
+        central.extend_from_slice(&0_u32.to_le_bytes()); // local header offset
+        central.extend_from_slice(fname_bytes);
+
+        let cd_size = u32::try_from(central.len()).expect("cd size");
+        buf.extend_from_slice(&central);
+
+        // End of central directory record (22 bytes)
+        buf.extend_from_slice(&[0x50, 0x4B, 0x05, 0x06]); // signature
+        buf.extend_from_slice(&0_u16.to_le_bytes()); // disk number
+        buf.extend_from_slice(&0_u16.to_le_bytes()); // disk with CD
+        buf.extend_from_slice(&1_u16.to_le_bytes()); // entries on disk
+        buf.extend_from_slice(&1_u16.to_le_bytes()); // total entries
+        buf.extend_from_slice(&cd_size.to_le_bytes()); // CD size
+        buf.extend_from_slice(&cd_offset.to_le_bytes()); // CD offset
+        buf.extend_from_slice(&0_u16.to_le_bytes()); // comment length
+
+        buf
+    }
+
     // ── NPZ tests ──
 
     #[test]
@@ -4903,7 +4976,7 @@ mod tests {
         // Verify it starts with ZIP magic
         assert_eq!(&npz[..4], &NPZ_MAGIC_PREFIX);
 
-        let entries = read_npz_bytes(&npz).expect("read npz");
+        let entries = read_npz_bytes(&npz, false).expect("read npz");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "arr0");
         assert_eq!(entries[0].array.header.shape, vec![3]);
@@ -4933,7 +5006,7 @@ mod tests {
             .collect();
 
         let npz = write_npz_bytes(&[("x", &h1, &p1), ("matrix", &h2, &p2)]).expect("write npz");
-        let entries = read_npz_bytes(&npz).expect("read npz");
+        let entries = read_npz_bytes(&npz, false).expect("read npz");
 
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name, "x");
@@ -4963,7 +5036,7 @@ mod tests {
         )
         .expect("write deflate npz");
 
-        let entries = read_npz_bytes(&npz).expect("read deflate npz");
+        let entries = read_npz_bytes(&npz, false).expect("read deflate npz");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "arr0");
         assert_eq!(entries[0].array.header.descr, IOSupportedDType::F64);
@@ -4992,7 +5065,7 @@ mod tests {
         npz[cd_pos + 10] = 1;
         npz[cd_pos + 11] = 0;
 
-        let err = read_npz_bytes(&npz).expect_err("unsupported compression must be rejected");
+        let err = read_npz_bytes(&npz, false).expect_err("unsupported compression must be rejected");
         assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
     }
 
@@ -5017,7 +5090,8 @@ mod tests {
         assert!(data_start < npz.len(), "expected deflate payload bytes");
         npz[data_start] ^= 0xFF;
 
-        let err = read_npz_bytes(&npz).expect_err("corrupted deflate payload must fail");
+        let err =
+            read_npz_bytes(&npz, false).expect_err("corrupted deflate payload must fail");
         assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
     }
 
@@ -5044,7 +5118,7 @@ mod tests {
         let declared = u32::try_from(npy_data.len()).expect("declared size");
         let npz = build_single_deflate_npz("arr0.npy", &compressed, crc, declared);
 
-        let err = read_npz_bytes(&npz).expect_err("extra bytes must be rejected");
+        let err = read_npz_bytes(&npz, false).expect_err("extra bytes must be rejected");
         assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
     }
 
@@ -5095,7 +5169,7 @@ mod tests {
         };
         let p = vec![1u8, 0, 1];
         let npz = write_npz_bytes(&[("flags", &h, &p)]).expect("write");
-        let entries = read_npz_bytes(&npz).expect("read");
+        let entries = read_npz_bytes(&npz, false).expect("read");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].array.header.descr, IOSupportedDType::Bool);
         assert_eq!(entries[0].array.payload, vec![1, 0, 1].into());
@@ -5112,7 +5186,7 @@ mod tests {
         let npz = write_npz_bytes(&[("a", &h, &p)]).expect("write");
         // Truncate
         let truncated = &npz[..npz.len() / 2];
-        assert!(read_npz_bytes(truncated).is_err());
+        assert!(read_npz_bytes(truncated, false).is_err());
     }
 
     #[test]
@@ -5125,7 +5199,8 @@ mod tests {
         let p: Vec<u8> = 1.0_f64.to_le_bytes().to_vec();
         let mut npz = write_npz_bytes(&[("a", &h, &p)]).expect("write");
         npz.extend(std::iter::repeat_n(0u8, 70_000));
-        let err = read_npz_bytes(&npz).expect_err("oversized trailing data should fail");
+        let err =
+            read_npz_bytes(&npz, false).expect_err("oversized trailing data should fail");
         assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
     }
 
@@ -5152,12 +5227,34 @@ mod tests {
         npz[cd_pos + 20..cd_pos + 24].copy_from_slice(&new_size_u32.to_le_bytes());
         npz[cd_pos + 24..cd_pos + 28].copy_from_slice(&new_size_u32.to_le_bytes());
 
-        let err = read_npz_bytes(&npz).expect_err("overlapping entry must be rejected");
+        let err =
+            read_npz_bytes(&npz, false).expect_err("overlapping entry must be rejected");
         assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
         assert!(
             err.to_string().contains("central directory"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn npz_object_payload_requires_allow_pickle() {
+        let header = NpyHeader {
+            shape: vec![1],
+            fortran_order: false,
+            descr: IOSupportedDType::Object,
+        };
+        let payload = vec![0x80, 0x05, 0x4B, 0x01, 0x2E];
+        let npy = write_npy_bytes(&header, &payload, true).expect("write npy");
+        let npz = build_single_store_npz("obj.npy", &npy);
+
+        let err = read_npz_bytes(&npz, false).expect_err("pickle policy should reject");
+        assert_eq!(err.reason_code(), "io_pickle_policy_violation");
+
+        let entries = read_npz_bytes(&npz, true).expect("allow_pickle read");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "obj");
+        assert_eq!(entries[0].array.header.descr, IOSupportedDType::Object);
+        assert_eq!(entries[0].array.payload, payload.into());
     }
 
     // ── fromfile / tofile tests ──
@@ -5500,7 +5597,7 @@ mod tests {
             ("y", &[2], &[4.0, 5.0], IOSupportedDType::F64),
         ];
         let bytes = savez(&entries).unwrap();
-        let loaded = load_npz(&bytes).unwrap();
+        let loaded = load_npz(&bytes, false).unwrap();
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].0, "x");
         assert_eq!(loaded[0].1, vec![3]);
@@ -5518,7 +5615,7 @@ mod tests {
             IOSupportedDType::F64,
         )];
         let bytes = savez_compressed(&entries).unwrap();
-        let loaded = load_npz(&bytes).unwrap();
+        let loaded = load_npz(&bytes, false).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].0, "arr");
         assert_eq!(loaded[0].2, vec![10.0, 20.0, 30.0, 40.0]);
@@ -6082,6 +6179,19 @@ mod tests {
         let payload = make_manual_npy_payload(header_literal, &body);
         let data = load_structured(&payload).expect("extra keys must be allowed");
         assert_eq!(data.shape, vec![1]);
+    }
+
+    #[test]
+    fn load_structured_rejects_truncated_payload() {
+        let desc = make_test_descriptor();
+        let col_x: Vec<u8> = [1.5f64.to_le_bytes(), 2.5f64.to_le_bytes()].concat();
+        let col_y: Vec<u8> = [10i32.to_le_bytes(), 20i32.to_le_bytes()].concat();
+        let mut npy_bytes =
+            save_structured(&[2], &desc, &[col_x, col_y]).expect("save structured");
+        npy_bytes.pop(); // truncate payload
+
+        let err = load_structured(&npy_bytes).expect_err("truncated payload must fail");
+        assert_eq!(err.reason_code(), "io_read_payload_incomplete");
     }
 
     // ── Memmap (file-backed array) tests ──
