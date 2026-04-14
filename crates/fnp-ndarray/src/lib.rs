@@ -1334,6 +1334,17 @@ mod tests {
     }
 
     #[test]
+    fn fix_unknown_dim_empty_array_with_known_product() {
+        // reshape(-1, 3) with 0 elements: known_product = 3, so -1 is inferred
+        // as 0/3 = 0. This matches NumPy behavior.
+        let r = fix_unknown_dimension(&[-1, 3], 0).unwrap();
+        assert_eq!(r, vec![0, 3]);
+        // Same for first dimension
+        let r2 = fix_unknown_dimension(&[3, -1], 0).unwrap();
+        assert_eq!(r2, vec![3, 0]);
+    }
+
+    #[test]
     fn fix_unknown_dim_scalar() {
         // 1 element → reshape() = scalar
         let r = fix_unknown_dimension(&[], 1).unwrap();

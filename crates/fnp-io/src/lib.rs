@@ -1347,11 +1347,12 @@ pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, 
     }
     if data[..4] == NPZ_EMPTY_PREFIX {
         let comment_len = u16::from_le_bytes([data[20], data[21]]) as usize;
-        let expected_len = 22usize
-            .checked_add(comment_len)
-            .ok_or(IOError::NpzArchiveContractViolation(
-                "npz: empty archive comment length overflow",
-            ))?;
+        let expected_len =
+            22usize
+                .checked_add(comment_len)
+                .ok_or(IOError::NpzArchiveContractViolation(
+                    "npz: empty archive comment length overflow",
+                ))?;
         if data.len() != expected_len {
             return Err(IOError::NpzArchiveContractViolation(
                 "npz: empty archive length mismatch",
@@ -3680,11 +3681,12 @@ pub fn load_structured(data: &[u8]) -> Result<StructuredNpyData, IOError> {
     let body = &data[header_end..];
     let expected_records = element_count(&shape)?;
     let record_size = descriptor.record_size()?;
-    let expected_bytes = expected_records
-        .checked_mul(record_size)
-        .ok_or(IOError::ReadPayloadIncomplete(
-            "structured payload byte count overflowed",
-        ))?;
+    let expected_bytes =
+        expected_records
+            .checked_mul(record_size)
+            .ok_or(IOError::ReadPayloadIncomplete(
+                "structured payload byte count overflowed",
+            ))?;
     if body.len() != expected_bytes {
         return Err(IOError::ReadPayloadIncomplete(
             "structured payload bytes must match expected record footprint",
@@ -3864,15 +3866,15 @@ mod tests {
         IORuntimeMode, IOSupportedDType, LoadBytes, LoadDispatch, MAX_ARCHIVE_MEMBERS,
         MAX_DISPATCH_RETRIES, MAX_HEADER_BYTES, MAX_MEMMAP_VALIDATION_RETRIES, MemmapMode,
         NPY_MAGIC_PREFIX, NPZ_EMPTY_PREFIX, NPZ_MAGIC_PREFIX, NpyHeader, NpzCompression,
-        SaveTxtConfig, StructuredIODescriptor,
-        StructuredIOField, classify_load_dispatch, crc32_ieee, encode_npy_header_bytes,
-        enforce_pickle_policy, fromfile, fromfile_complex, fromfile_strings, fromfile_structured,
-        fromfile_text, fromfile_text_with_budget, fromstring, genfromtxt, genfromtxt_full, load,
-        load_auto, load_complex, load_npz, load_strings, load_structured, loadtxt, loadtxt_unpack,
-        loadtxt_usecols, memmap, memmap_npy, parse_structured_descr, read_npy_bytes,
-        read_npz_bytes, save, save_complex, save_strings, save_structured, savetxt, savez,
-        savez_compressed, synthesize_npz_member_names, tobytes, tofile, tofile_complex,
-        tofile_strings, tofile_structured, tofile_text, tostring, validate_descriptor_roundtrip,
+        SaveTxtConfig, StructuredIODescriptor, StructuredIOField, classify_load_dispatch,
+        crc32_ieee, encode_npy_header_bytes, enforce_pickle_policy, fromfile, fromfile_complex,
+        fromfile_strings, fromfile_structured, fromfile_text, fromfile_text_with_budget,
+        fromstring, genfromtxt, genfromtxt_full, load, load_auto, load_complex, load_npz,
+        load_strings, load_structured, loadtxt, loadtxt_unpack, loadtxt_usecols, memmap,
+        memmap_npy, parse_structured_descr, read_npy_bytes, read_npz_bytes, save, save_complex,
+        save_strings, save_structured, savetxt, savez, savez_compressed,
+        synthesize_npz_member_names, tobytes, tofile, tofile_complex, tofile_strings,
+        tofile_structured, tofile_text, tostring, validate_descriptor_roundtrip,
         validate_header_schema, validate_io_policy_metadata, validate_magic_version,
         validate_memmap_contract, validate_npz_archive_budget, validate_read_payload,
         validate_write_contract, write_npy_bytes, write_npy_bytes_with_version, write_npy_preamble,
@@ -4242,8 +4244,7 @@ mod tests {
         let npz = classify_load_dispatch(&NPZ_MAGIC_PREFIX, false).expect("npz branch");
         assert_eq!(npz, LoadDispatch::Npz);
 
-        let npz_empty =
-            classify_load_dispatch(&NPZ_EMPTY_PREFIX, false).expect("npz empty branch");
+        let npz_empty = classify_load_dispatch(&NPZ_EMPTY_PREFIX, false).expect("npz empty branch");
         assert_eq!(npz_empty, LoadDispatch::Npz);
 
         let npy = classify_load_dispatch(&NPY_MAGIC_PREFIX, false).expect("npy branch");
@@ -4267,8 +4268,7 @@ mod tests {
             other => panic!("expected npy dispatch, got {other:?}"),
         }
 
-        let npz = savez(&[("arr", &[2], &[1.0, 2.0], IOSupportedDType::F64)])
-            .expect("savez npz");
+        let npz = savez(&[("arr", &[2], &[1.0, 2.0], IOSupportedDType::F64)]).expect("savez npz");
         match load_auto(&npz, false).expect("auto npz") {
             LoadBytes::Npz(entries) => {
                 assert_eq!(entries.len(), 1);
@@ -5177,7 +5177,8 @@ mod tests {
         npz[cd_pos + 10] = 1;
         npz[cd_pos + 11] = 0;
 
-        let err = read_npz_bytes(&npz, false).expect_err("unsupported compression must be rejected");
+        let err =
+            read_npz_bytes(&npz, false).expect_err("unsupported compression must be rejected");
         assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
     }
 
@@ -5202,8 +5203,7 @@ mod tests {
         assert!(data_start < npz.len(), "expected deflate payload bytes");
         npz[data_start] ^= 0xFF;
 
-        let err =
-            read_npz_bytes(&npz, false).expect_err("corrupted deflate payload must fail");
+        let err = read_npz_bytes(&npz, false).expect_err("corrupted deflate payload must fail");
         assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
     }
 
@@ -5311,8 +5311,7 @@ mod tests {
         let p: Vec<u8> = 1.0_f64.to_le_bytes().to_vec();
         let mut npz = write_npz_bytes(&[("a", &h, &p)]).expect("write");
         npz.extend(std::iter::repeat_n(0u8, 70_000));
-        let err =
-            read_npz_bytes(&npz, false).expect_err("oversized trailing data should fail");
+        let err = read_npz_bytes(&npz, false).expect_err("oversized trailing data should fail");
         assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
     }
 
@@ -5339,8 +5338,7 @@ mod tests {
         npz[cd_pos + 20..cd_pos + 24].copy_from_slice(&new_size_u32.to_le_bytes());
         npz[cd_pos + 24..cd_pos + 28].copy_from_slice(&new_size_u32.to_le_bytes());
 
-        let err =
-            read_npz_bytes(&npz, false).expect_err("overlapping entry must be rejected");
+        let err = read_npz_bytes(&npz, false).expect_err("overlapping entry must be rejected");
         assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
         assert!(
             err.to_string().contains("central directory"),
@@ -6316,8 +6314,7 @@ mod tests {
         let desc = make_test_descriptor();
         let col_x: Vec<u8> = [1.5f64.to_le_bytes(), 2.5f64.to_le_bytes()].concat();
         let col_y: Vec<u8> = [10i32.to_le_bytes(), 20i32.to_le_bytes()].concat();
-        let mut npy_bytes =
-            save_structured(&[2], &desc, &[col_x, col_y]).expect("save structured");
+        let mut npy_bytes = save_structured(&[2], &desc, &[col_x, col_y]).expect("save structured");
         npy_bytes.pop(); // truncate payload
 
         let err = load_structured(&npy_bytes).expect_err("truncated payload must fail");

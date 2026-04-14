@@ -5796,7 +5796,9 @@ mod tests {
         let mut rng = test_generator();
         let colors = [10, 20, 30];
         let nsample = 15;
-        let results = rng.multivariate_hypergeometric(&colors, nsample, 100).unwrap();
+        let results = rng
+            .multivariate_hypergeometric(&colors, nsample, 100)
+            .unwrap();
         assert_eq!(results.len(), 100);
         for sample in &results {
             assert_eq!(sample.len(), 3);
@@ -5813,7 +5815,9 @@ mod tests {
         let mut rng = test_generator();
         let colors = [5, 10, 3];
         let nsample = 8;
-        let results = rng.multivariate_hypergeometric(&colors, nsample, 200).unwrap();
+        let results = rng
+            .multivariate_hypergeometric(&colors, nsample, 200)
+            .unwrap();
         for sample in &results {
             for (i, &drawn) in sample.iter().enumerate() {
                 assert!(
@@ -5831,7 +5835,9 @@ mod tests {
         let mut rng = test_generator();
         let colors = [3, 2, 1];
         let nsample = 6; // = total
-        let results = rng.multivariate_hypergeometric(&colors, nsample, 10).unwrap();
+        let results = rng
+            .multivariate_hypergeometric(&colors, nsample, 10)
+            .unwrap();
         for sample in &results {
             assert_eq!(sample, &[3, 2, 1]);
         }
@@ -5841,9 +5847,10 @@ mod tests {
     fn multivariate_hypergeometric_rejects_large_total() {
         let mut rng = test_generator();
         // sum(colors) >= 10^9 should fail
-        assert!(rng
-            .multivariate_hypergeometric(&[500_000_000, 500_000_000], 5, 1)
-            .is_err());
+        assert!(
+            rng.multivariate_hypergeometric(&[500_000_000, 500_000_000], 5, 1)
+                .is_err()
+        );
         // nsample > total should fail
         assert!(rng.multivariate_hypergeometric(&[5, 10], 20, 1).is_err());
         // valid parameters should succeed

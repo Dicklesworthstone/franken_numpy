@@ -848,6 +848,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hardened_neg_infinity_risk_full_validates() {
+        assert_eq!(
+            decide_compatibility(
+                RuntimeMode::Hardened,
+                CompatibilityClass::KnownCompatible,
+                f64::NEG_INFINITY,
+                0.5,
+            ),
+            DecisionAction::FullValidate
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Wire decoding edge cases
     // -----------------------------------------------------------------------

@@ -12,8 +12,8 @@ pub mod workflow_scenarios;
 use crate::ufunc_differential::{UFuncInputCase, UFuncOperation};
 use fnp_dtype::{DType, can_cast, can_cast_lossless, promote};
 use fnp_io::{
-    IOError, IOSupportedDType, LoadDispatch, MemmapMode, NPY_MAGIC_PREFIX,
-    classify_load_dispatch, load_structured, validate_descriptor_roundtrip, validate_header_schema,
+    IOError, IOSupportedDType, LoadDispatch, MemmapMode, NPY_MAGIC_PREFIX, classify_load_dispatch,
+    load_structured, validate_descriptor_roundtrip, validate_header_schema,
     validate_io_policy_metadata, validate_magic_version, validate_memmap_contract,
     validate_npz_archive_budget, validate_read_payload,
 };
@@ -39,14 +39,14 @@ use fnp_runtime::{
     decide_and_record_with_context, decide_compatibility_from_wire,
 };
 use fnp_ufunc::{
-    BinaryOp, MAError, MaskedArray, StringArray, UFuncArray, UFuncError, busday_count,
+    BinaryOp, MAError, MaskedArray, StringArray, UFuncArray, UFuncError, UnaryOp, busday_count,
     busday_offset, cheb2poly, chebadd, chebder, chebdiv, chebfit, chebfromroots, chebint, chebmul,
-    chebroots, chebsub, chebval, herm2poly, hermadd, hermder, hermdiv, herme2poly, hermeadd,
-    hermediv, hermefromroots, hermemul, hermeroots, hermesub, hermeval, hermfromroots, hermint,
-    hermmul, hermroots, hermsub, hermval, is_busday, lag2poly, lagadd, lagder, lagdiv,
-    lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, leg2poly, legadd, legder, legdiv,
-    legfit, legfromroots, legint, legmul, legroots, legsub, legval, poly2cheb, poly2herm,
-    poly2herme, poly2lag, poly2leg,
+    chebroots, chebsub, chebval, copysign, herm2poly, hermadd, hermder, hermdiv, herme2poly,
+    hermeadd, hermediv, hermefromroots, hermemul, hermeroots, hermesub, hermeval, hermfromroots,
+    hermint, hermmul, hermroots, hermsub, hermval, hypot, is_busday, lag2poly, lagadd, lagder,
+    lagdiv, lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, ldexp, leg2poly, legadd, legder,
+    legdiv, legfit, legfromroots, legint, legmul, legroots, legsub, legval, logaddexp, logaddexp2,
+    nextafter, poly2cheb, poly2herm, poly2herme, poly2lag, poly2leg, signbit, spacing,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -906,6 +906,43 @@ struct SignalDifferentialCase {
     axis: Option<isize>,
     #[serde(default)]
     keepdims: bool,
+    #[serde(default)]
+    tensordot_axes: Option<usize>,
+    #[serde(default)]
+    axes: Vec<usize>,
+    // roll, flip, rot90, pad fields
+    #[serde(default)]
+    shift: isize,
+    #[serde(default)]
+    k: i32,
+    #[serde(default)]
+    pad_width: Vec<(usize, usize)>,
+    #[serde(default)]
+    constant: f64,
+    // clip fields
+    #[serde(default)]
+    min_val: Option<f64>,
+    #[serde(default)]
+    max_val: Option<f64>,
+    // einsum subscripts
+    #[serde(default)]
+    subscripts: String,
+    // histogram bins
+    #[serde(default)]
+    bins: Option<usize>,
+    // isclose tolerances
+    #[serde(default)]
+    rtol: Option<f64>,
+    #[serde(default)]
+    atol: Option<f64>,
+    // linspace/geomspace parameters
+    #[serde(default)]
+    start: Option<f64>,
+    #[serde(default)]
+    stop: Option<f64>,
+    // reshape parameters
+    #[serde(default)]
+    reshape_shape: Vec<isize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5929,7 +5966,10 @@ pub fn run_signal_differential_suite(config: &HarnessConfig) -> Result<SuiteRepo
             }
             Err(err) => {
                 if expected_error.is_empty() {
-                    let rendered = format!("{}: expected success but got error '{}'", case.id, err.message);
+                    let rendered = format!(
+                        "{}: expected success but got error '{}'",
+                        case.id, err.message
+                    );
                     report.failures.push(rendered.clone());
                     mismatches.push(SignalDifferentialMismatch {
                         fixture_id: case.id,
@@ -6042,7 +6082,8 @@ fn execute_signal_differential_operation(
             // Scale by 1/spacing (gradient values are inversely proportional to spacing)
             if (spacing - 1.0).abs() > 1e-12 {
                 let inv_spacing = 1.0 / spacing;
-                let scaled_values: Vec<f64> = result.values().iter().map(|v| v * inv_spacing).collect();
+                let scaled_values: Vec<f64> =
+                    result.values().iter().map(|v| v * inv_spacing).collect();
                 Ok(SignalOperationOutcome::Array {
                     shape: result.shape().to_vec(),
                     values: scaled_values,
@@ -6059,7 +6100,10 @@ fn execute_signal_differential_operation(
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
             let n = case.n.unwrap_or(1);
-            let result = input.diff(n, None).map_err(map_ufunc_error_to_signal_suite)?;
+            let axis = case.axis;
+            let result = input
+                .diff(n, axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             Ok(to_outcome(result))
         }
         "ediff1d" => {
@@ -6079,7 +6123,9 @@ fn execute_signal_differential_operation(
             } else {
                 Some(case.to_end.as_slice())
             };
-            let result = input.ediff1d_ext(to_begin, to_end).map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .ediff1d_ext(to_begin, to_end)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             Ok(to_outcome(result))
         }
         "cross" => {
@@ -6089,12 +6135,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let b = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let b = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = a.cross(&b).map_err(map_ufunc_error_to_signal_suite)?;
             Ok(to_outcome(result))
         }
@@ -6106,7 +6148,9 @@ fn execute_signal_differential_operation(
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
             let dx = case.dx.unwrap_or(1.0);
-            let result = input.trapezoid(dx, None).map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .trapezoid(dx, None)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             Ok(to_outcome(result))
         }
         "vector_norm" => {
@@ -6143,6 +6187,2200 @@ fn execute_signal_differential_operation(
                 .map_err(map_ufunc_error_to_signal_suite)?;
             Ok(to_outcome(result))
         }
+        "matvec" => {
+            let matrix = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let vector =
+                UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                    .map_err(map_ufunc_error_to_signal_suite)?;
+            let result =
+                UFuncArray::matvec(&matrix, &vector).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "vecmat" => {
+            let vector = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let matrix =
+                UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                    .map_err(map_ufunc_error_to_signal_suite)?;
+            let result =
+                UFuncArray::vecmat(&vector, &matrix).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "vecdot" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .vecdot(&rhs, case.axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "outer" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs.outer(&rhs).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "inner" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs.inner(&rhs).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "kron" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs.kron(&rhs).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "dot" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs.dot(&rhs).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "tensordot" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let axes = case.tensordot_axes.unwrap_or(1);
+            let result = lhs
+                .tensordot(&rhs, axes)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "matmul" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs.matmul(&rhs).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "permute_dims" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .permute_dims(&case.axes)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "concat" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let axis = case.axis.unwrap_or(0);
+            let result =
+                UFuncArray::concat(&[&lhs, &rhs], axis).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "roll" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .roll(case.shift, case.axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "flip" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .flip(case.axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "rot90" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .rot90(case.k)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "convolve" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let kernel =
+                UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                    .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .convolve(&kernel)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "correlate" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let kernel =
+                UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                    .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .correlate(&kernel)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "pad" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .pad(&case.pad_width, case.constant)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "cumsum" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .cumsum(case.axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "cumprod" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .cumprod(case.axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "searchsorted" => {
+            let sorted_arr = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let values =
+                UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                    .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = sorted_arr
+                .searchsorted(&values, None, None)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            // searchsorted returns I64, convert to F64 for test comparison
+            let result_f64 = result.astype(DType::F64);
+            Ok(to_outcome(result_f64))
+        }
+        "digitize" => {
+            let values = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let bins = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = values
+                .digitize(&bins)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            // digitize returns I64, convert to F64 for test comparison
+            let result_f64 = result.astype(DType::F64);
+            Ok(to_outcome(result_f64))
+        }
+        "clip" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let min_val = case.min_val.unwrap_or(f64::NEG_INFINITY);
+            let max_val = case.max_val.unwrap_or(f64::INFINITY);
+            let result = input.clip(min_val, max_val);
+            Ok(to_outcome(result))
+        }
+        "floor_divide" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::FloorDivide)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "fmod" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::Fmod)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "copysign" => {
+            let x1 = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let x2 = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = crate::copysign(&x1, &x2).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "signbit" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = crate::signbit(&input).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "hypot" => {
+            let x1 = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let x2 = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = crate::hypot(&x1, &x2).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "logaddexp" => {
+            let x1 = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let x2 = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = crate::logaddexp(&x1, &x2).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "logaddexp2" => {
+            let x1 = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let x2 = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = crate::logaddexp2(&x1, &x2).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "sort" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .sort(case.axis, None)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "argsort" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .argsort(case.axis, None)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            // argsort returns indices as I64, convert to F64 for comparison
+            let result_f64 = result.astype(DType::F64);
+            Ok(to_outcome(result_f64))
+        }
+        "unique" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input.unique();
+            Ok(to_outcome(result))
+        }
+        "any" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .any(case.axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "all" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .all(case.axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "nonzero" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input.nonzero();
+            // nonzero returns indices as I64, convert to F64 for comparison
+            let result_f64 = result.astype(DType::F64);
+            Ok(to_outcome(result_f64))
+        }
+        "median" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .median(case.axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "trace" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            // k field is used for trace offset (reusing rot90's k field)
+            let result = input
+                .trace(case.k as i64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "diag" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .diag(case.k as i64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "triu" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .triu(case.k as i64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "tril" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .tril(case.k as i64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "reduce_sum" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .reduce_sum(case.axis, case.keepdims)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "reduce_mean" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .reduce_mean(case.axis, case.keepdims)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "reduce_min" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .reduce_min(case.axis, case.keepdims)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "reduce_max" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .reduce_max(case.axis, case.keepdims)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "flatten" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input.flatten();
+            Ok(to_outcome(result))
+        }
+        "reshape" => {
+            if case.reshape_shape.is_empty() {
+                return Err(SignalSuiteError::new(
+                    "signal_input_contract_violation",
+                    "reshape requires reshape_shape",
+                ));
+            }
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .reshape(&case.reshape_shape)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "transpose" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .transpose(None)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "squeeze" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .squeeze(case.axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "expand_dims" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let ax = case.axis.unwrap_or(0);
+            let result = input
+                .expand_dims(ax)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "swapaxes" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            // Use k for axis1, axis for axis2
+            let result = input
+                .swapaxes(case.k as isize, case.axis.unwrap_or(1))
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "tile" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            // Use rhs_shape as reps
+            let result = input
+                .tile(&case.rhs_shape)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "repeat" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let repeats = case.n.unwrap_or(2);
+            let result = input
+                .repeat(repeats, case.axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "ravel" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input.ravel();
+            Ok(to_outcome(result))
+        }
+        "count_nonzero" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .count_nonzero(case.axis, case.keepdims)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "argmax" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .reduce_argmax(case.axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            // argmax returns indices as I64, convert to F64 for comparison
+            let result_f64 = result.astype(DType::F64);
+            Ok(to_outcome(result_f64))
+        }
+        "argmin" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .reduce_argmin(case.axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            // argmin returns indices as I64, convert to F64 for comparison
+            let result_f64 = result.astype(DType::F64);
+            Ok(to_outcome(result_f64))
+        }
+        "reduce_prod" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .reduce_prod(case.axis, case.keepdims)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "ptp" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .ptp(case.axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "reduce_var" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let ddof = case.n.unwrap_or(0);
+            let result = input
+                .reduce_var(case.axis, case.keepdims, ddof)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "reduce_std" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let ddof = case.n.unwrap_or(0);
+            let result = input
+                .reduce_std(case.axis, case.keepdims, ddof)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "where_select" => {
+            let condition = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let x = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            // Use expected_values as the third array (y values)
+            // We'll repurpose axes field for y_shape
+            let y_shape: Vec<usize> = if !case.axes.is_empty() {
+                case.axes.clone()
+            } else {
+                case.rhs_shape.clone()
+            };
+            // y values: use constant field repeated, or zeros
+            let y_values: Vec<f64> = if case.constant != 0.0 {
+                vec![case.constant; y_shape.iter().product()]
+            } else {
+                vec![0.0; y_shape.iter().product()]
+            };
+            let y = UFuncArray::new(y_shape, y_values, DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = UFuncArray::where_select(&condition, &x, &y)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "percentile" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let q = case.beta.unwrap_or(50.0);
+            let result = input
+                .percentile(q, case.axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "interp" => {
+            let x = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let xp = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            // For fp, use axes field to store shape, and use linear values 0..len as fp
+            let fp_len: usize = case.axes.iter().product();
+            let fp_values: Vec<f64> = (0..fp_len).map(|i| i as f64).collect();
+            let fp = UFuncArray::new(case.axes.clone(), fp_values, DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let result =
+                UFuncArray::interp(&x, &xp, &fp).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "bincount" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input.bincount().map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "einsum" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            // For single-operand einsum (trace, diagonal, etc.)
+            let result = if case.rhs_values.is_empty() {
+                UFuncArray::einsum(&case.subscripts, &[&input])
+                    .map_err(map_ufunc_error_to_signal_suite)?
+            } else {
+                let rhs =
+                    UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                        .map_err(map_ufunc_error_to_signal_suite)?;
+                UFuncArray::einsum(&case.subscripts, &[&input, &rhs])
+                    .map_err(map_ufunc_error_to_signal_suite)?
+            };
+            Ok(to_outcome(result))
+        }
+        "cov" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input.cov().map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "corrcoef" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input.corrcoef().map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "histogram" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let bins = case.bins.unwrap_or(10);
+            let (counts, _edges) = input
+                .histogram(bins)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(counts))
+        }
+        "nansum" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .nansum(case.axis, case.keepdims)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "nanmean" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .nanmean(case.axis, case.keepdims)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "nanmin" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .nanmin(case.axis, case.keepdims)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "nanmax" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .nanmax(case.axis, case.keepdims)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "union1d" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs.union1d(&rhs);
+            Ok(to_outcome(result))
+        }
+        "intersect1d" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs.intersect1d(&rhs);
+            Ok(to_outcome(result))
+        }
+        "setdiff1d" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs.setdiff1d(&rhs);
+            Ok(to_outcome(result))
+        }
+        "average" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let weights = if !case.rhs_values.is_empty() {
+                Some(
+                    UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                        .map_err(map_ufunc_error_to_signal_suite)?,
+                )
+            } else {
+                None
+            };
+            let result = input
+                .average(weights.as_ref(), case.axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "meshgrid" => {
+            let x = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let y = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let grids = UFuncArray::meshgrid(&[x, y]).map_err(map_ufunc_error_to_signal_suite)?;
+            // Return concatenated result for testing
+            if grids.len() >= 2 {
+                let flat0 = grids[0].flatten();
+                let flat1 = grids[1].flatten();
+                let combined_values: Vec<f64> = flat0
+                    .values()
+                    .iter()
+                    .chain(flat1.values().iter())
+                    .copied()
+                    .collect();
+                let combined =
+                    UFuncArray::new(vec![combined_values.len()], combined_values, DType::F64)
+                        .map_err(map_ufunc_error_to_signal_suite)?;
+                Ok(to_outcome(combined))
+            } else {
+                Ok(to_outcome(grids[0].clone()))
+            }
+        }
+        "hstack" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result =
+                UFuncArray::hstack(&[lhs, rhs]).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "vstack" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result =
+                UFuncArray::vstack(&[lhs, rhs]).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "dstack" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result =
+                UFuncArray::dstack(&[lhs, rhs]).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "stack" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let axis = case.axis.unwrap_or(0);
+            let result = UFuncArray::stack(&[&lhs, &rhs], axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "isclose" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rtol = case.rtol.unwrap_or(1e-5);
+            let atol = case.atol.unwrap_or(1e-8);
+            let result = lhs
+                .isclose(&rhs, rtol, atol)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "take" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let indices: Vec<i64> = case.rhs_values.iter().map(|&v| v as i64).collect();
+            let result = input
+                .take(&indices, case.axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "linspace" => {
+            let start = case.start.unwrap_or(0.0);
+            let stop = case.stop.unwrap_or(1.0);
+            let num = case.n.unwrap_or(50);
+            let result = UFuncArray::linspace(start, stop, num, DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "atleast_1d" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.atleast_1d()))
+        }
+        "atleast_2d" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.atleast_2d()))
+        }
+        "atleast_3d" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.atleast_3d()))
+        }
+        "broadcast_to" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input
+                .broadcast_to(&case.expected_shape)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "compress" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let condition: Vec<bool> = case.rhs_values.iter().map(|&v| v != 0.0).collect();
+            let result = input
+                .compress(&condition, case.axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "delete" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let indices: Vec<usize> = case.rhs_values.iter().map(|&v| v as usize).collect();
+            let result = input
+                .delete(&indices, case.axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "insert" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let values = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let index = case.n.unwrap_or(0);
+            let result = input
+                .insert(index, &values, case.axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "geomspace" => {
+            let start = case.start.unwrap_or(1.0);
+            let stop = case.stop.unwrap_or(100.0);
+            let num = case.n.unwrap_or(10);
+            let result = UFuncArray::geomspace(start, stop, num, DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "logspace" => {
+            let start = case.start.unwrap_or(0.0);
+            let stop = case.stop.unwrap_or(2.0);
+            let num = case.n.unwrap_or(10);
+            let base = case.beta.unwrap_or(10.0);
+            let result = UFuncArray::logspace(start, stop, num, base, DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "eye" => {
+            let n = case.n.unwrap_or(3);
+            let m = case.bins.unwrap_or(n);
+            let k = case.k as i64;
+            let result = UFuncArray::eye(n, Some(m), k, DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "identity" => {
+            let n = case.n.unwrap_or(3);
+            let result = UFuncArray::identity(n, DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "full" => {
+            let fill = case.constant;
+            let result = UFuncArray::full(case.expected_shape.clone(), fill, DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "zeros_like" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(UFuncArray::zeros_like(&input)))
+        }
+        "ones_like" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(UFuncArray::ones_like(&input)))
+        }
+        "full_like" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(UFuncArray::full_like(&input, case.constant)))
+        }
+        "arange" => {
+            let start = case.start.unwrap_or(0.0);
+            let stop = case.stop.unwrap_or(10.0);
+            let step = case.spacing.unwrap_or(1.0);
+            let result = UFuncArray::arange(start, stop, step, DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "abs" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Abs)))
+        }
+        "negative" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Negative)))
+        }
+        "positive" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Positive)))
+        }
+        "sign" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Sign)))
+        }
+        "sqrt" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Sqrt)))
+        }
+        "square" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Square)))
+        }
+        "cbrt" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Cbrt)))
+        }
+        "reciprocal" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Reciprocal)))
+        }
+        "exp" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Exp)))
+        }
+        "exp2" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Exp2)))
+        }
+        "expm1" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Expm1)))
+        }
+        "log" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Log)))
+        }
+        "log2" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Log2)))
+        }
+        "log10" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Log10)))
+        }
+        "log1p" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Log1p)))
+        }
+        "sin" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Sin)))
+        }
+        "cos" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Cos)))
+        }
+        "tan" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Tan)))
+        }
+        "arcsin" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Arcsin)))
+        }
+        "arccos" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Arccos)))
+        }
+        "arctan" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Arctan)))
+        }
+        "sinh" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Sinh)))
+        }
+        "cosh" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Cosh)))
+        }
+        "tanh" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Tanh)))
+        }
+        "floor" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Floor)))
+        }
+        "ceil" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Ceil)))
+        }
+        "trunc" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Trunc)))
+        }
+        "rint" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Round)))
+        }
+        "degrees" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Degrees)))
+        }
+        "radians" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Radians)))
+        }
+        "arcsinh" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Arcsinh)))
+        }
+        "arccosh" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Arccosh)))
+        }
+        "arctanh" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Arctanh)))
+        }
+        "isnan" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Isnan)))
+        }
+        "isinf" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Isinf)))
+        }
+        "isfinite" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Isfinite)))
+        }
+        // Binary comparison operations
+        "greater" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::Greater)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "greater_equal" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::GreaterEqual)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "less" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::Less)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "less_equal" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::LessEqual)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "equal" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::Equal)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "not_equal" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::NotEqual)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        // Elementwise min/max
+        "maximum" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::Maximum)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "minimum" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::Minimum)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "fmax" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::Fmax)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "fmin" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::Fmin)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        // Power and modulo
+        "power" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::Power)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "mod" | "remainder" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::Remainder)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        // Logical operations
+        "logical_and" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::LogicalAnd)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "logical_or" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::LogicalOr)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "logical_xor" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::LogicalXor)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "logical_not" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::LogicalNot)))
+        }
+        // Statistics
+        "quantile" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let q = case.constant;
+            let result = input
+                .quantile(q, case.axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "nanvar" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let ddof = case.n.unwrap_or(0);
+            let result = input
+                .nanvar(case.axis, case.keepdims, ddof)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "nanstd" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let ddof = case.n.unwrap_or(0);
+            let result = input
+                .nanstd(case.axis, case.keepdims, ddof)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        // Special math functions
+        "ldexp" => {
+            let mantissa = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let exponent = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = ldexp(&mantissa, &exponent).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "nextafter" => {
+            let x1 = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let x2 = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = nextafter(&x1, &x2).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        // Trigonometric binary
+        "arctan2" => {
+            let y = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let x = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = y
+                .elementwise_binary(&x, BinaryOp::Arctan2)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        // Bitwise operations (require integer dtype)
+        "bitwise_and" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::I64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::I64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::BitwiseAnd)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "bitwise_or" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::I64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::I64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::BitwiseOr)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "bitwise_xor" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::I64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::I64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::BitwiseXor)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "left_shift" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::I64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::I64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::LeftShift)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "right_shift" => {
+            let lhs = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::I64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::I64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::RightShift)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        // Array manipulation
+        "append" => {
+            let arr = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let values = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = arr
+                .append(&values, case.axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        // Set operations
+        "isin" => {
+            let elements = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let test_elements = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = elements.isin(&test_elements, false);
+            Ok(to_outcome(result))
+        }
+        // Linear algebra scalars
+        "det" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input.det().map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(SignalOperationOutcome::Array {
+                shape: vec![],
+                values: vec![result],
+            })
+        }
+        "inv" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = input.inv().map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "solve" => {
+            let a = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let b = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = a.solve(&b).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        // Additional math functions
+        "sinc" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.sinc()))
+        }
+        "heaviside" => {
+            let x1 = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let x2 = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = x1
+                .elementwise_binary(&x2, BinaryOp::Heaviside)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "spacing" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = spacing(&input).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "invert" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::I64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(input.elementwise_unary(UnaryOp::Invert)))
+        }
         op => Err(SignalSuiteError::new(
             "signal_unknown_operation",
             format!("unknown signal operation: {op}"),
@@ -6170,8 +8408,16 @@ fn validate_signal_differential_expectation(
                         values.len()
                     ));
                 }
-                let abs_tol = if case.abs_tol > 0.0 { case.abs_tol } else { 1e-9 };
-                let rel_tol = if case.rel_tol > 0.0 { case.rel_tol } else { 1e-9 };
+                let abs_tol = if case.abs_tol > 0.0 {
+                    case.abs_tol
+                } else {
+                    1e-9
+                };
+                let rel_tol = if case.rel_tol > 0.0 {
+                    case.rel_tol
+                } else {
+                    1e-9
+                };
                 if !approx_equal_values(&case.expected_values, values, abs_tol, rel_tol) {
                     return Err(format!(
                         "value mismatch expected={:?} actual={values:?}",
@@ -10908,10 +13154,7 @@ fn build_structured_header_literal(
     format!("{{{}, }}", parts.join(", "))
 }
 
-fn write_manual_npy_preamble(
-    buffer: &mut Vec<u8>,
-    header_len: usize,
-) -> Result<(), IoSuiteError> {
+fn write_manual_npy_preamble(buffer: &mut Vec<u8>, header_len: usize) -> Result<(), IoSuiteError> {
     if header_len == 0 {
         return Err(IoSuiteError::new(
             "io_header_schema_invalid",

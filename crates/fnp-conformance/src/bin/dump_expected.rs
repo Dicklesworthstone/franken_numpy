@@ -40,7 +40,10 @@ fn main() {
     println!("zipf: {:?}", g.zipf(2.0, 5).unwrap());
 
     let mut g = Generator::from_pcg64_dxsm(seed).unwrap();
-    println!("hypergeometric: {:?}", g.hypergeometric(10, 20, 5, 5).unwrap());
+    println!(
+        "hypergeometric: {:?}",
+        g.hypergeometric(10, 20, 5, 5).unwrap()
+    );
 
     let mut g = Generator::from_pcg64_dxsm(seed).unwrap();
     println!(

@@ -3142,6 +3142,102 @@ impl UFuncArray {
         Self::from_values_with_dtype_lossy(Vec::new(), vec![value], dtype)
     }
 
+    /// Create a 1D array from a vector of values.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let arr = UFuncArray::from_vec(vec![1.0, 2.0, 3.0]);
+    /// assert_eq!(arr.shape(), &[3]);
+    /// ```
+    #[must_use]
+    pub fn from_vec(values: Vec<f64>) -> Self {
+        let len = values.len();
+        Self::from_values_with_dtype_lossy(vec![len], values, DType::F64)
+    }
+
+    /// Create a 2D array from nested vectors.
+    ///
+    /// Returns an error if rows have inconsistent lengths.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let arr = UFuncArray::from_2d(vec![
+    ///     vec![1.0, 2.0, 3.0],
+    ///     vec![4.0, 5.0, 6.0],
+    /// ])?;
+    /// assert_eq!(arr.shape(), &[2, 3]);
+    /// ```
+    pub fn from_2d(rows: Vec<Vec<f64>>) -> Result<Self, UFuncError> {
+        if rows.is_empty() {
+            return Ok(Self::from_values_with_dtype_lossy(
+                vec![0, 0],
+                vec![],
+                DType::F64,
+            ));
+        }
+        let n_rows = rows.len();
+        let n_cols = rows[0].len();
+        for (i, row) in rows.iter().enumerate() {
+            if row.len() != n_cols {
+                return Err(UFuncError::Msg(format!(
+                    "from_2d: row {} has length {} but expected {}",
+                    i,
+                    row.len(),
+                    n_cols
+                )));
+            }
+        }
+        let values: Vec<f64> = rows.into_iter().flatten().collect();
+        Ok(Self::from_values_with_dtype_lossy(
+            vec![n_rows, n_cols],
+            values,
+            DType::F64,
+        ))
+    }
+
+    /// Create a 3D array from triply-nested vectors.
+    ///
+    /// Returns an error if slices have inconsistent shapes.
+    pub fn from_3d(slices: Vec<Vec<Vec<f64>>>) -> Result<Self, UFuncError> {
+        if slices.is_empty() {
+            return Ok(Self::from_values_with_dtype_lossy(
+                vec![0, 0, 0],
+                vec![],
+                DType::F64,
+            ));
+        }
+        let n0 = slices.len();
+        let n1 = slices[0].len();
+        let n2 = if n1 > 0 { slices[0][0].len() } else { 0 };
+        for (i, slice) in slices.iter().enumerate() {
+            if slice.len() != n1 {
+                return Err(UFuncError::Msg(format!(
+                    "from_3d: slice {} has {} rows but expected {}",
+                    i,
+                    slice.len(),
+                    n1
+                )));
+            }
+            for (j, row) in slice.iter().enumerate() {
+                if row.len() != n2 {
+                    return Err(UFuncError::Msg(format!(
+                        "from_3d: slice {}[{}] has length {} but expected {}",
+                        i,
+                        j,
+                        row.len(),
+                        n2
+                    )));
+                }
+            }
+        }
+        let values: Vec<f64> = slices.into_iter().flatten().flatten().collect();
+        Ok(Self::from_values_with_dtype_lossy(
+            vec![n0, n1, n2],
+            values,
+            DType::F64,
+        ))
+    }
+
     // ── Array creation functions ──────────────────────────────────────
 
     /// Create an array filled with zeros.
@@ -5858,6 +5954,16 @@ impl UFuncArray {
         self.transpose(Some(&axes))
     }
 
+    /// Permute the axes of an array (np.permute_dims, NumPy 2.0).
+    ///
+    /// This is a clearer-named alias for `transpose(axes)`. The axes parameter
+    /// specifies the new order of dimensions.
+    ///
+    /// Example: `permute_dims([2, 0, 1])` on shape (3, 4, 5) gives shape (5, 3, 4).
+    pub fn permute_dims(&self, axes: &[usize]) -> Result<Self, UFuncError> {
+        self.transpose(Some(axes))
+    }
+
     /// Return a 1-D copy of the array. Matches `numpy.ndarray.flatten()`.
     #[must_use]
     pub fn flatten(&self) -> Self {
@@ -7821,6 +7927,13 @@ impl UFuncArray {
         Self::concatenate(&refs, 0)
     }
 
+    /// Alias for concatenate (np.concat, NumPy 2.0).
+    ///
+    /// NumPy 2.0 added `np.concat` as a shorter alias for `np.concatenate`.
+    pub fn concat(arrays: &[&Self], axis: isize) -> Result<Self, UFuncError> {
+        Self::concatenate(arrays, axis)
+    }
+
     /// Stack with dtype and casting control (`np.stack(dtype=, casting=)`).
     pub fn stack_with_dtype(
         arrays: &[&Self],
@@ -8605,12 +8718,7 @@ impl UFuncArray {
     /// For N-D arrays, extracts diagonal along `axis1` and `axis2`, then sums
     /// along the diagonal axis. Output shape is the input shape with `axis1`
     /// and `axis2` removed.
-    pub fn trace_axis(
-        &self,
-        offset: i64,
-        axis1: isize,
-        axis2: isize,
-    ) -> Result<Self, UFuncError> {
+    pub fn trace_axis(&self, offset: i64, axis1: isize, axis2: isize) -> Result<Self, UFuncError> {
         let ndim = self.shape.len();
         if ndim < 2 {
             return Err(UFuncError::Msg(
@@ -8829,6 +8937,58 @@ impl UFuncArray {
         } else {
             Self::from_values_with_dtype(out_shape, values, dtype)
         }
+    }
+
+    /// Matrix-vector product (`np.matvec`, NumPy 2.0+).
+    ///
+    /// Computes the product of a matrix and a vector along their last dimensions.
+    /// The matrix's last axis (columns) contracts with the vector.
+    ///
+    /// - `matrix` shape: (..., m, n)
+    /// - `vector` shape: (..., n)
+    /// - output shape: (..., m)
+    ///
+    /// Batch dimensions broadcast together.
+    pub fn matvec(matrix: &Self, vector: &Self) -> Result<Self, UFuncError> {
+        if matrix.shape.len() < 2 {
+            return Err(UFuncError::Msg(
+                "matvec: matrix must have at least 2 dimensions".to_string(),
+            ));
+        }
+        if vector.shape.is_empty() {
+            return Err(UFuncError::Msg(
+                "matvec: vector must have at least 1 dimension".to_string(),
+            ));
+        }
+        // Delegate to matmul: (..., m, n) @ (..., n) -> (..., m)
+        // matmul already handles the 1D right-hand side case correctly
+        matrix.matmul(vector)
+    }
+
+    /// Vector-matrix product (`np.vecmat`, NumPy 2.0+).
+    ///
+    /// Computes the product of a vector and a matrix along their last dimensions.
+    /// The vector contracts with the matrix's second-to-last axis (rows).
+    ///
+    /// - `vector` shape: (..., n)
+    /// - `matrix` shape: (..., n, m)
+    /// - output shape: (..., m)
+    ///
+    /// Batch dimensions broadcast together.
+    pub fn vecmat(vector: &Self, matrix: &Self) -> Result<Self, UFuncError> {
+        if vector.shape.is_empty() {
+            return Err(UFuncError::Msg(
+                "vecmat: vector must have at least 1 dimension".to_string(),
+            ));
+        }
+        if matrix.shape.len() < 2 {
+            return Err(UFuncError::Msg(
+                "vecmat: matrix must have at least 2 dimensions".to_string(),
+            ));
+        }
+        // Delegate to matmul: (..., n) @ (..., n, m) -> (..., m)
+        // matmul already handles the 1D left-hand side case correctly
+        vector.matmul(matrix)
     }
 
     /// Cross product of two vectors (`np.cross`).
@@ -18934,6 +19094,51 @@ impl UFuncArray {
         fnp_dtype::can_cast(from, to, casting)
     }
 
+    /// Check if a dtype belongs to a specified kind (np.isdtype, NumPy 2.0).
+    ///
+    /// Supported kinds:
+    /// - "bool": boolean type
+    /// - "signed integer": I8, I16, I32, I64
+    /// - "unsigned integer": U8, U16, U32, U64
+    /// - "integral": bool + signed + unsigned integers
+    /// - "real floating": F16, F32, F64
+    /// - "complex floating": Complex64, Complex128
+    /// - "inexact": real floating + complex floating
+    /// - "numeric": integral + inexact
+    #[must_use]
+    pub fn isdtype(dtype: DType, kind: &str) -> bool {
+        match kind {
+            "bool" => matches!(dtype, DType::Bool),
+            "signed integer" => matches!(dtype, DType::I8 | DType::I16 | DType::I32 | DType::I64),
+            "unsigned integer" => {
+                matches!(dtype, DType::U8 | DType::U16 | DType::U32 | DType::U64)
+            }
+            "integral" => matches!(
+                dtype,
+                DType::Bool
+                    | DType::I8
+                    | DType::I16
+                    | DType::I32
+                    | DType::I64
+                    | DType::U8
+                    | DType::U16
+                    | DType::U32
+                    | DType::U64
+            ),
+            "real floating" => matches!(dtype, DType::F16 | DType::F32 | DType::F64),
+            "complex floating" => matches!(dtype, DType::Complex64 | DType::Complex128),
+            "inexact" => matches!(
+                dtype,
+                DType::F16 | DType::F32 | DType::F64 | DType::Complex64 | DType::Complex128
+            ),
+            "numeric" => !matches!(
+                dtype,
+                DType::Str | DType::DateTime64 | DType::TimeDelta64 | DType::Structured
+            ),
+            _ => false,
+        }
+    }
+
     /// Find the common type among arrays (np.common_type).
     ///
     /// Returns the broadest dtype that can hold all input dtypes.
@@ -19808,10 +20013,7 @@ fn compute_vector_norm(values: &[f64], ord: f64) -> Result<f64, UFuncError> {
             .fold(f64::NEG_INFINITY, f64::max))
     } else if ord == f64::NEG_INFINITY {
         // Min absolute value
-        Ok(values
-            .iter()
-            .map(|v| v.abs())
-            .fold(f64::INFINITY, f64::min))
+        Ok(values.iter().map(|v| v.abs()).fold(f64::INFINITY, f64::min))
     } else {
         // General p-norm: (sum |x_i|^p)^(1/p)
         let sum: f64 = values.iter().map(|v| v.abs().powf(ord)).sum();
@@ -26097,9 +26299,7 @@ pub fn spacing(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
         .values
         .iter()
         .map(|&v| {
-            if v.is_nan() {
-                f64::NAN
-            } else if v.is_infinite() {
+            if v.is_nan() || v.is_infinite() {
                 f64::NAN
             } else if v == 0.0 {
                 // Smallest positive subnormal
@@ -26278,6 +26478,138 @@ pub fn bitwise_count(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
         .collect();
     Ok(UFuncArray {
         shape: x.shape.clone(),
+        values,
+        dtype: DType::F64,
+        integer_sidecar: None,
+    })
+}
+
+/// Return x1 with the sign of x2, element-wise.
+///
+/// NumPy equivalent: `np.copysign(x1, x2)`.
+pub fn copysign(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
+    let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
+    let values: Vec<f64> = x1_bc
+        .values
+        .iter()
+        .zip(x2_bc.values.iter())
+        .map(|(&a, &b)| a.copysign(b))
+        .collect();
+    Ok(UFuncArray {
+        shape: x1_bc.shape.clone(),
+        values,
+        dtype: DType::F64,
+        integer_sidecar: None,
+    })
+}
+
+/// Returns element-wise True where signbit is set (i.e., value is negative).
+///
+/// NumPy equivalent: `np.signbit(x)`.
+pub fn signbit(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let values: Vec<f64> = x
+        .values
+        .iter()
+        .map(|&v| if v.is_sign_negative() { 1.0 } else { 0.0 })
+        .collect();
+    Ok(UFuncArray {
+        shape: x.shape.clone(),
+        values,
+        dtype: DType::Bool,
+        integer_sidecar: None,
+    })
+}
+
+/// Given the "legs" of a right triangle, return its hypotenuse.
+///
+/// Equivalent to `sqrt(x1**2 + x2**2)`, element-wise.
+/// NumPy equivalent: `np.hypot(x1, x2)`.
+pub fn hypot(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
+    let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
+    let values: Vec<f64> = x1_bc
+        .values
+        .iter()
+        .zip(x2_bc.values.iter())
+        .map(|(&a, &b)| a.hypot(b))
+        .collect();
+    Ok(UFuncArray {
+        shape: x1_bc.shape.clone(),
+        values,
+        dtype: DType::F64,
+        integer_sidecar: None,
+    })
+}
+
+/// Logarithm of the sum of exponentiations: log(exp(x1) + exp(x2)).
+///
+/// This is computed in a numerically stable way to avoid overflow.
+/// NumPy equivalent: `np.logaddexp(x1, x2)`.
+pub fn logaddexp(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
+    let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
+    let values: Vec<f64> = x1_bc
+        .values
+        .iter()
+        .zip(x2_bc.values.iter())
+        .map(|(&a, &b)| {
+            // log(exp(a) + exp(b)) = max(a,b) + log(1 + exp(-|a-b|))
+            // This avoids overflow when a or b is large
+            if a.is_nan() || b.is_nan() {
+                f64::NAN
+            } else if a == f64::NEG_INFINITY {
+                b
+            } else if b == f64::NEG_INFINITY {
+                a
+            } else if a == f64::INFINITY || b == f64::INFINITY {
+                f64::INFINITY
+            } else {
+                let max = a.max(b);
+                let min = a.min(b);
+                max + (1.0 + (min - max).exp()).ln()
+            }
+        })
+        .collect();
+    Ok(UFuncArray {
+        shape: x1_bc.shape.clone(),
+        values,
+        dtype: DType::F64,
+        integer_sidecar: None,
+    })
+}
+
+/// Logarithm base 2 of the sum of exponentiations: log2(2**x1 + 2**x2).
+///
+/// This is computed in a numerically stable way to avoid overflow.
+/// NumPy equivalent: `np.logaddexp2(x1, x2)`.
+pub fn logaddexp2(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
+    let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
+    let ln2 = std::f64::consts::LN_2;
+    let values: Vec<f64> = x1_bc
+        .values
+        .iter()
+        .zip(x2_bc.values.iter())
+        .map(|(&a, &b)| {
+            // log2(2**a + 2**b) = max(a,b) + log2(1 + 2**(min-max))
+            if a.is_nan() || b.is_nan() {
+                f64::NAN
+            } else if a == f64::NEG_INFINITY {
+                b
+            } else if b == f64::NEG_INFINITY {
+                a
+            } else if a == f64::INFINITY || b == f64::INFINITY {
+                f64::INFINITY
+            } else {
+                let max = a.max(b);
+                let min = a.min(b);
+                max + (1.0 + ((min - max) * ln2).exp()).log2()
+            }
+        })
+        .collect();
+    Ok(UFuncArray {
+        shape: x1_bc.shape.clone(),
         values,
         dtype: DType::F64,
         integer_sidecar: None,
@@ -27583,22 +27915,23 @@ mod tests {
         UFuncArray, UFuncArrayView, UFuncError, UFuncLogRecord, UFuncLoopRegistry,
         UFuncRuntimeMode, UnaryOp, bitwise_count, busday_count, busday_offset, cheb2poly, chebadd,
         chebder, chebdiv, chebfit, chebfromroots, chebint, chebmul, chebroots, chebsub, chebval,
-        checked_window_total, divmod_arrays, errstate, financial_fv, financial_ipmt, financial_irr,
-        financial_mirr, financial_nper, financial_npv, financial_pmt, financial_ppmt, financial_pv,
-        financial_rate, frexp, gcd_arrays, geterr, herm2poly, hermadd, hermder, hermdiv, ldexp,
-        herme2poly, hermeadd, hermediv, hermefromroots, hermemul, hermeroots, hermesub, hermeval,
-        hermfit, hermfromroots, hermint, hermmul, hermroots, hermsub, hermval, is_busday, isneginf,
-        isposinf, lag2poly, lagadd, lagder, lagdiv, lagfit, lagfromroots, lagint, lagmul, lagroots,
-        lagsub, lagval, lcm_arrays, leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint,
-        legmul, legroots, legsub, legval, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or,
+        checked_window_total, copysign, divmod_arrays, errstate, financial_fv, financial_ipmt,
+        financial_irr, financial_mirr, financial_nper, financial_npv, financial_pmt,
+        financial_ppmt, financial_pv, financial_rate, frexp, gcd_arrays, geterr, herm2poly,
+        hermadd, hermder, hermdiv, herme2poly, hermeadd, hermediv, hermefromroots, hermemul,
+        hermeroots, hermesub, hermeval, hermfit, hermfromroots, hermint, hermmul, hermroots,
+        hermsub, hermval, hypot, is_busday, isneginf, isposinf, lag2poly, lagadd, lagder, lagdiv,
+        lagfit, lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, lcm_arrays, ldexp,
+        leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub,
+        legval, logaddexp, logaddexp2, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or,
         mediate_ufunc_runtime_policy, modf, nextafter, normalize_fixed_signature_keywords,
         normalize_signature_keywords, pad_empty, pad_linear_ramp, pad_stat,
         parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch,
         plan_binary_dispatch_with_registry, plan_binary_dispatch_with_signature, poly2cheb,
         poly2herm, poly2herme, poly2lag, poly2leg, register_custom_loop, resolve_override_dispatch,
         scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log, scimath_log2, scimath_log10,
-        scimath_power, scimath_sqrt, seterr, seterr_state, seterrcall, sort_complex, spacing,
-        take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
+        scimath_power, scimath_sqrt, seterr, seterr_state, seterrcall, signbit, sort_complex,
+        spacing, take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
         validate_override_payload_class, where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
@@ -31568,6 +31901,107 @@ mod tests {
     }
 
     #[test]
+    fn permute_dims_basic() {
+        // permute_dims([2, 0, 1]) on shape (2, 3, 4) -> shape (4, 2, 3)
+        let arr = UFuncArray::new(
+            vec![2, 3, 4],
+            (0..24).map(|i| i as f64).collect(),
+            DType::F64,
+        )
+        .unwrap();
+        let out = arr.permute_dims(&[2, 0, 1]).unwrap();
+        assert_eq!(out.shape(), &[4, 2, 3]);
+    }
+
+    #[test]
+    fn permute_dims_identity() {
+        let arr =
+            UFuncArray::new(vec![2, 3], (0..6).map(|i| i as f64).collect(), DType::F64).unwrap();
+        let out = arr.permute_dims(&[0, 1]).unwrap();
+        assert_eq!(out.shape(), &[2, 3]);
+        assert_eq!(out.values(), arr.values());
+    }
+
+    #[test]
+    fn permute_dims_matches_transpose() {
+        let arr = UFuncArray::new(
+            vec![2, 3, 4],
+            (0..24).map(|i| i as f64).collect(),
+            DType::F64,
+        )
+        .unwrap();
+        let via_permute = arr.permute_dims(&[1, 2, 0]).unwrap();
+        let via_transpose = arr.transpose(Some(&[1, 2, 0])).unwrap();
+        assert_eq!(via_permute.shape(), via_transpose.shape());
+        assert_eq!(via_permute.values(), via_transpose.values());
+    }
+
+    #[test]
+    fn isdtype_bool() {
+        assert!(UFuncArray::isdtype(DType::Bool, "bool"));
+        assert!(!UFuncArray::isdtype(DType::I32, "bool"));
+    }
+
+    #[test]
+    fn isdtype_signed_integer() {
+        assert!(UFuncArray::isdtype(DType::I8, "signed integer"));
+        assert!(UFuncArray::isdtype(DType::I64, "signed integer"));
+        assert!(!UFuncArray::isdtype(DType::U32, "signed integer"));
+        assert!(!UFuncArray::isdtype(DType::F64, "signed integer"));
+    }
+
+    #[test]
+    fn isdtype_unsigned_integer() {
+        assert!(UFuncArray::isdtype(DType::U8, "unsigned integer"));
+        assert!(UFuncArray::isdtype(DType::U64, "unsigned integer"));
+        assert!(!UFuncArray::isdtype(DType::I32, "unsigned integer"));
+    }
+
+    #[test]
+    fn isdtype_integral() {
+        assert!(UFuncArray::isdtype(DType::Bool, "integral"));
+        assert!(UFuncArray::isdtype(DType::I32, "integral"));
+        assert!(UFuncArray::isdtype(DType::U64, "integral"));
+        assert!(!UFuncArray::isdtype(DType::F64, "integral"));
+    }
+
+    #[test]
+    fn isdtype_real_floating() {
+        assert!(UFuncArray::isdtype(DType::F32, "real floating"));
+        assert!(UFuncArray::isdtype(DType::F64, "real floating"));
+        assert!(!UFuncArray::isdtype(DType::Complex128, "real floating"));
+        assert!(!UFuncArray::isdtype(DType::I64, "real floating"));
+    }
+
+    #[test]
+    fn isdtype_complex_floating() {
+        assert!(UFuncArray::isdtype(DType::Complex64, "complex floating"));
+        assert!(UFuncArray::isdtype(DType::Complex128, "complex floating"));
+        assert!(!UFuncArray::isdtype(DType::F64, "complex floating"));
+    }
+
+    #[test]
+    fn isdtype_inexact() {
+        assert!(UFuncArray::isdtype(DType::F64, "inexact"));
+        assert!(UFuncArray::isdtype(DType::Complex128, "inexact"));
+        assert!(!UFuncArray::isdtype(DType::I32, "inexact"));
+    }
+
+    #[test]
+    fn isdtype_numeric() {
+        assert!(UFuncArray::isdtype(DType::I32, "numeric"));
+        assert!(UFuncArray::isdtype(DType::F64, "numeric"));
+        assert!(UFuncArray::isdtype(DType::Complex128, "numeric"));
+        assert!(UFuncArray::isdtype(DType::Bool, "numeric"));
+        assert!(!UFuncArray::isdtype(DType::Str, "numeric"));
+    }
+
+    #[test]
+    fn isdtype_unknown_kind() {
+        assert!(!UFuncArray::isdtype(DType::F64, "unknown_kind"));
+    }
+
+    #[test]
     fn cumulative_sum_is_cumsum() {
         let arr = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
         let cs = arr.cumsum(None).unwrap();
@@ -32074,6 +32508,16 @@ mod tests {
     }
 
     #[test]
+    fn concat_is_alias_for_concatenate() {
+        let a = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1, 2], vec![5.0, 6.0], DType::F64).unwrap();
+        let via_concatenate = UFuncArray::concatenate(&[&a, &b], 0).unwrap();
+        let via_concat = UFuncArray::concat(&[&a, &b], 0).unwrap();
+        assert_eq!(via_concatenate.shape(), via_concat.shape());
+        assert_eq!(via_concatenate.values(), via_concat.values());
+    }
+
+    #[test]
     fn concatenate_rejects_inexact_integer_sidecar_synthesis() {
         let invalid = UFuncArray::new(vec![1], vec![1.5], DType::I64).unwrap();
         let exact =
@@ -32413,6 +32857,61 @@ mod tests {
         assert_eq!(z.shape(), &[3, 2]);
         assert_eq!(z.values(), &[0.0; 6]);
         assert_eq!(z.dtype(), DType::I32);
+    }
+
+    #[test]
+    fn from_vec_creates_1d() {
+        let arr = UFuncArray::from_vec(vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(arr.shape(), &[4]);
+        assert_eq!(arr.values(), &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(arr.dtype(), DType::F64);
+    }
+
+    #[test]
+    fn from_vec_empty() {
+        let arr = UFuncArray::from_vec(vec![]);
+        assert_eq!(arr.shape(), &[0]);
+        assert!(arr.values().is_empty());
+    }
+
+    #[test]
+    fn from_2d_creates_matrix() {
+        let arr = UFuncArray::from_2d(vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]).unwrap();
+        assert_eq!(arr.shape(), &[2, 3]);
+        assert_eq!(arr.values(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn from_2d_empty() {
+        let arr = UFuncArray::from_2d(vec![]).unwrap();
+        assert_eq!(arr.shape(), &[0, 0]);
+        assert!(arr.values().is_empty());
+    }
+
+    #[test]
+    fn from_2d_ragged_fails() {
+        let result = UFuncArray::from_2d(vec![vec![1.0, 2.0], vec![3.0, 4.0, 5.0]]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_3d_creates_cube() {
+        let arr = UFuncArray::from_3d(vec![
+            vec![vec![1.0, 2.0], vec![3.0, 4.0]],
+            vec![vec![5.0, 6.0], vec![7.0, 8.0]],
+        ])
+        .unwrap();
+        assert_eq!(arr.shape(), &[2, 2, 2]);
+        assert_eq!(arr.values(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+    }
+
+    #[test]
+    fn from_3d_ragged_fails() {
+        let result = UFuncArray::from_3d(vec![
+            vec![vec![1.0, 2.0], vec![3.0, 4.0]],
+            vec![vec![5.0, 6.0, 7.0]], // wrong shape
+        ]);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -33322,8 +33821,12 @@ mod tests {
 
     #[test]
     fn trace_axis_2d_falls_back_to_simple_trace() {
-        let a = UFuncArray::new(vec![3, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], DType::F64)
-            .unwrap();
+        let a = UFuncArray::new(
+            vec![3, 3],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+            DType::F64,
+        )
+        .unwrap();
         let t = a.trace_axis(0, 0, 1).unwrap();
         assert_eq!(t.shape(), &[]);
         assert_eq!(t.values(), &[15.0]);
@@ -37375,6 +37878,87 @@ mod tests {
         let negative_axis = a.vecdot(&b, Some(-1)).unwrap();
         assert_eq!(default.shape(), negative_axis.shape());
         assert_eq!(default.values(), negative_axis.values());
+    }
+
+    #[test]
+    fn matvec_basic() {
+        // (2, 3) @ (3,) -> (2,)
+        // [[1, 2, 3], [4, 5, 6]] @ [1, 2, 3] = [1+4+9, 4+10+18] = [14, 32]
+        let m =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let v = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let r = UFuncArray::matvec(&m, &v).unwrap();
+        assert_eq!(r.shape(), &[2]);
+        assert_eq!(r.values(), &[14.0, 32.0]);
+    }
+
+    #[test]
+    fn matvec_batched() {
+        // (2, 2, 3) @ (3,) -> (2, 2) - batch of 2 matrices times same vector
+        let m = UFuncArray::new(
+            vec![2, 2, 3],
+            vec![
+                1.0, 0.0, 0.0, 0.0, 1.0, 0.0, // first 2x3 = [[1,0,0],[0,1,0]]
+                0.0, 0.0, 1.0, 1.0, 1.0, 1.0, // second 2x3 = [[0,0,1],[1,1,1]]
+            ],
+            DType::F64,
+        )
+        .unwrap();
+        let v = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let r = UFuncArray::matvec(&m, &v).unwrap();
+        assert_eq!(r.shape(), &[2, 2]);
+        // first mat: [1*1+0*2+0*3, 0*1+1*2+0*3] = [1, 2]
+        // second mat: [0*1+0*2+1*3, 1*1+1*2+1*3] = [3, 6]
+        assert_eq!(r.values(), &[1.0, 2.0, 3.0, 6.0]);
+    }
+
+    #[test]
+    fn vecmat_basic() {
+        // (3,) @ (3, 2) -> (2,)
+        // [1, 2, 3] @ [[1, 2], [3, 4], [5, 6]] = [1+6+15, 2+8+18] = [22, 28]
+        let v = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let m =
+            UFuncArray::new(vec![3, 2], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = UFuncArray::vecmat(&v, &m).unwrap();
+        assert_eq!(r.shape(), &[2]);
+        assert_eq!(r.values(), &[22.0, 28.0]);
+    }
+
+    #[test]
+    fn vecmat_batched() {
+        // (2, 3) @ (3, 2) -> broadcasts to (2, 2)
+        let v = UFuncArray::new(
+            vec![2, 3],
+            vec![
+                1.0, 0.0, 0.0, // first vector [1, 0, 0]
+                0.0, 1.0, 0.0, // second vector [0, 1, 0]
+            ],
+            DType::F64,
+        )
+        .unwrap();
+        let m =
+            UFuncArray::new(vec![3, 2], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = UFuncArray::vecmat(&v, &m).unwrap();
+        assert_eq!(r.shape(), &[2, 2]);
+        // first: [1,0,0] @ [[1,2],[3,4],[5,6]] = [1, 2]
+        // second: [0,1,0] @ [[1,2],[3,4],[5,6]] = [3, 4]
+        assert_eq!(r.values(), &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn matvec_dimension_error() {
+        // Matrix must have at least 2 dims
+        let v1 = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let v2 = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        assert!(UFuncArray::matvec(&v1, &v2).is_err());
+    }
+
+    #[test]
+    fn vecmat_dimension_error() {
+        // Matrix must have at least 2 dims
+        let v1 = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let v2 = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        assert!(UFuncArray::vecmat(&v1, &v2).is_err());
     }
 
     #[test]
@@ -42556,7 +43140,8 @@ mod tests {
 
     #[test]
     fn ldexp_inf() {
-        let m = UFuncArray::new(vec![2], vec![f64::INFINITY, f64::NEG_INFINITY], DType::F64).unwrap();
+        let m =
+            UFuncArray::new(vec![2], vec![f64::INFINITY, f64::NEG_INFINITY], DType::F64).unwrap();
         let e = UFuncArray::new(vec![2], vec![5.0, 5.0], DType::F64).unwrap();
         let result = ldexp(&m, &e).unwrap();
         assert!(result.values()[0].is_infinite() && result.values()[0] > 0.0);
@@ -43114,6 +43699,111 @@ mod tests {
         let out = bitwise_count(&arr).unwrap();
         assert_eq!(out.shape(), &[2, 2]);
         assert_eq!(out.values(), &[0.0, 2.0, 3.0, 1.0]);
+    }
+
+    // ── copysign tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn copysign_basic() {
+        let x1 = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let x2 = UFuncArray::new(vec![3], vec![-1.0, 1.0, -1.0], DType::F64).unwrap();
+        let out = copysign(&x1, &x2).unwrap();
+        assert_eq!(out.values(), &[-1.0, 2.0, -3.0]);
+    }
+
+    #[test]
+    fn copysign_negative_source() {
+        let x1 = UFuncArray::new(vec![2], vec![-5.0, -3.0], DType::F64).unwrap();
+        let x2 = UFuncArray::new(vec![2], vec![1.0, -1.0], DType::F64).unwrap();
+        let out = copysign(&x1, &x2).unwrap();
+        assert_eq!(out.values(), &[5.0, -3.0]);
+    }
+
+    #[test]
+    fn copysign_zero_sign() {
+        let x1 = UFuncArray::new(vec![1], vec![5.0], DType::F64).unwrap();
+        let x2 = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+        let out = copysign(&x1, &x2).unwrap();
+        assert_eq!(out.values(), &[5.0]); // +0.0 has positive sign
+    }
+
+    // ── signbit tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn signbit_basic() {
+        let x = UFuncArray::new(vec![4], vec![-1.0, 0.0, 1.0, -0.0], DType::F64).unwrap();
+        let out = signbit(&x).unwrap();
+        // -1.0 is negative, 0.0 is positive, 1.0 is positive, -0.0 is negative
+        assert_eq!(out.values(), &[1.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn signbit_infinity() {
+        let x =
+            UFuncArray::new(vec![2], vec![f64::INFINITY, f64::NEG_INFINITY], DType::F64).unwrap();
+        let out = signbit(&x).unwrap();
+        assert_eq!(out.values(), &[0.0, 1.0]);
+    }
+
+    // ── hypot tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn hypot_345() {
+        let x1 = UFuncArray::new(vec![1], vec![3.0], DType::F64).unwrap();
+        let x2 = UFuncArray::new(vec![1], vec![4.0], DType::F64).unwrap();
+        let out = hypot(&x1, &x2).unwrap();
+        assert!((out.values()[0] - 5.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn hypot_broadcast() {
+        let x1 = UFuncArray::new(vec![3], vec![3.0, 5.0, 8.0], DType::F64).unwrap();
+        let x2 = UFuncArray::new(vec![3], vec![4.0, 12.0, 15.0], DType::F64).unwrap();
+        let out = hypot(&x1, &x2).unwrap();
+        let expected = vec![5.0, 13.0, 17.0];
+        for (a, b) in out.values().iter().zip(expected.iter()) {
+            assert!((a - b).abs() < 1e-10);
+        }
+    }
+
+    // ── logaddexp tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn logaddexp_basic() {
+        let x1 = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+        let x2 = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+        let out = logaddexp(&x1, &x2).unwrap();
+        // log(exp(0) + exp(0)) = log(2) ≈ 0.693
+        assert!((out.values()[0] - std::f64::consts::LN_2).abs() < 1e-10);
+    }
+
+    #[test]
+    fn logaddexp_neg_infinity() {
+        let x1 = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
+        let x2 = UFuncArray::new(vec![1], vec![f64::NEG_INFINITY], DType::F64).unwrap();
+        let out = logaddexp(&x1, &x2).unwrap();
+        // log(exp(1) + exp(-inf)) = log(exp(1) + 0) = 1
+        assert!((out.values()[0] - 1.0).abs() < 1e-10);
+    }
+
+    // ── logaddexp2 tests ────────────────────────────────────────────────
+
+    #[test]
+    fn logaddexp2_basic() {
+        let x1 = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+        let x2 = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+        let out = logaddexp2(&x1, &x2).unwrap();
+        // log2(2**0 + 2**0) = log2(2) = 1
+        assert!((out.values()[0] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn logaddexp2_unequal() {
+        let x1 = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
+        let x2 = UFuncArray::new(vec![1], vec![2.0], DType::F64).unwrap();
+        let out = logaddexp2(&x1, &x2).unwrap();
+        // log2(2**1 + 2**2) = log2(2 + 4) = log2(6) ≈ 2.585
+        assert!((out.values()[0] - 6.0_f64.log2()).abs() < 1e-10);
     }
 
     // ── sort_complex tests ──────────────────────────────────────────────
@@ -47838,7 +48528,9 @@ mod tests {
     fn vector_norm_neg_inf() {
         // np.linalg.vector_norm([1, -2, 3], ord=-inf) = min(|1|, |2|, |3|) = 1
         let arr = UFuncArray::new(vec![3], vec![1.0, -2.0, 3.0], DType::F64).unwrap();
-        let r = arr.vector_norm(Some(f64::NEG_INFINITY), None, false).unwrap();
+        let r = arr
+            .vector_norm(Some(f64::NEG_INFINITY), None, false)
+            .unwrap();
         assert_eq!(r.shape(), &[]);
         assert!((r.values()[0] - 1.0).abs() < 1e-10);
     }
