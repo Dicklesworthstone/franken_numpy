@@ -1,0 +1,7 @@
+{
+  "suite": "signal_differential",
+  "total_cases": 25,
+  "passed_cases": 25,
+  "failed_cases": 0,
+  "mismatches": []
+}

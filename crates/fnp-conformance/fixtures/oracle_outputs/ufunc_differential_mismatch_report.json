@@ -1,7 +1,7 @@
 {
   "suite": "ufunc_differential",
-  "total_cases": 372,
-  "passed_cases": 372,
+  "total_cases": 378,
+  "passed_cases": 378,
   "failed_cases": 0,
   "mismatches": []
 }
