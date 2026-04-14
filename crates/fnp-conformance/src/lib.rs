@@ -9793,11 +9793,10 @@ fn generate_rng_samples(
             let ngood = f64_to_u64_param(case.param_a, "param_a")?;
             let nbad = f64_to_u64_param(case.param_b, "param_b")?;
             let nsample = f64_to_u64_param(case.param_c, "param_c")?;
-            Ok(generator
+            generator
                 .hypergeometric(ngood, nbad, nsample, draws)
-                .into_iter()
-                .map(|value| value as f64)
-                .collect())
+                .map_err(|e| RngSuiteError::new("parameter_violation", e.to_string()))
+                .map(|v| v.into_iter().map(|value| value as f64).collect())
         }
         "zipf" => generator
             .zipf(case.param_a, draws)
@@ -12303,7 +12302,7 @@ mod tests {
 
         // hypergeometric(ngood=20, nbad=10, nsample=15)
         let mut g = Generator::from_pcg64_dxsm(SEED).unwrap();
-        let hyper = g.hypergeometric(20, 10, 15, 5);
+        let hyper = g.hypergeometric(20, 10, 15, 5).unwrap();
         assert_eq!(hyper, vec![12, 8, 11, 11, 10], "hypergeometric mismatch");
 
         // multinomial(n=10, pvals=[0.2, 0.3, 0.5])

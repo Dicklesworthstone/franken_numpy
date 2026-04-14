@@ -3714,13 +3714,33 @@ impl Generator {
     ///
     /// Uses NumPy's exact algorithm: HRUA (Stadlober 1989) for large samples,
     /// direct counting via `random_interval()` for small samples.
-    pub fn hypergeometric(&mut self, ngood: u64, nbad: u64, nsample: u64, size: usize) -> Vec<u64> {
+    ///
+    /// # Errors
+    /// Returns `InvalidParameter` if ngood or nbad >= 10^9, or if nsample > ngood + nbad.
+    pub fn hypergeometric(
+        &mut self,
+        ngood: u64,
+        nbad: u64,
+        nsample: u64,
+        size: usize,
+    ) -> Result<Vec<u64>, RandomError> {
+        const HYPERGEOMETRIC_MAX: u64 = 1_000_000_000;
+        if ngood >= HYPERGEOMETRIC_MAX {
+            return Err(RandomError::InvalidParameter);
+        }
+        if nbad >= HYPERGEOMETRIC_MAX {
+            return Err(RandomError::InvalidParameter);
+        }
+        let total = ngood + nbad;
+        if nsample > total {
+            return Err(RandomError::InvalidParameter);
+        }
         let good = ngood as i64;
         let bad = nbad as i64;
         let sample = nsample as i64;
-        (0..size)
+        Ok((0..size)
             .map(|_| self.sample_hypergeometric(good, bad, sample) as u64)
-            .collect()
+            .collect())
     }
 
     /// Single hypergeometric sample matching NumPy's `random_hypergeometric`.
@@ -5471,7 +5491,7 @@ mod tests {
     #[test]
     fn hypergeometric_bounded_by_ngood_and_nsample() {
         let mut rng = test_generator();
-        let samples = rng.hypergeometric(10, 20, 8, 5000);
+        let samples = rng.hypergeometric(10, 20, 8, 5000).unwrap();
         for &s in &samples {
             assert!(s <= 8, "can't draw more successes than nsample");
             assert!(s <= 10, "can't draw more successes than ngood");
@@ -5479,6 +5499,19 @@ mod tests {
         // Expected mean = nsample * ngood / (ngood+nbad) = 8 * 10/30 ≈ 2.667
         let mean = samples.iter().sum::<u64>() as f64 / 5000.0;
         assert!((mean - 2.667).abs() < 0.2, "hypergeometric mean={mean}");
+    }
+
+    #[test]
+    fn hypergeometric_rejects_too_large_ngood_nbad() {
+        let mut rng = test_generator();
+        // ngood >= 10^9 should fail
+        assert!(rng.hypergeometric(1_000_000_000, 10, 5, 1).is_err());
+        // nbad >= 10^9 should fail
+        assert!(rng.hypergeometric(10, 1_000_000_000, 5, 1).is_err());
+        // nsample > total should fail
+        assert!(rng.hypergeometric(10, 10, 25, 1).is_err());
+        // valid parameters should succeed
+        assert!(rng.hypergeometric(100, 100, 50, 1).is_ok());
     }
 
     #[test]
@@ -6969,7 +7002,7 @@ mod tests {
     #[test]
     fn oracle_hypergeometric() {
         let mut g = oracle_gen();
-        let vals = g.hypergeometric(20, 30, 10, 10);
+        let vals = g.hypergeometric(20, 30, 10, 10).unwrap();
         let expected: Vec<u64> = vec![2, 6, 3, 3, 3, 4, 3, 7, 3, 2];
         assert_u64_seq("hypergeometric", &vals, &expected);
     }
