@@ -848,6 +848,54 @@ struct FftDifferentialCase {
 }
 
 #[derive(Debug, Deserialize)]
+struct SignalDifferentialCase {
+    id: String,
+    operation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    expected_reason_code: String,
+    #[serde(default)]
+    expected_error_contains: String,
+    #[serde(default)]
+    n: Option<usize>,
+    #[serde(default)]
+    beta: Option<f64>,
+    #[serde(default)]
+    spacing: Option<f64>,
+    #[serde(default)]
+    dx: Option<f64>,
+    #[serde(default)]
+    to_begin: Vec<f64>,
+    #[serde(default)]
+    to_end: Vec<f64>,
+    #[serde(default)]
+    input_shape: Vec<usize>,
+    #[serde(default)]
+    input_values: Vec<f64>,
+    #[serde(default)]
+    rhs_shape: Vec<usize>,
+    #[serde(default)]
+    rhs_values: Vec<f64>,
+    #[serde(default)]
+    expected_shape: Vec<usize>,
+    #[serde(default)]
+    expected_values: Vec<f64>,
+    #[serde(default)]
+    abs_tol: f64,
+    #[serde(default)]
+    rel_tol: f64,
+}
+
+#[derive(Debug, Deserialize)]
 struct PolynomialDifferentialCase {
     id: String,
     operation: String,
@@ -1646,6 +1694,15 @@ fn load_dtype_adversarial_cases(fixture_root: &Path) -> Result<Vec<DTypeAdversar
 
 fn load_fft_differential_cases(fixture_root: &Path) -> Result<Vec<FftDifferentialCase>, String> {
     let path = fixture_root.join("fft_differential_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
+}
+
+fn load_signal_differential_cases(
+    fixture_root: &Path,
+) -> Result<Vec<SignalDifferentialCase>, String> {
+    let path = fixture_root.join("signal_differential_cases.json");
     let raw = fs::read_to_string(&path)
         .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
     serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
@@ -5742,6 +5799,348 @@ fn map_ufunc_error_to_fft_suite(error: UFuncError) -> FftSuiteError {
     FftSuiteError::new(error.reason_code(), error.to_string())
 }
 
+// ────────────────────────────────────────────────────────────────────────────────
+// Signal processing differential suite (window functions, gradient, diff, etc.)
+// ────────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+enum SignalOperationOutcome {
+    Array { shape: Vec<usize>, values: Vec<f64> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SignalSuiteError {
+    reason_code: String,
+    message: String,
+}
+
+impl SignalSuiteError {
+    fn new(reason_code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            reason_code: reason_code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for SignalSuiteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for SignalSuiteError {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SignalDifferentialMismatch {
+    fixture_id: String,
+    seed: u64,
+    mode: String,
+    operation: String,
+    expected_reason_code: String,
+    actual_reason_code: String,
+    message: String,
+    artifact_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SignalDifferentialReportArtifact {
+    suite: &'static str,
+    total_cases: usize,
+    passed_cases: usize,
+    failed_cases: usize,
+    mismatches: Vec<SignalDifferentialMismatch>,
+}
+
+pub fn run_signal_differential_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let cases = load_signal_differential_cases(&config.fixture_root)?;
+
+    let mut report = SuiteReport {
+        suite: "signal_differential",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+    let mut mismatches = Vec::new();
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+        let expected_reason_code = if case.expected_reason_code.trim().is_empty() {
+            reason_code.clone()
+        } else {
+            case.expected_reason_code.trim().to_string()
+        };
+        let expected_error = case.expected_error_contains.trim().to_lowercase();
+
+        match execute_signal_differential_operation(&case) {
+            Ok(outcome) => {
+                if !expected_error.is_empty() {
+                    let rendered = format!(
+                        "{}: expected error containing '{}' but operation succeeded",
+                        case.id, case.expected_error_contains
+                    );
+                    report.failures.push(rendered.clone());
+                    mismatches.push(SignalDifferentialMismatch {
+                        fixture_id: case.id,
+                        seed: case.seed,
+                        mode,
+                        operation: case.operation,
+                        expected_reason_code,
+                        actual_reason_code: "none".to_string(),
+                        message: rendered,
+                        artifact_refs,
+                    });
+                    continue;
+                }
+
+                match validate_signal_differential_expectation(&case, &outcome) {
+                    Ok(()) => report.pass_count += 1,
+                    Err(message) => {
+                        let rendered = format!("{}: {}", case.id, message);
+                        report.failures.push(rendered.clone());
+                        mismatches.push(SignalDifferentialMismatch {
+                            fixture_id: case.id,
+                            seed: case.seed,
+                            mode,
+                            operation: case.operation,
+                            expected_reason_code,
+                            actual_reason_code: "signal_differential_mismatch".to_string(),
+                            message: rendered,
+                            artifact_refs,
+                        });
+                    }
+                }
+            }
+            Err(err) => {
+                if expected_error.is_empty() {
+                    let rendered = format!("{}: expected success but got error '{}'", case.id, err.message);
+                    report.failures.push(rendered.clone());
+                    mismatches.push(SignalDifferentialMismatch {
+                        fixture_id: case.id,
+                        seed: case.seed,
+                        mode,
+                        operation: case.operation,
+                        expected_reason_code,
+                        actual_reason_code: err.reason_code,
+                        message: rendered,
+                        artifact_refs,
+                    });
+                    continue;
+                }
+
+                let contains_expected = err.message.to_lowercase().contains(&expected_error);
+                if contains_expected {
+                    report.pass_count += 1;
+                } else {
+                    let rendered = format!(
+                        "{}: expected error containing '{}' but got '{}'",
+                        case.id, case.expected_error_contains, err.message
+                    );
+                    report.failures.push(rendered.clone());
+                    mismatches.push(SignalDifferentialMismatch {
+                        fixture_id: case.id,
+                        seed: case.seed,
+                        mode,
+                        operation: case.operation,
+                        expected_reason_code,
+                        actual_reason_code: err.reason_code,
+                        message: rendered,
+                        artifact_refs,
+                    });
+                }
+            }
+        }
+    }
+
+    let artifact = SignalDifferentialReportArtifact {
+        suite: "signal_differential",
+        total_cases: report.case_count,
+        passed_cases: report.pass_count,
+        failed_cases: report.case_count.saturating_sub(report.pass_count),
+        mismatches,
+    };
+    let report_path = config
+        .fixture_root
+        .join("oracle_outputs/signal_differential_report.json");
+    if let Some(parent) = report_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed creating {}: {err}", parent.display()))?;
+    }
+    let payload = serde_json::to_string_pretty(&artifact)
+        .map_err(|err| format!("failed serializing signal differential report: {err}"))?;
+    fs::write(&report_path, payload.as_bytes())
+        .map_err(|err| format!("failed writing {}: {err}", report_path.display()))?;
+
+    Ok(report)
+}
+
+fn execute_signal_differential_operation(
+    case: &SignalDifferentialCase,
+) -> Result<SignalOperationOutcome, SignalSuiteError> {
+    let to_outcome = |array: UFuncArray| SignalOperationOutcome::Array {
+        shape: array.shape().to_vec(),
+        values: array.values().to_vec(),
+    };
+
+    match case.operation.as_str() {
+        "bartlett" => {
+            let n = case.n.ok_or_else(|| {
+                SignalSuiteError::new("signal_input_contract_violation", "bartlett requires 'n'")
+            })?;
+            Ok(to_outcome(UFuncArray::bartlett(n)))
+        }
+        "blackman" => {
+            let n = case.n.ok_or_else(|| {
+                SignalSuiteError::new("signal_input_contract_violation", "blackman requires 'n'")
+            })?;
+            Ok(to_outcome(UFuncArray::blackman(n)))
+        }
+        "hamming" => {
+            let n = case.n.ok_or_else(|| {
+                SignalSuiteError::new("signal_input_contract_violation", "hamming requires 'n'")
+            })?;
+            Ok(to_outcome(UFuncArray::hamming(n)))
+        }
+        "hanning" => {
+            let n = case.n.ok_or_else(|| {
+                SignalSuiteError::new("signal_input_contract_violation", "hanning requires 'n'")
+            })?;
+            Ok(to_outcome(UFuncArray::hanning(n)))
+        }
+        "kaiser" => {
+            let n = case.n.ok_or_else(|| {
+                SignalSuiteError::new("signal_input_contract_violation", "kaiser requires 'n'")
+            })?;
+            let beta = case.beta.unwrap_or(14.0);
+            Ok(to_outcome(UFuncArray::kaiser(n, beta)))
+        }
+        "gradient" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let spacing = case.spacing.unwrap_or(1.0);
+            let result = input.gradient().map_err(map_ufunc_error_to_signal_suite)?;
+            // Scale by 1/spacing (gradient values are inversely proportional to spacing)
+            if (spacing - 1.0).abs() > 1e-12 {
+                let inv_spacing = 1.0 / spacing;
+                let scaled_values: Vec<f64> = result.values().iter().map(|v| v * inv_spacing).collect();
+                Ok(SignalOperationOutcome::Array {
+                    shape: result.shape().to_vec(),
+                    values: scaled_values,
+                })
+            } else {
+                Ok(to_outcome(result))
+            }
+        }
+        "diff" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let n = case.n.unwrap_or(1);
+            let result = input.diff(n, None).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "ediff1d" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let to_begin = if case.to_begin.is_empty() {
+                None
+            } else {
+                Some(case.to_begin.as_slice())
+            };
+            let to_end = if case.to_end.is_empty() {
+                None
+            } else {
+                Some(case.to_end.as_slice())
+            };
+            let result = input.ediff1d_ext(to_begin, to_end).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "cross" => {
+            let a = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let b = UFuncArray::new(
+                case.rhs_shape.clone(),
+                case.rhs_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let result = a.cross(&b).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "trapezoid" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let dx = case.dx.unwrap_or(1.0);
+            let result = input.trapezoid(dx, None).map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        op => Err(SignalSuiteError::new(
+            "signal_unknown_operation",
+            format!("unknown signal operation: {op}"),
+        )),
+    }
+}
+
+fn validate_signal_differential_expectation(
+    case: &SignalDifferentialCase,
+    outcome: &SignalOperationOutcome,
+) -> Result<(), String> {
+    match outcome {
+        SignalOperationOutcome::Array { shape, values } => {
+            if !case.expected_shape.is_empty() && case.expected_shape != *shape {
+                return Err(format!(
+                    "shape mismatch expected={:?} actual={shape:?}",
+                    case.expected_shape
+                ));
+            }
+            if !case.expected_values.is_empty() {
+                if case.expected_values.len() != values.len() {
+                    return Err(format!(
+                        "value length mismatch expected={} actual={}",
+                        case.expected_values.len(),
+                        values.len()
+                    ));
+                }
+                let abs_tol = if case.abs_tol > 0.0 { case.abs_tol } else { 1e-9 };
+                let rel_tol = if case.rel_tol > 0.0 { case.rel_tol } else { 1e-9 };
+                if !approx_equal_values(&case.expected_values, values, abs_tol, rel_tol) {
+                    return Err(format!(
+                        "value mismatch expected={:?} actual={values:?}",
+                        case.expected_values
+                    ));
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn map_ufunc_error_to_signal_suite(error: UFuncError) -> SignalSuiteError {
+    SignalSuiteError::new(error.reason_code(), error.to_string())
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum PolynomialOperationOutcome {
     Array {
@@ -8885,6 +9284,7 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
         run_datetime_differential_suite(config)?,
         run_polynomial_differential_suite(config)?,
         run_fft_differential_suite(config)?,
+        run_signal_differential_suite(config)?,
         run_linalg_differential_suite(config)?,
         run_linalg_metamorphic_suite(config)?,
         run_linalg_adversarial_suite(config)?,

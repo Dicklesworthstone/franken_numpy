@@ -1,0 +1,271 @@
+[
+  {
+    "id": "bartlett_len8_golden",
+    "operation": "bartlett",
+    "seed": 9001,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "n": 8,
+    "expected_shape": [8],
+    "expected_values": [0.0, 0.2857142857142857, 0.5714285714285714, 0.8571428571428572, 0.8571428571428572, 0.5714285714285714, 0.2857142857142857, 0.0],
+    "abs_tol": 1e-7,
+    "rel_tol": 1e-7
+  },
+  {
+    "id": "blackman_len8_golden",
+    "operation": "blackman",
+    "seed": 9002,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "n": 8,
+    "expected_shape": [8],
+    "expected_values": [0.0, 0.09045342435412808, 0.45918295754596367, 0.9203636180999082, 0.9203636180999082, 0.45918295754596367, 0.09045342435412808, 0.0],
+    "abs_tol": 1e-7,
+    "rel_tol": 1e-7
+  },
+  {
+    "id": "hamming_len8_golden",
+    "operation": "hamming",
+    "seed": 9003,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "n": 8,
+    "expected_shape": [8],
+    "expected_values": [0.08, 0.2531946911449826, 0.6423596296199047, 0.9544456792351128, 0.9544456792351128, 0.6423596296199047, 0.2531946911449826, 0.08],
+    "abs_tol": 1e-7,
+    "rel_tol": 1e-7
+  },
+  {
+    "id": "hanning_len8_golden",
+    "operation": "hanning",
+    "seed": 9004,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "n": 8,
+    "expected_shape": [8],
+    "expected_values": [0.0, 0.18825509907063326, 0.6112604669781572, 0.9504844339512095, 0.9504844339512095, 0.6112604669781572, 0.18825509907063326, 0.0],
+    "abs_tol": 1e-7,
+    "rel_tol": 1e-7
+  },
+  {
+    "id": "kaiser_len8_beta14_golden",
+    "operation": "kaiser",
+    "seed": 9005,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "n": 8,
+    "beta": 14.0,
+    "expected_shape": [8],
+    "expected_values": [7.726866835270368e-06, 0.017964073497790785, 0.2727720681863426, 0.8708037315729595, 0.8708037315729595, 0.2727720681863426, 0.017964073497790785, 7.726866835270368e-06],
+    "abs_tol": 1e-7,
+    "rel_tol": 1e-7
+  },
+  {
+    "id": "gradient_1d_golden",
+    "operation": "gradient",
+    "seed": 9006,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [5],
+    "input_values": [1.0, 2.0, 4.0, 7.0, 11.0],
+    "expected_shape": [5],
+    "expected_values": [1.0, 1.5, 2.5, 3.5, 4.0],
+    "abs_tol": 1e-7,
+    "rel_tol": 1e-7
+  },
+  {
+    "id": "gradient_1d_spacing_golden",
+    "operation": "gradient",
+    "seed": 9007,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [5],
+    "input_values": [1.0, 2.0, 4.0, 7.0, 11.0],
+    "spacing": 0.5,
+    "expected_shape": [5],
+    "expected_values": [2.0, 3.0, 5.0, 7.0, 8.0],
+    "abs_tol": 1e-7,
+    "rel_tol": 1e-7
+  },
+  {
+    "id": "diff_1d_golden",
+    "operation": "diff",
+    "seed": 9008,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [5],
+    "input_values": [1.0, 2.0, 4.0, 7.0, 11.0],
+    "expected_shape": [4],
+    "expected_values": [1.0, 2.0, 3.0, 4.0],
+    "abs_tol": 1e-7,
+    "rel_tol": 1e-7
+  },
+  {
+    "id": "diff_1d_n2_golden",
+    "operation": "diff",
+    "seed": 9009,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [5],
+    "input_values": [1.0, 2.0, 4.0, 7.0, 11.0],
+    "n": 2,
+    "expected_shape": [3],
+    "expected_values": [1.0, 1.0, 1.0],
+    "abs_tol": 1e-7,
+    "rel_tol": 1e-7
+  },
+  {
+    "id": "ediff1d_golden",
+    "operation": "ediff1d",
+    "seed": 9010,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [5],
+    "input_values": [1.0, 2.0, 4.0, 7.0, 11.0],
+    "expected_shape": [4],
+    "expected_values": [1.0, 2.0, 3.0, 4.0],
+    "abs_tol": 1e-7,
+    "rel_tol": 1e-7
+  },
+  {
+    "id": "ediff1d_to_begin_end_golden",
+    "operation": "ediff1d",
+    "seed": 9011,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [5],
+    "input_values": [1.0, 2.0, 4.0, 7.0, 11.0],
+    "to_begin": [0.0],
+    "to_end": [99.0],
+    "expected_shape": [6],
+    "expected_values": [0.0, 1.0, 2.0, 3.0, 4.0, 99.0],
+    "abs_tol": 1e-7,
+    "rel_tol": 1e-7
+  },
+  {
+    "id": "cross_3d_golden",
+    "operation": "cross",
+    "seed": 9012,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [3],
+    "input_values": [1.0, 2.0, 3.0],
+    "rhs_shape": [3],
+    "rhs_values": [4.0, 5.0, 6.0],
+    "expected_shape": [3],
+    "expected_values": [-3.0, 6.0, -3.0],
+    "abs_tol": 1e-7,
+    "rel_tol": 1e-7
+  },
+  {
+    "id": "trapezoid_1d_golden",
+    "operation": "trapezoid",
+    "seed": 9013,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [4],
+    "input_values": [1.0, 2.0, 3.0, 4.0],
+    "expected_shape": [],
+    "expected_values": [7.5],
+    "abs_tol": 1e-7,
+    "rel_tol": 1e-7
+  },
+  {
+    "id": "trapezoid_dx2_golden",
+    "operation": "trapezoid",
+    "seed": 9014,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [4],
+    "input_values": [1.0, 2.0, 3.0, 4.0],
+    "dx": 2.0,
+    "expected_shape": [],
+    "expected_values": [15.0],
+    "abs_tol": 1e-7,
+    "rel_tol": 1e-7
+  }
+]
