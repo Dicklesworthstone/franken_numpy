@@ -494,5 +494,136 @@
     "expected_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
     "abs_tol": 1e-10,
     "rel_tol": 1e-10
+  },
+  {
+    "id": "fft_single_element_golden",
+    "operation": "fft",
+    "seed": 8824,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [1],
+    "input_values": [42.0],
+    "expected_shape": [1, 2],
+    "expected_values": [42.0, 0.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "fft_prime_len7_bluestein_golden",
+    "operation": "fft",
+    "seed": 8825,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [7],
+    "input_values": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "expected_shape": [7, 2],
+    "expected_values": [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "fftshift_1d_even_golden",
+    "operation": "fftshift",
+    "seed": 8826,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [4],
+    "input_values": [0.0, 1.0, 2.0, 3.0],
+    "expected_shape": [4],
+    "expected_values": [2.0, 3.0, 0.0, 1.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "fftshift_1d_odd_golden",
+    "operation": "fftshift",
+    "seed": 8827,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [5],
+    "input_values": [0.0, 1.0, 2.0, 3.0, 4.0],
+    "expected_shape": [5],
+    "expected_values": [3.0, 4.0, 0.0, 1.0, 2.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "ifftshift_1d_even_roundtrip_golden",
+    "operation": "ifftshift",
+    "seed": 8828,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [4],
+    "input_values": [2.0, 3.0, 0.0, 1.0],
+    "expected_shape": [4],
+    "expected_values": [0.0, 1.0, 2.0, 3.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "fftfreq_8_samples_golden",
+    "operation": "fftfreq",
+    "seed": 8829,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "n": 8,
+    "expected_shape": [8],
+    "expected_values": [0.0, 0.125, 0.25, 0.375, -0.5, -0.375, -0.25, -0.125],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "rfftfreq_8_samples_golden",
+    "operation": "rfftfreq",
+    "seed": 8830,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "n": 8,
+    "expected_shape": [5],
+    "expected_values": [0.0, 0.125, 0.25, 0.375, 0.5],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
   }
 ]
