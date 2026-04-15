@@ -1,0 +1,14 @@
+[package]
+name = "fnp-python"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+
+[lib]
+name = "fnp_python"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23.5", features = ["extension-module"] }
+fnp-iter = { path = "../fnp-iter" }
+fnp-ndarray = { path = "../fnp-ndarray" }

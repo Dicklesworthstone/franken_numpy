@@ -10,6 +10,7 @@ members = [
   "crates/fnp-io",
   "crates/fnp-conformance",
   "crates/fnp-runtime",
+  "crates/fnp-python",
 ]
 
 [workspace.package]
