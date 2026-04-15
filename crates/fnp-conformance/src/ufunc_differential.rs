@@ -3229,12 +3229,18 @@ mod tests {
         UFuncInputCase, UFuncOperation, UFuncOracleCapture, UFuncOracleCase, canonical_dtype_name,
         capture_numpy_oracle_with_python, classify_reason_code, compare_against_oracle,
         compare_arrays, execute_input_case, load_input_cases, load_oracle_capture,
-        resolve_expected_reason_code, validate_capture_case_ids, write_differential_report,
+        resolve_expected_reason_code, resolve_oracle_python, validate_capture_case_ids,
+        write_differential_report,
     };
+    use fnp_dtype::DType;
+    use fnp_ufunc::{UFuncArray, frompyfunc};
+    use serde_json::Value;
     use std::collections::BTreeMap;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+    use std::process::Command;
+    use std::sync::OnceLock;
 
     fn temp_file(name: &str) -> PathBuf {
         let ts = std::time::SystemTime::now()
@@ -3248,6 +3254,31 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
         std::env::temp_dir().join(format!("fnp_{name}_{ts}.sh"))
+    }
+
+    fn real_numpy_python() -> &'static str {
+        static PYTHON: OnceLock<String> = OnceLock::new();
+        PYTHON
+            .get_or_init(|| {
+                let candidate = resolve_oracle_python().expect("oracle python");
+                let probe = Command::new(&candidate)
+                    .arg("-c")
+                    .arg("import numpy")
+                    .output()
+                    .expect("probe oracle python");
+                if probe.status.success() {
+                    return candidate;
+                }
+
+                let repo_python = super::repo_numpy_venv_python();
+                let bootstrap_python =
+                    super::configured_oracle_python().unwrap_or_else(|| candidate.clone());
+
+                super::bootstrap_repo_numpy_venv(&repo_python, &bootstrap_python)
+                    .or_else(|_| super::install_numpy_into_user_interpreter(&candidate))
+                    .expect("bootstrap real numpy oracle")
+            })
+            .as_str()
     }
 
     #[test]
@@ -3907,6 +3938,128 @@ mod tests {
         let _ = fs::remove_file(input_path);
         let _ = fs::remove_file(output_path);
         let _ = fs::remove_file(python_wrapper);
+    }
+
+    #[test]
+    fn frompyfunc_single_output_matches_numpy_oracle() {
+        let python = real_numpy_python();
+        let script = r#"
+import json
+import numpy as np
+
+a = np.array([[1.0], [2.0]])
+b = np.array([[10.0, 20.0, 30.0]])
+ufunc = np.frompyfunc(lambda x, y: x + 2.0 * y, 2, 1)
+out = ufunc(a, b)
+
+print(json.dumps({
+    "shape": list(out.shape),
+    "values": [float(v) for v in out.ravel().tolist()],
+}))
+"#;
+
+        let output = Command::new(python)
+            .arg("-c")
+            .arg(script)
+            .output()
+            .expect("run numpy oracle");
+        assert!(
+            output.status.success(),
+            "python oracle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let oracle: Value = serde_json::from_slice(&output.stdout).expect("parse oracle json");
+        let oracle_shape: Vec<usize> = oracle["shape"]
+            .as_array()
+            .expect("oracle shape array")
+            .iter()
+            .map(|value| {
+                usize::try_from(value.as_u64().expect("oracle shape usize")).expect("shape cast")
+            })
+            .collect();
+        let oracle_values: Vec<f64> = oracle["values"]
+            .as_array()
+            .expect("oracle values array")
+            .iter()
+            .map(|value| value.as_f64().expect("oracle value f64"))
+            .collect();
+
+        let a = UFuncArray::new(vec![2, 1], vec![1.0, 2.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1, 3], vec![10.0, 20.0, 30.0], DType::F64).unwrap();
+        let ufunc = frompyfunc(|args| vec![args[0] + 2.0 * args[1]], 2, 1).unwrap();
+        let actual = ufunc.call_single(&[&a, &b]).unwrap();
+
+        assert_eq!(actual.shape(), oracle_shape.as_slice());
+        assert_eq!(actual.values(), oracle_values.as_slice());
+    }
+
+    #[test]
+    fn frompyfunc_multi_output_matches_numpy_oracle() {
+        let python = real_numpy_python();
+        let script = r#"
+import json
+import numpy as np
+
+a = np.array([1.0, 2.0, 3.0])
+b = np.array([4.0, 5.0, 6.0])
+ufunc = np.frompyfunc(lambda x, y: (x + y, x - y), 2, 2)
+sum_out, diff_out = ufunc(a, b)
+
+print(json.dumps({
+    "sum_shape": list(sum_out.shape),
+    "sum_values": [float(v) for v in sum_out.ravel().tolist()],
+    "diff_shape": list(diff_out.shape),
+    "diff_values": [float(v) for v in diff_out.ravel().tolist()],
+}))
+"#;
+
+        let output = Command::new(python)
+            .arg("-c")
+            .arg(script)
+            .output()
+            .expect("run numpy oracle");
+        assert!(
+            output.status.success(),
+            "python oracle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let oracle: Value = serde_json::from_slice(&output.stdout).expect("parse oracle json");
+        let sum_shape: Vec<usize> = oracle["sum_shape"]
+            .as_array()
+            .expect("sum shape array")
+            .iter()
+            .map(|value| usize::try_from(value.as_u64().expect("sum shape usize")).expect("cast"))
+            .collect();
+        let sum_values: Vec<f64> = oracle["sum_values"]
+            .as_array()
+            .expect("sum values array")
+            .iter()
+            .map(|value| value.as_f64().expect("sum value f64"))
+            .collect();
+        let diff_shape: Vec<usize> = oracle["diff_shape"]
+            .as_array()
+            .expect("diff shape array")
+            .iter()
+            .map(|value| usize::try_from(value.as_u64().expect("diff shape usize")).expect("cast"))
+            .collect();
+        let diff_values: Vec<f64> = oracle["diff_values"]
+            .as_array()
+            .expect("diff values array")
+            .iter()
+            .map(|value| value.as_f64().expect("diff value f64"))
+            .collect();
+
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3], vec![4.0, 5.0, 6.0], DType::F64).unwrap();
+        let ufunc = frompyfunc(|args| vec![args[0] + args[1], args[0] - args[1]], 2, 2).unwrap();
+        let outputs = ufunc.call(&[&a, &b]).unwrap();
+
+        assert_eq!(outputs[0].shape(), sum_shape.as_slice());
+        assert_eq!(outputs[0].values(), sum_values.as_slice());
+        assert_eq!(outputs[1].shape(), diff_shape.as_slice());
+        assert_eq!(outputs[1].values(), diff_values.as_slice());
     }
 
     // Helper to make a unary input case

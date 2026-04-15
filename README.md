@@ -942,7 +942,7 @@ What works and what doesn't:
 - **Complex elementwise arithmetic uses interleaved storage.** Complex64/Complex128 dtypes store real/imaginary parts as interleaved floats with a trailing dimension of 2. Elementwise `multiply` and `divide` apply true complex arithmetic `(a+bi)(c+di) = (ac-bd)+(ad+bc)i`, but the interleaved representation adds overhead compared to native complex types.
 - **`multivariate_normal` uses Cholesky.** NumPy defaults to SVD. Adding SVD would require `fnp-linalg` as a dependency of `fnp-random` (currently zero-dependency).
 - **`multivariate_hypergeometric` uses sequential draws.** NumPy uses the `random_mvhg_marginals` algorithm.
-- **`frompyfunc`** requires Python callable protocol (N/A for Rust).
+- **`frompyfunc` is numeric-only today.** The Rust crate now supports closure-backed `frompyfunc` construction with broadcasting and multi-output returns, but Python callable protocol + object-array output parity still require a Python-facing bridge.
 - **No Python-facing `nditer` object wrapper yet.** The Python iterator protocol is not exposed, but the underlying nditer planning, broadcast, flag-validation, and overlap-policy semantics already live in `fnp-iter`.
 - **Single-threaded.** All operations are single-threaded. The `asupersync` async runtime integration is optional and used only for conformance pipeline orchestration, not for parallel array computation.
 - **f64 internal representation.** `UFuncArray` stores numeric values as `Vec<f64>` internally for arithmetic. For i64/u64 values > 2^53, an `IntegerSidecar` preserves exact integer values through storage round-trips (`from_storage` / `to_storage`). Arithmetic on large integers still uses f64 approximation.

@@ -2782,6 +2782,104 @@ impl UFuncArrayView {
     }
 }
 
+pub struct PyFuncUFunc<F>
+where
+    F: Fn(&[f64]) -> Vec<f64>,
+{
+    func: F,
+    nin: usize,
+    nout: usize,
+}
+
+impl<F> PyFuncUFunc<F>
+where
+    F: Fn(&[f64]) -> Vec<f64>,
+{
+    #[must_use]
+    pub const fn nin(&self) -> usize {
+        self.nin
+    }
+
+    #[must_use]
+    pub const fn nout(&self) -> usize {
+        self.nout
+    }
+
+    pub fn call(&self, arrays: &[&UFuncArray]) -> Result<Vec<UFuncArray>, UFuncError> {
+        if arrays.len() != self.nin {
+            return Err(UFuncError::Msg(format!(
+                "frompyfunc: expected {} input arrays, got {}",
+                self.nin,
+                arrays.len()
+            )));
+        }
+
+        let (out_shape, element_count, broadcasted) = if self.nin == 0 {
+            (Vec::new(), 1usize, Vec::new())
+        } else {
+            let broadcasted = UFuncArray::broadcast_arrays(arrays)?;
+            let out_shape = broadcasted[0].shape.clone();
+            let element_count = broadcasted[0].values.len();
+            (out_shape, element_count, broadcasted)
+        };
+
+        let mut outputs: Vec<Vec<f64>> = (0..self.nout)
+            .map(|_| Vec::with_capacity(element_count))
+            .collect();
+        let mut args = vec![0.0; self.nin];
+
+        for element_idx in 0..element_count {
+            for (arg_idx, array) in broadcasted.iter().enumerate() {
+                args[arg_idx] = array.values[element_idx];
+            }
+
+            let produced = (self.func)(&args);
+            if produced.len() != self.nout {
+                return Err(UFuncError::Msg(format!(
+                    "frompyfunc: callable returned {} outputs, expected {}",
+                    produced.len(),
+                    self.nout
+                )));
+            }
+
+            for (output, value) in outputs.iter_mut().zip(produced) {
+                output.push(value);
+            }
+        }
+
+        Ok(outputs
+            .into_iter()
+            .map(|values| {
+                UFuncArray::from_values_with_dtype_lossy(out_shape.clone(), values, DType::F64)
+            })
+            .collect())
+    }
+
+    pub fn call_single(&self, arrays: &[&UFuncArray]) -> Result<UFuncArray, UFuncError> {
+        if self.nout != 1 {
+            return Err(UFuncError::Msg(format!(
+                "frompyfunc: call_single requires nout=1, got {}",
+                self.nout
+            )));
+        }
+
+        self.call(arrays).map(|mut outputs| outputs.remove(0))
+    }
+}
+
+pub fn frompyfunc<F>(func: F, nin: usize, nout: usize) -> Result<PyFuncUFunc<F>, UFuncError>
+where
+    F: Fn(&[f64]) -> Vec<f64>,
+{
+    if nout == 0 {
+        return Err(UFuncError::Msg(
+            "frompyfunc: nout must be greater than zero".to_string(),
+        ));
+    }
+
+    Ok(PyFuncUFunc { func, nin, nout })
+}
+
 impl UFuncArray {
     pub fn new(shape: Vec<usize>, values: Vec<f64>, dtype: DType) -> Result<Self, UFuncError> {
         let expected = element_count(&shape).map_err(UFuncError::Shape)?;
@@ -29028,22 +29126,23 @@ mod tests {
         chebder, chebdiv, chebfit, chebfromroots, chebint, chebmul, chebroots, chebsub, chebval,
         checked_window_total, copysign, datetime_as_string, divmod_arrays, errstate, financial_fv,
         financial_ipmt, financial_irr, financial_mirr, financial_nper, financial_npv,
-        financial_pmt, financial_ppmt, financial_pv, financial_rate, frexp, gcd_arrays, geterr,
-        herm2poly, hermadd, hermder, hermdiv, herme2poly, hermeadd, hermediv, hermefromroots,
-        hermemul, hermeroots, hermesub, hermeval, hermfit, hermfromroots, hermint, hermmul,
-        hermroots, hermsub, hermval, hypot, is_busday, isnat, isneginf, isposinf, lag2poly, lagadd,
-        lagder, lagdiv, lagfit, lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, lcm_arrays,
-        ldexp, leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint, legmul, legroots,
-        legsub, legval, logaddexp, logaddexp2, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or,
-        mediate_ufunc_runtime_policy, modf, nextafter, normalize_fixed_signature_keywords,
-        normalize_signature_keywords, pad_empty, pad_linear_ramp, pad_stat,
-        parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch,
-        plan_binary_dispatch_with_registry, plan_binary_dispatch_with_signature, poly2cheb,
-        poly2herm, poly2herme, poly2lag, poly2leg, register_custom_loop, resolve_override_dispatch,
-        scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log, scimath_log2, scimath_log10,
-        scimath_power, scimath_sqrt, seterr, seterr_state, seterrcall, signbit, sort_complex,
-        spacing, take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
-        validate_override_payload_class, where_nonzero,
+        financial_pmt, financial_ppmt, financial_pv, financial_rate, frexp, frompyfunc, gcd_arrays,
+        geterr, herm2poly, hermadd, hermder, hermdiv, herme2poly, hermeadd, hermediv,
+        hermefromroots, hermemul, hermeroots, hermesub, hermeval, hermfit, hermfromroots, hermint,
+        hermmul, hermroots, hermsub, hermval, hypot, is_busday, isnat, isneginf, isposinf,
+        lag2poly, lagadd, lagder, lagdiv, lagfit, lagfromroots, lagint, lagmul, lagroots, lagsub,
+        lagval, lcm_arrays, ldexp, leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint,
+        legmul, legroots, legsub, legval, logaddexp, logaddexp2, ma_is_mask, ma_is_masked,
+        ma_make_mask, ma_mask_or, mediate_ufunc_runtime_policy, modf, nextafter,
+        normalize_fixed_signature_keywords, normalize_signature_keywords, pad_empty,
+        pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
+        plan_binary_dispatch, plan_binary_dispatch_with_registry,
+        plan_binary_dispatch_with_signature, poly2cheb, poly2herm, poly2herme, poly2lag, poly2leg,
+        register_custom_loop, resolve_override_dispatch, scimath_arccos, scimath_arcsin,
+        scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_power, scimath_sqrt,
+        seterr, seterr_state, seterrcall, signbit, sort_complex, spacing, take_float_error_events,
+        unique_all, unique_counts, unique_inverse, unique_values, validate_override_payload_class,
+        where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
@@ -43488,6 +43587,86 @@ mod tests {
         let b = UFuncArray::new(vec![1], vec![3.0], DType::F64).unwrap();
         let result = UFuncArray::vectorize_n(&[&a, &b], &[0, 1], |args| args[0] * args[1]).unwrap();
         assert_eq!(result.values(), &[15.0]);
+    }
+
+    #[test]
+    fn frompyfunc_single_output_broadcasts_inputs() {
+        let a = UFuncArray::new(vec![2, 1], vec![1.0, 2.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1, 3], vec![10.0, 20.0, 30.0], DType::F64).unwrap();
+        let ufunc = frompyfunc(|args| vec![args[0] + 2.0 * args[1]], 2, 1).unwrap();
+
+        let result = ufunc.call_single(&[&a, &b]).unwrap();
+
+        assert_eq!(ufunc.nin(), 2);
+        assert_eq!(ufunc.nout(), 1);
+        assert_eq!(result.shape(), &[2, 3]);
+        assert_eq!(result.values(), &[21.0, 41.0, 61.0, 22.0, 42.0, 62.0]);
+    }
+
+    #[test]
+    fn frompyfunc_multiple_outputs_return_parallel_arrays() {
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3], vec![4.0, 5.0, 6.0], DType::F64).unwrap();
+        let ufunc = frompyfunc(|args| vec![args[0] + args[1], args[0] - args[1]], 2, 2).unwrap();
+
+        let outputs = ufunc.call(&[&a, &b]).unwrap();
+
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].shape(), &[3]);
+        assert_eq!(outputs[0].values(), &[5.0, 7.0, 9.0]);
+        assert_eq!(outputs[1].shape(), &[3]);
+        assert_eq!(outputs[1].values(), &[-3.0, -3.0, -3.0]);
+    }
+
+    #[test]
+    fn frompyfunc_zero_input_callable_returns_scalar() {
+        let ufunc = frompyfunc(|_| vec![42.0], 0, 1).unwrap();
+
+        let result = ufunc.call_single(&[]).unwrap();
+
+        assert_eq!(result.shape(), &[]);
+        assert_eq!(result.values(), &[42.0]);
+    }
+
+    #[test]
+    fn frompyfunc_rejects_zero_outputs() {
+        let result = frompyfunc(|_| vec![1.0], 0, 0);
+        assert!(result.is_err(), "nout=0 must be rejected");
+        let err = result.err().expect("validated error result");
+        assert_eq!(
+            err.to_string(),
+            "frompyfunc: nout must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn frompyfunc_rejects_callable_returning_wrong_arity() {
+        let a = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
+        let ufunc = frompyfunc(|args| vec![args[0]], 1, 2).unwrap();
+
+        let err = ufunc
+            .call(&[&a])
+            .expect_err("wrong callable arity must fail closed");
+
+        assert_eq!(
+            err.to_string(),
+            "frompyfunc: callable returned 1 outputs, expected 2"
+        );
+    }
+
+    #[test]
+    fn frompyfunc_call_single_rejects_multi_output_ufunc() {
+        let a = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
+        let ufunc = frompyfunc(|args| vec![args[0], -args[0]], 1, 2).unwrap();
+
+        let err = ufunc
+            .call_single(&[&a])
+            .expect_err("call_single should reject multi-output ufuncs");
+
+        assert_eq!(
+            err.to_string(),
+            "frompyfunc: call_single requires nout=1, got 2"
+        );
     }
 
     // --- string comparison tests ---

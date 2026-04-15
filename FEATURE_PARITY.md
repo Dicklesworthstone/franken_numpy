@@ -38,6 +38,7 @@
 | numpy.lib.scimath | parity_green | scimath_sqrt, scimath_log, scimath_log2, scimath_log10, scimath_power, scimath_arccos, scimath_arcsin, scimath_arctanh | — |
 | NumPy 2.0+ API | parity_green | unique_all, unique_counts, unique_inverse, unique_values, permuted, matrix_transpose, cumulative_sum, cumulative_prod, trapezoid, unstack, vecdot | — |
 | Parameter completeness | parity_green | count_nonzero(axis,keepdims), isin(invert), searchsorted(side,sorter), where(1-arg), sum/prod(initial), copyto(casting), partition/argpartition(axis), packbits/unpackbits(axis) | — |
+| Higher-order callable wrappers | in_progress | `frompyfunc` now supports Rust-closure-backed numeric ufunc construction with `nin`/`nout`, broadcasting, multi-output, and NumPy oracle coverage for representative kernels; existing `vectorize*` helpers remain green | Python callable protocol + object-dtype output parity |
 | Linalg | parity_green | solve, det, inv, eig, svd, qr, cholesky, lstsq, norm, matrix_rank, matrix_power, multi_dot, tensorsolve, tensorinv, pinv, cond, slogdet, and funm are implemented with oracle and regression coverage green | — |
 | Random (numpy.random) | parity_green | PCG64DXSM generator with oracle-verified distributions; Lemire bounded integers + buffered uint32; BTPE binomial + inversion; HRUA hypergeometric + direct; PTRS Poisson + multiplicative; NumPy-exact gamma; zipf with Umin clamping; oracle and reproducibility coverage green | — |
 | I/O (npy/npz) | parity_green | load, save, savez, savez_compressed, loadtxt, savetxt, genfromtxt, fromfile, tofile, and array2string implemented; DEFLATE compression and oracle format coverage green | — |
@@ -62,7 +63,7 @@
 
 ## Remaining Gaps (Python-specific, low priority)
 
-1. `frompyfunc` — requires Python callable protocol (N/A for Rust)
+1. Python-callable / object-dtype `frompyfunc` parity — Rust-closure-backed numeric `frompyfunc` is implemented, but full Python callable protocol and object-array outputs still require a Python-facing layer
 2. Python-facing `nditer` object wrapper — low-level planning, broadcast, and overlap-policy semantics are implemented in `fnp-iter`, but the Python iterator protocol itself is not exposed
 3. Expanded CI matrix for alternate oracle environments and longer-horizon benchmark trend regression
 
