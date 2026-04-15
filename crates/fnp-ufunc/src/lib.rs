@@ -199,6 +199,17 @@ impl FloatErrorState {
             invalid: invalid_mode,
         }
     }
+
+    /// Returns true if all error modes are set to Ignore.
+    /// When this is true, we can skip per-element error checking in hot paths.
+    #[must_use]
+    #[inline]
+    pub const fn is_all_ignore(self) -> bool {
+        matches!(self.divide, FloatErrorMode::Ignore)
+            && matches!(self.over, FloatErrorMode::Ignore)
+            && matches!(self.under, FloatErrorMode::Ignore)
+            && matches!(self.invalid, FloatErrorMode::Ignore)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3987,16 +3998,103 @@ impl UFuncArray {
         };
 
         if self.shape == rhs.shape {
-            let values = self
-                .values
-                .iter()
-                .zip(&rhs.values)
-                .map(|(&lhs, &rhs)| {
-                    let result = op.apply(lhs, rhs);
-                    note_binary_float_errors(&mut float_error_flags, op, lhs, rhs, result);
-                    result
-                })
-                .collect::<Vec<_>>();
+            // Fast path: when shapes match and we can use a tight vectorizable loop
+            let error_state = geterr();
+            let can_skip_error_checks = error_state.is_all_ignore();
+
+            let values = if can_skip_error_checks {
+                // No float error checking needed - use a tight loop for auto-vectorization
+                match op {
+                    BinaryOp::Add => {
+                        let mut out = vec![0.0f64; self.values.len()];
+                        for (i, slot) in out.iter_mut().enumerate() {
+                            *slot = self.values[i] + rhs.values[i];
+                        }
+                        out
+                    }
+                    BinaryOp::Sub => {
+                        let mut out = vec![0.0f64; self.values.len()];
+                        for (i, slot) in out.iter_mut().enumerate() {
+                            *slot = self.values[i] - rhs.values[i];
+                        }
+                        out
+                    }
+                    BinaryOp::Mul => {
+                        let mut out = vec![0.0f64; self.values.len()];
+                        for (i, slot) in out.iter_mut().enumerate() {
+                            *slot = self.values[i] * rhs.values[i];
+                        }
+                        out
+                    }
+                    BinaryOp::Div => {
+                        let mut out = vec![0.0f64; self.values.len()];
+                        for (i, slot) in out.iter_mut().enumerate() {
+                            *slot = self.values[i] / rhs.values[i];
+                        }
+                        out
+                    }
+                    _ => {
+                        // Other ops - still use tight loop without error checking
+                        let mut out = vec![0.0f64; self.values.len()];
+                        for (i, slot) in out.iter_mut().enumerate() {
+                            *slot = op.apply(self.values[i], rhs.values[i]);
+                        }
+                        out
+                    }
+                }
+            } else {
+                // Standard path with float error checking - use zip iteration
+                // with pre-allocated output for better performance
+                let mut out = vec![0.0f64; self.values.len()];
+                match op {
+                    BinaryOp::Add => {
+                        for ((slot, &lhs), &rhs_val) in
+                            out.iter_mut().zip(&self.values).zip(&rhs.values)
+                        {
+                            let result = lhs + rhs_val;
+                            note_binary_float_errors(&mut float_error_flags, op, lhs, rhs_val, result);
+                            *slot = result;
+                        }
+                    }
+                    BinaryOp::Sub => {
+                        for ((slot, &lhs), &rhs_val) in
+                            out.iter_mut().zip(&self.values).zip(&rhs.values)
+                        {
+                            let result = lhs - rhs_val;
+                            note_binary_float_errors(&mut float_error_flags, op, lhs, rhs_val, result);
+                            *slot = result;
+                        }
+                    }
+                    BinaryOp::Mul => {
+                        for ((slot, &lhs), &rhs_val) in
+                            out.iter_mut().zip(&self.values).zip(&rhs.values)
+                        {
+                            let result = lhs * rhs_val;
+                            note_binary_float_errors(&mut float_error_flags, op, lhs, rhs_val, result);
+                            *slot = result;
+                        }
+                    }
+                    BinaryOp::Div => {
+                        for ((slot, &lhs), &rhs_val) in
+                            out.iter_mut().zip(&self.values).zip(&rhs.values)
+                        {
+                            let result = lhs / rhs_val;
+                            note_binary_float_errors(&mut float_error_flags, op, lhs, rhs_val, result);
+                            *slot = result;
+                        }
+                    }
+                    _ => {
+                        for ((slot, &lhs), &rhs_val) in
+                            out.iter_mut().zip(&self.values).zip(&rhs.values)
+                        {
+                            let result = op.apply(lhs, rhs_val);
+                            note_binary_float_errors(&mut float_error_flags, op, lhs, rhs_val, result);
+                            *slot = result;
+                        }
+                    }
+                }
+                out
+            };
             dispatch_float_error_flags(float_error_flags, op.name())?;
             let mut out = Self::from_values_with_dtype(out_shape, values, out_dtype)?;
             if (self.integer_sidecar.is_some() || rhs.integer_sidecar.is_some())
@@ -43760,7 +43858,7 @@ mod tests {
         let x1 = UFuncArray::new(vec![3], vec![3.0, 5.0, 8.0], DType::F64).unwrap();
         let x2 = UFuncArray::new(vec![3], vec![4.0, 12.0, 15.0], DType::F64).unwrap();
         let out = hypot(&x1, &x2).unwrap();
-        let expected = vec![5.0, 13.0, 17.0];
+        let expected = [5.0, 13.0, 17.0];
         for (a, b) in out.values().iter().zip(expected.iter()) {
             assert!((a - b).abs() < 1e-10);
         }
