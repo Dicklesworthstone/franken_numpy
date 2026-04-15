@@ -4120,40 +4120,152 @@ impl UFuncArray {
 
         if self.shape == out_shape {
             if let Some(rhs_span) = tail_contiguous_broadcast_span(&rhs.shape, &out_shape) {
+                // Fast path: lhs matches output, rhs broadcasts with tail-contiguous span
+                let error_state = geterr();
+                let can_skip_error_checks = error_state.is_all_ignore();
+
                 for (lhs_chunk, out_chunk) in self
                     .values
                     .chunks_exact(rhs_span)
                     .zip(out_values.chunks_exact_mut(rhs_span))
                 {
-                    if matches!(op, BinaryOp::Add) {
-                        out_chunk.copy_from_slice(lhs_chunk);
-                        for (slot, &rhs_value) in out_chunk.iter_mut().zip(rhs.values.iter()) {
-                            let lhs_value = *slot;
-                            let result = lhs_value + rhs_value;
-                            note_binary_float_errors(
-                                &mut float_error_flags,
-                                op,
-                                lhs_value,
-                                rhs_value,
-                                result,
-                            );
-                            *slot = result;
+                    if can_skip_error_checks {
+                        // Skip error checking - tight loop for vectorization
+                        match op {
+                            BinaryOp::Add => {
+                                for ((&lhs_value, &rhs_value), slot) in lhs_chunk
+                                    .iter()
+                                    .zip(rhs.values.iter())
+                                    .zip(out_chunk.iter_mut())
+                                {
+                                    *slot = lhs_value + rhs_value;
+                                }
+                            }
+                            BinaryOp::Sub => {
+                                for ((&lhs_value, &rhs_value), slot) in lhs_chunk
+                                    .iter()
+                                    .zip(rhs.values.iter())
+                                    .zip(out_chunk.iter_mut())
+                                {
+                                    *slot = lhs_value - rhs_value;
+                                }
+                            }
+                            BinaryOp::Mul => {
+                                for ((&lhs_value, &rhs_value), slot) in lhs_chunk
+                                    .iter()
+                                    .zip(rhs.values.iter())
+                                    .zip(out_chunk.iter_mut())
+                                {
+                                    *slot = lhs_value * rhs_value;
+                                }
+                            }
+                            BinaryOp::Div => {
+                                for ((&lhs_value, &rhs_value), slot) in lhs_chunk
+                                    .iter()
+                                    .zip(rhs.values.iter())
+                                    .zip(out_chunk.iter_mut())
+                                {
+                                    *slot = lhs_value / rhs_value;
+                                }
+                            }
+                            _ => {
+                                for ((&lhs_value, &rhs_value), slot) in lhs_chunk
+                                    .iter()
+                                    .zip(rhs.values.iter())
+                                    .zip(out_chunk.iter_mut())
+                                {
+                                    *slot = op.apply(lhs_value, rhs_value);
+                                }
+                            }
                         }
                     } else {
-                        for ((&lhs_value, &rhs_value), slot) in lhs_chunk
-                            .iter()
-                            .zip(rhs.values.iter())
-                            .zip(out_chunk.iter_mut())
-                        {
-                            let result = op.apply(lhs_value, rhs_value);
-                            note_binary_float_errors(
-                                &mut float_error_flags,
-                                op,
-                                lhs_value,
-                                rhs_value,
-                                result,
-                            );
-                            *slot = result;
+                        // Standard path with error checking - specialized for common ops
+                        match op {
+                            BinaryOp::Add => {
+                                for ((&lhs_value, &rhs_value), slot) in lhs_chunk
+                                    .iter()
+                                    .zip(rhs.values.iter())
+                                    .zip(out_chunk.iter_mut())
+                                {
+                                    let result = lhs_value + rhs_value;
+                                    note_binary_float_errors(
+                                        &mut float_error_flags,
+                                        op,
+                                        lhs_value,
+                                        rhs_value,
+                                        result,
+                                    );
+                                    *slot = result;
+                                }
+                            }
+                            BinaryOp::Sub => {
+                                for ((&lhs_value, &rhs_value), slot) in lhs_chunk
+                                    .iter()
+                                    .zip(rhs.values.iter())
+                                    .zip(out_chunk.iter_mut())
+                                {
+                                    let result = lhs_value - rhs_value;
+                                    note_binary_float_errors(
+                                        &mut float_error_flags,
+                                        op,
+                                        lhs_value,
+                                        rhs_value,
+                                        result,
+                                    );
+                                    *slot = result;
+                                }
+                            }
+                            BinaryOp::Mul => {
+                                for ((&lhs_value, &rhs_value), slot) in lhs_chunk
+                                    .iter()
+                                    .zip(rhs.values.iter())
+                                    .zip(out_chunk.iter_mut())
+                                {
+                                    let result = lhs_value * rhs_value;
+                                    note_binary_float_errors(
+                                        &mut float_error_flags,
+                                        op,
+                                        lhs_value,
+                                        rhs_value,
+                                        result,
+                                    );
+                                    *slot = result;
+                                }
+                            }
+                            BinaryOp::Div => {
+                                for ((&lhs_value, &rhs_value), slot) in lhs_chunk
+                                    .iter()
+                                    .zip(rhs.values.iter())
+                                    .zip(out_chunk.iter_mut())
+                                {
+                                    let result = lhs_value / rhs_value;
+                                    note_binary_float_errors(
+                                        &mut float_error_flags,
+                                        op,
+                                        lhs_value,
+                                        rhs_value,
+                                        result,
+                                    );
+                                    *slot = result;
+                                }
+                            }
+                            _ => {
+                                for ((&lhs_value, &rhs_value), slot) in lhs_chunk
+                                    .iter()
+                                    .zip(rhs.values.iter())
+                                    .zip(out_chunk.iter_mut())
+                                {
+                                    let result = op.apply(lhs_value, rhs_value);
+                                    note_binary_float_errors(
+                                        &mut float_error_flags,
+                                        op,
+                                        lhs_value,
+                                        rhs_value,
+                                        result,
+                                    );
+                                    *slot = result;
+                                }
+                            }
                         }
                     }
                 }
@@ -4193,26 +4305,163 @@ impl UFuncArray {
             }
         } else if rhs.shape == out_shape {
             if let Some(lhs_span) = tail_contiguous_broadcast_span(&self.shape, &out_shape) {
+                // Fast path: rhs matches output, lhs broadcasts with tail-contiguous span
+                let error_state = geterr();
+                let can_skip_error_checks = error_state.is_all_ignore();
+
                 for (rhs_chunk, out_chunk) in rhs
                     .values
                     .chunks_exact(lhs_span)
                     .zip(out_values.chunks_exact_mut(lhs_span))
                 {
-                    for ((&lhs_value, &rhs_value), slot) in self
-                        .values
-                        .iter()
-                        .zip(rhs_chunk.iter())
-                        .zip(out_chunk.iter_mut())
-                    {
-                        let result = op.apply(lhs_value, rhs_value);
-                        note_binary_float_errors(
-                            &mut float_error_flags,
-                            op,
-                            lhs_value,
-                            rhs_value,
-                            result,
-                        );
-                        *slot = result;
+                    if can_skip_error_checks {
+                        // Skip error checking - tight loop for vectorization
+                        match op {
+                            BinaryOp::Add => {
+                                for ((&lhs_value, &rhs_value), slot) in self
+                                    .values
+                                    .iter()
+                                    .zip(rhs_chunk.iter())
+                                    .zip(out_chunk.iter_mut())
+                                {
+                                    *slot = lhs_value + rhs_value;
+                                }
+                            }
+                            BinaryOp::Sub => {
+                                for ((&lhs_value, &rhs_value), slot) in self
+                                    .values
+                                    .iter()
+                                    .zip(rhs_chunk.iter())
+                                    .zip(out_chunk.iter_mut())
+                                {
+                                    *slot = lhs_value - rhs_value;
+                                }
+                            }
+                            BinaryOp::Mul => {
+                                for ((&lhs_value, &rhs_value), slot) in self
+                                    .values
+                                    .iter()
+                                    .zip(rhs_chunk.iter())
+                                    .zip(out_chunk.iter_mut())
+                                {
+                                    *slot = lhs_value * rhs_value;
+                                }
+                            }
+                            BinaryOp::Div => {
+                                for ((&lhs_value, &rhs_value), slot) in self
+                                    .values
+                                    .iter()
+                                    .zip(rhs_chunk.iter())
+                                    .zip(out_chunk.iter_mut())
+                                {
+                                    *slot = lhs_value / rhs_value;
+                                }
+                            }
+                            _ => {
+                                for ((&lhs_value, &rhs_value), slot) in self
+                                    .values
+                                    .iter()
+                                    .zip(rhs_chunk.iter())
+                                    .zip(out_chunk.iter_mut())
+                                {
+                                    *slot = op.apply(lhs_value, rhs_value);
+                                }
+                            }
+                        }
+                    } else {
+                        // Standard path with error checking
+                        match op {
+                            BinaryOp::Add => {
+                                for ((&lhs_value, &rhs_value), slot) in self
+                                    .values
+                                    .iter()
+                                    .zip(rhs_chunk.iter())
+                                    .zip(out_chunk.iter_mut())
+                                {
+                                    let result = lhs_value + rhs_value;
+                                    note_binary_float_errors(
+                                        &mut float_error_flags,
+                                        op,
+                                        lhs_value,
+                                        rhs_value,
+                                        result,
+                                    );
+                                    *slot = result;
+                                }
+                            }
+                            BinaryOp::Sub => {
+                                for ((&lhs_value, &rhs_value), slot) in self
+                                    .values
+                                    .iter()
+                                    .zip(rhs_chunk.iter())
+                                    .zip(out_chunk.iter_mut())
+                                {
+                                    let result = lhs_value - rhs_value;
+                                    note_binary_float_errors(
+                                        &mut float_error_flags,
+                                        op,
+                                        lhs_value,
+                                        rhs_value,
+                                        result,
+                                    );
+                                    *slot = result;
+                                }
+                            }
+                            BinaryOp::Mul => {
+                                for ((&lhs_value, &rhs_value), slot) in self
+                                    .values
+                                    .iter()
+                                    .zip(rhs_chunk.iter())
+                                    .zip(out_chunk.iter_mut())
+                                {
+                                    let result = lhs_value * rhs_value;
+                                    note_binary_float_errors(
+                                        &mut float_error_flags,
+                                        op,
+                                        lhs_value,
+                                        rhs_value,
+                                        result,
+                                    );
+                                    *slot = result;
+                                }
+                            }
+                            BinaryOp::Div => {
+                                for ((&lhs_value, &rhs_value), slot) in self
+                                    .values
+                                    .iter()
+                                    .zip(rhs_chunk.iter())
+                                    .zip(out_chunk.iter_mut())
+                                {
+                                    let result = lhs_value / rhs_value;
+                                    note_binary_float_errors(
+                                        &mut float_error_flags,
+                                        op,
+                                        lhs_value,
+                                        rhs_value,
+                                        result,
+                                    );
+                                    *slot = result;
+                                }
+                            }
+                            _ => {
+                                for ((&lhs_value, &rhs_value), slot) in self
+                                    .values
+                                    .iter()
+                                    .zip(rhs_chunk.iter())
+                                    .zip(out_chunk.iter_mut())
+                                {
+                                    let result = op.apply(lhs_value, rhs_value);
+                                    note_binary_float_errors(
+                                        &mut float_error_flags,
+                                        op,
+                                        lhs_value,
+                                        rhs_value,
+                                        result,
+                                    );
+                                    *slot = result;
+                                }
+                            }
+                        }
                     }
                 }
             } else {
