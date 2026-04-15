@@ -37032,6 +37032,17 @@ mod tests {
     }
 
     #[test]
+    fn roots_with_repeated_zero_root() {
+        // [1, 0, 0] -> x^2, roots: 0, 0
+        let p = UFuncArray::new(vec![3], vec![1.0, 0.0, 0.0], DType::F64).unwrap();
+        let r = p.roots().unwrap();
+        assert_eq!(r.shape(), &[2]);
+        let mut roots = r.values().to_vec();
+        roots.sort_by(|a, b| a.total_cmp(b));
+        assert_eq!(roots, vec![0.0, 0.0]);
+    }
+
+    #[test]
     fn roots_degree5() {
         // (x-1)(x-2)(x-3)(x-4)(x-5) = x^5 - 15x^4 + 85x^3 - 225x^2 + 274x - 120
         let p = UFuncArray::new(
