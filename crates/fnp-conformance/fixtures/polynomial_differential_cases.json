@@ -115,8 +115,7 @@
     "env_fingerprint": "numpy-2.2.5",
     "artifact_refs": [
       "crates/fnp-conformance/fixtures/polynomial_differential_cases.json",
-      "crates/fnp-ufunc/src/lib.rs",
-      "test_roots.rs"
+      "crates/fnp-ufunc/src/lib.rs"
     ],
     "reason_code": "polynomial_differential_expected_success",
     "expected_reason_code": "polynomial_differential_expected_success",
