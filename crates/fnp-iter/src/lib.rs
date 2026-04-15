@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+use std::iter::FusedIterator;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeMode {
     Strict,
@@ -726,6 +728,218 @@ impl NditerPlan {
         self.multi_index_to_linear_index(multi_index)
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NditerStep {
+    pub iterindex: usize,
+    pub multi_index: Vec<usize>,
+    pub linear_indices: Vec<usize>,
+}
+
+impl NditerStep {
+    #[must_use]
+    pub fn inner_loop_len(&self) -> usize {
+        self.linear_indices.len()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Nditer {
+    plan: NditerPlan,
+    chunk_count: usize,
+    next_chunk_index: usize,
+    last_chunk_index: Option<usize>,
+}
+
+impl Nditer {
+    pub fn new(
+        shape: Vec<usize>,
+        item_size: usize,
+        options: NditerOptions,
+    ) -> Result<Self, NditerError> {
+        Ok(Self::from_plan(NditerPlan::new(shape, item_size, options)?))
+    }
+
+    #[must_use]
+    pub fn from_plan(plan: NditerPlan) -> Self {
+        let chunk_count = if plan.element_count() == 0 {
+            0
+        } else {
+            plan.element_count() / Self::chunk_len_for_plan(&plan)
+        };
+
+        Self {
+            plan,
+            chunk_count,
+            next_chunk_index: 0,
+            last_chunk_index: None,
+        }
+    }
+
+    #[must_use]
+    pub fn plan(&self) -> &NditerPlan {
+        &self.plan
+    }
+
+    #[must_use]
+    pub fn ndim(&self) -> usize {
+        if self.plan.external_loop() {
+            self.plan.iteration_shape().len()
+        } else {
+            self.plan.shape().len()
+        }
+    }
+
+    #[must_use]
+    pub fn itersize(&self) -> usize {
+        self.plan.element_count()
+    }
+
+    #[must_use]
+    pub fn chunk_count(&self) -> usize {
+        self.chunk_count
+    }
+
+    #[must_use]
+    pub fn remaining_steps(&self) -> usize {
+        self.chunk_count.saturating_sub(self.next_chunk_index)
+    }
+
+    #[must_use]
+    pub fn remaining_elements(&self) -> usize {
+        self.plan.element_count().saturating_sub(
+            self.next_chunk_index
+                .saturating_mul(Self::chunk_len_for_plan(&self.plan)),
+        )
+    }
+
+    #[must_use]
+    pub fn finished(&self) -> bool {
+        self.next_chunk_index >= self.chunk_count
+    }
+
+    pub fn iterindex(&self) -> Result<usize, NditerError> {
+        Ok(self.chunk_start(self.position_chunk_index()?))
+    }
+
+    pub fn multi_index(&self) -> Result<Vec<usize>, NditerError> {
+        self.plan
+            .linear_index_to_multi_index(self.chunk_start(self.position_chunk_index()?))
+    }
+
+    pub fn current(&self) -> Result<NditerStep, NditerError> {
+        self.step_for_chunk(self.position_chunk_index()?)
+    }
+
+    pub fn set_iterindex(&mut self, iterindex: usize) -> Result<(), NditerError> {
+        if self.plan.element_count() == 0 {
+            return Err(NditerError::MultiIndexViolation(
+                "cannot seek an empty nditer",
+            ));
+        }
+        if iterindex >= self.plan.element_count() {
+            return Err(NditerError::MultiIndexViolation(
+                "iterindex out of bounds for nditer",
+            ));
+        }
+
+        let chunk_len = Self::chunk_len_for_plan(&self.plan);
+        if self.plan.external_loop() && !iterindex.is_multiple_of(chunk_len) {
+            return Err(NditerError::MultiIndexViolation(
+                "iterindex must align to external_loop chunk boundaries",
+            ));
+        }
+
+        self.next_chunk_index = iterindex / chunk_len;
+        self.last_chunk_index = None;
+        Ok(())
+    }
+
+    pub fn set_multi_index(&mut self, multi_index: &[usize]) -> Result<(), NditerError> {
+        let iterindex = self.plan.multi_index_to_linear_index(multi_index)?;
+        self.set_iterindex(iterindex)
+    }
+
+    pub fn reset(&mut self) {
+        self.next_chunk_index = 0;
+        self.last_chunk_index = None;
+    }
+
+    pub fn iternext(&mut self) -> bool {
+        if self.finished() {
+            return false;
+        }
+
+        self.last_chunk_index = Some(self.next_chunk_index);
+        self.next_chunk_index += 1;
+        !self.finished()
+    }
+
+    fn chunk_len_for_plan(plan: &NditerPlan) -> usize {
+        if plan.external_loop() {
+            plan.inner_loop_len()
+        } else {
+            1
+        }
+    }
+
+    fn chunk_start(&self, chunk_index: usize) -> usize {
+        chunk_index.saturating_mul(Self::chunk_len_for_plan(&self.plan))
+    }
+
+    fn position_chunk_index(&self) -> Result<usize, NditerError> {
+        if self.finished() {
+            self.last_chunk_index
+                .ok_or(NditerError::MultiIndexViolation("iterator is finished"))
+        } else {
+            Ok(self.next_chunk_index)
+        }
+    }
+
+    fn step_for_chunk(&self, chunk_index: usize) -> Result<NditerStep, NditerError> {
+        if chunk_index >= self.chunk_count {
+            return Err(NditerError::MultiIndexViolation(
+                "iterator chunk out of bounds",
+            ));
+        }
+
+        let iterindex = self.chunk_start(chunk_index);
+        let chunk_len = Self::chunk_len_for_plan(&self.plan);
+        Ok(NditerStep {
+            iterindex,
+            multi_index: self.plan.linear_index_to_multi_index(iterindex)?,
+            linear_indices: (iterindex..iterindex + chunk_len).collect(),
+        })
+    }
+}
+
+impl Iterator for Nditer {
+    type Item = NditerStep;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished() {
+            return None;
+        }
+
+        let step = self.step_for_chunk(self.next_chunk_index).ok()?;
+        self.last_chunk_index = Some(self.next_chunk_index);
+        self.next_chunk_index += 1;
+        Some(step)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.remaining_steps();
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for Nditer {
+    fn len(&self) -> usize {
+        self.remaining_steps()
+    }
+}
+
+impl FusedIterator for Nditer {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NditerOperandSpec {
@@ -1828,6 +2042,170 @@ mod tests {
         })
         .expect_err("unmediated overlap should reject");
         assert_eq!(err.reason_code(), "nditer_overlap_policy_triggered");
+    }
+
+    #[test]
+    fn nditer_wrapper_tracks_iterindex_multi_index_and_reset() {
+        let mut iter = Nditer::new(vec![2, 3], 8, NditerOptions::default()).expect("iter");
+        assert_eq!(iter.ndim(), 2);
+        assert_eq!(iter.itersize(), 6);
+        assert_eq!(iter.chunk_count(), 6);
+        assert_eq!(iter.remaining_steps(), 6);
+        assert_eq!(iter.iterindex().expect("iterindex"), 0);
+        assert_eq!(iter.multi_index().expect("multi-index"), vec![0, 0]);
+        assert_eq!(
+            iter.current().expect("current step"),
+            NditerStep {
+                iterindex: 0,
+                multi_index: vec![0, 0],
+                linear_indices: vec![0],
+            }
+        );
+
+        assert!(iter.iternext());
+        assert_eq!(iter.iterindex().expect("advanced iterindex"), 1);
+        assert_eq!(
+            iter.multi_index().expect("advanced multi-index"),
+            vec![0, 1]
+        );
+        assert_eq!(iter.remaining_elements(), 5);
+
+        while iter.iternext() {}
+
+        assert!(iter.finished());
+        assert_eq!(iter.iterindex().expect("last iterindex"), 5);
+        assert_eq!(iter.multi_index().expect("last multi-index"), vec![1, 2]);
+
+        iter.reset();
+        assert!(!iter.finished());
+        assert_eq!(iter.iterindex().expect("reset iterindex"), 0);
+        assert_eq!(iter.multi_index().expect("reset multi-index"), vec![0, 0]);
+    }
+
+    #[test]
+    fn nditer_wrapper_supports_seek_by_multi_index() {
+        let mut iter = Nditer::new(vec![2, 3], 8, NditerOptions::default()).expect("iter");
+        iter.set_multi_index(&[0, 2])
+            .expect("multi-index seek should succeed");
+        assert_eq!(iter.iterindex().expect("seek iterindex"), 2);
+
+        let step = iter.next().expect("iterator step");
+        assert_eq!(
+            step,
+            NditerStep {
+                iterindex: 2,
+                multi_index: vec![0, 2],
+                linear_indices: vec![2],
+            }
+        );
+    }
+
+    #[test]
+    fn nditer_wrapper_external_loop_groups_last_axis_for_c_order() {
+        let mut iter = Nditer::new(
+            vec![2, 3, 4],
+            8,
+            NditerOptions {
+                order: NditerOrder::C,
+                external_loop: true,
+            },
+        )
+        .expect("iter");
+
+        assert_eq!(iter.ndim(), 2);
+        assert_eq!(iter.chunk_count(), 6);
+        assert_eq!(iter.remaining_elements(), 24);
+
+        let first = iter.next().expect("first chunk");
+        assert_eq!(
+            first,
+            NditerStep {
+                iterindex: 0,
+                multi_index: vec![0, 0, 0],
+                linear_indices: vec![0, 1, 2, 3],
+            }
+        );
+        assert_eq!(first.inner_loop_len(), 4);
+
+        let second = iter.next().expect("second chunk");
+        assert_eq!(
+            second,
+            NditerStep {
+                iterindex: 4,
+                multi_index: vec![0, 1, 0],
+                linear_indices: vec![4, 5, 6, 7],
+            }
+        );
+    }
+
+    #[test]
+    fn nditer_wrapper_external_loop_f_order_seeks_on_chunk_boundaries() {
+        let mut iter = Nditer::new(
+            vec![2, 3, 4],
+            8,
+            NditerOptions {
+                order: NditerOrder::F,
+                external_loop: true,
+            },
+        )
+        .expect("iter");
+
+        assert_eq!(iter.ndim(), 2);
+        assert_eq!(iter.chunk_count(), 12);
+        assert_eq!(iter.current().expect("current").linear_indices, vec![0, 1]);
+
+        iter.set_iterindex(2)
+            .expect("aligned external_loop seek should succeed");
+        assert_eq!(iter.multi_index().expect("seek multi-index"), vec![0, 1, 0]);
+        assert_eq!(
+            iter.current().expect("seek current").linear_indices,
+            vec![2, 3]
+        );
+
+        let err = iter
+            .set_iterindex(1)
+            .expect_err("unaligned external_loop seek should fail");
+        assert_eq!(err.reason_code(), "nditer_multi_index_contract_violation");
+    }
+
+    #[test]
+    fn nditer_wrapper_scalar_iteration_retains_last_position() {
+        let mut iter = Nditer::new(vec![], 8, NditerOptions::default()).expect("scalar iter");
+        assert_eq!(iter.ndim(), 0);
+        assert_eq!(iter.itersize(), 1);
+        assert_eq!(iter.chunk_count(), 1);
+
+        let step = iter.next().expect("scalar step");
+        assert_eq!(
+            step,
+            NditerStep {
+                iterindex: 0,
+                multi_index: Vec::<usize>::new(),
+                linear_indices: vec![0],
+            }
+        );
+        assert!(iter.finished());
+        assert_eq!(iter.iterindex().expect("last iterindex"), 0);
+        assert_eq!(
+            iter.multi_index().expect("last multi-index"),
+            Vec::<usize>::new()
+        );
+        assert!(iter.next().is_none());
+
+        iter.reset();
+        assert_eq!(iter.next().expect("reset step").iterindex, 0);
+    }
+
+    #[test]
+    fn nditer_wrapper_empty_iterator_rejects_position_queries() {
+        let iter = Nditer::new(vec![0, 3], 8, NditerOptions::default()).expect("empty iter");
+        assert!(iter.finished());
+        assert_eq!(iter.len(), 0);
+
+        let err = iter
+            .iterindex()
+            .expect_err("empty iterator has no position");
+        assert_eq!(err.reason_code(), "nditer_multi_index_contract_violation");
     }
 
     // -----------------------------------------------------------------------

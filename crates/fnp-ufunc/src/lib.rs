@@ -2784,7 +2784,7 @@ impl UFuncArrayView {
 
 pub struct PyFuncUFunc<F>
 where
-    F: Fn(&[f64]) -> Vec<f64>,
+    F: Fn(&[f64], &mut [f64]) -> Result<(), UFuncError>,
 {
     func: F,
     nin: usize,
@@ -2793,7 +2793,7 @@ where
 
 impl<F> PyFuncUFunc<F>
 where
-    F: Fn(&[f64]) -> Vec<f64>,
+    F: Fn(&[f64], &mut [f64]) -> Result<(), UFuncError>,
 {
     #[must_use]
     pub const fn nin(&self) -> usize {
@@ -2827,23 +2827,17 @@ where
             .map(|_| Vec::with_capacity(element_count))
             .collect();
         let mut args = vec![0.0; self.nin];
+        let mut out_buf = vec![0.0; self.nout];
 
         for element_idx in 0..element_count {
             for (arg_idx, array) in broadcasted.iter().enumerate() {
                 args[arg_idx] = array.values[element_idx];
             }
 
-            let produced = (self.func)(&args);
-            if produced.len() != self.nout {
-                return Err(UFuncError::Msg(format!(
-                    "frompyfunc: callable returned {} outputs, expected {}",
-                    produced.len(),
-                    self.nout
-                )));
-            }
+            (self.func)(&args, &mut out_buf)?;
 
-            for (output, value) in outputs.iter_mut().zip(produced) {
-                output.push(value);
+            for (output, value) in outputs.iter_mut().zip(out_buf.iter()) {
+                output.push(*value);
             }
         }
 
@@ -2869,7 +2863,7 @@ where
 
 pub fn frompyfunc<F>(func: F, nin: usize, nout: usize) -> Result<PyFuncUFunc<F>, UFuncError>
 where
-    F: Fn(&[f64]) -> Vec<f64>,
+    F: Fn(&[f64], &mut [f64]) -> Result<(), UFuncError>,
 {
     if nout == 0 {
         return Err(UFuncError::Msg(
@@ -43593,7 +43587,15 @@ mod tests {
     fn frompyfunc_single_output_broadcasts_inputs() {
         let a = UFuncArray::new(vec![2, 1], vec![1.0, 2.0], DType::F64).unwrap();
         let b = UFuncArray::new(vec![1, 3], vec![10.0, 20.0, 30.0], DType::F64).unwrap();
-        let ufunc = frompyfunc(|args| vec![args[0] + 2.0 * args[1]], 2, 1).unwrap();
+        let ufunc = frompyfunc(
+            |args, out| {
+                out[0] = args[0] + 2.0 * args[1];
+                Ok(())
+            },
+            2,
+            1,
+        )
+        .unwrap();
 
         let result = ufunc.call_single(&[&a, &b]).unwrap();
 
@@ -43607,7 +43609,16 @@ mod tests {
     fn frompyfunc_multiple_outputs_return_parallel_arrays() {
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         let b = UFuncArray::new(vec![3], vec![4.0, 5.0, 6.0], DType::F64).unwrap();
-        let ufunc = frompyfunc(|args| vec![args[0] + args[1], args[0] - args[1]], 2, 2).unwrap();
+        let ufunc = frompyfunc(
+            |args, out| {
+                out[0] = args[0] + args[1];
+                out[1] = args[0] - args[1];
+                Ok(())
+            },
+            2,
+            2,
+        )
+        .unwrap();
 
         let outputs = ufunc.call(&[&a, &b]).unwrap();
 
@@ -43620,7 +43631,15 @@ mod tests {
 
     #[test]
     fn frompyfunc_zero_input_callable_returns_scalar() {
-        let ufunc = frompyfunc(|_| vec![42.0], 0, 1).unwrap();
+        let ufunc = frompyfunc(
+            |_, out| {
+                out[0] = 42.0;
+                Ok(())
+            },
+            0,
+            1,
+        )
+        .unwrap();
 
         let result = ufunc.call_single(&[]).unwrap();
 
@@ -43630,7 +43649,7 @@ mod tests {
 
     #[test]
     fn frompyfunc_rejects_zero_outputs() {
-        let result = frompyfunc(|_| vec![1.0], 0, 0);
+        let result = frompyfunc(|_, _| Ok(()), 0, 0);
         assert!(result.is_err(), "nout=0 must be rejected");
         let err = result.err().expect("validated error result");
         assert_eq!(
@@ -43640,24 +43659,31 @@ mod tests {
     }
 
     #[test]
-    fn frompyfunc_rejects_callable_returning_wrong_arity() {
+    fn frompyfunc_propagates_callable_errors() {
         let a = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
-        let ufunc = frompyfunc(|args| vec![args[0]], 1, 2).unwrap();
+        let ufunc =
+            frompyfunc(|_, _| Err(UFuncError::Msg("python exception".into())), 1, 1).unwrap();
 
         let err = ufunc
             .call(&[&a])
-            .expect_err("wrong callable arity must fail closed");
+            .expect_err("callable error must propagate");
 
-        assert_eq!(
-            err.to_string(),
-            "frompyfunc: callable returned 1 outputs, expected 2"
-        );
+        assert_eq!(err.to_string(), "python exception");
     }
 
     #[test]
     fn frompyfunc_call_single_rejects_multi_output_ufunc() {
         let a = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
-        let ufunc = frompyfunc(|args| vec![args[0], -args[0]], 1, 2).unwrap();
+        let ufunc = frompyfunc(
+            |args, out| {
+                out[0] = args[0];
+                out[1] = -args[0];
+                Ok(())
+            },
+            1,
+            2,
+        )
+        .unwrap();
 
         let err = ufunc
             .call_single(&[&a])

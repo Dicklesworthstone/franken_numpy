@@ -3987,7 +3987,15 @@ print(json.dumps({
 
         let a = UFuncArray::new(vec![2, 1], vec![1.0, 2.0], DType::F64).unwrap();
         let b = UFuncArray::new(vec![1, 3], vec![10.0, 20.0, 30.0], DType::F64).unwrap();
-        let ufunc = frompyfunc(|args| vec![args[0] + 2.0 * args[1]], 2, 1).unwrap();
+        let ufunc = frompyfunc(
+            |args, out| {
+                out[0] = args[0] + 2.0 * args[1];
+                Ok(())
+            },
+            2,
+            1,
+        )
+        .unwrap();
         let actual = ufunc.call_single(&[&a, &b]).unwrap();
 
         assert_eq!(actual.shape(), oracle_shape.as_slice());
@@ -4053,7 +4061,16 @@ print(json.dumps({
 
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         let b = UFuncArray::new(vec![3], vec![4.0, 5.0, 6.0], DType::F64).unwrap();
-        let ufunc = frompyfunc(|args| vec![args[0] + args[1], args[0] - args[1]], 2, 2).unwrap();
+        let ufunc = frompyfunc(
+            |args, out| {
+                out[0] = args[0] + args[1];
+                out[1] = args[0] - args[1];
+                Ok(())
+            },
+            2,
+            2,
+        )
+        .unwrap();
         let outputs = ufunc.call(&[&a, &b]).unwrap();
 
         assert_eq!(outputs[0].shape(), sum_shape.as_slice());

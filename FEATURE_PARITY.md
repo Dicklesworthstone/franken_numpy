@@ -54,7 +54,7 @@
 | fnp-ndarray | 87 | Shape legality, stride calculus, broadcast contracts, overlap detection, multi-axis negative strides, broadcast/reshape/stride edge cases, F-order, required_view_nbytes |
 | fnp-linalg | 235 | Linear algebra decompositions, solvers, norms, batch ops (det/inv/solve/trace), 16 NumPy oracle tests, extreme-scale regression, non-finite parity (cond_p, cross_product 2D, NaN/Inf propagation), rectangular MxN norm/cond support, cond_mxn NaN handling |
 | fnp-random | 196 | RNG distributions with statistical conformance coverage, permuted (1D/2D/axis/deterministic), seeding, reproducibility, large-n binomial/multinomial |
-| fnp-iter | 104 | Transfer-loop selector, NDIter traversal/broadcast/overlap contracts, flatiter indexing/assignment, ndindex/ndenumerate iterators |
+| fnp-iter | 110 | Transfer-loop selector, NDIter traversal/broadcast/overlap contracts, stateful `Nditer` wrapper (`iterindex`/`multi_index`/reset/seek/external-loop chunks), flatiter indexing/assignment, ndindex/ndenumerate iterators |
 | fnp-io | 176 | NPY/NPZ read/write, text formats, compression, 7 format oracle tests, genfromtxt_full, fromfile_text/tofile_text |
 | fnp-conformance | 144 | Differential parity, metamorphic identities, adversarial fuzzing, witness stability, matmul conformance |
 | fnp-dtype | 124 | Dtype taxonomy, promotion table (all 324 pairs explicit), cast policy primitives, NumPy byte-width parsing |
@@ -64,7 +64,7 @@
 ## Remaining Gaps (Python-specific, low priority)
 
 1. Python-callable / object-dtype `frompyfunc` parity — Rust-closure-backed numeric `frompyfunc` is implemented, but full Python callable protocol and object-array outputs still require a Python-facing layer
-2. Python-facing `nditer` object wrapper — low-level planning, broadcast, and overlap-policy semantics are implemented in `fnp-iter`, but the Python iterator protocol itself is not exposed
+2. Python FFI exposure for `fnp_iter::Nditer` — the Rust-side `nditer` state machine (`iterindex`, `multi_index`, reset/seek, external-loop chunks) is now implemented, but it is not yet exported through a Python bridge as `numpy.nditer`
 3. Expanded CI matrix for alternate oracle environments and longer-horizon benchmark trend regression
 
 ## Intentional Design Decisions
