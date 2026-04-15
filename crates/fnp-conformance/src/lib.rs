@@ -43,7 +43,7 @@ use fnp_ufunc::{
     busday_offset, cheb2poly, chebadd, chebder, chebdiv, chebfit, chebfromroots, chebint, chebmul,
     chebroots, chebsub, chebval, copysign, herm2poly, hermadd, hermder, hermdiv, herme2poly,
     hermeadd, hermediv, hermefromroots, hermemul, hermeroots, hermesub, hermeval, hermfromroots,
-    hermint, hermmul, hermroots, hermsub, hermval, hypot, is_busday, lag2poly, lagadd, lagder,
+    hermint, hermmul, hermroots, hermsub, hermval, hypot, is_busday, isnat, lag2poly, lagadd, lagder,
     lagdiv, lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, ldexp, leg2poly, legadd, legder,
     legdiv, legfit, legfromroots, legint, legmul, legroots, legsub, legval, logaddexp, logaddexp2,
     nextafter, poly2cheb, poly2herm, poly2herme, poly2lag, poly2leg, signbit, spacing,
@@ -10471,6 +10471,9 @@ fn execute_datetime_differential_operation(
         "timedelta_abs" => Ok(as_array(lhs.timedelta_abs())),
         "is_busday" => Ok(as_array(
             is_busday(&lhs).map_err(map_ufunc_error_to_datetime_suite)?,
+        )),
+        "isnat" => Ok(as_array(
+            isnat(&lhs).map_err(map_ufunc_error_to_datetime_suite)?,
         )),
         "busday_count" => {
             let rhs = rhs.ok_or_else(|| {

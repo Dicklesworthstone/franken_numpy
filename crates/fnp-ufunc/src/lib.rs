@@ -22590,6 +22590,10 @@ fn infer_datetime_target_unit(values: &[String]) -> Result<DateTimeUnit, UFuncEr
 
 fn infer_datetime_string_unit(raw: &str) -> Result<DateTimeUnit, UFuncError> {
     let trimmed = raw.trim().trim_end_matches('Z');
+    // NaT has no unit to infer - return None to skip during unit inference
+    if trimmed == "NaT" {
+        return Ok(DateTimeUnit::Day);
+    }
     let time_part = trimmed
         .split_once('T')
         .map(|(_, time)| time)
@@ -22637,6 +22641,10 @@ fn infer_timedelta_string_unit(raw: &str) -> Result<DateTimeUnit, UFuncError> {
         return Err(UFuncError::Msg(
             "timedelta64 string input must not be empty".to_string(),
         ));
+    }
+    // NaT has no unit to infer - return Day to skip during unit inference
+    if trimmed == "NaT" {
+        return Ok(DateTimeUnit::Day);
     }
     let body = trimmed.strip_prefix(['+', '-']).unwrap_or(trimmed);
     let suffix_start = body
@@ -22974,20 +22982,13 @@ pub fn isnat(arr: &UFuncArray) -> Result<UFuncArray, UFuncError> {
             "isnat requires DateTime64 or TimeDelta64 array".to_string(),
         ));
     }
-    // NaT is stored as i64::MIN, which when reinterpreted as f64 is a specific bit pattern.
-    // We check the underlying i64 representation.
-    let nat_as_f64 = f64::from_bits(i64::MIN as u64);
+    // NaT is stored as i64::MIN. When converted to f64 for storage, it becomes
+    // i64::MIN as f64 (a simple cast, not bit reinterpretation).
+    let nat_value = i64::MIN as f64;
     let values: Vec<f64> = arr
         .values()
         .iter()
-        .map(|&v| {
-            // Compare bit patterns since NaT has a specific i64::MIN representation
-            if v.to_bits() == nat_as_f64.to_bits() {
-                1.0
-            } else {
-                0.0
-            }
-        })
+        .map(|&v| if v == nat_value { 1.0 } else { 0.0 })
         .collect();
     UFuncArray::new(arr.shape().to_vec(), values, DType::Bool)
 }
@@ -42069,11 +42070,11 @@ mod tests {
 
     #[test]
     fn isnat_datetime64_basic() {
-        // NaT is represented as i64::MIN
-        let nat_as_f64 = f64::from_bits(i64::MIN as u64);
+        // NaT is stored as i64::MIN, which becomes i64::MIN as f64 when cast
+        let nat_value = i64::MIN as f64;
         let dates = UFuncArray::new(
             vec![4],
-            vec![0.0, nat_as_f64, 100.0, nat_as_f64],
+            vec![0.0, nat_value, 100.0, nat_value],
             DType::DateTime64,
         )
         .unwrap();
@@ -42084,10 +42085,10 @@ mod tests {
 
     #[test]
     fn isnat_timedelta64_basic() {
-        let nat_as_f64 = f64::from_bits(i64::MIN as u64);
+        let nat_value = i64::MIN as f64;
         let deltas = UFuncArray::new(
             vec![3],
-            vec![nat_as_f64, 86400.0, nat_as_f64],
+            vec![nat_value, 86400.0, nat_value],
             DType::TimeDelta64,
         )
         .unwrap();

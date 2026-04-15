@@ -717,5 +717,68 @@
     "expected_dtype": "bool",
     "abs_tol": 0.0,
     "rel_tol": 0.0
+  },
+  {
+    "id": "isnat_datetime64_mixed_golden",
+    "operation": "isnat",
+    "seed": 12033,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-datetime-packet-h",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "datetime_differential_expected_success",
+    "expected_reason_code": "datetime_differential_expected_success",
+    "lhs_shape": [4],
+    "lhs_strings": ["1970-01-01", "NaT", "1970-01-02", "NaT"],
+    "lhs_dtype": "datetime64",
+    "expected_shape": [4],
+    "expected_values": [0.0, 1.0, 0.0, 1.0],
+    "expected_dtype": "bool",
+    "abs_tol": 0.0,
+    "rel_tol": 0.0
+  },
+  {
+    "id": "isnat_timedelta64_mixed_golden",
+    "operation": "isnat",
+    "seed": 12034,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-datetime-packet-h",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "datetime_differential_expected_success",
+    "expected_reason_code": "datetime_differential_expected_success",
+    "lhs_shape": [3],
+    "lhs_strings": ["NaT", "1D", "NaT"],
+    "lhs_dtype": "timedelta64",
+    "expected_shape": [3],
+    "expected_values": [1.0, 0.0, 1.0],
+    "expected_dtype": "bool",
+    "abs_tol": 0.0,
+    "rel_tol": 0.0
+  },
+  {
+    "id": "isnat_all_valid_datetime64_golden",
+    "operation": "isnat",
+    "seed": 12035,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-datetime-packet-h",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "datetime_differential_expected_success",
+    "expected_reason_code": "datetime_differential_expected_success",
+    "lhs_shape": [3],
+    "lhs_values": [0.0, 1.0, 100.0],
+    "lhs_dtype": "datetime64",
+    "expected_shape": [3],
+    "expected_values": [0.0, 0.0, 0.0],
+    "expected_dtype": "bool",
+    "abs_tol": 0.0,
+    "rel_tol": 0.0
   }
 ]
