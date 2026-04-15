@@ -2791,6 +2791,144 @@ where
     nout: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum PyObjectValue {
+    #[default]
+    None,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    String(String),
+    Tuple(Vec<Self>),
+}
+
+impl From<bool> for PyObjectValue {
+    fn from(value: bool) -> Self {
+        Self::Bool(value)
+    }
+}
+
+impl From<i64> for PyObjectValue {
+    fn from(value: i64) -> Self {
+        Self::Int(value)
+    }
+}
+
+impl From<i32> for PyObjectValue {
+    fn from(value: i32) -> Self {
+        Self::Int(i64::from(value))
+    }
+}
+
+impl From<f64> for PyObjectValue {
+    fn from(value: f64) -> Self {
+        Self::Float(value)
+    }
+}
+
+impl From<f32> for PyObjectValue {
+    fn from(value: f32) -> Self {
+        Self::Float(f64::from(value))
+    }
+}
+
+impl From<String> for PyObjectValue {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<&str> for PyObjectValue {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_string())
+    }
+}
+
+impl From<Vec<Self>> for PyObjectValue {
+    fn from(value: Vec<Self>) -> Self {
+        Self::Tuple(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PyObjectArray {
+    shape: Vec<usize>,
+    values: Vec<PyObjectValue>,
+}
+
+impl PyObjectArray {
+    pub fn new(shape: Vec<usize>, values: Vec<PyObjectValue>) -> Result<Self, UFuncError> {
+        let expected = element_count(&shape).map_err(UFuncError::Shape)?;
+        if values.len() != expected {
+            return Err(UFuncError::InvalidInputLength {
+                expected,
+                actual: values.len(),
+            });
+        }
+        Ok(Self { shape, values })
+    }
+
+    #[must_use]
+    pub fn scalar(value: PyObjectValue) -> Self {
+        Self {
+            shape: Vec::new(),
+            values: vec![value],
+        }
+    }
+
+    #[must_use]
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    #[must_use]
+    pub fn values(&self) -> &[PyObjectValue] {
+        &self.values
+    }
+
+    #[must_use]
+    pub fn ndim(&self) -> usize {
+        self.shape.len()
+    }
+
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.values.len()
+    }
+}
+
+fn validate_frompyfunc_nout(nout: usize) -> Result<(), UFuncError> {
+    if nout == 0 {
+        return Err(UFuncError::Msg(
+            "frompyfunc: nout must be greater than zero".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn prepare_frompyfunc_call(
+    arrays: &[&UFuncArray],
+    nin: usize,
+) -> Result<(Vec<usize>, usize, Vec<UFuncArray>), UFuncError> {
+    if arrays.len() != nin {
+        return Err(UFuncError::Msg(format!(
+            "frompyfunc: expected {} input arrays, got {}",
+            nin,
+            arrays.len()
+        )));
+    }
+
+    if nin == 0 {
+        return Ok((Vec::new(), 1usize, Vec::new()));
+    }
+
+    let broadcasted = UFuncArray::broadcast_arrays(arrays)?;
+    let out_shape = broadcasted[0].shape.clone();
+    let element_count = broadcasted[0].values.len();
+    Ok((out_shape, element_count, broadcasted))
+}
+
 impl<F> PyFuncUFunc<F>
 where
     F: Fn(&[f64], &mut [f64]) -> Result<(), UFuncError>,
@@ -2806,22 +2944,7 @@ where
     }
 
     pub fn call(&self, arrays: &[&UFuncArray]) -> Result<Vec<UFuncArray>, UFuncError> {
-        if arrays.len() != self.nin {
-            return Err(UFuncError::Msg(format!(
-                "frompyfunc: expected {} input arrays, got {}",
-                self.nin,
-                arrays.len()
-            )));
-        }
-
-        let (out_shape, element_count, broadcasted) = if self.nin == 0 {
-            (Vec::new(), 1usize, Vec::new())
-        } else {
-            let broadcasted = UFuncArray::broadcast_arrays(arrays)?;
-            let out_shape = broadcasted[0].shape.clone();
-            let element_count = broadcasted[0].values.len();
-            (out_shape, element_count, broadcasted)
-        };
+        let (out_shape, element_count, broadcasted) = prepare_frompyfunc_call(arrays, self.nin)?;
 
         let mut outputs: Vec<Vec<f64>> = (0..self.nout)
             .map(|_| Vec::with_capacity(element_count))
@@ -2834,6 +2957,7 @@ where
                 args[arg_idx] = array.values[element_idx];
             }
 
+            out_buf.fill(0.0);
             (self.func)(&args, &mut out_buf)?;
 
             for (output, value) in outputs.iter_mut().zip(out_buf.iter()) {
@@ -2865,13 +2989,85 @@ pub fn frompyfunc<F>(func: F, nin: usize, nout: usize) -> Result<PyFuncUFunc<F>,
 where
     F: Fn(&[f64], &mut [f64]) -> Result<(), UFuncError>,
 {
-    if nout == 0 {
-        return Err(UFuncError::Msg(
-            "frompyfunc: nout must be greater than zero".to_string(),
-        ));
-    }
+    validate_frompyfunc_nout(nout)?;
 
     Ok(PyFuncUFunc { func, nin, nout })
+}
+
+pub struct PyObjectUFunc<F>
+where
+    F: Fn(&[f64], &mut [PyObjectValue]) -> Result<(), UFuncError>,
+{
+    func: F,
+    nin: usize,
+    nout: usize,
+}
+
+impl<F> PyObjectUFunc<F>
+where
+    F: Fn(&[f64], &mut [PyObjectValue]) -> Result<(), UFuncError>,
+{
+    #[must_use]
+    pub const fn nin(&self) -> usize {
+        self.nin
+    }
+
+    #[must_use]
+    pub const fn nout(&self) -> usize {
+        self.nout
+    }
+
+    pub fn call(&self, arrays: &[&UFuncArray]) -> Result<Vec<PyObjectArray>, UFuncError> {
+        let (out_shape, element_count, broadcasted) = prepare_frompyfunc_call(arrays, self.nin)?;
+
+        let mut outputs: Vec<Vec<PyObjectValue>> = (0..self.nout)
+            .map(|_| Vec::with_capacity(element_count))
+            .collect();
+        let mut args = vec![0.0; self.nin];
+        let mut out_buf = vec![PyObjectValue::None; self.nout];
+
+        for element_idx in 0..element_count {
+            for (arg_idx, array) in broadcasted.iter().enumerate() {
+                args[arg_idx] = array.values[element_idx];
+            }
+
+            out_buf.fill(PyObjectValue::None);
+            (self.func)(&args, &mut out_buf)?;
+
+            for (output, value) in outputs.iter_mut().zip(out_buf.iter()) {
+                output.push(value.clone());
+            }
+        }
+
+        outputs
+            .into_iter()
+            .map(|values| PyObjectArray::new(out_shape.clone(), values))
+            .collect()
+    }
+
+    pub fn call_single(&self, arrays: &[&UFuncArray]) -> Result<PyObjectArray, UFuncError> {
+        if self.nout != 1 {
+            return Err(UFuncError::Msg(format!(
+                "frompyfunc: call_single requires nout=1, got {}",
+                self.nout
+            )));
+        }
+
+        self.call(arrays).map(|mut outputs| outputs.remove(0))
+    }
+}
+
+pub fn frompyfunc_object<F>(
+    func: F,
+    nin: usize,
+    nout: usize,
+) -> Result<PyObjectUFunc<F>, UFuncError>
+where
+    F: Fn(&[f64], &mut [PyObjectValue]) -> Result<(), UFuncError>,
+{
+    validate_frompyfunc_nout(nout)?;
+
+    Ok(PyObjectUFunc { func, nin, nout })
 }
 
 impl UFuncArray {
@@ -27111,6 +27307,20 @@ pub fn scimath_log10(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
     })
 }
 
+/// Complex-aware logn (base n): returns complex result for negative inputs.
+pub fn scimath_logn(n: f64, x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let ln_n = n.ln();
+    scimath_unary(x, |v| {
+        if v > 0.0 {
+            (v.ln() / ln_n, 0.0)
+        } else if v == 0.0 {
+            (f64::NEG_INFINITY, 0.0)
+        } else {
+            ((-v).ln() / ln_n, std::f64::consts::PI / ln_n)
+        }
+    })
+}
+
 /// Complex-aware power: x^p with complex result for negative x with fractional p.
 pub fn scimath_power(x: &UFuncArray, p: f64) -> Result<UFuncArray, UFuncError> {
     scimath_unary(x, |v| {
@@ -29114,21 +29324,21 @@ mod tests {
     use super::{
         AxisSlice, BinaryDispatchMethod, BinaryOp, FloatErrorKind, FloatErrorMode, GridSpec,
         MAError, MaskedArray, OverrideDispatchDecision, OverrideOperand, OverridePayloadClass,
-        PrintOptions, QuantileInterp, ShapeError, StringArray, UFUNC_PACKET_REASON_CODES,
-        UFuncArray, UFuncArrayView, UFuncError, UFuncLogRecord, UFuncLoopRegistry,
-        UFuncRuntimeMode, UnaryOp, bitwise_count, busday_count, busday_offset, cheb2poly, chebadd,
-        chebder, chebdiv, chebfit, chebfromroots, chebint, chebmul, chebroots, chebsub, chebval,
-        checked_window_total, copysign, datetime_as_string, divmod_arrays, errstate, financial_fv,
-        financial_ipmt, financial_irr, financial_mirr, financial_nper, financial_npv,
-        financial_pmt, financial_ppmt, financial_pv, financial_rate, frexp, frompyfunc, gcd_arrays,
-        geterr, herm2poly, hermadd, hermder, hermdiv, herme2poly, hermeadd, hermediv,
-        hermefromroots, hermemul, hermeroots, hermesub, hermeval, hermfit, hermfromroots, hermint,
-        hermmul, hermroots, hermsub, hermval, hypot, is_busday, isnat, isneginf, isposinf,
-        lag2poly, lagadd, lagder, lagdiv, lagfit, lagfromroots, lagint, lagmul, lagroots, lagsub,
-        lagval, lcm_arrays, ldexp, leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint,
-        legmul, legroots, legsub, legval, logaddexp, logaddexp2, ma_is_mask, ma_is_masked,
-        ma_make_mask, ma_mask_or, mediate_ufunc_runtime_policy, modf, nextafter,
-        normalize_fixed_signature_keywords, normalize_signature_keywords, pad_empty,
+        PrintOptions, PyObjectValue, QuantileInterp, ShapeError, StringArray,
+        UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncArrayView, UFuncError, UFuncLogRecord,
+        UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp, bitwise_count, busday_count, busday_offset,
+        cheb2poly, chebadd, chebder, chebdiv, chebfit, chebfromroots, chebint, chebmul, chebroots,
+        chebsub, chebval, checked_window_total, copysign, datetime_as_string, divmod_arrays,
+        errstate, financial_fv, financial_ipmt, financial_irr, financial_mirr, financial_nper,
+        financial_npv, financial_pmt, financial_ppmt, financial_pv, financial_rate, frexp,
+        frompyfunc, frompyfunc_object, gcd_arrays, geterr, herm2poly, hermadd, hermder, hermdiv,
+        herme2poly, hermeadd, hermediv, hermefromroots, hermemul, hermeroots, hermesub, hermeval,
+        hermfit, hermfromroots, hermint, hermmul, hermroots, hermsub, hermval, hypot, is_busday,
+        isnat, isneginf, isposinf, lag2poly, lagadd, lagder, lagdiv, lagfit, lagfromroots, lagint,
+        lagmul, lagroots, lagsub, lagval, lcm_arrays, ldexp, leg2poly, legadd, legder, legdiv,
+        legfit, legfromroots, legint, legmul, legroots, legsub, legval, logaddexp, logaddexp2,
+        ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or, mediate_ufunc_runtime_policy, modf,
+        nextafter, normalize_fixed_signature_keywords, normalize_signature_keywords, pad_empty,
         pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
         plan_binary_dispatch, plan_binary_dispatch_with_registry,
         plan_binary_dispatch_with_signature, poly2cheb, poly2herm, poly2herme, poly2lag, poly2leg,
@@ -43695,6 +43905,80 @@ mod tests {
         );
     }
 
+    #[test]
+    fn frompyfunc_object_single_output_broadcasts_inputs() {
+        let a = UFuncArray::new(vec![2, 1], vec![1.0, 2.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1, 3], vec![10.0, 20.0, 30.0], DType::F64).unwrap();
+        let ufunc = frompyfunc_object(
+            |args, out| {
+                out[0] = format!("{}:{}", args[0] as i64, args[1] as i64).into();
+                Ok(())
+            },
+            2,
+            1,
+        )
+        .unwrap();
+
+        let result = ufunc.call_single(&[&a, &b]).unwrap();
+
+        assert_eq!(ufunc.nin(), 2);
+        assert_eq!(ufunc.nout(), 1);
+        assert_eq!(result.shape(), &[2, 3]);
+        assert_eq!(
+            result.values(),
+            &[
+                PyObjectValue::from("1:10"),
+                PyObjectValue::from("1:20"),
+                PyObjectValue::from("1:30"),
+                PyObjectValue::from("2:10"),
+                PyObjectValue::from("2:20"),
+                PyObjectValue::from("2:30"),
+            ]
+        );
+    }
+
+    #[test]
+    fn frompyfunc_object_multiple_outputs_preserve_nested_values() {
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3], vec![4.0, 5.0, 6.0], DType::F64).unwrap();
+        let ufunc = frompyfunc_object(
+            |args, out| {
+                out[0] = vec![
+                    PyObjectValue::from(args[0] as i64),
+                    PyObjectValue::from(args[1] as i64),
+                ]
+                .into();
+                out[1] = PyObjectValue::from(args[0] < args[1]);
+                Ok(())
+            },
+            2,
+            2,
+        )
+        .unwrap();
+
+        let outputs = ufunc.call(&[&a, &b]).unwrap();
+
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].shape(), &[3]);
+        assert_eq!(
+            outputs[0].values(),
+            &[
+                PyObjectValue::Tuple(vec![PyObjectValue::Int(1), PyObjectValue::Int(4)]),
+                PyObjectValue::Tuple(vec![PyObjectValue::Int(2), PyObjectValue::Int(5)]),
+                PyObjectValue::Tuple(vec![PyObjectValue::Int(3), PyObjectValue::Int(6)]),
+            ]
+        );
+        assert_eq!(outputs[1].shape(), &[3]);
+        assert_eq!(
+            outputs[1].values(),
+            &[
+                PyObjectValue::Bool(true),
+                PyObjectValue::Bool(true),
+                PyObjectValue::Bool(true),
+            ]
+        );
+    }
+
     // --- string comparison tests ---
 
     #[test]
@@ -46899,6 +47183,15 @@ mod tests {
         let out = scimath_log10(&arr).unwrap();
         assert!((out.values()[0] - 1.0).abs() < 1e-14); // log10(10) = 1
         let expected_imag = std::f64::consts::PI / std::f64::consts::LN_10;
+        assert!((out.values()[1] - expected_imag).abs() < 1e-12);
+    }
+
+    #[test]
+    fn scimath_logn_negative() {
+        let arr = UFuncArray::new(vec![1], vec![-8.0], DType::F64).unwrap();
+        let out = scimath_logn(2.0, &arr).unwrap();
+        assert!((out.values()[0] - 3.0).abs() < 1e-14); // log2(8) = 3
+        let expected_imag = std::f64::consts::PI / std::f64::consts::LN_2;
         assert!((out.values()[1] - expected_imag).abs() < 1e-12);
     }
 
