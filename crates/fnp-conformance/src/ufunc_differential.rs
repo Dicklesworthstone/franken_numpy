@@ -3233,7 +3233,10 @@ mod tests {
         write_differential_report,
     };
     use fnp_dtype::DType;
-    use fnp_ufunc::{PyObjectValue, UFuncArray, frompyfunc, frompyfunc_object};
+    use fnp_ufunc::{
+        PyObjectValue, UFuncArray, frompyfunc, frompyfunc_object,
+        frompyfunc_python_with_interpreter,
+    };
     use serde_json::Value;
     use std::collections::BTreeMap;
     use std::fs;
@@ -3279,25 +3282,6 @@ mod tests {
                     .expect("bootstrap real numpy oracle")
             })
             .as_str()
-    }
-
-    fn object_value_from_json(value: &Value) -> PyObjectValue {
-        match value {
-            Value::Null => PyObjectValue::None,
-            Value::Bool(flag) => PyObjectValue::Bool(*flag),
-            Value::Number(number) => number
-                .as_i64()
-                .map(PyObjectValue::Int)
-                .or_else(|| number.as_f64().map(PyObjectValue::Float))
-                .expect("json number compatible with PyObjectValue"),
-            Value::String(text) => PyObjectValue::String(text.clone()),
-            Value::Array(values) => {
-                PyObjectValue::Tuple(values.iter().map(object_value_from_json).collect())
-            }
-            Value::Object(object) => {
-                PyObjectValue::String(Value::Object(object.clone()).to_string())
-            }
-        }
     }
 
     #[test]
@@ -4140,7 +4124,7 @@ print(json.dumps({
             .as_array()
             .expect("oracle values array")
             .iter()
-            .map(object_value_from_json)
+            .map(PyObjectValue::from_json_value)
             .collect();
 
         let a = UFuncArray::new(vec![2, 1], vec![1.0, 2.0], DType::F64).unwrap();
@@ -4202,7 +4186,7 @@ print(json.dumps({
             .as_array()
             .expect("text values array")
             .iter()
-            .map(object_value_from_json)
+            .map(PyObjectValue::from_json_value)
             .collect();
         let bool_shape: Vec<usize> = oracle["bool_shape"]
             .as_array()
@@ -4214,7 +4198,7 @@ print(json.dumps({
             .as_array()
             .expect("bool values array")
             .iter()
-            .map(object_value_from_json)
+            .map(PyObjectValue::from_json_value)
             .collect();
 
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
@@ -4227,6 +4211,136 @@ print(json.dumps({
             },
             2,
             2,
+        )
+        .unwrap();
+        let outputs = ufunc.call(&[&a, &b]).unwrap();
+
+        assert_eq!(outputs[0].shape(), text_shape.as_slice());
+        assert_eq!(outputs[0].values(), text_values.as_slice());
+        assert_eq!(outputs[1].shape(), bool_shape.as_slice());
+        assert_eq!(outputs[1].values(), bool_values.as_slice());
+    }
+
+    #[test]
+    fn frompyfunc_python_source_output_matches_numpy_oracle() {
+        let python = real_numpy_python();
+        let script = r#"
+import json
+import numpy as np
+
+a = np.array([[1.0], [2.0]])
+b = np.array([[10.0, 20.0, 30.0]])
+ufunc = np.frompyfunc(lambda x, y: f"{int(x)}:{int(y)}", 2, 1)
+out = ufunc(a, b)
+
+print(json.dumps({
+    "shape": list(out.shape),
+    "values": [str(v) for v in out.ravel().tolist()],
+}))
+"#;
+
+        let output = Command::new(python)
+            .arg("-c")
+            .arg(script)
+            .output()
+            .expect("run numpy oracle");
+        assert!(
+            output.status.success(),
+            "python oracle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let oracle: Value = serde_json::from_slice(&output.stdout).expect("parse oracle json");
+        let oracle_shape: Vec<usize> = oracle["shape"]
+            .as_array()
+            .expect("oracle shape array")
+            .iter()
+            .map(|value| {
+                usize::try_from(value.as_u64().expect("oracle shape usize")).expect("shape cast")
+            })
+            .collect();
+        let oracle_values: Vec<PyObjectValue> = oracle["values"]
+            .as_array()
+            .expect("oracle values array")
+            .iter()
+            .map(PyObjectValue::from_json_value)
+            .collect();
+
+        let a = UFuncArray::new(vec![2, 1], vec![1.0, 2.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1, 3], vec![10.0, 20.0, 30.0], DType::F64).unwrap();
+        let ufunc =
+            frompyfunc_python_with_interpreter("lambda x, y: f'{int(x)}:{int(y)}'", 2, 1, python)
+                .unwrap();
+        let actual = ufunc.call_single(&[&a, &b]).unwrap();
+
+        assert_eq!(actual.shape(), oracle_shape.as_slice());
+        assert_eq!(actual.values(), oracle_values.as_slice());
+    }
+
+    #[test]
+    fn frompyfunc_python_source_multi_output_matches_numpy_oracle() {
+        let python = real_numpy_python();
+        let script = r#"
+import json
+import numpy as np
+
+a = np.array([1.0, 2.0, 3.0])
+b = np.array([4.0, 5.0, 6.0])
+ufunc = np.frompyfunc(lambda x, y: (f"{int(x)}:{int(y)}", bool(x < y)), 2, 2)
+text_out, bool_out = ufunc(a, b)
+
+print(json.dumps({
+    "text_shape": list(text_out.shape),
+    "text_values": [str(v) for v in text_out.ravel().tolist()],
+    "bool_shape": list(bool_out.shape),
+    "bool_values": [bool(v) for v in bool_out.ravel().tolist()],
+}))
+"#;
+
+        let output = Command::new(python)
+            .arg("-c")
+            .arg(script)
+            .output()
+            .expect("run numpy oracle");
+        assert!(
+            output.status.success(),
+            "python oracle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let oracle: Value = serde_json::from_slice(&output.stdout).expect("parse oracle json");
+        let text_shape: Vec<usize> = oracle["text_shape"]
+            .as_array()
+            .expect("text shape array")
+            .iter()
+            .map(|value| usize::try_from(value.as_u64().expect("text shape usize")).expect("cast"))
+            .collect();
+        let text_values: Vec<PyObjectValue> = oracle["text_values"]
+            .as_array()
+            .expect("text values array")
+            .iter()
+            .map(PyObjectValue::from_json_value)
+            .collect();
+        let bool_shape: Vec<usize> = oracle["bool_shape"]
+            .as_array()
+            .expect("bool shape array")
+            .iter()
+            .map(|value| usize::try_from(value.as_u64().expect("bool shape usize")).expect("cast"))
+            .collect();
+        let bool_values: Vec<PyObjectValue> = oracle["bool_values"]
+            .as_array()
+            .expect("bool values array")
+            .iter()
+            .map(PyObjectValue::from_json_value)
+            .collect();
+
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3], vec![4.0, 5.0, 6.0], DType::F64).unwrap();
+        let ufunc = frompyfunc_python_with_interpreter(
+            "lambda x, y: (f'{int(x)}:{int(y)}', bool(x < y))",
+            2,
+            2,
+            python,
         )
         .unwrap();
         let outputs = ufunc.call(&[&a, &b]).unwrap();

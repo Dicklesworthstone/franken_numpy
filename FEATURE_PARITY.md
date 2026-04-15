@@ -38,7 +38,7 @@
 | numpy.lib.scimath | parity_green | scimath_sqrt, scimath_log, scimath_log2, scimath_log10, scimath_logn, scimath_power, scimath_arccos, scimath_arcsin, scimath_arctanh | — |
 | NumPy 2.0+ API | parity_green | unique_all, unique_counts, unique_inverse, unique_values, permuted, matrix_transpose, cumulative_sum, cumulative_prod, trapezoid, unstack, vecdot | — |
 | Parameter completeness | parity_green | count_nonzero(axis,keepdims), isin(invert), searchsorted(side,sorter), where(1-arg), sum/prod(initial), copyto(casting), partition/argpartition(axis), packbits/unpackbits(axis) | — |
-| Higher-order callable wrappers | in_progress | `frompyfunc` now supports Rust-closure-backed numeric and object-value ufunc construction with `nin`/`nout`, broadcasting, nested object outputs, multi-output, and NumPy oracle coverage for representative kernels; existing `vectorize*` helpers remain green | Python callable protocol + Python bridge exposure |
+| Higher-order callable wrappers | in_progress | `frompyfunc` now supports Rust-closure-backed numeric and object-value ufunc construction plus source-evaluated Python callables via `frompyfunc_python`, with broadcasting, nested object outputs, multi-output, and NumPy oracle coverage for representative kernels; existing `vectorize*` helpers remain green | Direct Python callable-object handles + Python package bridge exposure |
 | Linalg | parity_green | solve, det, inv, eig, svd, qr, cholesky, lstsq, norm, matrix_rank, matrix_power, multi_dot, tensorsolve, tensorinv, pinv, cond, slogdet, and funm are implemented with oracle and regression coverage green | — |
 | Random (numpy.random) | parity_green | PCG64DXSM generator with oracle-verified distributions; Lemire bounded integers + buffered uint32; BTPE binomial + inversion; HRUA hypergeometric + direct; PTRS Poisson + multiplicative; NumPy-exact gamma; zipf with Umin clamping; oracle and reproducibility coverage green | — |
 | I/O (npy/npz) | parity_green | load, save, savez, savez_compressed, loadtxt, savetxt, genfromtxt, fromfile, tofile, and array2string implemented; DEFLATE compression and oracle format coverage green | — |
@@ -63,7 +63,7 @@
 
 ## Remaining Gaps (Python-specific, low priority)
 
-1. Python-callable `frompyfunc` parity — Rust-side numeric and object-value `frompyfunc` execution is implemented, but full Python callable protocol and Python-side object-array exposure still require a Python-facing layer
+1. Direct Python callable-object `frompyfunc` parity — Rust-side numeric/object-value `frompyfunc` execution and source-evaluated Python-callable bridging are implemented, but direct callable-object handles and Python-side object-array exposure still require a Python-facing layer
 2. Python FFI exposure for `fnp_iter::Nditer` — the Rust-side `nditer` state machine (`iterindex`, `multi_index`, reset/seek, external-loop chunks) is now implemented, but it is not yet exported through a Python bridge as `numpy.nditer`
 3. Expanded CI matrix for alternate oracle environments and longer-horizon benchmark trend regression
 

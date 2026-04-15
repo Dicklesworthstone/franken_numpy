@@ -10,7 +10,11 @@ use fnp_runtime::{
 };
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, RwLock};
+
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UFuncRuntimeMode {
@@ -2802,6 +2806,28 @@ pub enum PyObjectValue {
     Tuple(Vec<Self>),
 }
 
+impl PyObjectValue {
+    #[must_use]
+    pub fn from_json_value(value: &serde_json::Value) -> Self {
+        match value {
+            serde_json::Value::Null => Self::None,
+            serde_json::Value::Bool(flag) => Self::Bool(*flag),
+            serde_json::Value::Number(number) => number
+                .as_i64()
+                .map(Self::Int)
+                .or_else(|| number.as_f64().map(Self::Float))
+                .unwrap_or_else(|| Self::String(number.to_string())),
+            serde_json::Value::String(text) => Self::String(text.clone()),
+            serde_json::Value::Array(values) => {
+                Self::Tuple(values.iter().map(Self::from_json_value).collect())
+            }
+            serde_json::Value::Object(object) => {
+                Self::String(serde_json::Value::Object(object.clone()).to_string())
+            }
+        }
+    }
+}
+
 impl From<bool> for PyObjectValue {
     fn from(value: bool) -> Self {
         Self::Bool(value)
@@ -2855,6 +2881,77 @@ pub struct PyObjectArray {
     shape: Vec<usize>,
     values: Vec<PyObjectValue>,
 }
+
+#[derive(Debug, Serialize)]
+struct PythonFromPyFuncPayload {
+    callable: String,
+    nin: usize,
+    nout: usize,
+    arrays: Vec<PythonFromPyFuncInputArray>,
+}
+
+#[derive(Debug, Serialize)]
+struct PythonFromPyFuncInputArray {
+    shape: Vec<usize>,
+    values: Vec<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PythonFromPyFuncResponse {
+    outputs: Vec<PythonFromPyFuncOutput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PythonFromPyFuncOutput {
+    shape: Vec<usize>,
+    values: Vec<serde_json::Value>,
+}
+
+const FROMPYFUNC_PYTHON_BRIDGE_SCRIPT: &str = r#"
+import json
+import numpy as np
+import sys
+
+payload = json.loads(sys.stdin.read())
+globals_dict = {"np": np, "__builtins__": __builtins__}
+callable_obj = eval(payload["callable"], globals_dict, {})
+ufunc = np.frompyfunc(callable_obj, payload["nin"], payload["nout"])
+
+arrays = []
+for item in payload["arrays"]:
+    array = np.array(item["values"], dtype=float)
+    array = array.reshape(item["shape"])
+    arrays.append(array)
+
+result = ufunc(*arrays)
+outputs = [result] if payload["nout"] == 1 else list(result)
+
+def encode_scalar(value):
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, tuple):
+        return [encode_scalar(v) for v in value]
+    if isinstance(value, list):
+        return [encode_scalar(v) for v in value]
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return repr(value)
+
+encoded_outputs = []
+for output in outputs:
+    if isinstance(output, np.ndarray):
+        encoded_outputs.append({
+            "shape": list(output.shape),
+            "values": [encode_scalar(value) for value in output.ravel().tolist()],
+        })
+    else:
+        encoded_outputs.append({
+            "shape": [],
+            "values": [encode_scalar(output)],
+        })
+
+print(json.dumps({"outputs": encoded_outputs}))
+"#;
 
 impl PyObjectArray {
     pub fn new(shape: Vec<usize>, values: Vec<PyObjectValue>) -> Result<Self, UFuncError> {
@@ -2927,6 +3024,113 @@ fn prepare_frompyfunc_call(
     let out_shape = broadcasted[0].shape.clone();
     let element_count = broadcasted[0].values.len();
     Ok((out_shape, element_count, broadcasted))
+}
+
+fn default_frompyfunc_python_interpreter() -> String {
+    std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".to_string())
+}
+
+fn run_python_frompyfunc_bridge(
+    python: &str,
+    callable_source: &str,
+    nin: usize,
+    nout: usize,
+    out_shape: &[usize],
+    broadcasted: &[UFuncArray],
+) -> Result<Vec<PyObjectArray>, UFuncError> {
+    let payload = PythonFromPyFuncPayload {
+        callable: callable_source.to_string(),
+        nin,
+        nout,
+        arrays: broadcasted
+            .iter()
+            .map(|array| PythonFromPyFuncInputArray {
+                shape: array.shape.clone(),
+                values: array.values.clone(),
+            })
+            .collect(),
+    };
+    let payload_bytes = serde_json::to_vec(&payload).map_err(|err| {
+        UFuncError::Msg(format!(
+            "frompyfunc_python: failed to serialize bridge payload: {err}"
+        ))
+    })?;
+
+    let mut child = Command::new(python)
+        .arg("-c")
+        .arg(FROMPYFUNC_PYTHON_BRIDGE_SCRIPT)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| {
+            UFuncError::Msg(format!(
+                "frompyfunc_python: failed to spawn python bridge '{python}': {err}"
+            ))
+        })?;
+
+    let mut stdin = child.stdin.take().ok_or_else(|| {
+        UFuncError::Msg("frompyfunc_python: python bridge stdin was unavailable".to_string())
+    })?;
+    stdin.write_all(&payload_bytes).map_err(|err| {
+        UFuncError::Msg(format!(
+            "frompyfunc_python: failed to write bridge payload: {err}"
+        ))
+    })?;
+    drop(stdin);
+
+    let output = child.wait_with_output().map_err(|err| {
+        UFuncError::Msg(format!(
+            "frompyfunc_python: failed to wait on python bridge: {err}"
+        ))
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = if stderr.is_empty() {
+            "python bridge exited without stderr".to_string()
+        } else {
+            stderr
+        };
+        return Err(UFuncError::Msg(format!(
+            "frompyfunc_python: python bridge failed: {detail}"
+        )));
+    }
+
+    let response: PythonFromPyFuncResponse =
+        serde_json::from_slice(&output.stdout).map_err(|err| {
+            UFuncError::Msg(format!(
+                "frompyfunc_python: failed to parse bridge response: {err}"
+            ))
+        })?;
+
+    if response.outputs.len() != nout {
+        return Err(UFuncError::Msg(format!(
+            "frompyfunc_python: expected {nout} outputs, got {}",
+            response.outputs.len()
+        )));
+    }
+
+    response
+        .outputs
+        .into_iter()
+        .map(|output| {
+            if output.shape != out_shape {
+                return Err(UFuncError::Msg(format!(
+                    "frompyfunc_python: expected output shape {:?}, got {:?}",
+                    out_shape, output.shape
+                )));
+            }
+
+            PyObjectArray::new(
+                output.shape,
+                output
+                    .values
+                    .iter()
+                    .map(PyObjectValue::from_json_value)
+                    .collect(),
+            )
+        })
+        .collect()
 }
 
 impl<F> PyFuncUFunc<F>
@@ -3068,6 +3272,95 @@ where
     validate_frompyfunc_nout(nout)?;
 
     Ok(PyObjectUFunc { func, nin, nout })
+}
+
+#[derive(Debug)]
+pub struct PythonSourceUFunc {
+    callable_source: String,
+    python: String,
+    nin: usize,
+    nout: usize,
+}
+
+impl PythonSourceUFunc {
+    #[must_use]
+    pub const fn nin(&self) -> usize {
+        self.nin
+    }
+
+    #[must_use]
+    pub const fn nout(&self) -> usize {
+        self.nout
+    }
+
+    #[must_use]
+    pub fn callable_source(&self) -> &str {
+        &self.callable_source
+    }
+
+    #[must_use]
+    pub fn python(&self) -> &str {
+        &self.python
+    }
+
+    pub fn call(&self, arrays: &[&UFuncArray]) -> Result<Vec<PyObjectArray>, UFuncError> {
+        let (out_shape, _element_count, broadcasted) = prepare_frompyfunc_call(arrays, self.nin)?;
+        run_python_frompyfunc_bridge(
+            &self.python,
+            &self.callable_source,
+            self.nin,
+            self.nout,
+            &out_shape,
+            &broadcasted,
+        )
+    }
+
+    pub fn call_single(&self, arrays: &[&UFuncArray]) -> Result<PyObjectArray, UFuncError> {
+        if self.nout != 1 {
+            return Err(UFuncError::Msg(format!(
+                "frompyfunc: call_single requires nout=1, got {}",
+                self.nout
+            )));
+        }
+
+        self.call(arrays).map(|mut outputs| outputs.remove(0))
+    }
+}
+
+pub fn frompyfunc_python<S>(
+    callable_source: S,
+    nin: usize,
+    nout: usize,
+) -> Result<PythonSourceUFunc, UFuncError>
+where
+    S: Into<String>,
+{
+    frompyfunc_python_with_interpreter(
+        callable_source,
+        nin,
+        nout,
+        default_frompyfunc_python_interpreter(),
+    )
+}
+
+pub fn frompyfunc_python_with_interpreter<S, P>(
+    callable_source: S,
+    nin: usize,
+    nout: usize,
+    python: P,
+) -> Result<PythonSourceUFunc, UFuncError>
+where
+    S: Into<String>,
+    P: Into<String>,
+{
+    validate_frompyfunc_nout(nout)?;
+
+    Ok(PythonSourceUFunc {
+        callable_source: callable_source.into(),
+        python: python.into(),
+        nin,
+        nout,
+    })
 }
 
 impl UFuncArray {
@@ -29331,22 +29624,23 @@ mod tests {
         chebsub, chebval, checked_window_total, copysign, datetime_as_string, divmod_arrays,
         errstate, financial_fv, financial_ipmt, financial_irr, financial_mirr, financial_nper,
         financial_npv, financial_pmt, financial_ppmt, financial_pv, financial_rate, frexp,
-        frompyfunc, frompyfunc_object, gcd_arrays, geterr, herm2poly, hermadd, hermder, hermdiv,
-        herme2poly, hermeadd, hermediv, hermefromroots, hermemul, hermeroots, hermesub, hermeval,
-        hermfit, hermfromroots, hermint, hermmul, hermroots, hermsub, hermval, hypot, is_busday,
-        isnat, isneginf, isposinf, lag2poly, lagadd, lagder, lagdiv, lagfit, lagfromroots, lagint,
-        lagmul, lagroots, lagsub, lagval, lcm_arrays, ldexp, leg2poly, legadd, legder, legdiv,
-        legfit, legfromroots, legint, legmul, legroots, legsub, legval, logaddexp, logaddexp2,
-        ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or, mediate_ufunc_runtime_policy, modf,
-        nextafter, normalize_fixed_signature_keywords, normalize_signature_keywords, pad_empty,
+        frompyfunc, frompyfunc_object, frompyfunc_python, frompyfunc_python_with_interpreter,
+        gcd_arrays, geterr, herm2poly, hermadd, hermder, hermdiv, herme2poly, hermeadd, hermediv,
+        hermefromroots, hermemul, hermeroots, hermesub, hermeval, hermfit, hermfromroots, hermint,
+        hermmul, hermroots, hermsub, hermval, hypot, is_busday, isnat, isneginf, isposinf,
+        lag2poly, lagadd, lagder, lagdiv, lagfit, lagfromroots, lagint, lagmul, lagroots, lagsub,
+        lagval, lcm_arrays, ldexp, leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint,
+        legmul, legroots, legsub, legval, logaddexp, logaddexp2, ma_is_mask, ma_is_masked,
+        ma_make_mask, ma_mask_or, mediate_ufunc_runtime_policy, modf, nextafter,
+        normalize_fixed_signature_keywords, normalize_signature_keywords, pad_empty,
         pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
         plan_binary_dispatch, plan_binary_dispatch_with_registry,
         plan_binary_dispatch_with_signature, poly2cheb, poly2herm, poly2herme, poly2lag, poly2leg,
         register_custom_loop, resolve_override_dispatch, scimath_arccos, scimath_arcsin,
-        scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_power, scimath_sqrt,
-        seterr, seterr_state, seterrcall, signbit, sort_complex, spacing, take_float_error_events,
-        unique_all, unique_counts, unique_inverse, unique_values, validate_override_payload_class,
-        where_nonzero,
+        scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_logn, scimath_power,
+        scimath_sqrt, seterr, seterr_state, seterrcall, signbit, sort_complex, spacing,
+        take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
+        validate_override_payload_class, where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
@@ -29612,7 +29906,7 @@ mod tests {
     #[test]
     fn scalar_fractional_datetime_lossy_fallback_uses_f64_dtype() {
         let arr = UFuncArray::scalar(1.5, DType::DateTime64);
-        assert_eq!(arr.shape(), &[]);
+        assert!(arr.shape().is_empty());
         assert_eq!(arr.dtype(), DType::F64);
         assert_eq!(arr.values(), &[1.5]);
     }
@@ -29628,15 +29922,15 @@ mod tests {
     #[test]
     fn scalar_complex_lossy_fallback_uses_f64_dtype() {
         let arr = UFuncArray::scalar(1.0, DType::Complex128);
-        assert_eq!(arr.shape(), &[]);
+        assert!(arr.shape().is_empty());
         assert_eq!(arr.dtype(), DType::F64);
         assert_eq!(arr.values(), &[1.0]);
         let real = arr.isreal();
-        assert_eq!(real.shape(), &[]);
+        assert!(real.shape().is_empty());
         assert_eq!(real.dtype(), DType::Bool);
         assert_eq!(real.values(), &[1.0]);
         let complex = arr.iscomplex();
-        assert_eq!(complex.shape(), &[]);
+        assert!(complex.shape().is_empty());
         assert_eq!(complex.dtype(), DType::Bool);
         assert_eq!(complex.values(), &[0.0]);
     }
@@ -29939,7 +30233,7 @@ mod tests {
             .expect("arr");
 
         let out = arr.reduce_sum(None, false).expect("sum");
-        assert_eq!(out.shape(), &[]);
+        assert!(out.shape().is_empty());
         assert_eq!(out.values(), &[21.0]);
     }
 
@@ -30177,7 +30471,7 @@ mod tests {
         assert!(axis_one.values()[3].is_infinite() && axis_one.values()[3].is_sign_negative());
 
         let full = arr.reduce_sum(None, false).expect("sum all");
-        assert_eq!(full.shape(), &[]);
+        assert!(full.shape().is_empty());
         assert!(full.values()[0].is_nan());
     }
 
@@ -31428,7 +31722,7 @@ mod tests {
             .expect("arr");
 
         let out = arr.reduce_prod(None, false).expect("prod all");
-        assert_eq!(out.shape(), &[]);
+        assert!(out.shape().is_empty());
         assert!((out.values()[0] - 720.0).abs() < 1e-10);
     }
 
@@ -31456,7 +31750,7 @@ mod tests {
             .expect("arr");
 
         let out = arr.reduce_min(None, false).expect("min all");
-        assert_eq!(out.shape(), &[]);
+        assert!(out.shape().is_empty());
         assert!((out.values()[0] - 1.0).abs() < 1e-10);
     }
 
@@ -31485,7 +31779,7 @@ mod tests {
             .expect("arr");
 
         let out = arr.reduce_max(None, false).expect("max all");
-        assert_eq!(out.shape(), &[]);
+        assert!(out.shape().is_empty());
         assert!((out.values()[0] - 5.0).abs() < 1e-10);
     }
 
@@ -31535,7 +31829,7 @@ mod tests {
             .expect("arr");
 
         let out = arr.reduce_mean(None, false).expect("mean all");
-        assert_eq!(out.shape(), &[]);
+        assert!(out.shape().is_empty());
         assert!((out.values()[0] - 3.5).abs() < 1e-10);
     }
 
@@ -33830,7 +34124,7 @@ mod tests {
         let out = sorted
             .searchsorted(&probe, None, None)
             .expect("searchsorted");
-        assert_eq!(out.shape(), &[]);
+        assert!(out.shape().is_empty());
         assert_eq!(out.values(), &[2.0]);
         assert_eq!(out.dtype(), DType::I64);
     }
@@ -35242,7 +35536,7 @@ mod tests {
         )
         .unwrap();
         let t = a.trace_axis(0, 0, 1).unwrap();
-        assert_eq!(t.shape(), &[]);
+        assert!(t.shape().is_empty());
         assert_eq!(t.values(), &[15.0]);
     }
 
@@ -43853,7 +44147,7 @@ mod tests {
 
         let result = ufunc.call_single(&[]).unwrap();
 
-        assert_eq!(result.shape(), &[]);
+        assert!(result.shape().is_empty());
         assert_eq!(result.values(), &[42.0]);
     }
 
@@ -43976,6 +44270,40 @@ mod tests {
                 PyObjectValue::Bool(true),
                 PyObjectValue::Bool(true),
             ]
+        );
+    }
+
+    #[test]
+    fn frompyfunc_python_constructor_tracks_metadata() {
+        let ufunc = frompyfunc_python("lambda x, y: x + y", 2, 1).unwrap();
+        assert_eq!(ufunc.nin(), 2);
+        assert_eq!(ufunc.nout(), 1);
+        assert_eq!(ufunc.callable_source(), "lambda x, y: x + y");
+        assert!(!ufunc.python().is_empty());
+    }
+
+    #[test]
+    fn frompyfunc_python_rejects_zero_outputs() {
+        let err = frompyfunc_python("lambda: None", 0, 0)
+            .expect_err("nout=0 must be rejected for python bridge");
+        assert_eq!(
+            err.to_string(),
+            "frompyfunc: nout must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn frompyfunc_python_reports_missing_interpreter() {
+        let a = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
+        let ufunc =
+            frompyfunc_python_with_interpreter("lambda x: x", 1, 1, "/definitely/missing/python")
+                .unwrap();
+        let err = ufunc
+            .call_single(&[&a])
+            .expect_err("missing interpreter must surface as an error");
+        assert!(
+            err.to_string().contains("failed to spawn python bridge"),
+            "unexpected error: {err}"
         );
     }
 
@@ -50201,7 +50529,7 @@ mod tests {
         // np.linalg.vector_norm([1, 2, 3]) = sqrt(1 + 4 + 9) = sqrt(14)
         let arr = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         let r = arr.vector_norm(None, None, false).unwrap();
-        assert_eq!(r.shape(), &[]);
+        assert!(r.shape().is_empty());
         assert!((r.values()[0] - 14.0_f64.sqrt()).abs() < 1e-10);
     }
 
@@ -50210,7 +50538,7 @@ mod tests {
         // np.linalg.vector_norm([1, -2, 3], ord=1) = 1 + 2 + 3 = 6
         let arr = UFuncArray::new(vec![3], vec![1.0, -2.0, 3.0], DType::F64).unwrap();
         let r = arr.vector_norm(Some(1.0), None, false).unwrap();
-        assert_eq!(r.shape(), &[]);
+        assert!(r.shape().is_empty());
         assert!((r.values()[0] - 6.0).abs() < 1e-10);
     }
 
@@ -50219,7 +50547,7 @@ mod tests {
         // np.linalg.vector_norm([1, -2, 3], ord=inf) = max(|1|, |2|, |3|) = 3
         let arr = UFuncArray::new(vec![3], vec![1.0, -2.0, 3.0], DType::F64).unwrap();
         let r = arr.vector_norm(Some(f64::INFINITY), None, false).unwrap();
-        assert_eq!(r.shape(), &[]);
+        assert!(r.shape().is_empty());
         assert!((r.values()[0] - 3.0).abs() < 1e-10);
     }
 
@@ -50230,7 +50558,7 @@ mod tests {
         let r = arr
             .vector_norm(Some(f64::NEG_INFINITY), None, false)
             .unwrap();
-        assert_eq!(r.shape(), &[]);
+        assert!(r.shape().is_empty());
         assert!((r.values()[0] - 1.0).abs() < 1e-10);
     }
 
@@ -50239,7 +50567,7 @@ mod tests {
         // np.linalg.vector_norm([1, 0, 3, 0, 5], ord=0) = 3 (count of non-zeros)
         let arr = UFuncArray::new(vec![5], vec![1.0, 0.0, 3.0, 0.0, 5.0], DType::F64).unwrap();
         let r = arr.vector_norm(Some(0.0), None, false).unwrap();
-        assert_eq!(r.shape(), &[]);
+        assert!(r.shape().is_empty());
         assert!((r.values()[0] - 3.0).abs() < 1e-10);
     }
 
@@ -50257,7 +50585,7 @@ mod tests {
         // np.linalg.matrix_norm([[1, 2], [3, 4]]) = sqrt(1 + 4 + 9 + 16) = sqrt(30)
         let arr = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
         let r = arr.matrix_norm(None, false).unwrap();
-        assert_eq!(r.shape(), &[]);
+        assert!(r.shape().is_empty());
         assert!((r.values()[0] - 30.0_f64.sqrt()).abs() < 1e-10);
     }
 
@@ -50266,7 +50594,7 @@ mod tests {
         // np.linalg.matrix_norm([[1, 2], [3, 4]], ord=1) = max(|1|+|3|, |2|+|4|) = max(4, 6) = 6
         let arr = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
         let r = arr.matrix_norm(Some("1"), false).unwrap();
-        assert_eq!(r.shape(), &[]);
+        assert!(r.shape().is_empty());
         assert!((r.values()[0] - 6.0).abs() < 1e-10);
     }
 
@@ -50275,7 +50603,7 @@ mod tests {
         // np.linalg.matrix_norm([[1, 2], [3, 4]], ord=inf) = max(|1|+|2|, |3|+|4|) = max(3, 7) = 7
         let arr = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
         let r = arr.matrix_norm(Some("inf"), false).unwrap();
-        assert_eq!(r.shape(), &[]);
+        assert!(r.shape().is_empty());
         assert!((r.values()[0] - 7.0).abs() < 1e-10);
     }
 
