@@ -5301,6 +5301,65 @@
         127.0
       ],
       "dtype": "int8"
+    },
+    {
+      "id": "take_along_axis_axis1_basic",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        1
+      ],
+      "values": [
+        30.0,
+        40.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "put_along_axis_axis1_basic",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        2,
+        3
+      ],
+      "values": [
+        10.0,
+        99.0,
+        30.0,
+        40.0,
+        50.0,
+        88.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "put_along_axis_axis0_broadcast_values",
+      "status": "ok",
+      "error": null,
+      "shape": [
+        3,
+        5
+      ],
+      "values": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "dtype": "float64"
     }
   ]
 }

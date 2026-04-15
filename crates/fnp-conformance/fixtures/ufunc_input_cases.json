@@ -10974,5 +10974,158 @@
     "artifact_refs": [],
     "reason_code": "ufunc_dispatch_resolution_failed",
     "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "take_along_axis_axis1_basic",
+    "op": "take_along_axis",
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      10.0,
+      20.0,
+      30.0,
+      40.0,
+      50.0,
+      60.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [
+      2,
+      1
+    ],
+    "rhs_values": [
+      2.0,
+      0.0
+    ],
+    "rhs_dtype": "i64",
+    "axis": 1,
+    "keepdims": false,
+    "seed": 6510,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-along-axis",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "put_along_axis_axis1_basic",
+    "op": "put_along_axis",
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      10.0,
+      20.0,
+      30.0,
+      40.0,
+      50.0,
+      60.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [
+      2,
+      1
+    ],
+    "rhs_values": [
+      1.0,
+      2.0
+    ],
+    "rhs_dtype": "i64",
+    "axis": 1,
+    "keepdims": false,
+    "third_shape": [
+      2,
+      1
+    ],
+    "third_values": [
+      99.0,
+      88.0
+    ],
+    "third_dtype": "f64",
+    "seed": 6511,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-along-axis",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
+  },
+  {
+    "id": "put_along_axis_axis0_broadcast_values",
+    "op": "put_along_axis",
+    "lhs_shape": [
+      3,
+      5
+    ],
+    "lhs_values": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "lhs_dtype": "f64",
+    "rhs_shape": [
+      3,
+      5
+    ],
+    "rhs_values": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "rhs_dtype": "i64",
+    "axis": 0,
+    "keepdims": false,
+    "third_shape": [
+      1,
+      5
+    ],
+    "third_values": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "third_dtype": "f64",
+    "seed": 6512,
+    "mode": "strict",
+    "env_fingerprint": "fnp-conformance-along-axis",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json",
+      "test_put_along.py",
+      "test_put_along.rs"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed"
   }
 ]

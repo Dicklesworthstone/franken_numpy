@@ -666,6 +666,91 @@ def py_searchsorted(sorted_vals, sorted_shape, probe_vals, probe_shape):
     out = [float(bisect.bisect_left(sorted_vals, needle)) for needle in probe_vals]
     return list(probe_shape), out
 
+def py_take_along_axis(vals, shape, indices_vals, indices_shape, axis):
+    ndim = len(shape)
+    if len(indices_shape) != ndim:
+        raise ValueError(f'take_along_axis: indices ndim {len(indices_shape)} != array ndim {ndim}')
+
+    raw_axis = axis
+    if axis < 0:
+        axis += ndim
+    if axis < 0 or axis >= ndim:
+        raise ValueError(f'axis {raw_axis} out of bounds for shape {shape}')
+
+    for dim, (src_dim, idx_dim) in enumerate(zip(shape, indices_shape)):
+        if dim != axis and src_dim != 1 and src_dim != idx_dim:
+            raise ValueError(
+                f'take_along_axis: non-axis dimension {dim} mismatch: {src_dim} vs {idx_dim}'
+            )
+
+    axis_len = shape[axis]
+    src_strides = py_strides(shape)
+    idx_strides = py_strides(indices_shape)
+    total = math.prod(indices_shape) if indices_shape else 1
+    out = []
+    for flat in range(total):
+        rem = flat
+        src_flat = 0
+        for dim in range(ndim):
+            coord = rem // idx_strides[dim]
+            rem %= idx_strides[dim]
+            if dim == axis:
+                idx = int(indices_vals[flat])
+                resolved = idx + axis_len if idx < 0 else idx
+                if resolved < 0 or resolved >= axis_len:
+                    raise ValueError(
+                        f'take_along_axis: index {idx} out of bounds for axis {axis} with size {axis_len}'
+                    )
+                src_flat += resolved * src_strides[dim]
+            else:
+                src_flat += (0 if shape[dim] == 1 else coord) * src_strides[dim]
+        out.append(vals[src_flat])
+    return list(indices_shape), out
+
+def py_put_along_axis(dest_vals, dest_shape, indices_vals, indices_shape, value_vals, value_shape, axis):
+    ndim = len(dest_shape)
+    if len(indices_shape) != ndim or len(value_shape) != ndim:
+        raise ValueError('put_along_axis: all arrays must have same ndim')
+
+    raw_axis = axis
+    if axis < 0:
+        axis += ndim
+    if axis < 0 or axis >= ndim:
+        raise ValueError(f'axis {raw_axis} out of bounds for shape {dest_shape}')
+
+    for dim, (dst_dim, idx_dim) in enumerate(zip(dest_shape, indices_shape)):
+        if dim != axis and dst_dim != 1 and dst_dim != idx_dim:
+            raise ValueError(
+                f'put_along_axis: non-axis dimension {dim} mismatch: {dst_dim} vs {idx_dim}'
+            )
+
+    if py_broadcast_shape(value_shape, indices_shape) != list(indices_shape):
+        raise ValueError(f'cannot broadcast {value_shape} to {indices_shape}')
+
+    axis_len = dest_shape[axis]
+    dst_strides = py_strides(dest_shape)
+    idx_strides = py_strides(indices_shape)
+    value_strides = py_strides(value_shape)
+    total = math.prod(indices_shape) if indices_shape else 1
+    out = list(dest_vals)
+    for flat in range(total):
+        multi = py_unravel(flat, indices_shape, idx_strides)
+        dst_flat = 0
+        for dim, coord in enumerate(multi):
+            if dim == axis:
+                idx = int(indices_vals[flat])
+                resolved = idx + axis_len if idx < 0 else idx
+                if resolved < 0 or resolved >= axis_len:
+                    raise ValueError(
+                        f'put_along_axis: index {idx} out of bounds for axis {axis} with size {axis_len}'
+                    )
+                dst_flat += resolved * dst_strides[dim]
+            else:
+                dst_flat += (0 if dest_shape[dim] == 1 else coord) * dst_strides[dim]
+        value_flat = py_src_index(multi, value_shape, value_strides, len(indices_shape))
+        out[dst_flat] = value_vals[value_flat]
+    return list(dest_shape), out
+
 def py_var_std(vals, shape, axis, keepdims, ddof, emit_std):
     ddof = int(ddof)
     if axis is None:
@@ -1085,6 +1170,19 @@ for case in cases:
                 rhs_dtype = normalize_dtype_name(case.get('rhs_dtype', 'float64'))
                 rhs = np.array(case['rhs_values'], dtype=rhs_dtype).reshape(tuple(case['rhs_shape']))
                 out = np.searchsorted(lhs, rhs, side='left')
+            elif op == 'take_along_axis':
+                rhs_dtype = normalize_dtype_name(case.get('rhs_dtype', 'int64'))
+                rhs = np.array(case['rhs_values'], dtype=rhs_dtype).reshape(tuple(case['rhs_shape']))
+                axis = case.get('axis')
+                out = np.take_along_axis(lhs, rhs, axis=axis)
+            elif op == 'put_along_axis':
+                rhs_dtype = normalize_dtype_name(case.get('rhs_dtype', 'int64'))
+                rhs = np.array(case['rhs_values'], dtype=rhs_dtype).reshape(tuple(case['rhs_shape']))
+                third_dtype = normalize_dtype_name(case.get('third_dtype', 'float64'))
+                third = np.array(case['third_values'], dtype=third_dtype).reshape(tuple(case['third_shape']))
+                axis = case.get('axis')
+                out = np.array(lhs, copy=True)
+                np.put_along_axis(out, rhs, third, axis=axis)
             elif op == 'concatenate':
                 rhs_dtype = normalize_dtype_name(case.get('rhs_dtype', 'float64'))
                 rhs = np.array(case['rhs_values'], dtype=rhs_dtype).reshape(tuple(case['rhs_shape']))
@@ -1467,6 +1565,22 @@ for case in cases:
                 rhs_vals = [float(v) for v in case['rhs_values']]
                 shape, values = py_searchsorted(lhs_vals, lhs_shape, rhs_vals, rhs_shape)
                 dtype = 'i64'
+            elif op == 'take_along_axis':
+                rhs_shape = case['rhs_shape']
+                rhs_vals = [float(v) for v in case['rhs_values']]
+                axis = case.get('axis')
+                shape, values = py_take_along_axis(lhs_vals, lhs_shape, rhs_vals, rhs_shape, axis)
+                dtype = lhs_dtype
+            elif op == 'put_along_axis':
+                rhs_shape = case['rhs_shape']
+                rhs_vals = [float(v) for v in case['rhs_values']]
+                third_shape = case['third_shape']
+                third_vals = [float(v) for v in case['third_values']]
+                axis = case.get('axis')
+                shape, values = py_put_along_axis(
+                    lhs_vals, lhs_shape, rhs_vals, rhs_shape, third_vals, third_shape, axis
+                )
+                dtype = lhs_dtype
             elif op == 'concatenate':
                 rhs_shape = case['rhs_shape']
                 rhs_vals = [float(v) for v in case['rhs_values']]
@@ -1606,6 +1720,8 @@ pub enum UFuncOperation {
     Sort,
     Argsort,
     Searchsorted,
+    TakeAlongAxis,
+    PutAlongAxis,
     Concatenate,
     Stack,
     Cumsum,
@@ -2888,6 +3004,55 @@ pub fn execute_input_case(case: &UFuncInputCase) -> Result<(Vec<usize>, Vec<f64>
             lhs.searchsorted(&probes, None, None)
                 .map_err(|err| format!("searchsorted error: {err}"))?
         }
+        UFuncOperation::TakeAlongAxis => {
+            let index_shape = case
+                .rhs_shape
+                .clone()
+                .ok_or_else(|| "take_along_axis requires rhs_shape".to_string())?;
+            let index_values = case
+                .rhs_values
+                .clone()
+                .ok_or_else(|| "take_along_axis requires rhs_values".to_string())?;
+            let index_dtype = parse_dtype(case.rhs_dtype.as_deref().unwrap_or("i64"))?;
+            let indices = UFuncArray::new(index_shape, index_values, index_dtype)
+                .map_err(|err| format!("take_along_axis index array error: {err}"))?;
+            let axis = case
+                .axis
+                .ok_or_else(|| "take_along_axis requires axis".to_string())?;
+            lhs.take_along_axis(&indices, axis)
+                .map_err(|err| format!("take_along_axis error: {err}"))?
+        }
+        UFuncOperation::PutAlongAxis => {
+            let index_shape = case
+                .rhs_shape
+                .clone()
+                .ok_or_else(|| "put_along_axis requires rhs_shape".to_string())?;
+            let index_values = case
+                .rhs_values
+                .clone()
+                .ok_or_else(|| "put_along_axis requires rhs_values".to_string())?;
+            let index_dtype = parse_dtype(case.rhs_dtype.as_deref().unwrap_or("i64"))?;
+            let indices = UFuncArray::new(index_shape, index_values, index_dtype)
+                .map_err(|err| format!("put_along_axis index array error: {err}"))?;
+            let value_shape = case
+                .third_shape
+                .clone()
+                .ok_or_else(|| "put_along_axis requires third_shape".to_string())?;
+            let value_values = case
+                .third_values
+                .clone()
+                .ok_or_else(|| "put_along_axis requires third_values".to_string())?;
+            let value_dtype = parse_dtype(case.third_dtype.as_deref().unwrap_or("f64"))?;
+            let values = UFuncArray::new(value_shape, value_values, value_dtype)
+                .map_err(|err| format!("put_along_axis value array error: {err}"))?;
+            let axis = case
+                .axis
+                .ok_or_else(|| "put_along_axis requires axis".to_string())?;
+            let mut out = lhs.clone();
+            out.put_along_axis(&indices, &values, axis)
+                .map_err(|err| format!("put_along_axis error: {err}"))?;
+            out
+        }
         UFuncOperation::Concatenate => {
             let rhs_shape = case
                 .rhs_shape
@@ -3366,6 +3531,89 @@ mod tests {
         assert_eq!(
             values,
             vec![10.0, 13.0, 28.0, 40.0, 172.0, 193.0, 244.0, 274.0]
+        );
+        assert_eq!(dtype, "f64");
+    }
+
+    #[test]
+    fn execute_input_case_supports_take_along_axis() {
+        let case = UFuncInputCase {
+            id: "take_along_axis_basic".to_string(),
+            op: UFuncOperation::TakeAlongAxis,
+            lhs_shape: vec![2, 3],
+            lhs_values: vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+            lhs_dtype: "f64".to_string(),
+            rhs_shape: Some(vec![2, 1]),
+            rhs_values: Some(vec![2.0, 0.0]),
+            rhs_dtype: Some("i64".to_string()),
+            axis: Some(1),
+            axes: None,
+            keepdims: Some(false),
+            ddof: None,
+            clip_min: None,
+            clip_max: None,
+            third_shape: None,
+            third_values: None,
+            third_dtype: None,
+            sig: None,
+            signature: None,
+            dtype: None,
+            seed: 0,
+            mode: "strict".to_string(),
+            env_fingerprint: "tests".to_string(),
+            artifact_refs: Vec::new(),
+            reason_code: "ufunc_dispatch_resolution_failed".to_string(),
+            expected_reason_code: "ufunc_dispatch_resolution_failed".to_string(),
+            expected_error_contains: String::new(),
+        };
+
+        let (shape, values, dtype) =
+            execute_input_case(&case).expect("take_along_axis should pass");
+        assert_eq!(shape, vec![2, 1]);
+        assert_eq!(values, vec![30.0, 40.0]);
+        assert_eq!(dtype, "f64");
+    }
+
+    #[test]
+    fn execute_input_case_supports_put_along_axis_with_broadcast_values() {
+        let case = UFuncInputCase {
+            id: "put_along_axis_axis0_broadcast".to_string(),
+            op: UFuncOperation::PutAlongAxis,
+            lhs_shape: vec![3, 5],
+            lhs_values: vec![0.0; 15],
+            lhs_dtype: "f64".to_string(),
+            rhs_shape: Some(vec![3, 5]),
+            rhs_values: Some(vec![0.0; 15]),
+            rhs_dtype: Some("i64".to_string()),
+            axis: Some(0),
+            axes: None,
+            keepdims: Some(false),
+            ddof: None,
+            clip_min: None,
+            clip_max: None,
+            third_shape: Some(vec![1, 5]),
+            third_values: Some(vec![1.0; 5]),
+            third_dtype: Some("f64".to_string()),
+            sig: None,
+            signature: None,
+            dtype: None,
+            seed: 0,
+            mode: "strict".to_string(),
+            env_fingerprint: "tests".to_string(),
+            artifact_refs: Vec::new(),
+            reason_code: "ufunc_dispatch_resolution_failed".to_string(),
+            expected_reason_code: "ufunc_dispatch_resolution_failed".to_string(),
+            expected_error_contains: String::new(),
+        };
+
+        let (shape, values, dtype) =
+            execute_input_case(&case).expect("put_along_axis should pass");
+        assert_eq!(shape, vec![3, 5]);
+        assert_eq!(
+            values,
+            vec![
+                1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+            ]
         );
         assert_eq!(dtype, "f64");
     }
