@@ -1053,5 +1053,42 @@
     "fortran_order": false,
     "dtype_descr": "[('x', '<f8'), ('y', '<i4')]",
     "payload_len_bytes": 23
+  },
+  {
+    "id": "io_genfromtxt_full_skip_footer_comments_golden",
+    "operation": "genfromtxt_full",
+    "seed": 9974,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.2.5",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/io_differential_cases.json",
+      "test_skip.py",
+      "test_skip_fnp.rs"
+    ],
+    "reason_code": "io_genfromtxt_contract",
+    "expected_reason_code": "io_genfromtxt_contract",
+    "text": "# comment\n1,2\n3,4\n5,6\n# footer\n9,10\n",
+    "delimiter": ",",
+    "comments": "#",
+    "skip_footer": 2,
+    "expected_shape": [2, 2],
+    "expected_values": [1.0, 2.0, 3.0, 4.0]
+  },
+  {
+    "id": "io_genfromtxt_full_max_rows_zero_rejected",
+    "operation": "genfromtxt_full",
+    "seed": 9975,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.2.5",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/io_differential_cases.json",
+      "test_max_rows.rs"
+    ],
+    "reason_code": "io_read_payload_incomplete",
+    "expected_reason_code": "io_read_payload_incomplete",
+    "expected_error_contains": "max_rows",
+    "text": "1,2\n3,4\n",
+    "delimiter": ",",
+    "max_rows": 0
   }
 ]

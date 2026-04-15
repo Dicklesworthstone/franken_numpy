@@ -3606,8 +3606,7 @@ mod tests {
             expected_error_contains: String::new(),
         };
 
-        let (shape, values, dtype) =
-            execute_input_case(&case).expect("put_along_axis should pass");
+        let (shape, values, dtype) = execute_input_case(&case).expect("put_along_axis should pass");
         assert_eq!(shape, vec![3, 5]);
         assert_eq!(
             values,

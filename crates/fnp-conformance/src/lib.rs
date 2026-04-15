@@ -12,10 +12,10 @@ pub mod workflow_scenarios;
 use crate::ufunc_differential::{UFuncInputCase, UFuncOperation};
 use fnp_dtype::{DType, can_cast, can_cast_lossless, promote};
 use fnp_io::{
-    IOError, IOSupportedDType, LoadDispatch, MemmapMode, NPY_MAGIC_PREFIX, classify_load_dispatch,
-    load_structured, validate_descriptor_roundtrip, validate_header_schema,
-    validate_io_policy_metadata, validate_magic_version, validate_memmap_contract,
-    validate_npz_archive_budget, validate_read_payload,
+    GenFromTxtConfig, IOError, IOSupportedDType, LoadDispatch, MemmapMode, NPY_MAGIC_PREFIX,
+    classify_load_dispatch, genfromtxt_full, load_structured, validate_descriptor_roundtrip,
+    validate_header_schema, validate_io_policy_metadata, validate_magic_version,
+    validate_memmap_contract, validate_npz_archive_budget, validate_read_payload,
 };
 use fnp_iter::{
     FlatIterIndex, NditerTransferFlags, OverlapAction, TransferClass, TransferError,
@@ -472,6 +472,30 @@ struct IoDifferentialCase {
     expected_magic_version: String,
     #[serde(default)]
     expected_count: Option<usize>,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    delimiter: String,
+    #[serde(default)]
+    comments: String,
+    #[serde(default)]
+    skip_header: usize,
+    #[serde(default)]
+    skip_footer: usize,
+    #[serde(default)]
+    filling_values: Option<f64>,
+    #[serde(default)]
+    usecols: Vec<usize>,
+    #[serde(default)]
+    max_rows: Option<usize>,
+    #[serde(default)]
+    expected_shape: Vec<usize>,
+    #[serde(default)]
+    expected_values: Vec<f64>,
+    #[serde(default)]
+    abs_tol: f64,
+    #[serde(default)]
+    rel_tol: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -10702,12 +10726,13 @@ impl std::fmt::Display for RngSuiteError {
 
 impl std::error::Error for RngSuiteError {}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum IoOperationOutcome {
     Unit,
     Count(usize),
     Dispatch(String),
     MagicVersion(String),
+    Array { shape: Vec<usize>, values: Vec<f64> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13103,6 +13128,32 @@ fn write_manual_npy_preamble(buffer: &mut Vec<u8>, header_len: usize) -> Result<
     Ok(())
 }
 
+fn resolve_io_case_char(
+    case_id: &str,
+    field_name: &str,
+    raw: &str,
+    default: char,
+) -> Result<char, IoSuiteError> {
+    if raw.is_empty() {
+        return Ok(default);
+    }
+
+    let mut chars = raw.chars();
+    let ch = chars
+        .next()
+        .ok_or_else(|| IoSuiteError::new("io_differential_fixture_invalid", "empty char field"))?;
+    if chars.next().is_some() {
+        return Err(IoSuiteError::new(
+            "io_differential_fixture_invalid",
+            format!(
+                "{case_id}: {field_name} must be a single character, got {:?}",
+                raw
+            ),
+        ));
+    }
+    Ok(ch)
+}
+
 fn execute_io_differential_operation(
     case: &IoDifferentialCase,
 ) -> Result<IoOperationOutcome, IoSuiteError> {
@@ -13175,6 +13226,29 @@ fn execute_io_differential_operation(
         "policy_metadata" => validate_io_policy_metadata(&case.mode_raw, &case.class_raw)
             .map(|_| IoOperationOutcome::Unit)
             .map_err(map_io_error_to_suite),
+        "genfromtxt_full" => {
+            let delimiter = resolve_io_case_char(&case.id, "delimiter", &case.delimiter, ' ')?;
+            let comments = resolve_io_case_char(&case.id, "comments", &case.comments, '#')?;
+            let config = GenFromTxtConfig {
+                delimiter,
+                comments,
+                skip_header: case.skip_header,
+                skip_footer: case.skip_footer,
+                filling_values: case.filling_values.unwrap_or(f64::NAN),
+                usecols: if case.usecols.is_empty() {
+                    None
+                } else {
+                    Some(case.usecols.as_slice())
+                },
+                max_rows: case.max_rows.unwrap_or(usize::MAX),
+            };
+            genfromtxt_full(&case.text, &config)
+                .map(|parsed| IoOperationOutcome::Array {
+                    shape: vec![parsed.nrows, parsed.ncols],
+                    values: parsed.values,
+                })
+                .map_err(map_io_error_to_suite)
+        }
         other => Err(IoSuiteError::new(
             "io_policy_unknown_metadata",
             format!("unsupported io differential operation {other}"),
@@ -13233,6 +13307,50 @@ fn validate_io_differential_success_expectations(
             _ => {
                 return Err(
                     "expected count outcome but operation returned a different outcome type"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    if !case.expected_shape.is_empty() || !case.expected_values.is_empty() {
+        match outcome {
+            IoOperationOutcome::Array { shape, values } => {
+                if !case.expected_shape.is_empty() && case.expected_shape != *shape {
+                    return Err(format!(
+                        "shape mismatch expected={:?} actual={shape:?}",
+                        case.expected_shape
+                    ));
+                }
+                if !case.expected_values.is_empty() {
+                    if case.expected_values.len() != values.len() {
+                        return Err(format!(
+                            "value length mismatch expected={} actual={}",
+                            case.expected_values.len(),
+                            values.len()
+                        ));
+                    }
+                    let abs_tol = if case.abs_tol > 0.0 {
+                        case.abs_tol
+                    } else {
+                        1e-9
+                    };
+                    let rel_tol = if case.rel_tol > 0.0 {
+                        case.rel_tol
+                    } else {
+                        1e-9
+                    };
+                    if !approx_equal_values(&case.expected_values, values, abs_tol, rel_tol) {
+                        return Err(format!(
+                            "value mismatch expected={:?} actual={values:?} abs_tol={} rel_tol={}",
+                            case.expected_values, abs_tol, rel_tol
+                        ));
+                    }
+                }
+            }
+            _ => {
+                return Err(
+                    "expected array outcome but operation returned a different outcome type"
                         .to_string(),
                 );
             }
@@ -13360,6 +13478,18 @@ fn execute_io_adversarial_operation(case: &IoAdversarialCase) -> Result<(), IoSu
         expected_dispatch: String::new(),
         expected_magic_version: String::new(),
         expected_count: None,
+        text: String::new(),
+        delimiter: String::new(),
+        comments: String::new(),
+        skip_header: 0,
+        skip_footer: 0,
+        filling_values: None,
+        usecols: Vec::new(),
+        max_rows: None,
+        expected_shape: Vec::new(),
+        expected_values: Vec::new(),
+        abs_tol: 0.0,
+        rel_tol: 0.0,
     };
     execute_io_differential_operation(&differential_case).map(|_| ())
 }

@@ -2094,14 +2094,18 @@ pub fn genfromtxt_full(
     text: &str,
     config: &GenFromTxtConfig<'_>,
 ) -> Result<TextArrayData, IOError> {
-    let lines: Vec<&str> = text.lines().collect();
-    let end_idx = lines.len().saturating_sub(config.skip_footer);
+    if config.max_rows == 0 {
+        return Err(IOError::ReadPayloadIncomplete(
+            "'max_rows' must be at least 1.",
+        ));
+    }
 
-    // First, collect all non-skipped content lines
-    let all_lines: Vec<&str> = lines[..end_idx]
-        .iter()
+    // Collect parsed rows after skip_header and comment stripping, then trim footer rows
+    // from the remaining data lines to match NumPy's behavior.
+    let all_lines: Vec<&str> = text
+        .lines()
         .enumerate()
-        .filter_map(|(i, &line)| {
+        .filter_map(|(i, line)| {
             if i < config.skip_header {
                 return None;
             }
@@ -2113,12 +2117,10 @@ pub fn genfromtxt_full(
         })
         .collect();
 
-    // Apply max_rows (0 = no limit for consistency with loadtxt)
-    let effective_len = if config.max_rows == 0 {
-        all_lines.len()
-    } else {
-        all_lines.len().min(config.max_rows)
-    };
+    let effective_len = all_lines
+        .len()
+        .saturating_sub(config.skip_footer)
+        .min(config.max_rows);
 
     let mut values = Vec::new();
     let mut ncols: Option<usize> = None;
@@ -4583,6 +4585,22 @@ mod tests {
     }
 
     #[test]
+    fn genfromtxt_full_skip_footer_ignores_comment_lines() {
+        let text = "# comment\n1,2\n3,4\n5,6\n# footer\n9,10\n";
+        let config = GenFromTxtConfig {
+            delimiter: ',',
+            comments: '#',
+            skip_footer: 2,
+            filling_values: 0.0,
+            ..GenFromTxtConfig::default()
+        };
+        let result = genfromtxt_full(text, &config).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 2);
+        assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
     fn genfromtxt_full_usecols() {
         let text = "1,2,3\n4,5,6\n7,8,9\n";
         let usecols = [0usize, 2usize];
@@ -4615,7 +4633,7 @@ mod tests {
     }
 
     #[test]
-    fn genfromtxt_full_max_rows_zero_means_no_limit() {
+    fn genfromtxt_full_max_rows_zero_is_rejected() {
         let text = "1,2\n3,4\n5,6\n";
         let config = GenFromTxtConfig {
             delimiter: ',',
@@ -4624,9 +4642,9 @@ mod tests {
             max_rows: 0,
             ..GenFromTxtConfig::default()
         };
-        let result = genfromtxt_full(text, &config).unwrap();
-        assert_eq!(result.nrows, 3);
-        assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let err = genfromtxt_full(text, &config).unwrap_err();
+        assert_eq!(err.reason_code(), "io_read_payload_incomplete");
+        assert_eq!(err.to_string(), "'max_rows' must be at least 1.");
     }
 
     #[test]
