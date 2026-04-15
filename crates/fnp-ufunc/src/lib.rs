@@ -2884,7 +2884,7 @@ pub struct PyObjectArray {
 
 #[derive(Debug, Serialize)]
 struct PythonFromPyFuncPayload {
-    callable: String,
+    callable: PythonFromPyFuncCallable,
     nin: usize,
     nout: usize,
     arrays: Vec<PythonFromPyFuncInputArray>,
@@ -2907,14 +2907,35 @@ struct PythonFromPyFuncOutput {
     values: Vec<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum PythonFromPyFuncCallable {
+    Source {
+        expression: String,
+    },
+    Import {
+        module: String,
+        attr_path: Vec<String>,
+    },
+}
+
 const FROMPYFUNC_PYTHON_BRIDGE_SCRIPT: &str = r#"
+import importlib
 import json
 import numpy as np
 import sys
 
 payload = json.loads(sys.stdin.read())
 globals_dict = {"np": np, "__builtins__": __builtins__}
-callable_obj = eval(payload["callable"], globals_dict, {})
+callable_spec = payload["callable"]
+if callable_spec["kind"] == "source":
+    callable_obj = eval(callable_spec["expression"], globals_dict, {})
+elif callable_spec["kind"] == "import":
+    callable_obj = importlib.import_module(callable_spec["module"])
+    for attr in callable_spec["attr_path"]:
+        callable_obj = getattr(callable_obj, attr)
+else:
+    raise ValueError(f"unsupported callable kind: {callable_spec['kind']}")
 ufunc = np.frompyfunc(callable_obj, payload["nin"], payload["nout"])
 
 arrays = []
@@ -3030,16 +3051,48 @@ fn default_frompyfunc_python_interpreter() -> String {
     std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".to_string())
 }
 
+fn validate_frompyfunc_python_module(module: String) -> Result<String, UFuncError> {
+    let module = module.trim().to_string();
+    if module.is_empty() {
+        return Err(UFuncError::Msg(
+            "frompyfunc_python_import: module must not be empty".to_string(),
+        ));
+    }
+
+    Ok(module)
+}
+
+fn parse_frompyfunc_python_attr_path(attr_path: String) -> Result<Vec<String>, UFuncError> {
+    let attr_path = attr_path.trim().to_string();
+    if attr_path.is_empty() {
+        return Err(UFuncError::Msg(
+            "frompyfunc_python_import: attr_path must not be empty".to_string(),
+        ));
+    }
+
+    let segments: Vec<String> = attr_path
+        .split('.')
+        .map(|segment| segment.trim().to_string())
+        .collect();
+    if segments.iter().any(String::is_empty) {
+        return Err(UFuncError::Msg(
+            "frompyfunc_python_import: attr_path must not contain empty segments".to_string(),
+        ));
+    }
+
+    Ok(segments)
+}
+
 fn run_python_frompyfunc_bridge(
     python: &str,
-    callable_source: &str,
+    callable: &PythonFromPyFuncCallable,
     nin: usize,
     nout: usize,
     out_shape: &[usize],
     broadcasted: &[UFuncArray],
 ) -> Result<Vec<PyObjectArray>, UFuncError> {
     let payload = PythonFromPyFuncPayload {
-        callable: callable_source.to_string(),
+        callable: callable.clone(),
         nin,
         nout,
         arrays: broadcasted
@@ -3131,6 +3184,17 @@ fn run_python_frompyfunc_bridge(
             )
         })
         .collect()
+}
+
+fn call_python_frompyfunc(
+    python: &str,
+    callable: PythonFromPyFuncCallable,
+    nin: usize,
+    nout: usize,
+    arrays: &[&UFuncArray],
+) -> Result<Vec<PyObjectArray>, UFuncError> {
+    let (out_shape, _element_count, broadcasted) = prepare_frompyfunc_call(arrays, nin)?;
+    run_python_frompyfunc_bridge(python, &callable, nin, nout, &out_shape, &broadcasted)
 }
 
 impl<F> PyFuncUFunc<F>
@@ -3304,14 +3368,14 @@ impl PythonSourceUFunc {
     }
 
     pub fn call(&self, arrays: &[&UFuncArray]) -> Result<Vec<PyObjectArray>, UFuncError> {
-        let (out_shape, _element_count, broadcasted) = prepare_frompyfunc_call(arrays, self.nin)?;
-        run_python_frompyfunc_bridge(
+        call_python_frompyfunc(
             &self.python,
-            &self.callable_source,
+            PythonFromPyFuncCallable::Source {
+                expression: self.callable_source.clone(),
+            },
             self.nin,
             self.nout,
-            &out_shape,
-            &broadcasted,
+            arrays,
         )
     }
 
@@ -3357,6 +3421,113 @@ where
 
     Ok(PythonSourceUFunc {
         callable_source: callable_source.into(),
+        python: python.into(),
+        nin,
+        nout,
+    })
+}
+
+#[derive(Debug)]
+pub struct PythonImportedCallableUFunc {
+    module: String,
+    attr_path: Vec<String>,
+    python: String,
+    nin: usize,
+    nout: usize,
+}
+
+impl PythonImportedCallableUFunc {
+    #[must_use]
+    pub const fn nin(&self) -> usize {
+        self.nin
+    }
+
+    #[must_use]
+    pub const fn nout(&self) -> usize {
+        self.nout
+    }
+
+    #[must_use]
+    pub fn module(&self) -> &str {
+        &self.module
+    }
+
+    #[must_use]
+    pub fn attr_path(&self) -> &[String] {
+        &self.attr_path
+    }
+
+    #[must_use]
+    pub fn qualified_name(&self) -> String {
+        self.attr_path.join(".")
+    }
+
+    #[must_use]
+    pub fn python(&self) -> &str {
+        &self.python
+    }
+
+    pub fn call(&self, arrays: &[&UFuncArray]) -> Result<Vec<PyObjectArray>, UFuncError> {
+        call_python_frompyfunc(
+            &self.python,
+            PythonFromPyFuncCallable::Import {
+                module: self.module.clone(),
+                attr_path: self.attr_path.clone(),
+            },
+            self.nin,
+            self.nout,
+            arrays,
+        )
+    }
+
+    pub fn call_single(&self, arrays: &[&UFuncArray]) -> Result<PyObjectArray, UFuncError> {
+        if self.nout != 1 {
+            return Err(UFuncError::Msg(format!(
+                "frompyfunc: call_single requires nout=1, got {}",
+                self.nout
+            )));
+        }
+
+        self.call(arrays).map(|mut outputs| outputs.remove(0))
+    }
+}
+
+pub fn frompyfunc_python_import<M, A>(
+    module: M,
+    attr_path: A,
+    nin: usize,
+    nout: usize,
+) -> Result<PythonImportedCallableUFunc, UFuncError>
+where
+    M: Into<String>,
+    A: Into<String>,
+{
+    frompyfunc_python_import_with_interpreter(
+        module,
+        attr_path,
+        nin,
+        nout,
+        default_frompyfunc_python_interpreter(),
+    )
+}
+
+pub fn frompyfunc_python_import_with_interpreter<M, A, P>(
+    module: M,
+    attr_path: A,
+    nin: usize,
+    nout: usize,
+    python: P,
+) -> Result<PythonImportedCallableUFunc, UFuncError>
+where
+    M: Into<String>,
+    A: Into<String>,
+    P: Into<String>,
+{
+    validate_frompyfunc_nout(nout)?;
+
+    Ok(PythonImportedCallableUFunc {
+        module: validate_frompyfunc_python_module(module.into())?,
+        attr_path: parse_frompyfunc_python_attr_path(attr_path.into())?,
         python: python.into(),
         nin,
         nout,
@@ -27138,6 +27309,54 @@ pub fn hermfit(x: &[f64], y: &[f64], deg: usize) -> Result<Vec<f64>, UFuncError>
     solve_linear_system(&vtv, &vty, ncols)
 }
 
+/// Least-squares fit of data to a probabilist's Hermite series (`np.polynomial.hermite_e.hermefit`).
+///
+/// Fits `y = sum(c_k * He_k(x))` for k = 0..deg using the Vandermonde matrix
+/// in the Hermite_e basis and normal equations.
+pub fn hermefit(x: &[f64], y: &[f64], deg: usize) -> Result<Vec<f64>, UFuncError> {
+    if x.len() != y.len() {
+        return Err(UFuncError::Msg(
+            "hermefit: x and y must have same length".into(),
+        ));
+    }
+    if x.len() <= deg {
+        return Err(UFuncError::Msg(
+            "hermefit: more data points needed than degree".into(),
+        ));
+    }
+    let n = x.len();
+    let ncols = deg + 1;
+    // Build Vandermonde in probabilist's Hermite basis: He_0=1, He_1=x, He_k = x*He_{k-1} - (k-1)*He_{k-2}
+    let mut vander = vec![0.0; n * ncols];
+    for i in 0..n {
+        vander[i * ncols] = 1.0;
+        if ncols > 1 {
+            vander[i * ncols + 1] = x[i];
+        }
+        for j in 2..ncols {
+            vander[i * ncols + j] =
+                x[i] * vander[i * ncols + j - 1] - (j as f64 - 1.0) * vander[i * ncols + j - 2];
+        }
+    }
+    let mut vtv = vec![0.0; ncols * ncols];
+    let mut vty = vec![0.0; ncols];
+    for i in 0..ncols {
+        for j in 0..ncols {
+            let mut sum = 0.0;
+            for k in 0..n {
+                sum += vander[k * ncols + i] * vander[k * ncols + j];
+            }
+            vtv[i * ncols + j] = sum;
+        }
+        let mut sum = 0.0;
+        for k in 0..n {
+            sum += vander[k * ncols + i] * y[k];
+        }
+        vty[i] = sum;
+    }
+    solve_linear_system(&vtv, &vty, ncols)
+}
+
 /// Build a probabilist's Hermite series from roots.
 pub fn hermefromroots(roots: &[f64]) -> Vec<f64> {
     if roots.is_empty() {
@@ -29624,8 +29843,9 @@ mod tests {
         chebsub, chebval, checked_window_total, copysign, datetime_as_string, divmod_arrays,
         errstate, financial_fv, financial_ipmt, financial_irr, financial_mirr, financial_nper,
         financial_npv, financial_pmt, financial_ppmt, financial_pv, financial_rate, frexp,
-        frompyfunc, frompyfunc_object, frompyfunc_python, frompyfunc_python_with_interpreter,
-        gcd_arrays, geterr, herm2poly, hermadd, hermder, hermdiv, herme2poly, hermeadd, hermediv,
+        frompyfunc, frompyfunc_object, frompyfunc_python, frompyfunc_python_import,
+        frompyfunc_python_import_with_interpreter, frompyfunc_python_with_interpreter, gcd_arrays,
+        geterr, herm2poly, hermadd, hermder, hermdiv, herme2poly, hermeadd, hermediv, hermefit,
         hermefromroots, hermemul, hermeroots, hermesub, hermeval, hermfit, hermfromroots, hermint,
         hermmul, hermroots, hermsub, hermval, hypot, is_busday, isnat, isneginf, isposinf,
         lag2poly, lagadd, lagder, lagdiv, lagfit, lagfromroots, lagint, lagmul, lagroots, lagsub,
@@ -29645,6 +29865,7 @@ mod tests {
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
     use fnp_runtime::{CompatibilityClass, DecisionAction as RuntimeDecisionAction, RuntimeMode};
+    use std::process::Command;
     use std::sync::{Arc, Mutex, RwLock};
 
     fn packet005_artifacts() -> Vec<String> {
@@ -44282,6 +44503,37 @@ mod tests {
         assert!(!ufunc.python().is_empty());
     }
 
+    fn python_bridge_test_interpreter() -> Option<String> {
+        for candidate in [
+            std::env::var("FNP_ORACLE_PYTHON").ok(),
+            Some("python3".to_string()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let output = Command::new(&candidate)
+                .arg("-c")
+                .arg("import numpy")
+                .output();
+            if matches!(output, Ok(result) if result.status.success()) {
+                return Some(candidate);
+            }
+        }
+
+        None
+    }
+
+    #[test]
+    fn frompyfunc_python_import_constructor_tracks_metadata() {
+        let ufunc = frompyfunc_python_import("operator", "add", 2, 1).unwrap();
+        assert_eq!(ufunc.nin(), 2);
+        assert_eq!(ufunc.nout(), 1);
+        assert_eq!(ufunc.module(), "operator");
+        assert_eq!(ufunc.attr_path(), &[String::from("add")]);
+        assert_eq!(ufunc.qualified_name(), "add");
+        assert!(!ufunc.python().is_empty());
+    }
+
     #[test]
     fn frompyfunc_python_rejects_zero_outputs() {
         let err = frompyfunc_python("lambda: None", 0, 0)
@@ -44289,6 +44541,16 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "frompyfunc: nout must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn frompyfunc_python_import_rejects_empty_attr_path() {
+        let err = frompyfunc_python_import("operator", "", 2, 1)
+            .expect_err("empty attr_path must be rejected for python import bridge");
+        assert_eq!(
+            err.to_string(),
+            "frompyfunc_python_import: attr_path must not be empty"
         );
     }
 
@@ -44304,6 +44566,48 @@ mod tests {
         assert!(
             err.to_string().contains("failed to spawn python bridge"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn frompyfunc_python_calls_python_successfully() {
+        let Some(python) = python_bridge_test_interpreter() else {
+            return;
+        };
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let ufunc = frompyfunc_python_with_interpreter("lambda x: x + 10", 1, 1, python).unwrap();
+        let result = ufunc.call_single(&[&a]).unwrap();
+
+        assert_eq!(result.shape(), &[3]);
+        assert_eq!(
+            result.values(),
+            &[
+                PyObjectValue::Float(11.0),
+                PyObjectValue::Float(12.0),
+                PyObjectValue::Float(13.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn frompyfunc_python_import_calls_python_successfully() {
+        let Some(python) = python_bridge_test_interpreter() else {
+            return;
+        };
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3], vec![10.0, 20.0, 30.0], DType::F64).unwrap();
+        let ufunc =
+            frompyfunc_python_import_with_interpreter("operator", "add", 2, 1, python).unwrap();
+        let result = ufunc.call_single(&[&a, &b]).unwrap();
+
+        assert_eq!(result.shape(), &[3]);
+        assert_eq!(
+            result.values(),
+            &[
+                PyObjectValue::Float(11.0),
+                PyObjectValue::Float(22.0),
+                PyObjectValue::Float(33.0),
+            ]
         );
     }
 
@@ -49211,6 +49515,22 @@ mod tests {
     #[test]
     fn hermfit_rejects_insufficient_data() {
         assert!(hermfit(&[1.0], &[1.0], 2).is_err());
+    }
+
+    #[test]
+    fn hermefit_quadratic() {
+        // y = 2 + 3*He_1(x) + 4*He_2(x) = 2 + 3x + 4(x^2 - 1) = 4x^2 + 3x - 2
+        let x = [-1.0, 0.0, 1.0, 2.0];
+        let y: Vec<f64> = x.iter().map(|&xi| 4.0 * xi * xi + 3.0 * xi - 2.0).collect();
+        let c = hermefit(&x, &y, 2).unwrap();
+        assert!((c[0] - 2.0).abs() < 1e-12);
+        assert!((c[1] - 3.0).abs() < 1e-12);
+        assert!((c[2] - 4.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn hermefit_rejects_insufficient_data() {
+        assert!(hermefit(&[1.0], &[1.0], 2).is_err());
     }
 
     #[test]

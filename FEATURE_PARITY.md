@@ -22,7 +22,7 @@
 | Polynomial: power series | parity_green | polyval, polyder, polyint, polyfit, polymul, polyadd, polysub, polydiv, polyroots | — |
 | Polynomial: Chebyshev | parity_green | chebval, chebadd, chebsub, chebmul, chebdiv, chebder, chebint, chebroots, chebfromroots, chebfit, cheb2poly, poly2cheb | — |
 | Polynomial: Legendre | parity_green | legval, legadd, legsub, legmul, legdiv, legder, legint, legroots, legfromroots, legfit, leg2poly, poly2leg | — |
-| Polynomial: Hermite | parity_green | hermval, hermadd, hermsub, hermmul, hermdiv, hermder, hermint, hermroots, hermfromroots, hermfit, herm2poly, poly2herm (physicist); hermeval, hermeadd, hermesub, hermemul, hermediv, hermeroots, hermefromroots, herme2poly, poly2herme (probabilist) | — |
+| Polynomial: Hermite | parity_green | hermval, hermadd, hermsub, hermmul, hermdiv, hermder, hermint, hermroots, hermfromroots, hermfit, herm2poly, poly2herm (physicist); hermeval, hermeadd, hermesub, hermemul, hermediv, hermeroots, hermefromroots, hermefit, herme2poly, poly2herme (probabilist) | — |
 | Polynomial: Laguerre | parity_green | lagval, lagadd, lagsub, lagmul, lagdiv, lagder, lagint, lagroots, lagfromroots, lagfit, lag2poly, poly2lag | — |
 | Pad modes | parity_green | constant, edge, reflect, symmetric, wrap, linear_ramp, maximum, minimum, mean, median, empty | — |
 | Financial | parity_green | fv, pv, pmt, ppmt, ipmt, nper, rate, npv, irr, mirr | — |
@@ -38,7 +38,7 @@
 | numpy.lib.scimath | parity_green | scimath_sqrt, scimath_log, scimath_log2, scimath_log10, scimath_logn, scimath_power, scimath_arccos, scimath_arcsin, scimath_arctanh | — |
 | NumPy 2.0+ API | parity_green | unique_all, unique_counts, unique_inverse, unique_values, permuted, matrix_transpose, cumulative_sum, cumulative_prod, trapezoid, unstack, vecdot | — |
 | Parameter completeness | parity_green | count_nonzero(axis,keepdims), isin(invert), searchsorted(side,sorter), where(1-arg), sum/prod(initial), copyto(casting), partition/argpartition(axis), packbits/unpackbits(axis) | — |
-| Higher-order callable wrappers | in_progress | `frompyfunc` now supports Rust-closure-backed numeric and object-value ufunc construction plus source-evaluated Python callables via `frompyfunc_python`, with broadcasting, nested object outputs, multi-output, and NumPy oracle coverage for representative kernels; existing `vectorize*` helpers remain green | Direct Python callable-object handles + Python package bridge exposure |
+| Higher-order callable wrappers | parity_green | `frompyfunc` now supports Rust-closure-backed numeric and object-value ufunc construction plus source-evaluated and imported Python callables via `frompyfunc_python*`, with broadcasting, nested object outputs, multi-output, and NumPy oracle coverage for representative kernels; existing `vectorize*` helpers remain green | — |
 | Linalg | parity_green | solve, det, inv, eig, svd, qr, cholesky, lstsq, norm, matrix_rank, matrix_power, multi_dot, tensorsolve, tensorinv, pinv, cond, slogdet, and funm are implemented with oracle and regression coverage green | — |
 | Random (numpy.random) | parity_green | PCG64DXSM generator with oracle-verified distributions; Lemire bounded integers + buffered uint32; BTPE binomial + inversion; HRUA hypergeometric + direct; PTRS Poisson + multiplicative; NumPy-exact gamma; zipf with Umin clamping; oracle and reproducibility coverage green | — |
 | I/O (npy/npz) | parity_green | load, save, savez, savez_compressed, loadtxt, savetxt, genfromtxt, fromfile, tofile, and array2string implemented; DEFLATE compression and oracle format coverage green | — |
@@ -63,7 +63,7 @@
 
 ## Remaining Gaps (Python-specific, low priority)
 
-1. Direct Python callable-object `frompyfunc` parity — Rust-side numeric/object-value `frompyfunc` execution and source-evaluated Python-callable bridging are implemented, but direct callable-object handles and Python-side object-array exposure still require a Python-facing layer
+1. Direct live Python callable-object `frompyfunc` parity — Rust-side numeric/object-value `frompyfunc` execution plus source-evaluated and imported Python-callable bridging are implemented, but arbitrary live callable objects and Python-side object-array/package exposure still require a Python-facing layer
 2. Python FFI exposure for `fnp_iter::Nditer` — the Rust-side `nditer` state machine (`iterindex`, `multi_index`, reset/seek, external-loop chunks) is now implemented, but it is not yet exported through a Python bridge as `numpy.nditer`
 3. Expanded CI matrix for alternate oracle environments and longer-horizon benchmark trend regression
 
@@ -94,7 +94,7 @@
 
 **Set operations**: union1d, intersect1d, setdiff1d, setxor1d, in1d
 
-**Polynomials**: polyval, polyfit, polyder, polyint, polymul, polyadd, polysub, polydiv, polyroots, chebval, chebadd, chebsub, chebmul, chebdiv, chebder, chebint, chebroots, chebfromroots, chebfit, cheb2poly, poly2cheb, legval, legder, legint, legfit, hermval, hermeval, hermder, hermint, lagval, lagder, lagint
+**Polynomials**: polyval, polyfit, polyder, polyint, polymul, polyadd, polysub, polydiv, polyroots, chebval, chebadd, chebsub, chebmul, chebdiv, chebder, chebint, chebroots, chebfromroots, chebfit, cheb2poly, poly2cheb, legval, legder, legint, legfit, hermval, hermeval, hermder, hermint, hermfit, hermefit, lagval, lagder, lagint, lagfit
 
 **Financial**: fv, pv, pmt, ppmt, ipmt, nper, rate, npv, irr, mirr
 

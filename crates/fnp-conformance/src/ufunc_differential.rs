@@ -3235,7 +3235,7 @@ mod tests {
     use fnp_dtype::DType;
     use fnp_ufunc::{
         PyObjectValue, UFuncArray, frompyfunc, frompyfunc_object,
-        frompyfunc_python_with_interpreter,
+        frompyfunc_python_import_with_interpreter, frompyfunc_python_with_interpreter,
     };
     use serde_json::Value;
     use std::collections::BTreeMap;
@@ -4349,6 +4349,132 @@ print(json.dumps({
         assert_eq!(outputs[0].values(), text_values.as_slice());
         assert_eq!(outputs[1].shape(), bool_shape.as_slice());
         assert_eq!(outputs[1].values(), bool_values.as_slice());
+    }
+
+    #[test]
+    fn frompyfunc_python_import_output_matches_numpy_oracle() {
+        let python = real_numpy_python();
+        let script = r#"
+import json
+import numpy as np
+import operator
+
+a = np.array([[1.0], [2.0]])
+b = np.array([[10.0, 20.0, 30.0]])
+ufunc = np.frompyfunc(operator.add, 2, 1)
+out = ufunc(a, b)
+
+print(json.dumps({
+    "shape": list(out.shape),
+    "values": [float(v) for v in out.ravel().tolist()],
+}))
+"#;
+
+        let output = Command::new(python)
+            .arg("-c")
+            .arg(script)
+            .output()
+            .expect("run numpy oracle");
+        assert!(
+            output.status.success(),
+            "python oracle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let oracle: Value = serde_json::from_slice(&output.stdout).expect("parse oracle json");
+        let oracle_shape: Vec<usize> = oracle["shape"]
+            .as_array()
+            .expect("oracle shape array")
+            .iter()
+            .map(|value| {
+                usize::try_from(value.as_u64().expect("oracle shape usize")).expect("shape cast")
+            })
+            .collect();
+        let oracle_values: Vec<PyObjectValue> = oracle["values"]
+            .as_array()
+            .expect("oracle values array")
+            .iter()
+            .map(PyObjectValue::from_json_value)
+            .collect();
+
+        let a = UFuncArray::new(vec![2, 1], vec![1.0, 2.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1, 3], vec![10.0, 20.0, 30.0], DType::F64).unwrap();
+        let ufunc =
+            frompyfunc_python_import_with_interpreter("operator", "add", 2, 1, python).unwrap();
+        let actual = ufunc.call_single(&[&a, &b]).unwrap();
+
+        assert_eq!(actual.shape(), oracle_shape.as_slice());
+        assert_eq!(actual.values(), oracle_values.as_slice());
+    }
+
+    #[test]
+    fn frompyfunc_python_import_multi_output_matches_numpy_oracle() {
+        let python = real_numpy_python();
+        let script = r#"
+import builtins
+import json
+import numpy as np
+
+a = np.array([7.0, 8.0, 9.0])
+b = np.array([3.0, 3.0, 2.0])
+ufunc = np.frompyfunc(builtins.divmod, 2, 2)
+quo_out, rem_out = ufunc(a, b)
+
+print(json.dumps({
+    "quo_shape": list(quo_out.shape),
+    "quo_values": [float(v) for v in quo_out.ravel().tolist()],
+    "rem_shape": list(rem_out.shape),
+    "rem_values": [float(v) for v in rem_out.ravel().tolist()],
+}))
+"#;
+
+        let output = Command::new(python)
+            .arg("-c")
+            .arg(script)
+            .output()
+            .expect("run numpy oracle");
+        assert!(
+            output.status.success(),
+            "python oracle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let oracle: Value = serde_json::from_slice(&output.stdout).expect("parse oracle json");
+        let quo_shape: Vec<usize> = oracle["quo_shape"]
+            .as_array()
+            .expect("quo shape array")
+            .iter()
+            .map(|value| usize::try_from(value.as_u64().expect("quo shape usize")).expect("cast"))
+            .collect();
+        let quo_values: Vec<PyObjectValue> = oracle["quo_values"]
+            .as_array()
+            .expect("quo values array")
+            .iter()
+            .map(PyObjectValue::from_json_value)
+            .collect();
+        let rem_shape: Vec<usize> = oracle["rem_shape"]
+            .as_array()
+            .expect("rem shape array")
+            .iter()
+            .map(|value| usize::try_from(value.as_u64().expect("rem shape usize")).expect("cast"))
+            .collect();
+        let rem_values: Vec<PyObjectValue> = oracle["rem_values"]
+            .as_array()
+            .expect("rem values array")
+            .iter()
+            .map(PyObjectValue::from_json_value)
+            .collect();
+
+        let a = UFuncArray::new(vec![3], vec![7.0, 8.0, 9.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3], vec![3.0, 3.0, 2.0], DType::F64).unwrap();
+        let ufunc =
+            frompyfunc_python_import_with_interpreter("builtins", "divmod", 2, 2, python).unwrap();
+        let outputs = ufunc.call(&[&a, &b]).unwrap();
+
+        assert_eq!(outputs[0].shape(), quo_shape.as_slice());
+        assert_eq!(outputs[0].values(), quo_values.as_slice());
+        assert_eq!(outputs[1].shape(), rem_shape.as_slice());
+        assert_eq!(outputs[1].values(), rem_values.as_slice());
     }
 
     // Helper to make a unary input case
