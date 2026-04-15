@@ -39,14 +39,15 @@ use fnp_runtime::{
     decide_and_record_with_context, decide_compatibility_from_wire,
 };
 use fnp_ufunc::{
-    BinaryOp, MAError, MaskedArray, StringArray, UFuncArray, UFuncError, UnaryOp, busday_count,
-    busday_offset, cheb2poly, chebadd, chebder, chebdiv, chebfit, chebfromroots, chebint, chebmul,
-    chebroots, chebsub, chebval, copysign, herm2poly, hermadd, hermder, hermdiv, herme2poly,
-    hermeadd, hermediv, hermefromroots, hermemul, hermeroots, hermesub, hermeval, hermfromroots,
-    hermint, hermmul, hermroots, hermsub, hermval, hypot, is_busday, isnat, lag2poly, lagadd, lagder,
-    lagdiv, lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, ldexp, leg2poly, legadd, legder,
-    legdiv, legfit, legfromroots, legint, legmul, legroots, legsub, legval, logaddexp, logaddexp2,
-    nextafter, poly2cheb, poly2herm, poly2herme, poly2lag, poly2leg, signbit, spacing,
+    BinaryOp, MAError, MaskedArray, QuantileInterp, StringArray, UFuncArray, UFuncError, UnaryOp,
+    busday_count, busday_offset, cheb2poly, chebadd, chebder, chebdiv, chebfit, chebfromroots,
+    chebint, chebmul, chebroots, chebsub, chebval, copysign, herm2poly, hermadd, hermder, hermdiv,
+    herme2poly, hermeadd, hermediv, hermefromroots, hermemul, hermeroots, hermesub, hermeval,
+    hermfromroots, hermint, hermmul, hermroots, hermsub, hermval, hypot, is_busday, isnat,
+    lag2poly, lagadd, lagder, lagdiv, lagfromroots, lagint, lagmul, lagroots, lagsub, lagval,
+    ldexp, leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint, legmul, legroots,
+    legsub, legval, logaddexp, logaddexp2, nextafter, poly2cheb, poly2herm, poly2herme, poly2lag,
+    poly2leg, signbit, spacing,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -904,6 +905,8 @@ struct SignalDifferentialCase {
     ord_inf: Option<String>,
     #[serde(default)]
     axis: Option<isize>,
+    #[serde(default)]
+    method: String,
     #[serde(default)]
     keepdims: bool,
     #[serde(default)]
@@ -5881,6 +5884,20 @@ impl std::fmt::Display for SignalSuiteError {
 
 impl std::error::Error for SignalSuiteError {}
 
+fn parse_quantile_interp(method: &str) -> Result<QuantileInterp, SignalSuiteError> {
+    match method.to_ascii_lowercase().as_str() {
+        "linear" => Ok(QuantileInterp::Linear),
+        "lower" => Ok(QuantileInterp::Lower),
+        "higher" => Ok(QuantileInterp::Higher),
+        "nearest" => Ok(QuantileInterp::Nearest),
+        "midpoint" => Ok(QuantileInterp::Midpoint),
+        other => Err(SignalSuiteError::new(
+            "signal_differential_invalid_method",
+            format!("unsupported percentile method: {other}"),
+        )),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SignalDifferentialMismatch {
     fixture_id: String,
@@ -6654,9 +6671,32 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            // k field is used for trace offset (reusing rot90's k field)
+            let result = if case.axes.len() == 2 {
+                input
+                    .trace_axis(case.k as i64, case.axes[0] as isize, case.axes[1] as isize)
+                    .map_err(map_ufunc_error_to_signal_suite)?
+            } else {
+                input
+                    .trace(case.k as i64)
+                    .map_err(map_ufunc_error_to_signal_suite)?
+            };
+            Ok(to_outcome(result))
+        }
+        "diagonal" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            if case.axes.len() != 2 {
+                return Err(SignalSuiteError::new(
+                    "signal_differential_invalid_axes",
+                    "diagonal requires exactly two axes in the fixture",
+                ));
+            }
             let result = input
-                .trace(case.k as i64)
+                .diagonal(case.k as i64, case.axes[0] as isize, case.axes[1] as isize)
                 .map_err(map_ufunc_error_to_signal_suite)?;
             Ok(to_outcome(result))
         }
@@ -6989,6 +7029,20 @@ fn execute_signal_differential_operation(
                 .map_err(map_ufunc_error_to_signal_suite)?;
             Ok(to_outcome(result))
         }
+        "percentile_method" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let q = case.beta.unwrap_or(50.0);
+            let method = parse_quantile_interp(&case.method)?;
+            let result = input
+                .percentile_method(q, case.axis, method)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
         "interp" => {
             let x = UFuncArray::new(
                 case.input_shape.clone(),
@@ -7209,12 +7263,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result =
                 UFuncArray::hstack(&[lhs, rhs]).map_err(map_ufunc_error_to_signal_suite)?;
             Ok(to_outcome(result))
@@ -7226,12 +7276,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result =
                 UFuncArray::vstack(&[lhs, rhs]).map_err(map_ufunc_error_to_signal_suite)?;
             Ok(to_outcome(result))
@@ -7243,12 +7289,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result =
                 UFuncArray::dstack(&[lhs, rhs]).map_err(map_ufunc_error_to_signal_suite)?;
             Ok(to_outcome(result))
@@ -7260,15 +7302,11 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
-            let axis = case.axis.unwrap_or(0);
-            let result = UFuncArray::stack(&[&lhs, &rhs], axis)
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
                 .map_err(map_ufunc_error_to_signal_suite)?;
+            let axis = case.axis.unwrap_or(0);
+            let result =
+                UFuncArray::stack(&[&lhs, &rhs], axis).map_err(map_ufunc_error_to_signal_suite)?;
             Ok(to_outcome(result))
         }
         "isclose" => {
@@ -7278,12 +7316,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let rtol = case.rtol.unwrap_or(1e-5);
             let atol = case.atol.unwrap_or(1e-8);
             let result = lhs
@@ -7384,12 +7418,9 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let values = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let values =
+                UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                    .map_err(map_ufunc_error_to_signal_suite)?;
             let index = case.n.unwrap_or(0);
             let result = input
                 .insert(index, &values, case.axis)
@@ -7423,8 +7454,8 @@ fn execute_signal_differential_operation(
         }
         "identity" => {
             let n = case.n.unwrap_or(3);
-            let result = UFuncArray::identity(n, DType::F64)
-                .map_err(map_ufunc_error_to_signal_suite)?;
+            let result =
+                UFuncArray::identity(n, DType::F64).map_err(map_ufunc_error_to_signal_suite)?;
             Ok(to_outcome(result))
         }
         "full" => {
@@ -7800,12 +7831,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = lhs
                 .elementwise_binary(&rhs, BinaryOp::Greater)
                 .map_err(map_ufunc_error_to_signal_suite)?;
@@ -7818,12 +7845,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = lhs
                 .elementwise_binary(&rhs, BinaryOp::GreaterEqual)
                 .map_err(map_ufunc_error_to_signal_suite)?;
@@ -7836,12 +7859,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = lhs
                 .elementwise_binary(&rhs, BinaryOp::Less)
                 .map_err(map_ufunc_error_to_signal_suite)?;
@@ -7854,12 +7873,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = lhs
                 .elementwise_binary(&rhs, BinaryOp::LessEqual)
                 .map_err(map_ufunc_error_to_signal_suite)?;
@@ -7872,12 +7887,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = lhs
                 .elementwise_binary(&rhs, BinaryOp::Equal)
                 .map_err(map_ufunc_error_to_signal_suite)?;
@@ -7890,12 +7901,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = lhs
                 .elementwise_binary(&rhs, BinaryOp::NotEqual)
                 .map_err(map_ufunc_error_to_signal_suite)?;
@@ -7909,12 +7916,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = lhs
                 .elementwise_binary(&rhs, BinaryOp::Maximum)
                 .map_err(map_ufunc_error_to_signal_suite)?;
@@ -7927,12 +7930,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = lhs
                 .elementwise_binary(&rhs, BinaryOp::Minimum)
                 .map_err(map_ufunc_error_to_signal_suite)?;
@@ -7945,12 +7944,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = lhs
                 .elementwise_binary(&rhs, BinaryOp::Fmax)
                 .map_err(map_ufunc_error_to_signal_suite)?;
@@ -7963,12 +7958,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = lhs
                 .elementwise_binary(&rhs, BinaryOp::Fmin)
                 .map_err(map_ufunc_error_to_signal_suite)?;
@@ -7982,12 +7973,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = lhs
                 .elementwise_binary(&rhs, BinaryOp::Power)
                 .map_err(map_ufunc_error_to_signal_suite)?;
@@ -8000,12 +7987,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = lhs
                 .elementwise_binary(&rhs, BinaryOp::Remainder)
                 .map_err(map_ufunc_error_to_signal_suite)?;
@@ -8019,12 +8002,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = lhs
                 .elementwise_binary(&rhs, BinaryOp::LogicalAnd)
                 .map_err(map_ufunc_error_to_signal_suite)?;
@@ -8037,12 +8016,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = lhs
                 .elementwise_binary(&rhs, BinaryOp::LogicalOr)
                 .map_err(map_ufunc_error_to_signal_suite)?;
@@ -8055,12 +8030,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = lhs
                 .elementwise_binary(&rhs, BinaryOp::LogicalXor)
                 .map_err(map_ufunc_error_to_signal_suite)?;
@@ -8123,12 +8094,9 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let exponent = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let exponent =
+                UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                    .map_err(map_ufunc_error_to_signal_suite)?;
             let result = ldexp(&mantissa, &exponent).map_err(map_ufunc_error_to_signal_suite)?;
             Ok(to_outcome(result))
         }
@@ -8139,12 +8107,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let x2 = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let x2 = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = nextafter(&x1, &x2).map_err(map_ufunc_error_to_signal_suite)?;
             Ok(to_outcome(result))
         }
@@ -8156,12 +8120,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let x = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let x = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = y
                 .elementwise_binary(&x, BinaryOp::Arctan2)
                 .map_err(map_ufunc_error_to_signal_suite)?;
@@ -8175,12 +8135,8 @@ fn execute_signal_differential_operation(
                 DType::I64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::I64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::I64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = lhs
                 .elementwise_binary(&rhs, BinaryOp::BitwiseAnd)
                 .map_err(map_ufunc_error_to_signal_suite)?;
@@ -8193,12 +8149,8 @@ fn execute_signal_differential_operation(
                 DType::I64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::I64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::I64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = lhs
                 .elementwise_binary(&rhs, BinaryOp::BitwiseOr)
                 .map_err(map_ufunc_error_to_signal_suite)?;
@@ -8211,12 +8163,8 @@ fn execute_signal_differential_operation(
                 DType::I64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::I64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::I64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = lhs
                 .elementwise_binary(&rhs, BinaryOp::BitwiseXor)
                 .map_err(map_ufunc_error_to_signal_suite)?;
@@ -8229,12 +8177,8 @@ fn execute_signal_differential_operation(
                 DType::I64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::I64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::I64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = lhs
                 .elementwise_binary(&rhs, BinaryOp::LeftShift)
                 .map_err(map_ufunc_error_to_signal_suite)?;
@@ -8247,12 +8191,8 @@ fn execute_signal_differential_operation(
                 DType::I64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let rhs = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::I64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let rhs = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::I64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = lhs
                 .elementwise_binary(&rhs, BinaryOp::RightShift)
                 .map_err(map_ufunc_error_to_signal_suite)?;
@@ -8266,12 +8206,9 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let values = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let values =
+                UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                    .map_err(map_ufunc_error_to_signal_suite)?;
             let result = arr
                 .append(&values, case.axis)
                 .map_err(map_ufunc_error_to_signal_suite)?;
@@ -8285,12 +8222,9 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let test_elements = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let test_elements =
+                UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                    .map_err(map_ufunc_error_to_signal_suite)?;
             let result = elements.isin(&test_elements, false);
             Ok(to_outcome(result))
         }
@@ -8325,12 +8259,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let b = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let b = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = a.solve(&b).map_err(map_ufunc_error_to_signal_suite)?;
             Ok(to_outcome(result))
         }
@@ -8351,12 +8281,8 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let x2 = UFuncArray::new(
-                case.rhs_shape.clone(),
-                case.rhs_values.clone(),
-                DType::F64,
-            )
-            .map_err(map_ufunc_error_to_signal_suite)?;
+            let x2 = UFuncArray::new(case.rhs_shape.clone(), case.rhs_values.clone(), DType::F64)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             let result = x1
                 .elementwise_binary(&x2, BinaryOp::Heaviside)
                 .map_err(map_ufunc_error_to_signal_suite)?;

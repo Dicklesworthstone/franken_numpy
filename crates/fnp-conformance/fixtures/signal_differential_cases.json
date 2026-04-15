@@ -1792,6 +1792,50 @@
     "rel_tol": 1e-10
   },
   {
+    "id": "trace_axis_3d_golden",
+    "operation": "trace",
+    "seed": 9562,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs",
+      "test_trace.py"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [2, 2, 2],
+    "input_values": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+    "axes": [0, 1],
+    "k": 0,
+    "expected_shape": [2],
+    "expected_values": [6.0, 8.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "diagonal_axis_3d_golden",
+    "operation": "diagonal",
+    "seed": 9563,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs",
+      "test_trace.py"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [2, 2, 2],
+    "input_values": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+    "axes": [0, 1],
+    "k": 0,
+    "expected_shape": [2, 2],
+    "expected_values": [0.0, 6.0, 1.0, 7.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
     "id": "diag_2d_extract_golden",
     "operation": "diag",
     "seed": 9570,
@@ -2459,6 +2503,50 @@
     "beta": 25.0,
     "expected_shape": [],
     "expected_values": [2.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "percentile_nearest_25_golden",
+    "operation": "percentile_method",
+    "seed": 9802,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs",
+      "test_nearest_method.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [4],
+    "input_values": [1.0, 2.0, 3.0, 4.0],
+    "beta": 25.0,
+    "method": "nearest",
+    "expected_shape": [],
+    "expected_values": [2.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "percentile_nearest_75_golden",
+    "operation": "percentile_method",
+    "seed": 9803,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs",
+      "test_nearest_method.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [4],
+    "input_values": [1.0, 2.0, 3.0, 4.0],
+    "beta": 75.0,
+    "method": "nearest",
+    "expected_shape": [],
+    "expected_values": [3.0],
     "abs_tol": 1e-10,
     "rel_tol": 1e-10
   },

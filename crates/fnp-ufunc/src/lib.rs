@@ -4052,7 +4052,13 @@ impl UFuncArray {
                             out.iter_mut().zip(&self.values).zip(&rhs.values)
                         {
                             let result = lhs + rhs_val;
-                            note_binary_float_errors(&mut float_error_flags, op, lhs, rhs_val, result);
+                            note_binary_float_errors(
+                                &mut float_error_flags,
+                                op,
+                                lhs,
+                                rhs_val,
+                                result,
+                            );
                             *slot = result;
                         }
                     }
@@ -4061,7 +4067,13 @@ impl UFuncArray {
                             out.iter_mut().zip(&self.values).zip(&rhs.values)
                         {
                             let result = lhs - rhs_val;
-                            note_binary_float_errors(&mut float_error_flags, op, lhs, rhs_val, result);
+                            note_binary_float_errors(
+                                &mut float_error_flags,
+                                op,
+                                lhs,
+                                rhs_val,
+                                result,
+                            );
                             *slot = result;
                         }
                     }
@@ -4070,7 +4082,13 @@ impl UFuncArray {
                             out.iter_mut().zip(&self.values).zip(&rhs.values)
                         {
                             let result = lhs * rhs_val;
-                            note_binary_float_errors(&mut float_error_flags, op, lhs, rhs_val, result);
+                            note_binary_float_errors(
+                                &mut float_error_flags,
+                                op,
+                                lhs,
+                                rhs_val,
+                                result,
+                            );
                             *slot = result;
                         }
                     }
@@ -4079,7 +4097,13 @@ impl UFuncArray {
                             out.iter_mut().zip(&self.values).zip(&rhs.values)
                         {
                             let result = lhs / rhs_val;
-                            note_binary_float_errors(&mut float_error_flags, op, lhs, rhs_val, result);
+                            note_binary_float_errors(
+                                &mut float_error_flags,
+                                op,
+                                lhs,
+                                rhs_val,
+                                result,
+                            );
                             *slot = result;
                         }
                     }
@@ -4088,7 +4112,13 @@ impl UFuncArray {
                             out.iter_mut().zip(&self.values).zip(&rhs.values)
                         {
                             let result = op.apply(lhs, rhs_val);
-                            note_binary_float_errors(&mut float_error_flags, op, lhs, rhs_val, result);
+                            note_binary_float_errors(
+                                &mut float_error_flags,
+                                op,
+                                lhs,
+                                rhs_val,
+                                result,
+                            );
                             *slot = result;
                         }
                     }
@@ -4302,31 +4332,66 @@ impl UFuncArray {
                         BinaryOp::Add => {
                             for (flat, slot) in out_values.iter_mut().enumerate() {
                                 *slot = self.values[flat] + rhs.values[rhs_flat];
-                                odometer_increment!(flat, out_count, out_shape, out_multi, rhs_flat, rhs_axis_steps);
+                                odometer_increment!(
+                                    flat,
+                                    out_count,
+                                    out_shape,
+                                    out_multi,
+                                    rhs_flat,
+                                    rhs_axis_steps
+                                );
                             }
                         }
                         BinaryOp::Sub => {
                             for (flat, slot) in out_values.iter_mut().enumerate() {
                                 *slot = self.values[flat] - rhs.values[rhs_flat];
-                                odometer_increment!(flat, out_count, out_shape, out_multi, rhs_flat, rhs_axis_steps);
+                                odometer_increment!(
+                                    flat,
+                                    out_count,
+                                    out_shape,
+                                    out_multi,
+                                    rhs_flat,
+                                    rhs_axis_steps
+                                );
                             }
                         }
                         BinaryOp::Mul => {
                             for (flat, slot) in out_values.iter_mut().enumerate() {
                                 *slot = self.values[flat] * rhs.values[rhs_flat];
-                                odometer_increment!(flat, out_count, out_shape, out_multi, rhs_flat, rhs_axis_steps);
+                                odometer_increment!(
+                                    flat,
+                                    out_count,
+                                    out_shape,
+                                    out_multi,
+                                    rhs_flat,
+                                    rhs_axis_steps
+                                );
                             }
                         }
                         BinaryOp::Div => {
                             for (flat, slot) in out_values.iter_mut().enumerate() {
                                 *slot = self.values[flat] / rhs.values[rhs_flat];
-                                odometer_increment!(flat, out_count, out_shape, out_multi, rhs_flat, rhs_axis_steps);
+                                odometer_increment!(
+                                    flat,
+                                    out_count,
+                                    out_shape,
+                                    out_multi,
+                                    rhs_flat,
+                                    rhs_axis_steps
+                                );
                             }
                         }
                         _ => {
                             for (flat, slot) in out_values.iter_mut().enumerate() {
                                 *slot = op.apply(self.values[flat], rhs.values[rhs_flat]);
-                                odometer_increment!(flat, out_count, out_shape, out_multi, rhs_flat, rhs_axis_steps);
+                                odometer_increment!(
+                                    flat,
+                                    out_count,
+                                    out_shape,
+                                    out_multi,
+                                    rhs_flat,
+                                    rhs_axis_steps
+                                );
                             }
                         }
                     }
@@ -4338,9 +4403,22 @@ impl UFuncArray {
                                 let lhs_value = self.values[flat];
                                 let rhs_value = rhs.values[rhs_flat];
                                 let result = lhs_value + rhs_value;
-                                note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                                note_binary_float_errors(
+                                    &mut float_error_flags,
+                                    op,
+                                    lhs_value,
+                                    rhs_value,
+                                    result,
+                                );
                                 *slot = result;
-                                odometer_increment!(flat, out_count, out_shape, out_multi, rhs_flat, rhs_axis_steps);
+                                odometer_increment!(
+                                    flat,
+                                    out_count,
+                                    out_shape,
+                                    out_multi,
+                                    rhs_flat,
+                                    rhs_axis_steps
+                                );
                             }
                         }
                         BinaryOp::Sub => {
@@ -4348,9 +4426,22 @@ impl UFuncArray {
                                 let lhs_value = self.values[flat];
                                 let rhs_value = rhs.values[rhs_flat];
                                 let result = lhs_value - rhs_value;
-                                note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                                note_binary_float_errors(
+                                    &mut float_error_flags,
+                                    op,
+                                    lhs_value,
+                                    rhs_value,
+                                    result,
+                                );
                                 *slot = result;
-                                odometer_increment!(flat, out_count, out_shape, out_multi, rhs_flat, rhs_axis_steps);
+                                odometer_increment!(
+                                    flat,
+                                    out_count,
+                                    out_shape,
+                                    out_multi,
+                                    rhs_flat,
+                                    rhs_axis_steps
+                                );
                             }
                         }
                         BinaryOp::Mul => {
@@ -4358,9 +4449,22 @@ impl UFuncArray {
                                 let lhs_value = self.values[flat];
                                 let rhs_value = rhs.values[rhs_flat];
                                 let result = lhs_value * rhs_value;
-                                note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                                note_binary_float_errors(
+                                    &mut float_error_flags,
+                                    op,
+                                    lhs_value,
+                                    rhs_value,
+                                    result,
+                                );
                                 *slot = result;
-                                odometer_increment!(flat, out_count, out_shape, out_multi, rhs_flat, rhs_axis_steps);
+                                odometer_increment!(
+                                    flat,
+                                    out_count,
+                                    out_shape,
+                                    out_multi,
+                                    rhs_flat,
+                                    rhs_axis_steps
+                                );
                             }
                         }
                         BinaryOp::Div => {
@@ -4368,9 +4472,22 @@ impl UFuncArray {
                                 let lhs_value = self.values[flat];
                                 let rhs_value = rhs.values[rhs_flat];
                                 let result = lhs_value / rhs_value;
-                                note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                                note_binary_float_errors(
+                                    &mut float_error_flags,
+                                    op,
+                                    lhs_value,
+                                    rhs_value,
+                                    result,
+                                );
                                 *slot = result;
-                                odometer_increment!(flat, out_count, out_shape, out_multi, rhs_flat, rhs_axis_steps);
+                                odometer_increment!(
+                                    flat,
+                                    out_count,
+                                    out_shape,
+                                    out_multi,
+                                    rhs_flat,
+                                    rhs_axis_steps
+                                );
                             }
                         }
                         _ => {
@@ -4378,9 +4495,22 @@ impl UFuncArray {
                                 let lhs_value = self.values[flat];
                                 let rhs_value = rhs.values[rhs_flat];
                                 let result = op.apply(lhs_value, rhs_value);
-                                note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                                note_binary_float_errors(
+                                    &mut float_error_flags,
+                                    op,
+                                    lhs_value,
+                                    rhs_value,
+                                    result,
+                                );
                                 *slot = result;
-                                odometer_increment!(flat, out_count, out_shape, out_multi, rhs_flat, rhs_axis_steps);
+                                odometer_increment!(
+                                    flat,
+                                    out_count,
+                                    out_shape,
+                                    out_multi,
+                                    rhs_flat,
+                                    rhs_axis_steps
+                                );
                             }
                         }
                     }
@@ -4578,31 +4708,66 @@ impl UFuncArray {
                         BinaryOp::Add => {
                             for (flat, slot) in out_values.iter_mut().enumerate() {
                                 *slot = self.values[lhs_flat] + rhs.values[flat];
-                                odometer_increment_lhs!(flat, out_count, out_shape, out_multi, lhs_flat, lhs_axis_steps);
+                                odometer_increment_lhs!(
+                                    flat,
+                                    out_count,
+                                    out_shape,
+                                    out_multi,
+                                    lhs_flat,
+                                    lhs_axis_steps
+                                );
                             }
                         }
                         BinaryOp::Sub => {
                             for (flat, slot) in out_values.iter_mut().enumerate() {
                                 *slot = self.values[lhs_flat] - rhs.values[flat];
-                                odometer_increment_lhs!(flat, out_count, out_shape, out_multi, lhs_flat, lhs_axis_steps);
+                                odometer_increment_lhs!(
+                                    flat,
+                                    out_count,
+                                    out_shape,
+                                    out_multi,
+                                    lhs_flat,
+                                    lhs_axis_steps
+                                );
                             }
                         }
                         BinaryOp::Mul => {
                             for (flat, slot) in out_values.iter_mut().enumerate() {
                                 *slot = self.values[lhs_flat] * rhs.values[flat];
-                                odometer_increment_lhs!(flat, out_count, out_shape, out_multi, lhs_flat, lhs_axis_steps);
+                                odometer_increment_lhs!(
+                                    flat,
+                                    out_count,
+                                    out_shape,
+                                    out_multi,
+                                    lhs_flat,
+                                    lhs_axis_steps
+                                );
                             }
                         }
                         BinaryOp::Div => {
                             for (flat, slot) in out_values.iter_mut().enumerate() {
                                 *slot = self.values[lhs_flat] / rhs.values[flat];
-                                odometer_increment_lhs!(flat, out_count, out_shape, out_multi, lhs_flat, lhs_axis_steps);
+                                odometer_increment_lhs!(
+                                    flat,
+                                    out_count,
+                                    out_shape,
+                                    out_multi,
+                                    lhs_flat,
+                                    lhs_axis_steps
+                                );
                             }
                         }
                         _ => {
                             for (flat, slot) in out_values.iter_mut().enumerate() {
                                 *slot = op.apply(self.values[lhs_flat], rhs.values[flat]);
-                                odometer_increment_lhs!(flat, out_count, out_shape, out_multi, lhs_flat, lhs_axis_steps);
+                                odometer_increment_lhs!(
+                                    flat,
+                                    out_count,
+                                    out_shape,
+                                    out_multi,
+                                    lhs_flat,
+                                    lhs_axis_steps
+                                );
                             }
                         }
                     }
@@ -4613,9 +4778,22 @@ impl UFuncArray {
                                 let lhs_value = self.values[lhs_flat];
                                 let rhs_value = rhs.values[flat];
                                 let result = lhs_value + rhs_value;
-                                note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                                note_binary_float_errors(
+                                    &mut float_error_flags,
+                                    op,
+                                    lhs_value,
+                                    rhs_value,
+                                    result,
+                                );
                                 *slot = result;
-                                odometer_increment_lhs!(flat, out_count, out_shape, out_multi, lhs_flat, lhs_axis_steps);
+                                odometer_increment_lhs!(
+                                    flat,
+                                    out_count,
+                                    out_shape,
+                                    out_multi,
+                                    lhs_flat,
+                                    lhs_axis_steps
+                                );
                             }
                         }
                         BinaryOp::Sub => {
@@ -4623,9 +4801,22 @@ impl UFuncArray {
                                 let lhs_value = self.values[lhs_flat];
                                 let rhs_value = rhs.values[flat];
                                 let result = lhs_value - rhs_value;
-                                note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                                note_binary_float_errors(
+                                    &mut float_error_flags,
+                                    op,
+                                    lhs_value,
+                                    rhs_value,
+                                    result,
+                                );
                                 *slot = result;
-                                odometer_increment_lhs!(flat, out_count, out_shape, out_multi, lhs_flat, lhs_axis_steps);
+                                odometer_increment_lhs!(
+                                    flat,
+                                    out_count,
+                                    out_shape,
+                                    out_multi,
+                                    lhs_flat,
+                                    lhs_axis_steps
+                                );
                             }
                         }
                         BinaryOp::Mul => {
@@ -4633,9 +4824,22 @@ impl UFuncArray {
                                 let lhs_value = self.values[lhs_flat];
                                 let rhs_value = rhs.values[flat];
                                 let result = lhs_value * rhs_value;
-                                note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                                note_binary_float_errors(
+                                    &mut float_error_flags,
+                                    op,
+                                    lhs_value,
+                                    rhs_value,
+                                    result,
+                                );
                                 *slot = result;
-                                odometer_increment_lhs!(flat, out_count, out_shape, out_multi, lhs_flat, lhs_axis_steps);
+                                odometer_increment_lhs!(
+                                    flat,
+                                    out_count,
+                                    out_shape,
+                                    out_multi,
+                                    lhs_flat,
+                                    lhs_axis_steps
+                                );
                             }
                         }
                         BinaryOp::Div => {
@@ -4643,9 +4847,22 @@ impl UFuncArray {
                                 let lhs_value = self.values[lhs_flat];
                                 let rhs_value = rhs.values[flat];
                                 let result = lhs_value / rhs_value;
-                                note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                                note_binary_float_errors(
+                                    &mut float_error_flags,
+                                    op,
+                                    lhs_value,
+                                    rhs_value,
+                                    result,
+                                );
                                 *slot = result;
-                                odometer_increment_lhs!(flat, out_count, out_shape, out_multi, lhs_flat, lhs_axis_steps);
+                                odometer_increment_lhs!(
+                                    flat,
+                                    out_count,
+                                    out_shape,
+                                    out_multi,
+                                    lhs_flat,
+                                    lhs_axis_steps
+                                );
                             }
                         }
                         _ => {
@@ -4653,9 +4870,22 @@ impl UFuncArray {
                                 let lhs_value = self.values[lhs_flat];
                                 let rhs_value = rhs.values[flat];
                                 let result = op.apply(lhs_value, rhs_value);
-                                note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                                note_binary_float_errors(
+                                    &mut float_error_flags,
+                                    op,
+                                    lhs_value,
+                                    rhs_value,
+                                    result,
+                                );
                                 *slot = result;
-                                odometer_increment_lhs!(flat, out_count, out_shape, out_multi, lhs_flat, lhs_axis_steps);
+                                odometer_increment_lhs!(
+                                    flat,
+                                    out_count,
+                                    out_shape,
+                                    out_multi,
+                                    lhs_flat,
+                                    lhs_axis_steps
+                                );
                             }
                         }
                     }
@@ -4695,31 +4925,76 @@ impl UFuncArray {
                     BinaryOp::Add => {
                         for (flat, slot) in out_values.iter_mut().enumerate() {
                             *slot = self.values[lhs_flat] + rhs.values[rhs_flat];
-                            odometer_increment_both!(flat, out_count, out_shape, out_multi, lhs_flat, rhs_flat, lhs_axis_steps, rhs_axis_steps);
+                            odometer_increment_both!(
+                                flat,
+                                out_count,
+                                out_shape,
+                                out_multi,
+                                lhs_flat,
+                                rhs_flat,
+                                lhs_axis_steps,
+                                rhs_axis_steps
+                            );
                         }
                     }
                     BinaryOp::Sub => {
                         for (flat, slot) in out_values.iter_mut().enumerate() {
                             *slot = self.values[lhs_flat] - rhs.values[rhs_flat];
-                            odometer_increment_both!(flat, out_count, out_shape, out_multi, lhs_flat, rhs_flat, lhs_axis_steps, rhs_axis_steps);
+                            odometer_increment_both!(
+                                flat,
+                                out_count,
+                                out_shape,
+                                out_multi,
+                                lhs_flat,
+                                rhs_flat,
+                                lhs_axis_steps,
+                                rhs_axis_steps
+                            );
                         }
                     }
                     BinaryOp::Mul => {
                         for (flat, slot) in out_values.iter_mut().enumerate() {
                             *slot = self.values[lhs_flat] * rhs.values[rhs_flat];
-                            odometer_increment_both!(flat, out_count, out_shape, out_multi, lhs_flat, rhs_flat, lhs_axis_steps, rhs_axis_steps);
+                            odometer_increment_both!(
+                                flat,
+                                out_count,
+                                out_shape,
+                                out_multi,
+                                lhs_flat,
+                                rhs_flat,
+                                lhs_axis_steps,
+                                rhs_axis_steps
+                            );
                         }
                     }
                     BinaryOp::Div => {
                         for (flat, slot) in out_values.iter_mut().enumerate() {
                             *slot = self.values[lhs_flat] / rhs.values[rhs_flat];
-                            odometer_increment_both!(flat, out_count, out_shape, out_multi, lhs_flat, rhs_flat, lhs_axis_steps, rhs_axis_steps);
+                            odometer_increment_both!(
+                                flat,
+                                out_count,
+                                out_shape,
+                                out_multi,
+                                lhs_flat,
+                                rhs_flat,
+                                lhs_axis_steps,
+                                rhs_axis_steps
+                            );
                         }
                     }
                     _ => {
                         for (flat, slot) in out_values.iter_mut().enumerate() {
                             *slot = op.apply(self.values[lhs_flat], rhs.values[rhs_flat]);
-                            odometer_increment_both!(flat, out_count, out_shape, out_multi, lhs_flat, rhs_flat, lhs_axis_steps, rhs_axis_steps);
+                            odometer_increment_both!(
+                                flat,
+                                out_count,
+                                out_shape,
+                                out_multi,
+                                lhs_flat,
+                                rhs_flat,
+                                lhs_axis_steps,
+                                rhs_axis_steps
+                            );
                         }
                     }
                 }
@@ -4730,9 +5005,24 @@ impl UFuncArray {
                             let lhs_value = self.values[lhs_flat];
                             let rhs_value = rhs.values[rhs_flat];
                             let result = lhs_value + rhs_value;
-                            note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                            note_binary_float_errors(
+                                &mut float_error_flags,
+                                op,
+                                lhs_value,
+                                rhs_value,
+                                result,
+                            );
                             *slot = result;
-                            odometer_increment_both!(flat, out_count, out_shape, out_multi, lhs_flat, rhs_flat, lhs_axis_steps, rhs_axis_steps);
+                            odometer_increment_both!(
+                                flat,
+                                out_count,
+                                out_shape,
+                                out_multi,
+                                lhs_flat,
+                                rhs_flat,
+                                lhs_axis_steps,
+                                rhs_axis_steps
+                            );
                         }
                     }
                     BinaryOp::Sub => {
@@ -4740,9 +5030,24 @@ impl UFuncArray {
                             let lhs_value = self.values[lhs_flat];
                             let rhs_value = rhs.values[rhs_flat];
                             let result = lhs_value - rhs_value;
-                            note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                            note_binary_float_errors(
+                                &mut float_error_flags,
+                                op,
+                                lhs_value,
+                                rhs_value,
+                                result,
+                            );
                             *slot = result;
-                            odometer_increment_both!(flat, out_count, out_shape, out_multi, lhs_flat, rhs_flat, lhs_axis_steps, rhs_axis_steps);
+                            odometer_increment_both!(
+                                flat,
+                                out_count,
+                                out_shape,
+                                out_multi,
+                                lhs_flat,
+                                rhs_flat,
+                                lhs_axis_steps,
+                                rhs_axis_steps
+                            );
                         }
                     }
                     BinaryOp::Mul => {
@@ -4750,9 +5055,24 @@ impl UFuncArray {
                             let lhs_value = self.values[lhs_flat];
                             let rhs_value = rhs.values[rhs_flat];
                             let result = lhs_value * rhs_value;
-                            note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                            note_binary_float_errors(
+                                &mut float_error_flags,
+                                op,
+                                lhs_value,
+                                rhs_value,
+                                result,
+                            );
                             *slot = result;
-                            odometer_increment_both!(flat, out_count, out_shape, out_multi, lhs_flat, rhs_flat, lhs_axis_steps, rhs_axis_steps);
+                            odometer_increment_both!(
+                                flat,
+                                out_count,
+                                out_shape,
+                                out_multi,
+                                lhs_flat,
+                                rhs_flat,
+                                lhs_axis_steps,
+                                rhs_axis_steps
+                            );
                         }
                     }
                     BinaryOp::Div => {
@@ -4760,9 +5080,24 @@ impl UFuncArray {
                             let lhs_value = self.values[lhs_flat];
                             let rhs_value = rhs.values[rhs_flat];
                             let result = lhs_value / rhs_value;
-                            note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                            note_binary_float_errors(
+                                &mut float_error_flags,
+                                op,
+                                lhs_value,
+                                rhs_value,
+                                result,
+                            );
                             *slot = result;
-                            odometer_increment_both!(flat, out_count, out_shape, out_multi, lhs_flat, rhs_flat, lhs_axis_steps, rhs_axis_steps);
+                            odometer_increment_both!(
+                                flat,
+                                out_count,
+                                out_shape,
+                                out_multi,
+                                lhs_flat,
+                                rhs_flat,
+                                lhs_axis_steps,
+                                rhs_axis_steps
+                            );
                         }
                     }
                     _ => {
@@ -4770,9 +5105,24 @@ impl UFuncArray {
                             let lhs_value = self.values[lhs_flat];
                             let rhs_value = rhs.values[rhs_flat];
                             let result = op.apply(lhs_value, rhs_value);
-                            note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                            note_binary_float_errors(
+                                &mut float_error_flags,
+                                op,
+                                lhs_value,
+                                rhs_value,
+                                result,
+                            );
                             *slot = result;
-                            odometer_increment_both!(flat, out_count, out_shape, out_multi, lhs_flat, rhs_flat, lhs_axis_steps, rhs_axis_steps);
+                            odometer_increment_both!(
+                                flat,
+                                out_count,
+                                out_shape,
+                                out_multi,
+                                lhs_flat,
+                                rhs_flat,
+                                lhs_axis_steps,
+                                rhs_axis_steps
+                            );
                         }
                     }
                 }
@@ -23169,7 +23519,10 @@ pub fn busday_offset(dates: &UFuncArray, offsets: &UFuncArray) -> Result<UFuncAr
 ///
 /// Formats each datetime64 value as an ISO 8601 string. NaT values become "NaT".
 /// The unit parameter controls output precision (default: Day).
-pub fn datetime_as_string(dates: &UFuncArray, unit: Option<&str>) -> Result<StringArray, UFuncError> {
+pub fn datetime_as_string(
+    dates: &UFuncArray,
+    unit: Option<&str>,
+) -> Result<StringArray, UFuncError> {
     if !matches!(dates.dtype(), DType::DateTime64 | DType::TimeDelta64) {
         return Err(UFuncError::Msg(
             "datetime_as_string requires DateTime64 or TimeDelta64 array".to_string(),
@@ -28678,8 +29031,8 @@ mod tests {
         financial_ppmt, financial_pv, financial_rate, frexp, gcd_arrays, geterr, herm2poly,
         hermadd, hermder, hermdiv, herme2poly, hermeadd, hermediv, hermefromroots, hermemul,
         hermeroots, hermesub, hermeval, hermfit, hermfromroots, hermint, hermmul, hermroots,
-        hermsub, hermval, hypot, is_busday, isnat, isneginf, isposinf, lag2poly, lagadd, lagder, lagdiv,
-        lagfit, lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, lcm_arrays, ldexp,
+        hermsub, hermval, hypot, is_busday, isnat, isneginf, isposinf, lag2poly, lagadd, lagder,
+        lagdiv, lagfit, lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, lcm_arrays, ldexp,
         leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub,
         legval, logaddexp, logaddexp2, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or,
         mediate_ufunc_runtime_policy, modf, nextafter, normalize_fixed_signature_keywords,
@@ -42243,8 +42596,7 @@ mod tests {
     #[test]
     fn datetime_as_string_basic() {
         // Day 0 = 1970-01-01, Day 1 = 1970-01-02
-        let dates =
-            UFuncArray::new(vec![3], vec![0.0, 1.0, 365.0], DType::DateTime64).unwrap();
+        let dates = UFuncArray::new(vec![3], vec![0.0, 1.0, 365.0], DType::DateTime64).unwrap();
         let result = datetime_as_string(&dates, None).unwrap();
         assert_eq!(result.values(), &["1970-01-01", "1970-01-02", "1971-01-01"]);
     }
