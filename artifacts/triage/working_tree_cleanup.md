@@ -1,105 +1,131 @@
-# Working Tree Cleanup Triage (franken_numpy-rosd)
+# Working Tree Cleanup Triage
 
-Generated from `git status --porcelain` on 2026-04-10. This is a review-only manifest. **No deletions or moves have been performed.**
+Date: 2026-04-15
 
-Categories:
-- `project-artifact`: deliverables that should be tracked (keep/add to git)
-- `tooling-output`: transient logs or tool output (candidate .gitignore)
-- `fixed-bug-repro`: one-off repro files from past bugs (delete only after approval)
-- `useful-script`: potentially reusable helper scripts (promote to `scripts/dev/` after approval)
-- `compiled-binary`: extensionless compiled test binaries (delete after approval; add ignore patterns)
-- `unclear`: needs human review
+Scope:
+- Root-level untracked regular files only.
+- Excludes tracked files, directories (`target/`, `.beads/`, virtualenvs), and non-root paths.
+
+Current state:
+- 86 root regular files are not tracked.
+- 32 are currently visible as `??` in `git status`.
+- 54 are already ignored by the existing root `.gitignore`.
+- No files were deleted, moved, or edited during this triage pass.
+
+## Summary
+
+| Category | Count | Default disposition | Notes |
+|----------|-------|---------------------|-------|
+| tooling-output | 23 | delete (pending approval) | Already ignored; these are transient lint/scan captures. |
+| compiled-binary | 26 | delete (pending approval) | Already ignored; these are extensionless executables left in the repo root. |
+| fixed-bug-repro | 32 | delete (pending approval) | One-off repro sources/fixtures in the repo root, outside maintained `crates/` or `tests/` layouts. |
+| unclear | 5 | review for promotion or delete | Ad hoc helper scripts / one-shot mutation programs; inspect once before deletion. |
+
+Observations:
+- The current `.gitignore` already covers the transient output files, root compiled binaries, and the ad hoc helper scripts listed below.
+- The remaining visible `test_*.rs`, `test_*.py`, `test_*.c`, and `test_*.csv` files are not ignored by design, which is good: blindly ignoring source-like filenames would hide future legitimate files.
+- The cleanup still needs explicit user approval before any deletion.
+
+## Per-File Manifest
 
 | File | Category | Disposition | Rationale |
-| --- | --- | --- | --- |
-| `.ntm/` | tooling-output | .gitignore | NTM session artifacts, not source |
-| `apply_fixes.py` | useful-script | promote (pending approval) | One-off agent automation; keep only if still useful |
-| `artifacts/baselines/cross_engine_benchmark_v1.decode_proof.json` | project-artifact | keep/add to git | Cross-engine benchmark deliverable (RaptorQ decode proof) |
-| `artifacts/baselines/cross_engine_benchmark_v1.json` | project-artifact | keep/add to git | Cross-engine benchmark baseline (azql) |
-| `artifacts/baselines/cross_engine_benchmark_v1.raptorq.json` | project-artifact | keep/add to git | Cross-engine benchmark sidecar |
-| `artifacts/baselines/cross_engine_benchmark_v1.report.md` | project-artifact | keep/add to git | Cross-engine benchmark markdown report |
-| `artifacts/baselines/cross_engine_benchmark_v1.scrub_report.json` | project-artifact | keep/add to git | Cross-engine benchmark scrub report |
-| `docs/adr/ADR-001-parity-pivot.md` | unclear | keep/add to git (pending owner review) | Untracked ADR draft; confirm ownership and completeness |
-| `clippy_cast.txt` | tooling-output | .gitignore | Transient lint capture |
-| `clippy_casts_all.txt` | tooling-output | .gitignore | Transient lint capture |
-| `clippy_conformance.txt` | tooling-output | .gitignore | Transient lint capture |
-| `clippy_deep.txt` | tooling-output | .gitignore | Transient lint capture |
-| `clippy_indexing.txt` | tooling-output | .gitignore | Transient lint capture |
-| `clippy_indexing_new.txt` | tooling-output | .gitignore | Transient lint capture |
-| `clippy_issues.txt` | tooling-output | .gitignore | Transient lint capture |
-| `clippy_json.txt` | tooling-output | .gitignore | Transient lint capture |
-| `clippy_new.txt` | tooling-output | .gitignore | Transient lint capture |
-| `clippy_out.txt` | tooling-output | .gitignore | Transient lint capture |
-| `clippy_out2.txt` | tooling-output | .gitignore | Transient lint capture |
-| `clippy_out3.txt` | tooling-output | .gitignore | Transient lint capture |
-| `clippy_out4.txt` | tooling-output | .gitignore | Transient lint capture |
-| `clippy_pedantic.txt` | tooling-output | .gitignore | Transient lint capture |
-| `clippy_pedantic_2.txt` | tooling-output | .gitignore | Transient lint capture |
-| `clippy_pedantic_all.txt` | tooling-output | .gitignore | Transient lint capture |
-| `clippy_pedantic_new.txt` | tooling-output | .gitignore | Transient lint capture |
-| `clippy_ptr.txt` | tooling-output | .gitignore | Transient lint capture |
-| `clippy_suspicious.txt` | tooling-output | .gitignore | Transient lint capture |
-| `clippy_unwrap.txt` | tooling-output | .gitignore | Transient lint capture |
-| `deep_clippy.txt` | tooling-output | .gitignore | Transient lint capture |
-| `fix_clippy.py` | useful-script | promote (pending approval) | One-off agent automation; keep only if still useful |
-| `fix_product.py` | useful-script | promote (pending approval) | One-off agent automation; keep only if still useful |
-| `get_context.py` | useful-script | promote (pending approval) | One-off agent automation; keep only if still useful |
-| `patch_oracle` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `patch_oracle.rs` | fixed-bug-repro | delete (pending approval) | One-off oracle patch experiment |
-| `rust-bug-scan.txt` | tooling-output | .gitignore | Transient tool output |
-| `test_arange` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_cast_str.rs` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_contiguous` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_cow_bug.rs` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_digitize` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_digitize.py` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_digitize_nan` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_div` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_f16.rs` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_fnp_digitize.rs` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_idx` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_idx.rs` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_max` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_max_rows` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_max_rows.rs` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_min` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_multiple` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_multiple.rs` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_nan_bin` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_nan_cast` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_nan_max` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_nan_max.rs` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_nan_min` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_nat` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_ncx2.py` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_ncx2_fnp.rs` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_nearest.py` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_nearest_method.rs` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_neg_zero` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_npz.rs` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_overlap` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_pad` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_parse_json.rs` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_parse_tab` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_parse_tab.rs` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_polyder.py` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_polydiv.py` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_polydiv2.py` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_polydiv3.py` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_ptrs.c` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_put_along.py` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_put_along.rs` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_rem_panic.rs` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_rem_panic2` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_rem_panic2.rs` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_reshape.py` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_roots.rs` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_shift` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_shift2` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_skip.csv` | fixed-bug-repro | delete (pending approval) | One-off repro data |
-| `test_skip.py` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_skip_fnp.rs` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `test_solve` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_split` | compiled-binary | delete + .gitignore (pending approval) | Extensionless compiled artifact |
-| `test_trace.py` | fixed-bug-repro | delete (pending approval) | One-off repro |
-| `ubs_out.txt` | tooling-output | .gitignore | Transient tool output |
+|------|----------|-------------|-----------|
+| clippy_cast.txt | tooling-output | delete (pending approval) | Already ignored transient Clippy output; keeping it in the repo root adds noise but no durable value. |
+| clippy_casts_all.txt | tooling-output | delete (pending approval) | Already ignored transient Clippy output; keeping it in the repo root adds noise but no durable value. |
+| clippy_conformance.txt | tooling-output | delete (pending approval) | Already ignored transient Clippy output; keeping it in the repo root adds noise but no durable value. |
+| clippy_deep.txt | tooling-output | delete (pending approval) | Already ignored transient Clippy output; keeping it in the repo root adds noise but no durable value. |
+| clippy_indexing.txt | tooling-output | delete (pending approval) | Already ignored transient Clippy output; keeping it in the repo root adds noise but no durable value. |
+| clippy_indexing_new.txt | tooling-output | delete (pending approval) | Already ignored transient Clippy output; keeping it in the repo root adds noise but no durable value. |
+| clippy_issues.txt | tooling-output | delete (pending approval) | Already ignored transient Clippy output; keeping it in the repo root adds noise but no durable value. |
+| clippy_json.txt | tooling-output | delete (pending approval) | Already ignored transient Clippy output; keeping it in the repo root adds noise but no durable value. |
+| clippy_new.txt | tooling-output | delete (pending approval) | Already ignored transient Clippy output; keeping it in the repo root adds noise but no durable value. |
+| clippy_out.txt | tooling-output | delete (pending approval) | Already ignored transient Clippy output; keeping it in the repo root adds noise but no durable value. |
+| clippy_out2.txt | tooling-output | delete (pending approval) | Already ignored transient Clippy output; keeping it in the repo root adds noise but no durable value. |
+| clippy_out3.txt | tooling-output | delete (pending approval) | Already ignored transient Clippy output; keeping it in the repo root adds noise but no durable value. |
+| clippy_out4.txt | tooling-output | delete (pending approval) | Already ignored transient Clippy output; keeping it in the repo root adds noise but no durable value. |
+| clippy_pedantic.txt | tooling-output | delete (pending approval) | Already ignored transient Clippy output; keeping it in the repo root adds noise but no durable value. |
+| clippy_pedantic_2.txt | tooling-output | delete (pending approval) | Already ignored transient Clippy output; keeping it in the repo root adds noise but no durable value. |
+| clippy_pedantic_all.txt | tooling-output | delete (pending approval) | Already ignored transient Clippy output; keeping it in the repo root adds noise but no durable value. |
+| clippy_pedantic_new.txt | tooling-output | delete (pending approval) | Already ignored transient Clippy output; keeping it in the repo root adds noise but no durable value. |
+| clippy_ptr.txt | tooling-output | delete (pending approval) | Already ignored transient Clippy output; keeping it in the repo root adds noise but no durable value. |
+| clippy_suspicious.txt | tooling-output | delete (pending approval) | Already ignored transient Clippy output; keeping it in the repo root adds noise but no durable value. |
+| clippy_unwrap.txt | tooling-output | delete (pending approval) | Already ignored transient Clippy output; keeping it in the repo root adds noise but no durable value. |
+| deep_clippy.txt | tooling-output | delete (pending approval) | Already ignored transient lint output; keeping it in the repo root adds noise but no durable value. |
+| rust-bug-scan.txt | tooling-output | delete (pending approval) | Already ignored transient bug-scan output; keeping it in the repo root adds noise but no durable value. |
+| ubs_out.txt | tooling-output | delete (pending approval) | Already ignored transient UBS output; keeping it in the repo root adds noise but no durable value. |
+| a.out | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| patch_oracle | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_arange | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_contiguous | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_digitize | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_digitize_nan | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_div | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_idx | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_max | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_max_rows | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_min | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_multiple | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_nan_bin | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_nan_cast | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_nan_max | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_nan_min | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_nat | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_neg_zero | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_overlap | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_pad | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_parse_tab | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_rem_panic2 | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_shift | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_shift2 | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_solve | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_split | compiled-binary | delete (pending approval) | Already ignored build residue; extensionless executable in the repo root has no source-of-truth value. |
+| test_cast_str.rs | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_cow_bug.rs | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_digitize.py | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_f16.rs | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_fnp_digitize.rs | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_idx.rs | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_max_rows.rs | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_multiple.rs | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_nan_max.rs | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_ncx2.py | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_ncx2_fnp.rs | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_nearest.py | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_nearest_method.rs | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_npz.rs | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_parse_json.rs | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_parse_tab.rs | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_polyder.py | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_polydiv.py | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_polydiv2.py | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_polydiv3.py | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_ptrs.c | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_put_along.py | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_put_along.rs | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_rem_panic.rs | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_rem_panic2.rs | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_reshape.py | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_roots.rs | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_skip.csv | fixed-bug-repro | delete (pending approval) | Supporting fixture for a root repro script; keep only if intentionally promoted into permanent tests. |
+| test_skip.py | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_skip_fnp.rs | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_slice_reverse.rs | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| test_trace.py | fixed-bug-repro | delete (pending approval) | One-off root repro source outside maintained `crates/` or `tests/` layout; keep only if intentionally promoted into permanent tests. |
+| apply_fixes.py | unclear | review for promotion or delete | Ad hoc rewrite script that edits a specific file with brittle string replacements; not obviously reusable as tracked tooling. |
+| fix_clippy.py | unclear | review for promotion or delete | Ad hoc local diagnostic script for one crate and two lint codes; useful only if intentionally promoted into `scripts/dev/`. |
+| fix_product.py | unclear | review for promotion or delete | Ad hoc regex rewrite script spanning specific files and patterns; not obviously safe or reusable as tracked tooling. |
+| get_context.py | unclear | review for promotion or delete | Local line-dump helper tied to hard-coded file paths and line numbers; not obviously reusable as tracked tooling. |
+| patch_oracle.rs | unclear | review for promotion or delete | Single-target mutation program that injects a debug `println!` into one source file; not reusable as-is. |
+
+## Recommended Next Step
+
+1. User approves category-level dispositions:
+   - `tooling-output`: delete
+   - `compiled-binary`: delete
+   - `fixed-bug-repro`: delete unless a specific file should be promoted into maintained tests
+   - `unclear`: decide case-by-case whether to promote into `scripts/dev/` or delete
+2. After approval, delete only the approved files, then re-run:
+   - `git status`
+   - `git status --ignored`
+   - `CARGO_INCREMENTAL=0 rch exec -- cargo check --workspace --all-targets`
+   - `CARGO_INCREMENTAL=0 rch exec -- cargo test --workspace`
