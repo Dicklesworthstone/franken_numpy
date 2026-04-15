@@ -720,7 +720,7 @@ The iterator crate models NumPy's internal data transfer system, which decides *
 
 **FlatIter indexing** supports four modes: `Single(i)` for scalar access, `Slice{start, stop, step}` for regular ranges, `Fancy(Vec<usize>)` for arbitrary index arrays, and `BoolMask(Vec<bool>)` for boolean selection. The `count_true_mask` optimization processes boolean masks in 8-element chunks for vectorizable counting.
 
-**Stateful NDIter wrapper.** `fnp-iter` now exposes a first-class `Nditer` state machine on top of `NditerPlan`, including `iterindex`, `multi_index`, `reset`, seek-by-index/seek-by-multi-index, and `external_loop` chunk iteration. It also ships a NumPy-backed `nditer_python*` bridge for parity checks against Python-side stepping behavior, even though the project still lacks an importable Python package/FFI layer.
+**Stateful NDIter wrapper.** `fnp-iter` now exposes a first-class `Nditer` state machine on top of `NditerPlan`, including `iterindex`, `multi_index`, `reset`, seek-by-index/seek-by-multi-index, and `external_loop` chunk iteration. It also ships a NumPy-backed `nditer_python*` bridge for parity checks against Python-side stepping behavior, and `fnp-python` now exposes that iterator state machine as a Python extension-module `PyNditer`.
 
 ---
 
@@ -939,13 +939,13 @@ Performance budgets are enforced by the G7 gate, which measures p50/p95/p99 late
 
 What works and what doesn't:
 
-- **Not a Python package.** FrankenNumPy is a Rust library. There is no `pip install` or Python FFI bridge yet. You cannot `import frankennumpy` from Python today.
+- **Not a full Python package.** FrankenNumPy is still primarily a Rust library. There is no `pip install frankennumpy` packaging story today, but the workspace now includes an early `fnp-python` extension module exposing `PyNditer`.
 - **No BLAS/LAPACK backend.** Linear algebra uses pure-Rust implementations (Householder QR, Golub-Kahan SVD, implicit shifted QR for eigenvalues). Competitive with BLAS for small matrices; slower for large ones. Future BLAS linkage is planned.
 - **Complex elementwise arithmetic uses interleaved storage.** Complex64/Complex128 dtypes store real/imaginary parts as interleaved floats with a trailing dimension of 2. Elementwise `multiply` and `divide` apply true complex arithmetic `(a+bi)(c+di) = (ac-bd)+(ad+bc)i`, but the interleaved representation adds overhead compared to native complex types.
 - **`multivariate_normal` uses Cholesky.** NumPy defaults to SVD. Adding SVD would require `fnp-linalg` as a dependency of `fnp-random` (currently zero-dependency).
 - **`multivariate_hypergeometric` uses sequential draws.** NumPy uses the `random_mvhg_marginals` algorithm.
 - **`frompyfunc` has a Rust-to-Python bridge, not a Python package.** The Rust crate now supports closure-backed numeric `frompyfunc`, object-value outputs through `frompyfunc_object`, source-evaluated Python callables through `frompyfunc_python`, and imported Python callable handles through `frompyfunc_python_import`, with broadcasting and multi-output returns. Direct live Python callable objects and Python-side package exposure still require a Python-facing bridge.
-- **`nditer` has a Rust-to-Python bridge, not a Python package.** `fnp_iter::Nditer` now has `nditer_python` / `nditer_python_with_interpreter` for NumPy-backed state and chunk bridging, but there is still no importable Python package or live FFI surface exposing it as `numpy.nditer`.
+- **`nditer` now has package-level Python exposure, but only for that surface.** `fnp_iter::Nditer` has `nditer_python` / `nditer_python_with_interpreter` for NumPy-backed state and chunk bridging, and `fnp-python` now exposes a `PyNditer` class. Broader Python packaging and FFI coverage for the rest of FrankenNumPy remain incomplete.
 - **Single-threaded.** All operations are single-threaded. The `asupersync` async runtime integration is optional and used only for conformance pipeline orchestration, not for parallel array computation.
 - **f64 internal representation.** `UFuncArray` stores numeric values as `Vec<f64>` internally for arithmetic. For i64/u64 values > 2^53, an `IntegerSidecar` preserves exact integer values through storage round-trips (`from_storage` / `to_storage`). Arithmetic on large integers still uses f64 approximation.
 
