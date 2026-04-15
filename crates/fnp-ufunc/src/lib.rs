@@ -22828,6 +22828,28 @@ const fn is_leap_year(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
+/// Convert epoch day (days since 1970-01-01) to civil date (year, month, day).
+/// Inverse of `civil_to_epoch_days`. Uses the algorithms from Howard Hinnant's date library.
+fn epoch_days_to_civil(z: i64) -> (i32, u32, u32) {
+    // Shift epoch from 1970-01-01 to 0000-03-01 (era-adjusted)
+    let z = z + 719_468;
+    // Compute era
+    let era = if z >= 0 {
+        z / 146_097
+    } else {
+        (z - 146_096) / 146_097
+    };
+    let doe = (z - era * 146_097) as u32; // day of era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year [0, 365]
+    let mp = (5 * doy + 2) / 153; // month prime [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // day [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // month [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as i32, m, d)
+}
+
 /// Weekday for a date represented as days since Unix epoch (1970-01-01, Thursday).
 /// Returns 0=Monday .. 6=Sunday (NumPy convention).
 #[must_use]
@@ -23139,6 +23161,118 @@ pub fn busday_offset(dates: &UFuncArray, offsets: &UFuncArray) -> Result<UFuncAr
         values.push(current as f64);
     }
     UFuncArray::new(broadcast_shape, values, DType::DateTime64)
+}
+
+/// Convert datetime64 array elements to ISO 8601 string representation.
+///
+/// `np.datetime_as_string(dates, unit=None)`
+///
+/// Formats each datetime64 value as an ISO 8601 string. NaT values become "NaT".
+/// The unit parameter controls output precision (default: Day).
+pub fn datetime_as_string(dates: &UFuncArray, unit: Option<&str>) -> Result<StringArray, UFuncError> {
+    if !matches!(dates.dtype(), DType::DateTime64 | DType::TimeDelta64) {
+        return Err(UFuncError::Msg(
+            "datetime_as_string requires DateTime64 or TimeDelta64 array".to_string(),
+        ));
+    }
+    let unit = match unit {
+        Some(raw) => DateTimeUnit::parse(raw)?,
+        None => DateTimeUnit::Day,
+    };
+    let nat_value = i64::MIN as f64;
+    let is_timedelta = dates.dtype() == DType::TimeDelta64;
+    let values: Vec<String> = dates
+        .values()
+        .iter()
+        .map(|&v| {
+            if v == nat_value {
+                return "NaT".to_string();
+            }
+            let ticks = v as i64;
+            if is_timedelta {
+                format_timedelta_ticks(ticks, unit)
+            } else {
+                format_datetime_ticks(ticks, unit)
+            }
+        })
+        .collect();
+    StringArray::new(dates.shape().to_vec(), values)
+}
+
+/// Format datetime64 ticks as ISO 8601 string.
+fn format_datetime_ticks(ticks: i64, unit: DateTimeUnit) -> String {
+    // Convert ticks to nanoseconds since epoch
+    let nanos = i128::from(ticks) * unit.tick_nanos();
+    // Split into days and sub-day nanoseconds
+    let nanos_per_day = DateTimeUnit::Day.tick_nanos();
+    let (epoch_day, sub_day_nanos) = if nanos >= 0 {
+        (
+            (nanos / nanos_per_day) as i64,
+            (nanos % nanos_per_day) as u64,
+        )
+    } else {
+        // Handle negative values (before 1970)
+        let days = nanos.div_euclid(nanos_per_day) as i64;
+        let remainder = nanos.rem_euclid(nanos_per_day) as u64;
+        (days, remainder)
+    };
+    let (year, month, day) = epoch_days_to_civil(epoch_day);
+
+    // Build the date part
+    let date_str = format!("{year:04}-{month:02}-{day:02}");
+
+    // Add time components based on unit precision
+    match unit {
+        DateTimeUnit::Week | DateTimeUnit::Day => date_str,
+        _ => {
+            let nanos_per_hour = DateTimeUnit::Hour.tick_nanos() as u64;
+            let nanos_per_minute = DateTimeUnit::Minute.tick_nanos() as u64;
+            let nanos_per_second = DateTimeUnit::Second.tick_nanos() as u64;
+            let nanos_per_milli = DateTimeUnit::Millisecond.tick_nanos() as u64;
+            let nanos_per_micro = DateTimeUnit::Microsecond.tick_nanos() as u64;
+
+            let hours = sub_day_nanos / nanos_per_hour;
+            let remaining = sub_day_nanos % nanos_per_hour;
+            let minutes = remaining / nanos_per_minute;
+            let remaining = remaining % nanos_per_minute;
+            let seconds = remaining / nanos_per_second;
+            let remaining = remaining % nanos_per_second;
+
+            match unit {
+                DateTimeUnit::Hour => format!("{date_str}T{hours:02}"),
+                DateTimeUnit::Minute => format!("{date_str}T{hours:02}:{minutes:02}"),
+                DateTimeUnit::Second => format!("{date_str}T{hours:02}:{minutes:02}:{seconds:02}"),
+                DateTimeUnit::Millisecond => {
+                    let millis = remaining / nanos_per_milli;
+                    format!("{date_str}T{hours:02}:{minutes:02}:{seconds:02}.{millis:03}")
+                }
+                DateTimeUnit::Microsecond => {
+                    let micros = remaining / nanos_per_micro;
+                    format!("{date_str}T{hours:02}:{minutes:02}:{seconds:02}.{micros:06}")
+                }
+                DateTimeUnit::Nanosecond => {
+                    let nanos = remaining;
+                    format!("{date_str}T{hours:02}:{minutes:02}:{seconds:02}.{nanos:09}")
+                }
+                _ => date_str, // Covered above but needed for exhaustiveness
+            }
+        }
+    }
+}
+
+/// Format timedelta64 ticks as string (e.g., "5 days", "3600 seconds").
+fn format_timedelta_ticks(ticks: i64, unit: DateTimeUnit) -> String {
+    let unit_str = match unit {
+        DateTimeUnit::Week => "weeks",
+        DateTimeUnit::Day => "days",
+        DateTimeUnit::Hour => "hours",
+        DateTimeUnit::Minute => "minutes",
+        DateTimeUnit::Second => "seconds",
+        DateTimeUnit::Millisecond => "milliseconds",
+        DateTimeUnit::Microsecond => "microseconds",
+        DateTimeUnit::Nanosecond => "nanoseconds",
+    };
+    format!("{ticks} {unit_str}")
 }
 
 // ── numpy.ma — Masked Array Module ──────────────────────────────────────
@@ -42104,6 +42238,48 @@ mod tests {
 
         let ints = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::I64).unwrap();
         assert!(isnat(&ints).is_err());
+    }
+
+    #[test]
+    fn datetime_as_string_basic() {
+        // Day 0 = 1970-01-01, Day 1 = 1970-01-02
+        let dates =
+            UFuncArray::new(vec![3], vec![0.0, 1.0, 365.0], DType::DateTime64).unwrap();
+        let result = datetime_as_string(&dates, None).unwrap();
+        assert_eq!(result.values(), &["1970-01-01", "1970-01-02", "1971-01-01"]);
+    }
+
+    #[test]
+    fn datetime_as_string_with_nat() {
+        let nat_value = i64::MIN as f64;
+        let dates =
+            UFuncArray::new(vec![3], vec![0.0, nat_value, 100.0], DType::DateTime64).unwrap();
+        let result = datetime_as_string(&dates, None).unwrap();
+        assert_eq!(result.values()[0], "1970-01-01");
+        assert_eq!(result.values()[1], "NaT");
+    }
+
+    #[test]
+    fn datetime_as_string_hour_precision() {
+        // Day 0, hour 12 in hourly ticks = 12 hours
+        let dates = UFuncArray::new(vec![1], vec![12.0], DType::DateTime64).unwrap();
+        let result = datetime_as_string(&dates, Some("h")).unwrap();
+        assert_eq!(result.values()[0], "1970-01-01T12");
+    }
+
+    #[test]
+    fn datetime_as_string_second_precision() {
+        // In second ticks: 3661 = 1 hour, 1 minute, 1 second
+        let dates = UFuncArray::new(vec![1], vec![3661.0], DType::DateTime64).unwrap();
+        let result = datetime_as_string(&dates, Some("s")).unwrap();
+        assert_eq!(result.values()[0], "1970-01-01T01:01:01");
+    }
+
+    #[test]
+    fn timedelta_as_string_basic() {
+        let deltas = UFuncArray::new(vec![2], vec![5.0, -3.0], DType::TimeDelta64).unwrap();
+        let result = datetime_as_string(&deltas, None).unwrap();
+        assert_eq!(result.values(), &["5 days", "-3 days"]);
     }
 
     #[test]
