@@ -720,7 +720,7 @@ The iterator crate models NumPy's internal data transfer system, which decides *
 
 **FlatIter indexing** supports four modes: `Single(i)` for scalar access, `Slice{start, stop, step}` for regular ranges, `Fancy(Vec<usize>)` for arbitrary index arrays, and `BoolMask(Vec<bool>)` for boolean selection. The `count_true_mask` optimization processes boolean masks in 8-element chunks for vectorizable counting.
 
-**Stateful NDIter wrapper.** `fnp-iter` now exposes a first-class `Nditer` state machine on top of `NditerPlan`, including `iterindex`, `multi_index`, `reset`, seek-by-index/seek-by-multi-index, and `external_loop` chunk iteration. That closes the missing object-wrapper gap inside the Rust API even though the project still lacks a Python FFI layer.
+**Stateful NDIter wrapper.** `fnp-iter` now exposes a first-class `Nditer` state machine on top of `NditerPlan`, including `iterindex`, `multi_index`, `reset`, seek-by-index/seek-by-multi-index, and `external_loop` chunk iteration. It also ships a NumPy-backed `nditer_python*` bridge for parity checks against Python-side stepping behavior, even though the project still lacks an importable Python package/FFI layer.
 
 ---
 
@@ -945,7 +945,7 @@ What works and what doesn't:
 - **`multivariate_normal` uses Cholesky.** NumPy defaults to SVD. Adding SVD would require `fnp-linalg` as a dependency of `fnp-random` (currently zero-dependency).
 - **`multivariate_hypergeometric` uses sequential draws.** NumPy uses the `random_mvhg_marginals` algorithm.
 - **`frompyfunc` has a Rust-to-Python bridge, not a Python package.** The Rust crate now supports closure-backed numeric `frompyfunc`, object-value outputs through `frompyfunc_object`, source-evaluated Python callables through `frompyfunc_python`, and imported Python callable handles through `frompyfunc_python_import`, with broadcasting and multi-output returns. Direct live Python callable objects and Python-side package exposure still require a Python-facing bridge.
-- **`nditer` is Rust-only today.** `fnp_iter::Nditer` now exposes the iterator state machine inside the Rust API, but there is still no Python FFI bridge exposing it as `numpy.nditer`.
+- **`nditer` has a Rust-to-Python bridge, not a Python package.** `fnp_iter::Nditer` now has `nditer_python` / `nditer_python_with_interpreter` for NumPy-backed state and chunk bridging, but there is still no importable Python package or live FFI surface exposing it as `numpy.nditer`.
 - **Single-threaded.** All operations are single-threaded. The `asupersync` async runtime integration is optional and used only for conformance pipeline orchestration, not for parallel array computation.
 - **f64 internal representation.** `UFuncArray` stores numeric values as `Vec<f64>` internally for arithmetic. For i64/u64 values > 2^53, an `IntegerSidecar` preserves exact integer values through storage round-trips (`from_storage` / `to_storage`). Arithmetic on large integers still uses f64 approximation.
 

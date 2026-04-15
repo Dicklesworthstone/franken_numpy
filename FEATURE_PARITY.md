@@ -64,7 +64,7 @@
 ## Remaining Gaps (Python-specific, low priority)
 
 1. Direct live Python callable-object `frompyfunc` parity — Rust-side numeric/object-value `frompyfunc` execution plus source-evaluated and imported Python-callable bridging are implemented, but arbitrary live callable objects and Python-side object-array/package exposure still require a Python-facing layer
-2. Python FFI exposure for `fnp_iter::Nditer` — the Rust-side `nditer` state machine (`iterindex`, `multi_index`, reset/seek, external-loop chunks) is now implemented, but it is not yet exported through a Python bridge as `numpy.nditer`
+2. Direct Python package exposure for `fnp_iter::Nditer` — the Rust crate now includes a NumPy-backed `nditer_python*` bridge for step/state parity (`iterindex`, `multi_index`, seek, external-loop chunks), but there is still no importable Python package or live FFI surface exposing it as `numpy.nditer`
 3. Expanded CI matrix for alternate oracle environments and longer-horizon benchmark trend regression
 
 ## Intentional Design Decisions

@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 
+use std::io::Write;
 use std::iter::FusedIterator;
+use std::process::{Command, Stdio};
+
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeMode {
@@ -522,6 +526,16 @@ pub enum NditerOrder {
     F,
 }
 
+impl NditerOrder {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::C => "C",
+            Self::F => "F",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NditerOptions {
     pub order: NditerOrder,
@@ -743,6 +757,71 @@ impl NditerStep {
     }
 }
 
+#[derive(Debug, Serialize)]
+struct PythonNditerPayload {
+    shape: Vec<usize>,
+    order: String,
+    external_loop: bool,
+    seek_multi_index: Option<Vec<usize>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PythonNditerResponse {
+    states: Vec<PythonNditerStep>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PythonNditerStep {
+    iterindex: usize,
+    multi_index: Vec<usize>,
+    linear_indices: Vec<usize>,
+}
+
+const NDITER_PYTHON_BRIDGE_SCRIPT: &str = r#"
+import json
+import numpy as np
+import sys
+
+payload = json.loads(sys.stdin.read())
+shape = list(payload["shape"])
+order = payload["order"]
+external_loop = bool(payload["external_loop"])
+seek_multi_index = payload["seek_multi_index"]
+
+if shape:
+    element_count = int(np.prod(shape, dtype=np.int64))
+else:
+    element_count = 1
+
+inner_loop_len = 1
+if external_loop and shape:
+    inner_axis = len(shape) - 1 if order == "C" else 0
+    inner_loop_len = shape[inner_axis]
+
+if seek_multi_index is None:
+    start = 0
+else:
+    start = int(np.ravel_multi_index(tuple(seek_multi_index), tuple(shape), order=order))
+    if external_loop and inner_loop_len and start % inner_loop_len != 0:
+        raise ValueError("multi-index must align to external_loop chunk boundaries")
+
+states = []
+if element_count != 0:
+    for iterindex in range(start, element_count, inner_loop_len):
+        if shape:
+            multi_index = [int(idx) for idx in np.unravel_index(iterindex, tuple(shape), order=order)]
+        else:
+            multi_index = []
+        linear_indices = list(range(iterindex, iterindex + inner_loop_len))
+        states.append({
+            "iterindex": int(iterindex),
+            "multi_index": multi_index,
+            "linear_indices": linear_indices,
+        })
+
+print(json.dumps({"states": states}))
+"#;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Nditer {
     plan: NditerPlan,
@@ -942,6 +1021,187 @@ impl ExactSizeIterator for Nditer {
 impl FusedIterator for Nditer {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PythonNditer {
+    plan: NditerPlan,
+    python: String,
+}
+
+impl PythonNditer {
+    #[must_use]
+    pub fn plan(&self) -> &NditerPlan {
+        &self.plan
+    }
+
+    #[must_use]
+    pub fn python(&self) -> &str {
+        &self.python
+    }
+
+    pub fn steps(&self) -> Result<Vec<NditerStep>, NditerError> {
+        run_nditer_python_bridge(&self.python, &self.plan, None)
+    }
+
+    pub fn steps_from_iterindex(&self, iterindex: usize) -> Result<Vec<NditerStep>, NditerError> {
+        let mut iter = Nditer::from_plan(self.plan.clone());
+        iter.set_iterindex(iterindex)?;
+        self.steps_from_multi_index(&iter.multi_index()?)
+    }
+
+    pub fn steps_from_multi_index(
+        &self,
+        multi_index: &[usize],
+    ) -> Result<Vec<NditerStep>, NditerError> {
+        let mut iter = Nditer::from_plan(self.plan.clone());
+        iter.set_multi_index(multi_index)?;
+        run_nditer_python_bridge(&self.python, &self.plan, Some(iter.multi_index()?))
+    }
+}
+
+fn default_nditer_python_interpreter() -> String {
+    std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".to_string())
+}
+
+fn run_nditer_python_bridge(
+    python: &str,
+    plan: &NditerPlan,
+    seek_multi_index: Option<Vec<usize>>,
+) -> Result<Vec<NditerStep>, NditerError> {
+    let payload = PythonNditerPayload {
+        shape: plan.shape().to_vec(),
+        order: plan.order().as_str().to_string(),
+        external_loop: plan.external_loop(),
+        seek_multi_index,
+    };
+    let payload_bytes = serde_json::to_vec(&payload).map_err(|err| {
+        NditerError::PythonBridgeFailure(format!(
+            "failed to serialize python bridge payload: {err}"
+        ))
+    })?;
+
+    let mut child = Command::new(python)
+        .arg("-c")
+        .arg(NDITER_PYTHON_BRIDGE_SCRIPT)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| {
+            NditerError::PythonBridgeFailure(format!(
+                "failed to spawn python bridge '{python}': {err}"
+            ))
+        })?;
+
+    let mut stdin = child.stdin.take().ok_or_else(|| {
+        NditerError::PythonBridgeFailure("python bridge stdin was unavailable".to_string())
+    })?;
+    stdin.write_all(&payload_bytes).map_err(|err| {
+        NditerError::PythonBridgeFailure(format!("failed to write python bridge payload: {err}"))
+    })?;
+    drop(stdin);
+
+    let output = child.wait_with_output().map_err(|err| {
+        NditerError::PythonBridgeFailure(format!("failed to wait on python bridge: {err}"))
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = if stderr.is_empty() {
+            "python bridge exited without stderr".to_string()
+        } else {
+            stderr
+        };
+        return Err(NditerError::PythonBridgeFailure(format!(
+            "python bridge failed: {detail}"
+        )));
+    }
+
+    let response: PythonNditerResponse = serde_json::from_slice(&output.stdout).map_err(|err| {
+        NditerError::PythonBridgeFailure(format!("failed to parse python bridge response: {err}"))
+    })?;
+
+    let chunk_len = if plan.external_loop() {
+        plan.inner_loop_len()
+    } else {
+        1
+    };
+    response
+        .states
+        .into_iter()
+        .map(|state| {
+            if state.multi_index.len() != plan.shape().len() {
+                return Err(NditerError::PythonBridgeFailure(format!(
+                    "python bridge emitted multi-index rank {}, expected {}",
+                    state.multi_index.len(),
+                    plan.shape().len()
+                )));
+            }
+            if state.linear_indices.len() != chunk_len {
+                return Err(NditerError::PythonBridgeFailure(format!(
+                    "python bridge emitted chunk length {}, expected {chunk_len}",
+                    state.linear_indices.len()
+                )));
+            }
+            if state.linear_indices.first().copied() != Some(state.iterindex) {
+                return Err(NditerError::PythonBridgeFailure(
+                    "python bridge emitted a chunk whose first linear index does not match iterindex"
+                        .to_string(),
+                ));
+            }
+
+            let expected_iterindex = plan.multi_index_to_linear_index(&state.multi_index)?;
+            if expected_iterindex != state.iterindex {
+                return Err(NditerError::PythonBridgeFailure(format!(
+                    "python bridge emitted iterindex {} for multi-index {:?}, expected {expected_iterindex}",
+                    state.iterindex, state.multi_index
+                )));
+            }
+
+            let expected_linear_indices: Vec<usize> =
+                (state.iterindex..state.iterindex + chunk_len).collect();
+            if state.linear_indices != expected_linear_indices {
+                return Err(NditerError::PythonBridgeFailure(format!(
+                    "python bridge emitted linear indices {:?}, expected {:?}",
+                    state.linear_indices, expected_linear_indices
+                )));
+            }
+
+            Ok(NditerStep {
+                iterindex: state.iterindex,
+                multi_index: state.multi_index,
+                linear_indices: state.linear_indices,
+            })
+        })
+        .collect()
+}
+
+pub fn nditer_python(
+    shape: Vec<usize>,
+    item_size: usize,
+    options: NditerOptions,
+) -> Result<PythonNditer, NditerError> {
+    nditer_python_with_interpreter(
+        shape,
+        item_size,
+        options,
+        default_nditer_python_interpreter(),
+    )
+}
+
+pub fn nditer_python_with_interpreter<P>(
+    shape: Vec<usize>,
+    item_size: usize,
+    options: NditerOptions,
+    python: P,
+) -> Result<PythonNditer, NditerError>
+where
+    P: Into<String>,
+{
+    Ok(PythonNditer {
+        plan: NditerPlan::new(shape, item_size, options)?,
+        python: python.into(),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NditerOperandSpec {
     pub shape: Vec<usize>,
     pub no_broadcast: bool,
@@ -1086,6 +1346,7 @@ pub enum NditerError {
     NoBroadcastViolation(&'static str),
     OverlapPolicyTriggered(&'static str),
     NdindexShapeValidation(&'static str),
+    PythonBridgeFailure(String),
 }
 
 impl NditerError {
@@ -1097,6 +1358,7 @@ impl NditerError {
             Self::NoBroadcastViolation(_) => "nditer_no_broadcast_violation",
             Self::OverlapPolicyTriggered(_) => "nditer_overlap_policy_triggered",
             Self::NdindexShapeValidation(_) => "ndindex_shape_validation_failed",
+            Self::PythonBridgeFailure(_) => "nditer_python_bridge_failure",
         }
     }
 }
@@ -1109,6 +1371,7 @@ impl std::fmt::Display for NditerError {
             | Self::NoBroadcastViolation(msg)
             | Self::OverlapPolicyTriggered(msg)
             | Self::NdindexShapeValidation(msg) => write!(f, "{msg}"),
+            Self::PythonBridgeFailure(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -1541,12 +1804,46 @@ pub fn validate_post_transfer_fpe(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
 
     fn packet003_artifacts() -> Vec<String> {
         vec![
             "artifacts/phase2c/FNP-P2C-003/fixture_manifest.json".to_string(),
             "artifacts/phase2c/FNP-P2C-003/parity_gate.yaml".to_string(),
         ]
+    }
+
+    fn repo_numpy_venv_python() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(".venv-numpy314/bin/python3")
+    }
+
+    fn python_has_numpy(python: &str) -> bool {
+        Command::new(python)
+            .arg("-c")
+            .arg("import numpy")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+
+    fn python_with_numpy() -> Option<String> {
+        if let Ok(configured) = std::env::var("FNP_ORACLE_PYTHON")
+            && python_has_numpy(&configured)
+        {
+            return Some(configured);
+        }
+
+        let repo_python = repo_numpy_venv_python();
+        if repo_python.is_file() {
+            let candidate = repo_python.display().to_string();
+            if python_has_numpy(&candidate) {
+                return Some(candidate);
+            }
+        }
+
+        None
     }
 
     #[test]
@@ -2206,6 +2503,82 @@ mod tests {
             .iterindex()
             .expect_err("empty iterator has no position");
         assert_eq!(err.reason_code(), "nditer_multi_index_contract_violation");
+    }
+
+    #[test]
+    fn nditer_python_constructor_tracks_metadata() {
+        let bridge = nditer_python_with_interpreter(
+            vec![2, 3],
+            8,
+            NditerOptions {
+                order: NditerOrder::F,
+                external_loop: true,
+            },
+            "python3",
+        )
+        .expect("python bridge");
+        assert_eq!(bridge.plan().shape(), &[2, 3]);
+        assert_eq!(bridge.plan().order(), NditerOrder::F);
+        assert!(bridge.plan().external_loop());
+        assert_eq!(bridge.python(), "python3");
+    }
+
+    #[test]
+    fn nditer_python_reports_missing_interpreter() {
+        let bridge = nditer_python_with_interpreter(
+            vec![2, 3],
+            8,
+            NditerOptions::default(),
+            "/definitely/missing/python",
+        )
+        .expect("bridge constructor should not spawn python");
+        let err = bridge.steps().expect_err("missing python should fail");
+        assert_eq!(err.reason_code(), "nditer_python_bridge_failure");
+        assert!(
+            err.to_string().contains("failed to spawn python bridge"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn nditer_python_seek_by_iterindex_reuses_rust_alignment_rules() {
+        let bridge = nditer_python_with_interpreter(
+            vec![2, 3, 4],
+            8,
+            NditerOptions {
+                order: NditerOrder::F,
+                external_loop: true,
+            },
+            "python3",
+        )
+        .expect("python bridge");
+        let err = bridge
+            .steps_from_iterindex(1)
+            .expect_err("unaligned external_loop iterindex should fail locally");
+        assert_eq!(err.reason_code(), "nditer_multi_index_contract_violation");
+    }
+
+    #[test]
+    fn nditer_python_bridge_matches_local_wrapper_steps() {
+        let Some(python) = python_with_numpy() else {
+            return;
+        };
+        let options = NditerOptions {
+            order: NditerOrder::F,
+            external_loop: true,
+        };
+        let bridge = nditer_python_with_interpreter(vec![2, 3, 4], 8, options, python)
+            .expect("python bridge");
+        let mut iter = Nditer::new(vec![2, 3, 4], 8, options).expect("rust nditer");
+        iter.set_iterindex(2)
+            .expect("aligned external_loop seek should succeed");
+
+        assert_eq!(
+            bridge
+                .steps_from_iterindex(2)
+                .expect("python bridge steps from iterindex"),
+            iter.collect::<Vec<_>>()
+        );
     }
 
     // -----------------------------------------------------------------------

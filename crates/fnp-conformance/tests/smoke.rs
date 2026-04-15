@@ -3,7 +3,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use fnp_conformance::{HarnessConfig, run_all_core_suites, run_smoke};
-use fnp_iter::{Nditer, NditerOptions, NditerOrder};
+use fnp_iter::{Nditer, NditerOptions, NditerOrder, NditerStep, nditer_python_with_interpreter};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -251,4 +251,43 @@ fn nditer_wrapper_seek_matches_numpy_multi_index_assignment() {
     }
 
     assert_eq!(rust_states, oracle_states);
+}
+
+#[test]
+fn nditer_python_bridge_matches_rust_external_loop_c_order_chunks() {
+    let python = real_numpy_python();
+    let options = NditerOptions {
+        order: NditerOrder::C,
+        external_loop: true,
+    };
+    let bridge =
+        nditer_python_with_interpreter(vec![2, 3, 4], 8, options, python).expect("python bridge");
+    let rust_steps: Vec<NditerStep> = Nditer::new(vec![2, 3, 4], 8, options)
+        .expect("rust nditer")
+        .collect();
+
+    assert_eq!(bridge.steps().expect("python bridge steps"), rust_steps);
+}
+
+#[test]
+fn nditer_python_bridge_matches_rust_f_order_seek_from_iterindex() {
+    let python = real_numpy_python();
+    let options = NditerOptions {
+        order: NditerOrder::F,
+        external_loop: true,
+    };
+    let bridge =
+        nditer_python_with_interpreter(vec![2, 3, 4], 8, options, python).expect("python bridge");
+    let mut rust_iter = Nditer::new(vec![2, 3, 4], 8, options).expect("rust nditer");
+    rust_iter
+        .set_iterindex(2)
+        .expect("aligned external_loop seek should succeed");
+    let rust_steps: Vec<NditerStep> = rust_iter.collect();
+
+    assert_eq!(
+        bridge
+            .steps_from_iterindex(2)
+            .expect("python bridge seek-by-iterindex"),
+        rust_steps
+    );
 }
