@@ -22962,6 +22962,36 @@ impl UFuncArray {
     }
 }
 
+/// Check whether each element is NaT (Not a Time) for datetime64 or timedelta64 arrays.
+/// Returns a Bool-typed array: 1.0 = NaT, 0.0 = valid date/timedelta.
+///
+/// NaT is represented internally as i64::MIN.
+///
+/// `np.isnat(arr)`
+pub fn isnat(arr: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    if !matches!(arr.dtype(), DType::DateTime64 | DType::TimeDelta64) {
+        return Err(UFuncError::Msg(
+            "isnat requires DateTime64 or TimeDelta64 array".to_string(),
+        ));
+    }
+    // NaT is stored as i64::MIN, which when reinterpreted as f64 is a specific bit pattern.
+    // We check the underlying i64 representation.
+    let nat_as_f64 = f64::from_bits(i64::MIN as u64);
+    let values: Vec<f64> = arr
+        .values()
+        .iter()
+        .map(|&v| {
+            // Compare bit patterns since NaT has a specific i64::MIN representation
+            if v.to_bits() == nat_as_f64.to_bits() {
+                1.0
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    UFuncArray::new(arr.shape().to_vec(), values, DType::Bool)
+}
+
 /// Check whether each day (epoch days) is a business day (Mon-Fri).
 /// Returns a Bool-typed array: 1.0 = business day, 0.0 = weekend.
 ///
@@ -28513,7 +28543,7 @@ mod tests {
         financial_ppmt, financial_pv, financial_rate, frexp, gcd_arrays, geterr, herm2poly,
         hermadd, hermder, hermdiv, herme2poly, hermeadd, hermediv, hermefromroots, hermemul,
         hermeroots, hermesub, hermeval, hermfit, hermfromroots, hermint, hermmul, hermroots,
-        hermsub, hermval, hypot, is_busday, isneginf, isposinf, lag2poly, lagadd, lagder, lagdiv,
+        hermsub, hermval, hypot, is_busday, isnat, isneginf, isposinf, lag2poly, lagadd, lagder, lagdiv,
         lagfit, lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, lcm_arrays, ldexp,
         leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub,
         legval, logaddexp, logaddexp2, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or,
@@ -42035,6 +42065,44 @@ mod tests {
         assert!(dt.datetime_sub(&td).is_err());
         // timedelta_add requires two TimeDelta64
         assert!(td.timedelta_add(&dt).is_err());
+    }
+
+    #[test]
+    fn isnat_datetime64_basic() {
+        // NaT is represented as i64::MIN
+        let nat_as_f64 = f64::from_bits(i64::MIN as u64);
+        let dates = UFuncArray::new(
+            vec![4],
+            vec![0.0, nat_as_f64, 100.0, nat_as_f64],
+            DType::DateTime64,
+        )
+        .unwrap();
+        let result = isnat(&dates).unwrap();
+        assert_eq!(result.dtype(), DType::Bool);
+        assert_eq!(result.values(), &[0.0, 1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn isnat_timedelta64_basic() {
+        let nat_as_f64 = f64::from_bits(i64::MIN as u64);
+        let deltas = UFuncArray::new(
+            vec![3],
+            vec![nat_as_f64, 86400.0, nat_as_f64],
+            DType::TimeDelta64,
+        )
+        .unwrap();
+        let result = isnat(&deltas).unwrap();
+        assert_eq!(result.dtype(), DType::Bool);
+        assert_eq!(result.values(), &[1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn isnat_rejects_non_datetime_types() {
+        let floats = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        assert!(isnat(&floats).is_err());
+
+        let ints = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::I64).unwrap();
+        assert!(isnat(&ints).is_err());
     }
 
     #[test]
