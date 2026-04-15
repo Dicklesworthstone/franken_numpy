@@ -4270,36 +4270,119 @@ impl UFuncArray {
                     }
                 }
             } else {
+                // General broadcast odometer path - optimized with specialized loops
                 let mut out_multi = vec![0usize; out_shape.len()];
                 let mut rhs_flat = 0usize;
 
-                for (flat, slot) in out_values.iter_mut().enumerate() {
-                    let lhs_value = self.values[flat];
-                    let rhs_value = rhs.values[rhs_flat];
-                    let result = op.apply(lhs_value, rhs_value);
-                    note_binary_float_errors(
-                        &mut float_error_flags,
-                        op,
-                        lhs_value,
-                        rhs_value,
-                        result,
-                    );
-                    *slot = result;
+                let error_state = geterr();
+                let can_skip_error_checks = error_state.is_all_ignore();
 
-                    if flat + 1 == out_count || out_shape.is_empty() {
-                        continue;
-                    }
+                // Macro for the odometer increment logic to avoid repetition
+                macro_rules! odometer_increment {
+                    ($flat:expr, $out_count:expr, $out_shape:expr, $out_multi:expr, $rhs_flat:expr, $rhs_axis_steps:expr) => {
+                        if $flat + 1 < $out_count && !$out_shape.is_empty() {
+                            for axis in (0..$out_shape.len()).rev() {
+                                $out_multi[axis] += 1;
+                                $rhs_flat += $rhs_axis_steps[axis];
 
-                    for axis in (0..out_shape.len()).rev() {
-                        out_multi[axis] += 1;
-                        rhs_flat += rhs_axis_steps[axis];
+                                if $out_multi[axis] < $out_shape[axis] {
+                                    break;
+                                }
 
-                        if out_multi[axis] < out_shape[axis] {
-                            break;
+                                $out_multi[axis] = 0;
+                                $rhs_flat -= $rhs_axis_steps[axis] * $out_shape[axis];
+                            }
                         }
+                    };
+                }
 
-                        out_multi[axis] = 0;
-                        rhs_flat -= rhs_axis_steps[axis] * out_shape[axis];
+                if can_skip_error_checks {
+                    // Skip error checking - direct operators for common ops
+                    match op {
+                        BinaryOp::Add => {
+                            for (flat, slot) in out_values.iter_mut().enumerate() {
+                                *slot = self.values[flat] + rhs.values[rhs_flat];
+                                odometer_increment!(flat, out_count, out_shape, out_multi, rhs_flat, rhs_axis_steps);
+                            }
+                        }
+                        BinaryOp::Sub => {
+                            for (flat, slot) in out_values.iter_mut().enumerate() {
+                                *slot = self.values[flat] - rhs.values[rhs_flat];
+                                odometer_increment!(flat, out_count, out_shape, out_multi, rhs_flat, rhs_axis_steps);
+                            }
+                        }
+                        BinaryOp::Mul => {
+                            for (flat, slot) in out_values.iter_mut().enumerate() {
+                                *slot = self.values[flat] * rhs.values[rhs_flat];
+                                odometer_increment!(flat, out_count, out_shape, out_multi, rhs_flat, rhs_axis_steps);
+                            }
+                        }
+                        BinaryOp::Div => {
+                            for (flat, slot) in out_values.iter_mut().enumerate() {
+                                *slot = self.values[flat] / rhs.values[rhs_flat];
+                                odometer_increment!(flat, out_count, out_shape, out_multi, rhs_flat, rhs_axis_steps);
+                            }
+                        }
+                        _ => {
+                            for (flat, slot) in out_values.iter_mut().enumerate() {
+                                *slot = op.apply(self.values[flat], rhs.values[rhs_flat]);
+                                odometer_increment!(flat, out_count, out_shape, out_multi, rhs_flat, rhs_axis_steps);
+                            }
+                        }
+                    }
+                } else {
+                    // Standard path with error checking - still specialize common ops
+                    match op {
+                        BinaryOp::Add => {
+                            for (flat, slot) in out_values.iter_mut().enumerate() {
+                                let lhs_value = self.values[flat];
+                                let rhs_value = rhs.values[rhs_flat];
+                                let result = lhs_value + rhs_value;
+                                note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                                *slot = result;
+                                odometer_increment!(flat, out_count, out_shape, out_multi, rhs_flat, rhs_axis_steps);
+                            }
+                        }
+                        BinaryOp::Sub => {
+                            for (flat, slot) in out_values.iter_mut().enumerate() {
+                                let lhs_value = self.values[flat];
+                                let rhs_value = rhs.values[rhs_flat];
+                                let result = lhs_value - rhs_value;
+                                note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                                *slot = result;
+                                odometer_increment!(flat, out_count, out_shape, out_multi, rhs_flat, rhs_axis_steps);
+                            }
+                        }
+                        BinaryOp::Mul => {
+                            for (flat, slot) in out_values.iter_mut().enumerate() {
+                                let lhs_value = self.values[flat];
+                                let rhs_value = rhs.values[rhs_flat];
+                                let result = lhs_value * rhs_value;
+                                note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                                *slot = result;
+                                odometer_increment!(flat, out_count, out_shape, out_multi, rhs_flat, rhs_axis_steps);
+                            }
+                        }
+                        BinaryOp::Div => {
+                            for (flat, slot) in out_values.iter_mut().enumerate() {
+                                let lhs_value = self.values[flat];
+                                let rhs_value = rhs.values[rhs_flat];
+                                let result = lhs_value / rhs_value;
+                                note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                                *slot = result;
+                                odometer_increment!(flat, out_count, out_shape, out_multi, rhs_flat, rhs_axis_steps);
+                            }
+                        }
+                        _ => {
+                            for (flat, slot) in out_values.iter_mut().enumerate() {
+                                let lhs_value = self.values[flat];
+                                let rhs_value = rhs.values[rhs_flat];
+                                let result = op.apply(lhs_value, rhs_value);
+                                note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                                *slot = result;
+                                odometer_increment!(flat, out_count, out_shape, out_multi, rhs_flat, rhs_axis_steps);
+                            }
+                        }
                     }
                 }
             }
@@ -4465,70 +4548,233 @@ impl UFuncArray {
                     }
                 }
             } else {
+                // rhs.shape == out_shape fallback - lhs needs odometer, rhs is flat
                 let mut out_multi = vec![0usize; out_shape.len()];
                 let mut lhs_flat = 0usize;
 
-                for (flat, slot) in out_values.iter_mut().enumerate() {
-                    let lhs_value = self.values[lhs_flat];
-                    let rhs_value = rhs.values[flat];
-                    let result = op.apply(lhs_value, rhs_value);
-                    note_binary_float_errors(
-                        &mut float_error_flags,
-                        op,
-                        lhs_value,
-                        rhs_value,
-                        result,
-                    );
-                    *slot = result;
+                let error_state = geterr();
+                let can_skip_error_checks = error_state.is_all_ignore();
 
-                    if flat + 1 == out_count || out_shape.is_empty() {
-                        continue;
-                    }
+                macro_rules! odometer_increment_lhs {
+                    ($flat:expr, $out_count:expr, $out_shape:expr, $out_multi:expr, $lhs_flat:expr, $lhs_axis_steps:expr) => {
+                        if $flat + 1 < $out_count && !$out_shape.is_empty() {
+                            for axis in (0..$out_shape.len()).rev() {
+                                $out_multi[axis] += 1;
+                                $lhs_flat += $lhs_axis_steps[axis];
 
-                    for axis in (0..out_shape.len()).rev() {
-                        out_multi[axis] += 1;
-                        lhs_flat += lhs_axis_steps[axis];
+                                if $out_multi[axis] < $out_shape[axis] {
+                                    break;
+                                }
 
-                        if out_multi[axis] < out_shape[axis] {
-                            break;
+                                $out_multi[axis] = 0;
+                                $lhs_flat -= $lhs_axis_steps[axis] * $out_shape[axis];
+                            }
                         }
+                    };
+                }
 
-                        out_multi[axis] = 0;
-                        lhs_flat -= lhs_axis_steps[axis] * out_shape[axis];
+                if can_skip_error_checks {
+                    match op {
+                        BinaryOp::Add => {
+                            for (flat, slot) in out_values.iter_mut().enumerate() {
+                                *slot = self.values[lhs_flat] + rhs.values[flat];
+                                odometer_increment_lhs!(flat, out_count, out_shape, out_multi, lhs_flat, lhs_axis_steps);
+                            }
+                        }
+                        BinaryOp::Sub => {
+                            for (flat, slot) in out_values.iter_mut().enumerate() {
+                                *slot = self.values[lhs_flat] - rhs.values[flat];
+                                odometer_increment_lhs!(flat, out_count, out_shape, out_multi, lhs_flat, lhs_axis_steps);
+                            }
+                        }
+                        BinaryOp::Mul => {
+                            for (flat, slot) in out_values.iter_mut().enumerate() {
+                                *slot = self.values[lhs_flat] * rhs.values[flat];
+                                odometer_increment_lhs!(flat, out_count, out_shape, out_multi, lhs_flat, lhs_axis_steps);
+                            }
+                        }
+                        BinaryOp::Div => {
+                            for (flat, slot) in out_values.iter_mut().enumerate() {
+                                *slot = self.values[lhs_flat] / rhs.values[flat];
+                                odometer_increment_lhs!(flat, out_count, out_shape, out_multi, lhs_flat, lhs_axis_steps);
+                            }
+                        }
+                        _ => {
+                            for (flat, slot) in out_values.iter_mut().enumerate() {
+                                *slot = op.apply(self.values[lhs_flat], rhs.values[flat]);
+                                odometer_increment_lhs!(flat, out_count, out_shape, out_multi, lhs_flat, lhs_axis_steps);
+                            }
+                        }
+                    }
+                } else {
+                    match op {
+                        BinaryOp::Add => {
+                            for (flat, slot) in out_values.iter_mut().enumerate() {
+                                let lhs_value = self.values[lhs_flat];
+                                let rhs_value = rhs.values[flat];
+                                let result = lhs_value + rhs_value;
+                                note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                                *slot = result;
+                                odometer_increment_lhs!(flat, out_count, out_shape, out_multi, lhs_flat, lhs_axis_steps);
+                            }
+                        }
+                        BinaryOp::Sub => {
+                            for (flat, slot) in out_values.iter_mut().enumerate() {
+                                let lhs_value = self.values[lhs_flat];
+                                let rhs_value = rhs.values[flat];
+                                let result = lhs_value - rhs_value;
+                                note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                                *slot = result;
+                                odometer_increment_lhs!(flat, out_count, out_shape, out_multi, lhs_flat, lhs_axis_steps);
+                            }
+                        }
+                        BinaryOp::Mul => {
+                            for (flat, slot) in out_values.iter_mut().enumerate() {
+                                let lhs_value = self.values[lhs_flat];
+                                let rhs_value = rhs.values[flat];
+                                let result = lhs_value * rhs_value;
+                                note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                                *slot = result;
+                                odometer_increment_lhs!(flat, out_count, out_shape, out_multi, lhs_flat, lhs_axis_steps);
+                            }
+                        }
+                        BinaryOp::Div => {
+                            for (flat, slot) in out_values.iter_mut().enumerate() {
+                                let lhs_value = self.values[lhs_flat];
+                                let rhs_value = rhs.values[flat];
+                                let result = lhs_value / rhs_value;
+                                note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                                *slot = result;
+                                odometer_increment_lhs!(flat, out_count, out_shape, out_multi, lhs_flat, lhs_axis_steps);
+                            }
+                        }
+                        _ => {
+                            for (flat, slot) in out_values.iter_mut().enumerate() {
+                                let lhs_value = self.values[lhs_flat];
+                                let rhs_value = rhs.values[flat];
+                                let result = op.apply(lhs_value, rhs_value);
+                                note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                                *slot = result;
+                                odometer_increment_lhs!(flat, out_count, out_shape, out_multi, lhs_flat, lhs_axis_steps);
+                            }
+                        }
                     }
                 }
             }
         } else {
+            // General case - both lhs and rhs need odometers
             let mut out_multi = vec![0usize; out_shape.len()];
             let mut lhs_flat = 0usize;
             let mut rhs_flat = 0usize;
 
-            for (flat, slot) in out_values.iter_mut().enumerate() {
-                let lhs_value = self.values[lhs_flat];
-                let rhs_value = rhs.values[rhs_flat];
-                let result = op.apply(lhs_value, rhs_value);
-                note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
-                *slot = result;
+            let error_state = geterr();
+            let can_skip_error_checks = error_state.is_all_ignore();
 
-                // Increment the output index as an odometer and adjust source flat
-                // indices incrementally. This avoids re-unraveling and re-mapping
-                // every output element.
-                if flat + 1 == out_count || out_shape.is_empty() {
-                    continue;
-                }
+            macro_rules! odometer_increment_both {
+                ($flat:expr, $out_count:expr, $out_shape:expr, $out_multi:expr, $lhs_flat:expr, $rhs_flat:expr, $lhs_axis_steps:expr, $rhs_axis_steps:expr) => {
+                    if $flat + 1 < $out_count && !$out_shape.is_empty() {
+                        for axis in (0..$out_shape.len()).rev() {
+                            $out_multi[axis] += 1;
+                            $lhs_flat += $lhs_axis_steps[axis];
+                            $rhs_flat += $rhs_axis_steps[axis];
 
-                for axis in (0..out_shape.len()).rev() {
-                    out_multi[axis] += 1;
-                    lhs_flat += lhs_axis_steps[axis];
-                    rhs_flat += rhs_axis_steps[axis];
+                            if $out_multi[axis] < $out_shape[axis] {
+                                break;
+                            }
 
-                    if out_multi[axis] < out_shape[axis] {
-                        break;
+                            $out_multi[axis] = 0;
+                            $lhs_flat -= $lhs_axis_steps[axis] * $out_shape[axis];
+                            $rhs_flat -= $rhs_axis_steps[axis] * $out_shape[axis];
+                        }
                     }
+                };
+            }
 
-                    out_multi[axis] = 0;
-                    lhs_flat -= lhs_axis_steps[axis] * out_shape[axis];
-                    rhs_flat -= rhs_axis_steps[axis] * out_shape[axis];
+            if can_skip_error_checks {
+                match op {
+                    BinaryOp::Add => {
+                        for (flat, slot) in out_values.iter_mut().enumerate() {
+                            *slot = self.values[lhs_flat] + rhs.values[rhs_flat];
+                            odometer_increment_both!(flat, out_count, out_shape, out_multi, lhs_flat, rhs_flat, lhs_axis_steps, rhs_axis_steps);
+                        }
+                    }
+                    BinaryOp::Sub => {
+                        for (flat, slot) in out_values.iter_mut().enumerate() {
+                            *slot = self.values[lhs_flat] - rhs.values[rhs_flat];
+                            odometer_increment_both!(flat, out_count, out_shape, out_multi, lhs_flat, rhs_flat, lhs_axis_steps, rhs_axis_steps);
+                        }
+                    }
+                    BinaryOp::Mul => {
+                        for (flat, slot) in out_values.iter_mut().enumerate() {
+                            *slot = self.values[lhs_flat] * rhs.values[rhs_flat];
+                            odometer_increment_both!(flat, out_count, out_shape, out_multi, lhs_flat, rhs_flat, lhs_axis_steps, rhs_axis_steps);
+                        }
+                    }
+                    BinaryOp::Div => {
+                        for (flat, slot) in out_values.iter_mut().enumerate() {
+                            *slot = self.values[lhs_flat] / rhs.values[rhs_flat];
+                            odometer_increment_both!(flat, out_count, out_shape, out_multi, lhs_flat, rhs_flat, lhs_axis_steps, rhs_axis_steps);
+                        }
+                    }
+                    _ => {
+                        for (flat, slot) in out_values.iter_mut().enumerate() {
+                            *slot = op.apply(self.values[lhs_flat], rhs.values[rhs_flat]);
+                            odometer_increment_both!(flat, out_count, out_shape, out_multi, lhs_flat, rhs_flat, lhs_axis_steps, rhs_axis_steps);
+                        }
+                    }
+                }
+            } else {
+                match op {
+                    BinaryOp::Add => {
+                        for (flat, slot) in out_values.iter_mut().enumerate() {
+                            let lhs_value = self.values[lhs_flat];
+                            let rhs_value = rhs.values[rhs_flat];
+                            let result = lhs_value + rhs_value;
+                            note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                            *slot = result;
+                            odometer_increment_both!(flat, out_count, out_shape, out_multi, lhs_flat, rhs_flat, lhs_axis_steps, rhs_axis_steps);
+                        }
+                    }
+                    BinaryOp::Sub => {
+                        for (flat, slot) in out_values.iter_mut().enumerate() {
+                            let lhs_value = self.values[lhs_flat];
+                            let rhs_value = rhs.values[rhs_flat];
+                            let result = lhs_value - rhs_value;
+                            note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                            *slot = result;
+                            odometer_increment_both!(flat, out_count, out_shape, out_multi, lhs_flat, rhs_flat, lhs_axis_steps, rhs_axis_steps);
+                        }
+                    }
+                    BinaryOp::Mul => {
+                        for (flat, slot) in out_values.iter_mut().enumerate() {
+                            let lhs_value = self.values[lhs_flat];
+                            let rhs_value = rhs.values[rhs_flat];
+                            let result = lhs_value * rhs_value;
+                            note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                            *slot = result;
+                            odometer_increment_both!(flat, out_count, out_shape, out_multi, lhs_flat, rhs_flat, lhs_axis_steps, rhs_axis_steps);
+                        }
+                    }
+                    BinaryOp::Div => {
+                        for (flat, slot) in out_values.iter_mut().enumerate() {
+                            let lhs_value = self.values[lhs_flat];
+                            let rhs_value = rhs.values[rhs_flat];
+                            let result = lhs_value / rhs_value;
+                            note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                            *slot = result;
+                            odometer_increment_both!(flat, out_count, out_shape, out_multi, lhs_flat, rhs_flat, lhs_axis_steps, rhs_axis_steps);
+                        }
+                    }
+                    _ => {
+                        for (flat, slot) in out_values.iter_mut().enumerate() {
+                            let lhs_value = self.values[lhs_flat];
+                            let rhs_value = rhs.values[rhs_flat];
+                            let result = op.apply(lhs_value, rhs_value);
+                            note_binary_float_errors(&mut float_error_flags, op, lhs_value, rhs_value, result);
+                            *slot = result;
+                            odometer_increment_both!(flat, out_count, out_shape, out_multi, lhs_flat, rhs_flat, lhs_axis_steps, rhs_axis_steps);
+                        }
+                    }
                 }
             }
         }
