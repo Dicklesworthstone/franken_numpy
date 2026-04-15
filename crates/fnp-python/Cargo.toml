@@ -6,9 +6,13 @@ license-file.workspace = true
 
 [lib]
 name = "fnp_python"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+python-extension = ["pyo3/extension-module"]
 
 [dependencies]
-pyo3 = { version = "0.23.5", features = ["extension-module"] }
+pyo3 = { version = "0.23.5", features = ["auto-initialize"] }
 fnp-iter = { path = "../fnp-iter" }
 fnp-ndarray = { path = "../fnp-ndarray" }
