@@ -12700,21 +12700,83 @@ impl UFuncArray {
         Ok(())
     }
 
-    /// Fill the main diagonal of a 2-D array in-place (np.fill_diagonal).
-    pub fn fill_diagonal(&mut self, val: f64) -> Result<(), UFuncError> {
-        if self.shape.len() != 2 {
+    /// Fill the main diagonal in-place using NumPy's flat-stride semantics.
+    ///
+    /// For 2-D arrays this supports both rectangular matrices and `wrap=True`
+    /// behavior for tall matrices. For N-D arrays, all dimensions must have
+    /// equal length.
+    pub fn fill_diagonal_values(&mut self, vals: &Self, wrap: bool) -> Result<(), UFuncError> {
+        if self.shape.len() < 2 {
+            return Err(UFuncError::Msg("array must be at least 2-d".to_string()));
+        }
+
+        let total_len = self.values.len();
+        let (step, end) = if self.shape.len() == 2 {
+            let cols = self.shape[1];
+            let end = if wrap {
+                total_len
+            } else {
+                cols.saturating_mul(cols).min(total_len)
+            };
+            (cols + 1, end)
+        } else {
+            let first_dim = self.shape[0];
+            if self.shape[1..].iter().any(|&dim| dim != first_dim) {
+                return Err(UFuncError::Msg(
+                    "All dimensions of input must be of equal length".to_string(),
+                ));
+            }
+
+            let mut prefix_product = 1usize;
+            let mut step = 1usize;
+            for &dim in &self.shape[..self.shape.len() - 1] {
+                prefix_product = prefix_product
+                    .checked_mul(dim)
+                    .ok_or(UFuncError::Shape(fnp_ndarray::ShapeError::Overflow))?;
+                step = step
+                    .checked_add(prefix_product)
+                    .ok_or(UFuncError::Shape(fnp_ndarray::ShapeError::Overflow))?;
+            }
+            (step, total_len)
+        };
+
+        if vals.values.is_empty() {
+            if end == 0 || total_len == 0 {
+                return Ok(());
+            }
             return Err(UFuncError::Msg(
-                "fill_diagonal: array must be 2-D".to_string(),
+                "fill_diagonal: values array cannot be empty".to_string(),
             ));
         }
-        let min_dim = self.shape[0].min(self.shape[1]);
-        let cols = self.shape[1];
-        for i in 0..min_dim {
-            let flat = i * cols + i;
-            self.values[flat] = val;
-            self.write_integer_mutation(flat, val, None, i, "fill_diagonal")?;
+
+        let mut flat = 0usize;
+        let mut write_index = 0usize;
+        while flat < end && flat < total_len {
+            let source_index = write_index % vals.values.len();
+            let value = vals.values[source_index];
+            self.values[flat] = value;
+            self.write_integer_mutation(
+                flat,
+                value,
+                vals.integer_sidecar.as_ref(),
+                source_index,
+                "fill_diagonal",
+            )?;
+
+            write_index += 1;
+            flat = match flat.checked_add(step) {
+                Some(next) => next,
+                None => break,
+            };
         }
+
         Ok(())
+    }
+
+    /// Fill the main diagonal of an array in-place with a scalar.
+    pub fn fill_diagonal(&mut self, val: f64) -> Result<(), UFuncError> {
+        let vals = Self::new(vec![], vec![val], DType::F64)?;
+        self.fill_diagonal_values(&vals, false)
     }
 
     /// Return the indices of the diagonal elements of a 2-D array (np.diag_indices).
@@ -39440,6 +39502,89 @@ mod tests {
         let mut a = UFuncArray::new(vec![2, 4], vec![0.0; 8], DType::F64).unwrap();
         a.fill_diagonal(1.0).unwrap();
         assert_eq!(a.values(), &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn fill_diagonal_tall_matrix_wraps_when_requested() {
+        let mut a = UFuncArray::new(vec![10, 3], vec![0.0; 30], DType::F64).unwrap();
+        let vals = UFuncArray::new(vec![], vec![5.0], DType::F64).unwrap();
+
+        a.fill_diagonal_values(&vals, true).unwrap();
+
+        assert_eq!(
+            a.values(),
+            &[
+                5.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0,
+                5.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 5.0, 0.0,
+            ]
+        );
+    }
+
+    #[test]
+    fn fill_diagonal_supports_equal_length_nd_arrays() {
+        let mut a = UFuncArray::new(vec![3, 3, 3, 3], vec![0.0; 81], DType::F64).unwrap();
+        let vals = UFuncArray::new(vec![], vec![4.0], DType::F64).unwrap();
+
+        a.fill_diagonal_values(&vals, false).unwrap();
+
+        let nonzero_positions: Vec<usize> = a
+            .values()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| (*value != 0.0).then_some(index))
+            .collect();
+        assert_eq!(nonzero_positions, vec![0, 40, 80]);
+        assert_eq!(a.values()[0], 4.0);
+        assert_eq!(a.values()[40], 4.0);
+        assert_eq!(a.values()[80], 4.0);
+    }
+
+    #[test]
+    fn fill_diagonal_cycles_array_values() {
+        let mut a = UFuncArray::new(vec![4, 4], vec![0.0; 16], DType::F64).unwrap();
+        let vals = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+
+        a.fill_diagonal_values(&vals, false).unwrap();
+
+        assert_eq!(
+            a.values(),
+            &[
+                1.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 2.0,
+            ]
+        );
+    }
+
+    #[test]
+    fn fill_diagonal_rejects_low_dim_and_unequal_nd_shapes() {
+        let mut vector = UFuncArray::new(vec![3], vec![0.0; 3], DType::F64).unwrap();
+        let vals = UFuncArray::new(vec![], vec![1.0], DType::F64).unwrap();
+        let err = vector
+            .fill_diagonal_values(&vals, false)
+            .expect_err("1-D arrays must be rejected");
+        assert!(matches!(err, UFuncError::Msg(message) if message == "array must be at least 2-d"));
+
+        let mut unequal = UFuncArray::new(vec![3, 3, 7, 3], vec![0.0; 189], DType::F64).unwrap();
+        let err = unequal
+            .fill_diagonal_values(&vals, false)
+            .expect_err("unequal N-D shapes must be rejected");
+        assert!(
+            matches!(err, UFuncError::Msg(message) if message == "All dimensions of input must be of equal length")
+        );
+    }
+
+    #[test]
+    fn fill_diagonal_preserves_large_integer_sidecar_values() {
+        let mut arr = UFuncArray::from_storage(vec![3, 3], ArrayStorage::U64(vec![0; 9])).unwrap();
+        let large = (1_u64 << 63) + 12_345;
+        let vals =
+            UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![large, large - 1])).unwrap();
+
+        arr.fill_diagonal_values(&vals, false).unwrap();
+
+        assert_eq!(
+            arr.to_storage().unwrap(),
+            ArrayStorage::U64(vec![large, 0, 0, 0, large - 1, 0, 0, 0, large])
+        );
     }
 
     #[test]

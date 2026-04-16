@@ -1434,10 +1434,48 @@ fn indices(
 
 #[pyfunction]
 #[pyo3(signature = (v, k=0))]
+fn diag(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
+    let v = extract_precise_numeric_array(py, v.bind(py), "diag(v)")?;
+    let result = v.diag(k).map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(signature = (v, k=0))]
 fn diagflat(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
     let v = extract_precise_numeric_array(py, v.bind(py), "diagflat(v)")?;
     let result = v.diagflat(k);
     build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, offset=0, axis1=0, axis2=1))]
+fn diagonal(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    offset: i64,
+    axis1: isize,
+    axis2: isize,
+) -> PyResult<Py<PyAny>> {
+    let a = extract_precise_numeric_array(py, a.bind(py), "diagonal(a)")?;
+    let result = a.diagonal(offset, axis1, axis2).map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, val, wrap=false))]
+fn fill_diagonal(py: Python<'_>, a: Py<PyAny>, val: Py<PyAny>, wrap: bool) -> PyResult<Py<PyAny>> {
+    let a = a.bind(py);
+    require_numpy_ndarray(py, a, "fill_diagonal")?;
+
+    let mut array = extract_precise_numeric_array(py, a, "fill_diagonal(a)")?;
+    let values = extract_precise_numeric_array(py, val.bind(py), "fill_diagonal(val)")?;
+
+    array
+        .fill_diagonal_values(&values, wrap)
+        .map_err(map_ufunc_error)?;
+    copy_result_into_numpy_array(py, a, &array)?;
+    Ok(py.None())
 }
 
 #[pyfunction]
@@ -1656,7 +1694,10 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(place, m)?)?;
     m.add_function(wrap_pyfunction!(putmask, m)?)?;
     m.add_function(wrap_pyfunction!(indices, m)?)?;
+    m.add_function(wrap_pyfunction!(diag, m)?)?;
     m.add_function(wrap_pyfunction!(diagflat, m)?)?;
+    m.add_function(wrap_pyfunction!(diagonal, m)?)?;
+    m.add_function(wrap_pyfunction!(fill_diagonal, m)?)?;
     m.add_function(wrap_pyfunction!(ix_, m)?)?;
     m.add_function(wrap_pyfunction!(diag_indices, m)?)?;
     m.add_function(wrap_pyfunction!(diag_indices_from, m)?)?;
@@ -1673,12 +1714,12 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::{
         PyFromPyFunc, PyVectorize, argwhere, ceil, choose, compress, copysign, count_nonzero,
-        degrees, diag_indices, diag_indices_from, diagflat, digitize, extract, flatnonzero, floor,
-        fnp_python, frexp, hypot, indices, interp, isfinite, isinf, isnan, isneginf, isposinf, ix_,
-        ldexp, logaddexp, logaddexp2, modf, nan_to_num, nextafter, place, put, put_along_axis,
-        putmask, radians, rint, searchsorted, select, sign, signbit, sinc, spacing, take,
-        take_along_axis, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc,
-        where_py,
+        degrees, diag, diag_indices, diag_indices_from, diagflat, diagonal, digitize, extract,
+        fill_diagonal, flatnonzero, floor, fnp_python, frexp, hypot, indices, interp, isfinite,
+        isinf, isnan, isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2, modf, nan_to_num,
+        nextafter, place, put, put_along_axis, putmask, radians, rint, searchsorted, select, sign,
+        signbit, sinc, spacing, take, take_along_axis, tril_indices, tril_indices_from,
+        triu_indices, triu_indices_from, trunc, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::exceptions::PyValueError;
@@ -1830,7 +1871,10 @@ mod tests {
             assert!(module.getattr("place").is_ok());
             assert!(module.getattr("putmask").is_ok());
             assert!(module.getattr("indices").is_ok());
+            assert!(module.getattr("diag").is_ok());
             assert!(module.getattr("diagflat").is_ok());
+            assert!(module.getattr("diagonal").is_ok());
+            assert!(module.getattr("fill_diagonal").is_ok());
             assert!(module.getattr("ix_").is_ok());
             assert!(module.getattr("diag_indices").is_ok());
             assert!(module.getattr("diag_indices_from").is_ok());
@@ -4234,6 +4278,37 @@ mod tests {
     }
 
     #[test]
+    fn diag_matches_numpy_for_vector_matrix_and_large_uint64_inputs() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let vector = numeric_array(py, vec![10_i64, 20_i64, 30_i64], "int64");
+            let actual_vector = diag(py, vector.clone().unbind(), 1)?;
+            let numpy = py.import("numpy")?;
+            let expected_vector = numpy.call_method1("diag", (vector, 1))?;
+            assert_array_matches_numpy(actual_vector.bind(py), &expected_vector)?;
+
+            let matrix = numeric_array(
+                py,
+                vec![vec![1_i64, 2_i64, 3_i64], vec![4_i64, 5_i64, 6_i64]],
+                "int64",
+            );
+            let actual_matrix = diag(py, matrix.clone().unbind(), -1)?;
+            let expected_matrix = numpy.call_method1("diag", (matrix, -1))?;
+            assert_array_matches_numpy(actual_matrix.bind(py), &expected_matrix)?;
+
+            let large = (1_u64 << 63) + 777;
+            let uint_vector = numeric_array(py, vec![large, large - 1], "uint64");
+            let actual_uint = diag(py, uint_vector.clone().unbind(), 0)?;
+            let expected_uint = numpy.call_method1("diag", (uint_vector, 0))?;
+            assert_array_matches_numpy(actual_uint.bind(py), &expected_uint)?;
+            Ok(())
+        });
+    }
+
+    #[test]
     fn diagflat_matches_numpy_and_preserves_large_uint64_values() {
         with_python(|py| {
             if !numpy_available(py) {
@@ -4251,6 +4326,182 @@ mod tests {
             let actual_uint = diagflat(py, uint_input.clone().unbind(), 0)?;
             let expected_uint = numpy.call_method1("diagflat", (uint_input, 0))?;
             assert_array_matches_numpy(actual_uint.bind(py), &expected_uint)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn diagonal_matches_numpy_for_offsets_axes_and_errors() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let array = numeric_array(
+                py,
+                vec![
+                    vec![vec![0_i64, 1_i64], vec![2_i64, 3_i64], vec![4_i64, 5_i64]],
+                    vec![vec![6_i64, 7_i64], vec![8_i64, 9_i64], vec![10_i64, 11_i64]],
+                ],
+                "int64",
+            );
+            let actual = diagonal(py, array.clone().unbind(), 0, 0, 2)?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method(
+                "diagonal",
+                (array,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("offset", 0)?;
+                    kwargs.set_item("axis1", 0)?;
+                    kwargs.set_item("axis2", 2)?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(actual.bind(py), &expected)?;
+
+            let actual_neg_axes = diagonal(py, expected.clone().unbind(), 0, -2, -1)?;
+            let expected_neg_axes = numpy.call_method(
+                "diagonal",
+                (expected.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("offset", 0)?;
+                    kwargs.set_item("axis1", -2)?;
+                    kwargs.set_item("axis2", -1)?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(actual_neg_axes.bind(py), &expected_neg_axes)?;
+
+            let square = numeric_array(py, vec![vec![1_i64, 2_i64], vec![3_i64, 4_i64]], "int64");
+            let err = diagonal(py, square.unbind(), 0, 0, 0).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            assert!(
+                err.to_string()
+                    .contains("axis1 and axis2 must be different")
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn fill_diagonal_matches_numpy_for_wrap_nd_and_sequence_values() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let arr = numeric_array(
+                py,
+                vec![
+                    vec![0_i64, 0_i64, 0_i64],
+                    vec![0_i64, 0_i64, 0_i64],
+                    vec![0_i64, 0_i64, 0_i64],
+                    vec![0_i64, 0_i64, 0_i64],
+                    vec![0_i64, 0_i64, 0_i64],
+                ],
+                "int64",
+            );
+            let expected = numeric_array(
+                py,
+                vec![
+                    vec![0_i64, 0_i64, 0_i64],
+                    vec![0_i64, 0_i64, 0_i64],
+                    vec![0_i64, 0_i64, 0_i64],
+                    vec![0_i64, 0_i64, 0_i64],
+                    vec![0_i64, 0_i64, 0_i64],
+                ],
+                "int64",
+            );
+            let values = numeric_array(py, vec![9_i64, 8_i64], "int64");
+
+            let actual = fill_diagonal(py, arr.clone().unbind(), values.clone().unbind(), true)?;
+            assert!(actual.bind(py).is_none());
+
+            let numpy = py.import("numpy")?;
+            numpy.call_method(
+                "fill_diagonal",
+                (expected.clone(), values.clone()),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("wrap", true)?;
+                    kwargs
+                }),
+            )?;
+            assert_eq!(
+                repr_string(&arr.call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+
+            let cube = numeric_array(
+                py,
+                vec![
+                    vec![vec![0_i64, 0_i64], vec![0_i64, 0_i64]],
+                    vec![vec![0_i64, 0_i64], vec![0_i64, 0_i64]],
+                ],
+                "int64",
+            );
+            let expected_cube = numeric_array(
+                py,
+                vec![
+                    vec![vec![0_i64, 0_i64], vec![0_i64, 0_i64]],
+                    vec![vec![0_i64, 0_i64], vec![0_i64, 0_i64]],
+                ],
+                "int64",
+            );
+
+            let actual = fill_diagonal(
+                py,
+                cube.clone().unbind(),
+                numeric_array(py, 4_i64, "int64").unbind(),
+                false,
+            )?;
+            assert!(actual.bind(py).is_none());
+            numpy.call_method1("fill_diagonal", (expected_cube.clone(), 4_i64))?;
+            assert_eq!(
+                repr_string(&cube.call_method0("tolist")?),
+                repr_string(&expected_cube.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn fill_diagonal_rejects_low_dim_and_heterogeneous_nd_inputs() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let vector = numeric_array(py, vec![1_i64, 2_i64, 3_i64], "int64");
+            let err = fill_diagonal(
+                py,
+                vector.unbind(),
+                numeric_array(py, 5_i64, "int64").unbind(),
+                false,
+            )
+            .unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            assert!(err.to_string().contains("at least 2-d"));
+
+            let non_uniform = numeric_array(
+                py,
+                vec![
+                    vec![vec![0_i64, 0_i64, 0_i64], vec![0_i64, 0_i64, 0_i64]],
+                    vec![vec![0_i64, 0_i64, 0_i64], vec![0_i64, 0_i64, 0_i64]],
+                ],
+                "int64",
+            );
+            let err = fill_diagonal(
+                py,
+                non_uniform.unbind(),
+                numeric_array(py, 2_i64, "int64").unbind(),
+                false,
+            )
+            .unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            assert!(err.to_string().contains("equal length"));
             Ok(())
         });
     }
