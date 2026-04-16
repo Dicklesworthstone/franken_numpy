@@ -152,6 +152,21 @@ fn extract_condition_mask(
     Ok(mask.values().iter().map(|&value| value != 0.0).collect())
 }
 
+fn extract_numeric_array_sequence(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    context: &str,
+) -> PyResult<Vec<UFuncArray>> {
+    value
+        .try_iter()?
+        .enumerate()
+        .map(|(index, item)| {
+            let item = item?;
+            extract_numeric_array(py, &item, &format!("{context}[{index}]"))
+        })
+        .collect()
+}
+
 fn build_numpy_array_from_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -700,6 +715,21 @@ fn extract(py: Python<'_>, condition: Py<PyAny>, arr: Py<PyAny>) -> PyResult<Py<
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, choices, mode="raise"))]
+fn choose(py: Python<'_>, a: Py<PyAny>, choices: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
+    if mode != "raise" {
+        return Err(PyValueError::new_err(
+            "choose: only mode='raise' is implemented",
+        ));
+    }
+
+    let a = extract_integer_array(py, a.bind(py), "choose(a)")?;
+    let choices = extract_numeric_array_sequence(py, choices.bind(py), "choose(choices)")?;
+    let result = a.choose(&choices).map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, v, side="left", sorter=None))]
 fn searchsorted(
     py: Python<'_>,
@@ -762,6 +792,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(where_py, m)?)?;
     m.add_function(wrap_pyfunction!(compress, m)?)?;
     m.add_function(wrap_pyfunction!(extract, m)?)?;
+    m.add_function(wrap_pyfunction!(choose, m)?)?;
     m.add_function(wrap_pyfunction!(searchsorted, m)?)?;
     m.add_function(wrap_pyfunction!(take_along_axis, m)?)?;
     Ok(())
@@ -770,8 +801,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PyFromPyFunc, PyVectorize, compress, digitize, extract, fnp_python, interp, searchsorted,
-        take_along_axis, where_py,
+        PyFromPyFunc, PyVectorize, choose, compress, digitize, extract, fnp_python, interp,
+        searchsorted, take_along_axis, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
@@ -843,6 +874,7 @@ mod tests {
             assert!(module.getattr("where").is_ok());
             assert!(module.getattr("compress").is_ok());
             assert!(module.getattr("extract").is_ok());
+            assert!(module.getattr("choose").is_ok());
             assert!(module.getattr("searchsorted").is_ok());
             assert!(module.getattr("take_along_axis").is_ok());
             assert!(module.getattr("Nditer").is_ok());
@@ -1611,6 +1643,111 @@ mod tests {
             assert_eq!(
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn choose_matches_numpy_raise_mode() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let a = numeric_array(py, vec![0_i64, 1_i64, 0_i64, 1_i64], "int64");
+            let choices = PyTuple::new(
+                py,
+                [
+                    numeric_array(py, vec![10.0, 20.0, 30.0, 40.0], "float64")
+                        .into_any()
+                        .unbind(),
+                    numeric_array(py, vec![1.5, 2.5, 3.5, 4.5], "float64")
+                        .into_any()
+                        .unbind(),
+                ]
+                .iter()
+                .map(|item| item.bind(py)),
+            )?;
+
+            let actual = choose(
+                py,
+                a.clone().unbind(),
+                choices.clone().into_any().unbind(),
+                "raise",
+            )?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("choose", (a, choices))?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn choose_preserves_large_uint64_values() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let large = (1_u64 << 63) + 123;
+            let a = numeric_array(py, vec![0_i64, 1_i64, 1_i64, 0_i64], "int64");
+            let choices = PyTuple::new(
+                py,
+                [
+                    numeric_array(py, vec![large, 3_u64, 5_u64, large - 1], "uint64")
+                        .into_any()
+                        .unbind(),
+                    numeric_array(py, vec![7_u64, large - 2, large - 3, 9_u64], "uint64")
+                        .into_any()
+                        .unbind(),
+                ]
+                .iter()
+                .map(|item| item.bind(py)),
+            )?;
+
+            let actual = choose(
+                py,
+                a.clone().unbind(),
+                choices.clone().into_any().unbind(),
+                "raise",
+            )?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("choose", (a, choices))?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn choose_rejects_non_raise_mode() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let a = numeric_array(py, vec![0_i64, 1_i64], "int64");
+            let choices = PyTuple::new(
+                py,
+                [numeric_array(py, vec![10.0, 20.0], "float64")
+                    .into_any()
+                    .unbind()]
+                .iter()
+                .map(|item| item.bind(py)),
+            )?;
+
+            let err = choose(py, a.unbind(), choices.into_any().unbind(), "wrap").unwrap_err();
+            assert!(
+                err.to_string().contains("mode='raise'"),
+                "unexpected error: {err}"
             );
             Ok(())
         });
