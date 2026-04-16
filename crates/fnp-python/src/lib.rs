@@ -1,7 +1,7 @@
 use fnp_dtype::ArrayStorage;
 use fnp_iter::{Nditer, NditerOptions, NditerOrder};
 use fnp_ndarray::{broadcast_shapes, element_count};
-use fnp_ufunc::UFuncArray;
+use fnp_ufunc::{UFuncArray, where_nonzero};
 use pyo3::Bound;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -162,6 +162,16 @@ fn build_numpy_array_from_storage(
 fn build_numpy_array_from_ufunc(py: Python<'_>, array: &UFuncArray) -> PyResult<Py<PyAny>> {
     let storage = array.to_storage().map_err(map_ufunc_error)?;
     build_numpy_array_from_storage(py, array.shape(), storage)
+}
+
+fn build_numpy_tuple_from_ufuncs(py: Python<'_>, arrays: &[UFuncArray]) -> PyResult<Py<PyAny>> {
+    let arrays = arrays
+        .iter()
+        .map(|array| build_numpy_array_from_ufunc(py, array))
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(PyTuple::new(py, arrays.iter().map(|array| array.bind(py)))?
+        .into_any()
+        .unbind())
 }
 
 impl PyFromPyFunc {
@@ -597,6 +607,33 @@ fn interp(
     build_numpy_array_from_ufunc(py, &result)
 }
 
+#[pyfunction(name = "where")]
+#[pyo3(signature = (condition, x=None, y=None))]
+fn where_py(
+    py: Python<'_>,
+    condition: Py<PyAny>,
+    x: Option<Py<PyAny>>,
+    y: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let condition = extract_numeric_array(py, condition.bind(py), "where(condition)")?;
+
+    match (x, y) {
+        (Some(x), Some(y)) => {
+            let x = extract_numeric_array(py, x.bind(py), "where(x)")?;
+            let y = extract_numeric_array(py, y.bind(py), "where(y)")?;
+            let result = UFuncArray::where_select(&condition, &x, &y).map_err(map_ufunc_error)?;
+            build_numpy_array_from_ufunc(py, &result)
+        }
+        (None, None) => {
+            let result = where_nonzero(&condition).map_err(map_ufunc_error)?;
+            build_numpy_tuple_from_ufuncs(py, &result)
+        }
+        _ => Err(PyValueError::new_err(
+            "where: either provide both x and y or neither",
+        )),
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, v, side="left", sorter=None))]
 fn searchsorted(
@@ -627,13 +664,14 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(vectorize, m)?)?;
     m.add_function(wrap_pyfunction!(digitize, m)?)?;
     m.add_function(wrap_pyfunction!(interp, m)?)?;
+    m.add_function(wrap_pyfunction!(where_py, m)?)?;
     m.add_function(wrap_pyfunction!(searchsorted, m)?)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PyFromPyFunc, PyVectorize, digitize, fnp_python, interp, searchsorted};
+    use super::{PyFromPyFunc, PyVectorize, digitize, fnp_python, interp, searchsorted, where_py};
     use pyo3::IntoPyObject;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
     use pyo3::{PyResult, Python};
@@ -701,6 +739,7 @@ mod tests {
             assert!(module.getattr("Vectorize").is_ok());
             assert!(module.getattr("digitize").is_ok());
             assert!(module.getattr("interp").is_ok());
+            assert!(module.getattr("where").is_ok());
             assert!(module.getattr("searchsorted").is_ok());
             assert!(module.getattr("Nditer").is_ok());
             Ok(())
@@ -1085,6 +1124,98 @@ mod tests {
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn where_three_arg_matches_numpy_broadcasting() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let condition =
+                numeric_array(py, vec![vec![1_i64, 0_i64], vec![0_i64, 1_i64]], "int64");
+            let x = numeric_array(py, vec![10.0, 20.0], "float64");
+            let y = numeric_array(py, vec![vec![1.0], vec![2.0]], "float64");
+
+            let actual = where_py(
+                py,
+                condition.clone().unbind(),
+                Some(x.clone().unbind()),
+                Some(y.clone().unbind()),
+            )?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.getattr("where")?.call1((condition, x, y))?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn where_three_arg_preserves_large_uint64_values() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let large = 9_007_199_254_740_993_u64;
+            let condition = numeric_array(py, vec![1_i64, 0_i64, 1_i64], "int64");
+            let x = numeric_array(py, vec![large, large + 1, large + 2], "uint64");
+            let y = numeric_array(py, vec![7_u64, 8_u64, 9_u64], "uint64");
+
+            let actual = where_py(
+                py,
+                condition.clone().unbind(),
+                Some(x.clone().unbind()),
+                Some(y.clone().unbind()),
+            )?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.getattr("where")?.call1((condition, x, y))?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn where_single_argument_matches_numpy_nonzero_indices() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let condition = numeric_array(
+                py,
+                vec![vec![0_i64, 1_i64, 0_i64], vec![2_i64, 0_i64, 3_i64]],
+                "int64",
+            );
+
+            let actual = where_py(py, condition.clone().unbind(), None, None)?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.getattr("where")?.call1((condition,))?;
+
+            let actual = actual.bind(py).downcast::<PyTuple>()?;
+            let expected = expected.downcast::<PyTuple>()?;
+            assert_eq!(actual.len()?, 2);
+            assert_eq!(expected.len()?, 2);
+
+            for (actual_item, expected_item) in actual.try_iter()?.zip(expected.try_iter()?) {
+                let actual_item = actual_item?;
+                let expected_item = expected_item?;
+                assert_eq!(
+                    repr_string(&actual_item.call_method0("tolist")?),
+                    repr_string(&expected_item.call_method0("tolist")?)
+                );
+            }
             Ok(())
         });
     }
