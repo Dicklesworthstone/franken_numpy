@@ -446,6 +446,54 @@ fn extract_ix_array(
     extract_precise_numeric_array(py, &array, context)
 }
 
+fn validate_meshgrid_indexing(indexing: &str) -> PyResult<()> {
+    match indexing {
+        "xy" | "ij" => Ok(()),
+        _ => Err(PyValueError::new_err(format!(
+            "meshgrid: indexing must be 'xy' or 'ij', got '{indexing}'",
+        ))),
+    }
+}
+
+fn meshgrid_output_axis(index: usize, ndim: usize, indexing: &str) -> usize {
+    if indexing == "xy" && ndim >= 2 {
+        match index {
+            0 => 1,
+            1 => 0,
+            dim => dim,
+        }
+    } else {
+        index
+    }
+}
+
+fn normalize_meshgrid_inputs(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+) -> PyResult<Vec<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    args.iter()
+        .map(|value| {
+            let array = numpy.call_method1("asarray", (value,))?;
+            Ok(array.call_method1("reshape", (-1,))?.unbind())
+        })
+        .collect()
+}
+
+fn meshgrid_rust_compatible(py: Python<'_>, arrays: &[Py<PyAny>]) -> PyResult<bool> {
+    for array in arrays {
+        let kind = array
+            .bind(py)
+            .getattr("dtype")?
+            .getattr("kind")?
+            .extract::<String>()?;
+        if !matches!(kind.as_str(), "b" | "i" | "u" | "f") {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn build_numpy_array_from_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -513,6 +561,64 @@ fn build_numpy_tuple_from_ufuncs(py: Python<'_>, arrays: &[UFuncArray]) -> PyRes
     Ok(PyTuple::new(py, arrays.iter().map(|array| array.bind(py)))?
         .into_any()
         .unbind())
+}
+
+fn build_numpy_tuple_from_pyarrays(py: Python<'_>, arrays: &[Py<PyAny>]) -> PyResult<Py<PyAny>> {
+    Ok(PyTuple::new(py, arrays.iter().map(|array| array.bind(py)))?
+        .into_any()
+        .unbind())
+}
+
+fn build_meshgrid_numpy_outputs(
+    py: Python<'_>,
+    arrays: &[Py<PyAny>],
+    indexing: &str,
+    sparse: bool,
+    copy: bool,
+) -> PyResult<Py<PyAny>> {
+    validate_meshgrid_indexing(indexing)?;
+    if arrays.is_empty() {
+        return build_numpy_tuple_from_pyarrays(py, &[]);
+    }
+
+    let numpy = py.import("numpy")?;
+    let ndim = arrays.len();
+    let reshaped = arrays
+        .iter()
+        .enumerate()
+        .map(|(index, array)| {
+            let axis = meshgrid_output_axis(index, ndim, indexing);
+            let mut shape = vec![1_usize; ndim];
+            shape[axis] = array.bind(py).len()?;
+            let shape = PyTuple::new(py, shape.iter().copied())?;
+            Ok(array.bind(py).call_method1("reshape", (&shape,))?.unbind())
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+
+    let outputs = if sparse {
+        reshaped
+    } else {
+        let broadcast = numpy.getattr("broadcast_arrays")?.call1(PyTuple::new(
+            py,
+            reshaped.iter().map(|array| array.bind(py)),
+        )?)?;
+        let broadcast = broadcast.downcast::<PyTuple>()?;
+        broadcast
+            .try_iter()?
+            .map(|item| Ok(item?.unbind()))
+            .collect::<PyResult<Vec<_>>>()?
+    };
+
+    let outputs = if copy {
+        outputs
+            .into_iter()
+            .map(|array| Ok(array.bind(py).call_method0("copy")?.unbind()))
+            .collect::<PyResult<Vec<_>>>()?
+    } else {
+        outputs
+    };
+
+    build_numpy_tuple_from_pyarrays(py, &outputs)
 }
 
 impl PyFromPyFunc {
@@ -1491,6 +1597,32 @@ fn ix_(py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (*xi, copy=true, sparse=false, indexing="xy"))]
+fn meshgrid(
+    py: Python<'_>,
+    xi: &Bound<'_, PyTuple>,
+    copy: bool,
+    sparse: bool,
+    indexing: &str,
+) -> PyResult<Py<PyAny>> {
+    let arrays = normalize_meshgrid_inputs(py, xi)?;
+    if copy && meshgrid_rust_compatible(py, &arrays)? {
+        let arrays = arrays
+            .iter()
+            .enumerate()
+            .map(|(index, array)| {
+                extract_precise_numeric_array(py, array.bind(py), &format!("meshgrid(xi[{index}])"))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let result =
+            UFuncArray::meshgrid_advanced(&arrays, indexing, sparse).map_err(map_ufunc_error)?;
+        return build_numpy_tuple_from_ufuncs(py, &result);
+    }
+
+    build_meshgrid_numpy_outputs(py, &arrays, indexing, sparse, copy)
+}
+
+#[pyfunction]
 #[pyo3(signature = (n, ndim=2))]
 fn diag_indices(py: Python<'_>, n: usize, ndim: usize) -> PyResult<Py<PyAny>> {
     let (arrays, _) = UFuncArray::diag_indices(n, ndim);
@@ -1699,6 +1831,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(diagonal, m)?)?;
     m.add_function(wrap_pyfunction!(fill_diagonal, m)?)?;
     m.add_function(wrap_pyfunction!(ix_, m)?)?;
+    m.add_function(wrap_pyfunction!(meshgrid, m)?)?;
     m.add_function(wrap_pyfunction!(diag_indices, m)?)?;
     m.add_function(wrap_pyfunction!(diag_indices_from, m)?)?;
     m.add_function(wrap_pyfunction!(tril_indices, m)?)?;
@@ -1716,10 +1849,10 @@ mod tests {
         PyFromPyFunc, PyVectorize, argwhere, ceil, choose, compress, copysign, count_nonzero,
         degrees, diag, diag_indices, diag_indices_from, diagflat, diagonal, digitize, extract,
         fill_diagonal, flatnonzero, floor, fnp_python, frexp, hypot, indices, interp, isfinite,
-        isinf, isnan, isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2, modf, nan_to_num,
-        nextafter, place, put, put_along_axis, putmask, radians, rint, searchsorted, select, sign,
-        signbit, sinc, spacing, take, take_along_axis, tril_indices, tril_indices_from,
-        triu_indices, triu_indices_from, trunc, where_py,
+        isinf, isnan, isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2, meshgrid, modf,
+        nan_to_num, nextafter, place, put, put_along_axis, putmask, radians, rint, searchsorted,
+        select, sign, signbit, sinc, spacing, take, take_along_axis, tril_indices,
+        tril_indices_from, triu_indices, triu_indices_from, trunc, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::exceptions::PyValueError;
@@ -1876,6 +2009,7 @@ mod tests {
             assert!(module.getattr("diagonal").is_ok());
             assert!(module.getattr("fill_diagonal").is_ok());
             assert!(module.getattr("ix_").is_ok());
+            assert!(module.getattr("meshgrid").is_ok());
             assert!(module.getattr("diag_indices").is_ok());
             assert!(module.getattr("diag_indices_from").is_ok());
             assert!(module.getattr("tril_indices").is_ok());
@@ -4561,6 +4695,163 @@ mod tests {
                 err.to_string()
                     .contains("Cross index must be 1 dimensional")
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn meshgrid_matches_numpy_for_dense_default_and_ij_indexing() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let x = numeric_array(py, vec![1_f32, 2_f32, 3_f32], "float32");
+            let large = (1_u64 << 63) + 19;
+            let y = numeric_array(py, vec![large, large - 1], "uint64");
+            let args = PyTuple::new(py, [x.clone(), y.clone()])?;
+
+            let actual = meshgrid(py, &args, true, false, "xy")?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.getattr("meshgrid")?.call1((x.clone(), y.clone()))?;
+            assert_index_tuple_matches_numpy(actual.bind(py), &expected)?;
+
+            let actual_ij = meshgrid(py, &args, true, false, "ij")?;
+            let expected_ij = numpy.getattr("meshgrid")?.call(
+                (x, y),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("indexing", "ij")?;
+                    kwargs
+                }),
+            )?;
+            assert_index_tuple_matches_numpy(actual_ij.bind(py), &expected_ij)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn meshgrid_matches_numpy_for_empty_scalar_flattened_and_sparse_inputs() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let numpy = py.import("numpy")?;
+
+            let empty_args = PyTuple::new(py, Vec::<i32>::new())?;
+            let actual_empty = meshgrid(py, &empty_args, true, false, "xy")?;
+            let expected_empty = numpy.getattr("meshgrid")?.call0()?;
+            assert_eq!(
+                repr_string(actual_empty.bind(py)),
+                repr_string(&expected_empty)
+            );
+
+            let scalar = 5_i64.into_pyobject(py)?.into_any().unbind();
+            let scalar_args = PyTuple::new(py, [scalar.clone_ref(py)])?;
+            let actual_scalar = meshgrid(py, &scalar_args, true, false, "xy")?;
+            let expected_scalar = numpy.getattr("meshgrid")?.call1((scalar.bind(py),))?;
+            assert_index_tuple_matches_numpy(actual_scalar.bind(py), &expected_scalar)?;
+
+            let matrix = numeric_array(py, vec![vec![1_i64], vec![2_i64]], "int64");
+            let y = numeric_array(py, vec![10_i64, 20_i64], "int64");
+            let flat_args = PyTuple::new(py, [matrix.clone(), y.clone()])?;
+
+            let actual_flat = meshgrid(py, &flat_args, true, false, "xy")?;
+            let expected_flat = numpy
+                .getattr("meshgrid")?
+                .call1((matrix.clone(), y.clone()))?;
+            assert_index_tuple_matches_numpy(actual_flat.bind(py), &expected_flat)?;
+
+            let actual_sparse = meshgrid(py, &flat_args, true, true, "xy")?;
+            let expected_sparse = numpy.getattr("meshgrid")?.call(
+                (matrix, y),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("sparse", true)?;
+                    kwargs
+                }),
+            )?;
+            assert_index_tuple_matches_numpy(actual_sparse.bind(py), &expected_sparse)?;
+
+            assert!(meshgrid(py, &flat_args, true, false, "bad").is_err());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn meshgrid_matches_numpy_for_copy_false_writeback_and_object_sparse() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let x = numeric_array(py, vec![1_i64, 2_i64], "int64");
+            let y = numeric_array(py, vec![3_i64, 4_i64, 5_i64], "int64");
+            let expected_x = numeric_array(py, vec![1_i64, 2_i64], "int64");
+            let expected_y = numeric_array(py, vec![3_i64, 4_i64, 5_i64], "int64");
+            let args = PyTuple::new(py, [x.clone(), y.clone()])?;
+
+            let actual = meshgrid(py, &args, false, false, "xy")?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.getattr("meshgrid")?.call(
+                (expected_x.clone(), expected_y.clone()),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("copy", false)?;
+                    kwargs
+                }),
+            )?;
+            assert_index_tuple_matches_numpy(actual.bind(py), &expected)?;
+
+            let actual_tuple = actual.bind(py).downcast::<PyTuple>()?;
+            let expected_tuple = expected.downcast::<PyTuple>()?;
+            let actual_x_grid = actual_tuple.get_item(0)?;
+            let actual_y_grid = actual_tuple.get_item(1)?;
+            let expected_x_grid = expected_tuple.get_item(0)?;
+            let expected_y_grid = expected_tuple.get_item(1)?;
+
+            assert!(
+                !actual_x_grid
+                    .getattr("flags")?
+                    .get_item("OWNDATA")?
+                    .extract::<bool>()?
+            );
+            assert!(
+                actual_x_grid
+                    .getattr("flags")?
+                    .get_item("WRITEABLE")?
+                    .extract::<bool>()?
+            );
+
+            actual_x_grid.call_method1("fill", (99_i64,))?;
+            expected_x_grid.call_method1("fill", (99_i64,))?;
+            actual_y_grid.call_method1("fill", (-7_i64,))?;
+            expected_y_grid.call_method1("fill", (-7_i64,))?;
+
+            assert_eq!(
+                repr_string(&x.call_method0("tolist")?),
+                repr_string(&expected_x.call_method0("tolist")?)
+            );
+            assert_eq!(
+                repr_string(&y.call_method0("tolist")?),
+                repr_string(&expected_y.call_method0("tolist")?)
+            );
+
+            let object_x = object_array(py, vec!["left", "right"]);
+            let object_y = object_array(py, vec!["north", "south", "west"]);
+            let object_args = PyTuple::new(py, [object_x.clone(), object_y.clone()])?;
+            let actual_object = meshgrid(py, &object_args, true, true, "xy")?;
+            let expected_object = numpy.getattr("meshgrid")?.call(
+                (object_x, object_y),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("copy", true)?;
+                    kwargs.set_item("sparse", true)?;
+                    kwargs
+                }),
+            )?;
+            assert_index_tuple_matches_numpy(actual_object.bind(py), &expected_object)?;
             Ok(())
         });
     }

@@ -14240,7 +14240,7 @@ impl UFuncArray {
     /// Returns one array per input, each with shape (len(y), len(x)) for 2 inputs.
     /// Only supports 'xy' indexing (default NumPy).
     pub fn meshgrid(arrays: &[Self]) -> Result<Vec<Self>, UFuncError> {
-        Self::meshgrid_indexing(arrays, "xy")
+        Self::meshgrid_advanced(arrays, "xy", false)
     }
 
     /// `np.meshgrid` with explicit `indexing` parameter.
@@ -14248,11 +14248,15 @@ impl UFuncArray {
     /// `indexing`: `"xy"` (default, Cartesian) swaps first two dimensions.
     /// `"ij"` (matrix indexing) preserves input order.
     pub fn meshgrid_indexing(arrays: &[Self], indexing: &str) -> Result<Vec<Self>, UFuncError> {
-        if arrays.len() < 2 {
-            return Err(UFuncError::Msg(
-                "meshgrid requires at least 2 arrays".to_string(),
-            ));
-        }
+        Self::meshgrid_advanced(arrays, indexing, false)
+    }
+
+    /// `np.meshgrid` with explicit `indexing` and `sparse` parameters.
+    pub fn meshgrid_advanced(
+        arrays: &[Self],
+        indexing: &str,
+        sparse: bool,
+    ) -> Result<Vec<Self>, UFuncError> {
         for arr in arrays {
             if arr.shape.len() != 1 {
                 return Err(UFuncError::Msg(
@@ -14269,9 +14273,44 @@ impl UFuncArray {
                 )));
             }
         };
+
+        if arrays.is_empty() {
+            return Ok(vec![]);
+        }
+
         let ndim = arrays.len();
+        if ndim == 1 {
+            let len = isize::try_from(arrays[0].shape[0]).map_err(|_| {
+                UFuncError::Msg("meshgrid: input length exceeds isize range".to_string())
+            })?;
+            return Ok(vec![arrays[0].reshape(&[len])?]);
+        }
+
+        if sparse {
+            return arrays
+                .iter()
+                .enumerate()
+                .map(|(dim, arr)| {
+                    let axis = if swap {
+                        match dim {
+                            0 => 1,
+                            1 => 0,
+                            d => d,
+                        }
+                    } else {
+                        dim
+                    };
+                    let mut shape = vec![1_isize; ndim];
+                    shape[axis] = isize::try_from(arr.shape[0]).map_err(|_| {
+                        UFuncError::Msg("meshgrid: input length exceeds isize range".to_string())
+                    })?;
+                    arr.reshape(&shape)
+                })
+                .collect();
+        }
+
         let mut out_shape: Vec<usize> = arrays.iter().map(|a| a.shape[0]).collect();
-        if swap && ndim >= 2 {
+        if swap {
             out_shape.swap(0, 1);
         }
         let out_count: usize = fnp_ndarray::element_count(&out_shape).map_err(UFuncError::Shape)?;
@@ -14280,7 +14319,7 @@ impl UFuncArray {
         let mut results = Vec::with_capacity(ndim);
         for (dim, arr) in arrays.iter().enumerate() {
             // Which output axis does this input correspond to?
-            let axis = if swap && ndim >= 2 {
+            let axis = if swap {
                 match dim {
                     0 => 1,
                     1 => 0,
@@ -36893,6 +36932,41 @@ mod tests {
         let x = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
         let y = UFuncArray::new(vec![2], vec![3.0, 4.0], DType::F64).unwrap();
         assert!(UFuncArray::meshgrid_indexing(&[x, y], "bad").is_err());
+    }
+
+    #[test]
+    fn meshgrid_empty_and_single_input_match_numpy_shapes() {
+        assert!(UFuncArray::meshgrid(&[]).unwrap().is_empty());
+
+        let x = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let grids = UFuncArray::meshgrid(&[x]).unwrap();
+        assert_eq!(grids.len(), 1);
+        assert_eq!(grids[0].shape(), &[3]);
+        assert_eq!(grids[0].values(), &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn meshgrid_sparse_xy_and_ij() {
+        let x = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        let y = UFuncArray::new(vec![3], vec![3.0, 4.0, 5.0], DType::F64).unwrap();
+        let z = UFuncArray::new(vec![2], vec![8.0, 9.0], DType::F64).unwrap();
+
+        let sparse_xy =
+            UFuncArray::meshgrid_advanced(&[x.clone(), y.clone(), z.clone()], "xy", true).unwrap();
+        assert_eq!(sparse_xy[0].shape(), &[1, 2, 1]);
+        assert_eq!(sparse_xy[0].values(), &[1.0, 2.0]);
+        assert_eq!(sparse_xy[1].shape(), &[3, 1, 1]);
+        assert_eq!(sparse_xy[1].values(), &[3.0, 4.0, 5.0]);
+        assert_eq!(sparse_xy[2].shape(), &[1, 1, 2]);
+        assert_eq!(sparse_xy[2].values(), &[8.0, 9.0]);
+
+        let sparse_ij = UFuncArray::meshgrid_advanced(&[x, y, z], "ij", true).unwrap();
+        assert_eq!(sparse_ij[0].shape(), &[2, 1, 1]);
+        assert_eq!(sparse_ij[0].values(), &[1.0, 2.0]);
+        assert_eq!(sparse_ij[1].shape(), &[1, 3, 1]);
+        assert_eq!(sparse_ij[1].values(), &[3.0, 4.0, 5.0]);
+        assert_eq!(sparse_ij[2].shape(), &[1, 1, 2]);
+        assert_eq!(sparse_ij[2].values(), &[8.0, 9.0]);
     }
 
     #[test]

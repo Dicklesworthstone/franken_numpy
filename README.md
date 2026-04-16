@@ -645,7 +645,7 @@ FrankenNumPy implements the full set of NumPy's array construction and manipulat
 | `linspace(start, stop, num)` | `num` evenly spaced values including endpoints |
 | `logspace(start, stop, num)` | Values spaced evenly on log scale |
 | `geomspace(start, stop, num)` | Values spaced evenly on geometric scale |
-| `meshgrid(x, y, ...)` | Coordinate matrices from coordinate vectors (xy indexing) |
+| `meshgrid(x, y, ...)` | Coordinate matrices with `xy`/`ij`, `sparse`, and `copy` parity |
 | `fromfunction(shape, f)` | Apply closure `f(&[usize]) -> f64` to each multi-index |
 
 ### Joining and Splitting
