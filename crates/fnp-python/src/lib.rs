@@ -1007,6 +1007,23 @@ fn modf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (x, nan=0.0, posinf=None, neginf=None))]
+fn nan_to_num(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    nan: f64,
+    posinf: Option<f64>,
+    neginf: Option<f64>,
+) -> PyResult<Py<PyAny>> {
+    let x = extract_numeric_array(py, x.bind(py), "nan_to_num(x)")?;
+    let result = match (posinf, neginf) {
+        (None, None) if nan == 0.0 => x.nan_to_num_default(),
+        _ => x.nan_to_num(nan, posinf.unwrap_or(f64::MAX), neginf.unwrap_or(f64::MIN)),
+    };
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(signature = (condition, a, axis=None))]
 fn compress(
     py: Python<'_>,
@@ -1153,6 +1170,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(logaddexp2, m)?)?;
     m.add_function(wrap_pyfunction!(frexp, m)?)?;
     m.add_function(wrap_pyfunction!(modf, m)?)?;
+    m.add_function(wrap_pyfunction!(nan_to_num, m)?)?;
     m.add_function(wrap_pyfunction!(take, m)?)?;
     m.add_function(wrap_pyfunction!(compress, m)?)?;
     m.add_function(wrap_pyfunction!(extract, m)?)?;
@@ -1168,8 +1186,8 @@ mod tests {
     use super::{
         PyFromPyFunc, PyVectorize, argwhere, choose, compress, copysign, count_nonzero, digitize,
         extract, flatnonzero, fnp_python, frexp, hypot, interp, isfinite, isinf, isnan, isneginf,
-        isposinf, ldexp, logaddexp, logaddexp2, modf, nextafter, searchsorted, select, signbit,
-        sinc, spacing, take, take_along_axis, where_py,
+        isposinf, ldexp, logaddexp, logaddexp2, modf, nan_to_num, nextafter, searchsorted, select,
+        signbit, sinc, spacing, take, take_along_axis, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
@@ -1258,6 +1276,7 @@ mod tests {
             assert!(module.getattr("logaddexp2").is_ok());
             assert!(module.getattr("frexp").is_ok());
             assert!(module.getattr("modf").is_ok());
+            assert!(module.getattr("nan_to_num").is_ok());
             assert!(module.getattr("take").is_ok());
             assert!(module.getattr("compress").is_ok());
             assert!(module.getattr("extract").is_ok());
@@ -2767,6 +2786,95 @@ mod tests {
             assert_eq!(
                 repr_string(&actual_integral.call_method0("tolist")?),
                 repr_string(&expected_integral.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn nan_to_num_matches_numpy_defaults() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let x = numeric_array(
+                py,
+                vec![0.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY],
+                "float64",
+            );
+            let actual = nan_to_num(py, x.clone().unbind(), 0.0, None, None)?;
+
+            let numpy = py.import("numpy")?;
+            let expected = numpy.getattr("nan_to_num")?.call1((x,))?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn nan_to_num_matches_numpy_custom_replacements_and_int_passthrough() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let float_values = numeric_array(
+                py,
+                vec![vec![f64::NAN, f64::INFINITY], vec![f64::NEG_INFINITY, 5.0]],
+                "float64",
+            );
+            let actual_float = nan_to_num(
+                py,
+                float_values.clone().unbind(),
+                1.5,
+                Some(9.0),
+                Some(-7.0),
+            )?;
+
+            let numpy = py.import("numpy")?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("nan", 1.5)?;
+            kwargs.set_item("posinf", 9.0)?;
+            kwargs.set_item("neginf", -7.0)?;
+            let expected_float = numpy
+                .getattr("nan_to_num")?
+                .call((float_values,), Some(&kwargs))?;
+
+            assert_eq!(
+                actual_float
+                    .bind(py)
+                    .getattr("shape")?
+                    .extract::<Vec<usize>>()?,
+                vec![2, 2]
+            );
+            assert_eq!(
+                repr_string(&actual_float.bind(py).call_method0("tolist")?),
+                repr_string(&expected_float.call_method0("tolist")?)
+            );
+
+            let int_values = numeric_array(py, vec![1_i64, 2_i64, 3_i64], "int64");
+            let actual_int = nan_to_num(py, int_values.clone().unbind(), 0.0, None, None)?;
+            let expected_int = numpy.getattr("nan_to_num")?.call1((int_values,))?;
+
+            assert_eq!(
+                actual_int
+                    .bind(py)
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                expected_int.getattr("dtype")?.str()?.extract::<String>()?
+            );
+            assert_eq!(
+                actual_int
+                    .bind(py)
+                    .call_method0("tolist")?
+                    .extract::<Vec<i64>>()?,
+                expected_int.call_method0("tolist")?.extract::<Vec<i64>>()?
             );
             Ok(())
         });
