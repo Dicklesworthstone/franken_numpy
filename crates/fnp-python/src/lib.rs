@@ -920,6 +920,12 @@ fn spacing(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+fn sinc(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let x = extract_numeric_array(py, x.bind(py), "sinc(x)")?;
+    build_numpy_array_from_ufunc(py, &x.sinc())
+}
+
+#[pyfunction]
 #[pyo3(signature = (condition, a, axis=None))]
 fn compress(
     py: Python<'_>,
@@ -1057,6 +1063,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(isinf, m)?)?;
     m.add_function(wrap_pyfunction!(isfinite, m)?)?;
     m.add_function(wrap_pyfunction!(spacing, m)?)?;
+    m.add_function(wrap_pyfunction!(sinc, m)?)?;
     m.add_function(wrap_pyfunction!(take, m)?)?;
     m.add_function(wrap_pyfunction!(compress, m)?)?;
     m.add_function(wrap_pyfunction!(extract, m)?)?;
@@ -1072,7 +1079,7 @@ mod tests {
     use super::{
         PyFromPyFunc, PyVectorize, argwhere, choose, compress, count_nonzero, digitize, extract,
         flatnonzero, fnp_python, interp, isfinite, isinf, isnan, isneginf, isposinf, searchsorted,
-        select, signbit, spacing, take, take_along_axis, where_py,
+        select, signbit, sinc, spacing, take, take_along_axis, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
@@ -1152,6 +1159,7 @@ mod tests {
             assert!(module.getattr("isinf").is_ok());
             assert!(module.getattr("isfinite").is_ok());
             assert!(module.getattr("spacing").is_ok());
+            assert!(module.getattr("sinc").is_ok());
             assert!(module.getattr("take").is_ok());
             assert!(module.getattr("compress").is_ok());
             assert!(module.getattr("extract").is_ok());
@@ -2090,6 +2098,60 @@ mod tests {
             assert_eq!(
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn sinc_matches_numpy_basic() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(py, vec![0.0, 0.5, 1.0, -1.5], "float64");
+            let actual = sinc(py, values.clone().unbind())?;
+
+            let numpy = py.import("numpy")?;
+            let expected = numpy.getattr("sinc")?.call1((values,))?;
+
+            assert_eq!(
+                actual
+                    .bind(py)
+                    .call_method0("tolist")?
+                    .extract::<Vec<f64>>()?,
+                expected.call_method0("tolist")?.extract::<Vec<f64>>()?
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn sinc_matches_numpy_multidimensional_integer_input() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(py, vec![vec![0_i64, 1], vec![-2, 3]], "int64");
+            let actual = sinc(py, values.clone().unbind())?;
+
+            let numpy = py.import("numpy")?;
+            let expected = numpy.getattr("sinc")?.call1((values,))?;
+
+            assert_eq!(
+                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
+                vec![2, 2]
+            );
+            assert_eq!(
+                actual
+                    .bind(py)
+                    .call_method0("tolist")?
+                    .extract::<Vec<Vec<f64>>>()?,
+                expected
+                    .call_method0("tolist")?
+                    .extract::<Vec<Vec<f64>>>()?
             );
             Ok(())
         });
