@@ -143,6 +143,33 @@ fn extract_integer_array(
     UFuncArray::from_storage(shape, storage).map_err(map_ufunc_error)
 }
 
+fn extract_take_indices(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    context: &str,
+) -> PyResult<(Vec<usize>, Vec<i64>)> {
+    let indices = extract_integer_array(py, value, context)?;
+    let shape = indices.shape().to_vec();
+    let storage = indices.to_storage().map_err(map_ufunc_error)?;
+
+    let indices = match storage {
+        ArrayStorage::I64(values) => values,
+        ArrayStorage::U64(values) => values
+            .into_iter()
+            .map(|value| {
+                i64::try_from(value).map_err(|_| {
+                    PyValueError::new_err(format!(
+                        "{context}: index {value} exceeds signed 64-bit range",
+                    ))
+                })
+            })
+            .collect::<PyResult<Vec<_>>>()?,
+        _ => unreachable!("extract_integer_array only produces signed/unsigned integer storage"),
+    };
+
+    Ok((shape, indices))
+}
+
 fn extract_condition_mask(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
@@ -742,6 +769,77 @@ fn argwhere(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, indices, axis=None))]
+fn take(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    indices: Py<PyAny>,
+    axis: Option<isize>,
+) -> PyResult<Py<PyAny>> {
+    let a = extract_numeric_array(py, a.bind(py), "take(a)")?;
+    let (indices_shape, flat_indices) =
+        extract_take_indices(py, indices.bind(py), "take(indices)")?;
+    let mut result = a.take(&flat_indices, axis).map_err(map_ufunc_error)?;
+
+    let desired_shape = match axis {
+        None => indices_shape.clone(),
+        Some(axis) => {
+            let ndim = a.shape().len();
+            let normalized_axis = if axis < 0 {
+                axis + isize::try_from(ndim).map_err(|_| {
+                    PyValueError::new_err("take: array rank exceeds signed axis range")
+                })?
+            } else {
+                axis
+            };
+
+            if normalized_axis < 0
+                || normalized_axis
+                    >= isize::try_from(ndim).map_err(|_| {
+                        PyValueError::new_err("take: array rank exceeds signed axis range")
+                    })?
+            {
+                return Err(PyValueError::new_err(format!(
+                    "take: axis {axis} is out of bounds for array of dimension {ndim}",
+                )));
+            }
+
+            let normalized_axis = usize::try_from(normalized_axis).map_err(|_| {
+                PyValueError::new_err(format!(
+                    "take: axis {axis} is out of bounds for array of dimension {ndim}",
+                ))
+            })?;
+
+            let mut shape =
+                Vec::with_capacity(a.shape().len().saturating_sub(1) + indices_shape.len());
+            shape.extend_from_slice(&a.shape()[..normalized_axis]);
+            shape.extend_from_slice(&indices_shape);
+            shape.extend_from_slice(&a.shape()[normalized_axis + 1..]);
+            shape
+        }
+    };
+
+    if result.shape() != desired_shape.as_slice() {
+        let reshape_spec = desired_shape
+            .iter()
+            .map(|&dim| {
+                isize::try_from(dim).map_err(|_| {
+                    PyValueError::new_err("take: output shape exceeds signed reshape range")
+                })
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        result = result.reshape(&reshape_spec).map_err(map_ufunc_error)?;
+    }
+
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if desired_shape.is_empty() {
+        return Ok(output.bind(py).get_item(PyTuple::empty(py))?.unbind());
+    }
+
+    Ok(output)
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, axis=None, keepdims=false))]
 fn count_nonzero(
     py: Python<'_>,
@@ -906,6 +1004,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(flatnonzero, m)?)?;
     m.add_function(wrap_pyfunction!(argwhere, m)?)?;
     m.add_function(wrap_pyfunction!(count_nonzero, m)?)?;
+    m.add_function(wrap_pyfunction!(take, m)?)?;
     m.add_function(wrap_pyfunction!(compress, m)?)?;
     m.add_function(wrap_pyfunction!(extract, m)?)?;
     m.add_function(wrap_pyfunction!(select, m)?)?;
@@ -919,7 +1018,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::{
         PyFromPyFunc, PyVectorize, argwhere, choose, compress, count_nonzero, digitize, extract,
-        flatnonzero, fnp_python, interp, searchsorted, select, take_along_axis, where_py,
+        flatnonzero, fnp_python, interp, searchsorted, select, take, take_along_axis, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
@@ -992,6 +1091,7 @@ mod tests {
             assert!(module.getattr("flatnonzero").is_ok());
             assert!(module.getattr("argwhere").is_ok());
             assert!(module.getattr("count_nonzero").is_ok());
+            assert!(module.getattr("take").is_ok());
             assert!(module.getattr("compress").is_ok());
             assert!(module.getattr("extract").is_ok());
             assert!(module.getattr("select").is_ok());
@@ -1691,6 +1791,144 @@ mod tests {
             assert_eq!(
                 repr_string(&actual_empty.bind(py).call_method0("tolist")?),
                 repr_string(&expected_empty.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn take_matches_numpy_flat_multidimensional_indices() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let arr = numeric_array(
+                py,
+                vec![vec![10_i64, 20_i64, 30_i64], vec![40_i64, 50_i64, 60_i64]],
+                "int64",
+            );
+            let indices = numeric_array(py, vec![vec![2_i64, 0_i64], vec![1_i64, 1_i64]], "int64");
+            let actual = take(py, arr.clone().unbind(), indices.clone().unbind(), None)?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("take", (arr, indices))?;
+
+            assert_eq!(
+                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
+                expected.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn take_matches_numpy_axis_scalar_index() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let arr = numeric_array(
+                py,
+                vec![vec![10_i64, 20_i64, 30_i64], vec![40_i64, 50_i64, 60_i64]],
+                "int64",
+            );
+            let index = 1_i64.into_pyobject(py)?.unbind();
+            let actual = take(
+                py,
+                arr.clone().unbind(),
+                index.clone_ref(py).into(),
+                Some(1),
+            )?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method(
+                "take",
+                (arr, index.bind(py)),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("axis", 1)?;
+                    kwargs
+                }),
+            )?;
+
+            assert_eq!(
+                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
+                expected.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn take_matches_numpy_axis_multidimensional_indices() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let arr = numeric_array(
+                py,
+                vec![vec![10_i64, 20_i64, 30_i64], vec![40_i64, 50_i64, 60_i64]],
+                "int64",
+            );
+            let indices = numeric_array(py, vec![vec![2_i64, 0_i64], vec![1_i64, 1_i64]], "int64");
+            let actual = take(py, arr.clone().unbind(), indices.clone().unbind(), Some(1))?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method(
+                "take",
+                (arr, indices),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("axis", 1)?;
+                    kwargs
+                }),
+            )?;
+
+            assert_eq!(
+                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
+                expected.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn take_preserves_large_uint64_values() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let large = (1_u64 << 63) + 5;
+            let arr = numeric_array(py, vec![large, 7_u64, 9_u64], "uint64");
+            let indices = numeric_array(py, vec![0_i64, 2_i64], "int64");
+            let actual = take(py, arr.clone().unbind(), indices.clone().unbind(), None)?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("take", (arr, indices))?;
+
+            assert_eq!(
+                actual
+                    .bind(py)
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                expected.getattr("dtype")?.str()?.extract::<String>()?
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
             );
             Ok(())
         });
