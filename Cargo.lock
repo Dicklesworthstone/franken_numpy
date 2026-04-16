@@ -456,8 +456,10 @@ version = "0.1.0"
 name = "fnp-python"
 version = "0.1.0"
 dependencies = [
+ "fnp-dtype",
  "fnp-iter",
  "fnp-ndarray",
+ "fnp-ufunc",
  "pyo3",
 ]
 
