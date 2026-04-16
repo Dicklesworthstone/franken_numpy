@@ -3,10 +3,10 @@ use fnp_iter::{Nditer, NditerOptions, NditerOrder};
 use fnp_ndarray::{broadcast_shapes, element_count};
 use fnp_ufunc::UnaryOp;
 use fnp_ufunc::{
-    UFuncArray, copysign as ufunc_copysign, hypot as ufunc_hypot, isneginf as ufunc_isneginf,
-    isposinf as ufunc_isposinf, ldexp as ufunc_ldexp, logaddexp as ufunc_logaddexp,
-    logaddexp2 as ufunc_logaddexp2, nextafter as ufunc_nextafter, signbit as ufunc_signbit,
-    spacing as ufunc_spacing, where_nonzero,
+    UFuncArray, copysign as ufunc_copysign, frexp as ufunc_frexp, hypot as ufunc_hypot,
+    isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, ldexp as ufunc_ldexp,
+    logaddexp as ufunc_logaddexp, logaddexp2 as ufunc_logaddexp2, nextafter as ufunc_nextafter,
+    signbit as ufunc_signbit, spacing as ufunc_spacing, where_nonzero,
 };
 use pyo3::Bound;
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -976,6 +976,28 @@ fn logaddexp2(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny
 }
 
 #[pyfunction]
+fn frexp(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let x = extract_numeric_array(py, x.bind(py), "frexp(x)")?;
+    let (mantissas, exponents) = ufunc_frexp(&x).map_err(map_ufunc_error)?;
+    let mantissa = build_numpy_array_from_ufunc(py, &mantissas)?;
+    // NumPy exposes the exponent output as an integer array.
+    let exponent = build_numpy_array_from_storage(
+        py,
+        exponents.shape(),
+        ArrayStorage::I32(
+            exponents
+                .values()
+                .iter()
+                .map(|value| *value as i32)
+                .collect(),
+        ),
+    )?;
+    Ok(PyTuple::new(py, [mantissa.bind(py), exponent.bind(py)])?
+        .into_any()
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (condition, a, axis=None))]
 fn compress(
     py: Python<'_>,
@@ -1120,6 +1142,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ldexp, m)?)?;
     m.add_function(wrap_pyfunction!(logaddexp, m)?)?;
     m.add_function(wrap_pyfunction!(logaddexp2, m)?)?;
+    m.add_function(wrap_pyfunction!(frexp, m)?)?;
     m.add_function(wrap_pyfunction!(take, m)?)?;
     m.add_function(wrap_pyfunction!(compress, m)?)?;
     m.add_function(wrap_pyfunction!(extract, m)?)?;
@@ -1134,7 +1157,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::{
         PyFromPyFunc, PyVectorize, argwhere, choose, compress, copysign, count_nonzero, digitize,
-        extract, flatnonzero, fnp_python, hypot, interp, isfinite, isinf, isnan, isneginf,
+        extract, flatnonzero, fnp_python, frexp, hypot, interp, isfinite, isinf, isnan, isneginf,
         isposinf, ldexp, logaddexp, logaddexp2, nextafter, searchsorted, select, signbit, sinc,
         spacing, take, take_along_axis, where_py,
     };
@@ -1223,6 +1246,7 @@ mod tests {
             assert!(module.getattr("ldexp").is_ok());
             assert!(module.getattr("logaddexp").is_ok());
             assert!(module.getattr("logaddexp2").is_ok());
+            assert!(module.getattr("frexp").is_ok());
             assert!(module.getattr("take").is_ok());
             assert!(module.getattr("compress").is_ok());
             assert!(module.getattr("extract").is_ok());
@@ -2544,6 +2568,114 @@ mod tests {
             assert_eq!(
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn frexp_matches_numpy_basic() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let x = numeric_array(py, vec![0.0, 1.0, -2.5, 8.0], "float64");
+            let actual = frexp(py, x.clone().unbind())?;
+
+            let numpy = py.import("numpy")?;
+            let expected = numpy.getattr("frexp")?.call1((x,))?;
+
+            let actual_tuple = actual.bind(py).downcast::<PyTuple>()?;
+            let expected_tuple = expected.downcast::<PyTuple>()?;
+            assert_eq!(actual_tuple.len()?, 2);
+            assert_eq!(expected_tuple.len()?, 2);
+
+            let actual_mantissa = actual_tuple.get_item(0)?;
+            let actual_exponent = actual_tuple.get_item(1)?;
+            let expected_mantissa = expected_tuple.get_item(0)?;
+            let expected_exponent = expected_tuple.get_item(1)?;
+
+            assert_eq!(
+                actual_mantissa
+                    .call_method0("tolist")?
+                    .extract::<Vec<f64>>()?,
+                expected_mantissa
+                    .call_method0("tolist")?
+                    .extract::<Vec<f64>>()?
+            );
+            assert_eq!(
+                actual_exponent
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                expected_exponent
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?
+            );
+            assert_eq!(
+                actual_exponent
+                    .call_method0("tolist")?
+                    .extract::<Vec<i32>>()?,
+                expected_exponent
+                    .call_method0("tolist")?
+                    .extract::<Vec<i32>>()?
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn frexp_matches_numpy_special_values_and_shape() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let x = numeric_array(
+                py,
+                vec![vec![0.0, -0.0], vec![f64::INFINITY, f64::NAN]],
+                "float64",
+            );
+            let actual = frexp(py, x.clone().unbind())?;
+
+            let numpy = py.import("numpy")?;
+            let expected = numpy.getattr("frexp")?.call1((x,))?;
+
+            let actual_tuple = actual.bind(py).downcast::<PyTuple>()?;
+            let expected_tuple = expected.downcast::<PyTuple>()?;
+            let actual_mantissa = actual_tuple.get_item(0)?;
+            let actual_exponent = actual_tuple.get_item(1)?;
+            let expected_mantissa = expected_tuple.get_item(0)?;
+            let expected_exponent = expected_tuple.get_item(1)?;
+
+            assert_eq!(
+                actual_mantissa.getattr("shape")?.extract::<Vec<usize>>()?,
+                vec![2, 2]
+            );
+            assert_eq!(
+                actual_exponent.getattr("shape")?.extract::<Vec<usize>>()?,
+                vec![2, 2]
+            );
+            assert_eq!(
+                repr_string(&actual_mantissa.call_method0("tolist")?),
+                repr_string(&expected_mantissa.call_method0("tolist")?)
+            );
+            assert_eq!(
+                actual_exponent
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                "int32"
+            );
+            assert_eq!(
+                actual_exponent
+                    .call_method0("tolist")?
+                    .extract::<Vec<Vec<i32>>>()?,
+                expected_exponent
+                    .call_method0("tolist")?
+                    .extract::<Vec<Vec<i32>>>()?
             );
             Ok(())
         });
