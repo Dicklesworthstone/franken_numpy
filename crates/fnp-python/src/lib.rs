@@ -109,6 +109,40 @@ fn extract_index_vector(
         .collect()
 }
 
+fn extract_integer_array(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    context: &str,
+) -> PyResult<UFuncArray> {
+    let numpy = py.import("numpy")?;
+    let array = numpy.call_method1("asarray", (value,))?;
+    let shape = array.getattr("shape")?.extract::<Vec<usize>>()?;
+    let flat = array.call_method1("reshape", (-1,))?;
+    let dtype = array.getattr("dtype")?;
+    let dtype_name = dtype.str()?.extract::<String>()?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+
+    let storage = match kind.as_str() {
+        "i" => ArrayStorage::I64(
+            flat.call_method1("astype", ("int64",))?
+                .call_method0("tolist")?
+                .extract::<Vec<i64>>()?,
+        ),
+        "u" => ArrayStorage::U64(
+            flat.call_method1("astype", ("uint64",))?
+                .call_method0("tolist")?
+                .extract::<Vec<u64>>()?,
+        ),
+        _ => {
+            return Err(PyTypeError::new_err(format!(
+                "{context}: expected an integer index array, got dtype {dtype_name}",
+            )));
+        }
+    };
+
+    UFuncArray::from_storage(shape, storage).map_err(map_ufunc_error)
+}
+
 fn build_numpy_array_from_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -654,6 +688,36 @@ fn searchsorted(
     build_numpy_array_from_ufunc(py, &result)
 }
 
+#[pyfunction]
+#[pyo3(signature = (arr, indices, axis=Some(-1)))]
+fn take_along_axis(
+    py: Python<'_>,
+    arr: Py<PyAny>,
+    indices: Py<PyAny>,
+    axis: Option<isize>,
+) -> PyResult<Py<PyAny>> {
+    let arr = extract_numeric_array(py, arr.bind(py), "take_along_axis(arr)")?;
+    let indices = extract_integer_array(py, indices.bind(py), "take_along_axis(indices)")?;
+
+    let result = match axis {
+        Some(axis) => arr
+            .take_along_axis(&indices, axis)
+            .map_err(map_ufunc_error)?,
+        None => {
+            if indices.shape().len() != 1 {
+                return Err(PyValueError::new_err(
+                    "take_along_axis: when axis=None, indices must have a single dimension",
+                ));
+            }
+            arr.flatten()
+                .take_along_axis(&indices, 0)
+                .map_err(map_ufunc_error)?
+        }
+    };
+
+    build_numpy_array_from_ufunc(py, &result)
+}
+
 #[pymodule]
 fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyNditerStep>()?;
@@ -666,12 +730,16 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(interp, m)?)?;
     m.add_function(wrap_pyfunction!(where_py, m)?)?;
     m.add_function(wrap_pyfunction!(searchsorted, m)?)?;
+    m.add_function(wrap_pyfunction!(take_along_axis, m)?)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PyFromPyFunc, PyVectorize, digitize, fnp_python, interp, searchsorted, where_py};
+    use super::{
+        PyFromPyFunc, PyVectorize, digitize, fnp_python, interp, searchsorted, take_along_axis,
+        where_py,
+    };
     use pyo3::IntoPyObject;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
     use pyo3::{PyResult, Python};
@@ -741,6 +809,7 @@ mod tests {
             assert!(module.getattr("interp").is_ok());
             assert!(module.getattr("where").is_ok());
             assert!(module.getattr("searchsorted").is_ok());
+            assert!(module.getattr("take_along_axis").is_ok());
             assert!(module.getattr("Nditer").is_ok());
             Ok(())
         });
@@ -1306,6 +1375,93 @@ mod tests {
             let kwargs = PyDict::new(py);
             kwargs.set_item("sorter", sorter)?;
             let expected = numpy.call_method("searchsorted", (values, probes), Some(&kwargs))?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn take_along_axis_matches_numpy_along_axis() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let arr = numeric_array(
+                py,
+                vec![vec![10.0, 30.0, 20.0], vec![60.0, 40.0, 50.0]],
+                "float64",
+            );
+            let indices = numeric_array(py, vec![vec![0_i64, 2_i64], vec![1_i64, 0_i64]], "int64");
+
+            let actual =
+                take_along_axis(py, arr.clone().unbind(), indices.clone().unbind(), Some(1))?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("take_along_axis", (arr, indices, 1))?;
+
+            assert_eq!(
+                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
+                vec![2, 2]
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn take_along_axis_preserves_large_uint64_values() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let large = (1_u64 << 63) + 4099;
+            let arr = numeric_array(
+                py,
+                vec![vec![large, 3_u64, 9_u64], vec![7_u64, large - 1, 11_u64]],
+                "uint64",
+            );
+            let indices = numeric_array(py, vec![vec![0_i64, 2_i64], vec![1_i64, 0_i64]], "int64");
+
+            let actual =
+                take_along_axis(py, arr.clone().unbind(), indices.clone().unbind(), Some(1))?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("take_along_axis", (arr, indices, 1))?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn take_along_axis_axis_none_matches_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let arr = numeric_array(
+                py,
+                vec![vec![10.0, 30.0, 20.0], vec![60.0, 40.0, 50.0]],
+                "float64",
+            );
+            let indices = numeric_array(py, vec![5_i64, 2_i64, 0_i64], "int64");
+
+            let actual = take_along_axis(py, arr.clone().unbind(), indices.clone().unbind(), None)?;
+            let numpy = py.import("numpy")?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("axis", py.None())?;
+            let expected = numpy.call_method("take_along_axis", (arr, indices), Some(&kwargs))?;
 
             assert_eq!(
                 repr_string(&actual.bind(py).call_method0("tolist")?),
