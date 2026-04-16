@@ -58,13 +58,13 @@
 | fnp-io | 176 | NPY/NPZ read/write, text formats, compression, 7 format oracle tests, genfromtxt_full, fromfile_text/tofile_text |
 | fnp-conformance | 144 | Differential parity, metamorphic identities, adversarial fuzzing, witness stability, matmul conformance |
 | fnp-dtype | 124 | Dtype taxonomy, promotion table (all 324 pairs explicit), cast policy primitives, NumPy byte-width parsing |
-| fnp-python | 28 | PyO3 package surface coverage for `frompyfunc`, `vectorize`, `digitize`, `searchsorted`, `interp`, `where`, `take_along_axis`, `compress`, `extract`, and `choose`, including live callable parity, sorter/side bridging, left/right fill parity, one-argument nonzero parity, `axis=None` flatten semantics, short-condition truncation parity, large-uint64 coverage, `mode='raise'` enforcement, and module export wiring |
+| fnp-python | 29 | PyO3 package surface coverage for `frompyfunc`, `vectorize`, `digitize`, `searchsorted`, `interp`, `where`, `take_along_axis`, `compress`, `extract`, `select`, and `choose`, including live callable parity, sorter/side bridging, left/right fill parity, one-argument nonzero parity, `axis=None` flatten semantics, short-condition truncation parity, first-match `select` behavior, large-uint64 coverage, `mode='raise'` enforcement, and module export wiring |
 | fnp-runtime | 54 | Mode split, fail-closed decoding, override-audit gate, risk-aware decision engine, evidence ledger |
 | **Total** | **2,945** | |
 
 ## Remaining Gaps (Python-specific, low priority)
 
-1. Expanded Python package surface beyond `nditer`, `frompyfunc`, `vectorize`, `digitize`, `searchsorted`, `interp`, `where`, `take_along_axis`, `compress`, `extract`, and `choose` — `fnp-python` now exposes `PyNditer`, `frompyfunc`, `vectorize`, `digitize`, `searchsorted`, `interp`, `where`, `take_along_axis`, `compress`, `extract`, and `choose`, but broader Python-facing packaging and FFI coverage for additional NumPy APIs is still incomplete
+1. Expanded Python package surface beyond `nditer`, `frompyfunc`, `vectorize`, `digitize`, `searchsorted`, `interp`, `where`, `take_along_axis`, `compress`, `extract`, `select`, and `choose` — `fnp-python` now exposes `PyNditer`, `frompyfunc`, `vectorize`, `digitize`, `searchsorted`, `interp`, `where`, `take_along_axis`, `compress`, `extract`, `select`, and `choose`, but broader Python-facing packaging and FFI coverage for additional NumPy APIs is still incomplete
 2. Expanded CI matrix for alternate oracle environments and longer-horizon benchmark trend regression
 
 ## Intentional Design Decisions

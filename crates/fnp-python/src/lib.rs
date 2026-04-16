@@ -715,6 +715,40 @@ fn extract(py: Python<'_>, condition: Py<PyAny>, arr: Py<PyAny>) -> PyResult<Py<
 }
 
 #[pyfunction]
+#[pyo3(signature = (condlist, choicelist, default=None))]
+fn select(
+    py: Python<'_>,
+    condlist: Py<PyAny>,
+    choicelist: Py<PyAny>,
+    default: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let condlist = extract_numeric_array_sequence(py, condlist.bind(py), "select(condlist)")?;
+    let choicelist = extract_numeric_array_sequence(py, choicelist.bind(py), "select(choicelist)")?;
+
+    if condlist.len() != choicelist.len() {
+        return Err(PyValueError::new_err(
+            "select: condlist and choicelist must have the same length",
+        ));
+    }
+    if condlist.is_empty() {
+        return Err(PyValueError::new_err("select: condlist must be non-empty"));
+    }
+
+    let mut result = match default {
+        Some(default) => extract_numeric_array(py, default.bind(py), "select(default)")?,
+        None => {
+            UFuncArray::from_storage(vec![], ArrayStorage::I64(vec![0])).map_err(map_ufunc_error)?
+        }
+    };
+
+    for (condition, choice) in condlist.iter().zip(choicelist.iter()).rev() {
+        result = UFuncArray::where_select(condition, choice, &result).map_err(map_ufunc_error)?;
+    }
+
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, choices, mode="raise"))]
 fn choose(py: Python<'_>, a: Py<PyAny>, choices: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
     if mode != "raise" {
@@ -792,6 +826,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(where_py, m)?)?;
     m.add_function(wrap_pyfunction!(compress, m)?)?;
     m.add_function(wrap_pyfunction!(extract, m)?)?;
+    m.add_function(wrap_pyfunction!(select, m)?)?;
     m.add_function(wrap_pyfunction!(choose, m)?)?;
     m.add_function(wrap_pyfunction!(searchsorted, m)?)?;
     m.add_function(wrap_pyfunction!(take_along_axis, m)?)?;
@@ -802,7 +837,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::{
         PyFromPyFunc, PyVectorize, choose, compress, digitize, extract, fnp_python, interp,
-        searchsorted, take_along_axis, where_py,
+        searchsorted, select, take_along_axis, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
@@ -874,6 +909,7 @@ mod tests {
             assert!(module.getattr("where").is_ok());
             assert!(module.getattr("compress").is_ok());
             assert!(module.getattr("extract").is_ok());
+            assert!(module.getattr("select").is_ok());
             assert!(module.getattr("choose").is_ok());
             assert!(module.getattr("searchsorted").is_ok());
             assert!(module.getattr("take_along_axis").is_ok());
@@ -1747,6 +1783,228 @@ mod tests {
             let err = choose(py, a.unbind(), choices.into_any().unbind(), "wrap").unwrap_err();
             assert!(
                 err.to_string().contains("mode='raise'"),
+                "unexpected error: {err}"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn select_matches_numpy_first_match_with_python_int_default() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let condlist = PyTuple::new(
+                py,
+                [
+                    numeric_array(py, vec![true, false, false, false], "bool")
+                        .into_any()
+                        .unbind(),
+                    numeric_array(py, vec![false, true, true, false], "bool")
+                        .into_any()
+                        .unbind(),
+                ]
+                .iter()
+                .map(|item| item.bind(py)),
+            )?;
+            let choicelist = PyTuple::new(
+                py,
+                [
+                    numeric_array(py, vec![10_i64, 20_i64, 30_i64, 40_i64], "int64")
+                        .into_any()
+                        .unbind(),
+                    numeric_array(py, vec![100_i64, 200_i64, 300_i64, 400_i64], "int64")
+                        .into_any()
+                        .unbind(),
+                ]
+                .iter()
+                .map(|item| item.bind(py)),
+            )?;
+            let default = (-1_i64).into_pyobject(py)?.unbind();
+
+            let actual = select(
+                py,
+                condlist.clone().into_any().unbind(),
+                choicelist.clone().into_any().unbind(),
+                Some(default.clone_ref(py).into()),
+            )?;
+            let numpy = py.import("numpy")?;
+            let expected =
+                numpy.call_method1("select", (condlist, choicelist, default.clone_ref(py)))?;
+
+            assert_eq!(
+                actual
+                    .bind(py)
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                expected.getattr("dtype")?.str()?.extract::<String>()?
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn select_broadcasts_conditions_and_choices_like_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let condlist = PyTuple::new(
+                py,
+                [
+                    numeric_array(py, vec![true, false], "bool")
+                        .into_any()
+                        .unbind(),
+                    numeric_array(py, vec![vec![false], vec![true]], "bool")
+                        .into_any()
+                        .unbind(),
+                ]
+                .iter()
+                .map(|item| item.bind(py)),
+            )?;
+            let choicelist = PyTuple::new(
+                py,
+                [
+                    numeric_array(py, vec![1.5, 2.5], "float64")
+                        .into_any()
+                        .unbind(),
+                    numeric_array(py, vec![vec![10.0], vec![20.0]], "float64")
+                        .into_any()
+                        .unbind(),
+                ]
+                .iter()
+                .map(|item| item.bind(py)),
+            )?;
+
+            let actual = select(
+                py,
+                condlist.clone().into_any().unbind(),
+                choicelist.clone().into_any().unbind(),
+                None,
+            )?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("select", (condlist, choicelist))?;
+
+            assert_eq!(
+                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
+                expected.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn select_preserves_large_uint64_values_with_uint64_default() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let large = (1_u64 << 63) + 123;
+            let condlist = PyTuple::new(
+                py,
+                [
+                    numeric_array(py, vec![true, false, false], "bool")
+                        .into_any()
+                        .unbind(),
+                    numeric_array(py, vec![false, true, false], "bool")
+                        .into_any()
+                        .unbind(),
+                ]
+                .iter()
+                .map(|item| item.bind(py)),
+            )?;
+            let choicelist = PyTuple::new(
+                py,
+                [
+                    numeric_array(py, vec![large, 3_u64, 5_u64], "uint64")
+                        .into_any()
+                        .unbind(),
+                    numeric_array(py, vec![7_u64, large - 1, 9_u64], "uint64")
+                        .into_any()
+                        .unbind(),
+                ]
+                .iter()
+                .map(|item| item.bind(py)),
+            )?;
+            let numpy = py.import("numpy")?;
+            let default = numpy.getattr("uint64")?.call1((large - 2,))?.unbind();
+
+            let actual = select(
+                py,
+                condlist.clone().into_any().unbind(),
+                choicelist.clone().into_any().unbind(),
+                Some(default.clone_ref(py).into()),
+            )?;
+            let expected =
+                numpy.call_method1("select", (condlist, choicelist, default.clone_ref(py)))?;
+
+            assert_eq!(
+                actual
+                    .bind(py)
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                expected.getattr("dtype")?.str()?.extract::<String>()?
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn select_rejects_mismatched_condlist_and_choicelist_lengths() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let condlist = PyTuple::new(
+                py,
+                [numeric_array(py, vec![true, false], "bool")
+                    .into_any()
+                    .unbind()]
+                .iter()
+                .map(|item| item.bind(py)),
+            )?;
+            let choicelist = PyTuple::new(
+                py,
+                [
+                    numeric_array(py, vec![1_i64, 2_i64], "int64")
+                        .into_any()
+                        .unbind(),
+                    numeric_array(py, vec![3_i64, 4_i64], "int64")
+                        .into_any()
+                        .unbind(),
+                ]
+                .iter()
+                .map(|item| item.bind(py)),
+            )?;
+
+            let err = select(
+                py,
+                condlist.into_any().unbind(),
+                choicelist.into_any().unbind(),
+                None,
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("same length"),
                 "unexpected error: {err}"
             );
             Ok(())
