@@ -14,5 +14,7 @@ python-extension = ["pyo3/extension-module"]
 
 [dependencies]
 pyo3 = { version = "0.23.5", features = ["auto-initialize"] }
+fnp-dtype = { path = "../fnp-dtype" }
 fnp-iter = { path = "../fnp-iter" }
 fnp-ndarray = { path = "../fnp-ndarray" }
+fnp-ufunc = { path = "../fnp-ufunc" }

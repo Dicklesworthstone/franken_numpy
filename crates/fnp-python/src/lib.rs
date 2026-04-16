@@ -1,5 +1,7 @@
+use fnp_dtype::ArrayStorage;
 use fnp_iter::{Nditer, NditerOptions, NditerOrder};
 use fnp_ndarray::{broadcast_shapes, element_count};
+use fnp_ufunc::UFuncArray;
 use pyo3::Bound;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -36,6 +38,105 @@ enum VectorizeArgSlot {
 pub struct PyVectorize {
     callable: Py<PyAny>,
     excluded: Vec<usize>,
+}
+
+fn map_ufunc_error(err: impl std::fmt::Display) -> PyErr {
+    PyValueError::new_err(err.to_string())
+}
+
+fn extract_numeric_array(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    context: &str,
+) -> PyResult<UFuncArray> {
+    let numpy = py.import("numpy")?;
+    let array = numpy.call_method1("asarray", (value,))?;
+    let shape = array.getattr("shape")?.extract::<Vec<usize>>()?;
+    let flat = array.call_method1("reshape", (-1,))?;
+    let dtype = array.getattr("dtype")?;
+    let dtype_name = dtype.str()?.extract::<String>()?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+
+    let storage = match kind.as_str() {
+        "b" => ArrayStorage::Bool(flat.call_method0("tolist")?.extract::<Vec<bool>>()?),
+        "i" => ArrayStorage::I64(
+            flat.call_method1("astype", ("int64",))?
+                .call_method0("tolist")?
+                .extract::<Vec<i64>>()?,
+        ),
+        "u" => ArrayStorage::U64(
+            flat.call_method1("astype", ("uint64",))?
+                .call_method0("tolist")?
+                .extract::<Vec<u64>>()?,
+        ),
+        "f" => ArrayStorage::F64(
+            flat.call_method1("astype", ("float64",))?
+                .call_method0("tolist")?
+                .extract::<Vec<f64>>()?,
+        ),
+        _ => {
+            return Err(PyTypeError::new_err(format!(
+                "{context}: expected a bool/int/uint/float array, got dtype {dtype_name}",
+            )));
+        }
+    };
+
+    UFuncArray::from_storage(shape, storage).map_err(map_ufunc_error)
+}
+
+fn build_numpy_array_from_storage(
+    py: Python<'_>,
+    shape: &[usize],
+    storage: ArrayStorage,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let (list, dtype_name) = match storage {
+        ArrayStorage::Bool(values) => {
+            (PyList::new(py, values.iter().copied())?.into_any(), "bool_")
+        }
+        ArrayStorage::I8(values) => (PyList::new(py, values.iter().copied())?.into_any(), "int8"),
+        ArrayStorage::I16(values) => (PyList::new(py, values.iter().copied())?.into_any(), "int16"),
+        ArrayStorage::I32(values) => (PyList::new(py, values.iter().copied())?.into_any(), "int32"),
+        ArrayStorage::I64(values) => (PyList::new(py, values.iter().copied())?.into_any(), "int64"),
+        ArrayStorage::U8(values) => (PyList::new(py, values.iter().copied())?.into_any(), "uint8"),
+        ArrayStorage::U16(values) => (
+            PyList::new(py, values.iter().copied())?.into_any(),
+            "uint16",
+        ),
+        ArrayStorage::U32(values) => (
+            PyList::new(py, values.iter().copied())?.into_any(),
+            "uint32",
+        ),
+        ArrayStorage::U64(values) => (
+            PyList::new(py, values.iter().copied())?.into_any(),
+            "uint64",
+        ),
+        ArrayStorage::F32(values) => (
+            PyList::new(py, values.iter().copied())?.into_any(),
+            "float32",
+        ),
+        ArrayStorage::F64(values) => (
+            PyList::new(py, values.iter().copied())?.into_any(),
+            "float64",
+        ),
+        unsupported => {
+            return Err(PyTypeError::new_err(format!(
+                "fnp-python: cannot export dtype {} to NumPy yet",
+                unsupported.dtype().name()
+            )));
+        }
+    };
+
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype_name)?;
+    let array = numpy.call_method("array", (list,), Some(&kwargs))?;
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    Ok(array.call_method1("reshape", (&output_shape,))?.unbind())
+}
+
+fn build_numpy_array_from_ufunc(py: Python<'_>, array: &UFuncArray) -> PyResult<Py<PyAny>> {
+    let storage = array.to_storage().map_err(map_ufunc_error)?;
+    build_numpy_array_from_storage(py, array.shape(), storage)
 }
 
 impl PyFromPyFunc {
@@ -445,6 +546,15 @@ fn vectorize(
     PyVectorize::new_checked(callable_obj, excluded, py)
 }
 
+#[pyfunction]
+#[pyo3(signature = (x, bins, right=false))]
+fn digitize(py: Python<'_>, x: Py<PyAny>, bins: Py<PyAny>, right: bool) -> PyResult<Py<PyAny>> {
+    let x = extract_numeric_array(py, x.bind(py), "digitize(x)")?;
+    let bins = extract_numeric_array(py, bins.bind(py), "digitize(bins)")?;
+    let result = x.digitize_right(&bins, right).map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
+}
+
 #[pymodule]
 fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyNditerStep>()?;
@@ -453,12 +563,13 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVectorize>()?;
     m.add_function(wrap_pyfunction!(frompyfunc, m)?)?;
     m.add_function(wrap_pyfunction!(vectorize, m)?)?;
+    m.add_function(wrap_pyfunction!(digitize, m)?)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PyFromPyFunc, PyVectorize, fnp_python};
+    use super::{PyFromPyFunc, PyVectorize, digitize, fnp_python};
     use pyo3::IntoPyObject;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
     use pyo3::{PyResult, Python};
@@ -495,6 +606,21 @@ mod tests {
             .expect("np.array should work")
     }
 
+    fn numeric_array<'py>(
+        py: Python<'py>,
+        values: impl IntoPyObject<'py>,
+        dtype: &str,
+    ) -> pyo3::Bound<'py, pyo3::types::PyAny> {
+        let numpy = py.import("numpy").unwrap();
+        let kwargs = PyDict::new(py);
+        kwargs
+            .set_item("dtype", dtype)
+            .expect("dtype should be accepted");
+        numpy
+            .call_method("array", (values,), Some(&kwargs))
+            .expect("np.array should work")
+    }
+
     fn repr_string(value: &pyo3::Bound<'_, pyo3::types::PyAny>) -> String {
         value.repr().unwrap().extract::<String>().unwrap()
     }
@@ -509,6 +635,7 @@ mod tests {
             assert!(module.getattr("FromPyFunc").is_ok());
             assert!(module.getattr("vectorize").is_ok());
             assert!(module.getattr("Vectorize").is_ok());
+            assert!(module.getattr("digitize").is_ok());
             assert!(module.getattr("Nditer").is_ok());
             Ok(())
         });
@@ -705,6 +832,83 @@ mod tests {
             let expected = numpy
                 .call_method("vectorize", (callable.bind(py),), Some(&kwargs))?
                 .call1(expected_args)?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn digitize_matches_numpy_increasing_bins() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(py, vec![0.2, 6.4, 3.0, 1.6], "float64");
+            let bins = numeric_array(py, vec![0.0, 1.0, 2.5, 4.0, 10.0], "float64");
+
+            let actual = digitize(py, values.clone().unbind(), bins.clone().unbind(), false)?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.getattr("digitize")?.call1((values, bins))?;
+
+            assert_eq!(
+                actual
+                    .bind(py)
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                "int64"
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn digitize_matches_numpy_right_true_for_decreasing_bins() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(py, vec![9.0, 5.0, 0.5], "float64");
+            let bins = numeric_array(py, vec![10.0, 6.0, 3.0, 0.0], "float64");
+
+            let actual = digitize(py, values.clone().unbind(), bins.clone().unbind(), true)?;
+            let numpy = py.import("numpy")?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("right", true)?;
+            let expected = numpy.call_method("digitize", (values, bins), Some(&kwargs))?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn digitize_preserves_large_uint64_bins() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let large = 9_007_199_254_740_993_u64;
+            let values = numeric_array(py, vec![large, large + 1], "uint64");
+            let bins = numeric_array(py, vec![large - 1, large, large + 2], "uint64");
+
+            let actual = digitize(py, values.clone().unbind(), bins.clone().unbind(), false)?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.getattr("digitize")?.call1((values, bins))?;
 
             assert_eq!(
                 repr_string(&actual.bind(py).call_method0("tolist")?),
