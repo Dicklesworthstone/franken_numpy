@@ -3,8 +3,8 @@ use fnp_iter::{Nditer, NditerOptions, NditerOrder};
 use fnp_ndarray::{broadcast_shapes, element_count};
 use fnp_ufunc::UnaryOp;
 use fnp_ufunc::{
-    UFuncArray, isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, signbit as ufunc_signbit,
-    spacing as ufunc_spacing, where_nonzero,
+    UFuncArray, copysign as ufunc_copysign, isneginf as ufunc_isneginf, isposinf as ufunc_isposinf,
+    signbit as ufunc_signbit, spacing as ufunc_spacing, where_nonzero,
 };
 use pyo3::Bound;
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -926,6 +926,14 @@ fn sinc(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+fn copysign(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let x1 = extract_numeric_array(py, x1.bind(py), "copysign(x1)")?;
+    let x2 = extract_numeric_array(py, x2.bind(py), "copysign(x2)")?;
+    let result = ufunc_copysign(&x1, &x2).map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(signature = (condition, a, axis=None))]
 fn compress(
     py: Python<'_>,
@@ -1064,6 +1072,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(isfinite, m)?)?;
     m.add_function(wrap_pyfunction!(spacing, m)?)?;
     m.add_function(wrap_pyfunction!(sinc, m)?)?;
+    m.add_function(wrap_pyfunction!(copysign, m)?)?;
     m.add_function(wrap_pyfunction!(take, m)?)?;
     m.add_function(wrap_pyfunction!(compress, m)?)?;
     m.add_function(wrap_pyfunction!(extract, m)?)?;
@@ -1077,9 +1086,9 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PyFromPyFunc, PyVectorize, argwhere, choose, compress, count_nonzero, digitize, extract,
-        flatnonzero, fnp_python, interp, isfinite, isinf, isnan, isneginf, isposinf, searchsorted,
-        select, signbit, sinc, spacing, take, take_along_axis, where_py,
+        PyFromPyFunc, PyVectorize, argwhere, choose, compress, copysign, count_nonzero, digitize,
+        extract, flatnonzero, fnp_python, interp, isfinite, isinf, isnan, isneginf, isposinf,
+        searchsorted, select, signbit, sinc, spacing, take, take_along_axis, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
@@ -1160,6 +1169,7 @@ mod tests {
             assert!(module.getattr("isfinite").is_ok());
             assert!(module.getattr("spacing").is_ok());
             assert!(module.getattr("sinc").is_ok());
+            assert!(module.getattr("copysign").is_ok());
             assert!(module.getattr("take").is_ok());
             assert!(module.getattr("compress").is_ok());
             assert!(module.getattr("extract").is_ok());
@@ -2152,6 +2162,57 @@ mod tests {
                 expected
                     .call_method0("tolist")?
                     .extract::<Vec<Vec<f64>>>()?
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn copysign_matches_numpy_basic() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let x1 = numeric_array(py, vec![1.0, -2.5, 3.0], "float64");
+            let x2 = numeric_array(py, vec![-4.0, 5.0, -6.0], "float64");
+            let actual = copysign(py, x1.clone().unbind(), x2.clone().unbind())?;
+
+            let numpy = py.import("numpy")?;
+            let expected = numpy.getattr("copysign")?.call1((x1, x2))?;
+
+            assert_eq!(
+                actual
+                    .bind(py)
+                    .call_method0("tolist")?
+                    .extract::<Vec<f64>>()?,
+                expected.call_method0("tolist")?.extract::<Vec<f64>>()?
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn copysign_matches_numpy_signed_zero_and_broadcasting() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let x1 = numeric_array(py, vec![vec![1.0, -1.0], vec![0.0, -0.0]], "float64");
+            let x2 = numeric_array(py, vec![-0.0, 0.0], "float64");
+            let actual = copysign(py, x1.clone().unbind(), x2.clone().unbind())?;
+
+            let numpy = py.import("numpy")?;
+            let expected = numpy.getattr("copysign")?.call1((x1, x2))?;
+
+            assert_eq!(
+                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
+                vec![2, 2]
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
             );
             Ok(())
         });
