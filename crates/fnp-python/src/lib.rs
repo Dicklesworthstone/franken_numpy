@@ -923,6 +923,18 @@ fn spacing(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+fn degrees(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let x = extract_numeric_array(py, x.bind(py), "degrees(x)")?;
+    build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Degrees))
+}
+
+#[pyfunction]
+fn radians(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let x = extract_numeric_array(py, x.bind(py), "radians(x)")?;
+    build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Radians))
+}
+
+#[pyfunction]
 fn sinc(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x = extract_numeric_array(py, x.bind(py), "sinc(x)")?;
     build_numpy_array_from_ufunc(py, &x.sinc())
@@ -1161,6 +1173,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(isinf, m)?)?;
     m.add_function(wrap_pyfunction!(isfinite, m)?)?;
     m.add_function(wrap_pyfunction!(spacing, m)?)?;
+    m.add_function(wrap_pyfunction!(degrees, m)?)?;
+    m.add_function(wrap_pyfunction!(radians, m)?)?;
     m.add_function(wrap_pyfunction!(sinc, m)?)?;
     m.add_function(wrap_pyfunction!(copysign, m)?)?;
     m.add_function(wrap_pyfunction!(nextafter, m)?)?;
@@ -1184,10 +1198,10 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PyFromPyFunc, PyVectorize, argwhere, choose, compress, copysign, count_nonzero, digitize,
-        extract, flatnonzero, fnp_python, frexp, hypot, interp, isfinite, isinf, isnan, isneginf,
-        isposinf, ldexp, logaddexp, logaddexp2, modf, nan_to_num, nextafter, searchsorted, select,
-        signbit, sinc, spacing, take, take_along_axis, where_py,
+        PyFromPyFunc, PyVectorize, argwhere, choose, compress, copysign, count_nonzero, degrees,
+        digitize, extract, flatnonzero, fnp_python, frexp, hypot, interp, isfinite, isinf, isnan,
+        isneginf, isposinf, ldexp, logaddexp, logaddexp2, modf, nan_to_num, nextafter, radians,
+        searchsorted, select, signbit, sinc, spacing, take, take_along_axis, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
@@ -1267,6 +1281,8 @@ mod tests {
             assert!(module.getattr("isinf").is_ok());
             assert!(module.getattr("isfinite").is_ok());
             assert!(module.getattr("spacing").is_ok());
+            assert!(module.getattr("degrees").is_ok());
+            assert!(module.getattr("radians").is_ok());
             assert!(module.getattr("sinc").is_ok());
             assert!(module.getattr("copysign").is_ok());
             assert!(module.getattr("nextafter").is_ok());
@@ -2212,6 +2228,74 @@ mod tests {
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("spacing", (values,))?;
 
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn degrees_matches_numpy_basic() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(
+                py,
+                vec![0.0, std::f64::consts::FRAC_PI_2, std::f64::consts::PI],
+                "float64",
+            );
+            let actual = degrees(py, values.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("degrees", (values,))?;
+
+            assert_eq!(
+                actual
+                    .bind(py)
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                expected.getattr("dtype")?.str()?.extract::<String>()?
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn radians_matches_numpy_integer_multidimensional_input() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(
+                py,
+                vec![vec![0_i64, 90_i64], vec![180_i64, -45_i64]],
+                "int64",
+            );
+            let actual = radians(py, values.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("radians", (values,))?;
+
+            assert_eq!(
+                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
+                expected.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                actual
+                    .bind(py)
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                expected.getattr("dtype")?.str()?.extract::<String>()?
+            );
             assert_eq!(
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
