@@ -50,7 +50,7 @@
 
 | Crate | Tests | Description |
 |---|---|---|
-| fnp-ufunc | 1,794 | Core array operations, math, sorting, polynomials (Chebyshev div/roots/fromroots, Legendre/Hermite/Laguerre div/roots/fromroots edge cases), reductions, oracle tests, linalg bridge, FFT (hfft/ihfft), hermfit/lagfit, masked cov/corrcoef, datetime parsing, gufunc validation, parameter parity (equal_nan, bitorder, mode, endpoint, trim, period, axes, prepend/append, left/right), r_/c_ concat helpers, GridSpec mgrid/ogrid, linspace_retstep, concatenate_flat, einsum coverage, NaN/Inf/signed-zero edge cases (maximum, heaviside, logaddexp, floor_divide, remainder, clip, divmod, cummin/cummax), NaN set-op parity, behavioral edge cases |
+| fnp-ufunc | 1,797 | Core array operations, math, sorting, polynomials (Chebyshev div/roots/fromroots, Legendre/Hermite/Laguerre div/roots/fromroots edge cases), reductions, oracle tests, linalg bridge, FFT (hfft/ihfft), hermfit/lagfit, masked cov/corrcoef, datetime parsing, gufunc validation, parameter parity (equal_nan, bitorder, mode, endpoint, trim, period, axes, prepend/append, left/right), r_/c_ concat helpers, GridSpec mgrid/ogrid, linspace_retstep, concatenate_flat, einsum coverage, NaN/Inf/signed-zero edge cases (maximum, heaviside, logaddexp, floor_divide, remainder, clip, divmod, cummin/cummax), NaN set-op parity, `compress` short-mask truncation parity, behavioral edge cases |
 | fnp-ndarray | 87 | Shape legality, stride calculus, broadcast contracts, overlap detection, multi-axis negative strides, broadcast/reshape/stride edge cases, F-order, required_view_nbytes |
 | fnp-linalg | 235 | Linear algebra decompositions, solvers, norms, batch ops (det/inv/solve/trace), 16 NumPy oracle tests, extreme-scale regression, non-finite parity (cond_p, cross_product 2D, NaN/Inf propagation), rectangular MxN norm/cond support, cond_mxn NaN handling |
 | fnp-random | 196 | RNG distributions with statistical conformance coverage, permuted (1D/2D/axis/deterministic), seeding, reproducibility, large-n binomial/multinomial |
@@ -58,13 +58,13 @@
 | fnp-io | 176 | NPY/NPZ read/write, text formats, compression, 7 format oracle tests, genfromtxt_full, fromfile_text/tofile_text |
 | fnp-conformance | 144 | Differential parity, metamorphic identities, adversarial fuzzing, witness stability, matmul conformance |
 | fnp-dtype | 124 | Dtype taxonomy, promotion table (all 324 pairs explicit), cast policy primitives, NumPy byte-width parsing |
-| fnp-python | 21 | PyO3 package surface coverage for `frompyfunc`, `vectorize`, `digitize`, `searchsorted`, `interp`, `where`, and `take_along_axis`, including live callable parity, sorter/side bridging, left/right fill parity, one-argument nonzero parity, `axis=None` flatten semantics, large-uint64 coverage, and module export wiring |
+| fnp-python | 25 | PyO3 package surface coverage for `frompyfunc`, `vectorize`, `digitize`, `searchsorted`, `interp`, `where`, `take_along_axis`, `compress`, and `extract`, including live callable parity, sorter/side bridging, left/right fill parity, one-argument nonzero parity, `axis=None` flatten semantics, short-condition truncation parity, large-uint64 coverage, and module export wiring |
 | fnp-runtime | 54 | Mode split, fail-closed decoding, override-audit gate, risk-aware decision engine, evidence ledger |
-| **Total** | **2,935** | |
+| **Total** | **2,942** | |
 
 ## Remaining Gaps (Python-specific, low priority)
 
-1. Expanded Python package surface beyond `nditer`, `frompyfunc`, `vectorize`, `digitize`, `searchsorted`, `interp`, `where`, and `take_along_axis` — `fnp-python` now exposes `PyNditer`, `frompyfunc`, `vectorize`, `digitize`, `searchsorted`, `interp`, `where`, and `take_along_axis`, but broader Python-facing packaging and FFI coverage for additional NumPy APIs is still incomplete
+1. Expanded Python package surface beyond `nditer`, `frompyfunc`, `vectorize`, `digitize`, `searchsorted`, `interp`, `where`, `take_along_axis`, `compress`, and `extract` — `fnp-python` now exposes `PyNditer`, `frompyfunc`, `vectorize`, `digitize`, `searchsorted`, `interp`, `where`, `take_along_axis`, `compress`, and `extract`, but broader Python-facing packaging and FFI coverage for additional NumPy APIs is still incomplete
 2. Expanded CI matrix for alternate oracle environments and longer-horizon benchmark trend regression
 
 ## Intentional Design Decisions

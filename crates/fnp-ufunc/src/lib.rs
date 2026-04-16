@@ -11974,39 +11974,16 @@ impl UFuncArray {
     pub fn compress(&self, condition: &[bool], axis: Option<isize>) -> Result<Self, UFuncError> {
         match axis {
             None => {
-                // Flat: condition length must match total elements
-                if condition.len() != self.values.len() {
-                    return Err(UFuncError::Msg(format!(
-                        "compress: condition length {} != array size {}",
-                        condition.len(),
-                        self.values.len()
-                    )));
-                }
-                let mut values = Vec::with_capacity(condition.iter().filter(|&&c| c).count());
-                let mut source_indices = Vec::with_capacity(values.capacity());
-                for (i, (&v, &c)) in self.values.iter().zip(condition).enumerate() {
-                    if c {
-                        values.push(v);
-                        source_indices.push(i);
-                    }
-                }
-                Ok(Self {
-                    shape: vec![values.len()],
-                    values,
-                    dtype: self.dtype,
-                    integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
-                })
+                let indices: Vec<i64> = condition
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &selected)| selected)
+                    .map(|(i, _)| i as i64)
+                    .collect();
+                self.take(&indices, None)
             }
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
-                let axis_len = self.shape[ax];
-                if condition.len() != axis_len {
-                    return Err(UFuncError::Msg(format!(
-                        "compress: condition length {} != axis size {}",
-                        condition.len(),
-                        axis_len
-                    )));
-                }
                 let selected: Vec<usize> = condition
                     .iter()
                     .enumerate()
@@ -35837,9 +35814,25 @@ mod tests {
     }
 
     #[test]
-    fn compress_length_mismatch() {
+    fn compress_flat_short_condition_truncates_like_numpy() {
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
-        assert!(a.compress(&[true, false], None).is_err());
+        let r = a.compress(&[true, false], None).unwrap();
+        assert_eq!(r.values(), &[1.0]);
+    }
+
+    #[test]
+    fn compress_axis_short_condition_truncates_like_numpy() {
+        let a =
+            UFuncArray::new(vec![3, 2], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let r = a.compress(&[false, true], Some(0)).unwrap();
+        assert_eq!(r.shape(), &[1, 2]);
+        assert_eq!(r.values(), &[3.0, 4.0]);
+    }
+
+    #[test]
+    fn compress_extra_true_past_end_errors() {
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        assert!(a.compress(&[false, false, false, true], None).is_err());
     }
 
     #[test]

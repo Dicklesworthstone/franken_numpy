@@ -143,6 +143,15 @@ fn extract_integer_array(
     UFuncArray::from_storage(shape, storage).map_err(map_ufunc_error)
 }
 
+fn extract_condition_mask(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    context: &str,
+) -> PyResult<Vec<bool>> {
+    let mask = extract_numeric_array(py, value, context)?;
+    Ok(mask.values().iter().map(|&value| value != 0.0).collect())
+}
+
 fn build_numpy_array_from_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -669,6 +678,28 @@ fn where_py(
 }
 
 #[pyfunction]
+#[pyo3(signature = (condition, a, axis=None))]
+fn compress(
+    py: Python<'_>,
+    condition: Py<PyAny>,
+    a: Py<PyAny>,
+    axis: Option<isize>,
+) -> PyResult<Py<PyAny>> {
+    let condition = extract_condition_mask(py, condition.bind(py), "compress(condition)")?;
+    let a = extract_numeric_array(py, a.bind(py), "compress(a)")?;
+    let result = a.compress(&condition, axis).map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
+fn extract(py: Python<'_>, condition: Py<PyAny>, arr: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let condition = extract_numeric_array(py, condition.bind(py), "extract(condition)")?;
+    let arr = extract_numeric_array(py, arr.bind(py), "extract(arr)")?;
+    let result = UFuncArray::extract(&condition, &arr).map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, v, side="left", sorter=None))]
 fn searchsorted(
     py: Python<'_>,
@@ -729,6 +760,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(digitize, m)?)?;
     m.add_function(wrap_pyfunction!(interp, m)?)?;
     m.add_function(wrap_pyfunction!(where_py, m)?)?;
+    m.add_function(wrap_pyfunction!(compress, m)?)?;
+    m.add_function(wrap_pyfunction!(extract, m)?)?;
     m.add_function(wrap_pyfunction!(searchsorted, m)?)?;
     m.add_function(wrap_pyfunction!(take_along_axis, m)?)?;
     Ok(())
@@ -737,8 +770,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PyFromPyFunc, PyVectorize, digitize, fnp_python, interp, searchsorted, take_along_axis,
-        where_py,
+        PyFromPyFunc, PyVectorize, compress, digitize, extract, fnp_python, interp, searchsorted,
+        take_along_axis, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
@@ -808,6 +841,8 @@ mod tests {
             assert!(module.getattr("digitize").is_ok());
             assert!(module.getattr("interp").is_ok());
             assert!(module.getattr("where").is_ok());
+            assert!(module.getattr("compress").is_ok());
+            assert!(module.getattr("extract").is_ok());
             assert!(module.getattr("searchsorted").is_ok());
             assert!(module.getattr("take_along_axis").is_ok());
             assert!(module.getattr("Nditer").is_ok());
@@ -1462,6 +1497,116 @@ mod tests {
             let kwargs = PyDict::new(py);
             kwargs.set_item("axis", py.None())?;
             let expected = numpy.call_method("take_along_axis", (arr, indices), Some(&kwargs))?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn compress_matches_numpy_with_short_flat_condition() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let condition = numeric_array(py, vec![0_i64, 1_i64], "int64");
+            let arr = numeric_array(py, vec![10.0, 20.0, 30.0], "float64");
+
+            let actual = compress(py, condition.clone().unbind(), arr.clone().unbind(), None)?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("compress", (condition, arr))?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn compress_matches_numpy_with_short_axis_condition() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let condition = numeric_array(py, vec![0_i64, 1_i64], "int64");
+            let arr = numeric_array(
+                py,
+                vec![vec![10.0, 20.0], vec![30.0, 40.0], vec![50.0, 60.0]],
+                "float64",
+            );
+
+            let actual = compress(
+                py,
+                condition.clone().unbind(),
+                arr.clone().unbind(),
+                Some(0),
+            )?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("compress", (condition, arr, 0))?;
+
+            assert_eq!(
+                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
+                vec![1, 2]
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn compress_preserves_large_uint64_values() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let large = (1_u64 << 63) + 8195;
+            let condition = numeric_array(py, vec![1_i64, 0_i64, 1_i64, 0_i64], "int64");
+            let arr = numeric_array(py, vec![large, 3_u64, large - 1, 7_u64], "uint64");
+
+            let actual = compress(py, condition.clone().unbind(), arr.clone().unbind(), None)?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("compress", (condition, arr))?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn extract_matches_numpy_boolean_mask() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let condition = numeric_array(
+                py,
+                vec![vec![0_i64, 1_i64], vec![1_i64, 0_i64], vec![0_i64, 1_i64]],
+                "int64",
+            );
+            let arr = numeric_array(
+                py,
+                vec![vec![10.0, 20.0], vec![30.0, 40.0], vec![50.0, 60.0]],
+                "float64",
+            );
+
+            let actual = extract(py, condition.clone().unbind(), arr.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("extract", (condition, arr))?;
 
             assert_eq!(
                 repr_string(&actual.bind(py).call_method0("tolist")?),
