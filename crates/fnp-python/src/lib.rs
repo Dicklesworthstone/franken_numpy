@@ -941,6 +941,12 @@ fn ceil(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+fn trunc(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let x = extract_numeric_array(py, x.bind(py), "trunc(x)")?;
+    build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Trunc))
+}
+
+#[pyfunction]
 fn degrees(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x = extract_numeric_array(py, x.bind(py), "degrees(x)")?;
     build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Degrees))
@@ -1194,6 +1200,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sign, m)?)?;
     m.add_function(wrap_pyfunction!(floor, m)?)?;
     m.add_function(wrap_pyfunction!(ceil, m)?)?;
+    m.add_function(wrap_pyfunction!(trunc, m)?)?;
     m.add_function(wrap_pyfunction!(degrees, m)?)?;
     m.add_function(wrap_pyfunction!(radians, m)?)?;
     m.add_function(wrap_pyfunction!(sinc, m)?)?;
@@ -1223,7 +1230,7 @@ mod tests {
         degrees, digitize, extract, flatnonzero, floor, fnp_python, frexp, hypot, interp, isfinite,
         isinf, isnan, isneginf, isposinf, ldexp, logaddexp, logaddexp2, modf, nan_to_num,
         nextafter, radians, searchsorted, select, sign, signbit, sinc, spacing, take,
-        take_along_axis, where_py,
+        take_along_axis, trunc, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
@@ -1306,6 +1313,7 @@ mod tests {
             assert!(module.getattr("sign").is_ok());
             assert!(module.getattr("floor").is_ok());
             assert!(module.getattr("ceil").is_ok());
+            assert!(module.getattr("trunc").is_ok());
             assert!(module.getattr("degrees").is_ok());
             assert!(module.getattr("radians").is_ok());
             assert!(module.getattr("sinc").is_ok());
@@ -2429,6 +2437,81 @@ mod tests {
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("degrees", (values,))?;
 
+            assert_eq!(
+                actual
+                    .bind(py)
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                expected.getattr("dtype")?.str()?.extract::<String>()?
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn trunc_matches_numpy_float_and_special_values() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(
+                py,
+                vec![
+                    -0.0_f64,
+                    0.0_f64,
+                    1.7_f64,
+                    -1.7_f64,
+                    f64::INFINITY,
+                    f64::NAN,
+                ],
+                "float64",
+            );
+            let actual = trunc(py, values.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("trunc", (values,))?;
+
+            assert_eq!(
+                actual
+                    .bind(py)
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                expected.getattr("dtype")?.str()?.extract::<String>()?
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn trunc_matches_numpy_integer_input() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(
+                py,
+                vec![vec![1_i64, -2_i64, 0_i64], vec![5_i64, -8_i64, 3_i64]],
+                "int64",
+            );
+            let actual = trunc(py, values.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("trunc", (values,))?;
+
+            assert_eq!(
+                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
+                expected.getattr("shape")?.extract::<Vec<usize>>()?
+            );
             assert_eq!(
                 actual
                     .bind(py)
