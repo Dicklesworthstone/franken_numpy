@@ -237,6 +237,70 @@ fn extract_integer_array(
     UFuncArray::from_storage(shape, storage).map_err(map_ufunc_error)
 }
 
+fn extract_index_shape(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    context: &str,
+) -> PyResult<Vec<usize>> {
+    let numpy = py.import("numpy")?;
+    let array = numpy.call_method1("asarray", (value,))?;
+    let ndim = array.getattr("ndim")?.extract::<usize>()?;
+
+    if ndim == 0 {
+        let dim = array.extract::<i64>().map_err(|_| {
+            PyTypeError::new_err(format!(
+                "{context}: shape entries must be integers, not {}",
+                array
+                    .getattr("dtype")
+                    .and_then(|dtype| dtype.str())
+                    .and_then(|name| name.extract::<String>())
+                    .unwrap_or_else(|_| "unknown".to_string())
+            ))
+        })?;
+        return usize::try_from(dim).map(|dim| vec![dim]).map_err(|_| {
+            PyValueError::new_err(format!("{context}: shape entries must be non-negative"))
+        });
+    }
+
+    let flat = array.call_method1("reshape", (-1,))?;
+    if flat.getattr("size")?.extract::<usize>()? == 0 {
+        return Ok(vec![]);
+    }
+
+    let dtype = flat.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    match kind.as_str() {
+        "i" => flat
+            .call_method1("astype", ("int64",))?
+            .call_method0("tolist")?
+            .extract::<Vec<i64>>()?
+            .into_iter()
+            .map(|dim| {
+                usize::try_from(dim).map_err(|_| {
+                    PyValueError::new_err(format!("{context}: shape entries must be non-negative"))
+                })
+            })
+            .collect(),
+        "u" => flat
+            .call_method1("astype", ("uint64",))?
+            .call_method0("tolist")?
+            .extract::<Vec<u64>>()?
+            .into_iter()
+            .map(|dim| {
+                usize::try_from(dim).map_err(|_| {
+                    PyValueError::new_err(format!(
+                        "{context}: shape entry {dim} exceeds platform usize"
+                    ))
+                })
+            })
+            .collect(),
+        _ => Err(PyTypeError::new_err(format!(
+            "{context}: shape entries must be integers, not {}",
+            dtype.str()?.extract::<String>()?
+        ))),
+    }
+}
+
 fn extract_take_indices(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
@@ -271,6 +335,67 @@ fn extract_condition_mask(
 ) -> PyResult<Vec<bool>> {
     let mask = extract_numeric_array(py, value, context)?;
     Ok(mask.values().iter().map(|&value| value != 0.0).collect())
+}
+
+fn extract_ravel_multi_index_inputs(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    ndim: usize,
+) -> PyResult<Vec<UFuncArray>> {
+    let iter = value.try_iter().map_err(|_| {
+        PyValueError::new_err(format!(
+            "parameter multi_index must be a sequence of length {ndim}"
+        ))
+    })?;
+    let arrays = iter
+        .enumerate()
+        .map(|(index, item)| {
+            let item = item?;
+            extract_integer_array(
+                py,
+                &item,
+                &format!("ravel_multi_index(multi_index[{index}])"),
+            )
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+
+    if arrays.len() != ndim {
+        return Err(PyValueError::new_err(format!(
+            "parameter multi_index must be a sequence of length {ndim}"
+        )));
+    }
+    Ok(arrays)
+}
+
+fn extract_ravel_multi_index_modes(
+    py: Python<'_>,
+    value: Option<Py<PyAny>>,
+) -> PyResult<Vec<String>> {
+    let Some(value) = value else {
+        return Ok(vec!["raise".to_string()]);
+    };
+
+    let value = value.bind(py);
+    if let Ok(mode) = value.extract::<String>() {
+        return Ok(vec![mode]);
+    }
+
+    if let Ok(iter) = value.try_iter() {
+        return iter
+            .enumerate()
+            .map(|(index, item)| {
+                item?.extract::<String>().map_err(|_| {
+                    PyTypeError::new_err(format!(
+                        "ravel_multi_index(mode): mode[{index}] must be a string"
+                    ))
+                })
+            })
+            .collect();
+    }
+
+    Err(PyTypeError::new_err(
+        "ravel_multi_index(mode): mode must be a string or sequence of strings",
+    ))
 }
 
 fn extract_numeric_array_sequence(
@@ -561,6 +686,37 @@ fn build_numpy_tuple_from_ufuncs(py: Python<'_>, arrays: &[UFuncArray]) -> PyRes
     Ok(PyTuple::new(py, arrays.iter().map(|array| array.bind(py)))?
         .into_any()
         .unbind())
+}
+
+fn build_numpy_scalar_or_array_from_ufunc(
+    py: Python<'_>,
+    array: &UFuncArray,
+) -> PyResult<Py<PyAny>> {
+    let output = build_numpy_array_from_ufunc(py, array)?;
+    if array.shape().is_empty() {
+        Ok(output.bind(py).get_item(())?.unbind())
+    } else {
+        Ok(output)
+    }
+}
+
+fn build_numpy_index_tuple_from_ufuncs(
+    py: Python<'_>,
+    arrays: &[UFuncArray],
+    scalar_output: bool,
+) -> PyResult<Py<PyAny>> {
+    if !scalar_output {
+        return build_numpy_tuple_from_ufuncs(py, arrays);
+    }
+
+    let scalars = arrays
+        .iter()
+        .map(|array| {
+            let output = build_numpy_array_from_ufunc(py, array)?;
+            output.bind(py).get_item(())
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(PyTuple::new(py, scalars.iter())?.into_any().unbind())
 }
 
 fn build_numpy_tuple_from_pyarrays(py: Python<'_>, arrays: &[Py<PyAny>]) -> PyResult<Py<PyAny>> {
@@ -1623,6 +1779,41 @@ fn meshgrid(
 }
 
 #[pyfunction]
+#[pyo3(signature = (multi_index, dims, mode=None, order="C"))]
+fn ravel_multi_index(
+    py: Python<'_>,
+    multi_index: Py<PyAny>,
+    dims: Py<PyAny>,
+    mode: Option<Py<PyAny>>,
+    order: &str,
+) -> PyResult<Py<PyAny>> {
+    let dims = extract_index_shape(py, dims.bind(py), "ravel_multi_index(dims)")?;
+    let coords = extract_ravel_multi_index_inputs(py, multi_index.bind(py), dims.len())?;
+    let modes = extract_ravel_multi_index_modes(py, mode)?;
+    let refs: Vec<&UFuncArray> = coords.iter().collect();
+    let raw_modes: Vec<&str> = modes.iter().map(String::as_str).collect();
+    let result = UFuncArray::ravel_multi_index_with_options(&refs, &dims, &raw_modes, order)
+        .map_err(map_ufunc_error)?;
+    build_numpy_scalar_or_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(signature = (indices, shape, order="C"))]
+fn unravel_index(
+    py: Python<'_>,
+    indices: Py<PyAny>,
+    shape: Py<PyAny>,
+    order: &str,
+) -> PyResult<Py<PyAny>> {
+    let indices = extract_integer_array(py, indices.bind(py), "unravel_index(indices)")?;
+    let shape = extract_index_shape(py, shape.bind(py), "unravel_index(shape)")?;
+    let scalar_output = indices.shape().is_empty();
+    let result =
+        UFuncArray::unravel_index_order(&indices, &shape, order).map_err(map_ufunc_error)?;
+    build_numpy_index_tuple_from_ufuncs(py, &result, scalar_output)
+}
+
+#[pyfunction]
 #[pyo3(signature = (n, ndim=2))]
 fn diag_indices(py: Python<'_>, n: usize, ndim: usize) -> PyResult<Py<PyAny>> {
     let (arrays, _) = UFuncArray::diag_indices(n, ndim);
@@ -1832,6 +2023,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fill_diagonal, m)?)?;
     m.add_function(wrap_pyfunction!(ix_, m)?)?;
     m.add_function(wrap_pyfunction!(meshgrid, m)?)?;
+    m.add_function(wrap_pyfunction!(ravel_multi_index, m)?)?;
+    m.add_function(wrap_pyfunction!(unravel_index, m)?)?;
     m.add_function(wrap_pyfunction!(diag_indices, m)?)?;
     m.add_function(wrap_pyfunction!(diag_indices_from, m)?)?;
     m.add_function(wrap_pyfunction!(tril_indices, m)?)?;
@@ -1850,12 +2043,13 @@ mod tests {
         degrees, diag, diag_indices, diag_indices_from, diagflat, diagonal, digitize, extract,
         fill_diagonal, flatnonzero, floor, fnp_python, frexp, hypot, indices, interp, isfinite,
         isinf, isnan, isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2, meshgrid, modf,
-        nan_to_num, nextafter, place, put, put_along_axis, putmask, radians, rint, searchsorted,
-        select, sign, signbit, sinc, spacing, take, take_along_axis, tril_indices,
-        tril_indices_from, triu_indices, triu_indices_from, trunc, where_py,
+        nan_to_num, nextafter, place, put, put_along_axis, putmask, radians, ravel_multi_index,
+        rint, searchsorted, select, sign, signbit, sinc, spacing, take, take_along_axis,
+        tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc, unravel_index,
+        where_py,
     };
     use pyo3::IntoPyObject;
-    use pyo3::exceptions::PyValueError;
+    use pyo3::exceptions::{PyTypeError, PyValueError};
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyList, PyModule, PyTuple};
     use pyo3::{PyResult, Python};
 
@@ -2010,6 +2204,8 @@ mod tests {
             assert!(module.getattr("fill_diagonal").is_ok());
             assert!(module.getattr("ix_").is_ok());
             assert!(module.getattr("meshgrid").is_ok());
+            assert!(module.getattr("ravel_multi_index").is_ok());
+            assert!(module.getattr("unravel_index").is_ok());
             assert!(module.getattr("diag_indices").is_ok());
             assert!(module.getattr("diag_indices_from").is_ok());
             assert!(module.getattr("tril_indices").is_ok());
@@ -4852,6 +5048,289 @@ mod tests {
                 }),
             )?;
             assert_index_tuple_matches_numpy(actual_object.bind(py), &expected_object)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ravel_unravel_index_match_numpy_for_basic_order_and_mode_cases() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let numpy = py.import("numpy")?;
+            let dims = PyTuple::new(py, [7_usize, 6_usize])?;
+            let actual_scalar = unravel_index(
+                py,
+                2_i64.into_pyobject(py)?.into_any().unbind(),
+                dims.clone().into_any().unbind(),
+                "F",
+            )?;
+            let expected_scalar = numpy.getattr("unravel_index")?.call(
+                (2_i64, dims.clone()),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("order", "F")?;
+                    kwargs
+                }),
+            )?;
+            assert_eq!(
+                repr_string(actual_scalar.bind(py)),
+                repr_string(&expected_scalar)
+            );
+
+            let flat = numeric_array(py, vec![31_i64, 41_i64, 13_i64], "int64");
+            let actual_unravel = unravel_index(
+                py,
+                flat.clone().unbind(),
+                dims.clone().into_any().unbind(),
+                "F",
+            )?;
+            let expected_unravel = numpy.getattr("unravel_index")?.call(
+                (flat, dims.clone()),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("order", "F")?;
+                    kwargs
+                }),
+            )?;
+            assert_index_tuple_matches_numpy(actual_unravel.bind(py), &expected_unravel)?;
+
+            let coords = numeric_array(
+                py,
+                vec![vec![3_i64, 6_i64, 6_i64], vec![4_i64, 5_i64, 1_i64]],
+                "int64",
+            );
+            let actual_ravel = ravel_multi_index(
+                py,
+                coords.clone().unbind(),
+                dims.clone().into_any().unbind(),
+                None,
+                "F",
+            )?;
+            let expected_ravel = numpy.getattr("ravel_multi_index")?.call(
+                (coords.clone(), dims.clone()),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("order", "F")?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(actual_ravel.bind(py), &expected_ravel)?;
+
+            let clip_dims = PyTuple::new(py, [4_usize, 4_usize])?;
+            let clip_mode = PyTuple::new(py, ["clip", "wrap"])?;
+            let actual_clip = ravel_multi_index(
+                py,
+                coords.clone().unbind(),
+                clip_dims.clone().into_any().unbind(),
+                Some(clip_mode.clone().into_any().unbind()),
+                "C",
+            )?;
+            let expected_clip = numpy.getattr("ravel_multi_index")?.call(
+                (coords, clip_dims),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("mode", clip_mode)?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(actual_clip.bind(py), &expected_clip)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ravel_unravel_index_match_numpy_for_empty_zero_d_and_shape_preserving_cases() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let numpy = py.import("numpy")?;
+            let empty_dims = PyTuple::empty(py);
+            let actual_zero_d = unravel_index(
+                py,
+                0_i64.into_pyobject(py)?.into_any().unbind(),
+                empty_dims.clone().into_any().unbind(),
+                "C",
+            )?;
+            let expected_zero_d =
+                numpy.call_method1("unravel_index", (0_i64, empty_dims.clone()))?;
+            assert_eq!(
+                repr_string(actual_zero_d.bind(py)),
+                repr_string(&expected_zero_d)
+            );
+
+            let empty_indices = numeric_array(py, Vec::<i64>::new(), "int64");
+            let empty_shape = PyTuple::new(py, [10_usize, 3_usize, 5_usize])?;
+            let actual_empty = unravel_index(
+                py,
+                empty_indices.clone().unbind(),
+                empty_shape.clone().into_any().unbind(),
+                "C",
+            )?;
+            let expected_empty =
+                numpy.call_method1("unravel_index", (empty_indices, empty_shape))?;
+            assert_index_tuple_matches_numpy(actual_empty.bind(py), &expected_empty)?;
+
+            let uint_indices = numeric_array(py, vec![vec![1_u32, 0_u32, 1_u32, 0_u32]], "uint32");
+            let one_d_shape = PyTuple::new(py, [4_usize])?;
+            let actual_shape_preserved = unravel_index(
+                py,
+                uint_indices.clone().unbind(),
+                one_d_shape.clone().into_any().unbind(),
+                "C",
+            )?;
+            let expected_shape_preserved =
+                numpy.call_method1("unravel_index", (uint_indices, one_d_shape))?;
+            assert_index_tuple_matches_numpy(
+                actual_shape_preserved.bind(py),
+                &expected_shape_preserved,
+            )?;
+
+            let actual_empty_ravel = ravel_multi_index(
+                py,
+                empty_dims.clone().into_any().unbind(),
+                empty_dims.clone().into_any().unbind(),
+                None,
+                "C",
+            )?;
+            let expected_empty_ravel =
+                numpy.call_method1("ravel_multi_index", (empty_dims.clone(), empty_dims))?;
+            assert_eq!(
+                repr_string(actual_empty_ravel.bind(py)),
+                repr_string(&expected_empty_ravel)
+            );
+
+            let empty_coord_tuple = PyTuple::new(
+                py,
+                [
+                    numeric_array(py, Vec::<i64>::new(), "int64"),
+                    numeric_array(py, Vec::<i64>::new(), "int64"),
+                ],
+            )?;
+            let ravel_shape = PyTuple::new(py, [5_usize, 3_usize])?;
+            let actual_ravel_empty = ravel_multi_index(
+                py,
+                empty_coord_tuple.clone().into_any().unbind(),
+                ravel_shape.clone().into_any().unbind(),
+                None,
+                "C",
+            )?;
+            let expected_ravel_empty =
+                numpy.call_method1("ravel_multi_index", (empty_coord_tuple, ravel_shape))?;
+            assert_array_matches_numpy(actual_ravel_empty.bind(py), &expected_ravel_empty)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ravel_unravel_index_preserve_large_exact_integer_values() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let numpy = py.import("numpy")?;
+            let large = (1_i64 << 53) + 7;
+            let coords = PyTuple::new(py, [0_i64, large])?;
+            let dims = PyTuple::new(py, [1_usize, (large as usize) + 1])?;
+
+            let actual_ravel = ravel_multi_index(
+                py,
+                coords.clone().into_any().unbind(),
+                dims.clone().into_any().unbind(),
+                None,
+                "C",
+            )?;
+            let expected_ravel =
+                numpy.call_method1("ravel_multi_index", (coords.clone(), dims.clone()))?;
+            assert_eq!(
+                repr_string(actual_ravel.bind(py)),
+                repr_string(&expected_ravel)
+            );
+
+            let actual_unravel = unravel_index(
+                py,
+                actual_ravel.clone_ref(py),
+                dims.into_any().unbind(),
+                "C",
+            )?;
+            let expected_unravel = numpy.call_method1(
+                "unravel_index",
+                (
+                    expected_ravel,
+                    PyTuple::new(py, [1_usize, (large as usize) + 1])?,
+                ),
+            )?;
+            assert_eq!(
+                repr_string(actual_unravel.bind(py)),
+                repr_string(&expected_unravel)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ravel_unravel_index_reject_invalid_inputs_like_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let dims = PyTuple::new(py, [2_usize, 2_usize])?;
+
+            let err = unravel_index(
+                py,
+                0.5_f64.into_pyobject(py)?.into_any().unbind(),
+                dims.clone().into_any().unbind(),
+                "C",
+            )
+            .unwrap_err();
+            assert!(err.is_instance_of::<PyTypeError>(py));
+
+            let err = unravel_index(
+                py,
+                PyList::new(py, [0_i64])?.into_any().unbind(),
+                PyTuple::empty(py).into_any().unbind(),
+                "C",
+            )
+            .unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+
+            let err = ravel_multi_index(
+                py,
+                PyList::new(py, [1_i64, 0_i64, 1_i64, 0_i64])?
+                    .into_any()
+                    .unbind(),
+                PyTuple::new(py, [4_usize])?.into_any().unbind(),
+                None,
+                "C",
+            )
+            .unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+
+            let err = ravel_multi_index(
+                py,
+                PyTuple::new(py, [0.1_f64, 0.0_f64])?.into_any().unbind(),
+                dims.clone().into_any().unbind(),
+                None,
+                "C",
+            )
+            .unwrap_err();
+            assert!(err.is_instance_of::<PyTypeError>(py));
+
+            let err = ravel_multi_index(
+                py,
+                PyTuple::new(py, [-3_i64, 1_i64])?.into_any().unbind(),
+                dims.into_any().unbind(),
+                None,
+                "C",
+            )
+            .unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
             Ok(())
         });
     }

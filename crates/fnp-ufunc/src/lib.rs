@@ -2018,6 +2018,44 @@ impl ChooseMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MultiIndexMode {
+    Raise,
+    Wrap,
+    Clip,
+}
+
+impl MultiIndexMode {
+    fn parse(raw: &str) -> Result<Self, UFuncError> {
+        match raw {
+            "raise" => Ok(Self::Raise),
+            "wrap" => Ok(Self::Wrap),
+            "clip" => Ok(Self::Clip),
+            _ => Err(UFuncError::Msg(format!(
+                "ravel_multi_index: unsupported mode '{raw}'; expected 'raise', 'wrap', or 'clip'"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndexOrder {
+    C,
+    F,
+}
+
+impl IndexOrder {
+    fn parse(raw: &str, context: &str) -> Result<Self, UFuncError> {
+        match raw {
+            "C" => Ok(Self::C),
+            "F" => Ok(Self::F),
+            _ => Err(UFuncError::Msg(format!(
+                "{context}: order must be 'C' or 'F', got '{raw}'"
+            ))),
+        }
+    }
+}
+
 fn resolve_choose_index_i64(
     index: i64,
     n_choices: usize,
@@ -20115,37 +20153,101 @@ impl UFuncArray {
 
     /// Convert a flat index into a tuple of coordinate arrays (np.unravel_index).
     pub fn unravel_index(indices: &Self, shape: &[usize]) -> Result<Vec<Self>, UFuncError> {
-        let strides = c_strides_elems(shape);
-        let ndim = shape.len();
-        let total: usize = fnp_ndarray::element_count(shape).map_err(UFuncError::Shape)?;
-        let mut result: Vec<Vec<f64>> = vec![Vec::with_capacity(indices.values.len()); ndim];
-        for &idx_f in &indices.values {
-            let idx = idx_f as usize;
-            if idx >= total {
+        Self::unravel_index_order(indices, shape, "C")
+    }
+
+    /// `np.unravel_index` with explicit memory order.
+    pub fn unravel_index_order(
+        indices: &Self,
+        shape: &[usize],
+        order: &str,
+    ) -> Result<Vec<Self>, UFuncError> {
+        let order = IndexOrder::parse(order, "unravel_index")?;
+        if shape.is_empty() {
+            if !indices.shape.is_empty() {
+                return Err(UFuncError::Msg(
+                    "unravel_index: multiple indices are not supported for 0d arrays".to_string(),
+                ));
+            }
+
+            let sidecar = indices
+                .exact_integer_sidecar("unravel_index")?
+                .ok_or_else(|| {
+                    UFuncError::Msg("unravel_index: only int indices permitted".to_string())
+                })?;
+            let scalar = match sidecar {
+                IntegerSidecar::I64(values) => i128::from(values[0]),
+                IntegerSidecar::U64(values) => i128::from(values[0]),
+            };
+            if scalar != 0 {
                 return Err(UFuncError::Msg(format!(
-                    "unravel_index: index {idx} out of bounds for shape {shape:?}"
+                    "unravel_index: index {scalar} out of bounds for shape {shape:?}"
                 )));
             }
-            let mut rem = idx;
-            for d in 0..ndim {
-                result[d].push((rem / strides[d]) as f64);
-                rem %= strides[d];
+            return Ok(vec![]);
+        }
+
+        let strides = match order {
+            IndexOrder::C => c_strides_elems(shape),
+            IndexOrder::F => f_strides_elems(shape),
+        };
+        let ndim = shape.len();
+        let total = intp_element_count(shape, "unravel_index")?;
+        let total_u128 = total as u128;
+        let sidecar = indices
+            .exact_integer_sidecar("unravel_index")?
+            .ok_or_else(|| {
+                UFuncError::Msg("unravel_index: only int indices permitted".to_string())
+            })?;
+        let mut result: Vec<Vec<i64>> = vec![Vec::with_capacity(indices.values.len()); ndim];
+
+        for index in 0..indices.values.len() {
+            let idx_i128 = match &sidecar {
+                IntegerSidecar::I64(values) => i128::from(values[index]),
+                IntegerSidecar::U64(values) => i128::from(values[index]),
+            };
+            if idx_i128 < 0 || (idx_i128 as u128) >= total_u128 {
+                return Err(UFuncError::Msg(format!(
+                    "unravel_index: index {idx_i128} out of bounds for shape {shape:?}"
+                )));
+            }
+
+            let mut rem = usize::try_from(idx_i128)
+                .map_err(|_| UFuncError::Msg("unravel_index: index exceeds usize".to_string()))?;
+            match order {
+                IndexOrder::C => {
+                    for d in 0..ndim {
+                        result[d].push((rem / strides[d]) as i64);
+                        rem %= strides[d];
+                    }
+                }
+                IndexOrder::F => {
+                    for d in (0..ndim).rev() {
+                        result[d].push((rem / strides[d]) as i64);
+                        rem %= strides[d];
+                    }
+                }
             }
         }
-        let n = indices.values.len();
-        Ok(result
+
+        result
             .into_iter()
-            .map(|vals| Self {
-                shape: vec![n],
-                values: vals,
-                dtype: DType::I64,
-                integer_sidecar: None,
-            })
-            .collect())
+            .map(|values| Self::from_storage(indices.shape.clone(), ArrayStorage::I64(values)))
+            .collect()
     }
 
     /// Convert coordinate arrays into a flat index (np.ravel_multi_index).
     pub fn ravel_multi_index(multi_index: &[&Self], shape: &[usize]) -> Result<Self, UFuncError> {
+        Self::ravel_multi_index_with_options(multi_index, shape, &["raise"], "C")
+    }
+
+    /// `np.ravel_multi_index` with explicit `mode` and `order`.
+    pub fn ravel_multi_index_with_options(
+        multi_index: &[&Self],
+        shape: &[usize],
+        modes: &[&str],
+        order: &str,
+    ) -> Result<Self, UFuncError> {
         let ndim = shape.len();
         if multi_index.len() != ndim {
             return Err(UFuncError::Msg(format!(
@@ -20154,36 +20256,65 @@ impl UFuncArray {
                 ndim
             )));
         }
+
+        if ndim == 0 {
+            return Self::from_storage(vec![], ArrayStorage::I64(vec![0]));
+        }
+
+        let order = IndexOrder::parse(order, "ravel_multi_index")?;
+        let parsed_modes = if modes.len() == 1 {
+            vec![MultiIndexMode::parse(modes[0])?; ndim]
+        } else if modes.len() == ndim {
+            modes
+                .iter()
+                .map(|mode| MultiIndexMode::parse(mode))
+                .collect::<Result<Vec<_>, UFuncError>>()?
+        } else {
+            return Err(UFuncError::Msg(format!(
+                "ravel_multi_index: mode must be a single string or a sequence of length {ndim}"
+            )));
+        };
+
+        let shared_shape = multi_index[0].shape.clone();
         let n = multi_index[0].values.len();
         for arr in multi_index {
-            if arr.values.len() != n {
+            if arr.shape != shared_shape {
                 return Err(UFuncError::Msg(
-                    "ravel_multi_index: all index arrays must have same length".to_string(),
+                    "ravel_multi_index: all index arrays must have same shape".to_string(),
                 ));
             }
         }
-        let strides = c_strides_elems(shape);
+
+        let _ = intp_element_count(shape, "ravel_multi_index")?;
+        let strides = match order {
+            IndexOrder::C => c_strides_elems(shape),
+            IndexOrder::F => f_strides_elems(shape),
+        };
+        let sidecars = multi_index
+            .iter()
+            .map(|arr| {
+                arr.exact_integer_sidecar("ravel_multi_index")?
+                    .ok_or_else(|| {
+                        UFuncError::Msg("ravel_multi_index: only int indices permitted".to_string())
+                    })
+            })
+            .collect::<Result<Vec<_>, UFuncError>>()?;
         let mut values = Vec::with_capacity(n);
         for i in 0..n {
-            let mut flat = 0usize;
+            let mut flat = 0_u128;
             for d in 0..ndim {
-                let idx = multi_index[d].values[i] as usize;
-                if idx >= shape[d] {
-                    return Err(UFuncError::Msg(format!(
-                        "ravel_multi_index: index {idx} out of bounds for axis {d} with size {}",
-                        shape[d]
-                    )));
-                }
-                flat += idx * strides[d];
+                let raw_index = match &sidecars[d] {
+                    IntegerSidecar::I64(data) => i128::from(data[i]),
+                    IntegerSidecar::U64(data) => i128::from(data[i]),
+                };
+                let idx = resolve_multi_index_value(raw_index, shape[d], d, parsed_modes[d])?;
+                flat += (idx as u128) * (strides[d] as u128);
             }
-            values.push(flat as f64);
+            values.push(i64::try_from(flat).map_err(|_| {
+                UFuncError::Msg("ravel_multi_index: flat index exceeds platform range".to_string())
+            })?);
         }
-        Ok(Self {
-            shape: vec![n],
-            values,
-            dtype: DType::I64,
-            integer_sidecar: None,
-        })
+        Self::from_storage(shared_shape, ArrayStorage::I64(values))
     }
 
     /// Open meshgrid: return sparse arrays for N-D indexing (np.ogrid equivalent).
@@ -22203,6 +22334,68 @@ fn c_strides_elems(shape: &[usize]) -> Vec<usize> {
         strides[i] = strides[i + 1] * shape[i + 1];
     }
     strides
+}
+
+fn f_strides_elems(shape: &[usize]) -> Vec<usize> {
+    let ndim = shape.len();
+    let mut strides = vec![1usize; ndim];
+    for i in 1..ndim {
+        strides[i] = strides[i - 1] * shape[i - 1];
+    }
+    strides
+}
+
+fn intp_element_count(shape: &[usize], context: &str) -> Result<usize, UFuncError> {
+    let total = fnp_ndarray::element_count(shape).map_err(UFuncError::Shape)?;
+    if total > i64::MAX as usize {
+        return Err(UFuncError::Msg(format!(
+            "{context}: shape {shape:?} exceeds platform index capacity"
+        )));
+    }
+    Ok(total)
+}
+
+fn resolve_multi_index_value(
+    index: i128,
+    axis_len: usize,
+    axis: usize,
+    mode: MultiIndexMode,
+) -> Result<usize, UFuncError> {
+    let axis_len_i128 = i128::try_from(axis_len)
+        .map_err(|_| UFuncError::Msg("ravel_multi_index: axis length exceeds i128".to_string()))?;
+
+    if axis_len == 0 {
+        return Err(UFuncError::Msg(format!(
+            "ravel_multi_index: index {index} out of bounds for axis {axis} with size 0"
+        )));
+    }
+
+    match mode {
+        MultiIndexMode::Raise => {
+            if !(0..axis_len_i128).contains(&index) {
+                return Err(UFuncError::Msg(format!(
+                    "ravel_multi_index: index {index} out of bounds for axis {axis} with size {axis_len}"
+                )));
+            }
+            usize::try_from(index)
+                .map_err(|_| UFuncError::Msg("ravel_multi_index: index exceeds usize".to_string()))
+        }
+        MultiIndexMode::Wrap => usize::try_from(index.rem_euclid(axis_len_i128)).map_err(|_| {
+            UFuncError::Msg("ravel_multi_index: wrapped index exceeds usize".to_string())
+        }),
+        MultiIndexMode::Clip => {
+            let clipped = if index < 0 {
+                0
+            } else if index >= axis_len_i128 {
+                axis_len_i128 - 1
+            } else {
+                index
+            };
+            usize::try_from(clipped).map_err(|_| {
+                UFuncError::Msg("ravel_multi_index: clipped index exceeds usize".to_string())
+            })
+        }
+    }
 }
 
 /// Compute vector norm with the given order.
@@ -40084,6 +40277,109 @@ mod tests {
         let refs: Vec<&UFuncArray> = coords.iter().collect();
         let flat = UFuncArray::ravel_multi_index(&refs, &shape).unwrap();
         assert_eq!(flat.values(), indices.values());
+    }
+
+    #[test]
+    fn unravel_index_supports_fortran_order_and_shape_preservation() {
+        let indices =
+            UFuncArray::from_storage(vec![1, 3], ArrayStorage::I64(vec![31, 41, 13])).unwrap();
+        let result = UFuncArray::unravel_index_order(&indices, &[7, 6], "F").unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].shape(), &[1, 3]);
+        assert_eq!(result[1].shape(), &[1, 3]);
+        assert_eq!(
+            result[0].to_storage().unwrap(),
+            ArrayStorage::I64(vec![3, 6, 6])
+        );
+        assert_eq!(
+            result[1].to_storage().unwrap(),
+            ArrayStorage::I64(vec![4, 5, 1])
+        );
+
+        let scalar = UFuncArray::from_storage(vec![], ArrayStorage::I64(vec![0])).unwrap();
+        assert!(UFuncArray::unravel_index(&scalar, &[]).unwrap().is_empty());
+
+        let err = UFuncArray::unravel_index(
+            &UFuncArray::from_storage(vec![1], ArrayStorage::I64(vec![0])).unwrap(),
+            &[],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("0d arrays"));
+    }
+
+    #[test]
+    fn ravel_multi_index_supports_order_modes_and_scalar_output() {
+        let rows = UFuncArray::from_storage(vec![3], ArrayStorage::I64(vec![3, 6, 6])).unwrap();
+        let cols = UFuncArray::from_storage(vec![3], ArrayStorage::I64(vec![4, 5, 1])).unwrap();
+        let f_order =
+            UFuncArray::ravel_multi_index_with_options(&[&rows, &cols], &[7, 6], &["raise"], "F")
+                .unwrap();
+        assert_eq!(f_order.shape(), &[3]);
+        assert_eq!(
+            f_order.to_storage().unwrap(),
+            ArrayStorage::I64(vec![31, 41, 13])
+        );
+
+        let clipped = UFuncArray::ravel_multi_index_with_options(
+            &[&rows, &cols],
+            &[4, 4],
+            &["clip", "wrap"],
+            "C",
+        )
+        .unwrap();
+        assert_eq!(
+            clipped.to_storage().unwrap(),
+            ArrayStorage::I64(vec![12, 13, 13])
+        );
+
+        let x = UFuncArray::from_storage(vec![], ArrayStorage::I64(vec![1])).unwrap();
+        let y = UFuncArray::from_storage(vec![], ArrayStorage::I64(vec![0])).unwrap();
+        let scalar = UFuncArray::ravel_multi_index(&[&x, &y], &[2, 2]).unwrap();
+        assert!(scalar.shape().is_empty());
+        assert_eq!(scalar.to_storage().unwrap(), ArrayStorage::I64(vec![2]));
+        assert_eq!(
+            UFuncArray::ravel_multi_index(&[], &[])
+                .unwrap()
+                .to_storage()
+                .unwrap(),
+            ArrayStorage::I64(vec![0])
+        );
+    }
+
+    #[test]
+    fn ravel_unravel_index_preserve_large_exact_integer_values() {
+        let large = (1_i64 << 53) + 7;
+        let cols = UFuncArray::from_storage(vec![], ArrayStorage::I64(vec![large])).unwrap();
+        let row = UFuncArray::from_storage(vec![], ArrayStorage::I64(vec![0])).unwrap();
+        let flat =
+            UFuncArray::ravel_multi_index(&[&row, &cols], &[1, (large as usize) + 1]).unwrap();
+        assert!(flat.has_integer_sidecar());
+        assert_eq!(flat.to_storage().unwrap(), ArrayStorage::I64(vec![large]));
+
+        let unravelled = UFuncArray::unravel_index(&flat, &[1, (large as usize) + 1]).unwrap();
+        assert_eq!(
+            unravelled[0].to_storage().unwrap(),
+            ArrayStorage::I64(vec![0])
+        );
+        assert_eq!(
+            unravelled[1].to_storage().unwrap(),
+            ArrayStorage::I64(vec![large])
+        );
+    }
+
+    #[test]
+    fn ravel_multi_index_detects_intp_overflow() {
+        let zero = UFuncArray::from_storage(vec![], ArrayStorage::I64(vec![0])).unwrap();
+        let half_max = (i64::MAX as usize) / 2;
+        assert_eq!(
+            UFuncArray::ravel_multi_index(&[&zero, &zero], &[half_max, 2])
+                .unwrap()
+                .to_storage()
+                .unwrap(),
+            ArrayStorage::I64(vec![0])
+        );
+        let err = UFuncArray::ravel_multi_index(&[&zero, &zero], &[half_max + 1, 2]).unwrap_err();
+        assert!(err.to_string().contains("platform index capacity"));
     }
 
     #[test]

@@ -706,8 +706,8 @@ FrankenNumPy implements the full set of NumPy's array construction and manipulat
 | `piecewise(condlist, funclist)` | Piecewise constant function via condition list |
 | `take_along_axis(indices, axis)` | Gather values along axis by index array |
 | `put_along_axis(indices, values, axis)` | Scatter values along axis by index array |
-| `ravel_multi_index(coords, shape)` | Convert N-D coordinates to flat indices (C-order) |
-| `unravel_index(indices, shape)` | Convert flat indices to N-D coordinates |
+| `ravel_multi_index(coords, shape)` | Convert N-D coordinates to flat indices with `mode` and `order` parity |
+| `unravel_index(indices, shape)` | Convert flat indices to N-D coordinates with `order` and shape-preserving parity |
 
 ---
 
