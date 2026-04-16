@@ -928,15 +928,11 @@ fn select(
 #[pyfunction]
 #[pyo3(signature = (a, choices, mode="raise"))]
 fn choose(py: Python<'_>, a: Py<PyAny>, choices: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
-    if mode != "raise" {
-        return Err(PyValueError::new_err(
-            "choose: only mode='raise' is implemented",
-        ));
-    }
-
     let a = extract_integer_array(py, a.bind(py), "choose(a)")?;
     let choices = extract_numeric_array_sequence(py, choices.bind(py), "choose(choices)")?;
-    let result = a.choose(&choices).map_err(map_ufunc_error)?;
+    let result = a
+        .choose_with_mode(&choices, mode)
+        .map_err(map_ufunc_error)?;
     build_numpy_array_from_ufunc(py, &result)
 }
 
@@ -2306,7 +2302,107 @@ mod tests {
     }
 
     #[test]
-    fn choose_rejects_non_raise_mode() {
+    fn choose_matches_numpy_wrap_mode() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let a = numeric_array(py, vec![-1_i64, 0_i64, 3_i64, 4_i64], "int64");
+            let choices = PyTuple::new(
+                py,
+                [
+                    numeric_array(py, vec![10.0, 20.0, 30.0, 40.0], "float64")
+                        .into_any()
+                        .unbind(),
+                    numeric_array(py, vec![50.0, 60.0, 70.0, 80.0], "float64")
+                        .into_any()
+                        .unbind(),
+                    numeric_array(py, vec![90.0, 91.0, 92.0, 93.0], "float64")
+                        .into_any()
+                        .unbind(),
+                ]
+                .iter()
+                .map(|item| item.bind(py)),
+            )?;
+
+            let actual = choose(
+                py,
+                a.clone().unbind(),
+                choices.clone().into_any().unbind(),
+                "wrap",
+            )?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method(
+                "choose",
+                (a, choices),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("mode", "wrap")?;
+                    kwargs
+                }),
+            )?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn choose_matches_numpy_clip_mode() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let a = numeric_array(py, vec![-4_i64, 0_i64, 2_i64, 9_i64], "int64");
+            let choices = PyTuple::new(
+                py,
+                [
+                    numeric_array(py, vec![10.0, 20.0, 30.0, 40.0], "float64")
+                        .into_any()
+                        .unbind(),
+                    numeric_array(py, vec![50.0, 60.0, 70.0, 80.0], "float64")
+                        .into_any()
+                        .unbind(),
+                    numeric_array(py, vec![90.0, 91.0, 92.0, 93.0], "float64")
+                        .into_any()
+                        .unbind(),
+                ]
+                .iter()
+                .map(|item| item.bind(py)),
+            )?;
+
+            let actual = choose(
+                py,
+                a.clone().unbind(),
+                choices.clone().into_any().unbind(),
+                "clip",
+            )?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method(
+                "choose",
+                (a, choices),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("mode", "clip")?;
+                    kwargs
+                }),
+            )?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn choose_rejects_unknown_mode() {
         with_python(|py| {
             if !numpy_available(py) {
                 return Ok(());
@@ -2322,9 +2418,9 @@ mod tests {
                 .map(|item| item.bind(py)),
             )?;
 
-            let err = choose(py, a.unbind(), choices.into_any().unbind(), "wrap").unwrap_err();
+            let err = choose(py, a.unbind(), choices.into_any().unbind(), "invalid").unwrap_err();
             assert!(
-                err.to_string().contains("mode='raise'"),
+                err.to_string().contains("unsupported mode"),
                 "unexpected error: {err}"
             );
             Ok(())

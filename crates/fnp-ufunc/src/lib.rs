@@ -1991,6 +1991,132 @@ impl IntegerSidecar {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChooseMode {
+    Raise,
+    Wrap,
+    Clip,
+}
+
+impl ChooseMode {
+    fn parse(raw: &str) -> Result<Self, UFuncError> {
+        match raw {
+            "raise" => Ok(Self::Raise),
+            "wrap" => Ok(Self::Wrap),
+            "clip" => Ok(Self::Clip),
+            _ => Err(UFuncError::Msg(format!(
+                "choose: unsupported mode '{raw}'; expected 'raise', 'wrap', or 'clip'"
+            ))),
+        }
+    }
+}
+
+fn resolve_choose_index_i64(
+    index: i64,
+    n_choices: usize,
+    mode: ChooseMode,
+) -> Result<usize, UFuncError> {
+    let max_index = n_choices - 1;
+    match mode {
+        ChooseMode::Raise => {
+            if index < 0 {
+                return Err(UFuncError::Msg(format!(
+                    "choose: invalid index value {index}"
+                )));
+            }
+            let choice_idx = usize::try_from(index).map_err(|_| {
+                UFuncError::Msg(format!(
+                    "choose: index {index} out of range for {n_choices} choices"
+                ))
+            })?;
+            if choice_idx >= n_choices {
+                return Err(UFuncError::Msg(format!(
+                    "choose: index {choice_idx} out of range for {n_choices} choices"
+                )));
+            }
+            Ok(choice_idx)
+        }
+        ChooseMode::Wrap => {
+            let modulus = i64::try_from(n_choices).map_err(|_| {
+                UFuncError::Msg(format!(
+                    "choose: number of choices {n_choices} does not fit in i64"
+                ))
+            })?;
+            Ok(index.rem_euclid(modulus) as usize)
+        }
+        ChooseMode::Clip => Ok(if index <= 0 {
+            0
+        } else {
+            usize::try_from(index)
+                .ok()
+                .map_or(max_index, |value| value.min(max_index))
+        }),
+    }
+}
+
+fn resolve_choose_index_u64(
+    index: u64,
+    n_choices: usize,
+    mode: ChooseMode,
+) -> Result<usize, UFuncError> {
+    let max_index = n_choices - 1;
+    match mode {
+        ChooseMode::Raise => {
+            let choice_idx = usize::try_from(index).map_err(|_| {
+                UFuncError::Msg(format!(
+                    "choose: index {index} out of range for {n_choices} choices"
+                ))
+            })?;
+            if choice_idx >= n_choices {
+                return Err(UFuncError::Msg(format!(
+                    "choose: index {choice_idx} out of range for {n_choices} choices"
+                )));
+            }
+            Ok(choice_idx)
+        }
+        ChooseMode::Wrap => {
+            let modulus = u64::try_from(n_choices).map_err(|_| {
+                UFuncError::Msg(format!(
+                    "choose: number of choices {n_choices} does not fit in u64"
+                ))
+            })?;
+            Ok((index % modulus) as usize)
+        }
+        ChooseMode::Clip => Ok(usize::try_from(index)
+            .ok()
+            .map_or(max_index, |value| value.min(max_index))),
+    }
+}
+
+fn resolve_choose_index_f64(
+    index: f64,
+    n_choices: usize,
+    mode: ChooseMode,
+) -> Result<usize, UFuncError> {
+    if !index.is_finite() || index.fract() != 0.0 {
+        return Err(UFuncError::Msg(format!(
+            "choose: invalid index value {index}"
+        )));
+    }
+
+    if index < 0.0 {
+        if index < i64::MIN as f64 {
+            return Err(UFuncError::Msg(format!(
+                "choose: invalid index value {index}"
+            )));
+        }
+        return resolve_choose_index_i64(index as i64, n_choices, mode);
+    }
+
+    if index > u64::MAX as f64 {
+        return Err(UFuncError::Msg(format!(
+            "choose: invalid index value {index}"
+        )));
+    }
+
+    resolve_choose_index_u64(index as u64, n_choices, mode)
+}
+
 #[derive(Debug, Clone)]
 pub struct UFuncArray {
     shape: Vec<usize>,
@@ -17536,13 +17662,21 @@ impl UFuncArray {
     /// Choose elements from a list of arrays based on an index array (np.choose).
     /// `self` contains integer indices selecting which array to pick from.
     pub fn choose(&self, choices: &[Self]) -> Result<Self, UFuncError> {
+        self.choose_with_mode(choices, "raise")
+    }
+
+    /// Choose elements from a list of arrays based on an index array (np.choose)
+    /// with explicit NumPy mode handling.
+    pub fn choose_with_mode(&self, choices: &[Self], mode: &str) -> Result<Self, UFuncError> {
         if choices.is_empty() {
             return Err(UFuncError::Msg(
                 "choose: need at least 1 choice".to_string(),
             ));
         }
+        let mode = ChooseMode::parse(mode)?;
         let n_choices = choices.len();
         let mut values = Vec::with_capacity(self.values.len());
+        let source_sidecar = self.synthesized_integer_sidecar("choose")?;
         let choice_sidecars = if matches!(choices[0].dtype, DType::I64 | DType::U64) {
             Some(
                 choices
@@ -17559,17 +17693,15 @@ impl UFuncArray {
             _ => None,
         };
         for (i, &idx) in self.values.iter().enumerate() {
-            if !idx.is_finite() || idx < 0.0 {
-                return Err(UFuncError::Msg(format!(
-                    "choose: invalid index value {idx}"
-                )));
-            }
-            let choice_idx = idx as usize;
-            if choice_idx >= n_choices {
-                return Err(UFuncError::Msg(format!(
-                    "choose: index {choice_idx} out of range for {n_choices} choices"
-                )));
-            }
+            let choice_idx = match &source_sidecar {
+                Some(IntegerSidecar::I64(values)) => {
+                    resolve_choose_index_i64(values[i], n_choices, mode)?
+                }
+                Some(IntegerSidecar::U64(values)) => {
+                    resolve_choose_index_u64(values[i], n_choices, mode)?
+                }
+                None => resolve_choose_index_f64(idx, n_choices, mode)?,
+            };
             if i >= choices[choice_idx].values.len() {
                 return Err(UFuncError::Msg(format!(
                     "choose: position {i} out of range for choice {choice_idx}"
@@ -37186,6 +37318,30 @@ mod tests {
         let c1 = UFuncArray::new(vec![4], vec![50.0, 60.0, 70.0, 80.0], DType::F64).unwrap();
         let r = idx.choose(&[c0, c1]).unwrap();
         assert_eq!(r.values(), &[10.0, 60.0, 30.0, 80.0]);
+    }
+
+    #[test]
+    fn choose_wrap_mode_wraps_negative_and_large_indices() {
+        let idx = UFuncArray::from_storage(vec![4], ArrayStorage::I64(vec![-1, 0, 3, 4])).unwrap();
+        let c0 = UFuncArray::new(vec![4], vec![10.0, 20.0, 30.0, 40.0], DType::F64).unwrap();
+        let c1 = UFuncArray::new(vec![4], vec![50.0, 60.0, 70.0, 80.0], DType::F64).unwrap();
+        let c2 = UFuncArray::new(vec![4], vec![90.0, 91.0, 92.0, 93.0], DType::F64).unwrap();
+
+        let r = idx.choose_with_mode(&[c0, c1, c2], "wrap").unwrap();
+
+        assert_eq!(r.values(), &[90.0, 20.0, 30.0, 80.0]);
+    }
+
+    #[test]
+    fn choose_clip_mode_clips_negative_and_large_indices() {
+        let idx = UFuncArray::from_storage(vec![4], ArrayStorage::I64(vec![-4, 0, 2, 9])).unwrap();
+        let c0 = UFuncArray::new(vec![4], vec![10.0, 20.0, 30.0, 40.0], DType::F64).unwrap();
+        let c1 = UFuncArray::new(vec![4], vec![50.0, 60.0, 70.0, 80.0], DType::F64).unwrap();
+        let c2 = UFuncArray::new(vec![4], vec![90.0, 91.0, 92.0, 93.0], DType::F64).unwrap();
+
+        let r = idx.choose_with_mode(&[c0, c1, c2], "clip").unwrap();
+
+        assert_eq!(r.values(), &[10.0, 20.0, 92.0, 93.0]);
     }
 
     #[test]
