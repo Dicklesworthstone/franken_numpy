@@ -690,6 +690,9 @@ FrankenNumPy implements the full set of NumPy's array construction and manipulat
 | `extract(condition, arr)` | Flat extraction by boolean mask |
 | `place(mask, vals)` | In-place replacement where mask is true (cyclic values) |
 | `putmask(mask, values)` | In-place masked scatter with cyclic value repetition |
+| `indices(dimensions, dtype)` | Dense grid of coordinate indices with optional dtype |
+| `diagflat(v, k)` | Flatten input and place values on a diagonal matrix |
+| `ix_(*args)` | Open mesh of broadcastable index vectors |
 | `diag_indices(n, ndim)` | Tuple of diagonal index arrays |
 | `diag_indices_from(arr)` | Diagonal index tuple inferred from array shape |
 | `tril_indices(n, k, m)` | Lower-triangle row/column index tuple |

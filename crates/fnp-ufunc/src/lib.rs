@@ -3090,7 +3090,8 @@ ufunc = np.frompyfunc(callable_obj, payload["nin"], payload["nout"])
 
 arrays = []
 for item in payload["arrays"]:
-    array = np.array(item["values"], dtype=float)
+    dtype = object if item.get("dtype") == "object" else float
+    array = np.array(item["values"], dtype=dtype)
     array = array.reshape(item["shape"])
     arrays.append(array)
 
@@ -3163,6 +3164,42 @@ impl PyObjectArray {
     pub fn size(&self) -> usize {
         self.values.len()
     }
+
+    pub fn broadcast_arrays(arrays: &[&Self]) -> Result<Vec<Self>, UFuncError> {
+        if arrays.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut shape = arrays[0].shape.clone();
+        for arr in &arrays[1..] {
+            shape = broadcast_shape(&shape, &arr.shape).map_err(UFuncError::Shape)?;
+        }
+        let out_count = element_count(&shape).map_err(UFuncError::Shape)?;
+        let ndim = shape.len();
+        let mut result = Vec::with_capacity(arrays.len());
+        for arr in arrays {
+            let arr_ndim = arr.shape.len();
+            let arr_strides = contiguous_strides_elems(&arr.shape);
+            let steps = aligned_broadcast_axis_steps(ndim, &arr.shape, &arr_strides);
+            let out_strides = c_strides_elems(&shape);
+            let mut values = Vec::with_capacity(out_count);
+            for flat in 0..out_count {
+                let mut src_idx = 0usize;
+                for d in 0..ndim {
+                    let coord = (flat / out_strides[d]) % shape[d];
+                    let offset = ndim - arr_ndim;
+                    if d >= offset && arr.shape[d - offset] > 1 {
+                        src_idx += coord * steps[d];
+                    }
+                }
+                values.push(arr.values[src_idx].clone());
+            }
+            result.push(Self {
+                shape: shape.clone(),
+                values,
+            });
+        }
+        Ok(result)
+    }
 }
 
 fn validate_frompyfunc_nout(nout: usize) -> Result<(), UFuncError> {
@@ -3192,6 +3229,28 @@ fn prepare_frompyfunc_call(
     }
 
     let broadcasted = UFuncArray::broadcast_arrays(arrays)?;
+    let out_shape = broadcasted[0].shape.clone();
+    let element_count = broadcasted[0].values.len();
+    Ok((out_shape, element_count, broadcasted))
+}
+
+fn prepare_frompyfunc_object_call(
+    arrays: &[&PyObjectArray],
+    nin: usize,
+) -> Result<(Vec<usize>, usize, Vec<PyObjectArray>), UFuncError> {
+    if arrays.len() != nin {
+        return Err(UFuncError::Msg(format!(
+            "frompyfunc: expected {} input arrays, got {}",
+            nin,
+            arrays.len()
+        )));
+    }
+
+    if nin == 0 {
+        return Ok((Vec::new(), 1usize, Vec::new()));
+    }
+
+    let broadcasted = PyObjectArray::broadcast_arrays(arrays)?;
     let out_shape = broadcasted[0].shape.clone();
     let element_count = broadcasted[0].values.len();
     Ok((out_shape, element_count, broadcasted))
@@ -3505,7 +3564,8 @@ where
     }
 
     pub fn call_object(&self, arrays: &[&PyObjectArray]) -> Result<Vec<PyObjectArray>, UFuncError> {
-        let (out_shape, element_count, broadcasted) = prepare_frompyfunc_object_call(arrays, self.nin)?;
+        let (out_shape, element_count, broadcasted) =
+            prepare_frompyfunc_object_call(arrays, self.nin)?;
 
         let mut outputs: Vec<Vec<PyObjectValue>> = (0..self.nout)
             .map(|_| Vec::with_capacity(element_count))
@@ -3519,7 +3579,11 @@ where
                     PyObjectValue::Float(f) => args[arg_idx] = *f,
                     PyObjectValue::Int(i) => args[arg_idx] = *i as f64,
                     PyObjectValue::Bool(b) => args[arg_idx] = if *b { 1.0 } else { 0.0 },
-                    _ => return Err(UFuncError::Msg("frompyfunc: object input is not castable to float".to_string())),
+                    _ => {
+                        return Err(UFuncError::Msg(
+                            "frompyfunc: object input is not castable to float".to_string(),
+                        ));
+                    }
                 }
             }
 
@@ -3537,7 +3601,10 @@ where
             .collect()
     }
 
-    pub fn call_object_single(&self, arrays: &[&PyObjectArray]) -> Result<PyObjectArray, UFuncError> {
+    pub fn call_object_single(
+        &self,
+        arrays: &[&PyObjectArray],
+    ) -> Result<PyObjectArray, UFuncError> {
         if self.nout != 1 {
             return Err(UFuncError::Msg(format!(
                 "frompyfunc: call_single requires nout=1, got {}",
@@ -3545,7 +3612,8 @@ where
             )));
         }
 
-        self.call_object(arrays).map(|mut outputs| outputs.remove(0))
+        self.call_object(arrays)
+            .map(|mut outputs| outputs.remove(0))
     }
 }
 
@@ -3603,6 +3671,18 @@ impl PythonSourceUFunc {
         )
     }
 
+    pub fn call_object(&self, arrays: &[&PyObjectArray]) -> Result<Vec<PyObjectArray>, UFuncError> {
+        call_python_frompyfunc_object(
+            &self.python,
+            PythonFromPyFuncCallable::Source {
+                expression: self.callable_source.clone(),
+            },
+            self.nin,
+            self.nout,
+            arrays,
+        )
+    }
+
     pub fn call_single(&self, arrays: &[&UFuncArray]) -> Result<PyObjectArray, UFuncError> {
         if self.nout != 1 {
             return Err(UFuncError::Msg(format!(
@@ -3612,6 +3692,21 @@ impl PythonSourceUFunc {
         }
 
         self.call(arrays).map(|mut outputs| outputs.remove(0))
+    }
+
+    pub fn call_object_single(
+        &self,
+        arrays: &[&PyObjectArray],
+    ) -> Result<PyObjectArray, UFuncError> {
+        if self.nout != 1 {
+            return Err(UFuncError::Msg(format!(
+                "frompyfunc: call_single requires nout=1, got {}",
+                self.nout
+            )));
+        }
+
+        self.call_object(arrays)
+            .map(|mut outputs| outputs.remove(0))
     }
 }
 
@@ -3728,7 +3823,10 @@ impl PythonImportedCallableUFunc {
         self.call(arrays).map(|mut outputs| outputs.remove(0))
     }
 
-    pub fn call_object_single(&self, arrays: &[&PyObjectArray]) -> Result<PyObjectArray, UFuncError> {
+    pub fn call_object_single(
+        &self,
+        arrays: &[&PyObjectArray],
+    ) -> Result<PyObjectArray, UFuncError> {
         if self.nout != 1 {
             return Err(UFuncError::Msg(format!(
                 "frompyfunc: call_single requires nout=1, got {}",
@@ -3736,7 +3834,8 @@ impl PythonImportedCallableUFunc {
             )));
         }
 
-        self.call_object(arrays).map(|mut outputs| outputs.remove(0))
+        self.call_object(arrays)
+            .map(|mut outputs| outputs.remove(0))
     }
 }
 
@@ -30171,7 +30270,7 @@ mod tests {
     use super::{
         AxisSlice, BinaryDispatchMethod, BinaryOp, FloatErrorKind, FloatErrorMode, GridSpec,
         MAError, MaskedArray, OverrideDispatchDecision, OverrideOperand, OverridePayloadClass,
-        PrintOptions, PyObjectValue, QuantileInterp, ShapeError, StringArray,
+        PrintOptions, PyObjectArray, PyObjectValue, QuantileInterp, ShapeError, StringArray,
         UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncArrayView, UFuncError, UFuncLogRecord,
         UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp, bitwise_count, busday_count, busday_offset,
         cheb2poly, chebadd, chebder, chebdiv, chebfit, chebfromroots, chebint, chebmul, chebroots,
@@ -44931,6 +45030,31 @@ mod tests {
         }
 
         None
+    }
+
+    #[test]
+    fn frompyfunc_python_object_inputs() {
+        if let Some(python) = python_bridge_test_interpreter() {
+            let a = PyObjectArray::new(
+                vec![2],
+                vec![
+                    PyObjectValue::String("hello".into()),
+                    PyObjectValue::String("world".into()),
+                ],
+            )
+            .unwrap();
+            let ufunc =
+                frompyfunc_python_with_interpreter("lambda x: x + '!'", 1, 1, &python).unwrap();
+            let result = ufunc.call_object_single(&[&a]).unwrap();
+            assert_eq!(result.shape(), &[2]);
+            assert_eq!(
+                result.values(),
+                &[
+                    PyObjectValue::String("hello!".into()),
+                    PyObjectValue::String("world!".into())
+                ]
+            );
+        }
     }
 
     #[test]
