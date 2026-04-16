@@ -923,6 +923,12 @@ fn spacing(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+fn sign(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let x = extract_numeric_array(py, x.bind(py), "sign(x)")?;
+    build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Sign))
+}
+
+#[pyfunction]
 fn degrees(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x = extract_numeric_array(py, x.bind(py), "degrees(x)")?;
     build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Degrees))
@@ -1173,6 +1179,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(isinf, m)?)?;
     m.add_function(wrap_pyfunction!(isfinite, m)?)?;
     m.add_function(wrap_pyfunction!(spacing, m)?)?;
+    m.add_function(wrap_pyfunction!(sign, m)?)?;
     m.add_function(wrap_pyfunction!(degrees, m)?)?;
     m.add_function(wrap_pyfunction!(radians, m)?)?;
     m.add_function(wrap_pyfunction!(sinc, m)?)?;
@@ -1201,7 +1208,7 @@ mod tests {
         PyFromPyFunc, PyVectorize, argwhere, choose, compress, copysign, count_nonzero, degrees,
         digitize, extract, flatnonzero, fnp_python, frexp, hypot, interp, isfinite, isinf, isnan,
         isneginf, isposinf, ldexp, logaddexp, logaddexp2, modf, nan_to_num, nextafter, radians,
-        searchsorted, select, signbit, sinc, spacing, take, take_along_axis, where_py,
+        searchsorted, select, sign, signbit, sinc, spacing, take, take_along_axis, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
@@ -1281,6 +1288,7 @@ mod tests {
             assert!(module.getattr("isinf").is_ok());
             assert!(module.getattr("isfinite").is_ok());
             assert!(module.getattr("spacing").is_ok());
+            assert!(module.getattr("sign").is_ok());
             assert!(module.getattr("degrees").is_ok());
             assert!(module.getattr("radians").is_ok());
             assert!(module.getattr("sinc").is_ok());
@@ -2228,6 +2236,74 @@ mod tests {
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("spacing", (values,))?;
 
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn sign_matches_numpy_signed_zero_and_nan() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(
+                py,
+                vec![
+                    -0.0,
+                    0.0,
+                    -2.5,
+                    3.0,
+                    f64::NAN,
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                ],
+                "float64",
+            );
+            let actual = sign(py, values.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("sign", (values,))?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn sign_matches_numpy_multidimensional_integer_input() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(
+                py,
+                vec![vec![-2_i64, 0_i64, 5_i64], vec![7_i64, -11_i64, 0_i64]],
+                "int64",
+            );
+            let actual = sign(py, values.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("sign", (values,))?;
+
+            assert_eq!(
+                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
+                expected.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                actual
+                    .bind(py)
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                expected.getattr("dtype")?.str()?.extract::<String>()?
+            );
             assert_eq!(
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)

@@ -1065,7 +1065,7 @@ impl UnaryOp {
                 } else if x < 0.0 {
                     -1.0
                 } else {
-                    x
+                    0.0
                 }
             }
             Self::Sqrt => x.sqrt(),
@@ -32261,6 +32261,7 @@ mod tests {
         assert_eq!(out.values()[2], 1.0);
         assert!(out.values()[3].is_nan());
         assert_eq!(out.values()[4], 0.0);
+        assert!(!out.values()[4].is_sign_negative());
     }
 
     #[test]
