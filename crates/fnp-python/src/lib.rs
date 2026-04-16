@@ -167,6 +167,41 @@ fn extract_numeric_array_sequence(
         .collect()
 }
 
+fn extract_axis_spec(
+    py: Python<'_>,
+    axis: Option<Py<PyAny>>,
+    context: &str,
+) -> PyResult<Option<Vec<isize>>> {
+    let Some(axis) = axis else {
+        return Ok(None);
+    };
+
+    let axis = axis.bind(py);
+    if axis.is_none() {
+        return Ok(None);
+    }
+
+    if let Ok(axis) = axis.extract::<isize>() {
+        return Ok(Some(vec![axis]));
+    }
+
+    if let Ok(iter) = axis.try_iter() {
+        let axes = iter
+            .enumerate()
+            .map(|(index, item)| {
+                item?.extract::<isize>().map_err(|_| {
+                    PyTypeError::new_err(format!("{context}: axis[{index}] must be an integer"))
+                })
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        return Ok(Some(axes));
+    }
+
+    Err(PyTypeError::new_err(format!(
+        "{context}: axis must be an integer, tuple/list of integers, or None",
+    )))
+}
+
 fn build_numpy_array_from_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -707,6 +742,36 @@ fn argwhere(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, axis=None, keepdims=false))]
+fn count_nonzero(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    keepdims: bool,
+) -> PyResult<Py<PyAny>> {
+    let a = extract_numeric_array(py, a.bind(py), "count_nonzero(a)")?;
+    let axes = extract_axis_spec(py, axis, "count_nonzero")?;
+    let axis_is_none = axes.is_none();
+    let result = match axes {
+        None => a.count_nonzero(None, keepdims),
+        Some(axes) if axes.len() == 1 => a.count_nonzero(Some(axes[0]), keepdims),
+        Some(axes) => a.count_nonzero_axes(&axes, keepdims),
+    }
+    .map_err(map_ufunc_error)?;
+
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return if axis_is_none {
+            Ok(output.bind(py).call_method0("item")?.unbind())
+        } else {
+            Ok(output.bind(py).get_item(PyTuple::empty(py))?.unbind())
+        };
+    }
+
+    Ok(output)
+}
+
+#[pyfunction]
 #[pyo3(signature = (condition, a, axis=None))]
 fn compress(
     py: Python<'_>,
@@ -840,6 +905,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(where_py, m)?)?;
     m.add_function(wrap_pyfunction!(flatnonzero, m)?)?;
     m.add_function(wrap_pyfunction!(argwhere, m)?)?;
+    m.add_function(wrap_pyfunction!(count_nonzero, m)?)?;
     m.add_function(wrap_pyfunction!(compress, m)?)?;
     m.add_function(wrap_pyfunction!(extract, m)?)?;
     m.add_function(wrap_pyfunction!(select, m)?)?;
@@ -852,8 +918,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PyFromPyFunc, PyVectorize, argwhere, choose, compress, digitize, extract, flatnonzero,
-        fnp_python, interp, searchsorted, select, take_along_axis, where_py,
+        PyFromPyFunc, PyVectorize, argwhere, choose, compress, count_nonzero, digitize, extract,
+        flatnonzero, fnp_python, interp, searchsorted, select, take_along_axis, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
@@ -925,6 +991,7 @@ mod tests {
             assert!(module.getattr("where").is_ok());
             assert!(module.getattr("flatnonzero").is_ok());
             assert!(module.getattr("argwhere").is_ok());
+            assert!(module.getattr("count_nonzero").is_ok());
             assert!(module.getattr("compress").is_ok());
             assert!(module.getattr("extract").is_ok());
             assert!(module.getattr("select").is_ok());
@@ -1513,6 +1580,117 @@ mod tests {
             assert_eq!(
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn count_nonzero_matches_numpy_axis_none() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let arr = numeric_array(
+                py,
+                vec![vec![1_i64, 0_i64, 3_i64], vec![0_i64, 5_i64, 0_i64]],
+                "int64",
+            );
+            let actual = count_nonzero(py, arr.clone().unbind(), None, false)?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("count_nonzero", (arr,))?;
+
+            assert_eq!(repr_string(&actual.bind(py)), repr_string(&expected));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn count_nonzero_matches_numpy_axis_and_keepdims() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let arr = numeric_array(
+                py,
+                vec![vec![1_i64, 0_i64, 3_i64], vec![0_i64, 5_i64, 0_i64]],
+                "int64",
+            );
+            let axis = 1_i32.into_pyobject(py)?.unbind();
+            let actual = count_nonzero(py, arr.clone().unbind(), Some(axis.into()), true)?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method(
+                "count_nonzero",
+                (arr,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("axis", 1)?;
+                    kwargs.set_item("keepdims", true)?;
+                    kwargs
+                }),
+            )?;
+
+            assert_eq!(
+                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
+                expected.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn count_nonzero_matches_numpy_axis_tuple_and_empty_tuple() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let arr = numeric_array(
+                py,
+                vec![vec![1_i64, 0_i64, 3_i64], vec![0_i64, 5_i64, 0_i64]],
+                "int64",
+            );
+            let axis_tuple = PyTuple::new(py, [0_isize, 1_isize])?.unbind();
+            let actual_tuple = count_nonzero(
+                py,
+                arr.clone().unbind(),
+                Some(axis_tuple.clone_ref(py).into()),
+                false,
+            )?;
+            let numpy = py.import("numpy")?;
+            let expected_tuple =
+                numpy.call_method1("count_nonzero", (arr.clone(), axis_tuple.bind(py)))?;
+
+            assert_eq!(
+                repr_string(&actual_tuple.bind(py)),
+                repr_string(&expected_tuple)
+            );
+
+            let empty_axis = PyTuple::empty(py).unbind();
+            let actual_empty = count_nonzero(
+                py,
+                arr.clone().unbind(),
+                Some(empty_axis.clone_ref(py).into()),
+                false,
+            )?;
+            let expected_empty = numpy.call_method1("count_nonzero", (arr, empty_axis.bind(py)))?;
+
+            assert_eq!(
+                actual_empty
+                    .bind(py)
+                    .getattr("shape")?
+                    .extract::<Vec<usize>>()?,
+                expected_empty.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                repr_string(&actual_empty.bind(py).call_method0("tolist")?),
+                repr_string(&expected_empty.call_method0("tolist")?)
             );
             Ok(())
         });
