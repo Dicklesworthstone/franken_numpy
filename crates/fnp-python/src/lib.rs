@@ -236,6 +236,79 @@ fn extract_axis_spec(
     )))
 }
 
+fn require_numpy_ndarray(py: Python<'_>, value: &Bound<'_, PyAny>, context: &str) -> PyResult<()> {
+    let builtins = py.import("builtins")?;
+    let numpy = py.import("numpy")?;
+    let is_ndarray = builtins
+        .call_method1("isinstance", (value, numpy.getattr("ndarray")?))?
+        .extract::<bool>()?;
+
+    if is_ndarray {
+        Ok(())
+    } else {
+        Err(PyTypeError::new_err(format!(
+            "{context}: argument 1 must be numpy.ndarray",
+        )))
+    }
+}
+
+fn reshape_with_leading_singletons(
+    array: UFuncArray,
+    target_ndim: usize,
+    context: &str,
+) -> PyResult<UFuncArray> {
+    if array.shape().len() >= target_ndim {
+        return Ok(array);
+    }
+
+    let mut reshaped = Vec::with_capacity(target_ndim);
+    reshaped.extend(std::iter::repeat_n(
+        1_isize,
+        target_ndim - array.shape().len(),
+    ));
+    reshaped.extend(
+        array
+            .shape()
+            .iter()
+            .map(|&dim| {
+                isize::try_from(dim).map_err(|_| {
+                    PyValueError::new_err(format!(
+                        "{context}: dimension {dim} exceeds signed pointer range",
+                    ))
+                })
+            })
+            .collect::<PyResult<Vec<_>>>()?,
+    );
+
+    array
+        .reshape(&reshaped)
+        .map_err(|err| map_ufunc_error(format!("{context}: {err}")))
+}
+
+fn copy_result_into_numpy_array(
+    py: Python<'_>,
+    target: &Bound<'_, PyAny>,
+    array: &UFuncArray,
+) -> PyResult<()> {
+    let numpy = py.import("numpy")?;
+    let updated = build_numpy_array_from_ufunc(py, array)?;
+    numpy.call_method1("copyto", (target, updated.bind(py)))?;
+    Ok(())
+}
+
+fn extract_array_shape(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    context: &str,
+) -> PyResult<Vec<usize>> {
+    let numpy = py.import("numpy")?;
+    let array = numpy.call_method1("asarray", (value,))?;
+    array
+        .getattr("shape")?
+        .extract::<Vec<usize>>()
+        .map_err(|err| PyTypeError::new_err(format!("{context}: could not read shape: {err}")))
+}
+
 fn build_numpy_array_from_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -1163,6 +1236,180 @@ fn searchsorted(
 }
 
 #[pyfunction]
+fn put(py: Python<'_>, a: Py<PyAny>, ind: Py<PyAny>, v: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let a = a.bind(py);
+    require_numpy_ndarray(py, a, "put")?;
+
+    let mut array = extract_numeric_array(py, a, "put(a)")?;
+    let (_, indices) = extract_take_indices(py, ind.bind(py), "put(ind)")?;
+    let values = extract_numeric_array(py, v.bind(py), "put(v)")?;
+
+    array.put(&indices, &values).map_err(map_ufunc_error)?;
+    copy_result_into_numpy_array(py, a, &array)?;
+    Ok(py.None())
+}
+
+#[pyfunction]
+fn place(py: Python<'_>, arr: Py<PyAny>, mask: Py<PyAny>, vals: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let arr = arr.bind(py);
+    require_numpy_ndarray(py, arr, "place")?;
+
+    let mut array = extract_numeric_array(py, arr, "place(arr)")?;
+    let mask = extract_numeric_array(py, mask.bind(py), "place(mask)")?;
+    let values = extract_numeric_array(py, vals.bind(py), "place(vals)")?;
+
+    array.place(&mask, &values).map_err(map_ufunc_error)?;
+    copy_result_into_numpy_array(py, arr, &array)?;
+    Ok(py.None())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, /, mask, values))]
+fn putmask(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    mask: Py<PyAny>,
+    values: Py<PyAny>,
+) -> PyResult<Py<PyAny>> {
+    let a = a.bind(py);
+    require_numpy_ndarray(py, a, "putmask")?;
+
+    let mut array = extract_numeric_array(py, a, "putmask(a)")?;
+    let mask = extract_numeric_array(py, mask.bind(py), "putmask(mask)")?;
+    let values = extract_numeric_array(py, values.bind(py), "putmask(values)")?;
+
+    array.putmask(&mask, &values).map_err(map_ufunc_error)?;
+    copy_result_into_numpy_array(py, a, &array)?;
+    Ok(py.None())
+}
+
+#[pyfunction]
+#[pyo3(signature = (n, ndim=2))]
+fn diag_indices(py: Python<'_>, n: usize, ndim: usize) -> PyResult<Py<PyAny>> {
+    let (arrays, _) = UFuncArray::diag_indices(n, ndim);
+    build_numpy_tuple_from_ufuncs(py, &arrays)
+}
+
+#[pyfunction]
+fn diag_indices_from(py: Python<'_>, arr: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let shape = extract_array_shape(py, arr.bind(py), "diag_indices_from(arr)")?;
+    if shape.len() < 2 {
+        return Err(PyValueError::new_err("input array must be at least 2-d"));
+    }
+
+    let n = shape[0];
+    if shape[1..].iter().any(|&dim| dim != n) {
+        return Err(PyValueError::new_err(
+            "All dimensions of input must be of equal length",
+        ));
+    }
+
+    let (arrays, _) = UFuncArray::diag_indices(n, shape.len());
+    build_numpy_tuple_from_ufuncs(py, &arrays)
+}
+
+#[pyfunction]
+#[pyo3(signature = (n, k=0, m=None))]
+fn tril_indices(py: Python<'_>, n: usize, k: i64, m: Option<usize>) -> PyResult<Py<PyAny>> {
+    let (rows, cols) = UFuncArray::tril_indices(n, m.unwrap_or(n), k);
+    build_numpy_tuple_from_ufuncs(py, &[rows, cols])
+}
+
+#[pyfunction]
+#[pyo3(signature = (arr, k=0))]
+fn tril_indices_from(py: Python<'_>, arr: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
+    let shape = extract_array_shape(py, arr.bind(py), "tril_indices_from(arr)")?;
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("input array must be 2-d"));
+    }
+
+    let (rows, cols) = UFuncArray::tril_indices(shape[0], shape[1], k);
+    build_numpy_tuple_from_ufuncs(py, &[rows, cols])
+}
+
+#[pyfunction]
+#[pyo3(signature = (n, k=0, m=None))]
+fn triu_indices(py: Python<'_>, n: usize, k: i64, m: Option<usize>) -> PyResult<Py<PyAny>> {
+    let (rows, cols) = UFuncArray::triu_indices(n, m.unwrap_or(n), k);
+    build_numpy_tuple_from_ufuncs(py, &[rows, cols])
+}
+
+#[pyfunction]
+#[pyo3(signature = (arr, k=0))]
+fn triu_indices_from(py: Python<'_>, arr: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
+    let shape = extract_array_shape(py, arr.bind(py), "triu_indices_from(arr)")?;
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("input array must be 2-d"));
+    }
+
+    let (rows, cols) = UFuncArray::triu_indices(shape[0], shape[1], k);
+    build_numpy_tuple_from_ufuncs(py, &[rows, cols])
+}
+
+#[pyfunction]
+#[pyo3(signature = (arr, indices, values, axis=Some(-1)))]
+fn put_along_axis(
+    py: Python<'_>,
+    arr: Py<PyAny>,
+    indices: Py<PyAny>,
+    values: Py<PyAny>,
+    axis: Option<isize>,
+) -> PyResult<Py<PyAny>> {
+    let arr = arr.bind(py);
+    let _ = arr.getattr("ndim")?;
+    let original_shape = arr.getattr("shape")?.extract::<Vec<usize>>()?;
+    let mut array = extract_numeric_array(py, arr, "put_along_axis(arr)")?;
+
+    let indices_obj = indices.bind(py);
+    let _ = indices_obj.getattr("ndim")?;
+    let indices = extract_integer_array(py, indices_obj, "put_along_axis(indices)")?;
+    let values = extract_numeric_array(py, values.bind(py), "put_along_axis(values)")?;
+
+    match axis {
+        Some(axis) => {
+            let values = reshape_with_leading_singletons(
+                values,
+                array.shape().len(),
+                "put_along_axis(values)",
+            )?;
+            array
+                .put_along_axis(&indices, &values, axis)
+                .map_err(map_ufunc_error)?;
+        }
+        None => {
+            if indices.shape().len() != 1 {
+                return Err(PyValueError::new_err(
+                    "when axis=None, `indices` must have a single dimension.",
+                ));
+            }
+
+            let values = values.flatten();
+            let mut flattened = array.flatten();
+            flattened
+                .put_along_axis(&indices, &values, 0)
+                .map_err(map_ufunc_error)?;
+
+            let reshaped_shape = original_shape
+                .iter()
+                .map(|&dim| {
+                    isize::try_from(dim).map_err(|_| {
+                        PyValueError::new_err(format!(
+                            "put_along_axis(arr): dimension {dim} exceeds signed pointer range",
+                        ))
+                    })
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            array = flattened
+                .reshape(&reshaped_shape)
+                .map_err(map_ufunc_error)?;
+        }
+    }
+
+    copy_result_into_numpy_array(py, arr, &array)?;
+    Ok(py.None())
+}
+
+#[pyfunction]
 #[pyo3(signature = (arr, indices, axis=Some(-1)))]
 fn take_along_axis(
     py: Python<'_>,
@@ -1236,6 +1483,16 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(select, m)?)?;
     m.add_function(wrap_pyfunction!(choose, m)?)?;
     m.add_function(wrap_pyfunction!(searchsorted, m)?)?;
+    m.add_function(wrap_pyfunction!(put, m)?)?;
+    m.add_function(wrap_pyfunction!(place, m)?)?;
+    m.add_function(wrap_pyfunction!(putmask, m)?)?;
+    m.add_function(wrap_pyfunction!(diag_indices, m)?)?;
+    m.add_function(wrap_pyfunction!(diag_indices_from, m)?)?;
+    m.add_function(wrap_pyfunction!(tril_indices, m)?)?;
+    m.add_function(wrap_pyfunction!(tril_indices_from, m)?)?;
+    m.add_function(wrap_pyfunction!(triu_indices, m)?)?;
+    m.add_function(wrap_pyfunction!(triu_indices_from, m)?)?;
+    m.add_function(wrap_pyfunction!(put_along_axis, m)?)?;
     m.add_function(wrap_pyfunction!(take_along_axis, m)?)?;
     Ok(())
 }
@@ -1244,12 +1501,14 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::{
         PyFromPyFunc, PyVectorize, argwhere, ceil, choose, compress, copysign, count_nonzero,
-        degrees, digitize, extract, flatnonzero, floor, fnp_python, frexp, hypot, interp, isfinite,
-        isinf, isnan, isneginf, isposinf, ldexp, logaddexp, logaddexp2, modf, nan_to_num,
-        nextafter, radians, rint, searchsorted, select, sign, signbit, sinc, spacing, take,
-        take_along_axis, trunc, where_py,
+        degrees, diag_indices, diag_indices_from, digitize, extract, flatnonzero, floor,
+        fnp_python, frexp, hypot, interp, isfinite, isinf, isnan, isneginf, isposinf, ldexp,
+        logaddexp, logaddexp2, modf, nan_to_num, nextafter, place, put, put_along_axis, putmask,
+        radians, rint, searchsorted, select, sign, signbit, sinc, spacing, take, take_along_axis,
+        tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc, where_py,
     };
     use pyo3::IntoPyObject;
+    use pyo3::exceptions::PyValueError;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
     use pyo3::{PyResult, Python};
 
@@ -1304,6 +1563,31 @@ mod tests {
         value.repr().unwrap().extract::<String>().unwrap()
     }
 
+    fn assert_index_tuple_matches_numpy(
+        actual: &pyo3::Bound<'_, pyo3::types::PyAny>,
+        expected: &pyo3::Bound<'_, pyo3::types::PyAny>,
+    ) -> PyResult<()> {
+        let actual_tuple = actual.downcast::<PyTuple>()?;
+        let expected_tuple = expected.downcast::<PyTuple>()?;
+        assert_eq!(actual_tuple.len()?, expected_tuple.len()?);
+
+        for (actual_item, expected_item) in actual_tuple.try_iter()?.zip(expected_tuple.try_iter()?)
+        {
+            let actual_item = actual_item?;
+            let expected_item = expected_item?;
+            assert_eq!(
+                actual_item.getattr("dtype")?.str()?.extract::<String>()?,
+                expected_item.getattr("dtype")?.str()?.extract::<String>()?
+            );
+            assert_eq!(
+                repr_string(&actual_item.call_method0("tolist")?),
+                repr_string(&expected_item.call_method0("tolist")?)
+            );
+        }
+
+        Ok(())
+    }
+
     #[test]
     fn module_exports_python_surface() {
         with_python(|py| {
@@ -1350,6 +1634,16 @@ mod tests {
             assert!(module.getattr("select").is_ok());
             assert!(module.getattr("choose").is_ok());
             assert!(module.getattr("searchsorted").is_ok());
+            assert!(module.getattr("put").is_ok());
+            assert!(module.getattr("place").is_ok());
+            assert!(module.getattr("putmask").is_ok());
+            assert!(module.getattr("diag_indices").is_ok());
+            assert!(module.getattr("diag_indices_from").is_ok());
+            assert!(module.getattr("tril_indices").is_ok());
+            assert!(module.getattr("tril_indices_from").is_ok());
+            assert!(module.getattr("triu_indices").is_ok());
+            assert!(module.getattr("triu_indices_from").is_ok());
+            assert!(module.getattr("put_along_axis").is_ok());
             assert!(module.getattr("take_along_axis").is_ok());
             assert!(module.getattr("Nditer").is_ok());
             Ok(())
@@ -3486,6 +3780,391 @@ mod tests {
     }
 
     #[test]
+    fn put_matches_numpy_in_place_and_returns_none() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let arr = numeric_array(py, vec![1_i64, 2_i64, 3_i64, 4_i64], "int64");
+            let expected = numeric_array(py, vec![1_i64, 2_i64, 3_i64, 4_i64], "int64");
+            let indices = numeric_array(py, vec![3_i64, 1_i64, 1_i64], "int64");
+            let values = numeric_array(py, vec![9_i64, 8_i64], "int64");
+
+            let actual = put(
+                py,
+                arr.clone().unbind(),
+                indices.clone().unbind(),
+                values.clone().unbind(),
+            )?;
+            assert!(actual.bind(py).is_none());
+
+            let numpy = py.import("numpy")?;
+            numpy.call_method1("put", (expected.clone(), indices, values))?;
+
+            assert_eq!(
+                repr_string(&arr.call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn put_preserves_large_uint64_values_in_place() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let large = (1_u64 << 63) + 4099;
+            let arr = numeric_array(py, vec![1_u64, 2_u64, 3_u64], "uint64");
+            let expected = numeric_array(py, vec![1_u64, 2_u64, 3_u64], "uint64");
+            let indices = numeric_array(py, vec![1_i64, 2_i64], "int64");
+            let values = numeric_array(py, vec![large, large - 1], "uint64");
+
+            let actual = put(
+                py,
+                arr.clone().unbind(),
+                indices.clone().unbind(),
+                values.clone().unbind(),
+            )?;
+            assert!(actual.bind(py).is_none());
+
+            let numpy = py.import("numpy")?;
+            numpy.call_method1("put", (expected.clone(), indices, values))?;
+
+            assert_eq!(
+                arr.getattr("dtype")?.str()?.extract::<String>()?,
+                expected.getattr("dtype")?.str()?.extract::<String>()?
+            );
+            assert_eq!(
+                repr_string(&arr.call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn place_matches_numpy_in_place_and_returns_none() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let arr = numeric_array(py, vec![1_i64, 2_i64, 3_i64, 4_i64], "int64");
+            let expected = numeric_array(py, vec![1_i64, 2_i64, 3_i64, 4_i64], "int64");
+            let mask = numeric_array(py, vec![0_i64, 1_i64, 1_i64, 0_i64], "int64");
+            let values = numeric_array(py, vec![9_i64], "int64");
+
+            let actual = place(
+                py,
+                arr.clone().unbind(),
+                mask.clone().unbind(),
+                values.clone().unbind(),
+            )?;
+            assert!(actual.bind(py).is_none());
+
+            let numpy = py.import("numpy")?;
+            numpy.call_method1("place", (expected.clone(), mask, values))?;
+
+            assert_eq!(
+                repr_string(&arr.call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn place_preserves_large_uint64_values_in_place() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let large = (1_u64 << 63) + 8195;
+            let arr = numeric_array(py, vec![1_u64, 2_u64, 3_u64], "uint64");
+            let expected = numeric_array(py, vec![1_u64, 2_u64, 3_u64], "uint64");
+            let mask = numeric_array(py, vec![0_i64, 1_i64, 1_i64], "int64");
+            let values = numeric_array(py, vec![large, large - 1], "uint64");
+
+            let actual = place(
+                py,
+                arr.clone().unbind(),
+                mask.clone().unbind(),
+                values.clone().unbind(),
+            )?;
+            assert!(actual.bind(py).is_none());
+
+            let numpy = py.import("numpy")?;
+            numpy.call_method1("place", (expected.clone(), mask, values))?;
+
+            assert_eq!(
+                arr.getattr("dtype")?.str()?.extract::<String>()?,
+                expected.getattr("dtype")?.str()?.extract::<String>()?
+            );
+            assert_eq!(
+                repr_string(&arr.call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn putmask_matches_numpy_in_place_and_cycles_values() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let arr = numeric_array(py, vec![0_i64, 1_i64, 2_i64, 3_i64, 4_i64], "int64");
+            let expected = numeric_array(py, vec![0_i64, 1_i64, 2_i64, 3_i64, 4_i64], "int64");
+            let mask = numeric_array(py, vec![0_i64, 0_i64, 1_i64, 1_i64, 1_i64], "int64");
+            let values = numeric_array(py, vec![-33_i64, -44_i64], "int64");
+
+            let actual = putmask(
+                py,
+                arr.clone().unbind(),
+                mask.clone().unbind(),
+                values.clone().unbind(),
+            )?;
+            assert!(actual.bind(py).is_none());
+
+            let numpy = py.import("numpy")?;
+            numpy.call_method1("putmask", (expected.clone(), mask, values))?;
+
+            assert_eq!(
+                repr_string(&arr.call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn putmask_preserves_large_uint64_values_in_place() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let large = (1_u64 << 63) + 32_771;
+            let arr = numeric_array(py, vec![1_u64, 2_u64, 3_u64], "uint64");
+            let expected = numeric_array(py, vec![1_u64, 2_u64, 3_u64], "uint64");
+            let mask = numeric_array(py, vec![0_i64, 1_i64, 1_i64], "int64");
+            let values = numeric_array(py, vec![large, large - 1], "uint64");
+
+            let actual = putmask(
+                py,
+                arr.clone().unbind(),
+                mask.clone().unbind(),
+                values.clone().unbind(),
+            )?;
+            assert!(actual.bind(py).is_none());
+
+            let numpy = py.import("numpy")?;
+            numpy.call_method1("putmask", (expected.clone(), mask, values))?;
+
+            assert_eq!(
+                arr.getattr("dtype")?.str()?.extract::<String>()?,
+                expected.getattr("dtype")?.str()?.extract::<String>()?
+            );
+            assert_eq!(
+                repr_string(&arr.call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn putmask_matches_numpy_with_overlapping_view_inputs() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let builtins = py.import("builtins")?;
+            let slice = builtins.getattr("slice")?;
+
+            let arr = numeric_array(py, vec![10_i64, 20_i64, 30_i64, 40_i64], "int64");
+            let expected = numeric_array(py, vec![10_i64, 20_i64, 30_i64, 40_i64], "int64");
+
+            let actual_view = arr.get_item(slice.call1((1, 4))?)?;
+            let actual_values = arr.get_item(slice.call1((0, 3))?)?;
+            let expected_view = expected.get_item(slice.call1((1, 4))?)?;
+            let expected_values = expected.get_item(slice.call1((0, 3))?)?;
+            let mask = numeric_array(py, vec![1_i64, 1_i64, 1_i64], "int64");
+
+            let actual = putmask(
+                py,
+                actual_view.unbind(),
+                mask.clone().unbind(),
+                actual_values.unbind(),
+            )?;
+            assert!(actual.bind(py).is_none());
+
+            let numpy = py.import("numpy")?;
+            numpy.call_method1("putmask", (expected_view, mask, expected_values))?;
+
+            assert_eq!(
+                repr_string(&arr.call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn diag_indices_matches_numpy_default_and_ndim() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let actual_default = diag_indices(py, 4, 2)?;
+            let actual_ndim = diag_indices(py, 2, 3)?;
+            let numpy = py.import("numpy")?;
+            let expected_default = numpy.call_method1("diag_indices", (4,))?;
+            let expected_ndim = numpy.call_method1("diag_indices", (2, 3))?;
+
+            assert_index_tuple_matches_numpy(actual_default.bind(py), &expected_default)?;
+            assert_index_tuple_matches_numpy(actual_ndim.bind(py), &expected_ndim)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn diag_indices_from_matches_numpy_for_object_arrays() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let arr = object_array(py, vec![vec!["a", "b"], vec!["c", "d"]]);
+            let actual = diag_indices_from(py, arr.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("diag_indices_from", (arr,))?;
+
+            assert_index_tuple_matches_numpy(actual.bind(py), &expected)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn diag_indices_from_rejects_small_and_non_square_inputs() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let vector = numeric_array(py, vec![1_i64, 2_i64, 3_i64], "int64");
+            let err = diag_indices_from(py, vector.unbind()).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            assert!(err.to_string().contains("at least 2-d"));
+
+            let rect = numeric_array(
+                py,
+                vec![vec![1_i64, 2_i64, 3_i64], vec![4_i64, 5_i64, 6_i64]],
+                "int64",
+            );
+            let err = diag_indices_from(py, rect.unbind()).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            assert!(err.to_string().contains("equal length"));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn tril_indices_matches_numpy_with_offsets() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let actual = tril_indices(py, 4, 2, Some(5))?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("tril_indices", (4, 2, 5))?;
+
+            assert_index_tuple_matches_numpy(actual.bind(py), &expected)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn triu_indices_matches_numpy_with_offsets() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let actual = triu_indices(py, 4, 2, Some(5))?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("triu_indices", (4, 2, 5))?;
+
+            assert_index_tuple_matches_numpy(actual.bind(py), &expected)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn tril_indices_from_matches_numpy_and_rejects_non_2d() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let arr = numeric_array(
+                py,
+                vec![vec![1_i64, 2_i64, 3_i64], vec![4_i64, 5_i64, 6_i64]],
+                "int64",
+            );
+            let actual = tril_indices_from(py, arr.clone().unbind(), 1)?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("tril_indices_from", (arr, 1))?;
+            assert_index_tuple_matches_numpy(actual.bind(py), &expected)?;
+
+            let cube = numeric_array(
+                py,
+                vec![vec![vec![1_i64, 2_i64], vec![3_i64, 4_i64]]],
+                "int64",
+            );
+            let err = tril_indices_from(py, cube.unbind(), 0).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            assert!(err.to_string().contains("2-d"));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn triu_indices_from_matches_numpy_and_rejects_non_2d() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let arr = numeric_array(
+                py,
+                vec![vec![1_i64, 2_i64, 3_i64], vec![4_i64, 5_i64, 6_i64]],
+                "int64",
+            );
+            let actual = triu_indices_from(py, arr.clone().unbind(), 1)?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("triu_indices_from", (arr, 1))?;
+            assert_index_tuple_matches_numpy(actual.bind(py), &expected)?;
+
+            let vector = numeric_array(py, vec![1_i64, 2_i64, 3_i64], "int64");
+            let err = triu_indices_from(py, vector.unbind(), 0).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            assert!(err.to_string().contains("2-d"));
+            Ok(())
+        });
+    }
+
+    #[test]
     fn searchsorted_matches_numpy_left_side_with_duplicates() {
         with_python(|py| {
             if !numpy_available(py) {
@@ -3605,6 +4284,140 @@ mod tests {
             );
             assert_eq!(
                 repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn put_along_axis_matches_numpy_scalar_values_in_place() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let arr = numeric_array(
+                py,
+                vec![vec![10_i64, 20_i64, 30_i64], vec![40_i64, 50_i64, 60_i64]],
+                "int64",
+            );
+            let expected = numeric_array(
+                py,
+                vec![vec![10_i64, 20_i64, 30_i64], vec![40_i64, 50_i64, 60_i64]],
+                "int64",
+            );
+            let indices = numeric_array(py, vec![vec![1_i64], vec![2_i64]], "int64");
+            let scalar = 99_i64.into_pyobject(py)?.unbind();
+
+            let actual = put_along_axis(
+                py,
+                arr.clone().unbind(),
+                indices.clone().unbind(),
+                scalar.clone_ref(py).into(),
+                Some(1),
+            )?;
+            assert!(actual.bind(py).is_none());
+
+            let numpy = py.import("numpy")?;
+            numpy.call_method1(
+                "put_along_axis",
+                (expected.clone(), indices, scalar.bind(py), 1),
+            )?;
+
+            assert_eq!(
+                repr_string(&arr.call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn put_along_axis_axis_none_matches_numpy_in_place() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let arr = numeric_array(
+                py,
+                vec![vec![10.0, 20.0, 30.0], vec![40.0, 50.0, 60.0]],
+                "float64",
+            );
+            let expected = numeric_array(
+                py,
+                vec![vec![10.0, 20.0, 30.0], vec![40.0, 50.0, 60.0]],
+                "float64",
+            );
+            let indices = numeric_array(py, vec![5_i64, 1_i64, 0_i64], "int64");
+            let values = numeric_array(py, vec![7.0, 8.0, 9.0], "float64");
+
+            let actual = put_along_axis(
+                py,
+                arr.clone().unbind(),
+                indices.clone().unbind(),
+                values.clone().unbind(),
+                None,
+            )?;
+            assert!(actual.bind(py).is_none());
+
+            let numpy = py.import("numpy")?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("axis", py.None())?;
+            numpy.call_method(
+                "put_along_axis",
+                (expected.clone(), indices, values),
+                Some(&kwargs),
+            )?;
+
+            assert_eq!(
+                repr_string(&arr.call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn put_along_axis_preserves_large_uint64_values_in_place() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let large = (1_u64 << 63) + 16387;
+            let arr = numeric_array(
+                py,
+                vec![vec![1_u64, 2_u64, 3_u64], vec![4_u64, 5_u64, 6_u64]],
+                "uint64",
+            );
+            let expected = numeric_array(
+                py,
+                vec![vec![1_u64, 2_u64, 3_u64], vec![4_u64, 5_u64, 6_u64]],
+                "uint64",
+            );
+            let indices = numeric_array(py, vec![vec![1_i64], vec![2_i64]], "int64");
+            let values = numeric_array(py, vec![vec![large], vec![large - 1]], "uint64");
+
+            let actual = put_along_axis(
+                py,
+                arr.clone().unbind(),
+                indices.clone().unbind(),
+                values.clone().unbind(),
+                Some(1),
+            )?;
+            assert!(actual.bind(py).is_none());
+
+            let numpy = py.import("numpy")?;
+            numpy.call_method1("put_along_axis", (expected.clone(), indices, values, 1))?;
+
+            assert_eq!(
+                arr.getattr("dtype")?.str()?.extract::<String>()?,
+                expected.getattr("dtype")?.str()?.extract::<String>()?
+            );
+            assert_eq!(
+                repr_string(&arr.call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
             );
             Ok(())

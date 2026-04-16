@@ -2959,6 +2959,22 @@ impl PyObjectValue {
             }
         }
     }
+
+    #[must_use]
+    pub fn into_json_value(&self) -> serde_json::Value {
+        match self {
+            Self::None => serde_json::Value::Null,
+            Self::Bool(flag) => serde_json::Value::Bool(*flag),
+            Self::Int(val) => serde_json::Value::Number(serde_json::Number::from(*val)),
+            Self::Float(val) => serde_json::Number::from_f64(*val)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            Self::String(text) => serde_json::Value::String(text.clone()),
+            Self::Tuple(values) => {
+                serde_json::Value::Array(values.iter().map(Self::into_json_value).collect())
+            }
+        }
+    }
 }
 
 impl From<bool> for PyObjectValue {
@@ -3026,7 +3042,8 @@ struct PythonFromPyFuncPayload {
 #[derive(Debug, Serialize)]
 struct PythonFromPyFuncInputArray {
     shape: Vec<usize>,
-    values: Vec<f64>,
+    values: Vec<serde_json::Value>,
+    dtype: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3222,19 +3239,13 @@ fn run_python_frompyfunc_bridge(
     nin: usize,
     nout: usize,
     out_shape: &[usize],
-    broadcasted: &[UFuncArray],
+    arrays: Vec<PythonFromPyFuncInputArray>,
 ) -> Result<Vec<PyObjectArray>, UFuncError> {
     let payload = PythonFromPyFuncPayload {
         callable: callable.clone(),
         nin,
         nout,
-        arrays: broadcasted
-            .iter()
-            .map(|array| PythonFromPyFuncInputArray {
-                shape: array.shape.clone(),
-                values: array.values.clone(),
-            })
-            .collect(),
+        arrays,
     };
     let payload_bytes = serde_json::to_vec(&payload).map_err(|err| {
         UFuncError::Msg(format!(
@@ -3327,7 +3338,43 @@ fn call_python_frompyfunc(
     arrays: &[&UFuncArray],
 ) -> Result<Vec<PyObjectArray>, UFuncError> {
     let (out_shape, _element_count, broadcasted) = prepare_frompyfunc_call(arrays, nin)?;
-    run_python_frompyfunc_bridge(python, &callable, nin, nout, &out_shape, &broadcasted)
+    let input_arrays = broadcasted
+        .iter()
+        .map(|array| PythonFromPyFuncInputArray {
+            shape: array.shape.clone(),
+            values: array
+                .values
+                .iter()
+                .copied()
+                .map(|v| {
+                    serde_json::Number::from_f64(v)
+                        .map(serde_json::Value::Number)
+                        .unwrap_or(serde_json::Value::Null)
+                })
+                .collect(),
+            dtype: "float".to_string(),
+        })
+        .collect();
+    run_python_frompyfunc_bridge(python, &callable, nin, nout, &out_shape, input_arrays)
+}
+
+fn call_python_frompyfunc_object(
+    python: &str,
+    callable: PythonFromPyFuncCallable,
+    nin: usize,
+    nout: usize,
+    arrays: &[&PyObjectArray],
+) -> Result<Vec<PyObjectArray>, UFuncError> {
+    let (out_shape, _element_count, broadcasted) = prepare_frompyfunc_object_call(arrays, nin)?;
+    let input_arrays = broadcasted
+        .iter()
+        .map(|array| PythonFromPyFuncInputArray {
+            shape: array.shape.clone(),
+            values: array.values.iter().map(|v| v.into_json_value()).collect(),
+            dtype: "object".to_string(),
+        })
+        .collect();
+    run_python_frompyfunc_bridge(python, &callable, nin, nout, &out_shape, input_arrays)
 }
 
 impl<F> PyFuncUFunc<F>
@@ -3455,6 +3502,50 @@ where
         }
 
         self.call(arrays).map(|mut outputs| outputs.remove(0))
+    }
+
+    pub fn call_object(&self, arrays: &[&PyObjectArray]) -> Result<Vec<PyObjectArray>, UFuncError> {
+        let (out_shape, element_count, broadcasted) = prepare_frompyfunc_object_call(arrays, self.nin)?;
+
+        let mut outputs: Vec<Vec<PyObjectValue>> = (0..self.nout)
+            .map(|_| Vec::with_capacity(element_count))
+            .collect();
+        let mut args = vec![0.0; self.nin];
+        let mut out_buf = vec![PyObjectValue::None; self.nout];
+
+        for element_idx in 0..element_count {
+            for (arg_idx, array) in broadcasted.iter().enumerate() {
+                match &array.values[element_idx] {
+                    PyObjectValue::Float(f) => args[arg_idx] = *f,
+                    PyObjectValue::Int(i) => args[arg_idx] = *i as f64,
+                    PyObjectValue::Bool(b) => args[arg_idx] = if *b { 1.0 } else { 0.0 },
+                    _ => return Err(UFuncError::Msg("frompyfunc: object input is not castable to float".to_string())),
+                }
+            }
+
+            out_buf.fill(PyObjectValue::None);
+            (self.func)(&args, &mut out_buf)?;
+
+            for (output, value) in outputs.iter_mut().zip(out_buf.iter()) {
+                output.push(value.clone());
+            }
+        }
+
+        outputs
+            .into_iter()
+            .map(|values| PyObjectArray::new(out_shape.clone(), values))
+            .collect()
+    }
+
+    pub fn call_object_single(&self, arrays: &[&PyObjectArray]) -> Result<PyObjectArray, UFuncError> {
+        if self.nout != 1 {
+            return Err(UFuncError::Msg(format!(
+                "frompyfunc: call_single requires nout=1, got {}",
+                self.nout
+            )));
+        }
+
+        self.call_object(arrays).map(|mut outputs| outputs.remove(0))
     }
 }
 
@@ -3613,6 +3704,19 @@ impl PythonImportedCallableUFunc {
         )
     }
 
+    pub fn call_object(&self, arrays: &[&PyObjectArray]) -> Result<Vec<PyObjectArray>, UFuncError> {
+        call_python_frompyfunc_object(
+            &self.python,
+            PythonFromPyFuncCallable::Import {
+                module: self.module.clone(),
+                attr_path: self.attr_path.clone(),
+            },
+            self.nin,
+            self.nout,
+            arrays,
+        )
+    }
+
     pub fn call_single(&self, arrays: &[&UFuncArray]) -> Result<PyObjectArray, UFuncError> {
         if self.nout != 1 {
             return Err(UFuncError::Msg(format!(
@@ -3622,6 +3726,17 @@ impl PythonImportedCallableUFunc {
         }
 
         self.call(arrays).map(|mut outputs| outputs.remove(0))
+    }
+
+    pub fn call_object_single(&self, arrays: &[&PyObjectArray]) -> Result<PyObjectArray, UFuncError> {
+        if self.nout != 1 {
+            return Err(UFuncError::Msg(format!(
+                "frompyfunc: call_single requires nout=1, got {}",
+                self.nout
+            )));
+        }
+
+        self.call_object(arrays).map(|mut outputs| outputs.remove(0))
     }
 }
 
@@ -3778,13 +3893,6 @@ impl UFuncArray {
         self.integer_sidecar.clone()
     }
 
-    fn ensure_mutable_integer_sidecar(&mut self, context: &str) -> Result<(), UFuncError> {
-        if self.integer_sidecar.is_none() && matches!(self.dtype, DType::I64 | DType::U64) {
-            self.integer_sidecar = self.exact_integer_sidecar(context)?;
-        }
-        Ok(())
-    }
-
     fn write_integer_mutation(
         &mut self,
         flat_index: usize,
@@ -3793,7 +3901,90 @@ impl UFuncArray {
         source_index: usize,
         context: &str,
     ) -> Result<(), UFuncError> {
-        self.ensure_mutable_integer_sidecar(context)?;
+        if self.integer_sidecar.is_none() && matches!(self.dtype, DType::I64 | DType::U64) {
+            self.integer_sidecar = Some(match self.dtype {
+                DType::I64 => IntegerSidecar::I64(
+                    self.values
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .map(|(index, current)| {
+                            if index == flat_index {
+                                match source_sidecar {
+                                    Some(IntegerSidecar::I64(src)) => Ok(src[source_index]),
+                                    Some(IntegerSidecar::U64(src)) => {
+                                        i64::try_from(src[source_index]).map_err(|_| {
+                                            UFuncError::Msg(format!(
+                                                "{context}: value at index {source_index} ({}) cannot be represented as i64",
+                                                src[source_index]
+                                            ))
+                                        })
+                                    }
+                                    None => {
+                                        ensure_exact_integer_bridge_value_supported(
+                                            value,
+                                            DType::I64,
+                                            context,
+                                            source_index,
+                                        )?;
+                                        Ok(value as i64)
+                                    }
+                                }
+                            } else {
+                                ensure_exact_integer_bridge_value_supported(
+                                    current,
+                                    DType::I64,
+                                    context,
+                                    index,
+                                )?;
+                                Ok(current as i64)
+                            }
+                        })
+                        .collect::<Result<Vec<_>, UFuncError>>()?,
+                ),
+                DType::U64 => IntegerSidecar::U64(
+                    self.values
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .map(|(index, current)| {
+                            if index == flat_index {
+                                match source_sidecar {
+                                    Some(IntegerSidecar::I64(src)) => {
+                                        u64::try_from(src[source_index]).map_err(|_| {
+                                            UFuncError::Msg(format!(
+                                                "{context}: value at index {source_index} ({}) cannot be represented as u64",
+                                                src[source_index]
+                                            ))
+                                        })
+                                    }
+                                    Some(IntegerSidecar::U64(src)) => Ok(src[source_index]),
+                                    None => {
+                                        ensure_exact_integer_bridge_value_supported(
+                                            value,
+                                            DType::U64,
+                                            context,
+                                            source_index,
+                                        )?;
+                                        Ok(value as u64)
+                                    }
+                                }
+                            } else {
+                                ensure_exact_integer_bridge_value_supported(
+                                    current,
+                                    DType::U64,
+                                    context,
+                                    index,
+                                )?;
+                                Ok(current as u64)
+                            }
+                        })
+                        .collect::<Result<Vec<_>, UFuncError>>()?,
+                ),
+                _ => unreachable!("only integer dtypes materialize writable sidecars"),
+            });
+        }
+
         if let Some(sidecar) = self.integer_sidecar.as_mut() {
             match sidecar {
                 IntegerSidecar::I64(dst) => {
@@ -12351,7 +12542,7 @@ impl UFuncArray {
 
     /// Change elements of an array based on conditional and input values (np.place).
     /// Values are repeated cyclically if shorter than the number of True entries.
-    pub fn place(&mut self, mask: &Self, vals: &[f64]) -> Result<(), UFuncError> {
+    pub fn place(&mut self, mask: &Self, vals: &Self) -> Result<(), UFuncError> {
         if mask.values.len() != self.values.len() {
             return Err(UFuncError::Msg(format!(
                 "place: mask size {} != array size {}",
@@ -12359,15 +12550,22 @@ impl UFuncArray {
                 self.values.len()
             )));
         }
+        if vals.values.is_empty() {
+            return Err(UFuncError::Msg("place: vals must not be empty".to_string()));
+        }
         let mut vi = 0;
         for (i, &m) in mask.values.iter().enumerate() {
             if m != 0.0 {
-                if vals.is_empty() {
-                    return Err(UFuncError::Msg("place: vals must not be empty".to_string()));
-                }
-                let value = vals[vi % vals.len()];
+                let source_index = vi % vals.values.len();
+                let value = vals.values[source_index];
                 self.values[i] = value;
-                self.write_integer_mutation(i, value, None, i, "place")?;
+                self.write_integer_mutation(
+                    i,
+                    value,
+                    vals.integer_sidecar.as_ref(),
+                    source_index,
+                    "place",
+                )?;
                 vi += 1;
             }
         }
@@ -12376,8 +12574,8 @@ impl UFuncArray {
 
     /// Replaces specified flat elements of an array with given values (np.put).
     /// Indices are taken into the flattened array.
-    pub fn put(&mut self, indices: &[i64], vals: &[f64]) -> Result<(), UFuncError> {
-        if vals.is_empty() && !indices.is_empty() {
+    pub fn put(&mut self, indices: &[i64], vals: &Self) -> Result<(), UFuncError> {
+        if vals.values.is_empty() && !indices.is_empty() {
             return Err(UFuncError::Msg("put: vals must not be empty".to_string()));
         }
         let n = self.values.len() as i64;
@@ -12388,10 +12586,17 @@ impl UFuncArray {
                     "put: index {idx} out of bounds for size {n}"
                 )));
             }
-            let value = vals[i % vals.len()];
+            let source_index = i % vals.values.len();
+            let value = vals.values[source_index];
             let flat = resolved as usize;
             self.values[flat] = value;
-            self.write_integer_mutation(flat, value, None, i, "put")?;
+            self.write_integer_mutation(
+                flat,
+                value,
+                vals.integer_sidecar.as_ref(),
+                source_index,
+                "put",
+            )?;
         }
         Ok(())
     }
@@ -39111,14 +39316,16 @@ mod tests {
     fn place_cyclic() {
         let mut a = UFuncArray::new(vec![4], vec![0.0, 0.0, 0.0, 0.0], DType::F64).unwrap();
         let mask = UFuncArray::new(vec![4], vec![1.0, 0.0, 1.0, 1.0], DType::Bool).unwrap();
-        a.place(&mask, &[10.0, 20.0]).unwrap();
+        let vals = UFuncArray::new(vec![2], vec![10.0, 20.0], DType::F64).unwrap();
+        a.place(&mask, &vals).unwrap();
         assert_eq!(a.values(), &[10.0, 0.0, 20.0, 10.0]); // cycles back to 10.0
     }
 
     #[test]
     fn put_basic() {
         let mut a = UFuncArray::new(vec![5], vec![0.0; 5], DType::F64).unwrap();
-        a.put(&[0, 2, 4], &[10.0, 20.0, 30.0]).unwrap();
+        let vals = UFuncArray::new(vec![3], vec![10.0, 20.0, 30.0], DType::F64).unwrap();
+        a.put(&[0, 2, 4], &vals).unwrap();
         assert_eq!(a.values(), &[10.0, 0.0, 20.0, 0.0, 30.0]);
     }
 
@@ -39156,9 +39363,10 @@ mod tests {
     fn place_rejects_inexact_integer_bridge_values() {
         let mut arr = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![1, 2])).unwrap();
         let mask = UFuncArray::new(vec![2], vec![1.0, 0.0], DType::Bool).unwrap();
+        let vals = UFuncArray::new(vec![1], vec![1.5], DType::F64).unwrap();
 
         let err = arr
-            .place(&mask, &[1.5])
+            .place(&mask, &vals)
             .expect_err("fractional integer write must fail");
         assert!(matches!(err, UFuncError::Msg(message) if message.contains("place")));
     }
@@ -39166,9 +39374,10 @@ mod tests {
     #[test]
     fn put_rejects_inexact_integer_bridge_values() {
         let mut arr = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![1, 2])).unwrap();
+        let vals = UFuncArray::new(vec![1], vec![1.5], DType::F64).unwrap();
 
         let err = arr
-            .put(&[0], &[1.5])
+            .put(&[0], &vals)
             .expect_err("fractional integer write must fail");
         assert!(matches!(err, UFuncError::Msg(message) if message.contains("put")));
     }
@@ -39181,9 +39390,10 @@ mod tests {
             dtype: DType::I64,
             integer_sidecar: None,
         };
+        let vals = UFuncArray::new(vec![1], vec![3.0], DType::F64).unwrap();
 
         let err = arr
-            .put(&[1], &[3.0])
+            .put(&[1], &vals)
             .expect_err("degraded integer arrays must fail closed during recovery");
         assert!(matches!(err, UFuncError::Msg(message) if message.contains("put")));
     }
@@ -39197,11 +39407,40 @@ mod tests {
             integer_sidecar: None,
         };
         let mask = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::Bool).unwrap();
+        let vals = UFuncArray::new(vec![1], vec![3.0], DType::F64).unwrap();
 
         let err = arr
-            .place(&mask, &[3.0])
+            .place(&mask, &vals)
             .expect_err("degraded unsigned integer arrays must fail closed during recovery");
         assert!(matches!(err, UFuncError::Msg(message) if message.contains("place")));
+    }
+
+    #[test]
+    fn place_preserves_large_integer_sidecar_values() {
+        let mut arr = UFuncArray::from_storage(vec![3], ArrayStorage::U64(vec![1, 2, 3])).unwrap();
+        let mask = UFuncArray::new(vec![3], vec![0.0, 1.0, 1.0], DType::Bool).unwrap();
+        let large = (1_u64 << 63) + 4099;
+        let vals =
+            UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![large, large - 1])).unwrap();
+
+        arr.place(&mask, &vals).unwrap();
+
+        let storage = arr.to_storage().unwrap();
+        assert_eq!(storage, ArrayStorage::U64(vec![1, large, large - 1]));
+    }
+
+    #[test]
+    fn put_preserves_large_integer_sidecar_values() {
+        let mut arr =
+            UFuncArray::from_storage(vec![4], ArrayStorage::U64(vec![1, 2, 3, 4])).unwrap();
+        let large = (1_u64 << 63) + 8195;
+        let vals =
+            UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![large, large - 1])).unwrap();
+
+        arr.put(&[1, 3], &vals).unwrap();
+
+        let storage = arr.to_storage().unwrap();
+        assert_eq!(storage, ArrayStorage::U64(vec![1, large, 3, large - 1]));
     }
 
     #[test]

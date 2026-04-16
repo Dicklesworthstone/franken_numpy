@@ -689,6 +689,13 @@ FrankenNumPy implements the full set of NumPy's array construction and manipulat
 | `compress(condition, axis)` | Select elements where boolean condition is true |
 | `extract(condition, arr)` | Flat extraction by boolean mask |
 | `place(mask, vals)` | In-place replacement where mask is true (cyclic values) |
+| `putmask(mask, values)` | In-place masked scatter with cyclic value repetition |
+| `diag_indices(n, ndim)` | Tuple of diagonal index arrays |
+| `diag_indices_from(arr)` | Diagonal index tuple inferred from array shape |
+| `tril_indices(n, k, m)` | Lower-triangle row/column index tuple |
+| `tril_indices_from(arr, k)` | Lower-triangle index tuple inferred from array shape |
+| `triu_indices(n, k, m)` | Upper-triangle row/column index tuple |
+| `triu_indices_from(arr, k)` | Upper-triangle index tuple inferred from array shape |
 | `select(condlist, choicelist, default)` | Choose from multiple arrays by first-matching condition |
 | `piecewise(condlist, funclist)` | Piecewise constant function via condition list |
 | `take_along_axis(indices, axis)` | Gather values along axis by index array |
