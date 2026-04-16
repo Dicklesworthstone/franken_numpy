@@ -37,13 +37,9 @@ deep_clippy.txt
 rust-bug-scan.txt
 ubs_out.txt
 
-# Root-level compiled test binaries (keep source files)
+# Root-level compiled test binaries and scratch test source files
 /patch_oracle
 /test_*
-!/test_*.rs
-!/test_*.py
-!/test_*.c
-!/test_*.csv
 
 # Root-level agent scratch / one-off fix scripts
 /apply_fixes.py
@@ -110,3 +106,13 @@ storage.sqlite3-wal.corrupt-*
 .beads/*.repair_candidate_*
 .beads/*.rebuild_*
 .beads/*.bak-corrupt
+
+# Root-level agent-generated scripts and scratch output
+/*.txt
+/*.out
+/*.json
+!package.json
+/*.sh
+/*.py
+/*.c
+nohup.out
