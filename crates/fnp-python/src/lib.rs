@@ -2,7 +2,8 @@ use fnp_dtype::ArrayStorage;
 use fnp_iter::{Nditer, NditerOptions, NditerOrder};
 use fnp_ndarray::{broadcast_shapes, element_count};
 use fnp_ufunc::{
-    UFuncArray, isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, where_nonzero,
+    UFuncArray, isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, signbit as ufunc_signbit,
+    where_nonzero,
 };
 use pyo3::Bound;
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -886,6 +887,13 @@ fn isneginf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+fn signbit(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let x = extract_numeric_array(py, x.bind(py), "signbit(x)")?;
+    let result = ufunc_signbit(&x).map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(signature = (condition, a, axis=None))]
 fn compress(
     py: Python<'_>,
@@ -1018,6 +1026,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(count_nonzero, m)?)?;
     m.add_function(wrap_pyfunction!(isposinf, m)?)?;
     m.add_function(wrap_pyfunction!(isneginf, m)?)?;
+    m.add_function(wrap_pyfunction!(signbit, m)?)?;
     m.add_function(wrap_pyfunction!(take, m)?)?;
     m.add_function(wrap_pyfunction!(compress, m)?)?;
     m.add_function(wrap_pyfunction!(extract, m)?)?;
@@ -1032,7 +1041,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::{
         PyFromPyFunc, PyVectorize, argwhere, choose, compress, count_nonzero, digitize, extract,
-        flatnonzero, fnp_python, interp, isneginf, isposinf, searchsorted, select, take,
+        flatnonzero, fnp_python, interp, isneginf, isposinf, searchsorted, select, signbit, take,
         take_along_axis, where_py,
     };
     use pyo3::IntoPyObject;
@@ -1108,6 +1117,7 @@ mod tests {
             assert!(module.getattr("count_nonzero").is_ok());
             assert!(module.getattr("isposinf").is_ok());
             assert!(module.getattr("isneginf").is_ok());
+            assert!(module.getattr("signbit").is_ok());
             assert!(module.getattr("take").is_ok());
             assert!(module.getattr("compress").is_ok());
             assert!(module.getattr("extract").is_ok());
@@ -1855,6 +1865,66 @@ mod tests {
             let actual = isneginf(py, values.clone().unbind())?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("isneginf", (values,))?;
+
+            assert_eq!(
+                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
+                expected.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn signbit_matches_numpy_with_signed_zero_and_nan() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(
+                py,
+                vec![
+                    -0.0,
+                    0.0,
+                    -1.0,
+                    2.5,
+                    f64::NEG_INFINITY,
+                    f64::INFINITY,
+                    f64::NAN,
+                ],
+                "float64",
+            );
+            let actual = signbit(py, values.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("signbit", (values,))?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn signbit_matches_numpy_multidimensional_input() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(
+                py,
+                vec![vec![-0.0, 1.0, -2.0], vec![3.0, -4.0, f64::NEG_INFINITY]],
+                "float64",
+            );
+            let actual = signbit(py, values.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("signbit", (values,))?;
 
             assert_eq!(
                 actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
