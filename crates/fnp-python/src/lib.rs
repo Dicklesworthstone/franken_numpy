@@ -4,7 +4,7 @@ use fnp_ndarray::{broadcast_shapes, element_count};
 use fnp_ufunc::UnaryOp;
 use fnp_ufunc::{
     UFuncArray, isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, signbit as ufunc_signbit,
-    where_nonzero,
+    spacing as ufunc_spacing, where_nonzero,
 };
 use pyo3::Bound;
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -913,6 +913,13 @@ fn isfinite(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+fn spacing(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let x = extract_numeric_array(py, x.bind(py), "spacing(x)")?;
+    let result = ufunc_spacing(&x).map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(signature = (condition, a, axis=None))]
 fn compress(
     py: Python<'_>,
@@ -1049,6 +1056,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(isnan, m)?)?;
     m.add_function(wrap_pyfunction!(isinf, m)?)?;
     m.add_function(wrap_pyfunction!(isfinite, m)?)?;
+    m.add_function(wrap_pyfunction!(spacing, m)?)?;
     m.add_function(wrap_pyfunction!(take, m)?)?;
     m.add_function(wrap_pyfunction!(compress, m)?)?;
     m.add_function(wrap_pyfunction!(extract, m)?)?;
@@ -1064,7 +1072,7 @@ mod tests {
     use super::{
         PyFromPyFunc, PyVectorize, argwhere, choose, compress, count_nonzero, digitize, extract,
         flatnonzero, fnp_python, interp, isfinite, isinf, isnan, isneginf, isposinf, searchsorted,
-        select, signbit, take, take_along_axis, where_py,
+        select, signbit, spacing, take, take_along_axis, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
@@ -1143,6 +1151,7 @@ mod tests {
             assert!(module.getattr("isnan").is_ok());
             assert!(module.getattr("isinf").is_ok());
             assert!(module.getattr("isfinite").is_ok());
+            assert!(module.getattr("spacing").is_ok());
             assert!(module.getattr("take").is_ok());
             assert!(module.getattr("compress").is_ok());
             assert!(module.getattr("extract").is_ok());
@@ -2033,6 +2042,50 @@ mod tests {
             let actual = isfinite(py, values.clone().unbind())?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("isfinite", (values,))?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn spacing_matches_numpy_basic() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(py, vec![1.0, 0.0, -1.0, 2.0], "float64");
+            let actual = spacing(py, values.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("spacing", (values,))?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn spacing_matches_numpy_nan_and_inf_behavior() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(
+                py,
+                vec![f64::NAN, f64::NEG_INFINITY, f64::INFINITY, -0.0],
+                "float64",
+            );
+            let actual = spacing(py, values.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("spacing", (values,))?;
 
             assert_eq!(
                 repr_string(&actual.bind(py).call_method0("tolist")?),

@@ -1098,14 +1098,21 @@ impl UnaryOp {
             Self::Spacing => {
                 if x.is_nan() || x.is_infinite() {
                     f64::NAN
+                } else if x == 0.0 {
+                    f64::from_bits(1)
                 } else {
                     let abs_x = x.abs();
-                    if abs_x == f64::MAX {
+                    let spacing = if abs_x == f64::MAX {
                         f64::MAX - f64::from_bits(f64::MAX.to_bits() - 1)
                     } else {
                         // ULP: distance to the next representable float
                         let next = f64::from_bits(abs_x.to_bits() + 1);
                         next - abs_x
+                    };
+                    if x.is_sign_negative() {
+                        -spacing
+                    } else {
+                        spacing
                     }
                 }
             }
@@ -28326,7 +28333,8 @@ pub fn nextafter(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncEr
 
 /// Return the distance between x and the next representable floating-point value.
 ///
-/// This is equivalent to `nextafter(x, inf) - x` for positive x.
+/// This is equivalent to `nextafter(x, +inf) - x` for non-negative `x`.
+/// Negative finite values preserve NumPy's negative spacing sign.
 /// NumPy equivalent: `np.spacing(x)`.
 pub fn spacing(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
     let values: Vec<f64> = x
@@ -28340,9 +28348,18 @@ pub fn spacing(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
                 f64::from_bits(1)
             } else {
                 let abs_v = v.abs();
-                let bits = abs_v.to_bits();
-                let next_bits = bits.wrapping_add(1);
-                f64::from_bits(next_bits) - abs_v
+                let spacing = if abs_v == f64::MAX {
+                    f64::MAX - f64::from_bits(f64::MAX.to_bits() - 1)
+                } else {
+                    let bits = abs_v.to_bits();
+                    let next_bits = bits.wrapping_add(1);
+                    f64::from_bits(next_bits) - abs_v
+                };
+                if v.is_sign_negative() {
+                    -spacing
+                } else {
+                    spacing
+                }
             }
         })
         .collect();
@@ -32769,8 +32786,8 @@ mod tests {
         assert!((out.values()[0] - f64::EPSILON).abs() < 1e-30);
         // spacing(0.0) = smallest positive subnormal
         assert!(out.values()[1] > 0.0 && out.values()[1] < 1e-300);
-        // spacing(-1.0) = same as spacing(1.0) since it uses abs
-        assert!((out.values()[2] - f64::EPSILON).abs() < 1e-30);
+        // spacing(-1.0) = -EPSILON in NumPy
+        assert!((out.values()[2] + f64::EPSILON).abs() < 1e-30);
     }
 
     #[test]
@@ -45832,6 +45849,18 @@ mod tests {
         // spacing(0.0) should be smallest positive subnormal
         assert!(result.values()[0] > 0.0);
         assert!(result.values()[0] < f64::MIN_POSITIVE);
+    }
+
+    #[test]
+    fn spacing_negative_value() {
+        let arr = UFuncArray::new(vec![1], vec![-1.0], DType::F64).unwrap();
+        let result = spacing(&arr).unwrap();
+        assert!(
+            (result.values()[0] + f64::EPSILON).abs() < 1e-30,
+            "spacing(-1.0) = {}, expected {}",
+            result.values()[0],
+            -f64::EPSILON
+        );
     }
 
     #[test]
