@@ -581,6 +581,23 @@ fn digitize(py: Python<'_>, x: Py<PyAny>, bins: Py<PyAny>, right: bool) -> PyRes
 }
 
 #[pyfunction]
+#[pyo3(signature = (x, xp, fp, left=None, right=None))]
+fn interp(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    xp: Py<PyAny>,
+    fp: Py<PyAny>,
+    left: Option<f64>,
+    right: Option<f64>,
+) -> PyResult<Py<PyAny>> {
+    let x = extract_numeric_array(py, x.bind(py), "interp(x)")?;
+    let xp = extract_numeric_array(py, xp.bind(py), "interp(xp)")?;
+    let fp = extract_numeric_array(py, fp.bind(py), "interp(fp)")?;
+    let result = UFuncArray::interp_lr(&x, &xp, &fp, left, right).map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, v, side="left", sorter=None))]
 fn searchsorted(
     py: Python<'_>,
@@ -609,13 +626,14 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(frompyfunc, m)?)?;
     m.add_function(wrap_pyfunction!(vectorize, m)?)?;
     m.add_function(wrap_pyfunction!(digitize, m)?)?;
+    m.add_function(wrap_pyfunction!(interp, m)?)?;
     m.add_function(wrap_pyfunction!(searchsorted, m)?)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PyFromPyFunc, PyVectorize, digitize, fnp_python, searchsorted};
+    use super::{PyFromPyFunc, PyVectorize, digitize, fnp_python, interp, searchsorted};
     use pyo3::IntoPyObject;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
     use pyo3::{PyResult, Python};
@@ -682,6 +700,7 @@ mod tests {
             assert!(module.getattr("vectorize").is_ok());
             assert!(module.getattr("Vectorize").is_ok());
             assert!(module.getattr("digitize").is_ok());
+            assert!(module.getattr("interp").is_ok());
             assert!(module.getattr("searchsorted").is_ok());
             assert!(module.getattr("Nditer").is_ok());
             Ok(())
@@ -957,6 +976,111 @@ mod tests {
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("digitize")?.call1((values, bins))?;
 
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn interp_matches_numpy_with_multidimensional_x() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let x = numeric_array(py, vec![vec![0.5, 1.5], vec![2.5, 3.5]], "float64");
+            let xp = numeric_array(py, vec![0.0, 1.0, 2.0, 4.0], "float64");
+            let fp = numeric_array(py, vec![0.0, 10.0, 20.0, 40.0], "float64");
+
+            let actual = interp(
+                py,
+                x.clone().unbind(),
+                xp.clone().unbind(),
+                fp.clone().unbind(),
+                None,
+                None,
+            )?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.getattr("interp")?.call1((x, xp, fp))?;
+
+            assert_eq!(
+                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
+                vec![2, 2]
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn interp_matches_numpy_with_custom_left_and_right() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let x = numeric_array(py, vec![-1.0, 0.0, 3.0, 5.0], "float64");
+            let xp = numeric_array(py, vec![0.0, 1.0, 4.0], "float64");
+            let fp = numeric_array(py, vec![10.0, 20.0, 30.0], "float64");
+
+            let actual = interp(
+                py,
+                x.clone().unbind(),
+                xp.clone().unbind(),
+                fp.clone().unbind(),
+                Some(-5.0),
+                Some(99.0),
+            )?;
+            let numpy = py.import("numpy")?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("left", -5.0)?;
+            kwargs.set_item("right", 99.0)?;
+            let expected = numpy.call_method("interp", (x, xp, fp), Some(&kwargs))?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn interp_accepts_integer_xp_and_fp_inputs() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let x = numeric_array(py, vec![0_i64, 2, 3], "int64");
+            let xp = numeric_array(py, vec![0_i64, 1, 4], "int64");
+            let fp = numeric_array(py, vec![5_i64, 15, 45], "int64");
+
+            let actual = interp(
+                py,
+                x.clone().unbind(),
+                xp.clone().unbind(),
+                fp.clone().unbind(),
+                None,
+                None,
+            )?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.getattr("interp")?.call1((x, xp, fp))?;
+
+            assert_eq!(
+                actual
+                    .bind(py)
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                "float64"
+            );
             assert_eq!(
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)

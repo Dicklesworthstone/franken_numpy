@@ -58,13 +58,13 @@
 | fnp-io | 176 | NPY/NPZ read/write, text formats, compression, 7 format oracle tests, genfromtxt_full, fromfile_text/tofile_text |
 | fnp-conformance | 144 | Differential parity, metamorphic identities, adversarial fuzzing, witness stability, matmul conformance |
 | fnp-dtype | 124 | Dtype taxonomy, promotion table (all 324 pairs explicit), cast policy primitives, NumPy byte-width parsing |
-| fnp-python | 12 | PyO3 package surface coverage for `frompyfunc`, `vectorize`, `digitize`, and `searchsorted`, including live callable parity, sorter/side bridging, large-uint64 coverage, and module export wiring |
+| fnp-python | 15 | PyO3 package surface coverage for `frompyfunc`, `vectorize`, `digitize`, `searchsorted`, and `interp`, including live callable parity, sorter/side bridging, left/right fill parity, large-uint64 coverage, and module export wiring |
 | fnp-runtime | 54 | Mode split, fail-closed decoding, override-audit gate, risk-aware decision engine, evidence ledger |
-| **Total** | **2,926** | |
+| **Total** | **2,929** | |
 
 ## Remaining Gaps (Python-specific, low priority)
 
-1. Expanded Python package surface beyond `nditer`, `frompyfunc`, `vectorize`, `digitize`, and `searchsorted` — `fnp-python` now exposes `PyNditer`, `frompyfunc`, `vectorize`, `digitize`, and `searchsorted`, but broader Python-facing packaging and FFI coverage for additional NumPy APIs is still incomplete
+1. Expanded Python package surface beyond `nditer`, `frompyfunc`, `vectorize`, `digitize`, `searchsorted`, and `interp` — `fnp-python` now exposes `PyNditer`, `frompyfunc`, `vectorize`, `digitize`, `searchsorted`, and `interp`, but broader Python-facing packaging and FFI coverage for additional NumPy APIs is still incomplete
 2. Expanded CI matrix for alternate oracle environments and longer-horizon benchmark trend regression
 
 ## Intentional Design Decisions
