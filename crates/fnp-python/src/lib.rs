@@ -1911,7 +1911,7 @@ mod tests {
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("count_nonzero", (arr,))?;
 
-            assert_eq!(repr_string(&actual.bind(py)), repr_string(&expected));
+            assert_eq!(repr_string(actual.bind(py)), repr_string(&expected));
             Ok(())
         });
     }
@@ -1978,7 +1978,7 @@ mod tests {
                 numpy.call_method1("count_nonzero", (arr.clone(), axis_tuple.bind(py)))?;
 
             assert_eq!(
-                repr_string(&actual_tuple.bind(py)),
+                repr_string(actual_tuple.bind(py)),
                 repr_string(&expected_tuple)
             );
 
@@ -3708,13 +3708,13 @@ mod tests {
                 .iter()
                 .map(|item| item.bind(py)),
             )?;
-            let default = (-1_i64).into_pyobject(py)?.unbind();
+            let default: pyo3::Py<pyo3::PyAny> = (-1_i64).into_pyobject(py)?.into_any().unbind();
 
             let actual = select(
                 py,
                 condlist.clone().into_any().unbind(),
                 choicelist.clone().into_any().unbind(),
-                Some(default.clone_ref(py).into()),
+                Some(default.clone_ref(py)),
             )?;
             let numpy = py.import("numpy")?;
             let expected =
@@ -3832,7 +3832,7 @@ mod tests {
                 py,
                 condlist.clone().into_any().unbind(),
                 choicelist.clone().into_any().unbind(),
-                Some(default.clone_ref(py).into()),
+                Some(default.clone_ref(py)),
             )?;
             let expected =
                 numpy.call_method1("select", (condlist, choicelist, default.clone_ref(py)))?;
