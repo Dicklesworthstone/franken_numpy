@@ -1,13 +1,12 @@
 use fnp_dtype::{ArrayStorage, DType, f16};
 use fnp_iter::{Nditer, NditerOptions, NditerOrder};
 use fnp_ndarray::{broadcast_shapes, element_count};
-use fnp_ufunc::UnaryOp;
 use fnp_ufunc::{
-    UFuncArray, copysign as ufunc_copysign, frexp as ufunc_frexp, hypot as ufunc_hypot,
-    isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, ldexp as ufunc_ldexp,
-    logaddexp as ufunc_logaddexp, logaddexp2 as ufunc_logaddexp2, modf as ufunc_modf,
-    nextafter as ufunc_nextafter, signbit as ufunc_signbit, spacing as ufunc_spacing,
-    where_nonzero,
+    GridSpec, UFuncArray, UnaryOp, copysign as ufunc_copysign, frexp as ufunc_frexp,
+    hypot as ufunc_hypot, isneginf as ufunc_isneginf, isposinf as ufunc_isposinf,
+    ldexp as ufunc_ldexp, logaddexp as ufunc_logaddexp, logaddexp2 as ufunc_logaddexp2,
+    modf as ufunc_modf, nextafter as ufunc_nextafter, signbit as ufunc_signbit,
+    spacing as ufunc_spacing, where_nonzero,
 };
 use pyo3::Bound;
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -45,6 +44,19 @@ enum VectorizeArgSlot {
 pub struct PyVectorize {
     callable: Py<PyAny>,
     excluded: Vec<usize>,
+}
+
+#[pyclass(name = "MGridClass", unsendable)]
+pub struct PyMGridClass;
+
+#[pyclass(name = "OGridClass", unsendable)]
+pub struct PyOGridClass;
+
+struct ParsedGridAxis {
+    spec: GridSpec,
+    start: Py<PyAny>,
+    stop: Py<PyAny>,
+    step_for_dtype: Py<PyAny>,
 }
 
 fn map_ufunc_error(err: impl std::fmt::Display) -> PyErr {
@@ -619,6 +631,198 @@ fn meshgrid_rust_compatible(py: Python<'_>, arrays: &[Py<PyAny>]) -> PyResult<bo
     Ok(true)
 }
 
+fn parse_grid_slice(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    context: &str,
+) -> PyResult<ParsedGridAxis> {
+    let start = if value.getattr("start")?.is_none() {
+        0_i64.into_pyobject(py)?.into_any().unbind()
+    } else {
+        value.getattr("start")?.unbind()
+    };
+    let stop = if value.getattr("stop")?.is_none() {
+        0_i64.into_pyobject(py)?.into_any().unbind()
+    } else {
+        value.getattr("stop")?.unbind()
+    };
+    let step_obj = if value.getattr("step")?.is_none() {
+        1_i64.into_pyobject(py)?.into_any().unbind()
+    } else {
+        value.getattr("step")?.unbind()
+    };
+
+    let numpy = py.import("numpy")?;
+    let builtins = py.import("builtins")?;
+    let is_complex = numpy
+        .getattr("iscomplexobj")?
+        .call1((step_obj.bind(py),))?
+        .extract::<bool>()?;
+
+    let start_f64 = start.bind(py).extract::<f64>().map_err(|_| {
+        PyTypeError::new_err(format!(
+            "{context}: slice start must be an int or float-like scalar",
+        ))
+    })?;
+    let stop_f64 = stop.bind(py).extract::<f64>().map_err(|_| {
+        PyTypeError::new_err(format!(
+            "{context}: slice stop must be an int or float-like scalar",
+        ))
+    })?;
+
+    let (spec, step_for_dtype) = if is_complex {
+        let magnitude = builtins.call_method1("abs", (step_obj.bind(py),))?;
+        let num = magnitude.extract::<f64>().map_err(|_| {
+            PyTypeError::new_err(format!(
+                "{context}: complex slice step must have a numeric magnitude",
+            ))
+        })?;
+        (
+            GridSpec::Linspace {
+                start: start_f64,
+                stop: stop_f64,
+                num: num as usize,
+            },
+            magnitude.unbind(),
+        )
+    } else {
+        let step_f64 = step_obj.bind(py).extract::<f64>().map_err(|_| {
+            PyTypeError::new_err(format!(
+                "{context}: slice step must be an int or float-like scalar",
+            ))
+        })?;
+        (
+            GridSpec::Arange {
+                start: start_f64,
+                stop: stop_f64,
+                step: step_f64,
+            },
+            step_obj.clone_ref(py),
+        )
+    };
+
+    Ok(ParsedGridAxis {
+        spec,
+        start,
+        stop,
+        step_for_dtype,
+    })
+}
+
+fn parse_grid_key(
+    py: Python<'_>,
+    key: &Bound<'_, PyAny>,
+    context: &str,
+) -> PyResult<(Vec<GridSpec>, Py<PyAny>, bool)> {
+    let numpy = py.import("numpy")?;
+
+    if let Ok(tuple) = key.downcast::<PyTuple>() {
+        let mut specs = Vec::with_capacity(tuple.len());
+        let mut dtype_args = vec![0_i64.into_pyobject(py)?.into_any().unbind()];
+        for (index, item) in tuple.try_iter()?.enumerate() {
+            let item = item?;
+            let slice = item.downcast::<pyo3::types::PySlice>().map_err(|_| {
+                PyTypeError::new_err(format!(
+                    "{context}: index {index} must be a slice expression",
+                ))
+            })?;
+            let parsed = parse_grid_slice(py, slice.as_any(), context)?;
+            specs.push(parsed.spec);
+            dtype_args.push(parsed.start);
+            dtype_args.push(parsed.stop);
+            dtype_args.push(parsed.step_for_dtype);
+        }
+        let dtype = numpy.getattr("result_type")?.call1(PyTuple::new(
+            py,
+            dtype_args.iter().map(|value| value.bind(py)),
+        )?)?;
+        Ok((specs, dtype.unbind(), true))
+    } else {
+        let slice = key.downcast::<pyo3::types::PySlice>().map_err(|_| {
+            PyTypeError::new_err(format!("{context}: expected slice syntax, e.g. [0:5:2]"))
+        })?;
+        let parsed = parse_grid_slice(py, slice.as_any(), context)?;
+        let dtype = match parsed.spec {
+            GridSpec::Linspace { .. } => numpy.getattr("result_type")?.call1((
+                parsed.start.bind(py),
+                parsed.stop.bind(py),
+                parsed.step_for_dtype.bind(py),
+            ))?,
+            GridSpec::Arange { .. } => numpy
+                .getattr("arange")?
+                .call1((
+                    parsed.start.bind(py),
+                    parsed.stop.bind(py),
+                    parsed.step_for_dtype.bind(py),
+                ))?
+                .getattr("dtype")?,
+        };
+        Ok((vec![parsed.spec], dtype.unbind(), false))
+    }
+}
+
+fn cast_numpy_array_dtype(
+    py: Python<'_>,
+    array: Py<PyAny>,
+    dtype: &Bound<'_, PyAny>,
+) -> PyResult<Py<PyAny>> {
+    Ok(array
+        .bind(py)
+        .call_method(
+            "astype",
+            (dtype,),
+            Some(&{
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("copy", false)?;
+                kwargs
+            }),
+        )?
+        .unbind())
+}
+
+fn build_grid_numpy_outputs(
+    py: Python<'_>,
+    arrays: &[UFuncArray],
+    dtype: &Bound<'_, PyAny>,
+    sparse: bool,
+    tuple_input: bool,
+) -> PyResult<Py<PyAny>> {
+    if sparse {
+        if tuple_input {
+            let outputs = arrays
+                .iter()
+                .map(|array| {
+                    let output = build_numpy_array_from_ufunc(py, array)?;
+                    cast_numpy_array_dtype(py, output, dtype)
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            build_numpy_tuple_from_pyarrays(py, &outputs)
+        } else {
+            let output = build_numpy_array_from_ufunc(py, &arrays[0])?;
+            cast_numpy_array_dtype(py, output, dtype)
+        }
+    } else if tuple_input {
+        let numpy = py.import("numpy")?;
+        let tuple = build_numpy_tuple_from_ufuncs(py, arrays)?;
+        let stacked = numpy.getattr("stack")?.call1((tuple.bind(py),))?;
+        cast_numpy_array_dtype(py, stacked.unbind(), dtype)
+    } else {
+        let output = build_numpy_array_from_ufunc(py, &arrays[0])?;
+        cast_numpy_array_dtype(py, output, dtype)
+    }
+}
+
+fn grid_getitem(py: Python<'_>, key: &Bound<'_, PyAny>, sparse: bool) -> PyResult<Py<PyAny>> {
+    let context = if sparse { "ogrid" } else { "mgrid" };
+    let (specs, dtype, tuple_input) = parse_grid_key(py, key, context)?;
+    let arrays = if sparse {
+        UFuncArray::ogrid_spec(&specs)
+    } else {
+        UFuncArray::mgrid_spec(&specs)
+    };
+    build_grid_numpy_outputs(py, &arrays, dtype.bind(py), sparse, tuple_input)
+}
+
 fn build_numpy_array_from_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -1057,6 +1261,28 @@ impl PyVectorize {
                 .into_any()
                 .unbind())
         }
+    }
+}
+
+#[pymethods]
+impl PyMGridClass {
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        grid_getitem(py, key, false)
+    }
+
+    fn __repr__(&self) -> &str {
+        "MGridClass()"
+    }
+}
+
+#[pymethods]
+impl PyOGridClass {
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        grid_getitem(py, key, true)
+    }
+
+    fn __repr__(&self) -> &str {
+        "OGridClass()"
     }
 }
 
@@ -1971,10 +2197,13 @@ fn take_along_axis(
 
 #[pymodule]
 fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let py = m.py();
     m.add_class::<PyNditerStep>()?;
     m.add_class::<PyNditer>()?;
     m.add_class::<PyFromPyFunc>()?;
     m.add_class::<PyVectorize>()?;
+    m.add("mgrid", Py::new(py, PyMGridClass)?)?;
+    m.add("ogrid", Py::new(py, PyOGridClass)?)?;
     m.add_function(wrap_pyfunction!(frompyfunc, m)?)?;
     m.add_function(wrap_pyfunction!(vectorize, m)?)?;
     m.add_function(wrap_pyfunction!(digitize, m)?)?;
@@ -2050,8 +2279,8 @@ mod tests {
     };
     use pyo3::IntoPyObject;
     use pyo3::exceptions::{PyTypeError, PyValueError};
-    use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyList, PyModule, PyTuple};
-    use pyo3::{PyResult, Python};
+    use pyo3::types::{PyAny, PyAnyMethods, PyDict, PyDictMethods, PyList, PyModule, PyTuple};
+    use pyo3::{Py, PyResult, Python};
 
     fn with_python(test: impl FnOnce(Python<'_>) -> PyResult<()>) {
         pyo3::prepare_freethreaded_python();
@@ -2104,6 +2333,22 @@ mod tests {
         value.repr().unwrap().extract::<String>().unwrap()
     }
 
+    fn slice_object(
+        py: Python<'_>,
+        start: Option<Py<PyAny>>,
+        stop: Option<Py<PyAny>>,
+        step: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let builtins = py.import("builtins")?;
+        let start = start.unwrap_or_else(|| py.None());
+        let stop = stop.unwrap_or_else(|| py.None());
+        let step = step.unwrap_or_else(|| py.None());
+        Ok(builtins
+            .getattr("slice")?
+            .call1((start.bind(py), stop.bind(py), step.bind(py)))?
+            .unbind())
+    }
+
     fn assert_array_matches_numpy(
         actual: &pyo3::Bound<'_, pyo3::types::PyAny>,
         expected: &pyo3::Bound<'_, pyo3::types::PyAny>,
@@ -2138,6 +2383,10 @@ mod tests {
             assert_eq!(
                 actual_item.getattr("dtype")?.str()?.extract::<String>()?,
                 expected_item.getattr("dtype")?.str()?.extract::<String>()?
+            );
+            assert_eq!(
+                actual_item.getattr("shape")?.extract::<Vec<usize>>()?,
+                expected_item.getattr("shape")?.extract::<Vec<usize>>()?
             );
             assert_eq!(
                 repr_string(&actual_item.call_method0("tolist")?),
@@ -2203,6 +2452,8 @@ mod tests {
             assert!(module.getattr("diagonal").is_ok());
             assert!(module.getattr("fill_diagonal").is_ok());
             assert!(module.getattr("ix_").is_ok());
+            assert!(module.getattr("mgrid").is_ok());
+            assert!(module.getattr("ogrid").is_ok());
             assert!(module.getattr("meshgrid").is_ok());
             assert!(module.getattr("ravel_multi_index").is_ok());
             assert!(module.getattr("unravel_index").is_ok());
@@ -5048,6 +5299,180 @@ mod tests {
                 }),
             )?;
             assert_index_tuple_matches_numpy(actual_object.bind(py), &expected_object)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn mgrid_ogrid_match_numpy_for_single_and_multi_slice_shapes() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let builtins = py.import("builtins")?;
+
+            let complex_step = builtins.getattr("complex")?.call1((0_i64, 10_i64))?;
+            let single_key = slice_object(
+                py,
+                Some((-1_i64).into_pyobject(py)?.into_any().unbind()),
+                Some(1_i64.into_pyobject(py)?.into_any().unbind()),
+                Some(complex_step.unbind()),
+            )?;
+            let actual_mgrid = module.getattr("mgrid")?.get_item(single_key.bind(py))?;
+            let expected_mgrid = numpy.getattr("mgrid")?.get_item(single_key.bind(py))?;
+            assert_array_matches_numpy(&actual_mgrid, &expected_mgrid)?;
+
+            let actual_ogrid = module.getattr("ogrid")?.get_item(single_key.bind(py))?;
+            let expected_ogrid = numpy.getattr("ogrid")?.get_item(single_key.bind(py))?;
+            assert_array_matches_numpy(&actual_ogrid, &expected_ogrid)?;
+
+            let row_key = slice_object(
+                py,
+                Some(0_i64.into_pyobject(py)?.into_any().unbind()),
+                Some(4_i64.into_pyobject(py)?.into_any().unbind()),
+                None,
+            )?;
+            let col_key = slice_object(
+                py,
+                Some(0_i64.into_pyobject(py)?.into_any().unbind()),
+                Some(5_i64.into_pyobject(py)?.into_any().unbind()),
+                None,
+            )?;
+            let dense_key = PyTuple::new(py, [row_key.bind(py), col_key.bind(py)])?;
+
+            let actual_dense = module.getattr("mgrid")?.get_item(&dense_key)?;
+            let expected_dense = numpy.getattr("mgrid")?.get_item(&dense_key)?;
+            assert_array_matches_numpy(&actual_dense, &expected_dense)?;
+
+            let actual_sparse = module.getattr("ogrid")?.get_item(&dense_key)?;
+            let expected_sparse = numpy.getattr("ogrid")?.get_item(&dense_key)?;
+            assert_index_tuple_matches_numpy(&actual_sparse, &expected_sparse)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn mgrid_ogrid_match_numpy_for_none_defaults_and_tuple_single_slice_shapes() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            let default_start = slice_object(
+                py,
+                None,
+                Some(3_i64.into_pyobject(py)?.into_any().unbind()),
+                None,
+            )?;
+            let actual_mgrid = module.getattr("mgrid")?.get_item(default_start.bind(py))?;
+            let expected_mgrid = numpy.getattr("mgrid")?.get_item(default_start.bind(py))?;
+            assert_array_matches_numpy(&actual_mgrid, &expected_mgrid)?;
+
+            let actual_ogrid = module.getattr("ogrid")?.get_item(default_start.bind(py))?;
+            let expected_ogrid = numpy.getattr("ogrid")?.get_item(default_start.bind(py))?;
+            assert_array_matches_numpy(&actual_ogrid, &expected_ogrid)?;
+
+            let tuple_single_key = PyTuple::new(
+                py,
+                [slice_object(
+                    py,
+                    Some(0_i64.into_pyobject(py)?.into_any().unbind()),
+                    Some(5_i64.into_pyobject(py)?.into_any().unbind()),
+                    None,
+                )?
+                .bind(py)],
+            )?;
+
+            let actual_tuple_mgrid = module.getattr("mgrid")?.get_item(&tuple_single_key)?;
+            let expected_tuple_mgrid = numpy.getattr("mgrid")?.get_item(&tuple_single_key)?;
+            assert_array_matches_numpy(&actual_tuple_mgrid, &expected_tuple_mgrid)?;
+
+            let actual_tuple_ogrid = module.getattr("ogrid")?.get_item(&tuple_single_key)?;
+            let expected_tuple_ogrid = numpy.getattr("ogrid")?.get_item(&tuple_single_key)?;
+            assert_index_tuple_matches_numpy(&actual_tuple_ogrid, &expected_tuple_ogrid)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn mgrid_ogrid_match_numpy_for_float32_and_complex_count_dtypes() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let builtins = py.import("builtins")?;
+
+            let float32_key = slice_object(
+                py,
+                Some(numpy.getattr("float32")?.call1((0.1_f64,))?.unbind()),
+                Some(numpy.getattr("float32")?.call1((0.33_f64,))?.unbind()),
+                Some(numpy.getattr("float32")?.call1((0.1_f64,))?.unbind()),
+            )?;
+            let actual_float32 = module.getattr("mgrid")?.get_item(float32_key.bind(py))?;
+            let expected_float32 = numpy.getattr("mgrid")?.get_item(float32_key.bind(py))?;
+            assert_array_matches_numpy(&actual_float32, &expected_float32)?;
+
+            let float32_tuple = PyTuple::new(py, [float32_key.bind(py)])?;
+            let actual_float32_tuple = module.getattr("mgrid")?.get_item(&float32_tuple)?;
+            let expected_float32_tuple = numpy.getattr("mgrid")?.get_item(&float32_tuple)?;
+            assert_array_matches_numpy(&actual_float32_tuple, &expected_float32_tuple)?;
+
+            let complex64_key = slice_object(
+                py,
+                Some(0.1_f64.into_pyobject(py)?.into_any().unbind()),
+                Some(0.3_f64.into_pyobject(py)?.into_any().unbind()),
+                Some(
+                    numpy
+                        .getattr("complex64")?
+                        .call1((builtins.getattr("complex")?.call1((0_i64, 3_i64))?,))?
+                        .unbind(),
+                ),
+            )?;
+            let actual_complex = module.getattr("ogrid")?.get_item(complex64_key.bind(py))?;
+            let expected_complex = numpy.getattr("ogrid")?.get_item(complex64_key.bind(py))?;
+            assert_array_matches_numpy(&actual_complex, &expected_complex)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn mgrid_ogrid_reject_non_slice_indexing() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+
+            let err = module
+                .getattr("mgrid")?
+                .get_item(0_i64.into_pyobject(py)?.into_any())
+                .unwrap_err();
+            assert!(err.is_instance_of::<PyTypeError>(py));
+
+            let bad_index = 0_i64.into_pyobject(py)?.into_any().unbind();
+            let mixed_slice = slice_object(
+                py,
+                Some(0_i64.into_pyobject(py)?.into_any().unbind()),
+                Some(4_i64.into_pyobject(py)?.into_any().unbind()),
+                None,
+            )?;
+            let mixed_key = PyTuple::new(py, [bad_index.bind(py), mixed_slice.bind(py)])?;
+            let err = module.getattr("ogrid")?.get_item(&mixed_key).unwrap_err();
+            assert!(err.is_instance_of::<PyTypeError>(py));
             Ok(())
         });
     }
