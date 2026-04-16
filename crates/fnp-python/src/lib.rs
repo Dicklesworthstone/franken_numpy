@@ -5,8 +5,9 @@ use fnp_ufunc::UnaryOp;
 use fnp_ufunc::{
     UFuncArray, copysign as ufunc_copysign, frexp as ufunc_frexp, hypot as ufunc_hypot,
     isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, ldexp as ufunc_ldexp,
-    logaddexp as ufunc_logaddexp, logaddexp2 as ufunc_logaddexp2, nextafter as ufunc_nextafter,
-    signbit as ufunc_signbit, spacing as ufunc_spacing, where_nonzero,
+    logaddexp as ufunc_logaddexp, logaddexp2 as ufunc_logaddexp2, modf as ufunc_modf,
+    nextafter as ufunc_nextafter, signbit as ufunc_signbit, spacing as ufunc_spacing,
+    where_nonzero,
 };
 use pyo3::Bound;
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -998,6 +999,14 @@ fn frexp(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+fn modf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let x = extract_numeric_array(py, x.bind(py), "modf(x)")?;
+    let (fractional, integral) = ufunc_modf(&x).map_err(map_ufunc_error)?;
+    let outputs = [fractional, integral];
+    build_numpy_tuple_from_ufuncs(py, &outputs)
+}
+
+#[pyfunction]
 #[pyo3(signature = (condition, a, axis=None))]
 fn compress(
     py: Python<'_>,
@@ -1143,6 +1152,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(logaddexp, m)?)?;
     m.add_function(wrap_pyfunction!(logaddexp2, m)?)?;
     m.add_function(wrap_pyfunction!(frexp, m)?)?;
+    m.add_function(wrap_pyfunction!(modf, m)?)?;
     m.add_function(wrap_pyfunction!(take, m)?)?;
     m.add_function(wrap_pyfunction!(compress, m)?)?;
     m.add_function(wrap_pyfunction!(extract, m)?)?;
@@ -1158,8 +1168,8 @@ mod tests {
     use super::{
         PyFromPyFunc, PyVectorize, argwhere, choose, compress, copysign, count_nonzero, digitize,
         extract, flatnonzero, fnp_python, frexp, hypot, interp, isfinite, isinf, isnan, isneginf,
-        isposinf, ldexp, logaddexp, logaddexp2, nextafter, searchsorted, select, signbit, sinc,
-        spacing, take, take_along_axis, where_py,
+        isposinf, ldexp, logaddexp, logaddexp2, modf, nextafter, searchsorted, select, signbit,
+        sinc, spacing, take, take_along_axis, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
@@ -1247,6 +1257,7 @@ mod tests {
             assert!(module.getattr("logaddexp").is_ok());
             assert!(module.getattr("logaddexp2").is_ok());
             assert!(module.getattr("frexp").is_ok());
+            assert!(module.getattr("modf").is_ok());
             assert!(module.getattr("take").is_ok());
             assert!(module.getattr("compress").is_ok());
             assert!(module.getattr("extract").is_ok());
@@ -2676,6 +2687,86 @@ mod tests {
                 expected_exponent
                     .call_method0("tolist")?
                     .extract::<Vec<Vec<i32>>>()?
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn modf_matches_numpy_basic() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let x = numeric_array(py, vec![0.0, -0.0, 1.5, -2.5], "float64");
+            let actual = modf(py, x.clone().unbind())?;
+
+            let numpy = py.import("numpy")?;
+            let expected = numpy.getattr("modf")?.call1((x,))?;
+
+            let actual_tuple = actual.bind(py).downcast::<PyTuple>()?;
+            let expected_tuple = expected.downcast::<PyTuple>()?;
+            assert_eq!(actual_tuple.len()?, 2);
+            assert_eq!(expected_tuple.len()?, 2);
+
+            for (actual_item, expected_item) in
+                actual_tuple.try_iter()?.zip(expected_tuple.try_iter()?)
+            {
+                let actual_item = actual_item?;
+                let expected_item = expected_item?;
+                assert_eq!(
+                    actual_item.call_method0("tolist")?.extract::<Vec<f64>>()?,
+                    expected_item
+                        .call_method0("tolist")?
+                        .extract::<Vec<f64>>()?
+                );
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn modf_matches_numpy_special_values_and_shape() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let x = numeric_array(
+                py,
+                vec![vec![f64::INFINITY, f64::NEG_INFINITY], vec![f64::NAN, -0.0]],
+                "float64",
+            );
+            let actual = modf(py, x.clone().unbind())?;
+
+            let numpy = py.import("numpy")?;
+            let expected = numpy.getattr("modf")?.call1((x,))?;
+
+            let actual_tuple = actual.bind(py).downcast::<PyTuple>()?;
+            let expected_tuple = expected.downcast::<PyTuple>()?;
+            let actual_fractional = actual_tuple.get_item(0)?;
+            let actual_integral = actual_tuple.get_item(1)?;
+            let expected_fractional = expected_tuple.get_item(0)?;
+            let expected_integral = expected_tuple.get_item(1)?;
+
+            assert_eq!(
+                actual_fractional
+                    .getattr("shape")?
+                    .extract::<Vec<usize>>()?,
+                vec![2, 2]
+            );
+            assert_eq!(
+                actual_integral.getattr("shape")?.extract::<Vec<usize>>()?,
+                vec![2, 2]
+            );
+            assert_eq!(
+                repr_string(&actual_fractional.call_method0("tolist")?),
+                repr_string(&expected_fractional.call_method0("tolist")?)
+            );
+            assert_eq!(
+                repr_string(&actual_integral.call_method0("tolist")?),
+                repr_string(&expected_integral.call_method0("tolist")?)
             );
             Ok(())
         });

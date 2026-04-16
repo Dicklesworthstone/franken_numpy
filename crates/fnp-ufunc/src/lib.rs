@@ -28256,6 +28256,10 @@ pub fn modf(x: &UFuncArray) -> Result<(UFuncArray, UFuncArray), UFuncError> {
         if v.is_nan() {
             fractionals.push(f64::NAN);
             integrals.push(f64::NAN);
+        } else if v == 0.0 {
+            let zero = if v.is_sign_negative() { -0.0 } else { 0.0 };
+            fractionals.push(zero);
+            integrals.push(zero);
         } else if v.is_infinite() {
             fractionals.push(if v.is_sign_negative() { -0.0 } else { 0.0 });
             integrals.push(v);
@@ -45692,6 +45696,14 @@ mod tests {
         let (frac, int) = modf(&arr).unwrap();
         assert_eq!(frac.values(), &[0.0]);
         assert_eq!(int.values(), &[0.0]);
+    }
+
+    #[test]
+    fn modf_negative_zero() {
+        let arr = UFuncArray::new(vec![1], vec![-0.0], DType::F64).unwrap();
+        let (frac, int) = modf(&arr).unwrap();
+        assert!(frac.values()[0].is_sign_negative());
+        assert!(int.values()[0].is_sign_negative());
     }
 
     #[test]
