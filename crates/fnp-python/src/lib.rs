@@ -5,8 +5,8 @@ use fnp_ufunc::UnaryOp;
 use fnp_ufunc::{
     UFuncArray, copysign as ufunc_copysign, hypot as ufunc_hypot, isneginf as ufunc_isneginf,
     isposinf as ufunc_isposinf, ldexp as ufunc_ldexp, logaddexp as ufunc_logaddexp,
-    nextafter as ufunc_nextafter, signbit as ufunc_signbit, spacing as ufunc_spacing,
-    where_nonzero,
+    logaddexp2 as ufunc_logaddexp2, nextafter as ufunc_nextafter, signbit as ufunc_signbit,
+    spacing as ufunc_spacing, where_nonzero,
 };
 use pyo3::Bound;
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -968,6 +968,14 @@ fn logaddexp(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>
 }
 
 #[pyfunction]
+fn logaddexp2(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let x1 = extract_numeric_array(py, x1.bind(py), "logaddexp2(x1)")?;
+    let x2 = extract_numeric_array(py, x2.bind(py), "logaddexp2(x2)")?;
+    let result = ufunc_logaddexp2(&x1, &x2).map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(signature = (condition, a, axis=None))]
 fn compress(
     py: Python<'_>,
@@ -1111,6 +1119,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hypot, m)?)?;
     m.add_function(wrap_pyfunction!(ldexp, m)?)?;
     m.add_function(wrap_pyfunction!(logaddexp, m)?)?;
+    m.add_function(wrap_pyfunction!(logaddexp2, m)?)?;
     m.add_function(wrap_pyfunction!(take, m)?)?;
     m.add_function(wrap_pyfunction!(compress, m)?)?;
     m.add_function(wrap_pyfunction!(extract, m)?)?;
@@ -1126,8 +1135,8 @@ mod tests {
     use super::{
         PyFromPyFunc, PyVectorize, argwhere, choose, compress, copysign, count_nonzero, digitize,
         extract, flatnonzero, fnp_python, hypot, interp, isfinite, isinf, isnan, isneginf,
-        isposinf, ldexp, logaddexp, nextafter, searchsorted, select, signbit, sinc, spacing, take,
-        take_along_axis, where_py,
+        isposinf, ldexp, logaddexp, logaddexp2, nextafter, searchsorted, select, signbit, sinc,
+        spacing, take, take_along_axis, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
@@ -1213,6 +1222,7 @@ mod tests {
             assert!(module.getattr("hypot").is_ok());
             assert!(module.getattr("ldexp").is_ok());
             assert!(module.getattr("logaddexp").is_ok());
+            assert!(module.getattr("logaddexp2").is_ok());
             assert!(module.getattr("take").is_ok());
             assert!(module.getattr("compress").is_ok());
             assert!(module.getattr("extract").is_ok());
@@ -2466,6 +2476,66 @@ mod tests {
 
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("logaddexp")?.call1((x1, x2))?;
+
+            assert_eq!(
+                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
+                vec![2, 2]
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn logaddexp2_matches_numpy_basic() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let x1 = numeric_array(py, vec![0.0, 1.0, -2.0], "float64");
+            let x2 = numeric_array(py, vec![0.0, 3.0, -4.0], "float64");
+            let actual = logaddexp2(py, x1.clone().unbind(), x2.clone().unbind())?;
+
+            let numpy = py.import("numpy")?;
+            let expected = numpy.getattr("logaddexp2")?.call1((x1, x2))?;
+            let actual_values = actual
+                .bind(py)
+                .call_method0("tolist")?
+                .extract::<Vec<f64>>()?;
+            let expected_values = expected.call_method0("tolist")?.extract::<Vec<f64>>()?;
+
+            assert_eq!(actual_values.len(), expected_values.len());
+            for (actual, expected) in actual_values.iter().zip(expected_values.iter()) {
+                assert!(
+                    (actual - expected).abs() <= 1e-15,
+                    "expected {expected}, got {actual}"
+                );
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn logaddexp2_matches_numpy_broadcasting_and_infinities() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let x1 = numeric_array(
+                py,
+                vec![vec![f64::NEG_INFINITY, 1.0], vec![2.0, 3.0]],
+                "float64",
+            );
+            let x2 = numeric_array(py, vec![f64::NEG_INFINITY, f64::INFINITY], "float64");
+            let actual = logaddexp2(py, x1.clone().unbind(), x2.clone().unbind())?;
+
+            let numpy = py.import("numpy")?;
+            let expected = numpy.getattr("logaddexp2")?.call1((x1, x2))?;
 
             assert_eq!(
                 actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
