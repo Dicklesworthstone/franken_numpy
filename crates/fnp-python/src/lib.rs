@@ -84,6 +84,31 @@ fn extract_numeric_array(
     UFuncArray::from_storage(shape, storage).map_err(map_ufunc_error)
 }
 
+fn extract_index_vector(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    context: &str,
+) -> PyResult<Vec<usize>> {
+    let numpy = py.import("numpy")?;
+    let array = numpy.call_method1("asarray", (value,))?;
+    let flat = array.call_method1("reshape", (-1,))?;
+    let indices = flat
+        .call_method1("astype", ("int64",))?
+        .call_method0("tolist")?
+        .extract::<Vec<i64>>()?;
+
+    indices
+        .into_iter()
+        .map(|index| {
+            usize::try_from(index).map_err(|_| {
+                PyValueError::new_err(format!(
+                    "{context}: sorter indices must be non-negative, got {index}",
+                ))
+            })
+        })
+        .collect()
+}
+
 fn build_numpy_array_from_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -555,6 +580,26 @@ fn digitize(py: Python<'_>, x: Py<PyAny>, bins: Py<PyAny>, right: bool) -> PyRes
     build_numpy_array_from_ufunc(py, &result)
 }
 
+#[pyfunction]
+#[pyo3(signature = (a, v, side="left", sorter=None))]
+fn searchsorted(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    v: Py<PyAny>,
+    side: &str,
+    sorter: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let a = extract_numeric_array(py, a.bind(py), "searchsorted(a)")?;
+    let v = extract_numeric_array(py, v.bind(py), "searchsorted(v)")?;
+    let sorter = sorter
+        .map(|sorter| extract_index_vector(py, sorter.bind(py), "searchsorted(sorter)"))
+        .transpose()?;
+    let result = a
+        .searchsorted(&v, Some(side), sorter.as_deref())
+        .map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
+}
+
 #[pymodule]
 fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyNditerStep>()?;
@@ -564,12 +609,13 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(frompyfunc, m)?)?;
     m.add_function(wrap_pyfunction!(vectorize, m)?)?;
     m.add_function(wrap_pyfunction!(digitize, m)?)?;
+    m.add_function(wrap_pyfunction!(searchsorted, m)?)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PyFromPyFunc, PyVectorize, digitize, fnp_python};
+    use super::{PyFromPyFunc, PyVectorize, digitize, fnp_python, searchsorted};
     use pyo3::IntoPyObject;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
     use pyo3::{PyResult, Python};
@@ -636,6 +682,7 @@ mod tests {
             assert!(module.getattr("vectorize").is_ok());
             assert!(module.getattr("Vectorize").is_ok());
             assert!(module.getattr("digitize").is_ok());
+            assert!(module.getattr("searchsorted").is_ok());
             assert!(module.getattr("Nditer").is_ok());
             Ok(())
         });
@@ -909,6 +956,101 @@ mod tests {
             let actual = digitize(py, values.clone().unbind(), bins.clone().unbind(), false)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("digitize")?.call1((values, bins))?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn searchsorted_matches_numpy_left_side_with_duplicates() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let sorted = numeric_array(py, vec![1.0, 2.0, 2.0, 2.0, 3.0], "float64");
+            let values = numeric_array(py, vec![0.0, 2.0, 2.5, 4.0], "float64");
+
+            let actual = searchsorted(
+                py,
+                sorted.clone().unbind(),
+                values.clone().unbind(),
+                "left",
+                None,
+            )?;
+            let numpy = py.import("numpy")?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("side", "left")?;
+            let expected = numpy.call_method("searchsorted", (sorted, values), Some(&kwargs))?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn searchsorted_matches_numpy_right_side_with_probe_shape() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let sorted = numeric_array(py, vec![1.0, 3.0, 5.0, 7.0], "float64");
+            let values = numeric_array(py, vec![vec![0.0, 4.0], vec![6.0, 8.0]], "float64");
+
+            let actual = searchsorted(
+                py,
+                sorted.clone().unbind(),
+                values.clone().unbind(),
+                "right",
+                None,
+            )?;
+            let numpy = py.import("numpy")?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("side", "right")?;
+            let expected = numpy.call_method("searchsorted", (sorted, values), Some(&kwargs))?;
+
+            assert_eq!(
+                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
+                vec![2, 2]
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn searchsorted_supports_sorter_argument() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(py, vec![30_u64, 10_u64, 20_u64], "uint64");
+            let probes = numeric_array(py, vec![15_u64, 30_u64], "uint64");
+            let sorter = numeric_array(py, vec![1_i64, 2_i64, 0_i64], "int64");
+
+            let actual = searchsorted(
+                py,
+                values.clone().unbind(),
+                probes.clone().unbind(),
+                "left",
+                Some(sorter.clone().unbind()),
+            )?;
+            let numpy = py.import("numpy")?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("sorter", sorter)?;
+            let expected = numpy.call_method("searchsorted", (values, probes), Some(&kwargs))?;
 
             assert_eq!(
                 repr_string(&actual.bind(py).call_method0("tolist")?),
