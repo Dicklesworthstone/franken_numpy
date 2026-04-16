@@ -1,6 +1,7 @@
 use fnp_dtype::ArrayStorage;
 use fnp_iter::{Nditer, NditerOptions, NditerOrder};
 use fnp_ndarray::{broadcast_shapes, element_count};
+use fnp_ufunc::UnaryOp;
 use fnp_ufunc::{
     UFuncArray, isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, signbit as ufunc_signbit,
     where_nonzero,
@@ -894,6 +895,24 @@ fn signbit(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+fn isnan(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let x = extract_numeric_array(py, x.bind(py), "isnan(x)")?;
+    build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Isnan))
+}
+
+#[pyfunction]
+fn isinf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let x = extract_numeric_array(py, x.bind(py), "isinf(x)")?;
+    build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Isinf))
+}
+
+#[pyfunction]
+fn isfinite(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let x = extract_numeric_array(py, x.bind(py), "isfinite(x)")?;
+    build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Isfinite))
+}
+
+#[pyfunction]
 #[pyo3(signature = (condition, a, axis=None))]
 fn compress(
     py: Python<'_>,
@@ -1027,6 +1046,9 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(isposinf, m)?)?;
     m.add_function(wrap_pyfunction!(isneginf, m)?)?;
     m.add_function(wrap_pyfunction!(signbit, m)?)?;
+    m.add_function(wrap_pyfunction!(isnan, m)?)?;
+    m.add_function(wrap_pyfunction!(isinf, m)?)?;
+    m.add_function(wrap_pyfunction!(isfinite, m)?)?;
     m.add_function(wrap_pyfunction!(take, m)?)?;
     m.add_function(wrap_pyfunction!(compress, m)?)?;
     m.add_function(wrap_pyfunction!(extract, m)?)?;
@@ -1041,8 +1063,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::{
         PyFromPyFunc, PyVectorize, argwhere, choose, compress, count_nonzero, digitize, extract,
-        flatnonzero, fnp_python, interp, isneginf, isposinf, searchsorted, select, signbit, take,
-        take_along_axis, where_py,
+        flatnonzero, fnp_python, interp, isfinite, isinf, isnan, isneginf, isposinf, searchsorted,
+        select, signbit, take, take_along_axis, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
@@ -1118,6 +1140,9 @@ mod tests {
             assert!(module.getattr("isposinf").is_ok());
             assert!(module.getattr("isneginf").is_ok());
             assert!(module.getattr("signbit").is_ok());
+            assert!(module.getattr("isnan").is_ok());
+            assert!(module.getattr("isinf").is_ok());
+            assert!(module.getattr("isfinite").is_ok());
             assert!(module.getattr("take").is_ok());
             assert!(module.getattr("compress").is_ok());
             assert!(module.getattr("extract").is_ok());
@@ -1930,6 +1955,85 @@ mod tests {
                 actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
                 expected.getattr("shape")?.extract::<Vec<usize>>()?
             );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn isnan_matches_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(
+                py,
+                vec![f64::NAN, f64::NEG_INFINITY, -1.0, 0.0, f64::INFINITY],
+                "float64",
+            );
+            let actual = isnan(py, values.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("isnan", (values,))?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn isinf_matches_numpy_multidimensional_input() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(
+                py,
+                vec![
+                    vec![f64::NEG_INFINITY, -1.0, 0.0],
+                    vec![1.0, f64::INFINITY, f64::NAN],
+                ],
+                "float64",
+            );
+            let actual = isinf(py, values.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("isinf", (values,))?;
+
+            assert_eq!(
+                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
+                expected.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn isfinite_matches_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(
+                py,
+                vec![f64::NAN, f64::NEG_INFINITY, -3.0, -0.0, 1.5, f64::INFINITY],
+                "float64",
+            );
+            let actual = isfinite(py, values.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("isfinite", (values,))?;
+
             assert_eq!(
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
