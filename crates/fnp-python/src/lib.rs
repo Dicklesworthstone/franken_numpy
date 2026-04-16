@@ -1,4 +1,4 @@
-use fnp_dtype::ArrayStorage;
+use fnp_dtype::{ArrayStorage, DType};
 use fnp_iter::{Nditer, NditerOptions, NditerOrder};
 use fnp_ndarray::{broadcast_shapes, element_count};
 use fnp_ufunc::UnaryOp;
@@ -266,6 +266,10 @@ fn build_numpy_array_from_storage(
         ArrayStorage::F32(values) => (
             PyList::new(py, values.iter().copied())?.into_any(),
             "float32",
+        ),
+        ArrayStorage::F16(values) => (
+            PyList::new(py, values.iter().map(|value| f32::from(*value)))?.into_any(),
+            "float16",
         ),
         ArrayStorage::F64(values) => (
             PyList::new(py, values.iter().copied())?.into_any(),
@@ -947,6 +951,18 @@ fn trunc(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+fn rint(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let x = extract_numeric_array(py, x.bind(py), "rint(x)")?;
+    let result = x.elementwise_unary(UnaryOp::Rint);
+    let result = match x.dtype() {
+        DType::Bool => result.astype(DType::F16),
+        DType::I64 | DType::U64 => result.astype(DType::F64),
+        _ => result,
+    };
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
 fn degrees(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x = extract_numeric_array(py, x.bind(py), "degrees(x)")?;
     build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Degrees))
@@ -1201,6 +1217,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(floor, m)?)?;
     m.add_function(wrap_pyfunction!(ceil, m)?)?;
     m.add_function(wrap_pyfunction!(trunc, m)?)?;
+    m.add_function(wrap_pyfunction!(rint, m)?)?;
     m.add_function(wrap_pyfunction!(degrees, m)?)?;
     m.add_function(wrap_pyfunction!(radians, m)?)?;
     m.add_function(wrap_pyfunction!(sinc, m)?)?;
@@ -1229,7 +1246,7 @@ mod tests {
         PyFromPyFunc, PyVectorize, argwhere, ceil, choose, compress, copysign, count_nonzero,
         degrees, digitize, extract, flatnonzero, floor, fnp_python, frexp, hypot, interp, isfinite,
         isinf, isnan, isneginf, isposinf, ldexp, logaddexp, logaddexp2, modf, nan_to_num,
-        nextafter, radians, searchsorted, select, sign, signbit, sinc, spacing, take,
+        nextafter, radians, rint, searchsorted, select, sign, signbit, sinc, spacing, take,
         take_along_axis, trunc, where_py,
     };
     use pyo3::IntoPyObject;
@@ -1314,6 +1331,7 @@ mod tests {
             assert!(module.getattr("floor").is_ok());
             assert!(module.getattr("ceil").is_ok());
             assert!(module.getattr("trunc").is_ok());
+            assert!(module.getattr("rint").is_ok());
             assert!(module.getattr("degrees").is_ok());
             assert!(module.getattr("radians").is_ok());
             assert!(module.getattr("sinc").is_ok());
@@ -2512,6 +2530,111 @@ mod tests {
                 actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
                 expected.getattr("shape")?.extract::<Vec<usize>>()?
             );
+            assert_eq!(
+                actual
+                    .bind(py)
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                expected.getattr("dtype")?.str()?.extract::<String>()?
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn rint_matches_numpy_float_and_special_values() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(
+                py,
+                vec![
+                    -0.5_f64,
+                    -0.0_f64,
+                    0.0_f64,
+                    0.5_f64,
+                    1.5_f64,
+                    -1.5_f64,
+                    f64::INFINITY,
+                    f64::NAN,
+                ],
+                "float64",
+            );
+            let actual = rint(py, values.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("rint", (values,))?;
+
+            assert_eq!(
+                actual
+                    .bind(py)
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                expected.getattr("dtype")?.str()?.extract::<String>()?
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn rint_matches_numpy_integer_input() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(
+                py,
+                vec![vec![1_i64, -2_i64, 0_i64], vec![7_i64, -9_i64, 4_i64]],
+                "int64",
+            );
+            let actual = rint(py, values.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("rint", (values,))?;
+
+            assert_eq!(
+                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
+                expected.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                actual
+                    .bind(py)
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                expected.getattr("dtype")?.str()?.extract::<String>()?
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn rint_matches_numpy_bool_input() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(py, vec![true, false, true], "bool");
+            let actual = rint(py, values.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("rint", (values,))?;
+
             assert_eq!(
                 actual
                     .bind(py)
