@@ -1,7 +1,9 @@
 use fnp_dtype::ArrayStorage;
 use fnp_iter::{Nditer, NditerOptions, NditerOrder};
 use fnp_ndarray::{broadcast_shapes, element_count};
-use fnp_ufunc::{UFuncArray, where_nonzero};
+use fnp_ufunc::{
+    UFuncArray, isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, where_nonzero,
+};
 use pyo3::Bound;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -870,6 +872,20 @@ fn count_nonzero(
 }
 
 #[pyfunction]
+fn isposinf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let x = extract_numeric_array(py, x.bind(py), "isposinf(x)")?;
+    let result = ufunc_isposinf(&x).map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
+fn isneginf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let x = extract_numeric_array(py, x.bind(py), "isneginf(x)")?;
+    let result = ufunc_isneginf(&x).map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(signature = (condition, a, axis=None))]
 fn compress(
     py: Python<'_>,
@@ -1000,6 +1016,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(flatnonzero, m)?)?;
     m.add_function(wrap_pyfunction!(argwhere, m)?)?;
     m.add_function(wrap_pyfunction!(count_nonzero, m)?)?;
+    m.add_function(wrap_pyfunction!(isposinf, m)?)?;
+    m.add_function(wrap_pyfunction!(isneginf, m)?)?;
     m.add_function(wrap_pyfunction!(take, m)?)?;
     m.add_function(wrap_pyfunction!(compress, m)?)?;
     m.add_function(wrap_pyfunction!(extract, m)?)?;
@@ -1014,7 +1032,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::{
         PyFromPyFunc, PyVectorize, argwhere, choose, compress, count_nonzero, digitize, extract,
-        flatnonzero, fnp_python, interp, searchsorted, select, take, take_along_axis, where_py,
+        flatnonzero, fnp_python, interp, isneginf, isposinf, searchsorted, select, take,
+        take_along_axis, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
@@ -1087,6 +1106,8 @@ mod tests {
             assert!(module.getattr("flatnonzero").is_ok());
             assert!(module.getattr("argwhere").is_ok());
             assert!(module.getattr("count_nonzero").is_ok());
+            assert!(module.getattr("isposinf").is_ok());
+            assert!(module.getattr("isneginf").is_ok());
             assert!(module.getattr("take").is_ok());
             assert!(module.getattr("compress").is_ok());
             assert!(module.getattr("extract").is_ok());
@@ -1787,6 +1808,61 @@ mod tests {
             assert_eq!(
                 repr_string(&actual_empty.bind(py).call_method0("tolist")?),
                 repr_string(&expected_empty.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn isposinf_matches_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(
+                py,
+                vec![f64::NEG_INFINITY, -1.0, 0.0, f64::INFINITY, f64::NAN],
+                "float64",
+            );
+            let actual = isposinf(py, values.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("isposinf", (values,))?;
+
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn isneginf_matches_numpy_multidimensional_input() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let values = numeric_array(
+                py,
+                vec![
+                    vec![f64::NEG_INFINITY, 1.0, f64::INFINITY],
+                    vec![0.0, f64::NEG_INFINITY, f64::NAN],
+                ],
+                "float64",
+            );
+            let actual = isneginf(py, values.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("isneginf", (values,))?;
+
+            assert_eq!(
+                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
+                expected.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
             );
             Ok(())
         });
