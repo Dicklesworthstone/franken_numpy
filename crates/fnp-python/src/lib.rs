@@ -693,6 +693,20 @@ fn where_py(
 }
 
 #[pyfunction]
+fn flatnonzero(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let a = extract_numeric_array(py, a.bind(py), "flatnonzero(a)")?;
+    let result = a.flatnonzero();
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
+fn argwhere(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let a = extract_numeric_array(py, a.bind(py), "argwhere(a)")?;
+    let result = a.argwhere();
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(signature = (condition, a, axis=None))]
 fn compress(
     py: Python<'_>,
@@ -824,6 +838,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(digitize, m)?)?;
     m.add_function(wrap_pyfunction!(interp, m)?)?;
     m.add_function(wrap_pyfunction!(where_py, m)?)?;
+    m.add_function(wrap_pyfunction!(flatnonzero, m)?)?;
+    m.add_function(wrap_pyfunction!(argwhere, m)?)?;
     m.add_function(wrap_pyfunction!(compress, m)?)?;
     m.add_function(wrap_pyfunction!(extract, m)?)?;
     m.add_function(wrap_pyfunction!(select, m)?)?;
@@ -836,8 +852,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PyFromPyFunc, PyVectorize, choose, compress, digitize, extract, fnp_python, interp,
-        searchsorted, select, take_along_axis, where_py,
+        PyFromPyFunc, PyVectorize, argwhere, choose, compress, digitize, extract, flatnonzero,
+        fnp_python, interp, searchsorted, select, take_along_axis, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyTuple};
@@ -907,6 +923,8 @@ mod tests {
             assert!(module.getattr("digitize").is_ok());
             assert!(module.getattr("interp").is_ok());
             assert!(module.getattr("where").is_ok());
+            assert!(module.getattr("flatnonzero").is_ok());
+            assert!(module.getattr("argwhere").is_ok());
             assert!(module.getattr("compress").is_ok());
             assert!(module.getattr("extract").is_ok());
             assert!(module.getattr("select").is_ok());
@@ -1388,6 +1406,114 @@ mod tests {
                     repr_string(&expected_item.call_method0("tolist")?)
                 );
             }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn flatnonzero_matches_numpy_multidimensional_input() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let arr = numeric_array(
+                py,
+                vec![vec![0_i64, 2_i64, 0_i64], vec![3_i64, 0_i64, 4_i64]],
+                "int64",
+            );
+            let actual = flatnonzero(py, arr.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("flatnonzero", (arr,))?;
+
+            assert_eq!(
+                actual
+                    .bind(py)
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                expected.getattr("dtype")?.str()?.extract::<String>()?
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn flatnonzero_matches_numpy_scalar_input() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let arr = numeric_array(py, 1_i64, "int64");
+            let actual = flatnonzero(py, arr.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("flatnonzero", (arr,))?;
+
+            assert_eq!(
+                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
+                expected.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn argwhere_matches_numpy_multidimensional_input() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let arr = numeric_array(
+                py,
+                vec![vec![0.0, 2.5, 0.0], vec![3.5, 0.0, -4.0]],
+                "float64",
+            );
+            let actual = argwhere(py, arr.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("argwhere", (arr,))?;
+
+            assert_eq!(
+                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
+                expected.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn argwhere_matches_numpy_scalar_nonzero_shape() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let arr = numeric_array(py, 1_i64, "int64");
+            let actual = argwhere(py, arr.clone().unbind())?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("argwhere", (arr,))?;
+
+            assert_eq!(
+                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
+                expected.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
             Ok(())
         });
     }
