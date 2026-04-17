@@ -8741,10 +8741,11 @@ impl UFuncArray {
                 "column_stack requires at least one array".to_string(),
             ));
         }
-        // Promote 1-D to 2-D column vectors, then hstack
+        // Promote scalars/1-D to 2-D column vectors, then concatenate along axis 1.
         let promoted: Vec<Self> = arrays
             .iter()
             .map(|a| {
+                let a = a.atleast_1d();
                 if a.shape.len() == 1 {
                     Self {
                         shape: vec![a.shape[0], 1],
@@ -17780,11 +17781,12 @@ impl UFuncArray {
         if arrays.is_empty() {
             return Err(UFuncError::Msg("hstack: need at least 1 array".to_string()));
         }
-        // For 1-D arrays, concatenate along axis 0
-        if arrays.iter().all(|a| a.shape.len() == 1) {
-            return Self::concatenate(&arrays.iter().collect::<Vec<_>>(), 0);
+        let promoted: Vec<Self> = arrays.iter().map(|a| a.atleast_1d()).collect();
+        // NumPy selects the concatenation axis based on the first promoted input.
+        if promoted[0].shape.len() == 1 {
+            return Self::concatenate(&promoted.iter().collect::<Vec<_>>(), 0);
         }
-        Self::concatenate(&arrays.iter().collect::<Vec<_>>(), 1)
+        Self::concatenate(&promoted.iter().collect::<Vec<_>>(), 1)
     }
 
     // ── slice, item, ravel, copy, fill, ptp, round, choose ────────
@@ -37537,6 +37539,15 @@ mod tests {
     }
 
     #[test]
+    fn hstack_0d_promotes_to_1d() {
+        let a = UFuncArray::scalar(1.0, DType::F64);
+        let b = UFuncArray::scalar(2.0, DType::F64);
+        let r = UFuncArray::hstack(&[a, b]).unwrap();
+        assert_eq!(r.shape(), &[2]);
+        assert_eq!(r.values(), &[1.0, 2.0]);
+    }
+
+    #[test]
     fn hstack_2d() {
         let a = UFuncArray::new(vec![2, 1], vec![1.0, 2.0], DType::F64).unwrap();
         let b = UFuncArray::new(vec![2, 2], vec![3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
@@ -38348,6 +38359,15 @@ mod tests {
         let r = UFuncArray::column_stack(&[a, b]).unwrap();
         assert_eq!(r.shape(), &[3, 2]);
         assert_eq!(r.values(), &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    }
+
+    #[test]
+    fn column_stack_0d_promotes_to_single_column_entries() {
+        let a = UFuncArray::scalar(1.0, DType::F64);
+        let b = UFuncArray::scalar(2.0, DType::F64);
+        let r = UFuncArray::column_stack(&[a, b]).unwrap();
+        assert_eq!(r.shape(), &[1, 2]);
+        assert_eq!(r.values(), &[1.0, 2.0]);
     }
 
     #[test]
