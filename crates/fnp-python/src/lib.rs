@@ -52,6 +52,34 @@ pub struct PyMGridClass;
 #[pyclass(name = "OGridClass", unsendable)]
 pub struct PyOGridClass;
 
+#[pyclass(name = "RClass", unsendable)]
+pub struct PyRClass;
+
+#[pyclass(name = "CClass", unsendable)]
+pub struct PyCClass;
+
+#[derive(Clone, Copy)]
+enum AxisConcatenatorKind {
+    Rows,
+    Columns,
+}
+
+impl AxisConcatenatorKind {
+    const fn context(self) -> &'static str {
+        match self {
+            Self::Rows => "r_",
+            Self::Columns => "c_",
+        }
+    }
+
+    fn concatenate(self, arrays: &[UFuncArray]) -> Result<UFuncArray, fnp_ufunc::UFuncError> {
+        match self {
+            Self::Rows => UFuncArray::r_(arrays),
+            Self::Columns => UFuncArray::c_(arrays),
+        }
+    }
+}
+
 struct ParsedGridAxis {
     spec: GridSpec,
     start: Py<PyAny>,
@@ -823,6 +851,76 @@ fn grid_getitem(py: Python<'_>, key: &Bound<'_, PyAny>, sparse: bool) -> PyResul
     build_grid_numpy_outputs(py, &arrays, dtype.bind(py), sparse, tuple_input)
 }
 
+fn axis_concatenator_items(key: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
+    if let Ok(tuple) = key.downcast::<PyTuple>() {
+        tuple.try_iter()?.map(|item| Ok(item?.unbind())).collect()
+    } else {
+        Ok(vec![key.clone().unbind()])
+    }
+}
+
+fn axis_concatenator_slice_array(
+    py: Python<'_>,
+    kind: AxisConcatenatorKind,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<UFuncArray> {
+    let numpy = py.import("numpy")?;
+    let array = numpy
+        .getattr(kind.context())?
+        .call_method1("__getitem__", (value,))?;
+    extract_precise_numeric_array(py, &array, kind.context())
+}
+
+fn axis_concatenator_array(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    kind: AxisConcatenatorKind,
+) -> PyResult<Option<UFuncArray>> {
+    if value.extract::<String>().is_ok() {
+        return Ok(None);
+    }
+
+    if let Ok(slice) = value.downcast::<pyo3::types::PySlice>() {
+        return axis_concatenator_slice_array(py, kind, slice.as_any()).map(Some);
+    }
+
+    match extract_precise_numeric_array(py, value, kind.context()) {
+        Ok(array) => Ok(Some(array)),
+        Err(_) => Ok(None),
+    }
+}
+
+fn axis_concatenator_numpy_fallback(
+    py: Python<'_>,
+    kind: AxisConcatenatorKind,
+    key: &Bound<'_, PyAny>,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr(kind.context())?
+        .call_method1("__getitem__", (key,))?
+        .unbind())
+}
+
+fn axis_concatenator_getitem(
+    py: Python<'_>,
+    key: &Bound<'_, PyAny>,
+    kind: AxisConcatenatorKind,
+) -> PyResult<Py<PyAny>> {
+    let arrays = axis_concatenator_items(key)?
+        .into_iter()
+        .map(|item| axis_concatenator_array(py, item.bind(py), kind))
+        .collect::<PyResult<Vec<_>>>()?;
+
+    if arrays.iter().any(Option::is_none) {
+        return axis_concatenator_numpy_fallback(py, kind, key);
+    }
+
+    let materialized = arrays.into_iter().flatten().collect::<Vec<_>>();
+    let result = kind.concatenate(&materialized).map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
+}
+
 fn build_numpy_array_from_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -1283,6 +1381,36 @@ impl PyOGridClass {
 
     fn __repr__(&self) -> &str {
         "OGridClass()"
+    }
+}
+
+#[pymethods]
+impl PyRClass {
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        axis_concatenator_getitem(py, key, AxisConcatenatorKind::Rows)
+    }
+
+    fn __len__(&self) -> usize {
+        0
+    }
+
+    fn __repr__(&self) -> &str {
+        "RClass()"
+    }
+}
+
+#[pymethods]
+impl PyCClass {
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        axis_concatenator_getitem(py, key, AxisConcatenatorKind::Columns)
+    }
+
+    fn __len__(&self) -> usize {
+        0
+    }
+
+    fn __repr__(&self) -> &str {
+        "CClass()"
     }
 }
 
@@ -2204,6 +2332,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVectorize>()?;
     m.add("mgrid", Py::new(py, PyMGridClass)?)?;
     m.add("ogrid", Py::new(py, PyOGridClass)?)?;
+    m.add("r_", Py::new(py, PyRClass)?)?;
+    m.add("c_", Py::new(py, PyCClass)?)?;
     m.add_function(wrap_pyfunction!(frompyfunc, m)?)?;
     m.add_function(wrap_pyfunction!(vectorize, m)?)?;
     m.add_function(wrap_pyfunction!(digitize, m)?)?;
@@ -2454,6 +2584,8 @@ mod tests {
             assert!(module.getattr("ix_").is_ok());
             assert!(module.getattr("mgrid").is_ok());
             assert!(module.getattr("ogrid").is_ok());
+            assert!(module.getattr("r_").is_ok());
+            assert!(module.getattr("c_").is_ok());
             assert!(module.getattr("meshgrid").is_ok());
             assert!(module.getattr("ravel_multi_index").is_ok());
             assert!(module.getattr("unravel_index").is_ok());
@@ -5473,6 +5605,109 @@ mod tests {
             let mixed_key = PyTuple::new(py, [bad_index.bind(py), mixed_slice.bind(py)])?;
             let err = module.getattr("ogrid")?.get_item(&mixed_key).unwrap_err();
             assert!(err.is_instance_of::<PyTypeError>(py));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn r_c_match_numpy_for_numeric_scalars_and_slice_expansion() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let builtins = py.import("builtins")?;
+
+            let left = numeric_array(py, vec![1_i64, 2_i64, 3_i64], "int64").unbind();
+            let right = numeric_array(py, vec![4_i64, 5_i64, 6_i64], "int64").unbind();
+            let zero_a = 0_i64.into_pyobject(py)?.into_any().unbind();
+            let zero_b = 0_i64.into_pyobject(py)?.into_any().unbind();
+            let r_items = [left.clone_ref(py), zero_a, zero_b, right.clone_ref(py)];
+            let r_key = PyTuple::new(py, r_items.iter().map(|item| item.bind(py)))?;
+            let actual_r = module.getattr("r_")?.get_item(&r_key)?;
+            let expected_r = numpy.getattr("r_")?.get_item(&r_key)?;
+            assert_array_matches_numpy(&actual_r, &expected_r)?;
+
+            let complex_step = builtins.getattr("complex")?.call1((0_i64, 8_i64))?;
+            let slice_key = slice_object(
+                py,
+                Some((-1_i64).into_pyobject(py)?.into_any().unbind()),
+                Some(1_i64.into_pyobject(py)?.into_any().unbind()),
+                Some(complex_step.unbind()),
+            )?;
+            let actual_slice = module.getattr("r_")?.get_item(slice_key.bind(py))?;
+            let expected_slice = numpy.getattr("r_")?.get_item(slice_key.bind(py))?;
+            assert_array_matches_numpy(&actual_slice, &expected_slice)?;
+
+            let c_left = numeric_array(py, vec![1_i64, 2_i64, 3_i64], "int64").unbind();
+            let c_right = numeric_array(py, vec![4_i64, 5_i64, 6_i64], "int64").unbind();
+            let c_key = PyTuple::new(py, [c_left.bind(py), c_right.bind(py)])?;
+            let actual_c = module.getattr("c_")?.get_item(&c_key)?;
+            let expected_c = numpy.getattr("c_")?.get_item(&c_key)?;
+            assert_array_matches_numpy(&actual_c, &expected_c)?;
+
+            let row_left = numeric_array(py, vec![vec![1_i64, 2_i64, 3_i64]], "int64").unbind();
+            let row_right = numeric_array(py, vec![vec![4_i64, 5_i64, 6_i64]], "int64").unbind();
+            let row_zero_a = 0_i64.into_pyobject(py)?.into_any().unbind();
+            let row_zero_b = 0_i64.into_pyobject(py)?.into_any().unbind();
+            let c_row_items = [
+                row_left.clone_ref(py),
+                row_zero_a,
+                row_zero_b,
+                row_right.clone_ref(py),
+            ];
+            let c_row_key = PyTuple::new(py, c_row_items.iter().map(|item| item.bind(py)))?;
+            let actual_c_rows = module.getattr("c_")?.get_item(&c_row_key)?;
+            let expected_c_rows = numpy.getattr("c_")?.get_item(&c_row_key)?;
+            assert_array_matches_numpy(&actual_c_rows, &expected_c_rows)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn r_c_match_numpy_for_directives_and_object_dtype_fallbacks() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            let matrix_left =
+                numeric_array(py, vec![vec![0_i64, 1_i64], vec![2_i64, 3_i64]], "int64").unbind();
+            let matrix_right =
+                numeric_array(py, vec![vec![4_i64, 5_i64], vec![6_i64, 7_i64]], "int64").unbind();
+            let directive = "1".into_pyobject(py)?.into_any().unbind();
+            let directive_items = [
+                directive,
+                matrix_left.clone_ref(py),
+                matrix_right.clone_ref(py),
+            ];
+            let directive_key = PyTuple::new(py, directive_items.iter().map(|item| item.bind(py)))?;
+            let actual_directive = module.getattr("r_")?.get_item(&directive_key)?;
+            let expected_directive = numpy.getattr("r_")?.get_item(&directive_key)?;
+            assert_array_matches_numpy(&actual_directive, &expected_directive)?;
+
+            let matrix_mode = "r".into_pyobject(py)?.into_any().unbind();
+            let matrix_a = numeric_array(py, vec![1_i64, 2_i64, 3_i64], "int64").unbind();
+            let matrix_b = numeric_array(py, vec![4_i64, 5_i64, 6_i64], "int64").unbind();
+            let matrix_items = [matrix_mode, matrix_a, matrix_b];
+            let matrix_key = PyTuple::new(py, matrix_items.iter().map(|item| item.bind(py)))?;
+            let actual_matrix = module.getattr("r_")?.get_item(&matrix_key)?;
+            let expected_matrix = numpy.getattr("r_")?.get_item(&matrix_key)?;
+            assert_array_matches_numpy(&actual_matrix, &expected_matrix)?;
+
+            let object_left = object_array(py, vec!["north", "south"]).unbind();
+            let object_right = object_array(py, vec!["east", "west"]).unbind();
+            let object_key = PyTuple::new(py, [object_left.bind(py), object_right.bind(py)])?;
+            let actual_object = module.getattr("c_")?.get_item(&object_key)?;
+            let expected_object = numpy.getattr("c_")?.get_item(&object_key)?;
+            assert_array_matches_numpy(&actual_object, &expected_object)?;
             Ok(())
         });
     }

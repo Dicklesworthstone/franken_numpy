@@ -660,6 +660,8 @@ FrankenNumPy implements the full set of NumPy's array construction and manipulat
 | `hstack` | Stack horizontally. For 1-D: axis 0. For N-D: axis 1. |
 | `dstack` | Stack along axis 2. Promotes to at least 3-D first. |
 | `column_stack` | Stack 1-D arrays as columns of a 2-D array. |
+| `r_[...]` | Row-wise concatenation object with slice expansion and NumPy directive fallback |
+| `c_[...]` | Column-wise concatenation object with 1-D-to-column promotion and NumPy directive fallback |
 | `block(grid)` | Assemble from nested grid. Concatenates within rows, then stacks. |
 | `split(ary, n, axis)` | Split into `n` equal sub-arrays along axis |
 | `array_split(ary, n, axis)` | Split allowing unequal sub-arrays |
