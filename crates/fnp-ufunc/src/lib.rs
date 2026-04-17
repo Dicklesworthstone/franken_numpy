@@ -8766,6 +8766,11 @@ impl UFuncArray {
     ///
     /// Mimics `np.vsplit(a, sections)`.
     pub fn vsplit(&self, sections: usize) -> Result<Vec<Self>, UFuncError> {
+        if self.shape.len() < 2 {
+            return Err(UFuncError::Msg(
+                "vsplit only works on arrays of 2 or more dimensions".to_string(),
+            ));
+        }
         self.split(sections, 0)
     }
 
@@ -8773,13 +8778,24 @@ impl UFuncArray {
     ///
     /// Mimics `np.hsplit(a, sections)`.
     pub fn hsplit(&self, sections: usize) -> Result<Vec<Self>, UFuncError> {
-        self.split(sections, 1)
+        match self.shape.len() {
+            0 => Err(UFuncError::Msg(
+                "hsplit only works on arrays of 1 or more dimensions".to_string(),
+            )),
+            1 => self.split(sections, 0),
+            _ => self.split(sections, 1),
+        }
     }
 
     /// Split an array into multiple sub-arrays along axis 2 (depth).
     ///
     /// Mimics `np.dsplit(a, sections)`.
     pub fn dsplit(&self, sections: usize) -> Result<Vec<Self>, UFuncError> {
+        if self.shape.len() < 3 {
+            return Err(UFuncError::Msg(
+                "dsplit only works on arrays of 3 or more dimensions".to_string(),
+            ));
+        }
         self.split(sections, 2)
     }
 
@@ -10201,9 +10217,14 @@ impl UFuncArray {
         if self.shape.is_empty() {
             return Err(UFuncError::Msg("cannot split scalar array".to_string()));
         }
+        if sections == 0 {
+            return Err(UFuncError::Msg(
+                "number sections must be larger than 0.".to_string(),
+            ));
+        }
         let axis = normalize_axis(axis, self.shape.len())?;
         let axis_len = self.shape[axis];
-        if sections == 0 || !axis_len.is_multiple_of(sections) {
+        if !axis_len.is_multiple_of(sections) {
             return Err(UFuncError::Msg(format!(
                 "array split does not result in an equal division: {axis_len} into {sections}"
             )));
@@ -21308,7 +21329,7 @@ impl UFuncArray {
         }
         if sections == 0 {
             return Err(UFuncError::Msg(
-                "array_split: number of sections must be > 0".to_string(),
+                "number sections must be larger than 0.".to_string(),
             ));
         }
         let axis = normalize_axis(axis, self.shape.len())?;
@@ -35942,6 +35963,13 @@ mod tests {
     }
 
     #[test]
+    fn split_zero_sections_rejected() {
+        let arr = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
+        let err = arr.split(0, 0).unwrap_err();
+        assert_eq!(err.to_string(), "number sections must be larger than 0.");
+    }
+
+    #[test]
     fn split_at_indices() {
         // np.split([1,2,3,4,5,6], [2, 4]) → [[1,2], [3,4], [5,6]]
         let a = UFuncArray::new(vec![6], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
@@ -38411,6 +38439,41 @@ mod tests {
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0].shape(), &[2, 2]);
         assert_eq!(parts[0].values(), &[1.0, 2.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn hsplit_1d_uses_axis0() {
+        let a = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let parts = a.hsplit(2).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].shape(), &[2]);
+        assert_eq!(parts[0].values(), &[1.0, 2.0]);
+        assert_eq!(parts[1].values(), &[3.0, 4.0]);
+    }
+
+    #[test]
+    fn vsplit_1d_rejected() {
+        let a = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let err = a.vsplit(2).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "vsplit only works on arrays of 2 or more dimensions"
+        );
+    }
+
+    #[test]
+    fn dsplit_2d_rejected() {
+        let a = UFuncArray::new(
+            vec![2, 4],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            DType::F64,
+        )
+        .unwrap();
+        let err = a.dsplit(2).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "dsplit only works on arrays of 3 or more dimensions"
+        );
     }
 
     #[test]
@@ -43042,6 +43105,13 @@ mod tests {
         assert_eq!(parts[0].values(), &[1.0]);
         assert_eq!(parts[1].values(), &[2.0]);
         assert!(parts[2].values().is_empty());
+    }
+
+    #[test]
+    fn array_split_zero_sections_rejected() {
+        let a = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        let err = a.array_split(0, 0).unwrap_err();
+        assert_eq!(err.to_string(), "number sections must be larger than 0.");
     }
 
     // ── block tests ──

@@ -108,6 +108,42 @@ impl StackHelperKind {
     }
 }
 
+#[derive(Clone, Copy)]
+enum SplitHelperKind {
+    Equal,
+    Flexible,
+    Horizontal,
+    Vertical,
+    Depth,
+}
+
+impl SplitHelperKind {
+    const fn context(self) -> &'static str {
+        match self {
+            Self::Equal => "split",
+            Self::Flexible => "array_split",
+            Self::Horizontal => "hsplit",
+            Self::Vertical => "vsplit",
+            Self::Depth => "dsplit",
+        }
+    }
+
+    fn rust_sections(
+        self,
+        array: &UFuncArray,
+        sections: usize,
+        axis: isize,
+    ) -> Result<Vec<UFuncArray>, fnp_ufunc::UFuncError> {
+        match self {
+            Self::Equal => array.split(sections, axis),
+            Self::Flexible => array.array_split(sections, axis),
+            Self::Horizontal => array.hsplit(sections),
+            Self::Vertical => array.vsplit(sections),
+            Self::Depth => array.dsplit(sections),
+        }
+    }
+}
+
 struct ParsedGridAxis {
     spec: GridSpec,
     start: Py<PyAny>,
@@ -559,6 +595,86 @@ fn stack_helper_default(
 
     let result = kind.rust_default(&arrays).map_err(map_ufunc_error)?;
     build_numpy_array_from_ufunc(py, &result)
+}
+
+fn extract_split_sections(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Option<usize>> {
+    let numpy = py.import("numpy")?;
+    let array = numpy.call_method1("asarray", (value,))?;
+    if array.getattr("ndim")?.extract::<usize>()? != 0 {
+        return Ok(None);
+    }
+
+    let kind = array
+        .getattr("dtype")?
+        .getattr("kind")?
+        .extract::<String>()?;
+    if !matches!(kind.as_str(), "b" | "i" | "u" | "f") {
+        return Ok(None);
+    }
+
+    let sections = array
+        .call_method1("astype", ("int64",))?
+        .call_method0("item")?
+        .extract::<i64>()?;
+    if sections <= 0 {
+        return Err(PyValueError::new_err(
+            "number sections must be larger than 0.",
+        ));
+    }
+
+    usize::try_from(sections)
+        .map(Some)
+        .map_err(|_| PyValueError::new_err("number sections must be larger than 0."))
+}
+
+fn split_helper_numpy_fallback(
+    py: Python<'_>,
+    kind: SplitHelperKind,
+    ary: Py<PyAny>,
+    indices_or_sections: Py<PyAny>,
+    axis: Option<isize>,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    let has_kwargs = if let Some(axis) = axis {
+        kwargs.set_item("axis", axis)?;
+        true
+    } else {
+        false
+    };
+
+    let result = if has_kwargs {
+        numpy
+            .getattr(kind.context())?
+            .call((ary.bind(py), indices_or_sections.bind(py)), Some(&kwargs))?
+    } else {
+        numpy
+            .getattr(kind.context())?
+            .call1((ary.bind(py), indices_or_sections.bind(py)))?
+    };
+    Ok(result.unbind())
+}
+
+fn split_helper_default(
+    py: Python<'_>,
+    ary: Py<PyAny>,
+    indices_or_sections: Py<PyAny>,
+    kind: SplitHelperKind,
+    axis: Option<isize>,
+) -> PyResult<Py<PyAny>> {
+    let Some(sections) = extract_split_sections(py, indices_or_sections.bind(py))? else {
+        return split_helper_numpy_fallback(py, kind, ary, indices_or_sections, axis);
+    };
+
+    let array = match extract_precise_numeric_array(py, ary.bind(py), kind.context()) {
+        Ok(array) => array,
+        Err(_) => return split_helper_numpy_fallback(py, kind, ary, indices_or_sections, axis),
+    };
+
+    let result = kind
+        .rust_sections(&array, sections, axis.unwrap_or(0))
+        .map_err(map_ufunc_error)?;
+    build_numpy_list_from_ufuncs(py, &result)
 }
 
 fn extract_axis_spec(
@@ -1094,6 +1210,16 @@ fn build_numpy_tuple_from_ufuncs(py: Python<'_>, arrays: &[UFuncArray]) -> PyRes
         .map(|array| build_numpy_array_from_ufunc(py, array))
         .collect::<PyResult<Vec<_>>>()?;
     Ok(PyTuple::new(py, arrays.iter().map(|array| array.bind(py)))?
+        .into_any()
+        .unbind())
+}
+
+fn build_numpy_list_from_ufuncs(py: Python<'_>, arrays: &[UFuncArray]) -> PyResult<Py<PyAny>> {
+    let arrays = arrays
+        .iter()
+        .map(|array| build_numpy_array_from_ufunc(py, array))
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(PyList::new(py, arrays.iter().map(|array| array.bind(py)))?
         .into_any()
         .unbind())
 }
@@ -2155,6 +2281,67 @@ fn column_stack(py: Python<'_>, tup: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (ary, indices_or_sections, axis=0))]
+fn split(
+    py: Python<'_>,
+    ary: Py<PyAny>,
+    indices_or_sections: Py<PyAny>,
+    axis: isize,
+) -> PyResult<Py<PyAny>> {
+    split_helper_default(
+        py,
+        ary,
+        indices_or_sections,
+        SplitHelperKind::Equal,
+        Some(axis),
+    )
+}
+
+#[pyfunction]
+#[pyo3(signature = (ary, indices_or_sections, axis=0))]
+fn array_split(
+    py: Python<'_>,
+    ary: Py<PyAny>,
+    indices_or_sections: Py<PyAny>,
+    axis: isize,
+) -> PyResult<Py<PyAny>> {
+    split_helper_default(
+        py,
+        ary,
+        indices_or_sections,
+        SplitHelperKind::Flexible,
+        Some(axis),
+    )
+}
+
+#[pyfunction]
+fn hsplit(py: Python<'_>, ary: Py<PyAny>, indices_or_sections: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    split_helper_default(
+        py,
+        ary,
+        indices_or_sections,
+        SplitHelperKind::Horizontal,
+        None,
+    )
+}
+
+#[pyfunction]
+fn vsplit(py: Python<'_>, ary: Py<PyAny>, indices_or_sections: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    split_helper_default(
+        py,
+        ary,
+        indices_or_sections,
+        SplitHelperKind::Vertical,
+        None,
+    )
+}
+
+#[pyfunction]
+fn dsplit(py: Python<'_>, ary: Py<PyAny>, indices_or_sections: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    split_helper_default(py, ary, indices_or_sections, SplitHelperKind::Depth, None)
+}
+
+#[pyfunction]
 fn put(py: Python<'_>, a: Py<PyAny>, ind: Py<PyAny>, v: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let a = a.bind(py);
     require_numpy_ndarray(py, a, "put")?;
@@ -2538,6 +2725,11 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(select, m)?)?;
     m.add_function(wrap_pyfunction!(choose, m)?)?;
     m.add_function(wrap_pyfunction!(searchsorted, m)?)?;
+    m.add_function(wrap_pyfunction!(split, m)?)?;
+    m.add_function(wrap_pyfunction!(array_split, m)?)?;
+    m.add_function(wrap_pyfunction!(hsplit, m)?)?;
+    m.add_function(wrap_pyfunction!(vsplit, m)?)?;
+    m.add_function(wrap_pyfunction!(dsplit, m)?)?;
     m.add_function(wrap_pyfunction!(vstack, m)?)?;
     m.add_function(wrap_pyfunction!(hstack, m)?)?;
     m.add_function(wrap_pyfunction!(dstack, m)?)?;
@@ -2697,6 +2889,21 @@ mod tests {
         Ok(())
     }
 
+    fn assert_array_list_matches_numpy(
+        actual: &pyo3::Bound<'_, pyo3::types::PyAny>,
+        expected: &pyo3::Bound<'_, pyo3::types::PyAny>,
+    ) -> PyResult<()> {
+        let actual_list = actual.downcast::<PyList>()?;
+        let expected_list = expected.downcast::<PyList>()?;
+        assert_eq!(actual_list.len()?, expected_list.len()?);
+
+        for (actual_item, expected_item) in actual_list.try_iter()?.zip(expected_list.try_iter()?) {
+            assert_array_matches_numpy(&actual_item?, &expected_item?)?;
+        }
+
+        Ok(())
+    }
+
     #[test]
     fn module_exports_python_surface() {
         with_python(|py| {
@@ -2743,6 +2950,11 @@ mod tests {
             assert!(module.getattr("select").is_ok());
             assert!(module.getattr("choose").is_ok());
             assert!(module.getattr("searchsorted").is_ok());
+            assert!(module.getattr("split").is_ok());
+            assert!(module.getattr("array_split").is_ok());
+            assert!(module.getattr("hsplit").is_ok());
+            assert!(module.getattr("vsplit").is_ok());
+            assert!(module.getattr("dsplit").is_ok());
             assert!(module.getattr("vstack").is_ok());
             assert!(module.getattr("hstack").is_ok());
             assert!(module.getattr("dstack").is_ok());
@@ -6038,6 +6250,203 @@ mod tests {
             let actual_d = module.getattr("dstack")?.call1((seq.clone(),))?;
             let expected_d = numpy.getattr("dstack")?.call1((seq,))?;
             assert_array_matches_numpy(&actual_d, &expected_d)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn split_family_match_numpy_for_integer_sections_and_shapes() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            let one_d = numeric_array(py, vec![0_i64, 1_i64, 2_i64, 3_i64, 4_i64, 5_i64], "int64");
+            let actual_split = module.getattr("split")?.call1((one_d.clone(), 3_i64))?;
+            let expected_split = numpy.getattr("split")?.call1((one_d.clone(), 3_i64))?;
+            assert_array_list_matches_numpy(&actual_split, &expected_split)?;
+
+            let actual_array_split = module
+                .getattr("array_split")?
+                .call1((one_d.clone(), 4_i64))?;
+            let expected_array_split = numpy
+                .getattr("array_split")?
+                .call1((one_d.clone(), 4_i64))?;
+            assert_array_list_matches_numpy(&actual_array_split, &expected_array_split)?;
+
+            let actual_array_split_float = module
+                .getattr("array_split")?
+                .call1((one_d.clone(), 3.5_f64))?;
+            let expected_array_split_float = numpy
+                .getattr("array_split")?
+                .call1((one_d.clone(), 3.5_f64))?;
+            assert_array_list_matches_numpy(
+                &actual_array_split_float,
+                &expected_array_split_float,
+            )?;
+
+            let actual_hsplit = module.getattr("hsplit")?.call1((one_d.clone(), 2_i64))?;
+            let expected_hsplit = numpy.getattr("hsplit")?.call1((one_d.clone(), 2_i64))?;
+            assert_array_list_matches_numpy(&actual_hsplit, &expected_hsplit)?;
+
+            let matrix = numeric_array(
+                py,
+                vec![
+                    vec![1_i64, 2_i64, 3_i64, 4_i64],
+                    vec![5_i64, 6_i64, 7_i64, 8_i64],
+                ],
+                "int64",
+            );
+            let actual_vsplit = module.getattr("vsplit")?.call1((matrix.clone(), 2_i64))?;
+            let expected_vsplit = numpy.getattr("vsplit")?.call1((matrix.clone(), 2_i64))?;
+            assert_array_list_matches_numpy(&actual_vsplit, &expected_vsplit)?;
+
+            let cube = numpy
+                .getattr("arange")?
+                .call1((8_i64,))?
+                .call_method1("reshape", ((2_i64, 2_i64, 2_i64),))?;
+            let actual_dsplit = module.getattr("dsplit")?.call1((cube.clone(), 2_i64))?;
+            let expected_dsplit = numpy.getattr("dsplit")?.call1((cube.clone(), 2_i64))?;
+            assert_array_list_matches_numpy(&actual_dsplit, &expected_dsplit)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn split_family_match_numpy_for_index_fallbacks_and_object_arrays() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            let one_d = numeric_array(py, vec![0_i64, 1_i64, 2_i64, 3_i64, 4_i64, 5_i64], "int64");
+            let cut_points = PyList::new(py, [1_i64, 4_i64])?;
+            let actual_split = module
+                .getattr("split")?
+                .call1((one_d.clone(), cut_points.clone()))?;
+            let expected_split = numpy
+                .getattr("split")?
+                .call1((one_d.clone(), cut_points.clone()))?;
+            assert_array_list_matches_numpy(&actual_split, &expected_split)?;
+
+            let negative_points = PyList::new(py, [-1_i64, 2_i64])?;
+            let actual_array_split = module
+                .getattr("array_split")?
+                .call1((one_d.clone(), negative_points.clone()))?;
+            let expected_array_split = numpy
+                .getattr("array_split")?
+                .call1((one_d.clone(), negative_points.clone()))?;
+            assert_array_list_matches_numpy(&actual_array_split, &expected_array_split)?;
+
+            let object_matrix = object_array(
+                py,
+                vec![
+                    vec!["north", "south", "east", "west"],
+                    vec!["n2", "s2", "e2", "w2"],
+                ],
+            );
+            let object_points = PyList::new(py, [1_i64, 3_i64])?;
+            let actual_hsplit = module
+                .getattr("hsplit")?
+                .call1((object_matrix.clone(), object_points.clone()))?;
+            let expected_hsplit = numpy
+                .getattr("hsplit")?
+                .call1((object_matrix.clone(), object_points.clone()))?;
+            assert_array_list_matches_numpy(&actual_hsplit, &expected_hsplit)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn split_family_error_messages_match_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            let scalar = numpy.getattr("array")?.call1((1_i64,))?;
+            let actual_hsplit_err = module
+                .getattr("hsplit")?
+                .call1((scalar.clone(), 1_i64))
+                .unwrap_err();
+            let expected_hsplit_err = numpy
+                .getattr("hsplit")?
+                .call1((scalar.clone(), 1_i64))
+                .unwrap_err();
+            assert_eq!(
+                actual_hsplit_err.to_string(),
+                expected_hsplit_err.to_string()
+            );
+
+            let one_d = numeric_array(py, vec![1_i64, 2_i64, 3_i64, 4_i64], "int64");
+            let actual_vsplit_err = module
+                .getattr("vsplit")?
+                .call1((one_d.clone(), 2_i64))
+                .unwrap_err();
+            let expected_vsplit_err = numpy
+                .getattr("vsplit")?
+                .call1((one_d.clone(), 2_i64))
+                .unwrap_err();
+            assert_eq!(
+                actual_vsplit_err.to_string(),
+                expected_vsplit_err.to_string()
+            );
+
+            let two_d = numeric_array(
+                py,
+                vec![
+                    vec![1_i64, 2_i64, 3_i64, 4_i64],
+                    vec![5_i64, 6_i64, 7_i64, 8_i64],
+                ],
+                "int64",
+            );
+            let actual_dsplit_err = module
+                .getattr("dsplit")?
+                .call1((two_d.clone(), 2_i64))
+                .unwrap_err();
+            let expected_dsplit_err = numpy
+                .getattr("dsplit")?
+                .call1((two_d.clone(), 2_i64))
+                .unwrap_err();
+            assert_eq!(
+                actual_dsplit_err.to_string(),
+                expected_dsplit_err.to_string()
+            );
+
+            let actual_split_err = module
+                .getattr("split")?
+                .call1((one_d.clone(), 0_i64))
+                .unwrap_err();
+            let expected_split_err = numpy
+                .getattr("split")?
+                .call1((one_d.clone(), 0_i64))
+                .unwrap_err();
+            assert_eq!(actual_split_err.to_string(), expected_split_err.to_string());
+
+            let actual_array_split_err = module
+                .getattr("array_split")?
+                .call1((one_d.clone(), 0_i64))
+                .unwrap_err();
+            let expected_array_split_err = numpy
+                .getattr("array_split")?
+                .call1((one_d.clone(), 0_i64))
+                .unwrap_err();
+            assert_eq!(
+                actual_array_split_err.to_string(),
+                expected_array_split_err.to_string()
+            );
             Ok(())
         });
     }
