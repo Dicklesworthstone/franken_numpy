@@ -80,6 +80,34 @@ impl AxisConcatenatorKind {
     }
 }
 
+#[derive(Clone, Copy)]
+enum StackHelperKind {
+    Vertical,
+    Horizontal,
+    Depth,
+    Column,
+}
+
+impl StackHelperKind {
+    const fn context(self) -> &'static str {
+        match self {
+            Self::Vertical => "vstack",
+            Self::Horizontal => "hstack",
+            Self::Depth => "dstack",
+            Self::Column => "column_stack",
+        }
+    }
+
+    fn rust_default(self, arrays: &[UFuncArray]) -> Result<UFuncArray, fnp_ufunc::UFuncError> {
+        match self {
+            Self::Vertical => UFuncArray::vstack(arrays),
+            Self::Horizontal => UFuncArray::hstack(arrays),
+            Self::Depth => UFuncArray::dstack(arrays),
+            Self::Column => UFuncArray::column_stack(arrays),
+        }
+    }
+}
+
 struct ParsedGridAxis {
     spec: GridSpec,
     start: Py<PyAny>,
@@ -451,6 +479,86 @@ fn extract_numeric_array_sequence(
             extract_numeric_array(py, &item, &format!("{context}[{index}]"))
         })
         .collect()
+}
+
+fn extract_stack_sequence_items(
+    value: &Bound<'_, PyAny>,
+    context: &str,
+) -> PyResult<Vec<Py<PyAny>>> {
+    if !value.hasattr("__getitem__")? {
+        return Err(PyTypeError::new_err(format!(
+            "{context}: arrays to stack must be passed as a \"sequence\" type such as list or tuple."
+        )));
+    }
+
+    value.try_iter()?.map(|item| Ok(item?.unbind())).collect()
+}
+
+fn extract_stack_numeric_arrays(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    kind: StackHelperKind,
+) -> PyResult<Option<Vec<UFuncArray>>> {
+    let items = extract_stack_sequence_items(value, kind.context())?;
+    let mut arrays = Vec::with_capacity(items.len());
+
+    for (index, item) in items.into_iter().enumerate() {
+        match extract_precise_numeric_array(
+            py,
+            item.bind(py),
+            &format!("{}(tup[{index}])", kind.context()),
+        ) {
+            Ok(array) => arrays.push(array),
+            Err(_) => return Ok(None),
+        }
+    }
+
+    Ok(Some(arrays))
+}
+
+fn stack_helper_numpy_fallback(
+    py: Python<'_>,
+    kind: StackHelperKind,
+    tup: Py<PyAny>,
+    dtype: Option<Py<PyAny>>,
+    casting: Option<&str>,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    let mut has_kwargs = false;
+
+    if let Some(dtype) = dtype
+        && !dtype.bind(py).is_none()
+    {
+        kwargs.set_item("dtype", dtype.bind(py))?;
+        has_kwargs = true;
+    }
+    if let Some(casting) = casting {
+        kwargs.set_item("casting", casting)?;
+        has_kwargs = true;
+    }
+
+    let result = if has_kwargs {
+        numpy
+            .getattr(kind.context())?
+            .call((tup.bind(py),), Some(&kwargs))?
+    } else {
+        numpy.getattr(kind.context())?.call1((tup.bind(py),))?
+    };
+    Ok(result.unbind())
+}
+
+fn stack_helper_default(
+    py: Python<'_>,
+    tup: Py<PyAny>,
+    kind: StackHelperKind,
+) -> PyResult<Py<PyAny>> {
+    let Some(arrays) = extract_stack_numeric_arrays(py, tup.bind(py), kind)? else {
+        return stack_helper_numpy_fallback(py, kind, tup, None, None);
+    };
+
+    let result = kind.rust_default(&arrays).map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 fn extract_axis_spec(
@@ -1989,6 +2097,64 @@ fn searchsorted(
 }
 
 #[pyfunction]
+#[pyo3(signature = (tup, *, dtype=None, casting="same_kind"))]
+fn vstack(
+    py: Python<'_>,
+    tup: Py<PyAny>,
+    dtype: Option<Py<PyAny>>,
+    casting: &str,
+) -> PyResult<Py<PyAny>> {
+    if dtype
+        .as_ref()
+        .is_some_and(|dtype| !dtype.bind(py).is_none())
+        || casting != "same_kind"
+    {
+        return stack_helper_numpy_fallback(
+            py,
+            StackHelperKind::Vertical,
+            tup,
+            dtype,
+            Some(casting),
+        );
+    }
+    stack_helper_default(py, tup, StackHelperKind::Vertical)
+}
+
+#[pyfunction]
+#[pyo3(signature = (tup, *, dtype=None, casting="same_kind"))]
+fn hstack(
+    py: Python<'_>,
+    tup: Py<PyAny>,
+    dtype: Option<Py<PyAny>>,
+    casting: &str,
+) -> PyResult<Py<PyAny>> {
+    if dtype
+        .as_ref()
+        .is_some_and(|dtype| !dtype.bind(py).is_none())
+        || casting != "same_kind"
+    {
+        return stack_helper_numpy_fallback(
+            py,
+            StackHelperKind::Horizontal,
+            tup,
+            dtype,
+            Some(casting),
+        );
+    }
+    stack_helper_default(py, tup, StackHelperKind::Horizontal)
+}
+
+#[pyfunction]
+fn dstack(py: Python<'_>, tup: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    stack_helper_default(py, tup, StackHelperKind::Depth)
+}
+
+#[pyfunction]
+fn column_stack(py: Python<'_>, tup: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    stack_helper_default(py, tup, StackHelperKind::Column)
+}
+
+#[pyfunction]
 fn put(py: Python<'_>, a: Py<PyAny>, ind: Py<PyAny>, v: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let a = a.bind(py);
     require_numpy_ndarray(py, a, "put")?;
@@ -2372,6 +2538,10 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(select, m)?)?;
     m.add_function(wrap_pyfunction!(choose, m)?)?;
     m.add_function(wrap_pyfunction!(searchsorted, m)?)?;
+    m.add_function(wrap_pyfunction!(vstack, m)?)?;
+    m.add_function(wrap_pyfunction!(hstack, m)?)?;
+    m.add_function(wrap_pyfunction!(dstack, m)?)?;
+    m.add_function(wrap_pyfunction!(column_stack, m)?)?;
     m.add_function(wrap_pyfunction!(put, m)?)?;
     m.add_function(wrap_pyfunction!(place, m)?)?;
     m.add_function(wrap_pyfunction!(putmask, m)?)?;
@@ -2573,6 +2743,10 @@ mod tests {
             assert!(module.getattr("select").is_ok());
             assert!(module.getattr("choose").is_ok());
             assert!(module.getattr("searchsorted").is_ok());
+            assert!(module.getattr("vstack").is_ok());
+            assert!(module.getattr("hstack").is_ok());
+            assert!(module.getattr("dstack").is_ok());
+            assert!(module.getattr("column_stack").is_ok());
             assert!(module.getattr("put").is_ok());
             assert!(module.getattr("place").is_ok());
             assert!(module.getattr("putmask").is_ok());
@@ -5708,6 +5882,162 @@ mod tests {
             let actual_object = module.getattr("c_")?.get_item(&object_key)?;
             let expected_object = numpy.getattr("c_")?.get_item(&object_key)?;
             assert_array_matches_numpy(&actual_object, &expected_object)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn stack_helpers_match_numpy_for_scalar_and_numeric_shapes() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            let scalar_a = numpy.getattr("array")?.call1((1_i64,))?;
+            let scalar_b = numpy.getattr("array")?.call1((2_i64,))?;
+            let scalar_seq = PyList::new(py, [scalar_a.clone(), scalar_b.clone()])?;
+
+            let actual_v = module.getattr("vstack")?.call1((scalar_seq.clone(),))?;
+            let expected_v = numpy.getattr("vstack")?.call1((scalar_seq.clone(),))?;
+            assert_array_matches_numpy(&actual_v, &expected_v)?;
+
+            let actual_h = module.getattr("hstack")?.call1((scalar_seq.clone(),))?;
+            let expected_h = numpy.getattr("hstack")?.call1((scalar_seq.clone(),))?;
+            assert_array_matches_numpy(&actual_h, &expected_h)?;
+
+            let actual_d = module.getattr("dstack")?.call1((scalar_seq.clone(),))?;
+            let expected_d = numpy.getattr("dstack")?.call1((scalar_seq.clone(),))?;
+            assert_array_matches_numpy(&actual_d, &expected_d)?;
+
+            let actual_column = module.getattr("column_stack")?.call1((scalar_seq,))?;
+            let expected_column = numpy
+                .getattr("column_stack")?
+                .call1((PyList::new(py, [scalar_a.clone(), scalar_b.clone()])?,))?;
+            assert_array_matches_numpy(&actual_column, &expected_column)?;
+
+            let left = numeric_array(py, vec![1_i64, 2_i64, 3_i64], "int64");
+            let right = numeric_array(py, vec![4_i64, 5_i64, 6_i64], "int64");
+            let seq = PyTuple::new(py, [left.clone(), right.clone()])?;
+
+            let actual_column_vec = module.getattr("column_stack")?.call1((seq.clone(),))?;
+            let expected_column_vec = numpy.getattr("column_stack")?.call1((seq.clone(),))?;
+            assert_array_matches_numpy(&actual_column_vec, &expected_column_vec)?;
+
+            let actual_d_vec = module.getattr("dstack")?.call1((seq.clone(),))?;
+            let expected_d_vec = numpy.getattr("dstack")?.call1((seq,))?;
+            assert_array_matches_numpy(&actual_d_vec, &expected_d_vec)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn vstack_hstack_match_numpy_for_dtype_and_sequence_rules() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let builtins = py.import("builtins")?;
+
+            let a = numeric_array(py, vec![1_i64, 2_i64, 3_i64], "int64");
+            let b = numeric_array(py, vec![2.5_f64, 3.5_f64, 4.5_f64], "float64");
+            let seq = PyTuple::new(py, [a.clone(), b.clone()])?;
+
+            let actual_v = module.getattr("vstack")?.call(
+                (seq.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", numpy.getattr("int64")?)?;
+                    kwargs.set_item("casting", "unsafe")?;
+                    kwargs
+                }),
+            )?;
+            let expected_v = numpy.getattr("vstack")?.call(
+                (seq.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", numpy.getattr("int64")?)?;
+                    kwargs.set_item("casting", "unsafe")?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(&actual_v, &expected_v)?;
+
+            let actual_h = module.getattr("hstack")?.call(
+                (seq.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", numpy.getattr("int64")?)?;
+                    kwargs.set_item("casting", "unsafe")?;
+                    kwargs
+                }),
+            )?;
+            let expected_h = numpy.getattr("hstack")?.call(
+                (seq.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", numpy.getattr("int64")?)?;
+                    kwargs.set_item("casting", "unsafe")?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(&actual_h, &expected_h)?;
+
+            let err = module
+                .getattr("vstack")?
+                .call(
+                    (seq.clone(),),
+                    Some(&{
+                        let kwargs = PyDict::new(py);
+                        kwargs.set_item("dtype", numpy.getattr("int64")?)?;
+                        kwargs.set_item("casting", "safe")?;
+                        kwargs
+                    }),
+                )
+                .unwrap_err();
+            assert!(err.is_instance_of::<PyTypeError>(py));
+
+            let iter_source = PyList::new(py, [a.clone(), b.clone()])?;
+            let iterator = builtins.getattr("iter")?.call1((iter_source,))?;
+            let err = module.getattr("hstack")?.call1((iterator,)).unwrap_err();
+            assert!(err.is_instance_of::<PyTypeError>(py));
+            assert!(
+                err.to_string()
+                    .contains("arrays to stack must be passed as a \"sequence\"")
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn dstack_column_stack_match_numpy_for_object_fallbacks() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            let left = object_array(py, vec!["north", "south"]);
+            let right = object_array(py, vec!["east", "west"]);
+            let seq = PyTuple::new(py, [left.clone(), right.clone()])?;
+
+            let actual_column = module.getattr("column_stack")?.call1((seq.clone(),))?;
+            let expected_column = numpy.getattr("column_stack")?.call1((seq.clone(),))?;
+            assert_array_matches_numpy(&actual_column, &expected_column)?;
+
+            let actual_d = module.getattr("dstack")?.call1((seq.clone(),))?;
+            let expected_d = numpy.getattr("dstack")?.call1((seq,))?;
+            assert_array_matches_numpy(&actual_d, &expected_d)?;
             Ok(())
         });
     }

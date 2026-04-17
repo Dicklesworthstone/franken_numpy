@@ -98,7 +98,7 @@ Over 1,000 public functions across 9 crates covering the full NumPy API:
 | Category | Functions (highlights) |
 |---|---|
 | **Array creation** | `zeros`, `ones`, `empty`, `full`, `arange`, `linspace`, `logspace`, `geomspace`, `eye`, `identity`, `diag`, `meshgrid`, `mgrid`, `ogrid`, `fromfunction`, `array` |
-| **Shape manipulation** | `reshape`, `ravel`, `flatten`, `transpose`, `swapaxes`, `expand_dims`, `squeeze`, `broadcast_to`, `concatenate`, `stack`, `vstack`, `hstack`, `split`, `tile`, `repeat`, `pad`, `r_`, `c_` |
+| **Shape manipulation** | `reshape`, `ravel`, `flatten`, `transpose`, `swapaxes`, `expand_dims`, `squeeze`, `broadcast_to`, `concatenate`, `stack`, `vstack`, `hstack`, `dstack`, `column_stack`, `split`, `array_split`, `tile`, `repeat`, `pad`, `r_`, `c_` |
 | **Unary math** | `abs`, `sqrt`, `exp`, `log`, `sin`, `cos`, `tan`, `arcsin`, `arccos`, `arctan`, `sinh`, `cosh`, `tanh`, `floor`, `ceil`, `trunc`, `rint`, `round`, `sign`, `isnan`, `isinf`, `isfinite` (42 total) |
 | **Binary math** | `add`, `subtract`, `multiply`, `divide`, `floor_divide`, `remainder`, `power`, `fmod`, `arctan2`, `gcd`, `lcm`, `bitwise_and/or/xor`, comparisons (34 total) |
 | **Reductions** | `sum`, `prod`, `min`, `max`, `mean`, `var`, `std`, `argmin`, `argmax`, `cumsum`, `cumprod`, `all`, `any`, `count_nonzero`, `nansum`, `nanmin`, `nanmax`, `ptp` (22 total) |
