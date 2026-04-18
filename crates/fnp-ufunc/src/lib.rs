@@ -5193,6 +5193,14 @@ impl UFuncArray {
                 match op {
                     BinaryOp::Equal if lhs_nat || rhs_nat => 0.0,
                     BinaryOp::NotEqual if lhs_nat || rhs_nat => 1.0,
+                    BinaryOp::Less
+                    | BinaryOp::LessEqual
+                    | BinaryOp::Greater
+                    | BinaryOp::GreaterEqual
+                        if lhs_nat || rhs_nat =>
+                    {
+                        0.0
+                    }
                     _ => op.apply(lhs_value, rhs_value),
                 }
             })
@@ -5238,7 +5246,7 @@ impl UFuncArray {
             plan.out_dtype
         };
 
-        if matches!(op, BinaryOp::Equal | BinaryOp::NotEqual)
+        if op.is_bool_output()
             && (matches!(self.dtype, DType::DateTime64 | DType::TimeDelta64)
                 || matches!(rhs.dtype, DType::DateTime64 | DType::TimeDelta64))
         {
@@ -24968,7 +24976,43 @@ fn epoch_day_to_weekday(day: i64) -> u8 {
     wd as u8
 }
 
+fn temporal_nat_value() -> f64 {
+    i64::MIN as f64
+}
+
+fn is_temporal_nat(value: f64) -> bool {
+    value == temporal_nat_value()
+}
+
+fn is_business_day_with_holidays(day: i64, holidays: &[i64]) -> bool {
+    epoch_day_to_weekday(day) < 5 && !holidays.contains(&day)
+}
+
 impl UFuncArray {
+    fn temporal_binary_preserve_nat(
+        &self,
+        rhs: &Self,
+        op: BinaryOp,
+        dtype: DType,
+    ) -> Result<Self, UFuncError> {
+        let broadcasted = Self::broadcast_arrays(&[self, rhs])?;
+        let lhs = &broadcasted[0];
+        let rhs = &broadcasted[1];
+        let values = lhs
+            .values
+            .iter()
+            .zip(&rhs.values)
+            .map(|(&lhs_value, &rhs_value)| {
+                if is_temporal_nat(lhs_value) || is_temporal_nat(rhs_value) {
+                    temporal_nat_value()
+                } else {
+                    op.apply(lhs_value, rhs_value)
+                }
+            })
+            .collect();
+        Self::new(lhs.shape.clone(), values, dtype)
+    }
+
     // ── datetime + timedelta → datetime ─────────────────────────────
 
     /// Add timedelta array to datetime array element-wise.
@@ -24984,13 +25028,7 @@ impl UFuncArray {
                 "datetime_add requires TimeDelta64 delta".to_string(),
             ));
         }
-        let result = self.elementwise_binary(delta, BinaryOp::Add)?;
-        Ok(Self {
-            shape: result.shape,
-            values: result.values,
-            dtype: DType::DateTime64,
-            integer_sidecar: None,
-        })
+        self.temporal_binary_preserve_nat(delta, BinaryOp::Add, DType::DateTime64)
     }
 
     /// Subtract two datetime arrays → timedelta.
@@ -25000,13 +25038,7 @@ impl UFuncArray {
                 "datetime_sub requires two DateTime64 arrays".to_string(),
             ));
         }
-        let result = self.elementwise_binary(other, BinaryOp::Sub)?;
-        Ok(Self {
-            shape: result.shape,
-            values: result.values,
-            dtype: DType::TimeDelta64,
-            integer_sidecar: None,
-        })
+        self.temporal_binary_preserve_nat(other, BinaryOp::Sub, DType::TimeDelta64)
     }
 
     /// Add two timedelta arrays.
@@ -25016,13 +25048,7 @@ impl UFuncArray {
                 "timedelta_add requires two TimeDelta64 arrays".to_string(),
             ));
         }
-        let result = self.elementwise_binary(other, BinaryOp::Add)?;
-        Ok(Self {
-            shape: result.shape,
-            values: result.values,
-            dtype: DType::TimeDelta64,
-            integer_sidecar: None,
-        })
+        self.temporal_binary_preserve_nat(other, BinaryOp::Add, DType::TimeDelta64)
     }
 
     /// Subtract two timedelta arrays.
@@ -25032,13 +25058,7 @@ impl UFuncArray {
                 "timedelta_sub requires two TimeDelta64 arrays".to_string(),
             ));
         }
-        let result = self.elementwise_binary(other, BinaryOp::Sub)?;
-        Ok(Self {
-            shape: result.shape,
-            values: result.values,
-            dtype: DType::TimeDelta64,
-            integer_sidecar: None,
-        })
+        self.temporal_binary_preserve_nat(other, BinaryOp::Sub, DType::TimeDelta64)
     }
 
     /// Multiply timedelta by scalar.
@@ -25048,7 +25068,17 @@ impl UFuncArray {
                 "timedelta_mul requires TimeDelta64 array".to_string(),
             ));
         }
-        let values: Vec<f64> = self.values.iter().map(|&v| v * scalar).collect();
+        let values: Vec<f64> = self
+            .values
+            .iter()
+            .map(|&v| {
+                if is_temporal_nat(v) {
+                    temporal_nat_value()
+                } else {
+                    v * scalar
+                }
+            })
+            .collect();
         Ok(Self {
             shape: self.shape.clone(),
             values,
@@ -25069,7 +25099,17 @@ impl UFuncArray {
                 "division by zero in timedelta_div".to_string(),
             ));
         }
-        let values: Vec<f64> = self.values.iter().map(|&v| v / scalar).collect();
+        let values: Vec<f64> = self
+            .values
+            .iter()
+            .map(|&v| {
+                if is_temporal_nat(v) {
+                    temporal_nat_value()
+                } else {
+                    v / scalar
+                }
+            })
+            .collect();
         Ok(Self {
             shape: self.shape.clone(),
             values,
@@ -25083,7 +25123,17 @@ impl UFuncArray {
     pub fn timedelta_neg(&self) -> Self {
         Self {
             shape: self.shape.clone(),
-            values: self.values.iter().map(|&v| -v).collect(),
+            values: self
+                .values
+                .iter()
+                .map(|&v| {
+                    if is_temporal_nat(v) {
+                        temporal_nat_value()
+                    } else {
+                        -v
+                    }
+                })
+                .collect(),
             dtype: DType::TimeDelta64,
             integer_sidecar: None,
         }
@@ -25094,7 +25144,17 @@ impl UFuncArray {
     pub fn timedelta_abs(&self) -> Self {
         Self {
             shape: self.shape.clone(),
-            values: self.values.iter().map(|&v| v.abs()).collect(),
+            values: self
+                .values
+                .iter()
+                .map(|&v| {
+                    if is_temporal_nat(v) {
+                        temporal_nat_value()
+                    } else {
+                        v.abs()
+                    }
+                })
+                .collect(),
             dtype: DType::TimeDelta64,
             integer_sidecar: None,
         }
@@ -25115,7 +25175,7 @@ pub fn isnat(arr: &UFuncArray) -> Result<UFuncArray, UFuncError> {
     }
     // NaT is stored as i64::MIN. When converted to f64 for storage, it becomes
     // i64::MIN as f64 (a simple cast, not bit reinterpretation).
-    let nat_value = i64::MIN as f64;
+    let nat_value = temporal_nat_value();
     let values: Vec<f64> = arr
         .values()
         .iter()
@@ -25138,7 +25198,7 @@ pub fn is_busday(dates: &UFuncArray) -> Result<UFuncArray, UFuncError> {
         .values()
         .iter()
         .map(|&d| {
-            if d.is_nan() {
+            if is_temporal_nat(d) {
                 return 0.0;
             }
             let wd = epoch_day_to_weekday(d as i64);
@@ -25165,7 +25225,7 @@ pub fn busday_count(start: &UFuncArray, end: &UFuncArray) -> Result<UFuncArray, 
 
     let mut values = Vec::with_capacity(start_bc.values().len());
     for (&s, &e) in start_bc.values().iter().zip(end_bc.values().iter()) {
-        if s.is_nan() || e.is_nan() {
+        if is_temporal_nat(s) || is_temporal_nat(e) {
             return Err(UFuncError::Msg(
                 "Cannot compute a business day count with a NaT (not-a-time) date".to_string(),
             ));
@@ -25205,6 +25265,15 @@ pub fn busday_count(start: &UFuncArray, end: &UFuncArray) -> Result<UFuncArray, 
 ///
 /// `np.busday_offset(dates, offsets)`
 pub fn busday_offset(dates: &UFuncArray, offsets: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    busday_offset_with_holidays(dates, offsets, &[])
+}
+
+/// Offset dates by business days while treating the supplied epoch-day dates as holidays.
+pub fn busday_offset_with_holidays(
+    dates: &UFuncArray,
+    offsets: &UFuncArray,
+    holidays: &[i64],
+) -> Result<UFuncArray, UFuncError> {
     if dates.dtype() != DType::DateTime64 {
         return Err(UFuncError::Msg(
             "busday_offset requires DateTime64 dates array".to_string(),
@@ -25221,7 +25290,7 @@ pub fn busday_offset(dates: &UFuncArray, offsets: &UFuncArray) -> Result<UFuncAr
     let offsets_bc = offsets.broadcast_to(&broadcast_shape)?;
     let mut values = Vec::with_capacity(dates_bc.values().len());
     for (&d, &off) in dates_bc.values().iter().zip(offsets_bc.values().iter()) {
-        if d.is_nan() {
+        if is_temporal_nat(d) {
             return Err(UFuncError::Msg("NaT input in busday_offset".to_string()));
         }
         if off.is_nan() {
@@ -25232,37 +25301,35 @@ pub fn busday_offset(dates: &UFuncArray, offsets: &UFuncArray) -> Result<UFuncAr
         let mut current = d as i64;
         let off_i = off as i64;
 
-        let is_weekend = epoch_day_to_weekday(current) >= 5;
-
-        // If offset is 0 and we are on a weekend, NumPy's default roll='raise'
-        // would raise an error.
-        if off_i == 0 && is_weekend {
+        // If offset is 0 and we are on a non-business day, NumPy's default
+        // roll='raise' would raise an error.
+        if off_i == 0 && !is_business_day_with_holidays(current, holidays) {
             return Err(UFuncError::Msg(
                 "busday_offset: non-business day date in input".to_string(),
             ));
         }
 
         if off_i > 0 {
-            // Roll forward if starting on a weekend
-            while epoch_day_to_weekday(current) >= 5 {
+            // Roll forward if starting on a weekend or holiday.
+            while !is_business_day_with_holidays(current, holidays) {
                 current += 1;
             }
             let mut remaining = off_i;
             while remaining > 0 {
                 current += 1;
-                if epoch_day_to_weekday(current) < 5 {
+                if is_business_day_with_holidays(current, holidays) {
                     remaining -= 1;
                 }
             }
         } else if off_i < 0 {
-            // Roll backward if starting on a weekend
-            while epoch_day_to_weekday(current) >= 5 {
+            // Roll backward if starting on a weekend or holiday.
+            while !is_business_day_with_holidays(current, holidays) {
                 current -= 1;
             }
             let mut remaining = off_i.abs();
             while remaining > 0 {
                 current -= 1;
-                if epoch_day_to_weekday(current) < 5 {
+                if is_business_day_with_holidays(current, holidays) {
                     remaining -= 1;
                 }
             }
@@ -30937,28 +31004,28 @@ mod tests {
         PrintOptions, PyObjectArray, PyObjectValue, QuantileInterp, ShapeError, StringArray,
         UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncArrayView, UFuncError, UFuncLogRecord,
         UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp, bitwise_count, busday_count, busday_offset,
-        cheb2poly, chebadd, chebder, chebdiv, chebfit, chebfromroots, chebint, chebmul, chebroots,
-        chebsub, chebval, checked_window_total, copysign, datetime_as_string, divmod_arrays,
-        errstate, financial_fv, financial_ipmt, financial_irr, financial_mirr, financial_nper,
-        financial_npv, financial_pmt, financial_ppmt, financial_pv, financial_rate, frexp,
-        frompyfunc, frompyfunc_object, frompyfunc_python, frompyfunc_python_import,
-        frompyfunc_python_import_with_interpreter, frompyfunc_python_with_interpreter, gcd_arrays,
-        geterr, herm2poly, hermadd, hermder, hermdiv, herme2poly, hermeadd, hermediv, hermefit,
-        hermefromroots, hermemul, hermeroots, hermesub, hermeval, hermfit, hermfromroots, hermint,
-        hermmul, hermroots, hermsub, hermval, hypot, is_busday, isnat, isneginf, isposinf,
-        lag2poly, lagadd, lagder, lagdiv, lagfit, lagfromroots, lagint, lagmul, lagroots, lagsub,
-        lagval, lcm_arrays, ldexp, leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint,
-        legmul, legroots, legsub, legval, logaddexp, logaddexp2, ma_is_mask, ma_is_masked,
-        ma_make_mask, ma_mask_or, mediate_ufunc_runtime_policy, modf, nextafter,
-        normalize_fixed_signature_keywords, normalize_signature_keywords, pad_empty,
-        pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
-        plan_binary_dispatch, plan_binary_dispatch_with_registry,
-        plan_binary_dispatch_with_signature, poly2cheb, poly2herm, poly2herme, poly2lag, poly2leg,
-        register_custom_loop, resolve_override_dispatch, scimath_arccos, scimath_arcsin,
-        scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_logn, scimath_power,
-        scimath_sqrt, seterr, seterr_state, seterrcall, signbit, sort_complex, spacing,
-        take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
-        validate_override_payload_class, where_nonzero,
+        busday_offset_with_holidays, cheb2poly, chebadd, chebder, chebdiv, chebfit, chebfromroots,
+        chebint, chebmul, chebroots, chebsub, chebval, checked_window_total, copysign,
+        datetime_as_string, divmod_arrays, errstate, financial_fv, financial_ipmt, financial_irr,
+        financial_mirr, financial_nper, financial_npv, financial_pmt, financial_ppmt, financial_pv,
+        financial_rate, frexp, frompyfunc, frompyfunc_object, frompyfunc_python,
+        frompyfunc_python_import, frompyfunc_python_import_with_interpreter,
+        frompyfunc_python_with_interpreter, gcd_arrays, geterr, herm2poly, hermadd, hermder,
+        hermdiv, herme2poly, hermeadd, hermediv, hermefit, hermefromroots, hermemul, hermeroots,
+        hermesub, hermeval, hermfit, hermfromroots, hermint, hermmul, hermroots, hermsub, hermval,
+        hypot, is_busday, isnat, isneginf, isposinf, lag2poly, lagadd, lagder, lagdiv, lagfit,
+        lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, lcm_arrays, ldexp, leg2poly,
+        legadd, legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub, legval,
+        logaddexp, logaddexp2, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or,
+        mediate_ufunc_runtime_policy, modf, nextafter, normalize_fixed_signature_keywords,
+        normalize_signature_keywords, pad_empty, pad_linear_ramp, pad_stat,
+        parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch,
+        plan_binary_dispatch_with_registry, plan_binary_dispatch_with_signature, poly2cheb,
+        poly2herm, poly2herme, poly2lag, poly2leg, register_custom_loop, resolve_override_dispatch,
+        scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log, scimath_log2, scimath_log10,
+        scimath_logn, scimath_power, scimath_sqrt, seterr, seterr_state, seterrcall, signbit,
+        sort_complex, spacing, take_float_error_events, unique_all, unique_counts, unique_inverse,
+        unique_values, validate_override_payload_class, where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
@@ -45049,12 +45116,53 @@ mod tests {
     }
 
     #[test]
+    fn datetime_add_timedelta_preserves_nat() {
+        let nat = i64::MIN as f64;
+        let dates = UFuncArray::new(vec![2], vec![nat, 100.0], DType::DateTime64).unwrap();
+        let deltas = UFuncArray::new(vec![2], vec![5.0, nat], DType::TimeDelta64).unwrap();
+        let result = dates.datetime_add(&deltas).unwrap();
+        assert_eq!(result.dtype(), DType::DateTime64);
+        assert_eq!(result.values(), &[nat, nat]);
+    }
+
+    #[test]
     fn datetime_sub_datetimes() {
         let d1 = UFuncArray::new(vec![2], vec![110.0, 205.0], DType::DateTime64).unwrap();
         let d2 = UFuncArray::new(vec![2], vec![100.0, 200.0], DType::DateTime64).unwrap();
         let result = d1.datetime_sub(&d2).unwrap();
         assert_eq!(result.dtype(), DType::TimeDelta64);
         assert_eq!(result.values(), &[10.0, 5.0]);
+    }
+
+    #[test]
+    fn datetime_order_comparison_with_nat_is_false() {
+        let nat = i64::MIN as f64;
+        let lhs = UFuncArray::new(vec![1], vec![100.0], DType::DateTime64).unwrap();
+        let rhs = UFuncArray::new(vec![1], vec![nat], DType::DateTime64).unwrap();
+        assert_eq!(
+            lhs.elementwise_binary(&rhs, BinaryOp::Less)
+                .unwrap()
+                .values(),
+            &[0.0]
+        );
+        assert_eq!(
+            lhs.elementwise_binary(&rhs, BinaryOp::LessEqual)
+                .unwrap()
+                .values(),
+            &[0.0]
+        );
+        assert_eq!(
+            lhs.elementwise_binary(&rhs, BinaryOp::Greater)
+                .unwrap()
+                .values(),
+            &[0.0]
+        );
+        assert_eq!(
+            lhs.elementwise_binary(&rhs, BinaryOp::GreaterEqual)
+                .unwrap()
+                .values(),
+            &[0.0]
+        );
     }
 
     #[test]
@@ -45343,6 +45451,17 @@ mod tests {
         let result = busday_offset(&dates, &offsets).unwrap();
         assert_eq!(result.shape(), &[2]);
         assert_eq!(result.values(), &[5.0, 6.0]);
+    }
+
+    #[test]
+    fn busday_offset_with_holidays_skips_holiday_span() {
+        // 2024-06-10 is epoch day 19884. Holidays cover Jun 10-14 and Jun 17-18.
+        // Rolling forward and applying offset 1 lands on Thu Jun 20 (epoch day 19894).
+        let dates = UFuncArray::new(vec![1], vec![19_884.0], DType::DateTime64).unwrap();
+        let offsets = UFuncArray::new(vec![1], vec![1.0], DType::I64).unwrap();
+        let holidays = [19_884, 19_885, 19_886, 19_887, 19_888, 19_891, 19_892];
+        let result = busday_offset_with_holidays(&dates, &offsets, &holidays).unwrap();
+        assert_eq!(result.values(), &[19_894.0]);
     }
 
     #[test]

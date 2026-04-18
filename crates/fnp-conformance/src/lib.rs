@@ -42,14 +42,14 @@ use fnp_runtime::{
 };
 use fnp_ufunc::{
     BinaryOp, MAError, MaskedArray, QuantileInterp, StringArray, UFuncArray, UFuncError, UnaryOp,
-    busday_count, busday_offset, cheb2poly, chebadd, chebder, chebdiv, chebfit, chebfromroots,
-    chebint, chebmul, chebroots, chebsub, chebval, copysign, herm2poly, hermadd, hermder, hermdiv,
-    herme2poly, hermeadd, hermediv, hermefromroots, hermemul, hermeroots, hermesub, hermeval,
-    hermfromroots, hermint, hermmul, hermroots, hermsub, hermval, hypot, is_busday, isnat,
-    lag2poly, lagadd, lagder, lagdiv, lagfromroots, lagint, lagmul, lagroots, lagsub, lagval,
-    ldexp, leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint, legmul, legroots,
-    legsub, legval, logaddexp, logaddexp2, nextafter, poly2cheb, poly2herm, poly2herme, poly2lag,
-    poly2leg, signbit, spacing,
+    busday_count, busday_offset, busday_offset_with_holidays, cheb2poly, chebadd, chebder, chebdiv,
+    chebfit, chebfromroots, chebint, chebmul, chebroots, chebsub, chebval, copysign, herm2poly,
+    hermadd, hermder, hermdiv, herme2poly, hermeadd, hermediv, hermefromroots, hermemul,
+    hermeroots, hermesub, hermeval, hermfromroots, hermint, hermmul, hermroots, hermsub, hermval,
+    hypot, is_busday, isnat, lag2poly, lagadd, lagder, lagdiv, lagfromroots, lagint, lagmul,
+    lagroots, lagsub, lagval, ldexp, leg2poly, legadd, legder, legdiv, legfit, legfromroots,
+    legint, legmul, legroots, legsub, legval, logaddexp, logaddexp2, nextafter, poly2cheb,
+    poly2herm, poly2herme, poly2lag, poly2leg, signbit, spacing,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1485,6 +1485,54 @@ struct DateTimeMetamorphicCase {
     rel_tol: f64,
 }
 
+#[derive(Debug, Deserialize)]
+struct DateTimeAdversarialCase {
+    id: String,
+    operation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    base_datetime: String,
+    #[serde(default)]
+    datetime: String,
+    #[serde(default)]
+    datetime_a: String,
+    #[serde(default)]
+    datetime_b: String,
+    #[serde(default)]
+    base_date: String,
+    #[serde(default)]
+    delta_unit: String,
+    #[serde(default)]
+    delta_value: i64,
+    #[serde(default)]
+    delta_a: String,
+    #[serde(default)]
+    delta_a_unit: String,
+    #[serde(default)]
+    delta_b_unit: String,
+    #[serde(default)]
+    delta_b_value: i64,
+    #[serde(default)]
+    offset: Option<i64>,
+    #[serde(default)]
+    multiplier: Option<f64>,
+    #[serde(default)]
+    holidays: Vec<String>,
+    #[serde(default)]
+    expected_behavior: String,
+    #[serde(default)]
+    expected_datetime: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct IterSelectorFixtureInput {
     src_stride: isize,
@@ -2231,6 +2279,15 @@ fn load_datetime_metamorphic_cases(
     fixture_root: &Path,
 ) -> Result<Vec<DateTimeMetamorphicCase>, String> {
     let path = fixture_root.join("datetime_metamorphic_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
+}
+
+fn load_datetime_adversarial_cases(
+    fixture_root: &Path,
+) -> Result<Vec<DateTimeAdversarialCase>, String> {
+    let path = fixture_root.join("datetime_adversarial_cases.json");
     let raw = fs::read_to_string(&path)
         .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
     serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
@@ -12945,6 +13002,23 @@ enum DateTimeOperationOutcome {
     },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum DateTimeAdversarialOutcome {
+    Array {
+        shape: Vec<usize>,
+        values: Vec<f64>,
+        dtype: DType,
+    },
+    ComparisonWithNat {
+        equal: bool,
+        not_equal: bool,
+        less: bool,
+        less_equal: bool,
+        greater: bool,
+        greater_equal: bool,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DateTimeSuiteError {
     reason_code: String,
@@ -13166,6 +13240,477 @@ pub fn run_datetime_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteRep
     }
 
     Ok(report)
+}
+
+pub fn run_datetime_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let cases = load_datetime_adversarial_cases(&config.fixture_root)?;
+
+    let mut report = SuiteReport {
+        suite: "datetime_adversarial",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+
+        let verdict = match execute_datetime_adversarial_operation(&case) {
+            Ok(outcome) => validate_datetime_adversarial_expectation(&case, &outcome),
+            Err(err) => validate_datetime_adversarial_error(&case, &err),
+        };
+
+        match verdict {
+            Ok(()) => {
+                report.pass_count += 1;
+            }
+            Err(err) => {
+                report.failures.push(format!(
+                    "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} {} (actual_reason_code={})",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    err.message,
+                    err.reason_code
+                ));
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+fn execute_datetime_adversarial_operation(
+    case: &DateTimeAdversarialCase,
+) -> Result<DateTimeAdversarialOutcome, DateTimeSuiteError> {
+    let as_array = |array: UFuncArray| DateTimeAdversarialOutcome::Array {
+        shape: array.shape().to_vec(),
+        values: array.values().to_vec(),
+        dtype: array.dtype(),
+    };
+
+    match case.operation.as_str() {
+        "datetime_add" => {
+            let base = datetime_adversarial_datetime(&case.base_datetime, None)?;
+            let delta = datetime_adversarial_timedelta(case.delta_value, &case.delta_unit)?;
+            Ok(as_array(
+                base.datetime_add(&delta)
+                    .map_err(map_ufunc_error_to_datetime_suite)?,
+            ))
+        }
+        "datetime_sub" => {
+            let lhs = datetime_adversarial_datetime(&case.datetime_a, None)?;
+            let rhs = datetime_adversarial_datetime(&case.datetime_b, None)?;
+            Ok(as_array(
+                lhs.datetime_sub(&rhs)
+                    .map_err(map_ufunc_error_to_datetime_suite)?,
+            ))
+        }
+        "timedelta_add" => {
+            let lhs_unit = datetime_adversarial_first_unit(
+                &[&case.delta_a_unit, &case.delta_b_unit, &case.delta_unit],
+                "timedelta_add",
+            )?;
+            let lhs = datetime_adversarial_timedelta_raw(&case.delta_a, lhs_unit)?;
+            let rhs = datetime_adversarial_timedelta(case.delta_b_value, &case.delta_b_unit)?;
+            Ok(as_array(
+                lhs.timedelta_add(&rhs)
+                    .map_err(map_ufunc_error_to_datetime_suite)?,
+            ))
+        }
+        "timedelta_mul" => {
+            let delta = datetime_adversarial_timedelta(case.delta_value, &case.delta_unit)?;
+            let multiplier = case.multiplier.ok_or_else(|| {
+                DateTimeSuiteError::new(
+                    "datetime_input_contract_violation",
+                    "timedelta_mul requires multiplier",
+                )
+            })?;
+            Ok(as_array(
+                delta
+                    .timedelta_mul(multiplier)
+                    .map_err(map_ufunc_error_to_datetime_suite)?,
+            ))
+        }
+        "datetime_create" => Ok(as_array(datetime_adversarial_datetime(
+            &case.datetime,
+            None,
+        )?)),
+        "timedelta_create" => Ok(as_array(datetime_adversarial_timedelta(
+            case.delta_value,
+            &case.delta_unit,
+        )?)),
+        "datetime_compare" => {
+            let lhs = datetime_adversarial_datetime(&case.datetime_a, None)?;
+            let rhs = datetime_adversarial_datetime(&case.datetime_b, None)?;
+            Ok(DateTimeAdversarialOutcome::ComparisonWithNat {
+                equal: datetime_adversarial_bool_scalar(
+                    lhs.elementwise_binary(&rhs, BinaryOp::Equal)
+                        .map_err(map_ufunc_error_to_datetime_suite)?,
+                    "equal",
+                )?,
+                not_equal: datetime_adversarial_bool_scalar(
+                    lhs.elementwise_binary(&rhs, BinaryOp::NotEqual)
+                        .map_err(map_ufunc_error_to_datetime_suite)?,
+                    "not_equal",
+                )?,
+                less: datetime_adversarial_bool_scalar(
+                    lhs.elementwise_binary(&rhs, BinaryOp::Less)
+                        .map_err(map_ufunc_error_to_datetime_suite)?,
+                    "less",
+                )?,
+                less_equal: datetime_adversarial_bool_scalar(
+                    lhs.elementwise_binary(&rhs, BinaryOp::LessEqual)
+                        .map_err(map_ufunc_error_to_datetime_suite)?,
+                    "less_equal",
+                )?,
+                greater: datetime_adversarial_bool_scalar(
+                    lhs.elementwise_binary(&rhs, BinaryOp::Greater)
+                        .map_err(map_ufunc_error_to_datetime_suite)?,
+                    "greater",
+                )?,
+                greater_equal: datetime_adversarial_bool_scalar(
+                    lhs.elementwise_binary(&rhs, BinaryOp::GreaterEqual)
+                        .map_err(map_ufunc_error_to_datetime_suite)?,
+                    "greater_equal",
+                )?,
+            })
+        }
+        "busday_offset" => {
+            let base = datetime_adversarial_datetime(&case.base_date, Some("D"))?;
+            let offset = case.offset.ok_or_else(|| {
+                DateTimeSuiteError::new(
+                    "datetime_input_contract_violation",
+                    "busday_offset requires offset",
+                )
+            })?;
+            let offsets = UFuncArray::new(vec![1], vec![offset as f64], DType::I64)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            let holidays = datetime_adversarial_holidays(&case.holidays)?;
+            Ok(as_array(
+                busday_offset_with_holidays(&base, &offsets, &holidays)
+                    .map_err(map_ufunc_error_to_datetime_suite)?,
+            ))
+        }
+        other => Err(DateTimeSuiteError::new(
+            "datetime_policy_unknown_adversarial_operation",
+            format!("unsupported datetime adversarial operation {other}"),
+        )),
+    }
+}
+
+fn validate_datetime_adversarial_expectation(
+    case: &DateTimeAdversarialCase,
+    outcome: &DateTimeAdversarialOutcome,
+) -> Result<(), DateTimeSuiteError> {
+    if !case.expected_datetime.trim().is_empty() {
+        let expected = datetime_adversarial_datetime(&case.expected_datetime, None)?;
+        return validate_datetime_adversarial_array_equal(case, outcome, &expected);
+    }
+
+    match case.expected_behavior.as_str() {
+        "nat_result" => validate_datetime_adversarial_nat_result(case, outcome),
+        "comparison_with_nat" => validate_datetime_adversarial_nat_comparison(case, outcome),
+        "valid_negative_delta" => {
+            validate_datetime_adversarial_array_predicate(case, outcome, DType::TimeDelta64, |v| {
+                v < 0.0 && !datetime_adversarial_is_nat(v)
+            })
+        }
+        "unix_epoch" => {
+            let expected = datetime_adversarial_datetime("1970-01-01T00:00:00", None)?;
+            validate_datetime_adversarial_array_equal(case, outcome, &expected)
+        }
+        "valid_datetime" => {
+            validate_datetime_adversarial_array_predicate(case, outcome, DType::DateTime64, |v| {
+                !datetime_adversarial_is_nat(v)
+            })
+        }
+        "standard_weekdays" => {
+            let expected = datetime_adversarial_datetime("2024-06-17", Some("D"))?;
+            validate_datetime_adversarial_array_equal(case, outcome, &expected)
+        }
+        "skip_all_holidays" => {
+            let expected = datetime_adversarial_datetime("2024-06-20", Some("D"))?;
+            validate_datetime_adversarial_array_equal(case, outcome, &expected)
+        }
+        "zero_timedelta" => {
+            validate_datetime_adversarial_array_predicate(case, outcome, DType::TimeDelta64, |v| {
+                v == 0.0
+            })
+        }
+        "" => Err(DateTimeSuiteError::new(
+            "datetime_adversarial_fixture_invalid",
+            format!("{} missing expected_behavior or expected_datetime", case.id),
+        )),
+        other => Err(DateTimeSuiteError::new(
+            "datetime_policy_unknown_adversarial_behavior",
+            format!("unsupported datetime adversarial expected_behavior {other}"),
+        )),
+    }
+}
+
+fn validate_datetime_adversarial_error(
+    case: &DateTimeAdversarialCase,
+    err: &DateTimeSuiteError,
+) -> Result<(), DateTimeSuiteError> {
+    if case.expected_behavior == "leap_second_handling"
+        && err.message.to_ascii_lowercase().contains("out-of-range")
+    {
+        return Ok(());
+    }
+    Err(DateTimeSuiteError::new(
+        err.reason_code.clone(),
+        format!(
+            "{} expected success for operation '{}' but got error '{}'",
+            case.id, case.operation, err.message
+        ),
+    ))
+}
+
+fn validate_datetime_adversarial_nat_result(
+    case: &DateTimeAdversarialCase,
+    outcome: &DateTimeAdversarialOutcome,
+) -> Result<(), DateTimeSuiteError> {
+    let DateTimeAdversarialOutcome::Array { values, .. } = outcome else {
+        return Err(DateTimeSuiteError::new(
+            "datetime_adversarial_type_mismatch",
+            format!(
+                "{} expected datetime/timedelta array, got {outcome:?}",
+                case.id
+            ),
+        ));
+    };
+    if values
+        .iter()
+        .all(|value| datetime_adversarial_is_nat(*value))
+    {
+        Ok(())
+    } else {
+        Err(DateTimeSuiteError::new(
+            "datetime_adversarial_mismatch",
+            format!("{} expected all NaT values, actual={values:?}", case.id),
+        ))
+    }
+}
+
+fn validate_datetime_adversarial_nat_comparison(
+    case: &DateTimeAdversarialCase,
+    outcome: &DateTimeAdversarialOutcome,
+) -> Result<(), DateTimeSuiteError> {
+    let DateTimeAdversarialOutcome::ComparisonWithNat {
+        equal,
+        not_equal,
+        less,
+        less_equal,
+        greater,
+        greater_equal,
+    } = outcome
+    else {
+        return Err(DateTimeSuiteError::new(
+            "datetime_adversarial_type_mismatch",
+            format!("{} expected comparison outcome, got {outcome:?}", case.id),
+        ));
+    };
+    if !*equal && *not_equal && !*less && !*less_equal && !*greater && !*greater_equal {
+        Ok(())
+    } else {
+        Err(DateTimeSuiteError::new(
+            "datetime_adversarial_mismatch",
+            format!(
+                "{} expected NumPy NaT comparison semantics, got eq={} ne={} lt={} le={} gt={} ge={}",
+                case.id, equal, not_equal, less, less_equal, greater, greater_equal
+            ),
+        ))
+    }
+}
+
+fn validate_datetime_adversarial_array_predicate(
+    case: &DateTimeAdversarialCase,
+    outcome: &DateTimeAdversarialOutcome,
+    expected_dtype: DType,
+    predicate: impl Fn(f64) -> bool,
+) -> Result<(), DateTimeSuiteError> {
+    let DateTimeAdversarialOutcome::Array { values, dtype, .. } = outcome else {
+        return Err(DateTimeSuiteError::new(
+            "datetime_adversarial_type_mismatch",
+            format!("{} expected array outcome, got {outcome:?}", case.id),
+        ));
+    };
+    if *dtype != expected_dtype {
+        return Err(DateTimeSuiteError::new(
+            "datetime_adversarial_mismatch",
+            format!(
+                "{} dtype mismatch expected={expected_dtype:?} actual={dtype:?}",
+                case.id
+            ),
+        ));
+    }
+    if !values.is_empty() && values.iter().all(|value| predicate(*value)) {
+        Ok(())
+    } else {
+        Err(DateTimeSuiteError::new(
+            "datetime_adversarial_mismatch",
+            format!("{} values did not satisfy predicate: {values:?}", case.id),
+        ))
+    }
+}
+
+fn validate_datetime_adversarial_array_equal(
+    case: &DateTimeAdversarialCase,
+    outcome: &DateTimeAdversarialOutcome,
+    expected: &UFuncArray,
+) -> Result<(), DateTimeSuiteError> {
+    let DateTimeAdversarialOutcome::Array {
+        shape,
+        values,
+        dtype,
+    } = outcome
+    else {
+        return Err(DateTimeSuiteError::new(
+            "datetime_adversarial_type_mismatch",
+            format!("{} expected array outcome, got {outcome:?}", case.id),
+        ));
+    };
+    if *dtype != expected.dtype() {
+        return Err(DateTimeSuiteError::new(
+            "datetime_adversarial_mismatch",
+            format!(
+                "{} dtype mismatch expected={:?} actual={dtype:?}",
+                case.id,
+                expected.dtype()
+            ),
+        ));
+    }
+    if shape != expected.shape() {
+        return Err(DateTimeSuiteError::new(
+            "datetime_adversarial_mismatch",
+            format!(
+                "{} shape mismatch expected={:?} actual={shape:?}",
+                case.id,
+                expected.shape()
+            ),
+        ));
+    }
+    if approx_equal_values(expected.values(), values, 1e-9, 1e-9) {
+        Ok(())
+    } else {
+        Err(DateTimeSuiteError::new(
+            "datetime_adversarial_mismatch",
+            format!(
+                "{} values mismatch expected={:?} actual={values:?}",
+                case.id,
+                expected.values()
+            ),
+        ))
+    }
+}
+
+fn datetime_adversarial_datetime(
+    value: &str,
+    unit: Option<&str>,
+) -> Result<UFuncArray, DateTimeSuiteError> {
+    if value.trim().is_empty() {
+        return Err(DateTimeSuiteError::new(
+            "datetime_input_contract_violation",
+            "datetime value must not be empty",
+        ));
+    }
+    UFuncArray::from_datetime_strings(vec![1], vec![value.to_string()], unit)
+        .map_err(map_ufunc_error_to_datetime_suite)
+}
+
+fn datetime_adversarial_timedelta(
+    value: i64,
+    unit: &str,
+) -> Result<UFuncArray, DateTimeSuiteError> {
+    let unit = datetime_adversarial_required_unit(unit, "timedelta unit")?;
+    UFuncArray::from_timedelta_strings(vec![1], vec![format!("{value}{unit}")], Some(unit))
+        .map_err(map_ufunc_error_to_datetime_suite)
+}
+
+fn datetime_adversarial_timedelta_raw(
+    value: &str,
+    unit: &str,
+) -> Result<UFuncArray, DateTimeSuiteError> {
+    let unit = datetime_adversarial_required_unit(unit, "timedelta unit")?;
+    if value.trim().is_empty() {
+        return Err(DateTimeSuiteError::new(
+            "datetime_input_contract_violation",
+            "timedelta value must not be empty",
+        ));
+    }
+    UFuncArray::from_timedelta_strings(vec![1], vec![value.to_string()], Some(unit))
+        .map_err(map_ufunc_error_to_datetime_suite)
+}
+
+fn datetime_adversarial_first_unit<'a>(
+    units: &[&'a str],
+    label: &str,
+) -> Result<&'a str, DateTimeSuiteError> {
+    units
+        .iter()
+        .find_map(|unit| {
+            let trimmed = unit.trim();
+            (!trimmed.is_empty()).then_some(trimmed)
+        })
+        .ok_or_else(|| {
+            DateTimeSuiteError::new(
+                "datetime_input_contract_violation",
+                format!("{label} requires a timedelta unit"),
+            )
+        })
+}
+
+fn datetime_adversarial_required_unit<'a>(
+    unit: &'a str,
+    label: &str,
+) -> Result<&'a str, DateTimeSuiteError> {
+    let trimmed = unit.trim();
+    if trimmed.is_empty() {
+        Err(DateTimeSuiteError::new(
+            "datetime_input_contract_violation",
+            format!("{label} must not be empty"),
+        ))
+    } else {
+        Ok(trimmed)
+    }
+}
+
+fn datetime_adversarial_bool_scalar(
+    array: UFuncArray,
+    label: &str,
+) -> Result<bool, DateTimeSuiteError> {
+    if array.values().len() != 1 {
+        return Err(DateTimeSuiteError::new(
+            "datetime_adversarial_mismatch",
+            format!(
+                "{label} expected scalar bool outcome, got shape={:?} values={:?}",
+                array.shape(),
+                array.values()
+            ),
+        ));
+    }
+    Ok(array.values()[0] != 0.0)
+}
+
+fn datetime_adversarial_holidays(values: &[String]) -> Result<Vec<i64>, DateTimeSuiteError> {
+    values
+        .iter()
+        .map(|value| {
+            let array = datetime_adversarial_datetime(value, Some("D"))?;
+            Ok(array.values()[0] as i64)
+        })
+        .collect()
+}
+
+fn datetime_adversarial_is_nat(value: f64) -> bool {
+    value == i64::MIN as f64
 }
 
 fn execute_datetime_differential_operation(
@@ -14617,6 +15162,7 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
         run_masked_metamorphic_suite(config)?,
         run_datetime_differential_suite(config)?,
         run_datetime_metamorphic_suite(config)?,
+        run_datetime_adversarial_suite(config)?,
         run_polynomial_differential_suite(config)?,
         run_fft_differential_suite(config)?,
         run_fft_metamorphic_suite(config)?,
@@ -16782,13 +17328,14 @@ mod tests {
         MaskedArray, RngStatisticalCase, ShapeStrideFixtureCase, StringArray, UFuncArray,
         busday_count, chebval, default_rng_mean_abs_tol, default_rng_variance_abs_tol,
         evaluate_shape_stride_case, generate_rng_samples, infer_flatiter_len, run_all_core_suites,
-        run_crash_signature_regression_suite, run_datetime_differential_suite,
-        run_datetime_metamorphic_suite, run_dtype_adversarial_suite, run_dtype_differential_suite,
-        run_dtype_metamorphic_suite, run_dtype_promotion_suite, run_fft_differential_suite,
-        run_fft_metamorphic_suite, run_io_adversarial_suite, run_io_differential_suite,
-        run_io_metamorphic_suite, run_iter_adversarial_suite, run_iter_differential_suite,
-        run_iter_metamorphic_suite, run_linalg_adversarial_suite, run_linalg_differential_suite,
-        run_linalg_metamorphic_suite, run_masked_differential_suite, run_masked_metamorphic_suite,
+        run_crash_signature_regression_suite, run_datetime_adversarial_suite,
+        run_datetime_differential_suite, run_datetime_metamorphic_suite,
+        run_dtype_adversarial_suite, run_dtype_differential_suite, run_dtype_metamorphic_suite,
+        run_dtype_promotion_suite, run_fft_differential_suite, run_fft_metamorphic_suite,
+        run_io_adversarial_suite, run_io_differential_suite, run_io_metamorphic_suite,
+        run_iter_adversarial_suite, run_iter_differential_suite, run_iter_metamorphic_suite,
+        run_linalg_adversarial_suite, run_linalg_differential_suite, run_linalg_metamorphic_suite,
+        run_masked_differential_suite, run_masked_metamorphic_suite,
         run_polynomial_differential_suite, run_rng_adversarial_suite, run_rng_differential_suite,
         run_rng_metamorphic_suite, run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
         run_runtime_policy_metamorphic_suite, run_shape_stride_adversarial_suite,
@@ -17749,6 +18296,14 @@ mod tests {
         let cfg = HarnessConfig::default_paths();
         let suite =
             run_datetime_metamorphic_suite(&cfg).expect("datetime metamorphic suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn datetime_adversarial_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite =
+            run_datetime_adversarial_suite(&cfg).expect("datetime adversarial suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 
