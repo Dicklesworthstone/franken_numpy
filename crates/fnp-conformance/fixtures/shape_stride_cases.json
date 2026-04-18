@@ -903,5 +903,33 @@
     "env_fingerprint": "fnp-conformance-default-paths",
     "artifact_refs": ["artifacts/phase2c/FNP-P2C-006/fixture_manifest.json"],
     "reason_code": "transpose_identity_no_change"
+  },
+  {
+    "id": "broadcast_scalar_against_5d",
+    "lhs": [],
+    "rhs": [2, 3, 4, 5, 6],
+    "expected_broadcast": [2, 3, 4, 5, 6],
+    "stride_shape": [1],
+    "stride_item_size": 8,
+    "stride_order": "C",
+    "expected_strides": [8],
+    "seed": 147,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-006/fixture_manifest.json"],
+    "reason_code": "scalar_broadcast_to_high_rank"
+  },
+  {
+    "id": "broadcast_asymmetric_odd_dims",
+    "lhs": [1, 7, 1, 5],
+    "rhs": [3, 1, 9, 1],
+    "expected_broadcast": [3, 7, 9, 5],
+    "stride_shape": [3, 7, 9, 5],
+    "stride_item_size": 4,
+    "stride_order": "C",
+    "expected_strides": [1260, 180, 20, 4],
+    "seed": 148,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-006/fixture_manifest.json"],
+    "reason_code": "broadcast_interleaved_ones_odd_dims"
   }
 ]
