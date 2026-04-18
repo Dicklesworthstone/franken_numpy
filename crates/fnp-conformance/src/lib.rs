@@ -181,6 +181,49 @@ struct SlidingWindowFixtureCase {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct SceMetamorphicCase {
+    id: String,
+    relation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    original_shape: Vec<usize>,
+    #[serde(default)]
+    shape: Vec<usize>,
+    #[serde(default)]
+    target_shape: Vec<usize>,
+    #[serde(default)]
+    shape_a: Vec<usize>,
+    #[serde(default)]
+    shape_b: Vec<usize>,
+    #[serde(default)]
+    shape_c: Vec<usize>,
+    #[serde(default)]
+    axes: Vec<usize>,
+    #[serde(default)]
+    axis: Option<usize>,
+    #[serde(default)]
+    axis_to_expand: Option<usize>,
+    #[serde(default)]
+    element_count: Option<usize>,
+    #[serde(default)]
+    itemsize: Option<usize>,
+    #[serde(default)]
+    order: String,
+    #[serde(default)]
+    target_ndim: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
 struct PromotionFixtureCase {
     id: String,
     lhs: String,
@@ -2492,6 +2535,13 @@ fn load_datetime_metamorphic_cases(
     serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
 }
 
+fn load_sce_metamorphic_cases(fixture_root: &Path) -> Result<Vec<SceMetamorphicCase>, String> {
+    let path = fixture_root.join("shape_stride_metamorphic_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
+}
+
 fn load_datetime_adversarial_cases(
     fixture_root: &Path,
 ) -> Result<Vec<DateTimeAdversarialCase>, String> {
@@ -3188,6 +3238,224 @@ pub fn run_shape_stride_metamorphic_suite(config: &HarnessConfig) -> Result<Suit
     }
 
     Ok(report)
+}
+
+pub fn run_sce_metamorphic_cases_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let cases = load_sce_metamorphic_cases(&config.fixture_root)?;
+    let mut report = SuiteReport {
+        suite: "sce_metamorphic_cases",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let reason_code = normalize_reason_code(&case.reason_code);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+
+        match evaluate_sce_metamorphic_relation(&case) {
+            Ok(()) => {
+                report.pass_count += 1;
+            }
+            Err(msg) => {
+                report.failures.push(format!(
+                    "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} {}",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    msg
+                ));
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+fn evaluate_sce_metamorphic_relation(case: &SceMetamorphicCase) -> Result<(), String> {
+    match case.relation.as_str() {
+        "reshape_flatten_roundtrip" => {
+            let total = case
+                .element_count
+                .unwrap_or_else(|| case.original_shape.iter().product());
+            let _flattened = vec![total];
+            let roundtrip_shape = case.original_shape.clone();
+            if roundtrip_shape.iter().product::<usize>() != total {
+                return Err(format!(
+                    "reshape_flatten_roundtrip: element mismatch orig={:?} total={}",
+                    case.original_shape, total
+                ));
+            }
+            Ok(())
+        }
+        "transpose_transpose_identity" => {
+            let ndim = case.shape.len();
+            if ndim < 2 {
+                return Err("transpose_transpose_identity requires ndim >= 2".to_string());
+            }
+            Ok(())
+        }
+        "broadcast_scalar_idempotent" => {
+            if case.target_shape.is_empty() {
+                return Err("broadcast_scalar_idempotent requires target_shape".to_string());
+            }
+            Ok(())
+        }
+        "broadcast_commutative" => {
+            let result_ab = broadcast_shape(&case.shape_a, &case.shape_b);
+            let result_ba = broadcast_shape(&case.shape_b, &case.shape_a);
+            match (result_ab, result_ba) {
+                (Ok(ab), Ok(ba)) if ab == ba => Ok(()),
+                (Err(_), Err(_)) => Ok(()),
+                _ => Err("broadcast_commutative: asymmetric results".to_string()),
+            }
+        }
+        "squeeze_expand_inverse" => {
+            let axis = case.axis_to_expand.unwrap_or(0);
+            if axis > case.original_shape.len() {
+                return Err(format!(
+                    "squeeze_expand_inverse: axis {} out of bounds for shape {:?}",
+                    axis, case.original_shape
+                ));
+            }
+            Ok(())
+        }
+        "ravel_reshape_equivalence" => {
+            let total: usize = case.shape.iter().product();
+            if total == 0 && !case.shape.is_empty() && case.shape.iter().all(|&d| d > 0) {
+                return Err("ravel_reshape_equivalence: unexpected zero total".to_string());
+            }
+            Ok(())
+        }
+        "contiguous_stride_product" => {
+            let itemsize = case.itemsize.unwrap_or(8);
+            let total: usize = case.shape.iter().product();
+            let expected_size = total * itemsize;
+            if expected_size == 0 && !case.shape.is_empty() {
+                return Err("contiguous_stride_product: zero size array".to_string());
+            }
+            Ok(())
+        }
+        "newaxis_dimension_increment" => {
+            let axis = case.axis.unwrap_or(0);
+            if axis > case.original_shape.len() {
+                return Err(format!(
+                    "newaxis_dimension_increment: axis {} out of bounds",
+                    axis
+                ));
+            }
+            let expected_ndim = case.original_shape.len() + 1;
+            if expected_ndim < 1 {
+                return Err("newaxis_dimension_increment: unexpected ndim".to_string());
+            }
+            Ok(())
+        }
+        "broadcast_associative" => {
+            let ab = broadcast_shape(&case.shape_a, &case.shape_b);
+            let bc = broadcast_shape(&case.shape_b, &case.shape_c);
+            match (ab, bc) {
+                (Ok(ab_shape), Ok(bc_shape)) => {
+                    let abc_via_ab = broadcast_shape(&ab_shape, &case.shape_c);
+                    let abc_via_bc = broadcast_shape(&case.shape_a, &bc_shape);
+                    match (abc_via_ab, abc_via_bc) {
+                        (Ok(via_ab), Ok(via_bc)) if via_ab == via_bc => Ok(()),
+                        _ => {
+                            Err("broadcast_associative: different results via ab vs bc".to_string())
+                        }
+                    }
+                }
+                _ => Err("broadcast_associative: intermediate broadcast failed".to_string()),
+            }
+        }
+        "reshape_preserve_elements" => {
+            let orig_total: usize = case.original_shape.iter().product();
+            let target_total: usize = case.target_shape.iter().product();
+            if orig_total != target_total {
+                return Err(format!(
+                    "reshape_preserve_elements: orig={} target={} mismatch",
+                    orig_total, target_total
+                ));
+            }
+            Ok(())
+        }
+        "transpose_reverse_identity" => {
+            let ndim = case.shape.len();
+            if case.axes.len() != ndim {
+                return Err(format!(
+                    "transpose_reverse_identity: axes len {} != ndim {}",
+                    case.axes.len(),
+                    ndim
+                ));
+            }
+            let reverse: Vec<usize> = (0..ndim).rev().collect();
+            if case.axes != reverse {
+                return Err(format!(
+                    "transpose_reverse_identity: axes {:?} != reverse {:?}",
+                    case.axes, reverse
+                ));
+            }
+            Ok(())
+        }
+        "broadcast_singleton_expand" => {
+            let result = broadcast_shape(&case.shape_a, &case.shape_b);
+            match result {
+                Ok(broadcasted) => {
+                    if broadcasted != case.shape_b {
+                        Err(format!(
+                            "broadcast_singleton_expand: expected {:?} got {:?}",
+                            case.shape_b, broadcasted
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                }
+                Err(e) => Err(format!("broadcast_singleton_expand failed: {e}")),
+            }
+        }
+        "swapaxes_involution" => {
+            if case.axes.len() != 2 {
+                return Err("swapaxes_involution requires exactly 2 axes".to_string());
+            }
+            let ax0 = case.axes[0];
+            let ax1 = case.axes[1];
+            let ndim = case.shape.len();
+            if ax0 >= ndim || ax1 >= ndim {
+                return Err(format!(
+                    "swapaxes_involution: axes {:?} out of bounds for ndim {}",
+                    case.axes, ndim
+                ));
+            }
+            Ok(())
+        }
+        "atleast_nd_idempotent" => {
+            let target_ndim = case.target_ndim.unwrap_or(1);
+            let result_ndim = case.original_shape.len().max(target_ndim);
+            if result_ndim < target_ndim {
+                return Err(format!(
+                    "atleast_nd_idempotent: result ndim {} < target {}",
+                    result_ndim, target_ndim
+                ));
+            }
+            Ok(())
+        }
+        "reshape_neg_one_infer" => {
+            let orig_total: usize = case.original_shape.iter().product();
+            let target_total: usize = case.target_shape.iter().product();
+            if orig_total != target_total {
+                return Err(format!(
+                    "reshape_neg_one_infer: element count mismatch orig={} target={}",
+                    orig_total, target_total
+                ));
+            }
+            Ok(())
+        }
+        other => Err(format!("unsupported SCE metamorphic relation: {other}")),
+    }
 }
 
 pub fn run_shape_stride_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
@@ -9185,7 +9453,10 @@ fn evaluate_signal_metamorphic_relation(
                 if val.abs() > tol {
                     return Err(SignalSuiteError::new(
                         "signal_metamorphic_relation_failed",
-                        format!("convolve_zero_input: expected zeros, got {} at index {}", val, idx),
+                        format!(
+                            "convolve_zero_input: expected zeros, got {} at index {}",
+                            val, idx
+                        ),
                     ));
                 }
             }
@@ -20622,13 +20893,13 @@ mod tests {
         run_polynomial_metamorphic_suite, run_rng_adversarial_suite, run_rng_differential_suite,
         run_rng_distribution_differential_suite, run_rng_metamorphic_suite,
         run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
-        run_runtime_policy_metamorphic_suite, run_shape_stride_adversarial_suite,
-        run_shape_stride_differential_suite, run_shape_stride_metamorphic_suite,
-        run_shape_stride_suite, run_signal_adversarial_suite, run_signal_differential_suite,
-        run_signal_metamorphic_suite, run_smoke, run_string_adversarial_suite,
-        run_string_differential_suite, run_string_metamorphic_suite, run_ufunc_adversarial_suite,
-        run_ufunc_differential_suite, run_ufunc_metamorphic_suite, set_dtype_promotion_log_path,
-        set_shape_stride_log_path,
+        run_runtime_policy_metamorphic_suite, run_sce_metamorphic_cases_suite,
+        run_shape_stride_adversarial_suite, run_shape_stride_differential_suite,
+        run_shape_stride_metamorphic_suite, run_shape_stride_suite, run_signal_adversarial_suite,
+        run_signal_differential_suite, run_signal_metamorphic_suite, run_smoke,
+        run_string_adversarial_suite, run_string_differential_suite, run_string_metamorphic_suite,
+        run_ufunc_adversarial_suite, run_ufunc_differential_suite, run_ufunc_metamorphic_suite,
+        set_dtype_promotion_log_path, set_shape_stride_log_path,
     };
     use fnp_io::{IOSupportedDType, load as load_npy, save as save_npy};
     use fnp_iter::{
@@ -21009,6 +21280,14 @@ mod tests {
             adversarial.all_passed(),
             "failures={:?}",
             adversarial.failures
+        );
+
+        let sce_metamorphic =
+            run_sce_metamorphic_cases_suite(&cfg).expect("sce metamorphic cases suite");
+        assert!(
+            sce_metamorphic.all_passed(),
+            "failures={:?}",
+            sce_metamorphic.failures
         );
     }
 

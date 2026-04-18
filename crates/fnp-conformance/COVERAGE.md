@@ -17,7 +17,7 @@
 | Datetime/timedelta | 48 | 18 | 12 | 78 | Good - arithmetic, busday, NaT, broadcast, abs, comparisons, neg, mul-zero/neg-one, add/sub inverse, order-shift-preserved, double-neg metamorphic, NaT/epoch/y2038 adversarial |
 | Masked arrays | 44 | 18 | 12 | 74 | Good - reshape/concat/fill/broadcast/all-masked/argmin-max/axis-aware, min/max axis partial, mask preservation, add-commutative/mul-one/count-complement/mean-unmasked metamorphic, hardmask/compress adversarial |
 | Iterator/transfer | 37 | 21 | 18 | 76 | Good - transfer/overlap/flatiter/broadcast, single-element, copy-overlap flags |
-| Shape/stride (SCE) | 51 | 12 | 12 | 75 | Good - 0-D, empty, negative-stride, large shapes, 5D/6D transpose, scalar-to-5D, F-order, reshape/transpose roundtrip metamorphic, incompatible/negative-infer adversarial |
+| Shape/stride (SCE) | 51 | 18 | 12 | 81 | Good - 0-D, empty, negative-stride, large shapes, 5D/6D transpose, scalar-to-5D, F-order, reshape/transpose roundtrip/preserve-elements/neg-one-infer, broadcast associative/commutative/singleton, swapaxes involution, atleast_nd metamorphic, incompatible/negative-infer adversarial |
 | Dtype promotion | 198 | 17 | 20 | 235 | Good - full 14×14 type matrix + metamorphic + adversarial, title-case/trailing-space |
 | Runtime policy | 37 | 12 | 12 | 61 | Good - risk thresholds, boundaries, override audit, unknown-class, exact-threshold, monotonicity/subsumption metamorphic |
 

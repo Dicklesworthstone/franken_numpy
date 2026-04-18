@@ -166,5 +166,89 @@
     "shape_a": [3, 1, 1],
     "shape_b": [1, 4, 1],
     "shape_c": [1, 1, 5]
+  },
+  {
+    "id": "reshape_preserve_elements_2d_to_1d",
+    "relation": "reshape_preserve_elements",
+    "seed": 213,
+    "mode": "strict",
+    "env_fingerprint": "fnp-sce-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_metamorphic_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_metamorphic_reshape_preserve_contract",
+    "original_shape": [4, 6],
+    "target_shape": [24]
+  },
+  {
+    "id": "transpose_reverse_identity_3d",
+    "relation": "transpose_reverse_identity",
+    "seed": 214,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-sce-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_metamorphic_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_metamorphic_transpose_reverse_contract",
+    "shape": [2, 3, 4],
+    "axes": [2, 1, 0]
+  },
+  {
+    "id": "broadcast_singleton_expand",
+    "relation": "broadcast_singleton_expand",
+    "seed": 215,
+    "mode": "strict",
+    "env_fingerprint": "fnp-sce-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_metamorphic_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_metamorphic_singleton_expand_contract",
+    "shape_a": [1],
+    "shape_b": [5, 4, 3]
+  },
+  {
+    "id": "swapaxes_involution_3d",
+    "relation": "swapaxes_involution",
+    "seed": 216,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-sce-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_metamorphic_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_metamorphic_swapaxes_involution_contract",
+    "shape": [2, 3, 4],
+    "axes": [0, 2]
+  },
+  {
+    "id": "atleast_1d_idempotent_scalar",
+    "relation": "atleast_nd_idempotent",
+    "seed": 217,
+    "mode": "strict",
+    "env_fingerprint": "fnp-sce-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_metamorphic_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_metamorphic_atleast_nd_idempotent_contract",
+    "original_shape": [],
+    "target_ndim": 1
+  },
+  {
+    "id": "reshape_neg_one_infer_2d",
+    "relation": "reshape_neg_one_infer",
+    "seed": 218,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-sce-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_metamorphic_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_metamorphic_reshape_neg_one_contract",
+    "original_shape": [6, 4],
+    "target_shape": [3, 8]
   }
 ]
