@@ -1116,5 +1116,37 @@
     "expected_reason_code": "string_differential_expected_success",
     "lhs_strings": ["   ", "  hi  ", "\t\n"],
     "expected_strings": ["", "hi", ""]
+  },
+  {
+    "id": "upper_mixed_case",
+    "operation": "upper",
+    "seed": 10034,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["hello", "HeLLo", "HELLO"],
+    "expected_strings": ["HELLO", "HELLO", "HELLO"]
+  },
+  {
+    "id": "isalpha_mixed",
+    "operation": "isalpha",
+    "seed": 10035,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["abc", "a1b", "123"],
+    "expected_values": [1.0, 0.0, 0.0],
+    "abs_tol": 0.0,
+    "rel_tol": 0.0
   }
 ]
