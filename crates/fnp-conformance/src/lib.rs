@@ -922,6 +922,10 @@ struct SignalDifferentialCase {
     #[serde(default)]
     beta: Option<f64>,
     #[serde(default)]
+    period: Option<f64>,
+    #[serde(default)]
+    discont: Option<f64>,
+    #[serde(default)]
     spacing: Option<f64>,
     #[serde(default)]
     dx: Option<f64>,
@@ -6339,6 +6343,19 @@ fn execute_signal_differential_operation(
             let axis = case.axis;
             let result = input
                 .diff(n, axis)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "unwrap" => {
+            let input = UFuncArray::new(
+                case.input_shape.clone(),
+                case.input_values.clone(),
+                DType::F64,
+            )
+            .map_err(map_ufunc_error_to_signal_suite)?;
+            let axis = case.axis.unwrap_or(-1);
+            let result = input
+                .unwrap_period_axis(case.discont, case.period, axis)
                 .map_err(map_ufunc_error_to_signal_suite)?;
             Ok(to_outcome(result))
         }
@@ -13915,9 +13932,10 @@ mod tests {
         run_polynomial_differential_suite, run_rng_adversarial_suite, run_rng_differential_suite,
         run_rng_metamorphic_suite, run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
         run_shape_stride_adversarial_suite, run_shape_stride_differential_suite,
-        run_shape_stride_metamorphic_suite, run_shape_stride_suite, run_smoke,
-        run_string_differential_suite, run_ufunc_adversarial_suite, run_ufunc_differential_suite,
-        run_ufunc_metamorphic_suite, set_dtype_promotion_log_path, set_shape_stride_log_path,
+        run_shape_stride_metamorphic_suite, run_shape_stride_suite, run_signal_differential_suite,
+        run_smoke, run_string_differential_suite, run_ufunc_adversarial_suite,
+        run_ufunc_differential_suite, run_ufunc_metamorphic_suite, set_dtype_promotion_log_path,
+        set_shape_stride_log_path,
     };
     use fnp_io::{IOSupportedDType, load as load_npy, save as save_npy};
     use fnp_iter::{
@@ -14837,6 +14855,14 @@ mod tests {
     fn fft_differential_suite_is_green() {
         let cfg = HarnessConfig::default_paths();
         let suite = run_fft_differential_suite(&cfg).expect("fft differential suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn signal_differential_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite =
+            run_signal_differential_suite(&cfg).expect("signal differential suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 
