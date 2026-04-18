@@ -17287,42 +17287,51 @@ impl UFuncArray {
     }
 
     /// Shift the zero-frequency component to the center (np.fft.fftshift).
-    /// Works on 1-D arrays.
+    /// Applies to all axes, matching NumPy's default `axes=None` behavior.
     pub fn fftshift(&self) -> Result<Self, UFuncError> {
-        if self.shape.len() != 1 {
-            return Err(UFuncError::Msg(
-                "fftshift: only 1-D arrays supported".to_string(),
-            ));
-        }
-        let n = self.shape[0];
-        let shift = n / 2;
-        let source_indices: Vec<usize> = (0..n).map(|i| (i + n - shift) % n).collect();
-        let values: Vec<f64> = source_indices.iter().map(|&src| self.values[src]).collect();
-        Ok(Self {
-            shape: vec![n],
-            values,
-            dtype: self.dtype,
-            integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
-        })
+        self.fftshift_axes(None)
+    }
+
+    /// Shift the zero-frequency component on selected axes.
+    pub fn fftshift_axes(&self, axes: Option<&[isize]>) -> Result<Self, UFuncError> {
+        self.frequency_shift_axes(axes, false)
     }
 
     /// Inverse of fftshift (np.fft.ifftshift).
     pub fn ifftshift(&self) -> Result<Self, UFuncError> {
-        if self.shape.len() != 1 {
-            return Err(UFuncError::Msg(
-                "ifftshift: only 1-D arrays supported".to_string(),
-            ));
+        self.ifftshift_axes(None)
+    }
+
+    /// Inverse of fftshift on selected axes.
+    pub fn ifftshift_axes(&self, axes: Option<&[isize]>) -> Result<Self, UFuncError> {
+        self.frequency_shift_axes(axes, true)
+    }
+
+    fn frequency_shift_axes(
+        &self,
+        axes: Option<&[isize]>,
+        inverse: bool,
+    ) -> Result<Self, UFuncError> {
+        let axes: Vec<usize> = match axes {
+            Some(axes) => axes
+                .iter()
+                .map(|&axis| normalize_axis(axis, self.shape.len()))
+                .collect::<Result<_, _>>()?,
+            None => (0..self.shape.len()).collect(),
+        };
+
+        let mut shifted = self.clone();
+        for axis in axes {
+            let len = shifted.shape[axis];
+            if len == 0 {
+                continue;
+            }
+            let shift = (len / 2) as isize;
+            let shift = if inverse { -shift } else { shift };
+            shifted = shifted.roll(shift, Some(axis as isize))?;
         }
-        let n = self.shape[0];
-        let shift = n.div_ceil(2);
-        let source_indices: Vec<usize> = (0..n).map(|i| (i + n - shift) % n).collect();
-        let values: Vec<f64> = source_indices.iter().map(|&src| self.values[src]).collect();
-        Ok(Self {
-            shape: vec![n],
-            values,
-            dtype: self.dtype,
-            integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
-        })
+
+        Ok(shifted)
     }
 
     // ── Einsum ──────────────────────────────────────────────────────
@@ -42109,6 +42118,66 @@ mod tests {
     }
 
     #[test]
+    fn fftshift_shifts_nd_arrays_on_all_axes() {
+        let arr = UFuncArray::new(
+            vec![3, 4],
+            (0..12).map(|value| value as f64).collect(),
+            DType::F64,
+        )
+        .unwrap();
+
+        let shifted = arr.fftshift().unwrap();
+        assert_eq!(shifted.shape(), &[3, 4]);
+        assert_eq!(
+            shifted.values(),
+            &[10.0, 11.0, 8.0, 9.0, 2.0, 3.0, 0.0, 1.0, 6.0, 7.0, 4.0, 5.0,]
+        );
+
+        let unshifted = shifted.ifftshift().unwrap();
+        assert_eq!(unshifted.shape(), &[3, 4]);
+        assert_eq!(unshifted.values(), arr.values());
+    }
+
+    #[test]
+    fn ifftshift_shifts_nd_arrays_on_all_axes() {
+        let arr = UFuncArray::new(
+            vec![3, 4],
+            (0..12).map(|value| value as f64).collect(),
+            DType::F64,
+        )
+        .unwrap();
+
+        let shifted = arr.ifftshift().unwrap();
+        assert_eq!(shifted.shape(), &[3, 4]);
+        assert_eq!(
+            shifted.values(),
+            &[6.0, 7.0, 4.0, 5.0, 10.0, 11.0, 8.0, 9.0, 2.0, 3.0, 0.0, 1.0,]
+        );
+    }
+
+    #[test]
+    fn fftshift_axes_limits_shift_to_selected_axis() {
+        let arr = UFuncArray::new(
+            vec![3, 4],
+            (0..12).map(|value| value as f64).collect(),
+            DType::F64,
+        )
+        .unwrap();
+
+        let axis0 = arr.fftshift_axes(Some(&[0])).unwrap();
+        assert_eq!(
+            axis0.values(),
+            &[8.0, 9.0, 10.0, 11.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0,]
+        );
+
+        let axis1 = arr.fftshift_axes(Some(&[1])).unwrap();
+        assert_eq!(
+            axis1.values(),
+            &[2.0, 3.0, 0.0, 1.0, 6.0, 7.0, 4.0, 5.0, 10.0, 11.0, 8.0, 9.0,]
+        );
+    }
+
+    #[test]
     fn fftshift_preserves_large_u64_sidecar_values() {
         let large = (1_u64 << 53) + 17;
         let arr =
@@ -42118,6 +42187,21 @@ mod tests {
         assert_eq!(
             shifted.to_storage().unwrap(),
             ArrayStorage::U64(vec![3, 4, 1, large])
+        );
+    }
+
+    #[test]
+    fn fftshift_nd_preserves_large_u64_sidecar_values() {
+        let large = (1_u64 << 53) + 17;
+        let arr =
+            UFuncArray::from_storage(vec![2, 3], ArrayStorage::U64(vec![1, large, 3, 4, 5, 6]))
+                .unwrap();
+
+        let shifted = arr.fftshift().unwrap();
+        assert_eq!(shifted.dtype(), DType::U64);
+        assert_eq!(
+            shifted.to_storage().unwrap(),
+            ArrayStorage::U64(vec![6, 4, 5, 3, 1, large])
         );
     }
 
