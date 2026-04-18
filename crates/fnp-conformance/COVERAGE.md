@@ -17,46 +17,38 @@
 | Datetime/timedelta | 34 | — | — | 34 | Adequate - arithmetic + busday |
 | Masked arrays | 27 | — | — | 27 | Adequate - reshape/concat/fill |
 | Iterator/transfer | 22 | 16 | 16 | 54 | Thin - complex NDIter system |
-| Shape/stride (SCE) | 22 | — | — | 22 | **Thin** - critical engine |
-| Dtype promotion | 15 | — | — | 15 | **Thin** - 15/324 pairs (4.6%) |
-| Runtime policy | 12 | — | 8 | 20 | **Thin** - dual-mode system |
+| Shape/stride (SCE) | 36 | — | — | 36 | Adequate - 0-D, empty, negative-stride covered |
+| Dtype promotion | 59 | — | — | 59 | Adequate - 59/324 pairs (18.2%), key edge cases covered |
+| Runtime policy | 23 | — | 8 | 31 | Adequate - risk thresholds, boundaries covered |
 
 ## Priority Coverage Gaps
 
-### 1. Dtype Promotion Matrix (CRITICAL)
+### 1. Dtype Promotion Matrix (MEDIUM)
 
-**Current state:** 15 cases covering only 5 types (bool, i32, i64, f32, f64)
-**Required:** 324 pairs from 18 DType variants
-**Gap:** Missing u8, u16, u32, u64, i8, i16, f16, complex64, complex128
+**Current state:** 59 cases covering all 13 numeric types
+**Required:** 324 pairs from full cross-product
+**Covered:** u64+signed->f64, f16+i16->f32, complex64+i32->complex128, cross-promotion edges
 
-Key missing edge cases:
-- `u64 + any_signed -> f64` (counterintuitive widening rule)
-- `f16 + i16 -> f32` (mantissa overflow rule)
-- `complex64 + i32 -> complex128` (mirrors float widening)
-- All unsigned/signed cross-promotion
+Remaining gaps:
+- Full N×N matrix coverage (59/324 = 18.2%)
+- Symmetric pair verification (a+b == b+a)
 
-### 2. Shape/Stride Calculus Engine (CRITICAL)
+### 2. Shape/Stride Calculus Engine (MEDIUM)
 
-**Current state:** 22 cases
-**Gap:** SCE is the "non-negotiable compatibility kernel" but has thin coverage
+**Current state:** 36 cases covering core edge cases
+**Covered:** 0-D scalars, empty arrays, negative strides, Fortran order, various item sizes
 
-Missing edge cases:
-- 0-D arrays (scalar views)
-- Empty arrays (shape with 0 dimension)
-- Negative strides (reverse views)
+Remaining gaps:
 - Very large shapes (overflow checks)
 - Non-contiguous reshape failures
-- Multi-axis transpose permutations
-- Broadcast with negative strides
+- Multi-axis transpose permutations beyond 4D
 
-### 3. Runtime Policy Dual-Mode (HIGH)
+### 3. Runtime Policy Dual-Mode (MEDIUM)
 
-**Current state:** 20 cases (12 policy + 8 adversarial)
-**Gap:** Complex strict/hardened mode-split with risk-aware decisions
+**Current state:** 31 cases (23 policy + 8 adversarial)
+**Covered:** All CompatibilityClass variants, risk thresholds at boundaries (0.0, 0.69, 0.7, 0.71, 1.0), variable thresholds
 
-Missing coverage:
-- All `CompatibilityClass` variants exercised
-- Risk score thresholds at boundaries
+Remaining gaps:
 - Override audit event logging
 - Evidence ledger serialization
 

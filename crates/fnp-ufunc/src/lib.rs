@@ -29153,20 +29153,44 @@ pub fn isneginf(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
 ///
 /// Equivalent to `numpy.bitwise_count` (added in NumPy 2.0).
 pub fn bitwise_count(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
-    let values = x
-        .values
-        .iter()
-        .map(|&v| {
-            let i = (v.trunc() as i64).unsigned_abs();
-            i.count_ones() as f64
-        })
-        .collect();
-    Ok(UFuncArray {
-        shape: x.shape.clone(),
-        values,
-        dtype: DType::F64,
-        integer_sidecar: None,
-    })
+    let values: Vec<u8> = match x.dtype {
+        DType::Bool => x.values.iter().map(|&v| u8::from(v != 0.0)).collect(),
+        DType::I8 | DType::I16 | DType::I32 | DType::I64 => {
+            if let Some(IntegerSidecar::I64(values)) =
+                x.synthesized_integer_sidecar("bitwise_count")?
+            {
+                values
+                    .iter()
+                    .map(|&v| v.unsigned_abs().count_ones() as u8)
+                    .collect()
+            } else {
+                x.values
+                    .iter()
+                    .map(|&v| (v.trunc() as i64).unsigned_abs().count_ones() as u8)
+                    .collect()
+            }
+        }
+        DType::U8 | DType::U16 | DType::U32 | DType::U64 => {
+            if let Some(IntegerSidecar::U64(values)) =
+                x.synthesized_integer_sidecar("bitwise_count")?
+            {
+                values.iter().map(|&v| v.count_ones() as u8).collect()
+            } else {
+                x.values
+                    .iter()
+                    .map(|&v| (v.trunc() as u64).count_ones() as u8)
+                    .collect()
+            }
+        }
+        other => {
+            return Err(UFuncError::Msg(format!(
+                "bitwise_count: dtype {} is not supported",
+                other.name()
+            )));
+        }
+    };
+
+    UFuncArray::from_storage(x.shape.clone(), ArrayStorage::U8(values))
 }
 
 /// Return x1 with the sign of x2, element-wise.
@@ -47149,21 +47173,22 @@ mod tests {
 
     #[test]
     fn bitwise_count_powers_of_two() {
-        let arr = UFuncArray::new(vec![5], vec![1.0, 2.0, 4.0, 8.0, 16.0], DType::F64).unwrap();
+        let arr = UFuncArray::new(vec![5], vec![1.0, 2.0, 4.0, 8.0, 16.0], DType::I64).unwrap();
         let out = bitwise_count(&arr).unwrap();
+        assert_eq!(out.dtype(), DType::U8);
         assert_eq!(out.values(), &[1.0, 1.0, 1.0, 1.0, 1.0]);
     }
 
     #[test]
     fn bitwise_count_known_values() {
-        let arr = UFuncArray::new(vec![4], vec![0.0, 7.0, 255.0, 1023.0], DType::F64).unwrap();
+        let arr = UFuncArray::new(vec![4], vec![0.0, 7.0, 255.0, 1023.0], DType::I64).unwrap();
         let out = bitwise_count(&arr).unwrap();
         assert_eq!(out.values(), &[0.0, 3.0, 8.0, 10.0]);
     }
 
     #[test]
     fn bitwise_count_specific() {
-        let arr = UFuncArray::new(vec![3], vec![13.0, 100.0, 1024.0], DType::F64).unwrap();
+        let arr = UFuncArray::new(vec![3], vec![13.0, 100.0, 1024.0], DType::I64).unwrap();
         let out = bitwise_count(&arr).unwrap();
         // 13 = 1101 → 3, 100 = 1100100 → 3, 1024 = 10000000000 → 1
         assert_eq!(out.values(), &[3.0, 3.0, 1.0]);
@@ -47171,7 +47196,7 @@ mod tests {
 
     #[test]
     fn bitwise_count_negative() {
-        let arr = UFuncArray::new(vec![2], vec![-1.0, -7.0], DType::F64).unwrap();
+        let arr = UFuncArray::new(vec![2], vec![-1.0, -7.0], DType::I64).unwrap();
         let out = bitwise_count(&arr).unwrap();
         // Uses absolute value: |-1| = 1 → 1, |-7| = 7 → 3
         assert_eq!(out.values(), &[1.0, 3.0]);
@@ -47179,22 +47204,29 @@ mod tests {
 
     #[test]
     fn bitwise_count_zero() {
-        let arr = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
+        let arr = UFuncArray::new(vec![1], vec![0.0], DType::I64).unwrap();
         let out = bitwise_count(&arr).unwrap();
         assert_eq!(out.values(), &[0.0]);
     }
 
     #[test]
-    fn bitwise_count_float_truncation() {
+    fn bitwise_count_rejects_float_input() {
         let arr = UFuncArray::new(vec![1], vec![7.9], DType::F64).unwrap();
+        assert!(bitwise_count(&arr).is_err());
+    }
+
+    #[test]
+    fn bitwise_count_uint64_uses_exact_sidecar_and_returns_u8_storage() {
+        let arr =
+            UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![u64::MAX, 1 << 63])).unwrap();
         let out = bitwise_count(&arr).unwrap();
-        // 7.9 truncates to 7 = 111 → 3
-        assert_eq!(out.values(), &[3.0]);
+        assert_eq!(out.dtype(), DType::U8);
+        assert_eq!(out.to_storage().unwrap(), ArrayStorage::U8(vec![64, 1]));
     }
 
     #[test]
     fn bitwise_count_preserves_matrix_shape() {
-        let arr = UFuncArray::new(vec![2, 2], vec![0.0, 3.0, 7.0, 8.0], DType::F64).unwrap();
+        let arr = UFuncArray::new(vec![2, 2], vec![0.0, 3.0, 7.0, 8.0], DType::I64).unwrap();
         let out = bitwise_count(&arr).unwrap();
         assert_eq!(out.shape(), &[2, 2]);
         assert_eq!(out.values(), &[0.0, 2.0, 3.0, 1.0]);

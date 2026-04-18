@@ -2341,21 +2341,25 @@ pub fn run_shape_stride_metamorphic_suite(config: &HarnessConfig) -> Result<Suit
         );
 
         if let Some(expected) = &case.expected_broadcast {
-            let identity = broadcast_shape(expected, &[1usize]);
-            let identity_ok = identity.as_ref().is_ok_and(|actual| actual == expected);
-            record_suite_check(
-                &mut report,
-                identity_ok,
-                format!(
-                    "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} broadcast identity failed expected={expected:?} actual={identity:?}",
-                    case.id,
-                    case.seed,
-                    mode,
-                    reason_code,
-                    env_fingerprint,
-                    artifact_refs.join(",")
-                ),
-            );
+            // Skip identity check for 0-D scalars: broadcast([], [1]) == [1], not []
+            // This is correct NumPy behavior - the identity property only holds for rank >= 1
+            if !expected.is_empty() {
+                let identity = broadcast_shape(expected, &[1usize]);
+                let identity_ok = identity.as_ref().is_ok_and(|actual| actual == expected);
+                record_suite_check(
+                    &mut report,
+                    identity_ok,
+                    format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} broadcast identity failed expected={expected:?} actual={identity:?}",
+                        case.id,
+                        case.seed,
+                        mode,
+                        reason_code,
+                        env_fingerprint,
+                        artifact_refs.join(",")
+                    ),
+                );
+            }
         }
 
         let order = match parse_shape_stride_order(&case.id, &case.stride_order) {

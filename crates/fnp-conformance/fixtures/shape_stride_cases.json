@@ -694,5 +694,19 @@
     "env_fingerprint": "fnp-conformance-default-paths",
     "artifact_refs": ["artifacts/phase2c/FNP-P2C-001/fixture_manifest.json"],
     "reason_code": "item_size_complex128_stride"
+  },
+  {
+    "id": "scalar_broadcast_scalar",
+    "lhs": [],
+    "rhs": [],
+    "expected_broadcast": [],
+    "stride_shape": [],
+    "stride_item_size": 8,
+    "stride_order": "C",
+    "expected_strides": [],
+    "seed": 135,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-001/fixture_manifest.json"],
+    "reason_code": "0d_scalar_identity"
   }
 ]
