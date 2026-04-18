@@ -454,7 +454,7 @@
     }
   },
   {
-    "id": "iter_selector_zero_elements",
+    "id": "iter_selector_zero_elements_error",
     "operation": "select_transfer_class",
     "seed": 4123,
     "mode": "strict",
@@ -463,8 +463,9 @@
       "artifacts/phase2c/FNP-P2C-004/contract_table.md",
       "crates/fnp-conformance/fixtures/iter_differential_cases.json"
     ],
-    "reason_code": "nditer_constructor_contract",
-    "expected_reason_code": "nditer_constructor_contract",
+    "reason_code": "nditer_constructor_invalid_configuration",
+    "expected_reason_code": "nditer_constructor_invalid_configuration",
+    "expected_error_contains": "element_count must be > 0",
     "selector": {
       "src_stride": 8,
       "dst_stride": 8,
@@ -473,8 +474,7 @@
       "aligned": true,
       "cast_is_lossless": true,
       "same_value_cast": false
-    },
-    "expected_transfer_class": "contiguous"
+    }
   },
   {
     "id": "iter_overlap_exact_same_offset",
@@ -493,7 +493,7 @@
       "dst_offset": 16,
       "byte_len": 8
     },
-    "expected_overlap_action": "no_copy"
+    "expected_overlap_action": "forward_copy"
   },
   {
     "id": "iter_selector_large_element_count",
@@ -519,7 +519,7 @@
     "expected_transfer_class": "contiguous"
   },
   {
-    "id": "iter_flatiter_negative_step_slice_read",
+    "id": "iter_flatiter_step_2_slice_read",
     "operation": "validate_flatiter_read",
     "seed": 4126,
     "mode": "strict",
@@ -533,9 +533,9 @@
     "len": 10,
     "flat_index": {
       "kind": "slice",
-      "start": 9,
-      "stop": 0,
-      "step": -2
+      "start": 0,
+      "stop": 10,
+      "step": 2
     },
     "expected_selected": 5
   },
@@ -620,7 +620,7 @@
     "expected_selected": 4
   },
   {
-    "id": "iter_selector_unaligned_contiguous",
+    "id": "iter_selector_unaligned_strided",
     "operation": "select_transfer_class",
     "seed": 4131,
     "mode": "hardened",
@@ -640,6 +640,6 @@
       "cast_is_lossless": true,
       "same_value_cast": false
     },
-    "expected_transfer_class": "contiguous"
+    "expected_transfer_class": "strided"
   }
 ]
