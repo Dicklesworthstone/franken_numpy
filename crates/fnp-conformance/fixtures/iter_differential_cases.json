@@ -725,5 +725,50 @@
       "byte_len": 8
     },
     "expected_overlap_action": "no_copy"
+  },
+  {
+    "id": "iter_selector_cast_strided",
+    "operation": "select_transfer_class",
+    "seed": 4136,
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "nditer_constructor_contract",
+    "expected_reason_code": "nditer_constructor_contract",
+    "selector": {
+      "src_stride": 4,
+      "dst_stride": 8,
+      "item_size": 4,
+      "element_count": 8,
+      "aligned": true,
+      "cast_is_lossless": false,
+      "same_value_cast": false
+    },
+    "expected_transfer_class": "strided_cast"
+  },
+  {
+    "id": "iter_broadcast_scalar_pair",
+    "operation": "plan_nditer_broadcast",
+    "seed": 4137,
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "nditer_broadcast_plan_contract",
+    "expected_reason_code": "nditer_broadcast_plan_contract",
+    "broadcast": {
+      "operands": [
+        {"shape": [], "no_broadcast": false},
+        {"shape": [], "no_broadcast": false}
+      ],
+      "item_size": 8,
+      "order": "C"
+    },
+    "expected_broadcast_shape": []
   }
 ]
