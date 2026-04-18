@@ -544,5 +544,35 @@
     ],
     "reason_code": "io_dtype_descriptor_invalid",
     "dtype_descr": "<c32"
+  },
+  {
+    "id": "io_magic_version_future_unsupported",
+    "operation": "magic_version",
+    "expected_error_contains": "invalid or unsupported npy/npz magic/version",
+    "expected_reason_code": "io_magic_invalid",
+    "severity": "high",
+    "seed": 934,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_magic_invalid",
+    "payload_prefix": [147, 78, 85, 77, 80, 89, 9, 0]
+  },
+  {
+    "id": "io_dtype_void_zero_size_rejected",
+    "operation": "dtype_decode",
+    "expected_error_contains": "dtype descriptor is invalid or unsupported",
+    "expected_reason_code": "io_dtype_descriptor_invalid",
+    "severity": "medium",
+    "seed": 935,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/security_control_checks_v1.yaml",
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md"
+    ],
+    "reason_code": "io_dtype_descriptor_invalid",
+    "dtype_descr": "|V0"
   }
 ]
