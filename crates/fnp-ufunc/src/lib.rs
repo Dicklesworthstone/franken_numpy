@@ -10873,15 +10873,58 @@ impl UFuncArray {
         })
     }
 
-    /// Compute the inner product of two arrays. For 1-D, same as dot.
+    /// Compute the inner product of two arrays (`np.inner`).
+    ///
+    /// For 1-D arrays, this is the regular inner product (same as dot).
+    /// For ND arrays, sums over the last axis of both inputs.
+    /// Result shape is `a.shape[:-1] + b.shape[:-1]`.
     pub fn inner(&self, rhs: &Self) -> Result<Self, UFuncError> {
-        if self.shape.len() == 1 && rhs.shape.len() == 1 {
-            self.dot(rhs)
-        } else {
-            Err(UFuncError::Msg(
-                "inner: only 1-D arrays supported currently".to_string(),
-            ))
+        if self.shape.is_empty() || rhs.shape.is_empty() {
+            return self.elementwise_binary(rhs, BinaryOp::Mul);
         }
+
+        let a_last = self.shape[self.shape.len() - 1];
+        let b_last = rhs.shape[rhs.shape.len() - 1];
+
+        if a_last != b_last {
+            return Err(UFuncError::Msg(format!(
+                "inner: last axis dimensions must match, got {} and {}",
+                a_last, b_last
+            )));
+        }
+
+        if self.shape.len() == 1 && rhs.shape.len() == 1 {
+            return self.dot(rhs);
+        }
+
+        let contract_len = a_last;
+        let a_batch = &self.shape[..self.shape.len() - 1];
+        let b_batch = &rhs.shape[..rhs.shape.len() - 1];
+
+        let mut out_shape = Vec::with_capacity(a_batch.len() + b_batch.len());
+        out_shape.extend_from_slice(a_batch);
+        out_shape.extend_from_slice(b_batch);
+
+        let a_batch_count = element_count(a_batch).map_err(UFuncError::Shape)?;
+        let b_batch_count = element_count(b_batch).map_err(UFuncError::Shape)?;
+        let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+
+        let dtype = promote(self.dtype, rhs.dtype);
+        let mut out_values = Vec::with_capacity(out_count);
+
+        for a_idx in 0..a_batch_count {
+            let a_offset = a_idx * contract_len;
+            for b_idx in 0..b_batch_count {
+                let b_offset = b_idx * contract_len;
+                let mut sum = 0.0;
+                for k in 0..contract_len {
+                    sum += self.values[a_offset + k] * rhs.values[b_offset + k];
+                }
+                out_values.push(sum);
+            }
+        }
+
+        Self::from_values_with_dtype(out_shape, out_values, dtype)
     }
 
     /// Compute the trace of a 2-D matrix.
@@ -36576,10 +36619,62 @@ mod tests {
     }
 
     #[test]
-    fn inner_rejects_2d() {
-        let a = UFuncArray::new(vec![2, 2], vec![1.0; 4], DType::F64).unwrap();
+    fn inner_2d_2d() {
+        // np.inner([[1,2],[3,4]], [[1,2],[3,4]]) → [[5,11],[11,25]]
+        let a = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let r = a.inner(&b).unwrap();
+        assert_eq!(r.shape(), &[2, 2]);
+        assert_eq!(r.values(), &[5.0, 11.0, 11.0, 25.0]);
+    }
+
+    #[test]
+    fn inner_2d_1d() {
+        // np.inner([[1,2,3],[4,5,6]], [1,1,1]) → [6, 15]
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3], vec![1.0, 1.0, 1.0], DType::F64).unwrap();
+        let r = a.inner(&b).unwrap();
+        assert_eq!(r.shape(), &[2]);
+        assert_eq!(r.values(), &[6.0, 15.0]);
+    }
+
+    #[test]
+    fn inner_3d_2d() {
+        // a: (2,2,3), b: (2,3) → (2,2,2)
+        let a = UFuncArray::new(
+            vec![2, 2, 3],
+            vec![
+                1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+            ],
+            DType::F64,
+        )
+        .unwrap();
+        let b =
+            UFuncArray::new(vec![2, 3], vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0], DType::F64).unwrap();
+        let r = a.inner(&b).unwrap();
+        assert_eq!(r.shape(), &[2, 2, 2]);
+        // First row of b is [1,0,0], second is [0,1,0]
+        // a[0,0] = [1,2,3] → inner with [1,0,0]=1, with [0,1,0]=2
+        // a[0,1] = [4,5,6] → inner with [1,0,0]=4, with [0,1,0]=5
+        // a[1,0] = [7,8,9] → inner with [1,0,0]=7, with [0,1,0]=8
+        // a[1,1] = [10,11,12] → inner with [1,0,0]=10, with [0,1,0]=11
+        assert_eq!(r.values(), &[1.0, 2.0, 4.0, 5.0, 7.0, 8.0, 10.0, 11.0]);
+    }
+
+    #[test]
+    fn inner_dimension_mismatch() {
+        let a = UFuncArray::new(vec![2, 3], vec![1.0; 6], DType::F64).unwrap();
         let b = UFuncArray::new(vec![2, 2], vec![1.0; 4], DType::F64).unwrap();
         assert!(a.inner(&b).is_err());
+    }
+
+    #[test]
+    fn inner_scalar() {
+        let a = UFuncArray::scalar(3.0, DType::F64);
+        let b = UFuncArray::scalar(4.0, DType::F64);
+        let r = a.inner(&b).unwrap();
+        assert_eq!(r.values(), &[12.0]);
     }
 
     #[test]
