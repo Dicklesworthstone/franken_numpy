@@ -20,6 +20,8 @@ This folder stores normalized oracle-vs-target fixtures for `fnp-conformance`.
 - `rng_metamorphic_cases.json`: deterministic RNG metamorphic invariants (jump additivity, fill/iter equivalence, bounded repeatability).
 - `rng_adversarial_cases.json`: hostile RNG payloads expecting bounded fail-closed reason-code outcomes.
 - `datetime_differential_cases.json`: datetime64/timedelta64 arithmetic, comparisons, and business-day differential corpus.
+- `datetime_metamorphic_cases.json`: deterministic datetime metamorphic invariants (add/sub inverse, timedelta commutativity/associativity).
+- `datetime_adversarial_cases.json`: datetime edge cases (NaT propagation, epoch boundaries, Y2038, leap seconds).
 - `io_differential_cases.json`: packet `FNP-P2C-009` differential corpus for NPY/NPZ parser/dispatch contract checks.
 - `io_metamorphic_cases.json`: deterministic IO metamorphic invariants (idempotent header/dispatch/policy/budget validations).
 - `io_adversarial_cases.json`: parser-boundary adversarial IO corpus with severity-classified failure expectations.
@@ -29,6 +31,25 @@ This folder stores normalized oracle-vs-target fixtures for `fnp-conformance`.
 - `ufunc_input_cases.json`: differential ufunc/reduction input corpus.
 - `ufunc_metamorphic_cases.json`: deterministic metamorphic checks (commutativity, linearity).
 - `ufunc_adversarial_cases.json`: adversarial ufunc inputs expecting controlled errors.
+- `fft_differential_cases.json`: FFT transform families (fft/ifft/rfft/fft2/fftn) differential corpus.
+- `fft_metamorphic_cases.json`: FFT metamorphic invariants (inverse identity, linearity, Parseval energy, shift roundtrip).
+- `fft_adversarial_cases.json`: FFT edge cases (empty/single-element, NaN/Inf, prime-length Bluestein).
+- `signal_differential_cases.json`: signal processing (convolve/correlate/windows) differential corpus.
+- `signal_metamorphic_cases.json`: signal metamorphic invariants (convolve commutativity/distributivity, autocorrelation).
+- `signal_adversarial_cases.json`: signal edge cases (empty arrays, kernel > signal, window lengths).
+- `polynomial_differential_cases.json`: polynomial families (poly1d/chebyshev/legendre/hermite/laguerre) differential corpus.
+- `polynomial_metamorphic_cases.json`: polynomial metamorphic invariants (add-zero, sub-self, deriv-integral inverse).
+- `polynomial_adversarial_cases.json`: polynomial edge cases (empty coefficients, constant poly, roots).
+- `masked_differential_cases.json`: masked array operations differential corpus.
+- `masked_metamorphic_cases.json`: masked metamorphic invariants (fill consistency, mask preservation, compress idempotence).
+- `masked_adversarial_cases.json`: masked edge cases (all-masked reductions, hardmask, NaN fill).
+- `string_differential_cases.json`: string array char functions differential corpus.
+- `string_metamorphic_cases.json`: string metamorphic invariants (case idempotence, swapcase involution).
+- `string_adversarial_cases.json`: string edge cases (empty strings, whitespace, overlapping count).
+- `shape_stride_metamorphic_cases.json`: shape/stride metamorphic invariants (reshape roundtrip, transpose identity, broadcast commutativity).
+- `shape_stride_adversarial_cases.json`: shape/stride edge cases (incompatible broadcast, negative-infer reshape).
+- `runtime_policy_metamorphic_cases.json`: runtime policy metamorphic invariants (threshold monotonicity, mode subsumption).
+- `rng_statistical_cases.json`: RNG statistical distribution property tests.
 - `workflow_scenario_corpus.json`: user workflow golden journeys linking differential fixtures, e2e scripts, and prioritized gap beads (including packet `FNP-P2C-004` iterator replay scenarios).
 - `oracle_outputs/ufunc_oracle_output.json`: captured NumPy oracle outputs.
 - `oracle_outputs/ufunc_differential_report.json`: comparator report against current Rust implementation.
