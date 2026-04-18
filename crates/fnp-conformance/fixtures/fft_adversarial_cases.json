@@ -43,7 +43,8 @@
     "reason_code": "fft_adversarial_nan_propagation",
     "input_shape": [4],
     "input_values": [1.0, "NaN", 3.0, 4.0],
-    "expected_behavior": "nan_propagates"
+    "expected_shape": [4, 2],
+    "expected_values": ["NaN", 0.0, -2.0, "NaN", "NaN", 0.0, -2.0, "NaN"]
   },
   {
     "id": "fft_with_inf_input",
