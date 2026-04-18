@@ -1,0 +1,180 @@
+[
+  {
+    "id": "str_empty_string_lower",
+    "operation": "str_lower",
+    "seed": 10501,
+    "mode": "strict",
+    "env_fingerprint": "fnp-string-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_adversarial_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_adversarial_empty",
+    "input_strings": [""],
+    "expected_strings": [""]
+  },
+  {
+    "id": "str_whitespace_only_strip",
+    "operation": "str_strip",
+    "seed": 10502,
+    "mode": "strict",
+    "env_fingerprint": "fnp-string-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_adversarial_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_adversarial_whitespace_only",
+    "input_strings": ["   ", "\t\n\r", "  \t  "],
+    "expected_strings": ["", "", ""]
+  },
+  {
+    "id": "str_find_empty_substr",
+    "operation": "str_find",
+    "seed": 10503,
+    "mode": "strict",
+    "env_fingerprint": "fnp-string-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_adversarial_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_adversarial_find_empty",
+    "input_strings": ["hello", "world"],
+    "search_substr": "",
+    "expected_behavior": "returns_zero"
+  },
+  {
+    "id": "str_find_not_found",
+    "operation": "str_find",
+    "seed": 10504,
+    "mode": "strict",
+    "env_fingerprint": "fnp-string-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_adversarial_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_adversarial_find_missing",
+    "input_strings": ["hello", "world"],
+    "search_substr": "xyz",
+    "expected_values": [-1, -1]
+  },
+  {
+    "id": "str_replace_empty_old",
+    "operation": "str_replace",
+    "seed": 10505,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-string-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_adversarial_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_adversarial_replace_empty_old",
+    "input_strings": ["abc"],
+    "old_substr": "",
+    "new_substr": "X",
+    "expected_behavior": "insert_between_chars"
+  },
+  {
+    "id": "str_split_empty_sep",
+    "operation": "str_split",
+    "seed": 10506,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-string-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_adversarial_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_adversarial_split_empty",
+    "input_strings": ["hello"],
+    "separator": "",
+    "expected_behavior": "split_chars"
+  },
+  {
+    "id": "str_zfill_already_wider",
+    "operation": "str_zfill",
+    "seed": 10507,
+    "mode": "strict",
+    "env_fingerprint": "fnp-string-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_adversarial_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_adversarial_zfill_wider",
+    "input_strings": ["12345"],
+    "width": 3,
+    "expected_strings": ["12345"]
+  },
+  {
+    "id": "str_center_zero_width",
+    "operation": "str_center",
+    "seed": 10508,
+    "mode": "strict",
+    "env_fingerprint": "fnp-string-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_adversarial_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_adversarial_center_zero",
+    "input_strings": ["hello"],
+    "width": 0,
+    "expected_strings": ["hello"]
+  },
+  {
+    "id": "str_count_overlapping",
+    "operation": "str_count",
+    "seed": 10509,
+    "mode": "strict",
+    "env_fingerprint": "fnp-string-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_adversarial_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_adversarial_count_overlap",
+    "input_strings": ["aaaa"],
+    "search_substr": "aa",
+    "expected_behavior": "non_overlapping_count"
+  },
+  {
+    "id": "str_multiply_by_zero",
+    "operation": "str_multiply",
+    "seed": 10510,
+    "mode": "strict",
+    "env_fingerprint": "fnp-string-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_adversarial_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_adversarial_mul_zero",
+    "input_strings": ["hello"],
+    "multiplier": 0,
+    "expected_strings": [""]
+  },
+  {
+    "id": "str_multiply_negative",
+    "operation": "str_multiply",
+    "seed": 10511,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-string-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_adversarial_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_adversarial_mul_negative",
+    "input_strings": ["hello"],
+    "multiplier": -1,
+    "expected_strings": [""]
+  },
+  {
+    "id": "str_isdigit_empty",
+    "operation": "str_isdigit",
+    "seed": 10512,
+    "mode": "strict",
+    "env_fingerprint": "fnp-string-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_adversarial_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_adversarial_isdigit_empty",
+    "input_strings": [""],
+    "expected_values": [false]
+  }
+]

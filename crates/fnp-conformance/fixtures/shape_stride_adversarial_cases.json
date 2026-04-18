@@ -1,0 +1,181 @@
+[
+  {
+    "id": "sce_empty_shape",
+    "operation": "broadcast_shapes",
+    "seed": 301,
+    "mode": "strict",
+    "env_fingerprint": "fnp-sce-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_adversarial_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_adversarial_empty_shape",
+    "shape_a": [],
+    "shape_b": [3, 4],
+    "expected_shape": [3, 4]
+  },
+  {
+    "id": "sce_zero_dim_broadcast",
+    "operation": "broadcast_shapes",
+    "seed": 302,
+    "mode": "strict",
+    "env_fingerprint": "fnp-sce-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_adversarial_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_adversarial_zero_dim",
+    "shape_a": [0, 4],
+    "shape_b": [3, 4],
+    "expected_behavior": "broadcast_error"
+  },
+  {
+    "id": "sce_incompatible_shapes",
+    "operation": "broadcast_shapes",
+    "seed": 303,
+    "mode": "strict",
+    "env_fingerprint": "fnp-sce-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_adversarial_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_adversarial_incompatible",
+    "shape_a": [3, 4],
+    "shape_b": [5, 6],
+    "expected_behavior": "broadcast_error"
+  },
+  {
+    "id": "sce_reshape_to_zero_dim",
+    "operation": "reshape",
+    "seed": 304,
+    "mode": "strict",
+    "env_fingerprint": "fnp-sce-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_adversarial_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_adversarial_reshape_zero",
+    "original_shape": [0],
+    "new_shape": [0, 0],
+    "expected_behavior": "valid_reshape"
+  },
+  {
+    "id": "sce_reshape_infer_negative",
+    "operation": "reshape",
+    "seed": 305,
+    "mode": "strict",
+    "env_fingerprint": "fnp-sce-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_adversarial_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_adversarial_reshape_infer",
+    "original_shape": [12],
+    "new_shape": [3, -1],
+    "expected_shape": [3, 4]
+  },
+  {
+    "id": "sce_reshape_multiple_negatives",
+    "operation": "reshape",
+    "seed": 306,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-sce-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_adversarial_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_adversarial_multi_negative",
+    "original_shape": [12],
+    "new_shape": [-1, -1],
+    "expected_behavior": "reshape_error"
+  },
+  {
+    "id": "sce_transpose_empty",
+    "operation": "transpose",
+    "seed": 307,
+    "mode": "strict",
+    "env_fingerprint": "fnp-sce-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_adversarial_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_adversarial_transpose_empty",
+    "shape": [0, 3],
+    "axes": [1, 0],
+    "expected_shape": [3, 0]
+  },
+  {
+    "id": "sce_squeeze_no_ones",
+    "operation": "squeeze",
+    "seed": 308,
+    "mode": "strict",
+    "env_fingerprint": "fnp-sce-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_adversarial_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_adversarial_squeeze_none",
+    "shape": [3, 4, 5],
+    "expected_shape": [3, 4, 5]
+  },
+  {
+    "id": "sce_expand_dims_negative_axis",
+    "operation": "expand_dims",
+    "seed": 309,
+    "mode": "strict",
+    "env_fingerprint": "fnp-sce-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_adversarial_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_adversarial_expand_negative",
+    "shape": [3, 4],
+    "axis": -1,
+    "expected_shape": [3, 4, 1]
+  },
+  {
+    "id": "sce_strides_zero_itemsize",
+    "operation": "compute_strides",
+    "seed": 310,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-sce-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_adversarial_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_adversarial_zero_itemsize",
+    "shape": [3, 4],
+    "itemsize": 0,
+    "expected_behavior": "error_or_zero_strides"
+  },
+  {
+    "id": "sce_scalar_broadcast",
+    "operation": "broadcast_to",
+    "seed": 311,
+    "mode": "strict",
+    "env_fingerprint": "fnp-sce-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_adversarial_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_adversarial_scalar_broadcast",
+    "shape": [],
+    "target_shape": [2, 3, 4],
+    "expected_strides": [0, 0, 0]
+  },
+  {
+    "id": "sce_ravel_fortran_order",
+    "operation": "ravel",
+    "seed": 312,
+    "mode": "strict",
+    "env_fingerprint": "fnp-sce-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_adversarial_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_adversarial_ravel_fortran",
+    "shape": [2, 3],
+    "order": "F",
+    "expected_behavior": "column_major_flatten"
+  }
+]
