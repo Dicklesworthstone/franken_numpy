@@ -12,7 +12,8 @@
     "reason_code": "fft_adversarial_empty_input",
     "input_shape": [0],
     "input_values": [],
-    "expected_behavior": "empty_output"
+    "expected_reason_code": "ufunc_operation_error",
+    "expected_error_contains": "Invalid number of FFT data points (0) specified"
   },
   {
     "id": "fft_single_element",
@@ -174,7 +175,8 @@
     "reason_code": "fft_adversarial_ifft_empty",
     "input_shape": [0, 2],
     "input_values": [],
-    "expected_behavior": "empty_output"
+    "expected_reason_code": "ufunc_operation_error",
+    "expected_error_contains": "Invalid number of FFT data points (0) specified"
   },
   {
     "id": "rfft_odd_length",

@@ -998,6 +998,10 @@ struct FftAdversarialCase {
     #[serde(default)]
     reason_code: String,
     #[serde(default)]
+    expected_reason_code: String,
+    #[serde(default)]
+    expected_error_contains: String,
+    #[serde(default)]
     input_shape: Vec<usize>,
     #[serde(default)]
     input_values: Vec<serde_json::Value>,
@@ -6895,9 +6899,15 @@ pub fn run_fft_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport, 
         let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
         let reason_code = normalize_reason_code(&case.reason_code);
 
-        match execute_fft_adversarial_operation(&case)
-            .and_then(|outcome| validate_fft_adversarial_expectation(&case, &outcome))
-        {
+        let result = match execute_fft_adversarial_operation(&case) {
+            Ok(outcome) => validate_fft_adversarial_expectation(&case, &outcome),
+            Err(err) if fft_adversarial_expects_error(&case) => {
+                validate_fft_adversarial_error(&case, &err)
+            }
+            Err(err) => Err(err),
+        };
+
+        match result {
             Ok(()) => report.pass_count += 1,
             Err(err) => {
                 report.failures.push(format!(
@@ -6948,6 +6958,12 @@ fn validate_fft_adversarial_expectation(
     case: &FftAdversarialCase,
     outcome: &FftOperationOutcome,
 ) -> Result<(), FftSuiteError> {
+    if fft_adversarial_expects_error(case) {
+        return Err(FftSuiteError::new(
+            "fft_adversarial_mismatch",
+            format!("{} expected an error but operation succeeded", case.id),
+        ));
+    }
     if !case.expected_behavior.trim().is_empty() {
         return validate_fft_adversarial_behavior(case, outcome);
     }
@@ -6971,6 +6987,46 @@ fn validate_fft_adversarial_expectation(
         format!(
             "{} has no expected_shape, expected_values, or expected_behavior",
             case.id
+        ),
+    ))
+}
+
+fn fft_adversarial_expects_error(case: &FftAdversarialCase) -> bool {
+    !case.expected_error_contains.trim().is_empty() || !case.expected_reason_code.trim().is_empty()
+}
+
+fn validate_fft_adversarial_error(
+    case: &FftAdversarialCase,
+    err: &FftSuiteError,
+) -> Result<(), FftSuiteError> {
+    let expected_reason_code = case.expected_reason_code.trim();
+    if !expected_reason_code.is_empty() && expected_reason_code != err.reason_code {
+        return Err(FftSuiteError::new(
+            "fft_adversarial_mismatch",
+            format!(
+                "{} expected reason_code={expected_reason_code} actual_reason_code={} message={}",
+                case.id, err.reason_code, err.message
+            ),
+        ));
+    }
+
+    let expected_error = case.expected_error_contains.trim();
+    if expected_error.is_empty() {
+        return Ok(());
+    }
+    if err
+        .message
+        .to_lowercase()
+        .contains(&expected_error.to_lowercase())
+    {
+        return Ok(());
+    }
+
+    Err(FftSuiteError::new(
+        "fft_adversarial_mismatch",
+        format!(
+            "{} expected error containing {:?} actual={:?}",
+            case.id, expected_error, err.message
         ),
     ))
 }

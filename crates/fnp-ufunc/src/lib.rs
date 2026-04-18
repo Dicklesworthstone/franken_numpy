@@ -16734,12 +16734,9 @@ impl UFuncArray {
     pub fn fft(&self, n: Option<usize>) -> Result<Self, UFuncError> {
         let len = n.unwrap_or(self.values.len());
         if len == 0 {
-            return Ok(Self {
-                shape: vec![0],
-                values: vec![],
-                dtype: DType::F64,
-                integer_sidecar: None,
-            });
+            return Err(UFuncError::Msg(
+                "Invalid number of FFT data points (0) specified.".to_string(),
+            ));
         }
         // Build complex input (real from self.values, imag = 0)
         let mut re = vec![0.0_f64; len];
@@ -16772,12 +16769,9 @@ impl UFuncArray {
         }
         let len = self.shape[0];
         if len == 0 {
-            return Ok(Self {
-                shape: vec![0, 2],
-                values: vec![],
-                dtype: DType::F64,
-                integer_sidecar: None,
-            });
+            return Err(UFuncError::Msg(
+                "Invalid number of FFT data points (0) specified.".to_string(),
+            ));
         }
         let mut re = Vec::with_capacity(len);
         let mut im = Vec::with_capacity(len);
@@ -24495,9 +24489,7 @@ fn fftn_along_axis(shape: &[usize], re: &mut [f64], im: &mut [f64], axis: usize,
 fn fft_mul(a: f64, b: f64) -> f64 {
     // Threshold for "effectively zero" twiddle factor (covers cos/sin errors up to ~1e-14)
     const EPS: f64 = 1e-14;
-    if a.abs() < EPS && !b.is_finite() {
-        0.0
-    } else if b.abs() < EPS && !a.is_finite() {
+    if (a.abs() < EPS && !b.is_finite()) || (b.abs() < EPS && !a.is_finite()) {
         0.0
     } else {
         a * b
@@ -42452,23 +42444,75 @@ mod tests {
     }
 
     #[test]
+    fn fft_empty_input_matches_numpy_error() {
+        let a = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+        let err = a.fft(None).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Invalid number of FFT data points (0) specified."
+        );
+    }
+
+    #[test]
+    fn ifft_empty_input_matches_numpy_error() {
+        let a = UFuncArray::new(vec![0, 2], vec![], DType::F64).unwrap();
+        let err = a.ifft().unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Invalid number of FFT data points (0) specified."
+        );
+    }
+
+    #[test]
     fn fft_inf_propagation_matches_numpy() {
         // NumPy: np.fft.fft([1, inf, 3, -inf]) = [nan+0j, -2-infj, nan+0j, -2+infj]
         let vals = vec![1.0, f64::INFINITY, 3.0, f64::NEG_INFINITY];
         let a = UFuncArray::new(vec![4], vals, DType::F64).unwrap();
         let f = a.fft(None).unwrap();
         // Coefficient 0: nan + 0j (real = NaN, imag = 0)
-        assert!(f.values[0].is_nan(), "coeff[0] real should be NaN, got {}", f.values[0]);
-        assert_eq!(f.values[1], 0.0, "coeff[0] imag should be 0, got {}", f.values[1]);
+        assert!(
+            f.values[0].is_nan(),
+            "coeff[0] real should be NaN, got {}",
+            f.values[0]
+        );
+        assert_eq!(
+            f.values[1], 0.0,
+            "coeff[0] imag should be 0, got {}",
+            f.values[1]
+        );
         // Coefficient 1: -2 - inf*j (real = -2, imag = -inf)
-        assert!((f.values[2] - (-2.0)).abs() < 1e-10, "coeff[1] real should be -2, got {}", f.values[2]);
-        assert!(f.values[3].is_infinite() && f.values[3] < 0.0, "coeff[1] imag should be -inf, got {}", f.values[3]);
+        assert!(
+            (f.values[2] - (-2.0)).abs() < 1e-10,
+            "coeff[1] real should be -2, got {}",
+            f.values[2]
+        );
+        assert!(
+            f.values[3].is_infinite() && f.values[3] < 0.0,
+            "coeff[1] imag should be -inf, got {}",
+            f.values[3]
+        );
         // Coefficient 2: nan + 0j
-        assert!(f.values[4].is_nan(), "coeff[2] real should be NaN, got {}", f.values[4]);
-        assert_eq!(f.values[5], 0.0, "coeff[2] imag should be 0, got {}", f.values[5]);
+        assert!(
+            f.values[4].is_nan(),
+            "coeff[2] real should be NaN, got {}",
+            f.values[4]
+        );
+        assert_eq!(
+            f.values[5], 0.0,
+            "coeff[2] imag should be 0, got {}",
+            f.values[5]
+        );
         // Coefficient 3: -2 + inf*j
-        assert!((f.values[6] - (-2.0)).abs() < 1e-10, "coeff[3] real should be -2, got {}", f.values[6]);
-        assert!(f.values[7].is_infinite() && f.values[7] > 0.0, "coeff[3] imag should be +inf, got {}", f.values[7]);
+        assert!(
+            (f.values[6] - (-2.0)).abs() < 1e-10,
+            "coeff[3] real should be -2, got {}",
+            f.values[6]
+        );
+        assert!(
+            f.values[7].is_infinite() && f.values[7] > 0.0,
+            "coeff[3] imag should be +inf, got {}",
+            f.values[7]
+        );
     }
 
     #[test]
