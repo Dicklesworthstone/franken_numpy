@@ -15,7 +15,7 @@
 | RNG | 24 | 26 | 43 | 93 | Adequate + 39 statistical, small bound, zero-fill |
 | FFT | 45 | — | — | 45 | Good - transform families, edge sizes, 2D/3D, fftn/ifftn, shifts, single-element |
 | Datetime/timedelta | 48 | — | — | 48 | Good - arithmetic, busday, NaT, broadcast, abs, comparisons, neg, mul-zero |
-| Masked arrays | 42 | — | — | 42 | Good - reshape/concat/fill/broadcast/all-masked/argmin-max/axis-aware |
+| Masked arrays | 44 | — | — | 44 | Good - reshape/concat/fill/broadcast/all-masked/argmin-max/axis-aware, min/max axis partial |
 | Iterator/transfer | 35 | 19 | 18 | 72 | Good - transfer/overlap/flatiter/broadcast, empty slice, no-overlap |
 | Shape/stride (SCE) | 49 | — | — | 49 | Good - 0-D, empty, negative-stride, large shapes, 5D/6D transpose, scalar-to-5D |
 | Dtype promotion | 198 | 17 | 18 | 233 | Good - full 14×14 type matrix + metamorphic + adversarial |

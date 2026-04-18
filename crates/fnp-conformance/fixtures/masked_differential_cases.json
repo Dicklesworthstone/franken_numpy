@@ -893,5 +893,47 @@
     "expected_values": [1.0, 3.0, 5.0],
     "abs_tol": 1e-12,
     "rel_tol": 1e-12
+  },
+  {
+    "id": "masked_min_axis1_partial",
+    "operation": "min",
+    "seed": 11046,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-masked-packet-g",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "masked_differential_expected_success",
+    "expected_reason_code": "masked_differential_expected_success",
+    "lhs_shape": [2, 4],
+    "lhs_values": [5.0, 2.0, 8.0, 1.0, 9.0, 3.0, 7.0, 4.0],
+    "lhs_mask": [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+    "axis": 1,
+    "expected_shape": [2],
+    "expected_values": [1.0, 3.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "masked_max_axis0_partial",
+    "operation": "max",
+    "seed": 11047,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-masked-packet-g",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "masked_differential_expected_success",
+    "expected_reason_code": "masked_differential_expected_success",
+    "lhs_shape": [3, 2],
+    "lhs_values": [1.0, 5.0, 9.0, 2.0, 3.0, 8.0],
+    "lhs_mask": [0.0, 1.0, 0.0, 0.0, 1.0, 0.0],
+    "axis": 0,
+    "expected_shape": [2],
+    "expected_values": [9.0, 8.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
   }
 ]
