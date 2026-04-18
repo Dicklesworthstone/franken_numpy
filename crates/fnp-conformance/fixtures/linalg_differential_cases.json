@@ -1135,5 +1135,39 @@
     "matrix": [[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]],
     "expected_solution": [1.0],
     "expected_tolerance": 1e-10
+  },
+  {
+    "id": "linalg_det_diagonal_4x4",
+    "operation": "batch_det",
+    "seed": 8277,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [4, 4],
+    "matrix": [[2.0, 0.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 0.0, 5.0]],
+    "expected_solution": [120.0],
+    "expected_tolerance": 1e-10
+  },
+  {
+    "id": "linalg_inv_diagonal_3x3",
+    "operation": "batch_inv",
+    "seed": 8278,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/contract_table.md",
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [3, 3],
+    "matrix": [[2.0, 0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 5.0]],
+    "expected_solution": [0.5, 0.0, 0.0, 0.0, 0.25, 0.0, 0.0, 0.0, 0.2],
+    "expected_tolerance": 1e-10
   }
 ]

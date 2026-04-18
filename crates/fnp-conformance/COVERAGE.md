@@ -10,7 +10,7 @@
 | Signal processing | 303 | — | — | 303 | Good - extensive conv/corr/fft, atleast_nd, edge cases |
 | Polynomials | 92 | — | — | 92 | Good - all 5 families, edge cases |
 | I/O (npy/npz/text) | 68 | 38 | 35 | 141 | Good - parser boundaries, complex128, quoted fields |
-| Linear algebra | 63 | 28 | 37 | 128 | Good - core decompositions, 1x1 edge cases, identity |
+| Linear algebra | 65 | 28 | 37 | 130 | Good - core decompositions, 1x1 edge cases, identity, power=0 |
 | String arrays | 67 | — | — | 67 | Good - 33 char functions, empty/pattern edge cases |
 | RNG | 24 | 26 | 43 | 93 | Adequate + 39 statistical, small bound, zero-fill |
 | FFT | 45 | — | — | 45 | Good - transform families, edge sizes, 2D/3D, fftn/ifftn, shifts, single-element |
