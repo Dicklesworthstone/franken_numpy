@@ -1231,6 +1231,52 @@ struct DateTimeDifferentialCase {
     rel_tol: f64,
 }
 
+#[derive(Debug, Deserialize)]
+struct DateTimeMetamorphicCase {
+    id: String,
+    relation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    base_datetime: String,
+    #[serde(default)]
+    datetime_a: String,
+    #[serde(default)]
+    datetime_b: String,
+    #[serde(default)]
+    datetime_c: String,
+    #[serde(default)]
+    delta_unit: String,
+    #[serde(default)]
+    delta_value: i64,
+    #[serde(default)]
+    delta_a_unit: String,
+    #[serde(default)]
+    delta_a_value: i64,
+    #[serde(default)]
+    delta_b_unit: String,
+    #[serde(default)]
+    delta_b_value: i64,
+    #[serde(default)]
+    delta_c_unit: String,
+    #[serde(default)]
+    delta_c_value: i64,
+    #[serde(default)]
+    scalar: Option<f64>,
+    #[serde(default)]
+    abs_tol: f64,
+    #[serde(default)]
+    rel_tol: f64,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct IterSelectorFixtureInput {
     src_stride: isize,
@@ -1916,6 +1962,15 @@ fn load_datetime_differential_cases(
     fixture_root: &Path,
 ) -> Result<Vec<DateTimeDifferentialCase>, String> {
     let path = fixture_root.join("datetime_differential_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
+}
+
+fn load_datetime_metamorphic_cases(
+    fixture_root: &Path,
+) -> Result<Vec<DateTimeMetamorphicCase>, String> {
+    let path = fixture_root.join("datetime_metamorphic_cases.json");
     let raw = fs::read_to_string(&path)
         .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
     serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
@@ -10907,6 +10962,45 @@ pub fn run_datetime_differential_suite(config: &HarnessConfig) -> Result<SuiteRe
     Ok(report)
 }
 
+pub fn run_datetime_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let cases = load_datetime_metamorphic_cases(&config.fixture_root)?;
+
+    let mut report = SuiteReport {
+        suite: "datetime_metamorphic",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+
+        match evaluate_datetime_metamorphic_relation(&case) {
+            Ok(()) => {
+                report.pass_count += 1;
+            }
+            Err(err) => {
+                report.failures.push(format!(
+                    "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} {} (actual_reason_code={})",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    err.message,
+                    err.reason_code
+                ));
+            }
+        }
+    }
+
+    Ok(report)
+}
+
 fn execute_datetime_differential_operation(
     case: &DateTimeDifferentialCase,
 ) -> Result<DateTimeOperationOutcome, DateTimeSuiteError> {
@@ -11175,6 +11269,236 @@ fn validate_datetime_differential_expectation(
             Ok(())
         }
     }
+}
+
+fn evaluate_datetime_metamorphic_relation(
+    case: &DateTimeMetamorphicCase,
+) -> Result<(), DateTimeSuiteError> {
+    match case.relation.as_str() {
+        "datetime_add_sub_inverse" => {
+            let datetime = datetime_metamorphic_datetime(&case.base_datetime, &case.delta_unit)?;
+            let delta = datetime_metamorphic_timedelta(case.delta_value, &case.delta_unit)?;
+            let shifted = datetime
+                .datetime_add(&delta)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            let recovered_delta = shifted
+                .datetime_sub(&datetime)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            assert_datetime_metamorphic_array_equal(case, &recovered_delta, &delta)
+        }
+        "timedelta_add_commutative" => {
+            let delta_a = datetime_metamorphic_timedelta(case.delta_a_value, &case.delta_a_unit)?;
+            let delta_b = datetime_metamorphic_timedelta(case.delta_b_value, &case.delta_b_unit)?;
+            let left = delta_a
+                .timedelta_add(&delta_b)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            let right = delta_b
+                .timedelta_add(&delta_a)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            assert_datetime_metamorphic_array_equal(case, &left, &right)
+        }
+        "timedelta_sub_self_zero" => {
+            let delta = datetime_metamorphic_timedelta(case.delta_value, &case.delta_unit)?;
+            let zero = datetime_metamorphic_timedelta(0, &case.delta_unit)?;
+            let actual = delta
+                .timedelta_sub(&delta)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            assert_datetime_metamorphic_array_equal(case, &actual, &zero)
+        }
+        "timedelta_mul_one_identity" => {
+            let delta = datetime_metamorphic_timedelta(case.delta_value, &case.delta_unit)?;
+            let actual = delta
+                .timedelta_mul(1.0)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            assert_datetime_metamorphic_array_equal(case, &actual, &delta)
+        }
+        "timedelta_neg_neg_identity" => {
+            let delta = datetime_metamorphic_timedelta(case.delta_value, &case.delta_unit)?;
+            let actual = delta.timedelta_neg().timedelta_neg();
+            assert_datetime_metamorphic_array_equal(case, &actual, &delta)
+        }
+        "datetime_diff_add_inverse" => {
+            let datetime_a = datetime_metamorphic_datetime(&case.datetime_a, "h")?;
+            let datetime_b = datetime_metamorphic_datetime(&case.datetime_b, "h")?;
+            let delta = datetime_b
+                .datetime_sub(&datetime_a)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            let actual = datetime_a
+                .datetime_add(&delta)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            assert_datetime_metamorphic_array_equal(case, &actual, &datetime_b)
+        }
+        "timedelta_add_associative" => {
+            let delta_a = datetime_metamorphic_timedelta(case.delta_a_value, &case.delta_a_unit)?;
+            let delta_b = datetime_metamorphic_timedelta(case.delta_b_value, &case.delta_b_unit)?;
+            let delta_c = datetime_metamorphic_timedelta(case.delta_c_value, &case.delta_c_unit)?;
+            let left = delta_a
+                .timedelta_add(&delta_b)
+                .and_then(|sum| sum.timedelta_add(&delta_c))
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            let right = delta_b
+                .timedelta_add(&delta_c)
+                .and_then(|sum| delta_a.timedelta_add(&sum))
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            assert_datetime_metamorphic_array_equal(case, &left, &right)
+        }
+        "timedelta_mul_distributive" => {
+            let scalar = case.scalar.ok_or_else(|| {
+                DateTimeSuiteError::new(
+                    "datetime_input_contract_violation",
+                    "timedelta_mul_distributive requires scalar",
+                )
+            })?;
+            let delta_a = datetime_metamorphic_timedelta(case.delta_a_value, &case.delta_a_unit)?;
+            let delta_b = datetime_metamorphic_timedelta(case.delta_b_value, &case.delta_b_unit)?;
+            let left = delta_a
+                .timedelta_add(&delta_b)
+                .and_then(|sum| sum.timedelta_mul(scalar))
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            let scaled_a = delta_a
+                .timedelta_mul(scalar)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            let scaled_b = delta_b
+                .timedelta_mul(scalar)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            let right = scaled_a
+                .timedelta_add(&scaled_b)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            assert_datetime_metamorphic_array_equal(case, &left, &right)
+        }
+        "datetime_compare_transitivity" => {
+            let datetime_a = datetime_metamorphic_datetime(&case.datetime_a, "s")?;
+            let datetime_b = datetime_metamorphic_datetime(&case.datetime_b, "s")?;
+            let datetime_c = datetime_metamorphic_datetime(&case.datetime_c, "s")?;
+            let a_less_b = datetime_a
+                .elementwise_binary(&datetime_b, BinaryOp::Less)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            let b_less_c = datetime_b
+                .elementwise_binary(&datetime_c, BinaryOp::Less)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            let a_less_c = datetime_a
+                .elementwise_binary(&datetime_c, BinaryOp::Less)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            if datetime_metamorphic_single_true(&a_less_b)
+                && datetime_metamorphic_single_true(&b_less_c)
+                && datetime_metamorphic_single_true(&a_less_c)
+            {
+                Ok(())
+            } else {
+                Err(DateTimeSuiteError::new(
+                    "datetime_metamorphic_relation_failed",
+                    format!(
+                        "datetime_compare_transitivity failed: a<b={:?} b<c={:?} a<c={:?}",
+                        a_less_b.values(),
+                        b_less_c.values(),
+                        a_less_c.values()
+                    ),
+                ))
+            }
+        }
+        "timedelta_abs_idempotent" => {
+            let delta = datetime_metamorphic_timedelta(case.delta_value, &case.delta_unit)?;
+            let once = delta.timedelta_abs();
+            let twice = once.timedelta_abs();
+            assert_datetime_metamorphic_array_equal(case, &twice, &once)
+        }
+        "timedelta_add_zero_identity" => {
+            let delta = datetime_metamorphic_timedelta(case.delta_value, &case.delta_unit)?;
+            let zero = datetime_metamorphic_timedelta(0, &case.delta_unit)?;
+            let actual = delta
+                .timedelta_add(&zero)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            assert_datetime_metamorphic_array_equal(case, &actual, &delta)
+        }
+        other => Err(DateTimeSuiteError::new(
+            "datetime_policy_unknown_metamorphic_relation",
+            format!("unsupported datetime metamorphic relation {other}"),
+        )),
+    }
+}
+
+fn datetime_metamorphic_datetime(
+    value: &str,
+    unit: &str,
+) -> Result<UFuncArray, DateTimeSuiteError> {
+    require_datetime_metamorphic_field("datetime value", value)?;
+    require_datetime_metamorphic_field("datetime unit", unit)?;
+    UFuncArray::from_datetime_strings(vec![1], vec![value.to_string()], Some(unit))
+        .map_err(map_ufunc_error_to_datetime_suite)
+}
+
+fn datetime_metamorphic_timedelta(
+    value: i64,
+    unit: &str,
+) -> Result<UFuncArray, DateTimeSuiteError> {
+    require_datetime_metamorphic_field("timedelta unit", unit)?;
+    UFuncArray::from_timedelta_strings(vec![1], vec![format!("{value}{unit}")], Some(unit))
+        .map_err(map_ufunc_error_to_datetime_suite)
+}
+
+fn require_datetime_metamorphic_field(name: &str, value: &str) -> Result<(), DateTimeSuiteError> {
+    if value.trim().is_empty() {
+        return Err(DateTimeSuiteError::new(
+            "datetime_input_contract_violation",
+            format!("{name} must not be empty"),
+        ));
+    }
+    Ok(())
+}
+
+fn datetime_metamorphic_single_true(array: &UFuncArray) -> bool {
+    array.values().len() == 1 && (array.values()[0] - 1.0).abs() <= 1e-12
+}
+
+fn assert_datetime_metamorphic_array_equal(
+    case: &DateTimeMetamorphicCase,
+    actual: &UFuncArray,
+    expected: &UFuncArray,
+) -> Result<(), DateTimeSuiteError> {
+    if actual.shape() != expected.shape() {
+        return Err(DateTimeSuiteError::new(
+            "datetime_metamorphic_relation_failed",
+            format!(
+                "{} shape mismatch expected={:?} actual={:?}",
+                case.relation,
+                expected.shape(),
+                actual.shape()
+            ),
+        ));
+    }
+    if actual.dtype() != expected.dtype() {
+        return Err(DateTimeSuiteError::new(
+            "datetime_metamorphic_relation_failed",
+            format!(
+                "{} dtype mismatch expected={:?} actual={:?}",
+                case.relation,
+                expected.dtype(),
+                actual.dtype()
+            ),
+        ));
+    }
+    let abs_tol = if case.abs_tol > 0.0 {
+        case.abs_tol
+    } else {
+        1e-9
+    };
+    let rel_tol = if case.rel_tol > 0.0 {
+        case.rel_tol
+    } else {
+        1e-9
+    };
+    if !approx_equal_values(expected.values(), actual.values(), abs_tol, rel_tol) {
+        return Err(DateTimeSuiteError::new(
+            "datetime_metamorphic_relation_failed",
+            format!(
+                "{} value mismatch expected={:?} actual={:?} abs_tol={abs_tol} rel_tol={rel_tol}",
+                case.relation,
+                expected.values(),
+                actual.values()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn build_datetime_case_array(
@@ -12122,6 +12446,7 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
         run_string_metamorphic_suite(config)?,
         run_masked_differential_suite(config)?,
         run_datetime_differential_suite(config)?,
+        run_datetime_metamorphic_suite(config)?,
         run_polynomial_differential_suite(config)?,
         run_fft_differential_suite(config)?,
         run_signal_differential_suite(config)?,
@@ -14286,13 +14611,14 @@ mod tests {
         busday_count, chebval, default_rng_mean_abs_tol, default_rng_variance_abs_tol,
         evaluate_shape_stride_case, generate_rng_samples, infer_flatiter_len, run_all_core_suites,
         run_crash_signature_regression_suite, run_datetime_differential_suite,
-        run_dtype_adversarial_suite, run_dtype_differential_suite, run_dtype_metamorphic_suite,
-        run_dtype_promotion_suite, run_fft_differential_suite, run_io_adversarial_suite,
-        run_io_differential_suite, run_io_metamorphic_suite, run_iter_adversarial_suite,
-        run_iter_differential_suite, run_iter_metamorphic_suite, run_linalg_adversarial_suite,
-        run_linalg_differential_suite, run_linalg_metamorphic_suite, run_masked_differential_suite,
-        run_polynomial_differential_suite, run_rng_adversarial_suite, run_rng_differential_suite,
-        run_rng_metamorphic_suite, run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
+        run_datetime_metamorphic_suite, run_dtype_adversarial_suite, run_dtype_differential_suite,
+        run_dtype_metamorphic_suite, run_dtype_promotion_suite, run_fft_differential_suite,
+        run_io_adversarial_suite, run_io_differential_suite, run_io_metamorphic_suite,
+        run_iter_adversarial_suite, run_iter_differential_suite, run_iter_metamorphic_suite,
+        run_linalg_adversarial_suite, run_linalg_differential_suite, run_linalg_metamorphic_suite,
+        run_masked_differential_suite, run_polynomial_differential_suite,
+        run_rng_adversarial_suite, run_rng_differential_suite, run_rng_metamorphic_suite,
+        run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
         run_shape_stride_adversarial_suite, run_shape_stride_differential_suite,
         run_shape_stride_metamorphic_suite, run_shape_stride_suite, run_signal_differential_suite,
         run_smoke, run_string_differential_suite, run_string_metamorphic_suite,
@@ -15218,6 +15544,14 @@ mod tests {
         let cfg = HarnessConfig::default_paths();
         let suite =
             run_datetime_differential_suite(&cfg).expect("datetime differential suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn datetime_metamorphic_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite =
+            run_datetime_metamorphic_suite(&cfg).expect("datetime metamorphic suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 
