@@ -6588,6 +6588,132 @@ pub fn run_linalg_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteRepor
                     true
                 }
             }
+            "det_transpose_invariance" => {
+                let n = case.matrix.len();
+                if n == 0 || case.matrix.iter().any(|row| row.len() != n) {
+                    report.failures.push(format!(
+                        "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} matrix must be square for det_transpose_invariance",
+                        case.id, case.seed, reason_code, env_fingerprint, artifact_refs.join(",")
+                    ));
+                    continue;
+                }
+                let flat: Vec<f64> = case.matrix.iter().flatten().copied().collect();
+                let det_a = match fnp_linalg::det_nxn(&flat, n) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        report.failures.push(format!(
+                            "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} det(A) failed: {e}",
+                            case.id, case.seed, reason_code, env_fingerprint, artifact_refs.join(",")
+                        ));
+                        continue;
+                    }
+                };
+                let matrix_ref = &case.matrix;
+                let transposed: Vec<f64> = (0..n).flat_map(|i| (0..n).map(move |j| matrix_ref[j][i])).collect();
+                let det_at = match fnp_linalg::det_nxn(&transposed, n) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        report.failures.push(format!(
+                            "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} det(A^T) failed: {e}",
+                            case.id, case.seed, reason_code, env_fingerprint, artifact_refs.join(",")
+                        ));
+                        continue;
+                    }
+                };
+                if (det_a - det_at).abs() > 1e-9 {
+                    report.failures.push(format!(
+                        "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} det_transpose_invariance mismatch det(A)={det_a} det(A^T)={det_at}",
+                        case.id, case.seed, reason_code, env_fingerprint, artifact_refs.join(",")
+                    ));
+                    false
+                } else {
+                    true
+                }
+            }
+            "det_scalar_multiply" => {
+                let n = case.matrix.len();
+                if n == 0 || case.matrix.iter().any(|row| row.len() != n) {
+                    report.failures.push(format!(
+                        "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} matrix must be square for det_scalar_multiply",
+                        case.id, case.seed, reason_code, env_fingerprint, artifact_refs.join(",")
+                    ));
+                    continue;
+                }
+                let k = case.scalar;
+                let flat: Vec<f64> = case.matrix.iter().flatten().copied().collect();
+                let det_a = match fnp_linalg::det_nxn(&flat, n) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        report.failures.push(format!(
+                            "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} det(A) failed: {e}",
+                            case.id, case.seed, reason_code, env_fingerprint, artifact_refs.join(",")
+                        ));
+                        continue;
+                    }
+                };
+                let scaled: Vec<f64> = flat.iter().map(|x| x * k).collect();
+                let det_ka = match fnp_linalg::det_nxn(&scaled, n) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        report.failures.push(format!(
+                            "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} det(kA) failed: {e}",
+                            case.id, case.seed, reason_code, env_fingerprint, artifact_refs.join(",")
+                        ));
+                        continue;
+                    }
+                };
+                let expected = det_a * k.powi(n as i32);
+                if (det_ka - expected).abs() > 1e-9 * expected.abs().max(1.0) {
+                    report.failures.push(format!(
+                        "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} det_scalar_multiply mismatch det(kA)={det_ka} expected k^n*det(A)={expected}",
+                        case.id, case.seed, reason_code, env_fingerprint, artifact_refs.join(",")
+                    ));
+                    false
+                } else {
+                    true
+                }
+            }
+            "inv_involutive" => {
+                let n = case.matrix.len();
+                if n == 0 || case.matrix.iter().any(|row| row.len() != n) {
+                    report.failures.push(format!(
+                        "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} matrix must be square for inv_involutive",
+                        case.id, case.seed, reason_code, env_fingerprint, artifact_refs.join(",")
+                    ));
+                    continue;
+                }
+                let flat: Vec<f64> = case.matrix.iter().flatten().copied().collect();
+                let inv_a = match fnp_linalg::inv_nxn(&flat, n) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        report.failures.push(format!(
+                            "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} inv(A) failed: {e}",
+                            case.id, case.seed, reason_code, env_fingerprint, artifact_refs.join(",")
+                        ));
+                        continue;
+                    }
+                };
+                let inv_inv_a = match fnp_linalg::inv_nxn(&inv_a, n) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        report.failures.push(format!(
+                            "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} inv(inv(A)) failed: {e}",
+                            case.id, case.seed, reason_code, env_fingerprint, artifact_refs.join(",")
+                        ));
+                        continue;
+                    }
+                };
+                let max_diff = flat.iter().zip(inv_inv_a.iter()).map(|(a, b)| (a - b).abs()).fold(0.0_f64, f64::max);
+                if max_diff > 1e-9 {
+                    report.failures.push(format!(
+                        "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} inv_involutive mismatch max_diff={max_diff}",
+                        case.id, case.seed, reason_code, env_fingerprint, artifact_refs.join(",")
+                    ));
+                    false
+                } else {
+                    true
+                }
+            }
             other => {
                 report.failures.push(format!(
                     "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} unsupported relation {}",

@@ -432,5 +432,94 @@
     ],
     "rhs": [6.0, 9.0],
     "scalar": 0.5
+  },
+  {
+    "id": "linalg_det_transpose_invariance_2x2",
+    "relation": "det_transpose_invariance",
+    "seed": 8331,
+    "env_fingerprint": "fnp-linalg-metamorphic-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
+    ],
+    "reason_code": "linalg_metamorphic_det_transpose",
+    "matrix": [
+      [4.0, 7.0],
+      [2.0, 6.0]
+    ]
+  },
+  {
+    "id": "linalg_det_transpose_invariance_3x3",
+    "relation": "det_transpose_invariance",
+    "seed": 8332,
+    "env_fingerprint": "fnp-linalg-metamorphic-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
+    ],
+    "reason_code": "linalg_metamorphic_det_transpose",
+    "matrix": [
+      [1.0, 2.0, 3.0],
+      [4.0, 5.0, 6.0],
+      [7.0, 8.0, 10.0]
+    ]
+  },
+  {
+    "id": "linalg_det_scalar_multiply_2x2",
+    "relation": "det_scalar_multiply",
+    "seed": 8333,
+    "env_fingerprint": "fnp-linalg-metamorphic-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
+    ],
+    "reason_code": "linalg_metamorphic_det_scalar",
+    "matrix": [
+      [3.0, 1.0],
+      [2.0, 4.0]
+    ],
+    "scalar": 2.0
+  },
+  {
+    "id": "linalg_det_scalar_multiply_3x3",
+    "relation": "det_scalar_multiply",
+    "seed": 8334,
+    "env_fingerprint": "fnp-linalg-metamorphic-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
+    ],
+    "reason_code": "linalg_metamorphic_det_scalar",
+    "matrix": [
+      [2.0, 0.0, 1.0],
+      [1.0, 3.0, 2.0],
+      [0.0, 1.0, 2.0]
+    ],
+    "scalar": 3.0
+  },
+  {
+    "id": "linalg_inv_involutive_2x2",
+    "relation": "inv_involutive",
+    "seed": 8335,
+    "env_fingerprint": "fnp-linalg-metamorphic-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
+    ],
+    "reason_code": "linalg_metamorphic_inv_involutive",
+    "matrix": [
+      [4.0, 7.0],
+      [2.0, 6.0]
+    ]
+  },
+  {
+    "id": "linalg_inv_involutive_3x3",
+    "relation": "inv_involutive",
+    "seed": 8336,
+    "env_fingerprint": "fnp-linalg-metamorphic-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
+    ],
+    "reason_code": "linalg_metamorphic_inv_involutive",
+    "matrix": [
+      [1.0, 2.0, 1.0],
+      [0.0, 1.0, 2.0],
+      [1.0, 0.0, 1.0]
+    ]
   }
 ]

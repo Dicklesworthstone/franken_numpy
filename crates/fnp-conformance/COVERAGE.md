@@ -10,7 +10,7 @@
 | Signal processing | 305 | 12 | 12 | 329 | Good - extensive conv/corr/fft, atleast_nd, reciprocal/sign edge cases, convolve commutative/distributive, empty/nan/inf adversarial |
 | Polynomials | 96 | 12 | 12 | 120 | Good - all 5 families, edge cases, add-zero, sub-self, int/der edge, commutative/identity metamorphic, empty/nan/constant adversarial |
 | I/O (npy/npz/text) | 70 | 40 | 35 | 145 | Good - parser boundaries, complex128, quoted fields, F-order, single-member npz |
-| Linear algebra | 67 | 30 | 37 | 134 | Good - core decompositions, 1x1 edge cases, identity, wide QR, fractional solve |
+| Linear algebra | 67 | 36 | 37 | 140 | Good - core decompositions, 1x1 edge cases, identity, wide QR, fractional solve, det/inv metamorphic invariants |
 | String arrays | 71 | 12 | 12 | 95 | Good - 33 char functions, empty/pattern edge cases, case/title conversion, isdigit, idempotence/involution metamorphic, empty/whitespace/overlap adversarial |
 | RNG | 38 | 28 | 43 | 109 | Adequate + 39 statistical, 12 distribution differential (XFAIL: seeding mismatch), small bound, zero-fill, single-step jump |
 | FFT | 47 | 12 | 12 | 71 | Good - transform families, edge sizes, 2D/3D, fftn/ifftn, shifts, fftfreq, inverse/linearity/parseval metamorphic, edge-case adversarial |
