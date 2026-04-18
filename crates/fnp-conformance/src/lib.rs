@@ -5942,6 +5942,254 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     true
                 }
             }
+            "neg_involution" => {
+                let neg_case = UFuncInputCase {
+                    id: format!("{}::neg", case.id),
+                    op: UFuncOperation::Negative,
+                    lhs_shape: case.lhs_shape.clone(),
+                    lhs_values: case.lhs_values.clone(),
+                    lhs_dtype: case.lhs_dtype.clone(),
+                    rhs_shape: None,
+                    rhs_values: None,
+                    rhs_dtype: None,
+                    axis: None,
+                    axes: None,
+                    keepdims: None,
+                    ddof: None,
+                    clip_min: None,
+                    clip_max: None,
+                    third_shape: None,
+                    third_values: None,
+                    third_dtype: None,
+                    sig: None,
+                    signature: None,
+                    dtype: None,
+                    seed: case.seed,
+                    mode: mode.clone(),
+                    env_fingerprint: env_fingerprint.clone(),
+                    artifact_refs: artifact_refs.clone(),
+                    reason_code: reason_code.clone(),
+                    expected_reason_code: reason_code.clone(),
+                    expected_error_contains: String::new(),
+                };
+                let Ok((neg_shape, neg_values, _)) = ufunc_differential::execute_input_case(&neg_case) else {
+                    report.failures.push(format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} failed evaluating neg(x)",
+                        case.id, case.seed, mode, reason_code, env_fingerprint, artifact_refs.join(",")
+                    ));
+                    continue;
+                };
+                let neg_neg_case = UFuncInputCase {
+                    id: format!("{}::neg_neg", case.id),
+                    op: UFuncOperation::Negative,
+                    lhs_shape: neg_shape,
+                    lhs_values: neg_values,
+                    lhs_dtype: default_f64_dtype_name(),
+                    rhs_shape: None,
+                    rhs_values: None,
+                    rhs_dtype: None,
+                    axis: None,
+                    axes: None,
+                    keepdims: None,
+                    ddof: None,
+                    clip_min: None,
+                    clip_max: None,
+                    third_shape: None,
+                    third_values: None,
+                    third_dtype: None,
+                    sig: None,
+                    signature: None,
+                    dtype: None,
+                    seed: case.seed,
+                    mode: mode.clone(),
+                    env_fingerprint: env_fingerprint.clone(),
+                    artifact_refs: artifact_refs.clone(),
+                    reason_code: reason_code.clone(),
+                    expected_reason_code: reason_code.clone(),
+                    expected_error_contains: String::new(),
+                };
+                let Ok((_, neg_neg_values, _)) = ufunc_differential::execute_input_case(&neg_neg_case) else {
+                    report.failures.push(format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} failed evaluating neg(neg(x))",
+                        case.id, case.seed, mode, reason_code, env_fingerprint, artifact_refs.join(",")
+                    ));
+                    continue;
+                };
+                let max_diff = case.lhs_values.iter().zip(neg_neg_values.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0_f64, f64::max);
+                if max_diff > 1e-12 {
+                    report.failures.push(format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} neg_involution mismatch max_diff={}",
+                        case.id, case.seed, mode, reason_code, env_fingerprint, artifact_refs.join(","), max_diff
+                    ));
+                    false
+                } else {
+                    true
+                }
+            }
+            "abs_idempotent" => {
+                let abs_case = UFuncInputCase {
+                    id: format!("{}::abs", case.id),
+                    op: UFuncOperation::Abs,
+                    lhs_shape: case.lhs_shape.clone(),
+                    lhs_values: case.lhs_values.clone(),
+                    lhs_dtype: case.lhs_dtype.clone(),
+                    rhs_shape: None,
+                    rhs_values: None,
+                    rhs_dtype: None,
+                    axis: None,
+                    axes: None,
+                    keepdims: None,
+                    ddof: None,
+                    clip_min: None,
+                    clip_max: None,
+                    third_shape: None,
+                    third_values: None,
+                    third_dtype: None,
+                    sig: None,
+                    signature: None,
+                    dtype: None,
+                    seed: case.seed,
+                    mode: mode.clone(),
+                    env_fingerprint: env_fingerprint.clone(),
+                    artifact_refs: artifact_refs.clone(),
+                    reason_code: reason_code.clone(),
+                    expected_reason_code: reason_code.clone(),
+                    expected_error_contains: String::new(),
+                };
+                let Ok((abs_shape, abs_values, _)) = ufunc_differential::execute_input_case(&abs_case) else {
+                    report.failures.push(format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} failed evaluating abs(x)",
+                        case.id, case.seed, mode, reason_code, env_fingerprint, artifact_refs.join(",")
+                    ));
+                    continue;
+                };
+                let abs_abs_case = UFuncInputCase {
+                    id: format!("{}::abs_abs", case.id),
+                    op: UFuncOperation::Abs,
+                    lhs_shape: abs_shape,
+                    lhs_values: abs_values.clone(),
+                    lhs_dtype: default_f64_dtype_name(),
+                    rhs_shape: None,
+                    rhs_values: None,
+                    rhs_dtype: None,
+                    axis: None,
+                    axes: None,
+                    keepdims: None,
+                    ddof: None,
+                    clip_min: None,
+                    clip_max: None,
+                    third_shape: None,
+                    third_values: None,
+                    third_dtype: None,
+                    sig: None,
+                    signature: None,
+                    dtype: None,
+                    seed: case.seed,
+                    mode: mode.clone(),
+                    env_fingerprint: env_fingerprint.clone(),
+                    artifact_refs: artifact_refs.clone(),
+                    reason_code: reason_code.clone(),
+                    expected_reason_code: reason_code.clone(),
+                    expected_error_contains: String::new(),
+                };
+                let Ok((_, abs_abs_values, _)) = ufunc_differential::execute_input_case(&abs_abs_case) else {
+                    report.failures.push(format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} failed evaluating abs(abs(x))",
+                        case.id, case.seed, mode, reason_code, env_fingerprint, artifact_refs.join(",")
+                    ));
+                    continue;
+                };
+                let max_diff = abs_values.iter().zip(abs_abs_values.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0_f64, f64::max);
+                if max_diff > 1e-12 {
+                    report.failures.push(format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} abs_idempotent mismatch max_diff={}",
+                        case.id, case.seed, mode, reason_code, env_fingerprint, artifact_refs.join(","), max_diff
+                    ));
+                    false
+                } else {
+                    true
+                }
+            }
+            "max_commutative" => {
+                let Some(rhs_shape) = case.rhs_shape.clone() else {
+                    report.failures.push(format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} missing rhs_shape for max_commutative",
+                        case.id, case.seed, mode, reason_code, env_fingerprint, artifact_refs.join(",")
+                    ));
+                    continue;
+                };
+                let Some(rhs_values) = case.rhs_values.clone() else {
+                    report.failures.push(format!(
+                        "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} missing rhs_values for max_commutative",
+                        case.id, case.seed, mode, reason_code, env_fingerprint, artifact_refs.join(",")
+                    ));
+                    continue;
+                };
+                let rhs_dtype = case.rhs_dtype.clone().unwrap_or_else(default_f64_dtype_name);
+                let lhs_rhs = UFuncInputCase {
+                    id: format!("{}::lhs_rhs", case.id),
+                    op: UFuncOperation::Maximum,
+                    lhs_shape: case.lhs_shape.clone(),
+                    lhs_values: case.lhs_values.clone(),
+                    lhs_dtype: case.lhs_dtype.clone(),
+                    rhs_shape: Some(rhs_shape.clone()),
+                    rhs_values: Some(rhs_values.clone()),
+                    rhs_dtype: Some(rhs_dtype.clone()),
+                    axis: None,
+                    axes: None,
+                    keepdims: None,
+                    ddof: None,
+                    clip_min: None,
+                    clip_max: None,
+                    third_shape: None,
+                    third_values: None,
+                    third_dtype: None,
+                    sig: None,
+                    signature: None,
+                    dtype: None,
+                    seed: case.seed,
+                    mode: mode.clone(),
+                    env_fingerprint: env_fingerprint.clone(),
+                    artifact_refs: artifact_refs.clone(),
+                    reason_code: reason_code.clone(),
+                    expected_reason_code: reason_code.clone(),
+                    expected_error_contains: String::new(),
+                };
+                let rhs_lhs = UFuncInputCase {
+                    id: format!("{}::rhs_lhs", case.id),
+                    op: UFuncOperation::Maximum,
+                    lhs_shape: rhs_shape,
+                    lhs_values: rhs_values,
+                    lhs_dtype: rhs_dtype,
+                    rhs_shape: Some(case.lhs_shape.clone()),
+                    rhs_values: Some(case.lhs_values.clone()),
+                    rhs_dtype: Some(case.lhs_dtype.clone()),
+                    axis: None,
+                    axes: None,
+                    keepdims: None,
+                    ddof: None,
+                    clip_min: None,
+                    clip_max: None,
+                    third_shape: None,
+                    third_values: None,
+                    third_dtype: None,
+                    sig: None,
+                    signature: None,
+                    dtype: None,
+                    seed: case.seed,
+                    mode: mode.clone(),
+                    env_fingerprint: env_fingerprint.clone(),
+                    artifact_refs: artifact_refs.clone(),
+                    reason_code: reason_code.clone(),
+                    expected_reason_code: reason_code.clone(),
+                    expected_error_contains: String::new(),
+                };
+                evaluate_commutative_pair(&case.id, case.seed, &mode, &reason_code, &env_fingerprint, &artifact_refs, lhs_rhs, rhs_lhs, &mut report)
+            }
             other => {
                 report.failures.push(format!(
                     "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} unsupported relation {}",

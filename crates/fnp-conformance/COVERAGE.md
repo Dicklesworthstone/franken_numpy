@@ -6,7 +6,7 @@
 
 | Domain | Differential | Metamorphic | Adversarial | Total Cases | Coverage Assessment |
 |--------|:-----------:|:-----------:|:-----------:|:-----------:|---------------------|
-| Ufunc operations | 381 | 33 | 62 | 476 | Good - core ops well covered, 3D commutative, identity scalar |
+| Ufunc operations | 381 | 39 | 62 | 482 | Good - core ops well covered, 3D commutative, identity scalar, neg/abs/max metamorphic |
 | Signal processing | 305 | 12 | 12 | 329 | Good - extensive conv/corr/fft, atleast_nd, reciprocal/sign edge cases, convolve commutative/distributive, empty/nan/inf adversarial |
 | Polynomials | 96 | 12 | 12 | 120 | Good - all 5 families, edge cases, add-zero, sub-self, int/der edge, commutative/identity metamorphic, empty/nan/constant adversarial |
 | I/O (npy/npz/text) | 70 | 40 | 35 | 145 | Good - parser boundaries, complex128, quoted fields, F-order, single-member npz |
