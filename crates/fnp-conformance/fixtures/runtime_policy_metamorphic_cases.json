@@ -186,5 +186,99 @@
     "risk_score": 0.65,
     "threshold": 0.7,
     "description": "decision result independent of audit enabled/disabled"
+  },
+  {
+    "id": "policy_threshold_reflexive",
+    "relation": "threshold_reflexive",
+    "seed": 213,
+    "mode": "strict",
+    "env_fingerprint": "fnp-policy-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/runtime_policy_metamorphic_cases.json",
+      "crates/fnp-runtime/src/policy.rs"
+    ],
+    "reason_code": "policy_metamorphic_threshold_reflexive",
+    "risk_score": 0.5,
+    "threshold": 0.7,
+    "description": "same threshold evaluated twice gives same result"
+  },
+  {
+    "id": "policy_zero_risk_always_accepted",
+    "relation": "zero_risk_accepted",
+    "seed": 214,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-policy-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/runtime_policy_metamorphic_cases.json",
+      "crates/fnp-runtime/src/policy.rs"
+    ],
+    "reason_code": "policy_metamorphic_zero_risk",
+    "risk_score": 0.0,
+    "threshold": 0.5,
+    "expected_decision": "accept",
+    "description": "zero risk score always accepted regardless of threshold"
+  },
+  {
+    "id": "policy_mode_reflexive",
+    "relation": "mode_reflexive",
+    "seed": 215,
+    "mode": "strict",
+    "env_fingerprint": "fnp-policy-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/runtime_policy_metamorphic_cases.json",
+      "crates/fnp-runtime/src/policy.rs"
+    ],
+    "reason_code": "policy_metamorphic_mode_reflexive",
+    "risk_score": 0.65,
+    "threshold": 0.7,
+    "description": "same input evaluated twice in same mode gives same result"
+  },
+  {
+    "id": "policy_compatible_risk_independent",
+    "relation": "class_risk_independent",
+    "seed": 216,
+    "mode": "strict",
+    "env_fingerprint": "fnp-policy-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/runtime_policy_metamorphic_cases.json",
+      "crates/fnp-runtime/src/policy.rs"
+    ],
+    "reason_code": "policy_metamorphic_class_risk_independent",
+    "compatibility_class": "compatible",
+    "risk_a": 0.1,
+    "risk_b": 0.9,
+    "expected_decision": "accept",
+    "description": "compatible class accepted regardless of risk score"
+  },
+  {
+    "id": "policy_threshold_antisymmetric",
+    "relation": "threshold_antisymmetric",
+    "seed": 217,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-policy-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/runtime_policy_metamorphic_cases.json",
+      "crates/fnp-runtime/src/policy.rs"
+    ],
+    "reason_code": "policy_metamorphic_threshold_antisymmetric",
+    "risk_score": 0.7,
+    "threshold_low": 0.6,
+    "threshold_high": 0.8,
+    "description": "if rejected at low threshold then also rejected at high, but not necessarily vice versa"
+  },
+  {
+    "id": "policy_decision_stable",
+    "relation": "decision_stable",
+    "seed": 218,
+    "mode": "strict",
+    "env_fingerprint": "fnp-policy-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/runtime_policy_metamorphic_cases.json",
+      "crates/fnp-runtime/src/policy.rs"
+    ],
+    "reason_code": "policy_metamorphic_decision_stable",
+    "risk_score": 0.5,
+    "threshold": 0.7,
+    "description": "decision is stable across multiple evaluations"
   }
 ]

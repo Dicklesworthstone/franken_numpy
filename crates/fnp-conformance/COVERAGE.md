@@ -19,7 +19,7 @@
 | Iterator/transfer | 37 | 21 | 18 | 76 | Good - transfer/overlap/flatiter/broadcast, single-element, copy-overlap flags |
 | Shape/stride (SCE) | 51 | 18 | 12 | 81 | Good - 0-D, empty, negative-stride, large shapes, 5D/6D transpose, scalar-to-5D, F-order, reshape/transpose roundtrip/preserve-elements/neg-one-infer, broadcast associative/commutative/singleton, swapaxes involution, atleast_nd metamorphic, incompatible/negative-infer adversarial |
 | Dtype promotion | 198 | 17 | 20 | 235 | Good - full 14×14 type matrix + metamorphic + adversarial, title-case/trailing-space |
-| Runtime policy | 37 | 12 | 12 | 61 | Good - risk thresholds, boundaries, override audit, unknown-class, exact-threshold, monotonicity/subsumption metamorphic |
+| Runtime policy | 37 | 18 | 12 | 67 | Good - risk thresholds, boundaries, override audit, unknown-class, exact-threshold, monotonicity/subsumption/reflexive/antisymmetric/stability metamorphic |
 
 ## Priority Coverage Gaps
 

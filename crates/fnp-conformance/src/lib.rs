@@ -5635,6 +5635,83 @@ fn evaluate_runtime_policy_metamorphic_relation(
                 ))
             }
         }
+        "threshold_reflexive" => {
+            let mode = runtime_policy_metamorphic_mode(case)?;
+            let class = CompatibilityClass::KnownCompatible;
+            let first = decide_compatibility(mode, class, case.risk_score, case.threshold);
+            let second = decide_compatibility(mode, class, case.risk_score, case.threshold);
+            if first == second {
+                Ok(())
+            } else {
+                Err(format!(
+                    "threshold reflexivity violated: first={first:?} second={second:?}"
+                ))
+            }
+        }
+        "zero_risk_accepted" => {
+            let mode = runtime_policy_metamorphic_mode(case)?;
+            let class = CompatibilityClass::KnownCompatible;
+            let action = decide_compatibility(mode, class, 0.0, case.threshold);
+            if runtime_policy_metamorphic_is_accept(action) {
+                Ok(())
+            } else {
+                Err(format!("zero risk not accepted: action={action:?}"))
+            }
+        }
+        "mode_reflexive" => {
+            let mode = runtime_policy_metamorphic_mode(case)?;
+            let class = CompatibilityClass::KnownCompatible;
+            let first = decide_compatibility(mode, class, case.risk_score, case.threshold);
+            let second = decide_compatibility(mode, class, case.risk_score, case.threshold);
+            if first == second {
+                Ok(())
+            } else {
+                Err(format!(
+                    "mode reflexivity violated: first={first:?} second={second:?}"
+                ))
+            }
+        }
+        "class_risk_independent" => {
+            let mode = runtime_policy_metamorphic_mode(case)?;
+            let class = runtime_policy_metamorphic_class(&case.compatibility_class);
+            let action_a = decide_compatibility(mode, class, case.risk_a, case.threshold);
+            let action_b = decide_compatibility(mode, class, case.risk_b, case.threshold);
+            if action_a == action_b {
+                Ok(())
+            } else {
+                Err(format!(
+                    "class risk independence violated: risk_a={} action_a={action_a:?} risk_b={} action_b={action_b:?}",
+                    case.risk_a, case.risk_b
+                ))
+            }
+        }
+        "threshold_antisymmetric" => {
+            let mode = runtime_policy_metamorphic_mode(case)?;
+            let class = CompatibilityClass::KnownCompatible;
+            let low = decide_compatibility(mode, class, case.risk_score, case.threshold_low);
+            let high = decide_compatibility(mode, class, case.risk_score, case.threshold_high);
+            if runtime_policy_metamorphic_is_reject(high)
+                && runtime_policy_metamorphic_is_accept(low)
+            {
+                return Err(format!(
+                    "threshold antisymmetry violated: rejected at high threshold {} but accepted at low threshold {}",
+                    case.threshold_high, case.threshold_low
+                ));
+            }
+            Ok(())
+        }
+        "decision_stable" => {
+            let mode = runtime_policy_metamorphic_mode(case)?;
+            let class = CompatibilityClass::KnownCompatible;
+            let decisions: Vec<_> = (0..3)
+                .map(|_| decide_compatibility(mode, class, case.risk_score, case.threshold))
+                .collect();
+            if decisions.iter().all(|d| *d == decisions[0]) {
+                Ok(())
+            } else {
+                Err(format!("decision unstable: {:?}", decisions))
+            }
+        }
         other => Err(format!(
             "unsupported runtime policy metamorphic relation {other}"
         )),
