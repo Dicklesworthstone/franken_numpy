@@ -908,6 +908,49 @@ struct RngStatisticalCase {
 }
 
 #[derive(Debug, Deserialize)]
+struct RngDistributionDifferentialCase {
+    id: String,
+    operation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    size: usize,
+    #[serde(default)]
+    loc: f64,
+    #[serde(default)]
+    scale: f64,
+    #[serde(default)]
+    shape: f64,
+    #[serde(default)]
+    a: f64,
+    #[serde(default)]
+    b: f64,
+    #[serde(default)]
+    n: u64,
+    #[serde(default)]
+    p: f64,
+    #[serde(default)]
+    lam: f64,
+    #[serde(default)]
+    low: f64,
+    #[serde(default)]
+    high: f64,
+    #[serde(default)]
+    #[allow(dead_code)]
+    replace: bool,
+    #[serde(default)]
+    expected_values: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
 struct FftDifferentialCase {
     id: String,
     operation: String,
@@ -16037,6 +16080,53 @@ pub fn run_rng_differential_suite(config: &HarnessConfig) -> Result<SuiteReport,
     Ok(report)
 }
 
+pub fn run_rng_distribution_differential_suite(
+    config: &HarnessConfig,
+) -> Result<SuiteReport, String> {
+    let path = config
+        .fixture_root
+        .join("rng_distribution_differential_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    let cases: Vec<RngDistributionDifferentialCase> =
+        serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))?;
+
+    let mut report = SuiteReport {
+        suite: "rng_distribution_differential",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+
+        match execute_rng_distribution_differential_operation(&case) {
+            Ok(()) => {
+                report.pass_count += 1;
+            }
+            Err(err) => {
+                report.failures.push(format!(
+                    "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} {} (actual_reason_code={})",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    err.message,
+                    err.reason_code
+                ));
+            }
+        }
+    }
+
+    Ok(report)
+}
+
 pub fn run_rng_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
     let path = config.fixture_root.join("rng_metamorphic_cases.json");
     let raw = fs::read_to_string(&path)
@@ -18071,6 +18161,216 @@ fn execute_rng_differential_operation(case: &RngDifferentialCase) -> Result<(), 
     }
 }
 
+fn execute_rng_distribution_differential_operation(
+    case: &RngDistributionDifferentialCase,
+) -> Result<(), RngSuiteError> {
+    let mut rng = Generator::from_pcg64_dxsm(case.seed)
+        .map_err(|e| RngSuiteError::new("rng_bitgenerator_init_failed", e.to_string()))?;
+
+    match case.operation.as_str() {
+        "standard_normal_bit_exact" => {
+            let actual = rng.standard_normal(case.size);
+            compare_f64_sequence(&case.id, &actual, &case.expected_values)
+        }
+        "normal_bit_exact" => {
+            let actual = rng
+                .normal(case.loc, case.scale, case.size)
+                .map_err(|e| RngSuiteError::new("random_invalid_parameter", e.to_string()))?;
+            compare_f64_sequence(&case.id, &actual, &case.expected_values)
+        }
+        "exponential_bit_exact" => {
+            let actual = rng
+                .exponential(case.scale, case.size)
+                .map_err(|e| RngSuiteError::new("random_invalid_parameter", e.to_string()))?;
+            compare_f64_sequence(&case.id, &actual, &case.expected_values)
+        }
+        "poisson_bit_exact" => {
+            let actual = rng
+                .poisson(case.lam, case.size)
+                .map_err(|e| RngSuiteError::new("random_invalid_parameter", e.to_string()))?;
+            compare_u64_sequence(&case.id, &actual, &case.expected_values)
+        }
+        "binomial_bit_exact" => {
+            let actual = rng
+                .binomial(case.n, case.p, case.size)
+                .map_err(|e| RngSuiteError::new("random_invalid_parameter", e.to_string()))?;
+            compare_u64_sequence(&case.id, &actual, &case.expected_values)
+        }
+        "gamma_bit_exact" => {
+            let actual = rng
+                .gamma(case.shape, case.scale, case.size)
+                .map_err(|e| RngSuiteError::new("random_invalid_parameter", e.to_string()))?;
+            compare_f64_sequence(&case.id, &actual, &case.expected_values)
+        }
+        "beta_bit_exact" => {
+            let actual = rng
+                .beta(case.a, case.b, case.size)
+                .map_err(|e| RngSuiteError::new("random_invalid_parameter", e.to_string()))?;
+            compare_f64_sequence(&case.id, &actual, &case.expected_values)
+        }
+        "geometric_bit_exact" => {
+            let actual = rng
+                .geometric(case.p, case.size)
+                .map_err(|e| RngSuiteError::new("random_invalid_parameter", e.to_string()))?;
+            compare_u64_sequence(&case.id, &actual, &case.expected_values)
+        }
+        "weibull_bit_exact" => {
+            let actual = rng
+                .weibull(case.a, case.size)
+                .map_err(|e| RngSuiteError::new("random_invalid_parameter", e.to_string()))?;
+            compare_f64_sequence(&case.id, &actual, &case.expected_values)
+        }
+        "uniform_bit_exact" => {
+            let actual = rng
+                .uniform(case.low, case.high, case.size)
+                .map_err(|e| RngSuiteError::new("random_invalid_parameter", e.to_string()))?;
+            compare_f64_sequence(&case.id, &actual, &case.expected_values)
+        }
+        "integers_bit_exact" => {
+            let actual = rng
+                .integers(case.low as i64, case.high as i64, case.size)
+                .map_err(|e| RngSuiteError::new("random_invalid_parameter", e.to_string()))?;
+            compare_i64_sequence(&case.id, &actual, &case.expected_values)
+        }
+        "permutation_bit_exact" => {
+            let actual = rng
+                .permutation_range(case.n as usize)
+                .map_err(|e| RngSuiteError::new("random_invalid_parameter", e.to_string()))?;
+            compare_u64_sequence(&case.id, &actual, &case.expected_values)
+        }
+        other => Err(RngSuiteError::new(
+            "rng_policy_unknown_metadata",
+            format!("unsupported rng distribution differential operation {other}"),
+        )),
+    }
+}
+
+fn compare_f64_sequence(
+    case_id: &str,
+    actual: &[f64],
+    expected: &[serde_json::Value],
+) -> Result<(), RngSuiteError> {
+    if actual.len() != expected.len() {
+        return Err(RngSuiteError::new(
+            "random_distribution_parity_contract",
+            format!(
+                "{case_id}: length mismatch expected={} actual={}",
+                expected.len(),
+                actual.len()
+            ),
+        ));
+    }
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        let exp_val = e
+            .as_f64()
+            .ok_or_else(|| RngSuiteError::new("random_distribution_parity_contract", format!("{case_id}: expected value at index {i} is not f64")))?;
+        if (a - exp_val).abs() > 1e-14 {
+            return Err(RngSuiteError::new(
+                "random_distribution_parity_contract",
+                format!(
+                    "{case_id}: mismatch at index {i} expected={exp_val} actual={a}"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn compare_u64_sequence(
+    case_id: &str,
+    actual: &[u64],
+    expected: &[serde_json::Value],
+) -> Result<(), RngSuiteError> {
+    if actual.len() != expected.len() {
+        return Err(RngSuiteError::new(
+            "random_distribution_parity_contract",
+            format!(
+                "{case_id}: length mismatch expected={} actual={}",
+                expected.len(),
+                actual.len()
+            ),
+        ));
+    }
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        let exp_val = e
+            .as_u64()
+            .ok_or_else(|| RngSuiteError::new("random_distribution_parity_contract", format!("{case_id}: expected value at index {i} is not u64")))?;
+        if *a != exp_val {
+            return Err(RngSuiteError::new(
+                "random_distribution_parity_contract",
+                format!(
+                    "{case_id}: mismatch at index {i} expected={exp_val} actual={a}"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn compare_i64_sequence(
+    case_id: &str,
+    actual: &[i64],
+    expected: &[serde_json::Value],
+) -> Result<(), RngSuiteError> {
+    if actual.len() != expected.len() {
+        return Err(RngSuiteError::new(
+            "random_distribution_parity_contract",
+            format!(
+                "{case_id}: length mismatch expected={} actual={}",
+                expected.len(),
+                actual.len()
+            ),
+        ));
+    }
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        let exp_val = e
+            .as_i64()
+            .ok_or_else(|| RngSuiteError::new("random_distribution_parity_contract", format!("{case_id}: expected value at index {i} is not i64")))?;
+        if *a != exp_val {
+            return Err(RngSuiteError::new(
+                "random_distribution_parity_contract",
+                format!(
+                    "{case_id}: mismatch at index {i} expected={exp_val} actual={a}"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn compare_usize_sequence(
+    case_id: &str,
+    actual: &[usize],
+    expected: &[serde_json::Value],
+) -> Result<(), RngSuiteError> {
+    if actual.len() != expected.len() {
+        return Err(RngSuiteError::new(
+            "random_distribution_parity_contract",
+            format!(
+                "{case_id}: length mismatch expected={} actual={}",
+                expected.len(),
+                actual.len()
+            ),
+        ));
+    }
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        let exp_val = e
+            .as_u64()
+            .ok_or_else(|| RngSuiteError::new("random_distribution_parity_contract", format!("{case_id}: expected value at index {i} is not u64")))?
+            as usize;
+        if *a != exp_val {
+            return Err(RngSuiteError::new(
+                "random_distribution_parity_contract",
+                format!(
+                    "{case_id}: mismatch at index {i} expected={exp_val} actual={a}"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn evaluate_rng_metamorphic_relation(case: &RngMetamorphicCase) -> Result<(), RngSuiteError> {
     match case.relation.as_str() {
         "jump_partition_additivity" => {
@@ -18914,7 +19214,8 @@ mod tests {
         run_iter_metamorphic_suite, run_linalg_adversarial_suite, run_linalg_differential_suite,
         run_linalg_metamorphic_suite, run_masked_adversarial_suite, run_masked_differential_suite,
         run_masked_metamorphic_suite, run_polynomial_differential_suite, run_rng_adversarial_suite,
-        run_rng_differential_suite, run_rng_metamorphic_suite, run_rng_statistical_suite,
+        run_rng_differential_suite, run_rng_distribution_differential_suite,
+        run_rng_metamorphic_suite, run_rng_statistical_suite,
         run_runtime_policy_adversarial_suite, run_runtime_policy_metamorphic_suite,
         run_shape_stride_adversarial_suite, run_shape_stride_differential_suite,
         run_shape_stride_metamorphic_suite, run_shape_stride_suite, run_signal_adversarial_suite,
@@ -19789,6 +20090,15 @@ mod tests {
     fn rng_differential_suite_is_green() {
         let cfg = HarnessConfig::default_paths();
         let suite = run_rng_differential_suite(&cfg).expect("differential suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    #[ignore = "XFAIL: fnp-random PCG64 seeding differs from NumPy SeedSequence entropy mixing"]
+    fn rng_distribution_differential_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite = run_rng_distribution_differential_suite(&cfg)
+            .expect("distribution differential suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 

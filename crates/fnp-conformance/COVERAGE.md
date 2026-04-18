@@ -12,7 +12,7 @@
 | I/O (npy/npz/text) | 70 | 40 | 35 | 145 | Good - parser boundaries, complex128, quoted fields, F-order, single-member npz |
 | Linear algebra | 67 | 30 | 37 | 134 | Good - core decompositions, 1x1 edge cases, identity, wide QR, fractional solve |
 | String arrays | 71 | 12 | 12 | 95 | Good - 33 char functions, empty/pattern edge cases, case/title conversion, isdigit, idempotence/involution metamorphic, empty/whitespace/overlap adversarial |
-| RNG | 26 | 28 | 43 | 97 | Adequate + 39 statistical, small bound, zero-fill, single-step jump |
+| RNG | 38 | 28 | 43 | 109 | Adequate + 39 statistical, 12 distribution differential (XFAIL: seeding mismatch), small bound, zero-fill, single-step jump |
 | FFT | 47 | 12 | 12 | 71 | Good - transform families, edge sizes, 2D/3D, fftn/ifftn, shifts, fftfreq, inverse/linearity/parseval metamorphic, edge-case adversarial |
 | Datetime/timedelta | 48 | 12 | 12 | 72 | Good - arithmetic, busday, NaT, broadcast, abs, comparisons, neg, mul-zero, add/sub inverse metamorphic, NaT/epoch/y2038 adversarial |
 | Masked arrays | 44 | 12 | 12 | 68 | Good - reshape/concat/fill/broadcast/all-masked/argmin-max/axis-aware, min/max axis partial, mask preservation metamorphic, hardmask/compress adversarial |

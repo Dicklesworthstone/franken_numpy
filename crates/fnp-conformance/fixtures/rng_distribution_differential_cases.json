@@ -1,0 +1,251 @@
+[
+  {
+    "id": "rng_diff_standard_normal_10",
+    "operation": "standard_normal_bit_exact",
+    "seed": 9001,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-distribution-diff-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/rng_distribution_differential_cases.json"
+    ],
+    "reason_code": "random_distribution_parity_contract",
+    "size": 10,
+    "expected_values": [
+      0.01847810475746172,
+      -1.1905253178765383,
+      -0.5603660274862661,
+      2.2922973062409824,
+      -0.4712603045046847,
+      -0.5091447337302424,
+      -0.10558552351948577,
+      -0.593316195914052,
+      -0.24304311445252486,
+      -1.311265187336625
+    ]
+  },
+  {
+    "id": "rng_diff_normal_5_2_10",
+    "operation": "normal_bit_exact",
+    "seed": 9002,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-distribution-diff-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/rng_distribution_differential_cases.json"
+    ],
+    "reason_code": "random_distribution_parity_contract",
+    "loc": 5.0,
+    "scale": 2.0,
+    "size": 10,
+    "expected_values": [
+      6.209978609210111,
+      6.743587429655406,
+      6.658508013163339,
+      6.372891933225117,
+      3.790200890004511,
+      2.317655369926342,
+      6.787506432369668,
+      5.420733619744312,
+      5.028726558659815,
+      4.740874748959066
+    ]
+  },
+  {
+    "id": "rng_diff_exponential_2_5_10",
+    "operation": "exponential_bit_exact",
+    "seed": 9003,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-distribution-diff-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/rng_distribution_differential_cases.json"
+    ],
+    "reason_code": "random_distribution_parity_contract",
+    "scale": 2.5,
+    "size": 10,
+    "expected_values": [
+      0.6493404414860218,
+      1.161510337114589,
+      3.323700169801503,
+      0.6909267024840043,
+      2.6051395443970415,
+      1.6409308626106607,
+      0.8299726960339114,
+      4.735616284704951,
+      2.065354530576592,
+      0.15152866350324226
+    ]
+  },
+  {
+    "id": "rng_diff_poisson_5_10",
+    "operation": "poisson_bit_exact",
+    "seed": 9004,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-distribution-diff-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/rng_distribution_differential_cases.json"
+    ],
+    "reason_code": "random_distribution_parity_contract",
+    "lam": 5.0,
+    "size": 10,
+    "expected_values": [4, 2, 6, 5, 7, 8, 1, 1, 9, 2]
+  },
+  {
+    "id": "rng_diff_binomial_20_0_3_10",
+    "operation": "binomial_bit_exact",
+    "seed": 9005,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-distribution-diff-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/rng_distribution_differential_cases.json"
+    ],
+    "reason_code": "random_distribution_parity_contract",
+    "n": 20,
+    "p": 0.3,
+    "size": 10,
+    "expected_values": [4, 7, 8, 7, 6, 3, 6, 6, 7, 3]
+  },
+  {
+    "id": "rng_diff_gamma_2_1_5_10",
+    "operation": "gamma_bit_exact",
+    "seed": 9006,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-distribution-diff-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/rng_distribution_differential_cases.json"
+    ],
+    "reason_code": "random_distribution_parity_contract",
+    "shape": 2.0,
+    "scale": 1.5,
+    "size": 10,
+    "expected_values": [
+      0.8237952783668472,
+      7.416787429720806,
+      3.6076852183300074,
+      2.102225748156943,
+      3.323894200424368,
+      1.1211692677867764,
+      1.3160599933880182,
+      4.543980367153726,
+      7.163549481937453,
+      5.372628647809864
+    ]
+  },
+  {
+    "id": "rng_diff_beta_2_5_10",
+    "operation": "beta_bit_exact",
+    "seed": 9007,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-distribution-diff-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/rng_distribution_differential_cases.json"
+    ],
+    "reason_code": "random_distribution_parity_contract",
+    "a": 2.0,
+    "b": 5.0,
+    "size": 10,
+    "expected_values": [
+      0.17609141118688898,
+      0.34351677956521826,
+      0.18748158796612216,
+      0.23519450340783407,
+      0.03674865664853672,
+      0.12588329332362036,
+      0.30553374072115447,
+      0.24735579105069,
+      0.45511456649706655,
+      0.10697353533543982
+    ]
+  },
+  {
+    "id": "rng_diff_geometric_0_3_10",
+    "operation": "geometric_bit_exact",
+    "seed": 9008,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-distribution-diff-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/rng_distribution_differential_cases.json"
+    ],
+    "reason_code": "random_distribution_parity_contract",
+    "p": 0.3,
+    "size": 10,
+    "expected_values": [4, 2, 5, 6, 1, 3, 2, 1, 8, 1]
+  },
+  {
+    "id": "rng_diff_weibull_1_5_10",
+    "operation": "weibull_bit_exact",
+    "seed": 9009,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-distribution-diff-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/rng_distribution_differential_cases.json"
+    ],
+    "reason_code": "random_distribution_parity_contract",
+    "a": 1.5,
+    "size": 10,
+    "expected_values": [
+      1.1574660648781039,
+      0.41625055570667235,
+      0.6144422046966329,
+      0.9153067858980792,
+      1.9733698632282841,
+      0.7129213401562262,
+      0.8007334640489959,
+      0.1279355435731027,
+      0.4550039761764579,
+      0.7250164409674157
+    ]
+  },
+  {
+    "id": "rng_diff_uniform_neg2_3_10",
+    "operation": "uniform_bit_exact",
+    "seed": 9010,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-distribution-diff-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/rng_distribution_differential_cases.json"
+    ],
+    "reason_code": "random_distribution_parity_contract",
+    "low": -2.0,
+    "high": 3.0,
+    "size": 10,
+    "expected_values": [
+      -0.40133459284590045,
+      0.7124890493478286,
+      -0.42125172588351956,
+      2.2584573470995144,
+      2.3498120523495567,
+      1.7829018221288595,
+      -0.6718649976474076,
+      1.4313437673825997,
+      -1.9764421277838404,
+      0.052180660543770685
+    ]
+  },
+  {
+    "id": "rng_diff_integers_0_100_10",
+    "operation": "integers_bit_exact",
+    "seed": 9011,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-distribution-diff-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/rng_distribution_differential_cases.json"
+    ],
+    "reason_code": "random_distribution_parity_contract",
+    "low": 0,
+    "high": 100,
+    "size": 10,
+    "expected_values": [47, 31, 51, 10, 53, 45, 66, 88, 35, 45]
+  },
+  {
+    "id": "rng_diff_permutation_8",
+    "operation": "permutation_bit_exact",
+    "seed": 9013,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-distribution-diff-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/rng_distribution_differential_cases.json"
+    ],
+    "reason_code": "random_distribution_parity_contract",
+    "n": 8,
+    "expected_values": [7, 2, 5, 4, 0, 1, 6, 3]
+  }
+]

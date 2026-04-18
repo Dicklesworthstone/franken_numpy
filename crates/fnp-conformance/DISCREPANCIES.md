@@ -94,6 +94,18 @@
 
 ---
 
+## DISC-008: PCG64 seeding via SeedSequence
+
+- **Reference:** NumPy's `Generator(PCG64(seed))` uses `SeedSequence` entropy mixing to derive 256-bit initial state
+- **Our impl:** `Generator::from_pcg64_dxsm(seed)` uses direct state initialization
+- **Impact:** Bit-exact sequence parity impossible without SeedSequence implementation
+- **Resolution:** ACCEPTED (for now)
+- **Reason:** SeedSequence is a complex entropy-mixing algorithm. Distribution statistical properties match; only bit-exact sequence differs.
+- **Tests affected:** rng_distribution_differential_cases.json (XFAIL)
+- **Review date:** 2026-04-18
+
+---
+
 ## Adding New Divergences
 
 When documenting a new divergence:

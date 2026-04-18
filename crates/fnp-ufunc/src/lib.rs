@@ -15733,8 +15733,9 @@ impl UFuncArray {
         let values = match mode {
             "full" => full,
             "same" => {
-                let start = (m - 1) / 2;
-                full[start..start + n].to_vec()
+                let same_len = n.max(m);
+                let start = (n.min(m) - 1) / 2;
+                full[start..start + same_len].to_vec()
             }
             "valid" => {
                 let valid_len = n.max(m) - n.min(m) + 1;
@@ -38069,6 +38070,15 @@ mod tests {
         assert_eq!(r.shape(), &[5]);
         // Full: [1, 4, 10, 16, 22, 22, 15] → same takes middle 5: [4, 10, 16, 22, 22]
         assert_eq!(r.values(), &[4.0, 10.0, 16.0, 22.0, 22.0]);
+    }
+
+    #[test]
+    fn convolve_mode_same_kernel_longer_matches_numpy() {
+        let a = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        let k = UFuncArray::new(vec![5], vec![1.0, 0.5, 0.25, 0.125, 0.0625], DType::F64).unwrap();
+        let r = a.convolve_mode(&k, "same").unwrap();
+        assert_eq!(r.shape(), &[5]);
+        assert_eq!(r.values(), &[1.0, 2.5, 1.25, 0.625, 0.3125]);
     }
 
     #[test]
