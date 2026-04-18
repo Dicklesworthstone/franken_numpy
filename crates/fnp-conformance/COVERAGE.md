@@ -15,7 +15,7 @@
 | RNG | 22 | 23 | 41 | 86 | Adequate + 39 statistical |
 | FFT | 30 | — | — | 30 | Adequate - transform families |
 | Datetime/timedelta | 34 | — | — | 34 | Adequate - arithmetic + busday |
-| Masked arrays | 27 | — | — | 27 | Adequate - reshape/concat/fill |
+| Masked arrays | 36 | — | — | 36 | Good - reshape/concat/fill/broadcast/all-masked/argmin-max |
 | Iterator/transfer | 31 | 16 | 16 | 63 | Adequate - transfer/overlap/flatiter edges covered |
 | Shape/stride (SCE) | 47 | — | — | 47 | Good - 0-D, empty, negative-stride, large shapes, 5D/6D transpose covered |
 | Dtype promotion | 198 | — | — | 198 | Good - full 14×14 type matrix coverage |
