@@ -18,7 +18,7 @@
 | Masked arrays | 44 | — | — | 44 | Good - reshape/concat/fill/broadcast/all-masked/argmin-max/axis-aware, min/max axis partial |
 | Iterator/transfer | 37 | 19 | 18 | 74 | Good - transfer/overlap/flatiter/broadcast, empty slice, no-overlap, cast class |
 | Shape/stride (SCE) | 51 | — | — | 51 | Good - 0-D, empty, negative-stride, large shapes, 5D/6D transpose, scalar-to-5D, F-order |
-| Dtype promotion | 198 | 17 | 18 | 233 | Good - full 14×14 type matrix + metamorphic + adversarial |
+| Dtype promotion | 198 | 17 | 20 | 235 | Good - full 14×14 type matrix + metamorphic + adversarial, title-case/trailing-space |
 | Runtime policy | 35 | — | 12 | 47 | Good - risk thresholds, boundaries, override audit, injection defense |
 
 ## Priority Coverage Gaps

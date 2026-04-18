@@ -20411,10 +20411,13 @@ impl UFuncArray {
                         let current = base + k * inner + inner_idx;
                         let diff = self.values[current] - self.values[prev];
                         let mut offset = 0.0;
-                        if diff > disc {
-                            offset = -p * ((diff + half_p) / p).floor();
-                        } else if diff < -disc {
-                            offset = p * ((-diff + half_p) / p).floor();
+                        if diff.abs() >= disc {
+                            let mut wrapped = (diff + half_p).rem_euclid(p) - half_p;
+                            let boundary_tol = f64::EPSILON * p.abs().max(1.0);
+                            if (wrapped + half_p).abs() <= boundary_tol && diff > 0.0 {
+                                wrapped = half_p;
+                            }
+                            offset = wrapped - diff;
                         }
                         correction += offset;
                         values[current] += correction;
@@ -36432,6 +36435,26 @@ mod tests {
 
         assert_eq!(out.shape(), &[2, 3]);
         assert_values_close(out.values(), &[0.0, 0.5, 1.0, 1.0, 0.5, 0.0]);
+    }
+
+    #[test]
+    fn unwrap_positive_odd_half_period_uses_upper_boundary() {
+        let pi = std::f64::consts::PI;
+        let arr = UFuncArray::new(vec![3], vec![0.0, 3.0 * pi, 4.0 * pi], DType::F64).unwrap();
+
+        let out = arr.unwrap(None).unwrap();
+
+        assert_values_close(out.values(), &[0.0, pi, 2.0 * pi]);
+    }
+
+    #[test]
+    fn unwrap_negative_odd_half_period_keeps_lower_boundary() {
+        let pi = std::f64::consts::PI;
+        let arr = UFuncArray::new(vec![3], vec![0.0, -3.0 * pi, -4.0 * pi], DType::F64).unwrap();
+
+        let out = arr.unwrap(None).unwrap();
+
+        assert_values_close(out.values(), &[0.0, -pi, -2.0 * pi]);
     }
 
     #[test]

@@ -302,5 +302,37 @@
       "crates/fnp-conformance/fixtures/packet002_dtype/dtype_adversarial_cases.json"
     ],
     "reason_code": "dtype_normalization_failed"
+  },
+  {
+    "id": "dtype002_adv_unknown_lhs_title_case",
+    "lhs": "Float64",
+    "rhs": "i32",
+    "expected_error_contains": "unknown lhs dtype",
+    "expected_reason_code": "dtype_normalization_failed",
+    "severity": "low",
+    "seed": 2319,
+    "mode": "strict",
+    "env_fingerprint": "fnp-dtype-packet002-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-002/risk_note.md",
+      "crates/fnp-conformance/fixtures/packet002_dtype/dtype_adversarial_cases.json"
+    ],
+    "reason_code": "dtype_normalization_failed"
+  },
+  {
+    "id": "dtype002_adv_unknown_rhs_trailing_space",
+    "lhs": "f64",
+    "rhs": "i32 ",
+    "expected_error_contains": "unknown rhs dtype",
+    "expected_reason_code": "dtype_normalization_failed",
+    "severity": "medium",
+    "seed": 2320,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-dtype-packet002-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-002/risk_note.md",
+      "crates/fnp-conformance/fixtures/packet002_dtype/dtype_adversarial_cases.json"
+    ],
+    "reason_code": "dtype_normalization_failed"
   }
 ]
