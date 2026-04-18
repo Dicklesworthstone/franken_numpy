@@ -1,0 +1,211 @@
+[
+  {
+    "id": "convolve_empty_a",
+    "operation": "convolve",
+    "seed": 10301,
+    "mode": "strict",
+    "env_fingerprint": "fnp-signal-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_adversarial_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_adversarial_empty_input",
+    "a_shape": [0],
+    "a_values": [],
+    "b_shape": [3],
+    "b_values": [1.0, 2.0, 3.0],
+    "convmode": "full",
+    "expected_behavior": "empty_output"
+  },
+  {
+    "id": "convolve_empty_b",
+    "operation": "convolve",
+    "seed": 10302,
+    "mode": "strict",
+    "env_fingerprint": "fnp-signal-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_adversarial_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_adversarial_empty_kernel",
+    "a_shape": [4],
+    "a_values": [1.0, 2.0, 3.0, 4.0],
+    "b_shape": [0],
+    "b_values": [],
+    "convmode": "full",
+    "expected_behavior": "empty_output"
+  },
+  {
+    "id": "convolve_single_element_both",
+    "operation": "convolve",
+    "seed": 10303,
+    "mode": "strict",
+    "env_fingerprint": "fnp-signal-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_adversarial_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_adversarial_single_element",
+    "a_shape": [1],
+    "a_values": [5.0],
+    "b_shape": [1],
+    "b_values": [3.0],
+    "convmode": "full",
+    "expected_shape": [1],
+    "expected_values": [15.0]
+  },
+  {
+    "id": "convolve_with_nan",
+    "operation": "convolve",
+    "seed": 10304,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-signal-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_adversarial_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_adversarial_nan_propagation",
+    "a_shape": [4],
+    "a_values": [1.0, "NaN", 3.0, 4.0],
+    "b_shape": [2],
+    "b_values": [1.0, 1.0],
+    "convmode": "full",
+    "expected_behavior": "nan_propagates"
+  },
+  {
+    "id": "convolve_with_inf",
+    "operation": "convolve",
+    "seed": 10305,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-signal-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_adversarial_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_adversarial_inf_handling",
+    "a_shape": [3],
+    "a_values": [1.0, "Inf", 3.0],
+    "b_shape": [2],
+    "b_values": [1.0, -1.0],
+    "convmode": "full",
+    "expected_behavior": "inf_propagates"
+  },
+  {
+    "id": "convolve_kernel_longer_than_signal",
+    "operation": "convolve",
+    "seed": 10306,
+    "mode": "strict",
+    "env_fingerprint": "fnp-signal-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_adversarial_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_adversarial_kernel_longer",
+    "a_shape": [2],
+    "a_values": [1.0, 2.0],
+    "b_shape": [5],
+    "b_values": [1.0, 0.5, 0.25, 0.125, 0.0625],
+    "convmode": "full",
+    "expected_behavior": "valid_output"
+  },
+  {
+    "id": "convolve_valid_mode_empty_result",
+    "operation": "convolve",
+    "seed": 10307,
+    "mode": "strict",
+    "env_fingerprint": "fnp-signal-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_adversarial_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_adversarial_valid_empty",
+    "a_shape": [3],
+    "a_values": [1.0, 2.0, 3.0],
+    "b_shape": [5],
+    "b_values": [1.0, 1.0, 1.0, 1.0, 1.0],
+    "convmode": "valid",
+    "expected_behavior": "empty_output"
+  },
+  {
+    "id": "correlate_empty_input",
+    "operation": "correlate",
+    "seed": 10308,
+    "mode": "strict",
+    "env_fingerprint": "fnp-signal-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_adversarial_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_adversarial_correlate_empty",
+    "a_shape": [0],
+    "a_values": [],
+    "b_shape": [3],
+    "b_values": [1.0, 2.0, 3.0],
+    "expected_behavior": "empty_output"
+  },
+  {
+    "id": "convolve_all_zeros",
+    "operation": "convolve",
+    "seed": 10309,
+    "mode": "strict",
+    "env_fingerprint": "fnp-signal-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_adversarial_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_adversarial_all_zeros",
+    "a_shape": [4],
+    "a_values": [0.0, 0.0, 0.0, 0.0],
+    "b_shape": [3],
+    "b_values": [1.0, 2.0, 3.0],
+    "convmode": "full",
+    "expected_behavior": "all_zeros_output"
+  },
+  {
+    "id": "convolve_large_kernel",
+    "operation": "convolve",
+    "seed": 10310,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-signal-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_adversarial_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_adversarial_large_kernel",
+    "a_shape": [8],
+    "a_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "b_shape": [64],
+    "b_values_generator": "ones",
+    "convmode": "same",
+    "expected_behavior": "moving_sum"
+  },
+  {
+    "id": "window_bartlett_len_zero",
+    "operation": "bartlett",
+    "seed": 10311,
+    "mode": "strict",
+    "env_fingerprint": "fnp-signal-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_adversarial_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_adversarial_window_zero",
+    "n": 0,
+    "expected_behavior": "empty_output"
+  },
+  {
+    "id": "window_hamming_len_one",
+    "operation": "hamming",
+    "seed": 10312,
+    "mode": "strict",
+    "env_fingerprint": "fnp-signal-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_adversarial_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_adversarial_window_one",
+    "n": 1,
+    "expected_shape": [1],
+    "expected_values": [1.0]
+  }
+]
