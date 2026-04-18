@@ -3069,6 +3069,58 @@ pub struct PyObjectArray {
     values: Vec<PyObjectValue>,
 }
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum FromPyFuncReduceIdentity<T> {
+    #[default]
+    Omitted,
+    ReorderableNone,
+    Value(T),
+}
+
+impl<T> FromPyFuncReduceIdentity<T> {
+    #[must_use]
+    pub const fn is_reorderable(&self) -> bool {
+        !matches!(self, Self::Omitted)
+    }
+
+    #[must_use]
+    pub const fn value(&self) -> Option<&T> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::Omitted | Self::ReorderableNone => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FromPyFuncReduceAxisSpec {
+    Default,
+    All,
+    Axis(isize),
+    Axes(Vec<isize>),
+}
+
+#[derive(Debug)]
+pub enum FromPyFuncReduceError<E> {
+    UFunc(UFuncError),
+    Callback(E),
+}
+
+impl<E> From<UFuncError> for FromPyFuncReduceError<E> {
+    fn from(value: UFuncError) -> Self {
+        Self::UFunc(value)
+    }
+}
+
+pub struct FromPyFuncReduceOptions<'a, T> {
+    pub axis_spec: FromPyFuncReduceAxisSpec,
+    pub keepdims: bool,
+    pub initial: Option<T>,
+    pub where_mask: Option<&'a [bool]>,
+    pub identity: &'a FromPyFuncReduceIdentity<T>,
+    pub op_name: &'a str,
+}
+
 #[derive(Debug, Serialize)]
 struct PythonFromPyFuncPayload {
     callable: PythonFromPyFuncCallable,
@@ -3240,14 +3292,205 @@ impl PyObjectArray {
     }
 }
 
-fn validate_frompyfunc_nout(nout: usize) -> Result<(), UFuncError> {
-    if nout == 0 {
-        return Err(UFuncError::Msg(
-            "frompyfunc: nout must be greater than zero".to_string(),
+fn frompyfunc_reduce_not_reorderable(op_name: &str) -> UFuncError {
+    UFuncError::Msg(format!(
+        "reduction operation '{op_name}' is not reorderable, so at most one axis may be specified",
+    ))
+}
+
+fn frompyfunc_reduce_no_identity(op_name: &str) -> UFuncError {
+    UFuncError::Msg(format!(
+        "zero-size array to reduction operation {op_name} which has no identity",
+    ))
+}
+
+fn frompyfunc_reduce_where_requires_initial(op_name: &str) -> UFuncError {
+    UFuncError::Msg(format!(
+        "reduction operation '{op_name}' does not have an identity, so to use a where mask one has to specify 'initial'",
+    ))
+}
+
+fn normalize_frompyfunc_reduce_axes(
+    shape: &[usize],
+    axis_spec: &FromPyFuncReduceAxisSpec,
+    reorderable: bool,
+    op_name: &str,
+) -> Result<Vec<usize>, UFuncError> {
+    let ndim = shape.len();
+    match axis_spec {
+        FromPyFuncReduceAxisSpec::Default => {
+            if ndim == 0 {
+                Ok(Vec::new())
+            } else {
+                Ok(vec![0])
+            }
+        }
+        FromPyFuncReduceAxisSpec::All => {
+            if ndim > 1 && !reorderable {
+                Err(frompyfunc_reduce_not_reorderable(op_name))
+            } else {
+                Ok((0..ndim).collect())
+            }
+        }
+        FromPyFuncReduceAxisSpec::Axis(axis) => {
+            if ndim == 0 {
+                if *axis == 0 || *axis == -1 {
+                    Ok(Vec::new())
+                } else {
+                    Err(UFuncError::AxisOutOfBounds { axis: *axis, ndim })
+                }
+            } else {
+                Ok(vec![normalize_axis(*axis, ndim)?])
+            }
+        }
+        FromPyFuncReduceAxisSpec::Axes(axes) => {
+            if axes.is_empty() {
+                return Ok(Vec::new());
+            }
+            let mut normalized = Vec::with_capacity(axes.len());
+            let mut seen = HashSet::with_capacity(axes.len());
+            for &axis in axes {
+                let normalized_axis = normalize_axis(axis, ndim)?;
+                if !seen.insert(normalized_axis) {
+                    return Err(UFuncError::Msg("duplicate value in 'axis'".to_string()));
+                }
+                normalized.push(normalized_axis);
+            }
+            if normalized.len() > 1 && !reorderable {
+                Err(frompyfunc_reduce_not_reorderable(op_name))
+            } else {
+                Ok(normalized)
+            }
+        }
+    }
+}
+
+pub fn reduce_frompyfunc_values<T, F, G, E>(
+    shape: &[usize],
+    values: &[T],
+    options: FromPyFuncReduceOptions<'_, T>,
+    mut clone_value: G,
+    mut fold: F,
+) -> Result<(Vec<usize>, Vec<T>), FromPyFuncReduceError<E>>
+where
+    F: FnMut(&T, &T) -> Result<T, E>,
+    G: FnMut(&T) -> T,
+{
+    let FromPyFuncReduceOptions {
+        axis_spec,
+        keepdims,
+        initial,
+        where_mask,
+        identity,
+        op_name,
+    } = options;
+
+    let expected = element_count(shape).map_err(UFuncError::Shape)?;
+    if values.len() != expected {
+        return Err(UFuncError::InvalidInputLength {
+            expected,
+            actual: values.len(),
+        }
+        .into());
+    }
+
+    let reduced_axes =
+        normalize_frompyfunc_reduce_axes(shape, &axis_spec, identity.is_reorderable(), op_name)?;
+    if reduced_axes.is_empty() {
+        return Ok((
+            shape.to_vec(),
+            values.iter().map(&mut clone_value).collect(),
         ));
     }
 
-    Ok(())
+    if let Some(mask) = where_mask {
+        if mask.len() != values.len() {
+            return Err(UFuncError::Msg(
+                "frompyfunc reduce: where mask shape mismatch".to_string(),
+            )
+            .into());
+        }
+        if initial.is_none() {
+            return Err(frompyfunc_reduce_where_requires_initial(op_name).into());
+        }
+    }
+
+    let reduced_axes_set: HashSet<usize> = reduced_axes.iter().copied().collect();
+    let keep_axes: Vec<usize> = (0..shape.len())
+        .filter(|axis| !reduced_axes_set.contains(axis))
+        .collect();
+    let keep_shape: Vec<usize> = keep_axes.iter().map(|&axis| shape[axis]).collect();
+    let out_shape = if keepdims {
+        shape
+            .iter()
+            .enumerate()
+            .map(|(axis, &dim)| {
+                if reduced_axes_set.contains(&axis) {
+                    1
+                } else {
+                    dim
+                }
+            })
+            .collect()
+    } else {
+        keep_shape.clone()
+    };
+    let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+    if out_count == 0 {
+        return Ok((out_shape, Vec::new()));
+    }
+
+    let reduced_shape: Vec<usize> = reduced_axes.iter().map(|&axis| shape[axis]).collect();
+    let reduced_count = element_count(&reduced_shape).map_err(UFuncError::Shape)?;
+    let input_strides = c_strides_elems(shape);
+    let keep_strides = c_strides_elems(&keep_shape);
+    let reduced_strides = c_strides_elems(&reduced_shape);
+    let mut out_values = Vec::with_capacity(out_count);
+
+    for out_flat in 0..out_count {
+        let mut base = 0usize;
+        for (coord_idx, &axis) in keep_axes.iter().enumerate() {
+            let coord = (out_flat / keep_strides[coord_idx]) % keep_shape[coord_idx];
+            base += coord * input_strides[axis];
+        }
+
+        let mut acc = initial.as_ref().map(&mut clone_value);
+        let mut seen_value = acc.is_some();
+
+        for reduced_flat in 0..reduced_count {
+            let mut input_index = base;
+            for (coord_idx, &axis) in reduced_axes.iter().enumerate() {
+                let coord = (reduced_flat / reduced_strides[coord_idx]) % reduced_shape[coord_idx];
+                input_index += coord * input_strides[axis];
+            }
+
+            if let Some(mask) = where_mask
+                && !mask[input_index]
+            {
+                continue;
+            }
+
+            let value = &values[input_index];
+            if let Some(current) = acc.as_ref() {
+                acc = Some(fold(current, value).map_err(FromPyFuncReduceError::Callback)?);
+            } else {
+                acc = Some(clone_value(value));
+            }
+            seen_value = true;
+        }
+
+        if seen_value {
+            out_values.push(
+                acc.expect("frompyfunc reduction should produce an accumulator when seen_value"),
+            );
+        } else if let Some(identity_value) = identity.value() {
+            out_values.push(clone_value(identity_value));
+        } else {
+            return Err(frompyfunc_reduce_no_identity(op_name).into());
+        }
+    }
+
+    Ok((out_shape, out_values))
 }
 
 fn prepare_frompyfunc_call(
@@ -3534,8 +3777,6 @@ pub fn frompyfunc<F>(func: F, nin: usize, nout: usize) -> Result<PyFuncUFunc<F>,
 where
     F: Fn(&[f64], &mut [f64]) -> Result<(), UFuncError>,
 {
-    validate_frompyfunc_nout(nout)?;
-
     Ok(PyFuncUFunc { func, nin, nout })
 }
 
@@ -3663,8 +3904,6 @@ pub fn frompyfunc_object<F>(
 where
     F: Fn(&[f64], &mut [PyObjectValue]) -> Result<(), UFuncError>,
 {
-    validate_frompyfunc_nout(nout)?;
-
     Ok(PyObjectUFunc { func, nin, nout })
 }
 
@@ -3774,8 +4013,6 @@ where
     S: Into<String>,
     P: Into<String>,
 {
-    validate_frompyfunc_nout(nout)?;
-
     Ok(PythonSourceUFunc {
         callable_source: callable_source.into(),
         python: python.into(),
@@ -3908,8 +4145,6 @@ where
     A: Into<String>,
     P: Into<String>,
 {
-    validate_frompyfunc_nout(nout)?;
-
     Ok(PythonImportedCallableUFunc {
         module: validate_frompyfunc_python_module(module.into())?,
         attr_path: parse_frompyfunc_python_attr_path(attr_path.into())?,
@@ -31082,33 +31317,35 @@ impl StringArray {
 #[cfg(test)]
 mod tests {
     use super::{
-        AxisSlice, BinaryDispatchMethod, BinaryOp, FloatErrorKind, FloatErrorMode, GridSpec,
-        MAError, MaskedArray, OverrideDispatchDecision, OverrideOperand, OverridePayloadClass,
-        PrintOptions, PyObjectArray, PyObjectValue, QuantileInterp, ShapeError, StringArray,
-        UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncArrayView, UFuncError, UFuncLogRecord,
-        UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp, bitwise_count, busday_count, busday_offset,
-        busday_offset_with_holidays, cheb2poly, chebadd, chebder, chebdiv, chebfit, chebfromroots,
-        chebint, chebmul, chebroots, chebsub, chebval, checked_window_total, copysign,
-        datetime_as_string, divmod_arrays, errstate, financial_fv, financial_ipmt, financial_irr,
-        financial_mirr, financial_nper, financial_npv, financial_pmt, financial_ppmt, financial_pv,
-        financial_rate, frexp, frompyfunc, frompyfunc_object, frompyfunc_python,
-        frompyfunc_python_import, frompyfunc_python_import_with_interpreter,
-        frompyfunc_python_with_interpreter, gcd_arrays, geterr, herm2poly, hermadd, hermder,
-        hermdiv, herme2poly, hermeadd, hermediv, hermefit, hermefromroots, hermemul, hermeroots,
-        hermesub, hermeval, hermfit, hermfromroots, hermint, hermmul, hermroots, hermsub, hermval,
-        hypot, is_busday, isnat, isneginf, isposinf, lag2poly, lagadd, lagder, lagdiv, lagfit,
-        lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, lcm_arrays, ldexp, leg2poly,
-        legadd, legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub, legval,
-        logaddexp, logaddexp2, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or,
-        mediate_ufunc_runtime_policy, modf, nextafter, normalize_fixed_signature_keywords,
-        normalize_signature_keywords, pad_empty, pad_linear_ramp, pad_stat,
-        parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch,
-        plan_binary_dispatch_with_registry, plan_binary_dispatch_with_signature, poly2cheb,
-        poly2herm, poly2herme, poly2lag, poly2leg, register_custom_loop, resolve_override_dispatch,
-        scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log, scimath_log2, scimath_log10,
-        scimath_logn, scimath_power, scimath_sqrt, seterr, seterr_state, seterrcall, signbit,
-        sort_complex, spacing, take_float_error_events, unique_all, unique_counts, unique_inverse,
-        unique_values, validate_override_payload_class, where_nonzero,
+        AxisSlice, BinaryDispatchMethod, BinaryOp, FloatErrorKind, FloatErrorMode,
+        FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
+        FromPyFuncReduceOptions, GridSpec, MAError, MaskedArray, OverrideDispatchDecision,
+        OverrideOperand, OverridePayloadClass, PrintOptions, PyObjectArray, PyObjectValue,
+        QuantileInterp, ShapeError, StringArray, UFUNC_PACKET_REASON_CODES, UFuncArray,
+        UFuncArrayView, UFuncError, UFuncLogRecord, UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp,
+        bitwise_count, busday_count, busday_offset, busday_offset_with_holidays, cheb2poly,
+        chebadd, chebder, chebdiv, chebfit, chebfromroots, chebint, chebmul, chebroots, chebsub,
+        chebval, checked_window_total, copysign, datetime_as_string, divmod_arrays, errstate,
+        financial_fv, financial_ipmt, financial_irr, financial_mirr, financial_nper, financial_npv,
+        financial_pmt, financial_ppmt, financial_pv, financial_rate, frexp, frompyfunc,
+        frompyfunc_object, frompyfunc_python, frompyfunc_python_import,
+        frompyfunc_python_import_with_interpreter, frompyfunc_python_with_interpreter, gcd_arrays,
+        geterr, herm2poly, hermadd, hermder, hermdiv, herme2poly, hermeadd, hermediv, hermefit,
+        hermefromroots, hermemul, hermeroots, hermesub, hermeval, hermfit, hermfromroots, hermint,
+        hermmul, hermroots, hermsub, hermval, hypot, is_busday, isnat, isneginf, isposinf,
+        lag2poly, lagadd, lagder, lagdiv, lagfit, lagfromroots, lagint, lagmul, lagroots, lagsub,
+        lagval, lcm_arrays, ldexp, leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint,
+        legmul, legroots, legsub, legval, logaddexp, logaddexp2, ma_is_mask, ma_is_masked,
+        ma_make_mask, ma_mask_or, mediate_ufunc_runtime_policy, modf, nextafter,
+        normalize_fixed_signature_keywords, normalize_signature_keywords, pad_empty,
+        pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
+        plan_binary_dispatch, plan_binary_dispatch_with_registry,
+        plan_binary_dispatch_with_signature, poly2cheb, poly2herm, poly2herme, poly2lag, poly2leg,
+        reduce_frompyfunc_values, register_custom_loop, resolve_override_dispatch, scimath_arccos,
+        scimath_arcsin, scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_logn,
+        scimath_power, scimath_sqrt, seterr, seterr_state, seterrcall, signbit, sort_complex,
+        spacing, take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
+        validate_override_payload_class, where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
@@ -46546,14 +46783,29 @@ mod tests {
     }
 
     #[test]
-    fn frompyfunc_rejects_zero_outputs() {
-        let result = frompyfunc(|_, _| Ok(()), 0, 0);
-        assert!(result.is_err(), "nout=0 must be rejected");
-        let err = result.err().expect("validated error result");
-        assert_eq!(
-            err.to_string(),
-            "frompyfunc: nout must be greater than zero"
-        );
+    fn frompyfunc_zero_outputs_allow_side_effects() {
+        use std::cell::Cell;
+
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let call_count = Cell::new(0usize);
+        let seen_total = Cell::new(0.0f64);
+        let ufunc = frompyfunc(
+            |args, out| {
+                assert!(out.is_empty(), "nout=0 should provide no output buffer");
+                call_count.set(call_count.get() + 1);
+                seen_total.set(seen_total.get() + args[0]);
+                Ok(())
+            },
+            1,
+            0,
+        )
+        .unwrap();
+
+        let outputs = ufunc.call(&[&a]).unwrap();
+
+        assert!(outputs.is_empty(), "nout=0 should return no output arrays");
+        assert_eq!(call_count.get(), 3, "callable should run once per element");
+        assert_eq!(seen_total.get(), 6.0);
     }
 
     #[test]
@@ -46591,6 +46843,155 @@ mod tests {
             err.to_string(),
             "frompyfunc: call_single requires nout=1, got 2"
         );
+    }
+
+    #[test]
+    fn frompyfunc_reduce_values_default_axis_reduces_first_dimension() {
+        let (shape, values) = reduce_frompyfunc_values(
+            &[2, 2],
+            &[2_i64, 3_i64, 4_i64, 5_i64],
+            FromPyFuncReduceOptions {
+                axis_spec: FromPyFuncReduceAxisSpec::Default,
+                keepdims: false,
+                initial: None,
+                where_mask: None,
+                identity: &FromPyFuncReduceIdentity::Omitted,
+                op_name: "mul (vectorized)",
+            },
+            |value| *value,
+            |lhs, rhs| Ok::<i64, UFuncError>(lhs * rhs),
+        )
+        .expect("default-axis reduction should succeed");
+
+        assert_eq!(shape, vec![2]);
+        assert_eq!(values, vec![8, 15]);
+    }
+
+    #[test]
+    fn frompyfunc_reduce_values_axis_none_requires_reorderable_identity() {
+        let err = reduce_frompyfunc_values(
+            &[2, 2],
+            &[2_i64, 3_i64, 4_i64, 5_i64],
+            FromPyFuncReduceOptions {
+                axis_spec: FromPyFuncReduceAxisSpec::All,
+                keepdims: false,
+                initial: None,
+                where_mask: None,
+                identity: &FromPyFuncReduceIdentity::Omitted,
+                op_name: "mul (vectorized)",
+            },
+            |value| *value,
+            |lhs, rhs| Ok::<i64, UFuncError>(lhs * rhs),
+        )
+        .expect_err("axis=None should reject non-reorderable reductions");
+
+        match err {
+            FromPyFuncReduceError::UFunc(UFuncError::Msg(message)) => assert_eq!(
+                message,
+                "reduction operation 'mul (vectorized)' is not reorderable, so at most one axis may be specified"
+            ),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn frompyfunc_reduce_values_identity_value_handles_empty_inputs() {
+        let (shape, values) = reduce_frompyfunc_values(
+            &[0],
+            &[],
+            FromPyFuncReduceOptions {
+                axis_spec: FromPyFuncReduceAxisSpec::All,
+                keepdims: false,
+                initial: None,
+                where_mask: None,
+                identity: &FromPyFuncReduceIdentity::Value(1_i64),
+                op_name: "mul (vectorized)",
+            },
+            |value| *value,
+            |lhs, rhs| Ok::<i64, UFuncError>(lhs * rhs),
+        )
+        .expect("identity-backed empty reductions should succeed");
+
+        assert!(shape.is_empty());
+        assert_eq!(values, vec![1]);
+    }
+
+    #[test]
+    fn frompyfunc_reduce_values_explicit_none_still_rejects_empty_inputs() {
+        let err = reduce_frompyfunc_values(
+            &[0],
+            &[],
+            FromPyFuncReduceOptions {
+                axis_spec: FromPyFuncReduceAxisSpec::All,
+                keepdims: false,
+                initial: None,
+                where_mask: None,
+                identity: &FromPyFuncReduceIdentity::<i64>::ReorderableNone,
+                op_name: "mul (vectorized)",
+            },
+            |value| *value,
+            |lhs, rhs| Ok::<i64, UFuncError>(lhs * rhs),
+        )
+        .expect_err("explicit None should not provide an identity value");
+
+        match err {
+            FromPyFuncReduceError::UFunc(UFuncError::Msg(message)) => assert_eq!(
+                message,
+                "zero-size array to reduction operation mul (vectorized) which has no identity"
+            ),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn frompyfunc_reduce_values_where_uses_initial_once_per_output() {
+        let mask = [true, false, false, true];
+        let (shape, values) = reduce_frompyfunc_values(
+            &[2, 2],
+            &[2_i64, 3_i64, 4_i64, 5_i64],
+            FromPyFuncReduceOptions {
+                axis_spec: FromPyFuncReduceAxisSpec::Default,
+                keepdims: false,
+                initial: Some(7_i64),
+                where_mask: Some(&mask),
+                identity: &FromPyFuncReduceIdentity::Omitted,
+                op_name: "mul (vectorized)",
+            },
+            |value| *value,
+            |lhs, rhs| Ok::<i64, UFuncError>(lhs * rhs),
+        )
+        .expect("where+initial reduction should succeed");
+
+        assert_eq!(shape, vec![2]);
+        assert_eq!(values, vec![14, 35]);
+    }
+
+    #[test]
+    fn frompyfunc_reduce_values_where_without_initial_errors() {
+        let mask = [true, false, true];
+        let err = reduce_frompyfunc_values(
+            &[3],
+            &[2_i64, 3_i64, 4_i64],
+            FromPyFuncReduceOptions {
+                axis_spec: FromPyFuncReduceAxisSpec::Default,
+                keepdims: false,
+                initial: None,
+                where_mask: Some(&mask),
+                identity: &FromPyFuncReduceIdentity::Value(1_i64),
+                op_name: "mul (vectorized)",
+            },
+            |value| *value,
+            |lhs, rhs| Ok::<i64, UFuncError>(lhs * rhs),
+        )
+        .expect_err("where without initial should be rejected");
+
+        match err {
+            FromPyFuncReduceError::UFunc(UFuncError::Msg(message)) => assert_eq!(
+                message,
+                "reduction operation 'mul (vectorized)' does not have an identity, so to use a where mask one has to specify 'initial'"
+            ),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
@@ -46733,13 +47134,15 @@ mod tests {
     }
 
     #[test]
-    fn frompyfunc_python_rejects_zero_outputs() {
-        let err = frompyfunc_python("lambda: None", 0, 0)
-            .expect_err("nout=0 must be rejected for python bridge");
-        assert_eq!(
-            err.to_string(),
-            "frompyfunc: nout must be greater than zero"
-        );
+    fn frompyfunc_python_allows_zero_outputs() {
+        let Some(python) = python_bridge_test_interpreter() else {
+            return;
+        };
+        let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let ufunc = frompyfunc_python_with_interpreter("lambda x: None", 1, 0, python).unwrap();
+        let outputs = ufunc.call(&[&a]).unwrap();
+
+        assert!(outputs.is_empty(), "nout=0 should return no python outputs");
     }
 
     #[test]

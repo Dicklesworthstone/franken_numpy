@@ -2,16 +2,17 @@ use fnp_dtype::{ArrayStorage, DType, f16};
 use fnp_iter::{Nditer, NditerOptions, NditerOrder};
 use fnp_ndarray::{broadcast_shapes, element_count};
 use fnp_ufunc::{
-    GridSpec, UFuncArray, UnaryOp, copysign as ufunc_copysign, frexp as ufunc_frexp,
-    hypot as ufunc_hypot, isneginf as ufunc_isneginf, isposinf as ufunc_isposinf,
-    ldexp as ufunc_ldexp, logaddexp as ufunc_logaddexp, logaddexp2 as ufunc_logaddexp2,
-    modf as ufunc_modf, nextafter as ufunc_nextafter, signbit as ufunc_signbit,
-    spacing as ufunc_spacing, where_nonzero,
+    FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
+    FromPyFuncReduceOptions, GridSpec, UFuncArray, UnaryOp, copysign as ufunc_copysign,
+    frexp as ufunc_frexp, hypot as ufunc_hypot, isneginf as ufunc_isneginf,
+    isposinf as ufunc_isposinf, ldexp as ufunc_ldexp, logaddexp as ufunc_logaddexp,
+    logaddexp2 as ufunc_logaddexp2, modf as ufunc_modf, nextafter as ufunc_nextafter,
+    reduce_frompyfunc_values, signbit as ufunc_signbit, spacing as ufunc_spacing, where_nonzero,
 };
 use pyo3::Bound;
 use pyo3::exceptions::{PyTypeError, PyValueError, PyZeroDivisionError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyList, PyModule, PyTuple};
+use pyo3::types::{PyAny, PyBool, PyDict, PyList, PyModule, PyTuple};
 use pyo3::wrap_pyfunction;
 
 #[pyclass(name = "NditerStep", get_all, unsendable)]
@@ -30,6 +31,8 @@ pub struct PyNditer {
 #[pyclass(name = "FromPyFunc", unsendable)]
 pub struct PyFromPyFunc {
     callable: Py<PyAny>,
+    display_name: String,
+    identity: FromPyFuncReduceIdentity<Py<PyAny>>,
     nin: usize,
     nout: usize,
 }
@@ -1322,22 +1325,298 @@ fn build_meshgrid_numpy_outputs(
     build_numpy_tuple_from_pyarrays(py, &outputs)
 }
 
-impl PyFromPyFunc {
-    fn new_checked(callable: Py<PyAny>, nin: usize, nout: usize, py: Python<'_>) -> PyResult<Self> {
-        if nout == 0 {
-            return Err(PyValueError::new_err(
-                "frompyfunc: nout must be greater than zero",
-            ));
-        }
+fn frompyfunc_display_name(callable: &Bound<'_, PyAny>) -> String {
+    let base_name = callable
+        .getattr("__name__")
+        .and_then(|name| name.extract::<String>())
+        .unwrap_or_else(|_| "pyfunc".to_string());
+    format!("{base_name} (vectorized)")
+}
 
+fn parse_frompyfunc_identity(
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<FromPyFuncReduceIdentity<Py<PyAny>>> {
+    let Some(kwargs) = kwargs else {
+        return Ok(FromPyFuncReduceIdentity::Omitted);
+    };
+
+    let mut identity = FromPyFuncReduceIdentity::Omitted;
+    for (key, value) in kwargs.iter() {
+        let key = key
+            .extract::<String>()
+            .map_err(|_| PyTypeError::new_err("frompyfunc() keywords must be strings"))?;
+        match key.as_str() {
+            "identity" => {
+                identity = if value.is_none() {
+                    FromPyFuncReduceIdentity::ReorderableNone
+                } else {
+                    FromPyFuncReduceIdentity::Value(value.unbind())
+                };
+            }
+            other => {
+                return Err(PyTypeError::new_err(format!(
+                    "frompyfunc() got an unexpected keyword argument '{other}'",
+                )));
+            }
+        }
+    }
+
+    Ok(identity)
+}
+
+fn extract_object_array_input(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    context: &str,
+) -> PyResult<(Vec<usize>, Vec<Py<PyAny>>)> {
+    let numpy = py.import("numpy")?;
+    let builtins = py.import("builtins")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", builtins.getattr("object")?)?;
+    let array = numpy.call_method("asarray", (value,), Some(&kwargs))?;
+    let shape = array.getattr("shape")?.extract::<Vec<usize>>()?;
+    let flat = array.call_method1("reshape", (-1,))?;
+    let values = flat
+        .call_method0("tolist")?
+        .extract::<Vec<Py<PyAny>>>()
+        .map_err(|_| {
+            PyTypeError::new_err(format!("{context}: failed to normalize object array"))
+        })?;
+    Ok((shape, values))
+}
+
+fn build_numpy_object_array_from_flat_values(
+    py: Python<'_>,
+    shape: &[usize],
+    values: &[Py<PyAny>],
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let builtins = py.import("builtins")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", builtins.getattr("object")?)?;
+    let list = PyList::new(py, values.iter().map(|value| value.bind(py)))?;
+    let array = numpy.call_method("array", (list,), Some(&kwargs))?;
+    let shape = PyTuple::new(py, shape.iter().copied())?;
+    Ok(array.call_method1("reshape", (shape,))?.unbind())
+}
+
+fn build_numpy_scalar_or_array_from_object_values(
+    py: Python<'_>,
+    shape: &[usize],
+    values: &[Py<PyAny>],
+) -> PyResult<Py<PyAny>> {
+    let array = build_numpy_object_array_from_flat_values(py, shape, values)?;
+    if shape.is_empty() {
+        Ok(array.bind(py).get_item(())?.unbind())
+    } else {
+        Ok(array)
+    }
+}
+
+fn normalize_reduce_out_argument(py: Python<'_>, out: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    let candidate = if let Ok(tuple) = out.downcast::<PyTuple>() {
+        if tuple.len() != 1 {
+            return Err(PyTypeError::new_err("output must be an array"));
+        }
+        tuple.get_item(0)?
+    } else if out.downcast::<PyList>().is_ok() {
+        return Err(PyTypeError::new_err("output must be an array"));
+    } else {
+        out.clone()
+    };
+
+    if require_numpy_ndarray(py, &candidate, "reduce(out)").is_err() {
+        return Err(PyTypeError::new_err("output must be an array"));
+    }
+    Ok(candidate.unbind())
+}
+
+fn extract_frompyfunc_reduce_axis_spec(
+    py: Python<'_>,
+    axis: Option<Py<PyAny>>,
+) -> PyResult<FromPyFuncReduceAxisSpec> {
+    let Some(axis) = axis else {
+        return Ok(FromPyFuncReduceAxisSpec::Default);
+    };
+
+    let axis = axis.bind(py);
+    if axis.is_none() {
+        return Ok(FromPyFuncReduceAxisSpec::All);
+    }
+
+    if let Ok(axis) = axis.extract::<isize>() {
+        return Ok(FromPyFuncReduceAxisSpec::Axis(axis));
+    }
+
+    if let Ok(iter) = axis.try_iter() {
+        let axes = iter
+            .enumerate()
+            .map(|(index, item)| {
+                item?.extract::<isize>().map_err(|_| {
+                    PyTypeError::new_err(format!("reduce: axis[{index}] must be an integer"))
+                })
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        return Ok(FromPyFuncReduceAxisSpec::Axes(axes));
+    }
+
+    Err(PyTypeError::new_err(
+        "reduce: axis must be an integer, tuple/list of integers, or None",
+    ))
+}
+
+fn extract_frompyfunc_where_mask(
+    py: Python<'_>,
+    shape: &[usize],
+    where_value: &Bound<'_, PyAny>,
+) -> PyResult<Option<Vec<bool>>> {
+    if where_value.is_instance_of::<PyBool>() {
+        return if where_value.extract::<bool>()? {
+            Ok(None)
+        } else {
+            Ok(Some(vec![
+                false;
+                element_count(shape).map_err(|err| {
+                    PyValueError::new_err(err.to_string())
+                })?
+            ]))
+        };
+    }
+
+    let numpy = py.import("numpy")?;
+    let builtins = py.import("builtins")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", builtins.getattr("bool")?)?;
+    let mask = numpy.call_method("asarray", (where_value,), Some(&kwargs))?;
+    let shape = PyTuple::new(py, shape.iter().copied())?;
+    let broadcast = numpy.call_method1("broadcast_to", (mask, shape))?;
+    let flat = broadcast.call_method1("reshape", (-1,))?;
+    Ok(Some(flat.call_method0("tolist")?.extract::<Vec<bool>>()?))
+}
+
+struct ParsedFromPyFuncReduce {
+    array: Py<PyAny>,
+    axis_spec: FromPyFuncReduceAxisSpec,
+    out: Option<Py<PyAny>>,
+    keepdims: bool,
+    initial: Option<Py<PyAny>>,
+    where_arg: Option<Py<PyAny>>,
+}
+
+fn set_reduce_kwarg<T>(slot: &mut Option<T>, value: T, name: &str) -> PyResult<()> {
+    if slot.is_some() {
+        Err(PyTypeError::new_err(format!(
+            "reduce() got multiple values for argument '{name}'",
+        )))
+    } else {
+        *slot = Some(value);
+        Ok(())
+    }
+}
+
+fn parse_frompyfunc_reduce_call(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<ParsedFromPyFuncReduce> {
+    if args.is_empty() {
+        return Err(PyTypeError::new_err(
+            "reduce() missing required argument 'array' (pos 1)",
+        ));
+    }
+    if args.len() > 7 {
+        return Err(PyTypeError::new_err(format!(
+            "reduce() takes at most 7 arguments ({} given)",
+            args.len()
+        )));
+    }
+
+    let array = args.get_item(0)?.unbind();
+    let mut axis = args.get_item(1).ok().map(|value| value.unbind());
+    let mut out = args
+        .get_item(3)
+        .ok()
+        .filter(|value| !value.is_none())
+        .map(|value| value.unbind());
+    let mut keepdims = args
+        .get_item(4)
+        .ok()
+        .map(|value| value.extract::<bool>())
+        .transpose()?
+        .unwrap_or(false);
+    let mut initial = args
+        .get_item(5)
+        .ok()
+        .filter(|value| !value.is_none())
+        .map(|value| value.unbind());
+    let mut where_arg = args.get_item(6).ok().map(|value| value.unbind());
+
+    if let Some(kwargs) = kwargs {
+        for (key, value) in kwargs.iter() {
+            let key = key
+                .extract::<String>()
+                .map_err(|_| PyTypeError::new_err("reduce() keywords must be strings"))?;
+            match key.as_str() {
+                "axis" => set_reduce_kwarg(&mut axis, value.unbind(), "axis")?,
+                "dtype" => {}
+                "out" => {
+                    if !value.is_none() {
+                        set_reduce_kwarg(&mut out, value.unbind(), "out")?;
+                    }
+                }
+                "keepdims" => {
+                    if args.get_item(4).is_ok() {
+                        return Err(PyTypeError::new_err(
+                            "reduce() got multiple values for argument 'keepdims'",
+                        ));
+                    }
+                    keepdims = value.extract::<bool>()?;
+                }
+                "initial" => {
+                    if !value.is_none() {
+                        set_reduce_kwarg(&mut initial, value.unbind(), "initial")?;
+                    }
+                }
+                "where" => set_reduce_kwarg(&mut where_arg, value.unbind(), "where")?,
+                other => {
+                    return Err(PyTypeError::new_err(format!(
+                        "reduce() got an unexpected keyword argument '{other}'",
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(ParsedFromPyFuncReduce {
+        array,
+        axis_spec: extract_frompyfunc_reduce_axis_spec(py, axis)?,
+        out,
+        keepdims,
+        initial,
+        where_arg,
+    })
+}
+
+impl PyFromPyFunc {
+    fn new_checked(
+        callable: Py<PyAny>,
+        nin: usize,
+        nout: usize,
+        kwargs: Option<&Bound<'_, PyDict>>,
+        py: Python<'_>,
+    ) -> PyResult<Self> {
         if !callable.bind(py).is_callable() {
             return Err(PyTypeError::new_err(
                 "frompyfunc: callable_obj must be callable",
             ));
         }
+        let display_name = frompyfunc_display_name(callable.bind(py));
+        let identity = parse_frompyfunc_identity(kwargs)?;
 
         Ok(Self {
             callable,
+            display_name,
+            identity,
             nin,
             nout,
         })
@@ -1398,6 +1677,10 @@ impl PyFromPyFunc {
                     .map(|values| values[element_idx].bind(py)),
             )?;
             let result = self.callable.bind(py).call1(call_args)?;
+
+            if self.nout == 0 {
+                continue;
+            }
 
             if self.nout == 1 {
                 outputs[0].push(result.unbind());
@@ -1712,8 +1995,15 @@ impl PyNditer {
 #[pymethods]
 impl PyFromPyFunc {
     #[new]
-    fn new(callable_obj: Py<PyAny>, nin: usize, nout: usize, py: Python<'_>) -> PyResult<Self> {
-        Self::new_checked(callable_obj, nin, nout, py)
+    #[pyo3(signature = (callable_obj, nin, nout, **kwargs))]
+    fn new(
+        callable_obj: Py<PyAny>,
+        nin: usize,
+        nout: usize,
+        kwargs: Option<&Bound<'_, PyDict>>,
+        py: Python<'_>,
+    ) -> PyResult<Self> {
+        Self::new_checked(callable_obj, nin, nout, kwargs, py)
     }
 
     #[getter]
@@ -1726,12 +2016,81 @@ impl PyFromPyFunc {
         self.nout
     }
 
+    #[getter]
+    fn identity(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(match &self.identity {
+            FromPyFuncReduceIdentity::Value(value) => value.clone_ref(py),
+            FromPyFuncReduceIdentity::Omitted | FromPyFuncReduceIdentity::ReorderableNone => {
+                py.None()
+            }
+        })
+    }
+
     fn __call__(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         self.call_bound(py, args)
     }
 
+    #[pyo3(signature = (*args, **kwargs))]
+    fn reduce(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        if self.nin != 2 {
+            return Err(PyValueError::new_err(
+                "reduce only supported for binary functions",
+            ));
+        }
+        if self.nout != 1 {
+            return Err(PyValueError::new_err(
+                "reduce only supported for functions returning a single value",
+            ));
+        }
+
+        let parsed = parse_frompyfunc_reduce_call(py, args, kwargs)?;
+        let (shape, values) =
+            extract_object_array_input(py, parsed.array.bind(py), "reduce(array)")?;
+        let where_mask = match parsed.where_arg.as_ref() {
+            Some(where_arg) => extract_frompyfunc_where_mask(py, &shape, where_arg.bind(py))?,
+            None => None,
+        };
+
+        let (out_shape, out_values) = reduce_frompyfunc_values(
+            &shape,
+            &values,
+            FromPyFuncReduceOptions {
+                axis_spec: parsed.axis_spec,
+                keepdims: parsed.keepdims,
+                initial: parsed.initial,
+                where_mask: where_mask.as_deref(),
+                identity: &self.identity,
+                op_name: &self.display_name,
+            },
+            |value| value.clone_ref(py),
+            |lhs, rhs| {
+                let call_args = PyTuple::new(py, [lhs.bind(py), rhs.bind(py)])?;
+                Ok(self.callable.bind(py).call1(call_args)?.unbind())
+            },
+        )
+        .map_err(|err| match err {
+            FromPyFuncReduceError::UFunc(err) => PyValueError::new_err(err.to_string()),
+            FromPyFuncReduceError::Callback(err) => err,
+        })?;
+
+        if let Some(out) = parsed.out {
+            let out = normalize_reduce_out_argument(py, out.bind(py))?;
+            let result = build_numpy_object_array_from_flat_values(py, &out_shape, &out_values)?;
+            py.import("numpy")?
+                .call_method1("copyto", (out.bind(py), result.bind(py)))?;
+            Ok(out)
+        } else {
+            build_numpy_scalar_or_array_from_object_values(py, &out_shape, &out_values)
+        }
+    }
+
     fn __repr__(&self) -> String {
-        format!("FromPyFunc(nin={}, nout={})", self.nin, self.nout)
+        format!("<ufunc '{}'>", self.display_name)
     }
 }
 
@@ -1762,13 +2121,15 @@ impl PyVectorize {
 }
 
 #[pyfunction]
+#[pyo3(signature = (callable_obj, nin, nout, **kwargs))]
 fn frompyfunc(
     py: Python<'_>,
     callable_obj: Py<PyAny>,
     nin: usize,
     nout: usize,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyFromPyFunc> {
-    PyFromPyFunc::new_checked(callable_obj, nin, nout, py)
+    PyFromPyFunc::new_checked(callable_obj, nin, nout, kwargs, py)
 }
 
 #[pyfunction]
@@ -1982,7 +2343,7 @@ fn count_nonzero(
 
     let output = build_numpy_array_from_ufunc(py, &result)?;
     if result.shape().is_empty() {
-        return Ok(output.bind(py).get_item(PyTuple::empty(py))?.unbind());
+        return Ok(output.bind(py).get_item(())?.unbind());
     }
 
     Ok(output)
@@ -2823,7 +3184,9 @@ mod tests {
     };
     use pyo3::IntoPyObject;
     use pyo3::exceptions::{PyTypeError, PyValueError};
-    use pyo3::types::{PyAny, PyAnyMethods, PyDict, PyDictMethods, PyList, PyModule, PyTuple};
+    use pyo3::types::{
+        PyAny, PyAnyMethods, PyDict, PyDictMethods, PyList, PyModule, PyTuple, PyTypeMethods,
+    };
     use pyo3::{Py, PyResult, Python};
 
     fn with_python(test: impl FnOnce(Python<'_>) -> PyResult<()>) {
@@ -2875,6 +3238,22 @@ mod tests {
 
     fn repr_string(value: &pyo3::Bound<'_, pyo3::types::PyAny>) -> String {
         value.repr().unwrap().extract::<String>().unwrap()
+    }
+
+    fn reduce_outcome(
+        py: Python<'_>,
+        ufunc: &pyo3::Bound<'_, pyo3::types::PyAny>,
+        array: &pyo3::Bound<'_, pyo3::types::PyAny>,
+        kwargs: Option<&pyo3::Bound<'_, PyDict>>,
+    ) -> PyResult<String> {
+        match ufunc.call_method("reduce", (array,), kwargs) {
+            Ok(value) => Ok(format!("ok:{}", repr_string(&value))),
+            Err(err) => {
+                let name = err.get_type(py).name()?;
+                let message = err.value(py).str()?.extract::<String>()?;
+                Ok(format!("err:{name}:{message}"))
+            }
+        }
     }
 
     fn slice_object(
@@ -3055,7 +3434,7 @@ mod tests {
                 .getattr("partial")?
                 .call1((operator.getattr("mul")?, "x"))?
                 .unbind();
-            let ufunc = PyFromPyFunc::new_checked(callable.clone_ref(py), 1, 1, py)?;
+            let ufunc = PyFromPyFunc::new_checked(callable.clone_ref(py), 1, 1, None, py)?;
 
             let values = object_array(py, vec![1, 2, 3]);
             let args = PyTuple::new(py, [values.clone()])?;
@@ -3089,7 +3468,7 @@ mod tests {
 
             let builtins = py.import("builtins")?;
             let callable = builtins.getattr("divmod")?.unbind();
-            let ufunc = PyFromPyFunc::new_checked(callable.clone_ref(py), 2, 2, py)?;
+            let ufunc = PyFromPyFunc::new_checked(callable.clone_ref(py), 2, 2, None, py)?;
 
             let lhs = object_array(py, vec![10, 11, 12]);
             let rhs = object_array(py, vec![3]);
@@ -3123,6 +3502,362 @@ mod tests {
                 );
             }
             Ok(())
+        });
+    }
+
+    #[test]
+    fn frompyfunc_live_callable_matches_numpy_zero_output_side_effects() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let callable = py.get_type::<PyList>().getattr("reverse")?.unbind();
+            let actual_values = object_array(py, vec![vec![1, 2, 3], vec![4, 5], vec![6, 7, 8, 9]]);
+            let expected_values =
+                object_array(py, vec![vec![1, 2, 3], vec![4, 5], vec![6, 7, 8, 9]]);
+            let ufunc = PyFromPyFunc::new_checked(callable.clone_ref(py), 1, 0, None, py)?;
+
+            let actual_args = PyTuple::new(py, [actual_values.clone()])?;
+            let actual = ufunc.call_bound(py, &actual_args)?;
+
+            let numpy = py.import("numpy")?;
+            let expected_args = PyTuple::new(py, [expected_values.clone()])?;
+            let expected = numpy
+                .getattr("frompyfunc")?
+                .call1((callable.bind(py), 1, 0))?
+                .call1(expected_args)?;
+
+            let actual_repr = repr_string(actual.bind(py));
+            let expected_repr = repr_string(&expected);
+            let actual_tuple = actual.bind(py).downcast::<PyTuple>()?;
+            let expected_tuple = expected.downcast::<PyTuple>()?;
+            assert_eq!(actual_tuple.len()?, 0);
+            assert_eq!(expected_tuple.len()?, 0);
+            assert_eq!(actual_repr, expected_repr);
+            assert_eq!(
+                repr_string(&actual_values.call_method0("tolist")?),
+                repr_string(&expected_values.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn frompyfunc_live_callable_matches_numpy_identity_and_reduce() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+
+            let operator = py.import("operator")?;
+            let numpy = py.import("numpy")?;
+            let callable = operator.getattr("mul")?.unbind();
+            let reduce_input = object_array(py, vec![vec![1_i64, 1_i64], vec![1_i64, 1_i64]]);
+            let empty_input = object_array(py, Vec::<i64>::new());
+            let list_input = vec![2_i64, 3_i64, 4_i64];
+
+            let none_kwargs = PyDict::new(py);
+            none_kwargs.set_item("identity", py.None())?;
+            let one_kwargs = PyDict::new(py);
+            one_kwargs.set_item("identity", 1_i64)?;
+            let axis_kwargs = PyDict::new(py);
+            axis_kwargs.set_item("axis", (0_i64, 1_i64))?;
+
+            let actual_omitted = module
+                .getattr("frompyfunc")?
+                .call1((callable.bind(py), 2, 1))?;
+            let expected_omitted = numpy
+                .getattr("frompyfunc")?
+                .call1((callable.bind(py), 2, 1))?;
+
+            let actual_none = module
+                .getattr("frompyfunc")?
+                .call((callable.bind(py), 2, 1), Some(&none_kwargs))?;
+            let expected_none = numpy
+                .getattr("frompyfunc")?
+                .call((callable.bind(py), 2, 1), Some(&none_kwargs))?;
+
+            let actual_one = module
+                .getattr("frompyfunc")?
+                .call((callable.bind(py), 2, 1), Some(&one_kwargs))?;
+            let expected_one = numpy
+                .getattr("frompyfunc")?
+                .call((callable.bind(py), 2, 1), Some(&one_kwargs))?;
+
+            for (actual, expected) in [
+                (&actual_omitted, &expected_omitted),
+                (&actual_none, &expected_none),
+                (&actual_one, &expected_one),
+            ] {
+                assert_eq!(
+                    repr_string(&actual.getattr("identity")?),
+                    repr_string(&expected.getattr("identity")?)
+                );
+            }
+
+            for (actual, expected) in [
+                (&actual_omitted, &expected_omitted),
+                (&actual_none, &expected_none),
+                (&actual_one, &expected_one),
+            ] {
+                assert_eq!(
+                    reduce_outcome(py, actual, &object_array(py, list_input.clone()), None)?,
+                    reduce_outcome(py, expected, &object_array(py, list_input.clone()), None)?,
+                );
+            }
+
+            assert_eq!(
+                reduce_outcome(py, &actual_omitted, &reduce_input, Some(&axis_kwargs))?,
+                reduce_outcome(py, &expected_omitted, &reduce_input, Some(&axis_kwargs))?,
+            );
+            assert_eq!(
+                reduce_outcome(py, &actual_none, &reduce_input, Some(&axis_kwargs))?,
+                reduce_outcome(py, &expected_none, &reduce_input, Some(&axis_kwargs))?,
+            );
+            assert_eq!(
+                reduce_outcome(py, &actual_one, &reduce_input, Some(&axis_kwargs))?,
+                reduce_outcome(py, &expected_one, &reduce_input, Some(&axis_kwargs))?,
+            );
+
+            assert_eq!(
+                reduce_outcome(py, &actual_omitted, &empty_input, None)?,
+                reduce_outcome(py, &expected_omitted, &empty_input, None)?,
+            );
+            assert_eq!(
+                reduce_outcome(py, &actual_none, &empty_input, None)?,
+                reduce_outcome(py, &expected_none, &empty_input, None)?,
+            );
+            assert_eq!(
+                reduce_outcome(py, &actual_one, &empty_input, None)?,
+                reduce_outcome(py, &expected_one, &empty_input, None)?,
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn frompyfunc_live_callable_matches_numpy_reduce_kwargs_and_out() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+
+            let operator = py.import("operator")?;
+            let numpy = py.import("numpy")?;
+            let callable = operator.getattr("mul")?.unbind();
+            let reduce_input = object_array(
+                py,
+                vec![vec![2_i64, 3_i64, 4_i64], vec![5_i64, 6_i64, 7_i64]],
+            );
+
+            let actual = module
+                .getattr("frompyfunc")?
+                .call1((callable.bind(py), 2, 1))?;
+            let expected = numpy
+                .getattr("frompyfunc")?
+                .call1((callable.bind(py), 2, 1))?;
+
+            let keepdims_kwargs = PyDict::new(py);
+            keepdims_kwargs.set_item("axis", 1_i64)?;
+            keepdims_kwargs.set_item("keepdims", true)?;
+            assert_eq!(
+                reduce_outcome(py, &actual, &reduce_input, Some(&keepdims_kwargs))?,
+                reduce_outcome(py, &expected, &reduce_input, Some(&keepdims_kwargs))?,
+            );
+
+            let where_mask = numeric_array(py, vec![true, false, true], "bool");
+            let where_kwargs = PyDict::new(py);
+            where_kwargs.set_item("axis", 0_i64)?;
+            where_kwargs.set_item("where", where_mask.clone())?;
+            where_kwargs.set_item("initial", 11_i64)?;
+            assert_eq!(
+                reduce_outcome(py, &actual, &reduce_input, Some(&where_kwargs))?,
+                reduce_outcome(py, &expected, &reduce_input, Some(&where_kwargs))?,
+            );
+
+            let where_error_kwargs = PyDict::new(py);
+            where_error_kwargs.set_item("axis", 0_i64)?;
+            where_error_kwargs.set_item("where", where_mask)?;
+            assert_eq!(
+                reduce_outcome(py, &actual, &reduce_input, Some(&where_error_kwargs))?,
+                reduce_outcome(py, &expected, &reduce_input, Some(&where_error_kwargs))?,
+            );
+
+            let actual_out = object_array(py, vec![0_i64, 0_i64, 0_i64]);
+            let expected_out = object_array(py, vec![0_i64, 0_i64, 0_i64]);
+            let actual_out_kwargs = PyDict::new(py);
+            let expected_out_kwargs = PyDict::new(py);
+            actual_out_kwargs.set_item("axis", 0_i64)?;
+            expected_out_kwargs.set_item("axis", 0_i64)?;
+            actual_out_kwargs.set_item("out", PyTuple::new(py, [actual_out.clone()])?)?;
+            expected_out_kwargs.set_item("out", PyTuple::new(py, [expected_out.clone()])?)?;
+
+            let actual_result =
+                actual.call_method("reduce", (reduce_input.clone(),), Some(&actual_out_kwargs))?;
+            let expected_result =
+                expected.call_method("reduce", (reduce_input,), Some(&expected_out_kwargs))?;
+
+            assert_array_matches_numpy(&actual_result, &expected_result)?;
+            assert_array_matches_numpy(&actual_out, &expected_out)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn frompyfunc_live_callable_matches_numpy_reduce_scalar_where_and_direct_out() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+
+            let operator = py.import("operator")?;
+            let numpy = py.import("numpy")?;
+            let callable = operator.getattr("mul")?.unbind();
+            let reduce_input = object_array(
+                py,
+                vec![vec![2_i64, 3_i64, 4_i64], vec![5_i64, 6_i64, 7_i64]],
+            );
+
+            let actual = module
+                .getattr("frompyfunc")?
+                .call1((callable.bind(py), 2, 1))?;
+            let expected = numpy
+                .getattr("frompyfunc")?
+                .call1((callable.bind(py), 2, 1))?;
+
+            let where_true_kwargs = PyDict::new(py);
+            where_true_kwargs.set_item("axis", 0_i64)?;
+            where_true_kwargs.set_item("where", true)?;
+            assert_eq!(
+                reduce_outcome(py, &actual, &reduce_input, Some(&where_true_kwargs))?,
+                reduce_outcome(py, &expected, &reduce_input, Some(&where_true_kwargs))?,
+            );
+
+            let where_false_initial_kwargs = PyDict::new(py);
+            where_false_initial_kwargs.set_item("axis", 0_i64)?;
+            where_false_initial_kwargs.set_item("where", false)?;
+            where_false_initial_kwargs.set_item("initial", 11_i64)?;
+            assert_eq!(
+                reduce_outcome(
+                    py,
+                    &actual,
+                    &reduce_input,
+                    Some(&where_false_initial_kwargs)
+                )?,
+                reduce_outcome(
+                    py,
+                    &expected,
+                    &reduce_input,
+                    Some(&where_false_initial_kwargs)
+                )?,
+            );
+
+            let where_false_error_kwargs = PyDict::new(py);
+            where_false_error_kwargs.set_item("axis", 0_i64)?;
+            where_false_error_kwargs.set_item("where", false)?;
+            assert_eq!(
+                reduce_outcome(py, &actual, &reduce_input, Some(&where_false_error_kwargs))?,
+                reduce_outcome(
+                    py,
+                    &expected,
+                    &reduce_input,
+                    Some(&where_false_error_kwargs)
+                )?,
+            );
+
+            let actual_out = object_array(py, vec![0_i64, 0_i64, 0_i64]);
+            let expected_out = object_array(py, vec![0_i64, 0_i64, 0_i64]);
+            let actual_out_kwargs = PyDict::new(py);
+            let expected_out_kwargs = PyDict::new(py);
+            actual_out_kwargs.set_item("axis", 0_i64)?;
+            expected_out_kwargs.set_item("axis", 0_i64)?;
+            actual_out_kwargs.set_item("out", actual_out.clone())?;
+            expected_out_kwargs.set_item("out", expected_out.clone())?;
+
+            let actual_result =
+                actual.call_method("reduce", (reduce_input.clone(),), Some(&actual_out_kwargs))?;
+            let expected_result = expected.call_method(
+                "reduce",
+                (reduce_input.clone(),),
+                Some(&expected_out_kwargs),
+            )?;
+
+            assert_array_matches_numpy(&actual_result, &expected_result)?;
+            assert_array_matches_numpy(&actual_out, &expected_out)?;
+
+            let actual_bad_out = object_array(py, vec![0_i64, 0_i64, 0_i64]);
+            let expected_bad_out = object_array(py, vec![0_i64, 0_i64, 0_i64]);
+            let actual_bad_out_kwargs = PyDict::new(py);
+            let expected_bad_out_kwargs = PyDict::new(py);
+            actual_bad_out_kwargs.set_item("axis", 0_i64)?;
+            expected_bad_out_kwargs.set_item("axis", 0_i64)?;
+            actual_bad_out_kwargs.set_item("out", PyList::new(py, [actual_bad_out])?)?;
+            expected_bad_out_kwargs.set_item("out", PyList::new(py, [expected_bad_out])?)?;
+
+            assert_eq!(
+                reduce_outcome(py, &actual, &reduce_input, Some(&actual_bad_out_kwargs))?,
+                reduce_outcome(py, &expected, &reduce_input, Some(&expected_bad_out_kwargs))?,
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn frompyfunc_reduce_does_not_delegate_to_numpy_frompyfunc() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+
+            let numpy = py.import("numpy")?;
+            let operator = py.import("operator")?;
+            let original = numpy.getattr("frompyfunc")?.unbind();
+            let poison = PyModule::from_code(
+                py,
+                pyo3::ffi::c_str!(
+                    "def fail(*args, **kwargs):\n    raise RuntimeError('numpy.frompyfunc should not be called')\n"
+                ),
+                pyo3::ffi::c_str!("poison_frompyfunc.py"),
+                pyo3::ffi::c_str!("poison_frompyfunc"),
+            )?;
+
+            let result = (|| -> PyResult<()> {
+                numpy.setattr("frompyfunc", poison.getattr("fail")?)?;
+                let ufunc =
+                    module
+                        .getattr("frompyfunc")?
+                        .call1((operator.getattr("mul")?, 2, 1))?;
+
+                assert_eq!(repr_string(&ufunc.getattr("identity")?), "None");
+                assert_eq!(
+                    reduce_outcome(
+                        py,
+                        &ufunc,
+                        &object_array(py, vec![2_i64, 3_i64, 4_i64]),
+                        None
+                    )?,
+                    "ok:24"
+                );
+                Ok(())
+            })();
+
+            numpy.setattr("frompyfunc", original.bind(py))?;
+            result
         });
     }
 
@@ -3713,6 +4448,70 @@ mod tests {
     }
 
     #[test]
+    fn flatnonzero_matches_numpy_zero_scalar_and_empty_input() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let numpy = py.import("numpy")?;
+
+            let zero_scalar = numeric_array(py, 0_i64, "int64");
+            let zero_actual = flatnonzero(py, zero_scalar.clone().unbind())?;
+            let zero_expected = numpy.call_method1("flatnonzero", (zero_scalar,))?;
+
+            assert_eq!(
+                zero_actual
+                    .bind(py)
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                zero_expected.getattr("dtype")?.str()?.extract::<String>()?
+            );
+            assert_eq!(
+                zero_actual
+                    .bind(py)
+                    .getattr("shape")?
+                    .extract::<Vec<usize>>()?,
+                zero_expected.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                repr_string(&zero_actual.bind(py).call_method0("tolist")?),
+                repr_string(&zero_expected.call_method0("tolist")?)
+            );
+
+            let empty = numeric_array(py, Vec::<i64>::new(), "int64");
+            let empty_actual = flatnonzero(py, empty.clone().unbind())?;
+            let empty_expected = numpy.call_method1("flatnonzero", (empty,))?;
+
+            assert_eq!(
+                empty_actual
+                    .bind(py)
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                empty_expected
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?
+            );
+            assert_eq!(
+                empty_actual
+                    .bind(py)
+                    .getattr("shape")?
+                    .extract::<Vec<usize>>()?,
+                empty_expected.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                repr_string(&empty_actual.bind(py).call_method0("tolist")?),
+                repr_string(&empty_expected.call_method0("tolist")?)
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn argwhere_matches_numpy_multidimensional_input() {
         with_python(|py| {
             if !numpy_available(py) {
@@ -3760,6 +4559,70 @@ mod tests {
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn argwhere_matches_numpy_zero_scalar_and_empty_input() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let numpy = py.import("numpy")?;
+
+            let zero_scalar = numeric_array(py, 0_i64, "int64");
+            let zero_actual = argwhere(py, zero_scalar.clone().unbind())?;
+            let zero_expected = numpy.call_method1("argwhere", (zero_scalar,))?;
+
+            assert_eq!(
+                zero_actual
+                    .bind(py)
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                zero_expected.getattr("dtype")?.str()?.extract::<String>()?
+            );
+            assert_eq!(
+                zero_actual
+                    .bind(py)
+                    .getattr("shape")?
+                    .extract::<Vec<usize>>()?,
+                zero_expected.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                repr_string(&zero_actual.bind(py).call_method0("tolist")?),
+                repr_string(&zero_expected.call_method0("tolist")?)
+            );
+
+            let empty = numeric_array(py, Vec::<i64>::new(), "int64");
+            let empty_actual = argwhere(py, empty.clone().unbind())?;
+            let empty_expected = numpy.call_method1("argwhere", (empty,))?;
+
+            assert_eq!(
+                empty_actual
+                    .bind(py)
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                empty_expected
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?
+            );
+            assert_eq!(
+                empty_actual
+                    .bind(py)
+                    .getattr("shape")?
+                    .extract::<Vec<usize>>()?,
+                empty_expected.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                repr_string(&empty_actual.bind(py).call_method0("tolist")?),
+                repr_string(&empty_expected.call_method0("tolist")?)
+            );
+
             Ok(())
         });
     }
@@ -3871,6 +4734,178 @@ mod tests {
                 repr_string(&actual_empty.bind(py).call_method0("tolist")?),
                 repr_string(&expected_empty.call_method0("tolist")?)
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn count_nonzero_matches_numpy_keepdims_none_and_scalar_inputs() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let numpy = py.import("numpy")?;
+            let array = numeric_array(
+                py,
+                vec![vec![1_i64, 0_i64, 3_i64], vec![0_i64, 5_i64, 0_i64]],
+                "int64",
+            );
+            let actual_keepdims = count_nonzero(py, array.clone().unbind(), None, true)?;
+            let expected_keepdims = numpy.call_method(
+                "count_nonzero",
+                (array,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("keepdims", true)?;
+                    kwargs
+                }),
+            )?;
+
+            assert_eq!(
+                actual_keepdims
+                    .bind(py)
+                    .getattr("shape")?
+                    .extract::<Vec<usize>>()?,
+                expected_keepdims
+                    .getattr("shape")?
+                    .extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                repr_string(&actual_keepdims.bind(py).call_method0("tolist")?),
+                repr_string(&expected_keepdims.call_method0("tolist")?)
+            );
+
+            let zero_scalar = numeric_array(py, 0_i64, "int64");
+            let zero_actual = count_nonzero(py, zero_scalar.clone().unbind(), None, false)?;
+            let zero_expected = numpy.call_method1("count_nonzero", (zero_scalar,))?;
+            assert_eq!(
+                repr_string(zero_actual.bind(py)),
+                repr_string(&zero_expected)
+            );
+
+            let nonzero_scalar = numeric_array(py, 7_i64, "int64");
+            let nonzero_actual = count_nonzero(py, nonzero_scalar.clone().unbind(), None, false)?;
+            let nonzero_expected = numpy.call_method1("count_nonzero", (nonzero_scalar,))?;
+            assert_eq!(
+                repr_string(nonzero_actual.bind(py)),
+                repr_string(&nonzero_expected)
+            );
+
+            let false_scalar = numeric_array(py, false, "bool");
+            let false_actual = count_nonzero(py, false_scalar.clone().unbind(), None, false)?;
+            let false_expected = numpy.call_method1("count_nonzero", (false_scalar,))?;
+            assert_eq!(
+                repr_string(false_actual.bind(py)),
+                repr_string(&false_expected)
+            );
+
+            let true_scalar = numeric_array(py, true, "bool");
+            let true_actual = count_nonzero(py, true_scalar.clone().unbind(), None, false)?;
+            let true_expected = numpy.call_method1("count_nonzero", (true_scalar,))?;
+            assert_eq!(
+                repr_string(true_actual.bind(py)),
+                repr_string(&true_expected)
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn count_nonzero_matches_numpy_empty_array_keepdims_variants() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let numpy = py.import("numpy")?;
+
+            let empty_rows = numeric_array(py, Vec::<i64>::new(), "int64")
+                .call_method1("reshape", (0_usize, 3_usize))?;
+            let axis0 = 0_i32.into_pyobject(py)?.unbind();
+            let actual_axis0 =
+                count_nonzero(py, empty_rows.clone().unbind(), Some(axis0.into()), true)?;
+            let expected_axis0 = numpy.call_method(
+                "count_nonzero",
+                (empty_rows.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("axis", 0)?;
+                    kwargs.set_item("keepdims", true)?;
+                    kwargs
+                }),
+            )?;
+
+            assert_eq!(
+                actual_axis0
+                    .bind(py)
+                    .getattr("shape")?
+                    .extract::<Vec<usize>>()?,
+                expected_axis0.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                repr_string(&actual_axis0.bind(py).call_method0("tolist")?),
+                repr_string(&expected_axis0.call_method0("tolist")?)
+            );
+
+            let empty_cols = numeric_array(py, vec![Vec::<i64>::new(), Vec::<i64>::new()], "int64");
+            let axis1 = 1_i32.into_pyobject(py)?.unbind();
+            let actual_axis1 =
+                count_nonzero(py, empty_cols.clone().unbind(), Some(axis1.into()), true)?;
+            let expected_axis1 = numpy.call_method(
+                "count_nonzero",
+                (empty_cols.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("axis", 1)?;
+                    kwargs.set_item("keepdims", true)?;
+                    kwargs
+                }),
+            )?;
+
+            assert_eq!(
+                actual_axis1
+                    .bind(py)
+                    .getattr("shape")?
+                    .extract::<Vec<usize>>()?,
+                expected_axis1.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                repr_string(&actual_axis1.bind(py).call_method0("tolist")?),
+                repr_string(&expected_axis1.call_method0("tolist")?)
+            );
+
+            let axis_tuple = PyTuple::new(py, [0_isize, 1_isize])?.unbind();
+            let actual_tuple = count_nonzero(
+                py,
+                empty_rows.clone().unbind(),
+                Some(axis_tuple.clone_ref(py).into()),
+                true,
+            )?;
+            let expected_tuple = numpy.call_method(
+                "count_nonzero",
+                (empty_rows,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("axis", axis_tuple.bind(py))?;
+                    kwargs.set_item("keepdims", true)?;
+                    kwargs
+                }),
+            )?;
+
+            assert_eq!(
+                actual_tuple
+                    .bind(py)
+                    .getattr("shape")?
+                    .extract::<Vec<usize>>()?,
+                expected_tuple.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+            assert_eq!(
+                repr_string(&actual_tuple.bind(py).call_method0("tolist")?),
+                repr_string(&expected_tuple.call_method0("tolist")?)
+            );
+
             Ok(())
         });
     }
