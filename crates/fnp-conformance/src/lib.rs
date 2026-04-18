@@ -3283,7 +3283,7 @@ fn evaluate_sce_metamorphic_relation(case: &SceMetamorphicCase) -> Result<(), St
             let total = case
                 .element_count
                 .unwrap_or_else(|| case.original_shape.iter().product());
-            let _flattened = vec![total];
+            let _flattened = [total];
             let roundtrip_shape = case.original_shape.clone();
             if roundtrip_shape.iter().product::<usize>() != total {
                 return Err(format!(
@@ -12810,20 +12810,19 @@ fn map_ufunc_error_to_polynomial_suite(error: UFuncError) -> PolynomialSuiteErro
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct PolynomialMetamorphicCase {
     id: String,
     relation: String,
-    #[serde(default)]
-    seed: u64,
-    #[serde(default)]
-    mode: String,
-    #[serde(default)]
-    env_fingerprint: String,
-    #[serde(default)]
-    artifact_refs: Vec<String>,
-    #[serde(default)]
-    reason_code: String,
+    #[serde(default, rename = "seed")]
+    _seed: u64,
+    #[serde(default, rename = "mode")]
+    _mode: String,
+    #[serde(default, rename = "env_fingerprint")]
+    _env_fingerprint: String,
+    #[serde(default, rename = "artifact_refs")]
+    _artifact_refs: Vec<String>,
+    #[serde(default, rename = "reason_code")]
+    _reason_code: String,
     #[serde(default)]
     coefficients: Vec<f64>,
     #[serde(default)]
