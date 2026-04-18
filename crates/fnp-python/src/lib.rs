@@ -1798,6 +1798,50 @@ fn interp(
     build_numpy_array_from_ufunc(py, &result)
 }
 
+fn trapezoid_impl(
+    py: Python<'_>,
+    name: &str,
+    y: Py<PyAny>,
+    x: Option<Py<PyAny>>,
+    dx: f64,
+    axis: isize,
+) -> PyResult<Py<PyAny>> {
+    let y = extract_numeric_array(py, y.bind(py), &format!("{name}(y)"))?;
+    let result = match x {
+        Some(x) => {
+            let x = extract_numeric_array(py, x.bind(py), &format!("{name}(x)"))?;
+            y.trapezoid_x(&x, Some(axis))
+        }
+        None => y.trapezoid(dx, Some(axis)),
+    }
+    .map_err(map_ufunc_error)?;
+    build_numpy_scalar_or_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(signature = (y, x=None, dx=1.0, axis=-1))]
+fn trapezoid(
+    py: Python<'_>,
+    y: Py<PyAny>,
+    x: Option<Py<PyAny>>,
+    dx: f64,
+    axis: isize,
+) -> PyResult<Py<PyAny>> {
+    trapezoid_impl(py, "trapezoid", y, x, dx, axis)
+}
+
+#[pyfunction]
+#[pyo3(signature = (y, x=None, dx=1.0, axis=-1))]
+fn trapz(
+    py: Python<'_>,
+    y: Py<PyAny>,
+    x: Option<Py<PyAny>>,
+    dx: f64,
+    axis: isize,
+) -> PyResult<Py<PyAny>> {
+    trapezoid_impl(py, "trapz", y, x, dx, axis)
+}
+
 #[pyfunction(name = "where")]
 #[pyo3(signature = (condition, x=None, y=None))]
 fn where_py(
@@ -2691,6 +2735,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(vectorize, m)?)?;
     m.add_function(wrap_pyfunction!(digitize, m)?)?;
     m.add_function(wrap_pyfunction!(interp, m)?)?;
+    m.add_function(wrap_pyfunction!(trapezoid, m)?)?;
+    m.add_function(wrap_pyfunction!(trapz, m)?)?;
     m.add_function(wrap_pyfunction!(where_py, m)?)?;
     m.add_function(wrap_pyfunction!(flatnonzero, m)?)?;
     m.add_function(wrap_pyfunction!(argwhere, m)?)?;
@@ -2916,6 +2962,8 @@ mod tests {
             assert!(module.getattr("Vectorize").is_ok());
             assert!(module.getattr("digitize").is_ok());
             assert!(module.getattr("interp").is_ok());
+            assert!(module.getattr("trapezoid").is_ok());
+            assert!(module.getattr("trapz").is_ok());
             assert!(module.getattr("where").is_ok());
             assert!(module.getattr("flatnonzero").is_ok());
             assert!(module.getattr("argwhere").is_ok());
@@ -3366,6 +3414,92 @@ mod tests {
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn trapezoid_matches_numpy_scalar_result() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let y = numeric_array(py, vec![1.0, 2.0, 4.0, 8.0], "float64");
+            let actual = trapezoid(py, y.clone().unbind(), None, 1.0, -1)?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("trapezoid", (y,))?;
+
+            assert_eq!(repr_string(actual.bind(py)), repr_string(&expected));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn trapezoid_matches_numpy_dx_and_axis() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let y = numeric_array(
+                py,
+                vec![vec![1.0, 2.0, 4.0], vec![3.0, 5.0, 9.0]],
+                "float64",
+            );
+            let actual = trapezoid(py, y.clone().unbind(), None, 0.5, 0)?;
+            let numpy = py.import("numpy")?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dx", 0.5)?;
+            kwargs.set_item("axis", 0)?;
+            let expected = numpy.call_method("trapezoid", (y,), Some(&kwargs))?;
+
+            assert_array_matches_numpy(actual.bind(py), &expected)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn trapezoid_matches_numpy_with_x_spacing() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let y = numeric_array(
+                py,
+                vec![vec![1.0, 2.0, 4.0], vec![3.0, 5.0, 9.0]],
+                "float64",
+            );
+            let x = numeric_array(py, vec![0.0, 1.0, 3.0], "float64");
+            let actual = trapezoid(py, y.clone().unbind(), Some(x.clone().unbind()), 99.0, 1)?;
+            let numpy = py.import("numpy")?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("x", x)?;
+            kwargs.set_item("dx", 99.0)?;
+            kwargs.set_item("axis", 1)?;
+            let expected = numpy.call_method("trapezoid", (y,), Some(&kwargs))?;
+
+            assert_array_matches_numpy(actual.bind(py), &expected)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn trapz_alias_matches_numpy_trapezoid() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let y = numeric_array(py, vec![2.0, 3.0, 7.0], "float64");
+            let actual = trapz(py, y.clone().unbind(), None, 2.0, -1)?;
+            let numpy = py.import("numpy")?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dx", 2.0)?;
+            let expected = numpy.call_method("trapezoid", (y,), Some(&kwargs))?;
+
+            assert_eq!(repr_string(actual.bind(py)), repr_string(&expected));
             Ok(())
         });
     }
