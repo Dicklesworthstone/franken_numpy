@@ -13,8 +13,8 @@
 | Linear algebra | 63 | 25 | 35 | 123 | Good - core decompositions, 1x1 edge cases, identity |
 | String arrays | 60 | — | — | 60 | Good - 33 char functions, empty/whitespace edge cases |
 | RNG | 22 | 23 | 41 | 86 | Adequate + 39 statistical |
-| FFT | 38 | — | — | 38 | Good - transform families, edge sizes, 2D non-square |
-| Datetime/timedelta | 38 | — | — | 38 | Good - arithmetic, busday, NaT, broadcast, abs |
+| FFT | 41 | — | — | 41 | Good - transform families, edge sizes, 2D/3D, fftn/ifftn |
+| Datetime/timedelta | 42 | — | — | 42 | Good - arithmetic, busday, NaT, broadcast, abs, comparisons |
 | Masked arrays | 40 | — | — | 40 | Good - reshape/concat/fill/broadcast/all-masked/argmin-max/axis-aware |
 | Iterator/transfer | 31 | 16 | 16 | 63 | Adequate - transfer/overlap/flatiter edges covered |
 | Shape/stride (SCE) | 47 | — | — | 47 | Good - 0-D, empty, negative-stride, large shapes, 5D/6D transpose covered |

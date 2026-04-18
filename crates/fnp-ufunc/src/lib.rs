@@ -20370,6 +20370,11 @@ impl UFuncArray {
         self.unwrap_period(discont, None)
     }
 
+    /// `np.unwrap` along an explicit axis.
+    pub fn unwrap_axis(&self, discont: Option<f64>, axis: isize) -> Result<Self, UFuncError> {
+        self.unwrap_period_axis(discont, None, axis)
+    }
+
     /// `np.unwrap` with explicit `period` parameter (NumPy 1.21+).
     ///
     /// `period`: size of the range over which the input wraps (default: 2*PI).
@@ -20378,25 +20383,43 @@ impl UFuncArray {
         discont: Option<f64>,
         period: Option<f64>,
     ) -> Result<Self, UFuncError> {
-        if self.shape.len() != 1 {
-            return Err(UFuncError::Msg(
-                "unwrap: only 1-D arrays supported".to_string(),
-            ));
-        }
+        self.unwrap_period_axis(discont, period, -1)
+    }
+
+    /// `np.unwrap` with explicit `period` and axis parameters.
+    pub fn unwrap_period_axis(
+        &self,
+        discont: Option<f64>,
+        period: Option<f64>,
+        axis: isize,
+    ) -> Result<Self, UFuncError> {
+        let axis = normalize_axis(axis, self.shape.len())?;
         let p = period.unwrap_or(2.0 * std::f64::consts::PI);
         let half_p = p / 2.0;
         let disc = discont.unwrap_or(half_p);
         let mut values = self.values.clone();
-        let mut offset = 0.0;
-        for i in 1..values.len() {
-            let diff = values[i] - values[i - 1] + offset;
-            offset = 0.0;
-            if diff > disc {
-                offset = -p * ((diff + half_p) / p).floor();
-            } else if diff < -disc {
-                offset = p * ((-diff + half_p) / p).floor();
+        let axis_len = self.shape[axis];
+        if axis_len > 1 {
+            let inner = element_count(&self.shape[axis + 1..]).map_err(UFuncError::Shape)?;
+            let outer = element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
+            for outer_idx in 0..outer {
+                let base = outer_idx * axis_len * inner;
+                for inner_idx in 0..inner {
+                    let mut offset = 0.0;
+                    for k in 1..axis_len {
+                        let prev = base + (k - 1) * inner + inner_idx;
+                        let current = base + k * inner + inner_idx;
+                        let diff = values[current] - values[prev] + offset;
+                        offset = 0.0;
+                        if diff > disc {
+                            offset = -p * ((diff + half_p) / p).floor();
+                        } else if diff < -disc {
+                            offset = p * ((-diff + half_p) / p).floor();
+                        }
+                        values[current] += offset;
+                    }
+                }
             }
-            values[i] += offset;
         }
         Ok(Self {
             shape: self.shape.clone(),
