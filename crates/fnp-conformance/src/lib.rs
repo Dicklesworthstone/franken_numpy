@@ -9931,6 +9931,24 @@ fn execute_masked_differential_operation(
             lhs.shrink_mask();
             Ok(masked_array_to_outcome(&lhs))
         }
+        "argmin" => {
+            let result = lhs
+                .argmin(case.axis)
+                .map_err(map_ma_error_to_masked_suite)?;
+            Ok(MaskedOperationOutcome::Array {
+                shape: result.shape().to_vec(),
+                values: result.values().to_vec(),
+            })
+        }
+        "argmax" => {
+            let result = lhs
+                .argmax(case.axis)
+                .map_err(map_ma_error_to_masked_suite)?;
+            Ok(MaskedOperationOutcome::Array {
+                shape: result.shape().to_vec(),
+                values: result.values().to_vec(),
+            })
+        }
         other => Err(MaskedSuiteError::new(
             "masked_policy_unknown_operation",
             format!("unsupported masked differential operation {other}"),
