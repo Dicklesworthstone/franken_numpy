@@ -18,7 +18,7 @@
 | Masked arrays | 42 | — | — | 42 | Good - reshape/concat/fill/broadcast/all-masked/argmin-max/axis-aware |
 | Iterator/transfer | 33 | 19 | 18 | 70 | Good - transfer/overlap/flatiter/broadcast covered |
 | Shape/stride (SCE) | 47 | — | — | 47 | Good - 0-D, empty, negative-stride, large shapes, 5D/6D transpose covered |
-| Dtype promotion | 198 | 17 | — | 215 | Good - full 14×14 type matrix + metamorphic relations |
+| Dtype promotion | 198 | 17 | 18 | 233 | Good - full 14×14 type matrix + metamorphic + adversarial |
 | Runtime policy | 35 | — | 10 | 45 | Good - risk thresholds, boundaries, override audit covered |
 
 ## Priority Coverage Gaps
