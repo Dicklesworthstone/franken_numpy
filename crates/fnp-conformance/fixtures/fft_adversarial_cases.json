@@ -1,0 +1,186 @@
+[
+  {
+    "id": "fft_empty_input",
+    "operation": "fft",
+    "seed": 8951,
+    "mode": "strict",
+    "env_fingerprint": "fnp-fft-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_adversarial_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_adversarial_empty_input",
+    "input_shape": [0],
+    "input_values": [],
+    "expected_behavior": "empty_output"
+  },
+  {
+    "id": "fft_single_element",
+    "operation": "fft",
+    "seed": 8952,
+    "mode": "strict",
+    "env_fingerprint": "fnp-fft-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_adversarial_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_adversarial_single_element",
+    "input_shape": [1],
+    "input_values": [42.0],
+    "expected_shape": [1, 2],
+    "expected_values": [42.0, 0.0]
+  },
+  {
+    "id": "fft_with_nan_input",
+    "operation": "fft",
+    "seed": 8953,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-fft-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_adversarial_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_adversarial_nan_propagation",
+    "input_shape": [4],
+    "input_values": [1.0, "NaN", 3.0, 4.0],
+    "expected_behavior": "nan_propagates"
+  },
+  {
+    "id": "fft_with_inf_input",
+    "operation": "fft",
+    "seed": 8954,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-fft-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_adversarial_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_adversarial_inf_handling",
+    "input_shape": [4],
+    "input_values": [1.0, "Inf", 3.0, "-Inf"],
+    "expected_behavior": "inf_propagates"
+  },
+  {
+    "id": "fft_n_larger_than_input",
+    "operation": "fft",
+    "seed": 8955,
+    "mode": "strict",
+    "env_fingerprint": "fnp-fft-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_adversarial_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_adversarial_zero_pad",
+    "input_shape": [3],
+    "input_values": [1.0, 2.0, 3.0],
+    "n": 8,
+    "expected_behavior": "zero_padded"
+  },
+  {
+    "id": "fft_n_smaller_than_input",
+    "operation": "fft",
+    "seed": 8956,
+    "mode": "strict",
+    "env_fingerprint": "fnp-fft-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_adversarial_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_adversarial_truncate",
+    "input_shape": [8],
+    "input_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "n": 4,
+    "expected_behavior": "truncated"
+  },
+  {
+    "id": "fft_n_equals_one",
+    "operation": "fft",
+    "seed": 8957,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-fft-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_adversarial_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_adversarial_n_one",
+    "input_shape": [4],
+    "input_values": [1.0, 2.0, 3.0, 4.0],
+    "n": 1,
+    "expected_behavior": "single_coefficient"
+  },
+  {
+    "id": "fft_all_zeros",
+    "operation": "fft",
+    "seed": 8958,
+    "mode": "strict",
+    "env_fingerprint": "fnp-fft-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_adversarial_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_adversarial_all_zeros",
+    "input_shape": [4],
+    "input_values": [0.0, 0.0, 0.0, 0.0],
+    "expected_behavior": "all_zeros_output"
+  },
+  {
+    "id": "fft_alternating_sign",
+    "operation": "fft",
+    "seed": 8959,
+    "mode": "strict",
+    "env_fingerprint": "fnp-fft-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_adversarial_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_adversarial_alternating",
+    "input_shape": [4],
+    "input_values": [1.0, -1.0, 1.0, -1.0],
+    "expected_behavior": "nyquist_peak"
+  },
+  {
+    "id": "fft_prime_length",
+    "operation": "fft",
+    "seed": 8960,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-fft-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_adversarial_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_adversarial_prime_bluestein",
+    "input_shape": [17],
+    "input_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0],
+    "expected_behavior": "bluestein_fallback"
+  },
+  {
+    "id": "ifft_empty_input",
+    "operation": "ifft",
+    "seed": 8961,
+    "mode": "strict",
+    "env_fingerprint": "fnp-fft-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_adversarial_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_adversarial_ifft_empty",
+    "input_shape": [0, 2],
+    "input_values": [],
+    "expected_behavior": "empty_output"
+  },
+  {
+    "id": "rfft_odd_length",
+    "operation": "rfft",
+    "seed": 8962,
+    "mode": "strict",
+    "env_fingerprint": "fnp-fft-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_adversarial_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_adversarial_rfft_odd",
+    "input_shape": [5],
+    "input_values": [1.0, 2.0, 3.0, 4.0, 5.0],
+    "expected_behavior": "hermitian_output"
+  }
+]

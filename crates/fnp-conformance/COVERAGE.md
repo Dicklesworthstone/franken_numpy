@@ -13,7 +13,7 @@
 | Linear algebra | 67 | 30 | 37 | 134 | Good - core decompositions, 1x1 edge cases, identity, wide QR, fractional solve |
 | String arrays | 71 | 12 | — | 83 | Good - 33 char functions, empty/pattern edge cases, case/title conversion, isdigit, idempotence/involution metamorphic |
 | RNG | 26 | 28 | 43 | 97 | Adequate + 39 statistical, small bound, zero-fill, single-step jump |
-| FFT | 47 | 12 | — | 59 | Good - transform families, edge sizes, 2D/3D, fftn/ifftn, shifts, fftfreq, inverse/linearity/parseval metamorphic |
+| FFT | 47 | 12 | 12 | 71 | Good - transform families, edge sizes, 2D/3D, fftn/ifftn, shifts, fftfreq, inverse/linearity/parseval metamorphic, edge-case adversarial |
 | Datetime/timedelta | 48 | 12 | — | 60 | Good - arithmetic, busday, NaT, broadcast, abs, comparisons, neg, mul-zero, add/sub inverse metamorphic |
 | Masked arrays | 44 | 12 | — | 56 | Good - reshape/concat/fill/broadcast/all-masked/argmin-max/axis-aware, min/max axis partial, mask preservation metamorphic |
 | Iterator/transfer | 37 | 21 | 18 | 76 | Good - transfer/overlap/flatiter/broadcast, single-element, copy-overlap flags |
