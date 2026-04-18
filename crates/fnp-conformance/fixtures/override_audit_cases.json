@@ -1,0 +1,218 @@
+[
+  {
+    "id": "override_hardened_compatible_allowlisted_approved",
+    "mode": "hardened",
+    "class": "known_compatible",
+    "requested_deviation_class": "elevated_trust",
+    "allowlisted_classes": ["elevated_trust", "partner_verified"],
+    "packet_id": "packet_001",
+    "requested_by": "system_admin",
+    "override_reason_code": "admin_escalation",
+    "expected_approved": true,
+    "expected_action": "full_validate",
+    "seed": 301,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
+    ],
+    "reason_code": "override_audit_allowlisted"
+  },
+  {
+    "id": "override_hardened_compatible_not_allowlisted_rejected",
+    "mode": "hardened",
+    "class": "known_compatible",
+    "requested_deviation_class": "untrusted_source",
+    "allowlisted_classes": ["elevated_trust", "partner_verified"],
+    "packet_id": "packet_002",
+    "requested_by": "external_user",
+    "override_reason_code": "external_request",
+    "expected_approved": false,
+    "expected_action": "fail_closed",
+    "seed": 302,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
+    ],
+    "reason_code": "override_audit_not_allowlisted"
+  },
+  {
+    "id": "override_strict_compatible_rejected",
+    "mode": "strict",
+    "class": "known_compatible",
+    "requested_deviation_class": "elevated_trust",
+    "allowlisted_classes": ["elevated_trust"],
+    "packet_id": "packet_003",
+    "requested_by": "admin",
+    "override_reason_code": "strict_mode_override_attempt",
+    "expected_approved": false,
+    "expected_action": "fail_closed",
+    "seed": 303,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
+    ],
+    "reason_code": "override_audit_strict_mode_rejected"
+  },
+  {
+    "id": "override_hardened_incompatible_rejected",
+    "mode": "hardened",
+    "class": "known_incompatible",
+    "requested_deviation_class": "elevated_trust",
+    "allowlisted_classes": ["elevated_trust"],
+    "packet_id": "packet_004",
+    "requested_by": "admin",
+    "override_reason_code": "incompatible_override_attempt",
+    "expected_approved": false,
+    "expected_action": "fail_closed",
+    "seed": 304,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
+    ],
+    "reason_code": "override_audit_incompatible_rejected"
+  },
+  {
+    "id": "override_hardened_unknown_rejected",
+    "mode": "hardened",
+    "class": "unknown",
+    "requested_deviation_class": "elevated_trust",
+    "allowlisted_classes": ["elevated_trust"],
+    "packet_id": "packet_005",
+    "requested_by": "admin",
+    "override_reason_code": "unknown_override_attempt",
+    "expected_approved": false,
+    "expected_action": "fail_closed",
+    "seed": 305,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
+    ],
+    "reason_code": "override_audit_unknown_rejected"
+  },
+  {
+    "id": "override_hardened_empty_deviation_class_rejected",
+    "mode": "hardened",
+    "class": "known_compatible",
+    "requested_deviation_class": "",
+    "allowlisted_classes": ["elevated_trust"],
+    "packet_id": "packet_006",
+    "requested_by": "admin",
+    "override_reason_code": "empty_deviation_class",
+    "expected_approved": false,
+    "expected_action": "fail_closed",
+    "seed": 306,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
+    ],
+    "reason_code": "override_audit_empty_class_rejected"
+  },
+  {
+    "id": "override_hardened_empty_allowlist_rejected",
+    "mode": "hardened",
+    "class": "known_compatible",
+    "requested_deviation_class": "elevated_trust",
+    "allowlisted_classes": [],
+    "packet_id": "packet_007",
+    "requested_by": "admin",
+    "override_reason_code": "empty_allowlist",
+    "expected_approved": false,
+    "expected_action": "fail_closed",
+    "seed": 307,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
+    ],
+    "reason_code": "override_audit_empty_allowlist_rejected"
+  },
+  {
+    "id": "override_hardened_whitespace_packet_id_normalized",
+    "mode": "hardened",
+    "class": "known_compatible",
+    "requested_deviation_class": "elevated_trust",
+    "allowlisted_classes": ["elevated_trust"],
+    "packet_id": "  ",
+    "requested_by": "admin",
+    "override_reason_code": "whitespace_packet_id",
+    "expected_approved": true,
+    "expected_action": "full_validate",
+    "seed": 308,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
+    ],
+    "reason_code": "override_audit_whitespace_normalization"
+  },
+  {
+    "id": "override_hardened_whitespace_requester_normalized",
+    "mode": "hardened",
+    "class": "known_compatible",
+    "requested_deviation_class": "elevated_trust",
+    "allowlisted_classes": ["elevated_trust"],
+    "packet_id": "packet_009",
+    "requested_by": "  ",
+    "override_reason_code": "whitespace_requester",
+    "expected_approved": true,
+    "expected_action": "full_validate",
+    "seed": 309,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
+    ],
+    "reason_code": "override_audit_whitespace_normalization"
+  },
+  {
+    "id": "override_strict_unknown_rejected",
+    "mode": "strict",
+    "class": "unknown",
+    "requested_deviation_class": "elevated_trust",
+    "allowlisted_classes": ["elevated_trust"],
+    "packet_id": "packet_010",
+    "requested_by": "admin",
+    "override_reason_code": "strict_unknown_override",
+    "expected_approved": false,
+    "expected_action": "fail_closed",
+    "seed": 310,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
+    ],
+    "reason_code": "override_audit_strict_unknown_rejected"
+  },
+  {
+    "id": "override_hardened_multiple_allowlist_match",
+    "mode": "hardened",
+    "class": "known_compatible",
+    "requested_deviation_class": "partner_verified",
+    "allowlisted_classes": ["elevated_trust", "partner_verified", "internal_bypass"],
+    "packet_id": "packet_011",
+    "requested_by": "partner_system",
+    "override_reason_code": "partner_integration",
+    "expected_approved": true,
+    "expected_action": "full_validate",
+    "seed": 311,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
+    ],
+    "reason_code": "override_audit_multiple_allowlist"
+  },
+  {
+    "id": "override_hardened_whitespace_deviation_class_rejected",
+    "mode": "hardened",
+    "class": "known_compatible",
+    "requested_deviation_class": "  elevated_trust  ",
+    "allowlisted_classes": ["elevated_trust"],
+    "packet_id": "packet_012",
+    "requested_by": "admin",
+    "override_reason_code": "whitespace_deviation_class",
+    "expected_approved": true,
+    "expected_action": "full_validate",
+    "seed": 312,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
+    ],
+    "reason_code": "override_audit_whitespace_trimmed"
+  }
+]

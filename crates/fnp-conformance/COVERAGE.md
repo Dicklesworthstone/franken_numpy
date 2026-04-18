@@ -19,7 +19,7 @@
 | Iterator/transfer | 31 | 16 | 16 | 63 | Adequate - transfer/overlap/flatiter edges covered |
 | Shape/stride (SCE) | 47 | — | — | 47 | Good - 0-D, empty, negative-stride, large shapes, 5D/6D transpose covered |
 | Dtype promotion | 198 | — | — | 198 | Good - full 14×14 type matrix coverage |
-| Runtime policy | 23 | — | 8 | 31 | Adequate - risk thresholds, boundaries covered |
+| Runtime policy | 35 | — | 8 | 43 | Good - risk thresholds, boundaries, override audit covered |
 
 ## Priority Coverage Gaps
 
@@ -38,14 +38,12 @@ No remaining gaps.
 
 No remaining gaps.
 
-### 3. Runtime Policy Dual-Mode (MEDIUM)
+### 3. Runtime Policy Dual-Mode (COMPLETE)
 
-**Current state:** 31 cases (23 policy + 8 adversarial)
-**Covered:** All CompatibilityClass variants, risk thresholds at boundaries (0.0, 0.69, 0.7, 0.71, 1.0), variable thresholds
+**Current state:** 43 cases (23 policy + 8 adversarial + 12 override audit)
+**Covered:** All CompatibilityClass variants, risk thresholds at boundaries (0.0, 0.69, 0.7, 0.71, 1.0), variable thresholds, override audit events
 
-Remaining gaps:
-- Override audit event logging
-- Evidence ledger serialization
+No remaining gaps.
 
 ### 4. Iterator/Transfer System (LOW)
 

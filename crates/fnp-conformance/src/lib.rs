@@ -35,8 +35,9 @@ use fnp_random::{
     RandomPolicyError, SeedMaterial, SeedSequence, SeedSequenceError, validate_rng_policy_metadata,
 };
 use fnp_runtime::{
-    CompatibilityClass, DecisionAction, DecisionAuditContext, EvidenceLedger, RuntimeMode,
-    decide_and_record_with_context, decide_compatibility_from_wire,
+    CompatibilityClass, DecisionAction, DecisionAuditContext, EvidenceLedger, OverrideAuditEvent,
+    RuntimeMode, decide_and_record_with_context, decide_compatibility_from_wire,
+    evaluate_policy_override,
 };
 use fnp_ufunc::{
     BinaryOp, MAError, MaskedArray, QuantileInterp, StringArray, UFuncArray, UFuncError, UnaryOp,
@@ -287,6 +288,28 @@ struct PolicyAdversarialFixtureCase {
     class_raw: String,
     risk_score: f64,
     threshold: f64,
+    expected_action: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OverrideAuditFixtureCase {
+    id: String,
+    mode: String,
+    class: String,
+    requested_deviation_class: String,
+    allowlisted_classes: Vec<String>,
+    packet_id: String,
+    requested_by: String,
+    override_reason_code: String,
+    expected_approved: bool,
     expected_action: String,
     #[serde(default)]
     seed: u64,
@@ -4373,6 +4396,73 @@ pub fn run_runtime_policy_adversarial_suite(config: &HarnessConfig) -> Result<Su
     }
 
     validate_runtime_policy_log_fields(&mut report, ledger.events());
+
+    Ok(report)
+}
+
+pub fn run_override_audit_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let path = config
+        .fixture_root
+        .join("override_audit_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    let cases: Vec<OverrideAuditFixtureCase> =
+        serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))?;
+
+    let mut report = SuiteReport {
+        suite: "override_audit",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let Some(mode) = RuntimeMode::from_wire(&case.mode) else {
+            report.failures.push(format!("{}: invalid mode {}", case.id, case.mode));
+            continue;
+        };
+        let class = CompatibilityClass::from_wire(&case.class);
+        let allowlist_refs: Vec<&str> = case.allowlisted_classes.iter().map(|s| s.as_str()).collect();
+        let expected_action = parse_expected_action(&case.id, &case.expected_action)?;
+
+        let event: OverrideAuditEvent = evaluate_policy_override(
+            mode,
+            class,
+            &case.requested_deviation_class,
+            &allowlist_refs,
+            &case.packet_id,
+            &case.requested_by,
+            &case.override_reason_code,
+        );
+
+        let mut passed = true;
+        let mut failure_reasons = Vec::new();
+
+        if event.approved != case.expected_approved {
+            passed = false;
+            failure_reasons.push(format!(
+                "approved mismatch expected={} actual={}",
+                case.expected_approved, event.approved
+            ));
+        }
+        if event.action != expected_action {
+            passed = false;
+            failure_reasons.push(format!(
+                "action mismatch expected={expected_action:?} actual={:?}",
+                event.action
+            ));
+        }
+
+        if passed {
+            report.pass_count += 1;
+        } else {
+            report.failures.push(format!(
+                "{}: {}",
+                case.id,
+                failure_reasons.join("; ")
+            ));
+        }
+    }
 
     Ok(report)
 }
@@ -11544,6 +11634,7 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
         run_dtype_promotion_suite(config)?,
         run_runtime_policy_suite(config)?,
         run_runtime_policy_adversarial_suite(config)?,
+        run_override_audit_suite(config)?,
         run_rng_differential_suite(config)?,
         run_rng_metamorphic_suite(config)?,
         run_rng_adversarial_suite(config)?,
