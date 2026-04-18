@@ -15,7 +15,8 @@
     "b_shape": [3],
     "b_values": [1.0, 2.0, 3.0],
     "convmode": "full",
-    "expected_behavior": "empty_output"
+    "expected_reason_code": "ufunc_operation_error",
+    "expected_error_contains": "a cannot be empty"
   },
   {
     "id": "convolve_empty_b",
@@ -33,7 +34,8 @@
     "b_shape": [0],
     "b_values": [],
     "convmode": "full",
-    "expected_behavior": "empty_output"
+    "expected_reason_code": "ufunc_operation_error",
+    "expected_error_contains": "v cannot be empty"
   },
   {
     "id": "convolve_single_element_both",
@@ -142,7 +144,26 @@
     "a_values": [],
     "b_shape": [3],
     "b_values": [1.0, 2.0, 3.0],
-    "expected_behavior": "empty_output"
+    "expected_reason_code": "ufunc_operation_error",
+    "expected_error_contains": "first array argument cannot be empty"
+  },
+  {
+    "id": "correlate_empty_kernel",
+    "operation": "correlate",
+    "seed": 10313,
+    "mode": "strict",
+    "env_fingerprint": "fnp-signal-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_adversarial_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_adversarial_correlate_empty_kernel",
+    "a_shape": [3],
+    "a_values": [1.0, 2.0, 3.0],
+    "b_shape": [0],
+    "b_values": [],
+    "expected_reason_code": "ufunc_operation_error",
+    "expected_error_contains": "second array argument cannot be empty"
   },
   {
     "id": "convolve_all_zeros",

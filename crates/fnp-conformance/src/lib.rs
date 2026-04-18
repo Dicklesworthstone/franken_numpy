@@ -1176,6 +1176,10 @@ struct SignalAdversarialCase {
     #[serde(default)]
     reason_code: String,
     #[serde(default)]
+    expected_reason_code: String,
+    #[serde(default)]
+    expected_error_contains: String,
+    #[serde(default)]
     a_shape: Vec<usize>,
     #[serde(default)]
     a_values: Vec<serde_json::Value>,
@@ -7996,9 +8000,15 @@ pub fn run_signal_adversarial_suite(config: &HarnessConfig) -> Result<SuiteRepor
         let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
         let reason_code = normalize_reason_code(&case.reason_code);
 
-        match execute_signal_adversarial_operation(&case)
-            .and_then(|outcome| validate_signal_adversarial_expectation(&case, &outcome))
-        {
+        let result = match execute_signal_adversarial_operation(&case) {
+            Ok(outcome) => validate_signal_adversarial_expectation(&case, &outcome),
+            Err(err) if signal_adversarial_expects_error(&case) => {
+                validate_signal_adversarial_error(&case, &err)
+            }
+            Err(err) => Err(err),
+        };
+
+        match result {
             Ok(()) => report.pass_count += 1,
             Err(err) => {
                 report.failures.push(format!(
@@ -8079,6 +8089,12 @@ fn validate_signal_adversarial_expectation(
     case: &SignalAdversarialCase,
     outcome: &SignalOperationOutcome,
 ) -> Result<(), SignalSuiteError> {
+    if signal_adversarial_expects_error(case) {
+        return Err(SignalSuiteError::new(
+            "signal_adversarial_mismatch",
+            format!("{} expected an error but operation succeeded", case.id),
+        ));
+    }
     if !case.expected_behavior.trim().is_empty() {
         return validate_signal_adversarial_behavior(case, outcome);
     }
@@ -8102,6 +8118,46 @@ fn validate_signal_adversarial_expectation(
         format!(
             "{} has no expected_shape, expected_values, or expected_behavior",
             case.id
+        ),
+    ))
+}
+
+fn signal_adversarial_expects_error(case: &SignalAdversarialCase) -> bool {
+    !case.expected_error_contains.trim().is_empty() || !case.expected_reason_code.trim().is_empty()
+}
+
+fn validate_signal_adversarial_error(
+    case: &SignalAdversarialCase,
+    err: &SignalSuiteError,
+) -> Result<(), SignalSuiteError> {
+    let expected_reason_code = case.expected_reason_code.trim();
+    if !expected_reason_code.is_empty() && expected_reason_code != err.reason_code {
+        return Err(SignalSuiteError::new(
+            "signal_adversarial_mismatch",
+            format!(
+                "{} expected reason_code={expected_reason_code} actual_reason_code={} message={}",
+                case.id, err.reason_code, err.message
+            ),
+        ));
+    }
+
+    let expected_error = case.expected_error_contains.trim();
+    if expected_error.is_empty() {
+        return Ok(());
+    }
+    if err
+        .message
+        .to_lowercase()
+        .contains(&expected_error.to_lowercase())
+    {
+        return Ok(());
+    }
+
+    Err(SignalSuiteError::new(
+        "signal_adversarial_mismatch",
+        format!(
+            "{} expected error containing {:?} actual={:?}",
+            case.id, expected_error, err.message
         ),
     ))
 }

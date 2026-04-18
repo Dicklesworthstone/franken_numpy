@@ -15715,13 +15715,11 @@ impl UFuncArray {
         }
         let n = self.shape[0];
         let m = kernel.shape[0];
-        if n == 0 || m == 0 {
-            return Ok(Self {
-                shape: vec![0],
-                values: Vec::new(),
-                dtype: promote(self.dtype, kernel.dtype),
-                integer_sidecar: None,
-            });
+        if n == 0 {
+            return Err(UFuncError::Msg("a cannot be empty".to_string()));
+        }
+        if m == 0 {
+            return Err(UFuncError::Msg("v cannot be empty".to_string()));
         }
         // Compute full convolution
         let full_len = n + m - 1;
@@ -15768,6 +15766,16 @@ impl UFuncArray {
         if self.shape.len() != 1 || kernel.shape.len() != 1 {
             return Err(UFuncError::Msg(
                 "correlate: only 1-D arrays supported".to_string(),
+            ));
+        }
+        if self.shape[0] == 0 {
+            return Err(UFuncError::Msg(
+                "first array argument cannot be empty".to_string(),
+            ));
+        }
+        if kernel.shape[0] == 0 {
+            return Err(UFuncError::Msg(
+                "second array argument cannot be empty".to_string(),
             ));
         }
         // correlate(a, v) = convolve(a, v[::-1])
@@ -38019,6 +38027,18 @@ mod tests {
     }
 
     #[test]
+    fn convolve_empty_inputs_match_numpy_errors() {
+        let empty = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+        let values = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+
+        let err = empty.convolve(&values).unwrap_err();
+        assert_eq!(err.to_string(), "a cannot be empty");
+
+        let err = values.convolve(&empty).unwrap_err();
+        assert_eq!(err.to_string(), "v cannot be empty");
+    }
+
+    #[test]
     fn correlate_basic() {
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         let b = UFuncArray::new(vec![3], vec![0.0, 1.0, 0.5], DType::F64).unwrap();
@@ -38026,6 +38046,18 @@ mod tests {
         assert_eq!(r.shape(), &[5]);
         // correlate reverses kernel: convolve([1,2,3], [0.5,1,0])
         assert_eq!(r.values(), &[0.5, 2.0, 3.5, 3.0, 0.0]);
+    }
+
+    #[test]
+    fn correlate_empty_inputs_match_numpy_errors() {
+        let empty = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+        let values = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+
+        let err = empty.correlate(&values).unwrap_err();
+        assert_eq!(err.to_string(), "first array argument cannot be empty");
+
+        let err = values.correlate(&empty).unwrap_err();
+        assert_eq!(err.to_string(), "second array argument cannot be empty");
     }
 
     #[test]
