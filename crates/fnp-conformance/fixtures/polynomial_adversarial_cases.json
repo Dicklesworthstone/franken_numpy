@@ -1,0 +1,180 @@
+[
+  {
+    "id": "poly_empty_coefficients",
+    "operation": "polyval",
+    "seed": 10401,
+    "mode": "strict",
+    "env_fingerprint": "fnp-poly-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_adversarial_cases.json",
+      "crates/fnp-ufunc/src/polynomial.rs"
+    ],
+    "reason_code": "poly_adversarial_empty_coeffs",
+    "coefficients": [],
+    "eval_point": 1.0,
+    "expected_behavior": "zero_polynomial"
+  },
+  {
+    "id": "poly_single_coefficient",
+    "operation": "polyval",
+    "seed": 10402,
+    "mode": "strict",
+    "env_fingerprint": "fnp-poly-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_adversarial_cases.json",
+      "crates/fnp-ufunc/src/polynomial.rs"
+    ],
+    "reason_code": "poly_adversarial_constant",
+    "coefficients": [42.0],
+    "eval_point": 999.0,
+    "expected_value": 42.0
+  },
+  {
+    "id": "poly_eval_at_zero",
+    "operation": "polyval",
+    "seed": 10403,
+    "mode": "strict",
+    "env_fingerprint": "fnp-poly-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_adversarial_cases.json",
+      "crates/fnp-ufunc/src/polynomial.rs"
+    ],
+    "reason_code": "poly_adversarial_eval_zero",
+    "coefficients": [1.0, 2.0, 3.0, 4.0],
+    "eval_point": 0.0,
+    "expected_value": 1.0
+  },
+  {
+    "id": "poly_with_nan_coefficient",
+    "operation": "polyval",
+    "seed": 10404,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-poly-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_adversarial_cases.json",
+      "crates/fnp-ufunc/src/polynomial.rs"
+    ],
+    "reason_code": "poly_adversarial_nan_coeff",
+    "coefficients": [1.0, "NaN", 3.0],
+    "eval_point": 2.0,
+    "expected_behavior": "nan_result"
+  },
+  {
+    "id": "poly_eval_at_inf",
+    "operation": "polyval",
+    "seed": 10405,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-poly-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_adversarial_cases.json",
+      "crates/fnp-ufunc/src/polynomial.rs"
+    ],
+    "reason_code": "poly_adversarial_eval_inf",
+    "coefficients": [1.0, 2.0, 3.0],
+    "eval_point": "Inf",
+    "expected_behavior": "inf_result"
+  },
+  {
+    "id": "polyadd_empty_plus_nonempty",
+    "operation": "polyadd",
+    "seed": 10406,
+    "mode": "strict",
+    "env_fingerprint": "fnp-poly-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_adversarial_cases.json",
+      "crates/fnp-ufunc/src/polynomial.rs"
+    ],
+    "reason_code": "poly_adversarial_add_empty",
+    "coefficients_a": [],
+    "coefficients_b": [1.0, 2.0, 3.0],
+    "expected_coefficients": [1.0, 2.0, 3.0]
+  },
+  {
+    "id": "polymul_by_zero_poly",
+    "operation": "polymul",
+    "seed": 10407,
+    "mode": "strict",
+    "env_fingerprint": "fnp-poly-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_adversarial_cases.json",
+      "crates/fnp-ufunc/src/polynomial.rs"
+    ],
+    "reason_code": "poly_adversarial_mul_zero",
+    "coefficients_a": [1.0, 2.0, 3.0],
+    "coefficients_b": [0.0],
+    "expected_behavior": "zero_polynomial"
+  },
+  {
+    "id": "polyroots_constant",
+    "operation": "roots",
+    "seed": 10408,
+    "mode": "strict",
+    "env_fingerprint": "fnp-poly-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_adversarial_cases.json",
+      "crates/fnp-ufunc/src/polynomial.rs"
+    ],
+    "reason_code": "poly_adversarial_roots_constant",
+    "coefficients": [5.0],
+    "expected_behavior": "no_roots"
+  },
+  {
+    "id": "polyroots_linear",
+    "operation": "roots",
+    "seed": 10409,
+    "mode": "strict",
+    "env_fingerprint": "fnp-poly-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_adversarial_cases.json",
+      "crates/fnp-ufunc/src/polynomial.rs"
+    ],
+    "reason_code": "poly_adversarial_roots_linear",
+    "coefficients": [1.0, -3.0],
+    "expected_roots": [3.0]
+  },
+  {
+    "id": "polyder_constant",
+    "operation": "polyder",
+    "seed": 10410,
+    "mode": "strict",
+    "env_fingerprint": "fnp-poly-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_adversarial_cases.json",
+      "crates/fnp-ufunc/src/polynomial.rs"
+    ],
+    "reason_code": "poly_adversarial_der_constant",
+    "coefficients": [42.0],
+    "expected_coefficients": [0.0]
+  },
+  {
+    "id": "polyint_with_constant",
+    "operation": "polyint",
+    "seed": 10411,
+    "mode": "strict",
+    "env_fingerprint": "fnp-poly-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_adversarial_cases.json",
+      "crates/fnp-ufunc/src/polynomial.rs"
+    ],
+    "reason_code": "poly_adversarial_int_constant",
+    "coefficients": [6.0],
+    "integration_constant": 5.0,
+    "expected_coefficients": [5.0, 6.0]
+  },
+  {
+    "id": "polyfit_perfect_line",
+    "operation": "polyfit",
+    "seed": 10412,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-poly-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_adversarial_cases.json",
+      "crates/fnp-ufunc/src/polynomial.rs"
+    ],
+    "reason_code": "poly_adversarial_fit_exact",
+    "x_values": [0.0, 1.0, 2.0, 3.0],
+    "y_values": [1.0, 3.0, 5.0, 7.0],
+    "degree": 1,
+    "expected_coefficients": [1.0, 2.0]
+  }
+]

@@ -8,7 +8,7 @@
 |--------|:-----------:|:-----------:|:-----------:|:-----------:|---------------------|
 | Ufunc operations | 381 | 33 | 62 | 476 | Good - core ops well covered, 3D commutative, identity scalar |
 | Signal processing | 305 | 12 | 12 | 329 | Good - extensive conv/corr/fft, atleast_nd, reciprocal/sign edge cases, convolve commutative/distributive, empty/nan/inf adversarial |
-| Polynomials | 96 | 12 | — | 108 | Good - all 5 families, edge cases, add-zero, sub-self, int/der edge, commutative/identity metamorphic |
+| Polynomials | 96 | 12 | 12 | 120 | Good - all 5 families, edge cases, add-zero, sub-self, int/der edge, commutative/identity metamorphic, empty/nan/constant adversarial |
 | I/O (npy/npz/text) | 70 | 40 | 35 | 145 | Good - parser boundaries, complex128, quoted fields, F-order, single-member npz |
 | Linear algebra | 67 | 30 | 37 | 134 | Good - core decompositions, 1x1 edge cases, identity, wide QR, fractional solve |
 | String arrays | 71 | 12 | — | 83 | Good - 33 char functions, empty/pattern edge cases, case/title conversion, isdigit, idempotence/involution metamorphic |
