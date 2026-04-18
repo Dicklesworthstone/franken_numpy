@@ -25494,6 +25494,34 @@ impl From<UFuncError> for MAError {
     }
 }
 
+fn flat_index_to_index_path(mut index: usize, shape: &[usize]) -> Result<Vec<i64>, MAError> {
+    if shape.is_empty() {
+        return if index == 0 {
+            Ok(Vec::new())
+        } else {
+            Err(MAError::Msg(format!(
+                "flat index {index} out of bounds for scalar"
+            )))
+        };
+    }
+
+    let mut path = vec![0_i64; shape.len()];
+    for axis in (0..shape.len()).rev() {
+        let dim = shape[axis];
+        if dim == 0 {
+            return Err(MAError::Msg(format!(
+                "flat index into zero-length axis {axis}"
+            )));
+        }
+        let coord = index % dim;
+        index /= dim;
+        path[axis] = i64::try_from(coord)
+            .map_err(|_| MAError::Msg("flat index coordinate overflow".to_string()))?;
+    }
+
+    Ok(path)
+}
+
 /// A masked array analogous to `numpy.ma.MaskedArray`.
 ///
 /// Mask convention (matching NumPy): `true` (1.0) = element is **masked** (excluded/invalid),
@@ -25853,6 +25881,31 @@ impl MaskedArray {
         self.hard_mask
     }
 
+    /// Assign a value by flat index, respecting hard-mask semantics.
+    pub fn set_item_flat(&mut self, index: usize, value: f64) -> Result<(), MAError> {
+        if index >= self.size() {
+            return Err(MAError::Msg(format!(
+                "set_item_flat: index {index} out of bounds for size {}",
+                self.size()
+            )));
+        }
+
+        let is_masked = self
+            .mask
+            .as_ref()
+            .is_some_and(|mask| mask.values()[index] != 0.0);
+        if is_masked && self.hard_mask {
+            return Ok(());
+        }
+
+        let index_path = flat_index_to_index_path(index, self.shape())?;
+        self.data.itemset(&index_path, value)?;
+        if is_masked && let Some(mask) = self.mask.as_mut() {
+            mask.itemset(&index_path, 0.0)?;
+        }
+        Ok(())
+    }
+
     // ── Helper: inverted mask for reduce_sum_where ──────────────────
 
     /// Build an inverted mask (1.0 where valid) suitable for `reduce_sum_where`.
@@ -25907,6 +25960,19 @@ impl MaskedArray {
 
     /// Sum of non-masked elements.
     pub fn sum(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, MAError> {
+        if axis.is_none()
+            && self.mask.as_ref().is_some_and(|mask| {
+                !mask.values().is_empty() && mask.values().iter().all(|&value| value != 0.0)
+            })
+        {
+            return Ok(Self {
+                data: UFuncArray::scalar(0.0, self.data.dtype()),
+                mask: Some(UFuncArray::scalar(1.0, DType::Bool)),
+                fill_value: self.fill_value,
+                hard_mask: false,
+            });
+        }
+
         let result_data = match self.valid_mask() {
             None => self.data.reduce_sum(axis, keepdims)?,
             Some(vmask) => self.data.reduce_sum_where(&vmask, axis, keepdims)?,
@@ -44541,6 +44607,16 @@ mod tests {
     }
 
     #[test]
+    fn masked_array_sum_all_masked_returns_masked_scalar() {
+        let data = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![3], vec![1.0, 1.0, 1.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        let result = ma.sum(None, false).unwrap();
+        assert_eq!(result.data().values(), &[0.0]);
+        assert_eq!(result.mask().map(UFuncArray::values), Some(&[1.0][..]));
+    }
+
+    #[test]
     fn masked_array_sum_no_mask() {
         let data = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         let ma = MaskedArray::new(data, None, None).unwrap();
@@ -44674,6 +44750,20 @@ mod tests {
         assert!(ma.is_hard_mask());
         ma.soften_mask();
         assert!(!ma.is_hard_mask());
+    }
+
+    #[test]
+    fn masked_set_item_flat_respects_hard_mask() {
+        let data = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![3], vec![0.0, 1.0, 0.0], DType::Bool).unwrap();
+        let mut ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        ma.harden_mask();
+        ma.set_item_flat(1, 99.0).unwrap();
+        assert_eq!(ma.data().values(), &[1.0, 2.0, 3.0]);
+        assert_eq!(
+            ma.mask().map(UFuncArray::values),
+            Some(&[0.0, 1.0, 0.0][..])
+        );
     }
 
     #[test]

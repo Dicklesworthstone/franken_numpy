@@ -1392,6 +1392,56 @@ struct MaskedMetamorphicCase {
 }
 
 #[derive(Debug, Deserialize)]
+struct MaskedAdversarialCase {
+    id: String,
+    operation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    data_shape: Vec<usize>,
+    #[serde(default)]
+    data_values: Vec<serde_json::Value>,
+    #[serde(default)]
+    mask: Option<serde_json::Value>,
+    #[serde(default)]
+    fill_value: Option<serde_json::Value>,
+    #[serde(default)]
+    hardmask: bool,
+    #[serde(default)]
+    set_index: Option<usize>,
+    #[serde(default)]
+    set_value: Option<serde_json::Value>,
+    #[serde(default)]
+    a_shape: Vec<usize>,
+    #[serde(default)]
+    a_values: Vec<serde_json::Value>,
+    #[serde(default)]
+    a_mask: Vec<bool>,
+    #[serde(default)]
+    b_value: Option<serde_json::Value>,
+    #[serde(default)]
+    b_mask: Option<bool>,
+    #[serde(default)]
+    new_shape: Vec<isize>,
+    #[serde(default)]
+    expected_behavior: String,
+    #[serde(default)]
+    expected_count: Option<usize>,
+    #[serde(default)]
+    abs_tol: f64,
+    #[serde(default)]
+    rel_tol: f64,
+}
+
+#[derive(Debug, Deserialize)]
 struct DateTimeDifferentialCase {
     id: String,
     operation: String,
@@ -2261,6 +2311,15 @@ fn load_masked_metamorphic_cases(
     fixture_root: &Path,
 ) -> Result<Vec<MaskedMetamorphicCase>, String> {
     let path = fixture_root.join("masked_metamorphic_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
+}
+
+fn load_masked_adversarial_cases(
+    fixture_root: &Path,
+) -> Result<Vec<MaskedAdversarialCase>, String> {
+    let path = fixture_root.join("masked_adversarial_cases.json");
     let raw = fs::read_to_string(&path)
         .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
     serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
@@ -12993,6 +13052,596 @@ fn masked_metamorphic_assert_values_equal(
     Ok(())
 }
 
+pub fn run_masked_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let cases = load_masked_adversarial_cases(&config.fixture_root)?;
+
+    let mut report = SuiteReport {
+        suite: "masked_adversarial",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+
+        let verdict = match execute_masked_adversarial_operation(&case) {
+            Ok(outcome) => validate_masked_adversarial_expectation(&case, &outcome),
+            Err(err) => validate_masked_adversarial_error(&case, &err),
+        };
+
+        match verdict {
+            Ok(()) => {
+                report.pass_count += 1;
+            }
+            Err(err) => {
+                report.failures.push(format!(
+                    "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} {} (actual_reason_code={})",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    err.message,
+                    err.reason_code
+                ));
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+fn execute_masked_adversarial_operation(
+    case: &MaskedAdversarialCase,
+) -> Result<MaskedOperationOutcome, MaskedSuiteError> {
+    match case.operation.as_str() {
+        "masked_sum" => {
+            let array = masked_adversarial_array(case)?;
+            let result = array
+                .sum(None, false)
+                .map_err(map_ma_error_to_masked_suite)?;
+            Ok(masked_array_to_outcome(&result))
+        }
+        "masked_array_create" => Ok(masked_array_to_outcome(&masked_adversarial_array(case)?)),
+        "masked_filled" => {
+            let array = masked_adversarial_array(case)?;
+            let fill_value = masked_adversarial_optional_value(&case.fill_value, "fill_value")?
+                .unwrap_or_else(|| array.fill_value());
+            let result = array
+                .filled(fill_value)
+                .map_err(map_ufunc_error_to_masked_suite)?;
+            Ok(MaskedOperationOutcome::Array {
+                shape: result.shape().to_vec(),
+                values: result.values().to_vec(),
+            })
+        }
+        "masked_setitem" => {
+            let mut array = masked_adversarial_array(case)?;
+            let index = case.set_index.ok_or_else(|| {
+                MaskedSuiteError::new(
+                    "masked_input_contract_violation",
+                    "masked_setitem requires set_index",
+                )
+            })?;
+            let value = masked_adversarial_required_value(&case.set_value, "set_value")?;
+            array
+                .set_item_flat(index, value)
+                .map_err(map_ma_error_to_masked_suite)?;
+            Ok(masked_array_to_outcome(&array))
+        }
+        "masked_compress" => {
+            let result = masked_adversarial_array(case)?.compressed();
+            Ok(MaskedOperationOutcome::Array {
+                shape: result.shape().to_vec(),
+                values: result.values().to_vec(),
+            })
+        }
+        "masked_argmax" => {
+            let result = masked_adversarial_array(case)?
+                .argmax(None)
+                .map_err(map_ma_error_to_masked_suite)?;
+            Ok(MaskedOperationOutcome::Array {
+                shape: result.shape().to_vec(),
+                values: result.values().to_vec(),
+            })
+        }
+        "masked_add" => {
+            let lhs = masked_adversarial_array_from_parts(
+                &case.a_shape,
+                &case.a_values,
+                Some(&masked_adversarial_bool_mask_to_f64(&case.a_mask)),
+                None,
+                "a",
+            )?;
+            let rhs_value = masked_adversarial_required_value(&case.b_value, "b_value")?;
+            let rhs_data = UFuncArray::scalar(rhs_value, DType::F64);
+            let rhs_mask = case
+                .b_mask
+                .map(|masked| UFuncArray::scalar(if masked { 1.0 } else { 0.0 }, DType::Bool));
+            let rhs =
+                MaskedArray::new(rhs_data, rhs_mask, None).map_err(map_ma_error_to_masked_suite)?;
+            let result = lhs
+                .elementwise_binary(&rhs, BinaryOp::Add)
+                .map_err(map_ma_error_to_masked_suite)?;
+            Ok(masked_array_to_outcome(&result))
+        }
+        "masked_reshape" => {
+            if case.new_shape.is_empty() {
+                return Err(MaskedSuiteError::new(
+                    "masked_input_contract_violation",
+                    "masked_reshape requires new_shape",
+                ));
+            }
+            let result = masked_adversarial_array(case)?
+                .reshape(&case.new_shape)
+                .map_err(map_ma_error_to_masked_suite)?;
+            Ok(masked_array_to_outcome(&result))
+        }
+        "masked_count" => {
+            let result = masked_adversarial_array(case)?
+                .count(None)
+                .map_err(map_ma_error_to_masked_suite)?;
+            Ok(MaskedOperationOutcome::Array {
+                shape: result.shape().to_vec(),
+                values: result.values().to_vec(),
+            })
+        }
+        "masked_getmask" => Ok(masked_array_to_outcome(&masked_adversarial_array(case)?)),
+        other => Err(MaskedSuiteError::new(
+            "masked_policy_unknown_adversarial_operation",
+            format!("unsupported masked adversarial operation {other}"),
+        )),
+    }
+}
+
+fn validate_masked_adversarial_expectation(
+    case: &MaskedAdversarialCase,
+    outcome: &MaskedOperationOutcome,
+) -> Result<(), MaskedSuiteError> {
+    if let Some(expected_count) = case.expected_count {
+        let actual = masked_adversarial_scalar(outcome, case, "count")?;
+        return masked_adversarial_assert_values_equal(
+            case,
+            &[actual],
+            &[expected_count as f64],
+            "count",
+        );
+    }
+
+    match case.expected_behavior.as_str() {
+        "masked_result" => {
+            let actual_mask = masked_adversarial_mask_from_outcome(outcome, case)?;
+            masked_adversarial_assert_values_equal(case, &actual_mask, &[1.0], "masked result")
+        }
+        "empty_masked_array" => {
+            let MaskedOperationOutcome::Masked {
+                shape,
+                values,
+                mask,
+            } = outcome
+            else {
+                return Err(masked_adversarial_type_mismatch(
+                    case,
+                    outcome,
+                    "masked array",
+                ));
+            };
+            masked_adversarial_assert_shape(case, shape, &[0])?;
+            masked_adversarial_assert_values_equal(case, values, &[], "empty values")?;
+            if let Some(mask) = mask {
+                masked_adversarial_assert_values_equal(case, mask, &[], "empty mask")?;
+            }
+            Ok(())
+        }
+        "no_mask_scalar" => {
+            let MaskedOperationOutcome::Masked {
+                shape,
+                values,
+                mask,
+            } = outcome
+            else {
+                return Err(masked_adversarial_type_mismatch(
+                    case,
+                    outcome,
+                    "masked array",
+                ));
+            };
+            masked_adversarial_assert_shape(case, shape, &[1])?;
+            masked_adversarial_assert_values_equal(case, values, &[42.0], "scalar values")?;
+            if let Some(mask) = mask
+                && mask.iter().any(|&value| value != 0.0)
+            {
+                return Err(MaskedSuiteError::new(
+                    "masked_adversarial_mismatch",
+                    format!("{} expected no mask but got {mask:?}", case.id),
+                ));
+            }
+            Ok(())
+        }
+        "nan_fill" => {
+            let MaskedOperationOutcome::Array { shape, values } = outcome else {
+                return Err(masked_adversarial_type_mismatch(
+                    case,
+                    outcome,
+                    "filled array",
+                ));
+            };
+            masked_adversarial_assert_shape(case, shape, &[4])?;
+            masked_adversarial_assert_values_equal(
+                case,
+                values,
+                &[1.0, f64::NAN, 3.0, f64::NAN],
+                "filled values",
+            )
+        }
+        "nan_masked_out" => {
+            let actual = masked_adversarial_scalar(outcome, case, "masked sum")?;
+            masked_adversarial_assert_values_equal(case, &[actual], &[8.0], "masked sum")
+        }
+        "hardmask_preserves" => {
+            let MaskedOperationOutcome::Masked { values, mask, .. } = outcome else {
+                return Err(masked_adversarial_type_mismatch(
+                    case,
+                    outcome,
+                    "masked array",
+                ));
+            };
+            let expected_values =
+                masked_adversarial_values(&case.data_values, "data_values", Some(case))?;
+            let expected_mask =
+                masked_adversarial_mask_values(&case.mask, "mask", case)?.unwrap_or_default();
+            masked_adversarial_assert_values_equal(case, values, &expected_values, "values")?;
+            let actual_mask = mask.as_ref().ok_or_else(|| {
+                MaskedSuiteError::new(
+                    "masked_adversarial_mismatch",
+                    format!("{} expected hard mask to preserve mask", case.id),
+                )
+            })?;
+            masked_adversarial_assert_values_equal(case, actual_mask, &expected_mask, "mask")
+        }
+        "empty_result" => {
+            let MaskedOperationOutcome::Array { shape, values } = outcome else {
+                return Err(masked_adversarial_type_mismatch(
+                    case,
+                    outcome,
+                    "compressed array",
+                ));
+            };
+            masked_adversarial_assert_shape(case, shape, &[0])?;
+            masked_adversarial_assert_values_equal(case, values, &[], "compressed values")
+        }
+        "masked_argmax_result" => {
+            let actual = masked_adversarial_scalar(outcome, case, "argmax")?;
+            masked_adversarial_assert_values_equal(case, &[actual], &[0.0], "argmax")
+        }
+        "broadcast_preserves_mask" => {
+            let MaskedOperationOutcome::Masked {
+                shape,
+                values,
+                mask,
+            } = outcome
+            else {
+                return Err(masked_adversarial_type_mismatch(
+                    case,
+                    outcome,
+                    "masked array",
+                ));
+            };
+            let lhs_values = masked_adversarial_values(&case.a_values, "a_values", Some(case))?;
+            let rhs_value = masked_adversarial_required_value(&case.b_value, "b_value")?;
+            let expected_values: Vec<f64> =
+                lhs_values.iter().map(|value| value + rhs_value).collect();
+            let expected_mask = masked_adversarial_bool_mask_to_f64(&case.a_mask);
+            masked_adversarial_assert_shape(case, shape, &case.a_shape)?;
+            masked_adversarial_assert_values_equal(case, values, &expected_values, "values")?;
+            let actual_mask = mask.as_ref().ok_or_else(|| {
+                MaskedSuiteError::new(
+                    "masked_adversarial_mismatch",
+                    format!("{} expected broadcast mask", case.id),
+                )
+            })?;
+            masked_adversarial_assert_values_equal(case, actual_mask, &expected_mask, "mask")
+        }
+        "reshape_error" => Err(MaskedSuiteError::new(
+            "masked_adversarial_expected_error",
+            format!("{} expected reshape error but operation succeeded", case.id),
+        )),
+        "mask_view_not_copy" => {
+            let actual_mask = masked_adversarial_mask_from_outcome(outcome, case)?;
+            let expected_mask =
+                masked_adversarial_mask_values(&case.mask, "mask", case)?.unwrap_or_default();
+            masked_adversarial_assert_values_equal(case, &actual_mask, &expected_mask, "mask")
+        }
+        "" => Err(MaskedSuiteError::new(
+            "masked_adversarial_fixture_invalid",
+            format!("{} missing expected_behavior or expected_count", case.id),
+        )),
+        other => Err(MaskedSuiteError::new(
+            "masked_policy_unknown_adversarial_behavior",
+            format!("unsupported masked adversarial expected_behavior {other}"),
+        )),
+    }
+}
+
+fn validate_masked_adversarial_error(
+    case: &MaskedAdversarialCase,
+    err: &MaskedSuiteError,
+) -> Result<(), MaskedSuiteError> {
+    let error_lower = err.message.to_ascii_lowercase();
+    if case.expected_behavior == "reshape_error"
+        && (error_lower.contains("reshape")
+            || error_lower.contains("element count mismatch")
+            || err.reason_code == "ufunc_shape_contract_violation")
+    {
+        return Ok(());
+    }
+    Err(MaskedSuiteError::new(
+        err.reason_code.clone(),
+        format!(
+            "{} expected success for operation '{}' but got error '{}'",
+            case.id, case.operation, err.message
+        ),
+    ))
+}
+
+fn masked_adversarial_array(case: &MaskedAdversarialCase) -> Result<MaskedArray, MaskedSuiteError> {
+    let fill_value = masked_adversarial_optional_value(&case.fill_value, "fill_value")?;
+    let mask_values = masked_adversarial_mask_values(&case.mask, "mask", case)?;
+    let mut array = masked_adversarial_array_from_parts(
+        &case.data_shape,
+        &case.data_values,
+        mask_values.as_deref(),
+        fill_value,
+        "data",
+    )?;
+    if case.hardmask {
+        array.harden_mask();
+    }
+    Ok(array)
+}
+
+fn masked_adversarial_array_from_parts(
+    shape: &[usize],
+    raw_values: &[serde_json::Value],
+    mask_values: Option<&[f64]>,
+    fill_value: Option<f64>,
+    label: &str,
+) -> Result<MaskedArray, MaskedSuiteError> {
+    let values = masked_adversarial_values(raw_values, &format!("{label}_values"), None)?;
+    let empty_mask: [f64; 0] = [];
+    masked_values_to_array(
+        shape,
+        &values,
+        mask_values.unwrap_or(&empty_mask),
+        fill_value,
+        &[],
+        &[],
+    )
+}
+
+fn masked_adversarial_values(
+    values: &[serde_json::Value],
+    field: &str,
+    case: Option<&MaskedAdversarialCase>,
+) -> Result<Vec<f64>, MaskedSuiteError> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| masked_adversarial_value(value, field, index, case))
+        .collect()
+}
+
+fn masked_adversarial_optional_value(
+    value: &Option<serde_json::Value>,
+    field: &str,
+) -> Result<Option<f64>, MaskedSuiteError> {
+    value
+        .as_ref()
+        .map(|value| masked_adversarial_value(value, field, 0, None))
+        .transpose()
+}
+
+fn masked_adversarial_required_value(
+    value: &Option<serde_json::Value>,
+    field: &str,
+) -> Result<f64, MaskedSuiteError> {
+    masked_adversarial_optional_value(value, field)?.ok_or_else(|| {
+        MaskedSuiteError::new(
+            "masked_input_contract_violation",
+            format!("{field} is required"),
+        )
+    })
+}
+
+fn masked_adversarial_value(
+    value: &serde_json::Value,
+    field: &str,
+    index: usize,
+    case: Option<&MaskedAdversarialCase>,
+) -> Result<f64, MaskedSuiteError> {
+    match value {
+        serde_json::Value::Number(number) => number.as_f64().ok_or_else(|| {
+            MaskedSuiteError::new(
+                "masked_input_contract_violation",
+                format!("{field}[{index}] is not representable as f64"),
+            )
+        }),
+        serde_json::Value::String(raw) => match raw.as_str() {
+            "NaN" | "nan" => Ok(f64::NAN),
+            "Infinity" | "inf" | "+inf" => Ok(f64::INFINITY),
+            "-Infinity" | "-inf" => Ok(f64::NEG_INFINITY),
+            other => Err(MaskedSuiteError::new(
+                "masked_input_contract_violation",
+                format!(
+                    "{} {field}[{index}] has unsupported numeric sentinel {other:?}",
+                    case.map_or("", |case| case.id.as_str())
+                ),
+            )),
+        },
+        other => Err(MaskedSuiteError::new(
+            "masked_input_contract_violation",
+            format!("{field}[{index}] must be number or numeric sentinel string, got {other:?}"),
+        )),
+    }
+}
+
+fn masked_adversarial_mask_values(
+    value: &Option<serde_json::Value>,
+    field: &str,
+    case: &MaskedAdversarialCase,
+) -> Result<Option<Vec<f64>>, MaskedSuiteError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(raw) if raw == "nomask" => Ok(None),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| match value {
+                serde_json::Value::Bool(masked) => Ok(if *masked { 1.0 } else { 0.0 }),
+                serde_json::Value::Number(number) => number.as_f64().ok_or_else(|| {
+                    MaskedSuiteError::new(
+                        "masked_input_contract_violation",
+                        format!("{} {field}[{index}] is not representable as f64", case.id),
+                    )
+                }),
+                other => Err(MaskedSuiteError::new(
+                    "masked_input_contract_violation",
+                    format!(
+                        "{} {field}[{index}] must be bool or number, got {other:?}",
+                        case.id
+                    ),
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some),
+        other => Err(MaskedSuiteError::new(
+            "masked_input_contract_violation",
+            format!(
+                "{} {field} must be array or \"nomask\", got {other:?}",
+                case.id
+            ),
+        )),
+    }
+}
+
+fn masked_adversarial_bool_mask_to_f64(mask: &[bool]) -> Vec<f64> {
+    mask.iter()
+        .map(|&masked| if masked { 1.0 } else { 0.0 })
+        .collect()
+}
+
+fn masked_adversarial_scalar(
+    outcome: &MaskedOperationOutcome,
+    case: &MaskedAdversarialCase,
+    label: &str,
+) -> Result<f64, MaskedSuiteError> {
+    let values = match outcome {
+        MaskedOperationOutcome::Array { values, .. }
+        | MaskedOperationOutcome::Masked { values, .. } => values,
+    };
+    if values.len() != 1 {
+        return Err(MaskedSuiteError::new(
+            "masked_adversarial_mismatch",
+            format!(
+                "{} expected scalar {label} but got values={values:?}",
+                case.id
+            ),
+        ));
+    }
+    Ok(values[0])
+}
+
+fn masked_adversarial_mask_from_outcome(
+    outcome: &MaskedOperationOutcome,
+    case: &MaskedAdversarialCase,
+) -> Result<Vec<f64>, MaskedSuiteError> {
+    let MaskedOperationOutcome::Masked { shape, mask, .. } = outcome else {
+        return Err(masked_adversarial_type_mismatch(
+            case,
+            outcome,
+            "masked array",
+        ));
+    };
+    Ok(mask
+        .clone()
+        .unwrap_or_else(|| vec![0.0; shape.iter().product()]))
+}
+
+fn masked_adversarial_assert_shape(
+    case: &MaskedAdversarialCase,
+    actual: &[usize],
+    expected: &[usize],
+) -> Result<(), MaskedSuiteError> {
+    if actual == expected {
+        return Ok(());
+    }
+    Err(MaskedSuiteError::new(
+        "masked_adversarial_mismatch",
+        format!(
+            "{} shape mismatch expected={expected:?} actual={actual:?}",
+            case.id
+        ),
+    ))
+}
+
+fn masked_adversarial_assert_values_equal(
+    case: &MaskedAdversarialCase,
+    actual: &[f64],
+    expected: &[f64],
+    label: &str,
+) -> Result<(), MaskedSuiteError> {
+    if actual.len() != expected.len() {
+        return Err(MaskedSuiteError::new(
+            "masked_adversarial_mismatch",
+            format!(
+                "{} {label} length mismatch expected={} actual={}",
+                case.id,
+                expected.len(),
+                actual.len()
+            ),
+        ));
+    }
+    let abs_tol = if case.abs_tol > 0.0 {
+        case.abs_tol
+    } else {
+        1e-9
+    };
+    let rel_tol = if case.rel_tol > 0.0 {
+        case.rel_tol
+    } else {
+        1e-9
+    };
+    if approx_equal_values(expected, actual, abs_tol, rel_tol) {
+        return Ok(());
+    }
+    Err(MaskedSuiteError::new(
+        "masked_adversarial_mismatch",
+        format!(
+            "{} {label} mismatch expected={expected:?} actual={actual:?} abs_tol={abs_tol} rel_tol={rel_tol}",
+            case.id
+        ),
+    ))
+}
+
+fn masked_adversarial_type_mismatch(
+    case: &MaskedAdversarialCase,
+    outcome: &MaskedOperationOutcome,
+    expected: &str,
+) -> MaskedSuiteError {
+    MaskedSuiteError::new(
+        "masked_adversarial_type_mismatch",
+        format!("{} expected {expected}, got {outcome:?}", case.id),
+    )
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum DateTimeOperationOutcome {
     Array {
@@ -15160,6 +15809,7 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
         run_string_adversarial_suite(config)?,
         run_masked_differential_suite(config)?,
         run_masked_metamorphic_suite(config)?,
+        run_masked_adversarial_suite(config)?,
         run_datetime_differential_suite(config)?,
         run_datetime_metamorphic_suite(config)?,
         run_datetime_adversarial_suite(config)?,
@@ -17335,7 +17985,7 @@ mod tests {
         run_io_adversarial_suite, run_io_differential_suite, run_io_metamorphic_suite,
         run_iter_adversarial_suite, run_iter_differential_suite, run_iter_metamorphic_suite,
         run_linalg_adversarial_suite, run_linalg_differential_suite, run_linalg_metamorphic_suite,
-        run_masked_differential_suite, run_masked_metamorphic_suite,
+        run_masked_adversarial_suite, run_masked_differential_suite, run_masked_metamorphic_suite,
         run_polynomial_differential_suite, run_rng_adversarial_suite, run_rng_differential_suite,
         run_rng_metamorphic_suite, run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
         run_runtime_policy_metamorphic_suite, run_shape_stride_adversarial_suite,
@@ -18280,6 +18930,14 @@ mod tests {
         let cfg = HarnessConfig::default_paths();
         let suite =
             run_masked_metamorphic_suite(&cfg).expect("masked metamorphic suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn masked_adversarial_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite =
+            run_masked_adversarial_suite(&cfg).expect("masked adversarial suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 
