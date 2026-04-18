@@ -12462,6 +12462,7 @@ fn map_ufunc_error_to_polynomial_suite(error: UFuncError) -> PolynomialSuiteErro
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct PolynomialMetamorphicCase {
     id: String,
     relation: String,
