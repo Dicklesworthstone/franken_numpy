@@ -1262,6 +1262,56 @@ struct MaskedDifferentialCase {
 }
 
 #[derive(Debug, Deserialize)]
+struct MaskedMetamorphicCase {
+    id: String,
+    relation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    data_shape: Vec<usize>,
+    #[serde(default)]
+    data_values: Vec<f64>,
+    #[serde(default)]
+    mask: Vec<bool>,
+    #[serde(default)]
+    fill_value: Option<f64>,
+    #[serde(default)]
+    data_dtype: String,
+    #[serde(default)]
+    new_shape: Vec<isize>,
+    #[serde(default)]
+    operation: String,
+    #[serde(default)]
+    a_shape: Vec<usize>,
+    #[serde(default)]
+    a_values: Vec<f64>,
+    #[serde(default)]
+    a_mask: Vec<bool>,
+    #[serde(default)]
+    b_shape: Vec<usize>,
+    #[serde(default)]
+    b_values: Vec<f64>,
+    #[serde(default)]
+    b_mask: Vec<bool>,
+    #[serde(default)]
+    axis: Option<isize>,
+    #[serde(default)]
+    hardmask: bool,
+    #[serde(default)]
+    abs_tol: f64,
+    #[serde(default)]
+    rel_tol: f64,
+}
+
+#[derive(Debug, Deserialize)]
 struct DateTimeDifferentialCase {
     id: String,
     operation: String,
@@ -2047,6 +2097,15 @@ fn load_masked_differential_cases(
     fixture_root: &Path,
 ) -> Result<Vec<MaskedDifferentialCase>, String> {
     let path = fixture_root.join("masked_differential_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
+}
+
+fn load_masked_metamorphic_cases(
+    fixture_root: &Path,
+) -> Result<Vec<MaskedMetamorphicCase>, String> {
+    let path = fixture_root.join("masked_metamorphic_cases.json");
     let raw = fs::read_to_string(&path)
         .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
     serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
@@ -11681,6 +11740,465 @@ fn map_ma_error_to_masked_suite(error: MAError) -> MaskedSuiteError {
     }
 }
 
+pub fn run_masked_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let cases = load_masked_metamorphic_cases(&config.fixture_root)?;
+
+    let mut report = SuiteReport {
+        suite: "masked_metamorphic",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+
+        match evaluate_masked_metamorphic_relation(&case) {
+            Ok(()) => {
+                report.pass_count += 1;
+            }
+            Err(err) => {
+                report.failures.push(format!(
+                    "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} {} (actual_reason_code={})",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    err.message,
+                    err.reason_code
+                ));
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+fn evaluate_masked_metamorphic_relation(
+    case: &MaskedMetamorphicCase,
+) -> Result<(), MaskedSuiteError> {
+    match case.relation.as_str() {
+        "masked_fill_value_consistent" => {
+            let array = masked_metamorphic_array(case)?;
+            let transformed = array.elementwise_unary(UnaryOp::Negative);
+            masked_metamorphic_assert_scalar_equal(
+                case,
+                transformed.fill_value(),
+                array.fill_value(),
+                "fill_value after unary op",
+            )
+        }
+        "masked_compress_idempotent" => {
+            let array = masked_metamorphic_array(case)?;
+            let once = array.compressed();
+            let remasked = MaskedArray::new(once.clone(), None, case.fill_value)
+                .map_err(map_ma_error_to_masked_suite)?;
+            let twice = remasked.compressed();
+            masked_metamorphic_assert_values_equal(
+                case,
+                twice.values(),
+                once.values(),
+                "compressed values",
+            )
+        }
+        "masked_mask_or_idempotent" => {
+            let array = masked_metamorphic_array(case)?;
+            let result = array
+                .elementwise_binary(&array, BinaryOp::Add)
+                .map_err(map_ma_error_to_masked_suite)?;
+            let expected = masked_metamorphic_mask_to_f64(&case.mask);
+            let actual = masked_metamorphic_array_mask_values(&result);
+            masked_metamorphic_assert_values_equal(case, &actual, &expected, "mask OR idempotence")
+        }
+        "masked_filled_unmask_inverse" => {
+            let array = masked_metamorphic_array(case)?;
+            let fill_value = case.fill_value.unwrap_or_else(|| array.fill_value());
+            let filled = array
+                .filled(fill_value)
+                .map_err(map_ufunc_error_to_masked_suite)?;
+            masked_metamorphic_assert_values_equal(
+                case,
+                filled.values(),
+                &case.data_values,
+                "filled unmasked values",
+            )
+        }
+        "masked_reshape_preserve_mask_count" => {
+            if case.new_shape.is_empty() {
+                return Err(MaskedSuiteError::new(
+                    "masked_input_contract_violation",
+                    "reshape-preserve relation requires new_shape",
+                ));
+            }
+            let array = masked_metamorphic_array(case)?;
+            let before = array.count_masked();
+            let reshaped = array
+                .reshape(&case.new_shape)
+                .map_err(map_ma_error_to_masked_suite)?;
+            let after = reshaped.count_masked();
+            if before != after {
+                return Err(MaskedSuiteError::new(
+                    "masked_metamorphic_relation_failed",
+                    format!("mask count changed across reshape: before={before} after={after}"),
+                ));
+            }
+            Ok(())
+        }
+        "masked_reduction_all_masked" => {
+            let array = masked_metamorphic_array(case)?;
+            let reduced = match case.operation.as_str() {
+                "" | "sum" => array.sum(None, false),
+                "prod" => array.prod(None, false),
+                other => {
+                    return Err(MaskedSuiteError::new(
+                        "masked_policy_unknown_operation",
+                        format!("unsupported masked reduction operation {other}"),
+                    ));
+                }
+            }
+            .map_err(map_ma_error_to_masked_suite)?;
+            let actual = reduced.data().values().first().copied().ok_or_else(|| {
+                MaskedSuiteError::new(
+                    "masked_metamorphic_relation_failed",
+                    "all-masked reduction returned no values",
+                )
+            })?;
+            masked_metamorphic_assert_scalar_equal(
+                case,
+                actual,
+                case.fill_value.unwrap_or(0.0),
+                "all-masked reduction fill",
+            )
+        }
+        "masked_concat_mask_count_additive" => {
+            let lhs = masked_metamorphic_array_from_parts(
+                case,
+                &case.a_shape,
+                &case.a_values,
+                &case.a_mask,
+                case.fill_value,
+            )?;
+            let rhs = masked_metamorphic_array_from_parts(
+                case,
+                &case.b_shape,
+                &case.b_values,
+                &case.b_mask,
+                case.fill_value,
+            )?;
+            let axis = case.axis.unwrap_or(0);
+            let result = MaskedArray::concatenate(&[&lhs, &rhs], axis)
+                .map_err(map_ma_error_to_masked_suite)?;
+            let expected = lhs.count_masked() + rhs.count_masked();
+            let actual = result.count_masked();
+            if actual != expected {
+                return Err(MaskedSuiteError::new(
+                    "masked_metamorphic_relation_failed",
+                    format!("concatenated mask count mismatch expected={expected} actual={actual}"),
+                ));
+            }
+            Ok(())
+        }
+        "masked_arithmetic_mask_union" => {
+            let lhs = masked_metamorphic_array_from_parts(
+                case,
+                &case.a_shape,
+                &case.a_values,
+                &case.a_mask,
+                case.fill_value,
+            )?;
+            let rhs = masked_metamorphic_array_from_parts(
+                case,
+                &case.b_shape,
+                &case.b_values,
+                &case.b_mask,
+                case.fill_value,
+            )?;
+            let op = match case.operation.as_str() {
+                "" | "add" => BinaryOp::Add,
+                "multiply" => BinaryOp::Mul,
+                other => {
+                    return Err(MaskedSuiteError::new(
+                        "masked_policy_unknown_operation",
+                        format!("unsupported masked arithmetic operation {other}"),
+                    ));
+                }
+            };
+            let result = lhs
+                .elementwise_binary(&rhs, op)
+                .map_err(map_ma_error_to_masked_suite)?;
+            let expected = masked_metamorphic_mask_union(&case.a_mask, &case.b_mask)?;
+            let actual = masked_metamorphic_array_mask_values(&result);
+            masked_metamorphic_assert_values_equal(case, &actual, &expected, "mask union")
+        }
+        "masked_copy_independence" => {
+            let array = masked_metamorphic_array(case)?;
+            let original_fill = array.fill_value();
+            let mut cloned = array.clone();
+            cloned.set_fill_value(-12_345.0);
+            masked_metamorphic_assert_scalar_equal(
+                case,
+                array.fill_value(),
+                original_fill,
+                "original fill_value after clone mutation",
+            )?;
+            if (cloned.fill_value() - array.fill_value()).abs() <= f64::EPSILON {
+                return Err(MaskedSuiteError::new(
+                    "masked_metamorphic_relation_failed",
+                    "clone fill_value mutation leaked back to original",
+                ));
+            }
+            let unmasked_copy = array.copy_without_mask();
+            if unmasked_copy.mask().is_some() {
+                return Err(MaskedSuiteError::new(
+                    "masked_metamorphic_relation_failed",
+                    "copy_without_mask kept a mask",
+                ));
+            }
+            if array.mask().is_none() {
+                return Err(MaskedSuiteError::new(
+                    "masked_metamorphic_relation_failed",
+                    "copy_without_mask removed mask from original array",
+                ));
+            }
+            Ok(())
+        }
+        "masked_getmaskarray_nomask" => {
+            let array = masked_metamorphic_unmasked_array(case)?;
+            let actual = masked_metamorphic_array_mask_values(&array);
+            let expected = vec![0.0; array.size()];
+            masked_metamorphic_assert_values_equal(case, &actual, &expected, "nomask getmaskarray")
+        }
+        "masked_transpose_mask_transpose" => {
+            let array = masked_metamorphic_array(case)?;
+            let transposed = array
+                .transpose(None)
+                .map_err(map_ma_error_to_masked_suite)?;
+            let expected_transposed_mask =
+                masked_metamorphic_transpose_2d_values(&case.data_shape, &case.mask)?;
+            let actual_transposed_mask = masked_metamorphic_array_mask_values(&transposed);
+            masked_metamorphic_assert_values_equal(
+                case,
+                &actual_transposed_mask,
+                &expected_transposed_mask,
+                "transposed mask",
+            )?;
+            let recovered = transposed
+                .transpose(None)
+                .map_err(map_ma_error_to_masked_suite)?;
+            let expected = masked_metamorphic_mask_to_f64(&case.mask);
+            let actual = masked_metamorphic_array_mask_values(&recovered);
+            masked_metamorphic_assert_values_equal(case, &actual, &expected, "double transpose")
+        }
+        "masked_hardmask_softmask_consistency" => {
+            let mut array = masked_metamorphic_array(case)?;
+            if case.hardmask {
+                array.harden_mask();
+            } else {
+                array.soften_mask();
+            }
+            let original_mask = masked_metamorphic_array_mask_values(&array);
+            array.harden_mask();
+            if !array.is_hard_mask() {
+                return Err(MaskedSuiteError::new(
+                    "masked_metamorphic_relation_failed",
+                    "harden_mask did not enable hard mask",
+                ));
+            }
+            let hardened_mask = masked_metamorphic_array_mask_values(&array);
+            masked_metamorphic_assert_values_equal(
+                case,
+                &hardened_mask,
+                &original_mask,
+                "hardened mask values",
+            )?;
+            array.soften_mask();
+            if array.is_hard_mask() {
+                return Err(MaskedSuiteError::new(
+                    "masked_metamorphic_relation_failed",
+                    "soften_mask did not disable hard mask",
+                ));
+            }
+            let softened_mask = masked_metamorphic_array_mask_values(&array);
+            masked_metamorphic_assert_values_equal(
+                case,
+                &softened_mask,
+                &original_mask,
+                "softened mask values",
+            )
+        }
+        other => Err(MaskedSuiteError::new(
+            "masked_policy_unknown_metamorphic_relation",
+            format!("unsupported masked metamorphic relation {other}"),
+        )),
+    }
+}
+
+fn masked_metamorphic_array(case: &MaskedMetamorphicCase) -> Result<MaskedArray, MaskedSuiteError> {
+    masked_metamorphic_array_from_parts(
+        case,
+        &case.data_shape,
+        &case.data_values,
+        &case.mask,
+        case.fill_value,
+    )
+}
+
+fn masked_metamorphic_unmasked_array(
+    case: &MaskedMetamorphicCase,
+) -> Result<MaskedArray, MaskedSuiteError> {
+    masked_metamorphic_validate_dtype(case)?;
+    let data = UFuncArray::new(
+        case.data_shape.clone(),
+        case.data_values.clone(),
+        DType::F64,
+    )
+    .map_err(map_ufunc_error_to_masked_suite)?;
+    MaskedArray::new(data, None, case.fill_value).map_err(map_ma_error_to_masked_suite)
+}
+
+fn masked_metamorphic_array_from_parts(
+    case: &MaskedMetamorphicCase,
+    shape: &[usize],
+    values: &[f64],
+    mask: &[bool],
+    fill_value: Option<f64>,
+) -> Result<MaskedArray, MaskedSuiteError> {
+    masked_metamorphic_validate_dtype(case)?;
+    let mask_values = masked_metamorphic_mask_to_f64(mask);
+    masked_values_to_array(shape, values, &mask_values, fill_value, &[], &[])
+}
+
+fn masked_metamorphic_validate_dtype(case: &MaskedMetamorphicCase) -> Result<(), MaskedSuiteError> {
+    let dtype = case.data_dtype.trim().to_ascii_lowercase();
+    if dtype.is_empty() || dtype == "f64" || dtype == "float64" {
+        return Ok(());
+    }
+    Err(MaskedSuiteError::new(
+        "masked_input_contract_violation",
+        format!("unsupported masked metamorphic dtype {}", case.data_dtype),
+    ))
+}
+
+fn masked_metamorphic_mask_to_f64(mask: &[bool]) -> Vec<f64> {
+    mask.iter()
+        .map(|&masked| if masked { 1.0 } else { 0.0 })
+        .collect()
+}
+
+fn masked_metamorphic_array_mask_values(array: &MaskedArray) -> Vec<f64> {
+    array
+        .mask()
+        .map(|mask| mask.values().to_vec())
+        .unwrap_or_else(|| vec![0.0; array.size()])
+}
+
+fn masked_metamorphic_mask_union(lhs: &[bool], rhs: &[bool]) -> Result<Vec<f64>, MaskedSuiteError> {
+    if lhs.len() != rhs.len() {
+        return Err(MaskedSuiteError::new(
+            "masked_input_contract_violation",
+            format!(
+                "mask union requires equal lengths, lhs={} rhs={}",
+                lhs.len(),
+                rhs.len()
+            ),
+        ));
+    }
+    Ok(lhs
+        .iter()
+        .zip(rhs.iter())
+        .map(|(&left, &right)| if left || right { 1.0 } else { 0.0 })
+        .collect())
+}
+
+fn masked_metamorphic_transpose_2d_values(
+    shape: &[usize],
+    mask: &[bool],
+) -> Result<Vec<f64>, MaskedSuiteError> {
+    if shape.len() != 2 {
+        return Err(MaskedSuiteError::new(
+            "masked_input_contract_violation",
+            format!("2-D transpose relation requires rank 2 shape, got {shape:?}"),
+        ));
+    }
+    let rows = shape[0];
+    let cols = shape[1];
+    if rows * cols != mask.len() {
+        return Err(MaskedSuiteError::new(
+            "masked_input_contract_violation",
+            format!(
+                "mask length {} does not match 2-D shape {shape:?}",
+                mask.len()
+            ),
+        ));
+    }
+    let mut transposed = vec![0.0; mask.len()];
+    for row in 0..rows {
+        for col in 0..cols {
+            transposed[col * rows + row] = if mask[row * cols + col] { 1.0 } else { 0.0 };
+        }
+    }
+    Ok(transposed)
+}
+
+fn masked_metamorphic_abs_tol(case: &MaskedMetamorphicCase) -> f64 {
+    if case.abs_tol > 0.0 {
+        case.abs_tol
+    } else {
+        1e-9
+    }
+}
+
+fn masked_metamorphic_rel_tol(case: &MaskedMetamorphicCase) -> f64 {
+    if case.rel_tol > 0.0 {
+        case.rel_tol
+    } else {
+        1e-9
+    }
+}
+
+fn masked_metamorphic_assert_scalar_equal(
+    case: &MaskedMetamorphicCase,
+    actual: f64,
+    expected: f64,
+    label: &str,
+) -> Result<(), MaskedSuiteError> {
+    masked_metamorphic_assert_values_equal(case, &[actual], &[expected], label)
+}
+
+fn masked_metamorphic_assert_values_equal(
+    case: &MaskedMetamorphicCase,
+    actual: &[f64],
+    expected: &[f64],
+    label: &str,
+) -> Result<(), MaskedSuiteError> {
+    if actual.len() != expected.len() {
+        return Err(MaskedSuiteError::new(
+            "masked_metamorphic_relation_failed",
+            format!(
+                "{label} length mismatch expected={} actual={}",
+                expected.len(),
+                actual.len()
+            ),
+        ));
+    }
+    let abs_tol = masked_metamorphic_abs_tol(case);
+    let rel_tol = masked_metamorphic_rel_tol(case);
+    if !approx_equal_values(expected, actual, abs_tol, rel_tol) {
+        return Err(MaskedSuiteError::new(
+            "masked_metamorphic_relation_failed",
+            format!(
+                "{label} mismatch expected={expected:?} actual={actual:?} abs_tol={abs_tol} rel_tol={rel_tol}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum DateTimeOperationOutcome {
     Array {
@@ -13357,6 +13875,7 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
         run_string_differential_suite(config)?,
         run_string_metamorphic_suite(config)?,
         run_masked_differential_suite(config)?,
+        run_masked_metamorphic_suite(config)?,
         run_datetime_differential_suite(config)?,
         run_datetime_metamorphic_suite(config)?,
         run_polynomial_differential_suite(config)?,
@@ -15530,7 +16049,7 @@ mod tests {
         run_fft_metamorphic_suite, run_io_adversarial_suite, run_io_differential_suite,
         run_io_metamorphic_suite, run_iter_adversarial_suite, run_iter_differential_suite,
         run_iter_metamorphic_suite, run_linalg_adversarial_suite, run_linalg_differential_suite,
-        run_linalg_metamorphic_suite, run_masked_differential_suite,
+        run_linalg_metamorphic_suite, run_masked_differential_suite, run_masked_metamorphic_suite,
         run_polynomial_differential_suite, run_rng_adversarial_suite, run_rng_differential_suite,
         run_rng_metamorphic_suite, run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
         run_shape_stride_adversarial_suite, run_shape_stride_differential_suite,
@@ -16450,6 +16969,14 @@ mod tests {
         let cfg = HarnessConfig::default_paths();
         let suite =
             run_masked_differential_suite(&cfg).expect("masked differential suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn masked_metamorphic_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite =
+            run_masked_metamorphic_suite(&cfg).expect("masked metamorphic suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 
