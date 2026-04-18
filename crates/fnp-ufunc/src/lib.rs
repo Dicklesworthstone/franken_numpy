@@ -11169,60 +11169,85 @@ impl UFuncArray {
         vector.matmul(matrix)
     }
 
-    /// Cross product of two vectors (`np.cross`).
+    /// Cross product of vectors or arrays of vectors (`np.cross`).
     ///
     /// Supports 2-D and 3-D vectors. For 2-D vectors `[a, b]` and `[c, d]`,
-    /// returns the scalar `a*d - b*c`. For 3-D vectors, returns the 3-D cross product.
+    /// returns the scalar `a*d - b*c`. Leading dimensions broadcast like NumPy.
     pub fn cross(&self, other: &Self) -> Result<Self, UFuncError> {
-        if self.shape.len() != 1 || other.shape.len() != 1 {
+        if self.shape.is_empty() || other.shape.is_empty() {
             return Err(UFuncError::Msg(
-                "cross: inputs must be 1-D vectors".to_string(),
+                "cross: inputs must have a vector axis".to_string(),
             ));
         }
-        let a_len = self.shape[0];
-        let b_len = other.shape[0];
+        let a_len = self.shape[self.shape.len() - 1];
+        let b_len = other.shape[other.shape.len() - 1];
         if (a_len != 2 && a_len != 3) || (b_len != 2 && b_len != 3) {
             return Err(UFuncError::Msg(
-                "cross: inputs must have length 2 or 3".to_string(),
+                "cross: vector axes must have length 2 or 3".to_string(),
             ));
         }
         let dtype = promote(self.dtype, other.dtype);
-        let a = &self.values;
-        let b = &other.values;
-        if a_len == 2 && b_len == 2 {
-            // 2D × 2D → scalar
-            Ok(Self::scalar(a[0] * b[1] - a[1] * b[0], dtype))
+
+        let a_batch = &self.shape[..self.shape.len() - 1];
+        let b_batch = &other.shape[..other.shape.len() - 1];
+        let out_batch = broadcast_shape(a_batch, b_batch).map_err(UFuncError::Shape)?;
+        let out_batch_count = element_count(&out_batch).map_err(UFuncError::Shape)?;
+
+        let vector_output = a_len != 2 || b_len != 2;
+        let mut out_shape = out_batch.clone();
+        if vector_output {
+            out_shape.push(3);
+        }
+        let out_len = if vector_output {
+            out_batch_count.saturating_mul(3)
         } else {
-            // Extend 2-D to 3-D by padding with 0
-            let ax = if a_len == 3 {
-                [a[0], a[1], a[2]]
+            out_batch_count
+        };
+        let mut values = Vec::with_capacity(out_len);
+
+        let out_strides = contiguous_strides_elems(&out_batch);
+        let a_batch_strides = contiguous_strides_elems(a_batch);
+        let b_batch_strides = contiguous_strides_elems(b_batch);
+        let a_steps = aligned_broadcast_axis_steps(out_batch.len(), a_batch, &a_batch_strides);
+        let b_steps = aligned_broadcast_axis_steps(out_batch.len(), b_batch, &b_batch_strides);
+
+        for flat in 0..out_batch_count {
+            let mut a_vector_index = 0usize;
+            let mut b_vector_index = 0usize;
+            for axis in 0..out_batch.len() {
+                let coord = (flat / out_strides[axis]) % out_batch[axis];
+                a_vector_index += coord * a_steps[axis];
+                b_vector_index += coord * b_steps[axis];
+            }
+
+            let a_base = a_vector_index * a_len;
+            let b_base = b_vector_index * b_len;
+            let ax = self.values[a_base];
+            let ay = self.values[a_base + 1];
+            let az = if a_len == 3 {
+                self.values[a_base + 2]
             } else {
-                [a[0], a[1], 0.0]
+                0.0
             };
-            let bx = if b_len == 3 {
-                [b[0], b[1], b[2]]
+            let bx = other.values[b_base];
+            let by = other.values[b_base + 1];
+            let bz = if b_len == 3 {
+                other.values[b_base + 2]
             } else {
-                [b[0], b[1], 0.0]
+                0.0
             };
-            let cx = ax[1] * bx[2] - ax[2] * bx[1];
-            let cy = ax[2] * bx[0] - ax[0] * bx[2];
-            let cz = ax[0] * bx[1] - ax[1] * bx[0];
-            if a_len == 2 || b_len == 2 {
-                // Mixed 2D/3D → 3D result
-                Ok(Self::from_values_with_dtype(
-                    vec![3],
-                    vec![cx, cy, cz],
-                    dtype,
-                )?)
+
+            let cx = ay * bz - az * by;
+            let cy = az * bx - ax * bz;
+            let cz = ax * by - ay * bx;
+            if vector_output {
+                values.extend_from_slice(&[cx, cy, cz]);
             } else {
-                // 3D × 3D → 3D
-                Ok(Self::from_values_with_dtype(
-                    vec![3],
-                    vec![cx, cy, cz],
-                    dtype,
-                )?)
+                values.push(cz);
             }
         }
+
+        Self::from_values_with_dtype(out_shape, values, dtype)
     }
 
     /// Compute the dot product of two or more arrays in an optimized order (`np.multi_dot`).
@@ -41151,6 +41176,37 @@ mod tests {
         let r = a.cross(&b).unwrap();
         assert_eq!(r.shape(), &[3]);
         assert_eq!(r.values(), &[10.0, -5.0, -2.0]);
+    }
+
+    #[test]
+    fn cross_broadcasts_vector_batches() {
+        let a = UFuncArray::new(vec![1, 3], vec![0.0, 1.0, 2.0], DType::F64).unwrap();
+        let b =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+
+        let r = a.cross(&b).unwrap();
+
+        assert_eq!(r.shape(), &[2, 3]);
+        assert_eq!(r.values(), &[-1.0, 2.0, -1.0, -4.0, 8.0, -4.0]);
+    }
+
+    #[test]
+    fn cross_2d_vector_batches_return_scalar_batch() {
+        let a = UFuncArray::new(vec![2, 2], vec![0.0, 1.0, 2.0, 3.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1, 2], vec![1.0, 2.0], DType::F64).unwrap();
+
+        let r = a.cross(&b).unwrap();
+
+        assert_eq!(r.shape(), &[2]);
+        assert_eq!(r.values(), &[-1.0, 1.0]);
+    }
+
+    #[test]
+    fn cross_rejects_non_broadcastable_vector_batches() {
+        let a = UFuncArray::new(vec![2, 3], vec![0.0; 6], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3, 3], vec![0.0; 9], DType::F64).unwrap();
+
+        assert!(a.cross(&b).is_err());
     }
 
     #[test]
