@@ -5172,6 +5172,34 @@ impl UFuncArray {
         self.elementwise_binary_with_registry(rhs, op, &UFuncLoopRegistry::new())
     }
 
+    fn elementwise_datetime_comparison(
+        &self,
+        rhs: &Self,
+        op: BinaryOp,
+    ) -> Result<Self, UFuncError> {
+        let broadcasted = Self::broadcast_arrays(&[self, rhs])?;
+        let lhs = &broadcasted[0];
+        let rhs = &broadcasted[1];
+        let nat_value = i64::MIN as f64;
+        let values = lhs
+            .values
+            .iter()
+            .zip(&rhs.values)
+            .map(|(&lhs_value, &rhs_value)| {
+                let lhs_nat = matches!(lhs.dtype, DType::DateTime64 | DType::TimeDelta64)
+                    && lhs_value == nat_value;
+                let rhs_nat = matches!(rhs.dtype, DType::DateTime64 | DType::TimeDelta64)
+                    && rhs_value == nat_value;
+                match op {
+                    BinaryOp::Equal if lhs_nat || rhs_nat => 0.0,
+                    BinaryOp::NotEqual if lhs_nat || rhs_nat => 1.0,
+                    _ => op.apply(lhs_value, rhs_value),
+                }
+            })
+            .collect();
+        Self::from_values_with_dtype(lhs.shape.clone(), values, DType::Bool)
+    }
+
     pub fn elementwise_binary_with_registry(
         &self,
         rhs: &Self,
@@ -5209,6 +5237,13 @@ impl UFuncArray {
             }
             plan.out_dtype
         };
+
+        if matches!(op, BinaryOp::Equal | BinaryOp::NotEqual)
+            && (matches!(self.dtype, DType::DateTime64 | DType::TimeDelta64)
+                || matches!(rhs.dtype, DType::DateTime64 | DType::TimeDelta64))
+        {
+            return self.elementwise_datetime_comparison(rhs, op);
+        }
 
         if self.shape == rhs.shape {
             // Fast path: when shapes match and we can use a tight vectorizable loop
@@ -15110,10 +15145,10 @@ impl UFuncArray {
                     }
                     return fp.values[0];
                 }
-                if xi <= xp.values[0] {
+                if xi < xp.values[0] {
                     return left_val;
                 }
-                if xi >= xp.values[n - 1] {
+                if xi > xp.values[n - 1] {
                     return right_val;
                 }
                 // Binary search for interval
@@ -33783,6 +33818,23 @@ mod tests {
             .expect("not_equal");
         // IEEE 754: NaN != NaN is true, NaN != 1.0 is true
         assert_eq!(out.values(), &[1.0, 1.0]);
+    }
+
+    #[test]
+    fn binary_datetime_nat_equality_uses_numpy_semantics() {
+        let nat = i64::MIN as f64;
+        let lhs = UFuncArray::new(vec![3], vec![nat, 0.0, nat], DType::DateTime64).expect("lhs");
+        let rhs = UFuncArray::new(vec![3], vec![nat, 0.0, 1.0], DType::DateTime64).expect("rhs");
+
+        let equal = lhs
+            .elementwise_binary(&rhs, BinaryOp::Equal)
+            .expect("equal");
+        assert_eq!(equal.values(), &[0.0, 1.0, 0.0]);
+
+        let not_equal = lhs
+            .elementwise_binary(&rhs, BinaryOp::NotEqual)
+            .expect("not_equal");
+        assert_eq!(not_equal.values(), &[1.0, 0.0, 1.0]);
     }
 
     #[test]

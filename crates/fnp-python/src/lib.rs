@@ -2069,12 +2069,14 @@ fn rint(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 fn degrees(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x = extract_numeric_array(py, x.bind(py), "degrees(x)")?;
+    let x = x.astype(DType::F64);
     build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Degrees))
 }
 
 #[pyfunction]
 fn radians(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x = extract_numeric_array(py, x.bind(py), "radians(x)")?;
+    let x = x.astype(DType::F64);
     build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Radians))
 }
 
