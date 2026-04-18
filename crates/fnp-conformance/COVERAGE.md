@@ -45,15 +45,14 @@ No remaining gaps.
 
 No remaining gaps.
 
-### 4. Iterator/Transfer System (LOW)
+### 4. Iterator/Transfer System (ADEQUATE)
 
-**Current state:** 63 cases (31 diff + 16 meta + 16 adversarial)
+**Current state:** 63 cases (31 diff + 16 meta + 16 adversarial) + oracle smoke tests
 **Covered:** Transfer class selection, overlap copy direction, flatiter read/write, error cases
+**Oracle-verified in smoke.rs:** External loop chunking, seek via set_multi_index/set_iterindex
 
 Remaining gaps:
-- Multi-operand iteration
-- External loop chunking
-- Seek/reset mid-iteration
+- Multi-operand iteration (plan_nditer_broadcast)
 
 ## Fixture Provenance
 
