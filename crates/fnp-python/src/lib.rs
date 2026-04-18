@@ -3486,6 +3486,60 @@ mod tests {
     }
 
     #[test]
+    fn trapezoid_matches_numpy_with_broadcast_x_spacing() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let y = numeric_array(
+                py,
+                vec![vec![1.0, 2.0, 4.0], vec![3.0, 5.0, 9.0]],
+                "float64",
+            );
+            let x = numeric_array(py, vec![vec![0.0, 1.0, 3.0]], "float64");
+            let actual = trapezoid(py, y.clone().unbind(), Some(x.clone().unbind()), 1.0, 1)?;
+            let numpy = py.import("numpy")?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("x", x)?;
+            kwargs.set_item("axis", 1)?;
+            let expected = numpy.call_method("trapezoid", (y,), Some(&kwargs))?;
+
+            assert_array_matches_numpy(actual.bind(py), &expected)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn trapezoid_matches_numpy_with_same_shape_x_spacing() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let y = numeric_array(
+                py,
+                vec![vec![1.0, 2.0, 4.0], vec![3.0, 5.0, 9.0]],
+                "float64",
+            );
+            let x = numeric_array(
+                py,
+                vec![vec![0.0, 1.0, 3.0], vec![0.0, 2.0, 5.0]],
+                "float64",
+            );
+            let actual = trapezoid(py, y.clone().unbind(), Some(x.clone().unbind()), 1.0, 1)?;
+            let numpy = py.import("numpy")?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("x", x)?;
+            kwargs.set_item("axis", 1)?;
+            let expected = numpy.call_method("trapezoid", (y,), Some(&kwargs))?;
+
+            assert_array_matches_numpy(actual.bind(py), &expected)?;
+            Ok(())
+        });
+    }
+
+    #[test]
     fn trapz_alias_matches_numpy_trapezoid() {
         with_python(|py| {
             if !numpy_available(py) {

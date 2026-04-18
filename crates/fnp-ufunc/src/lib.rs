@@ -19915,29 +19915,76 @@ impl UFuncArray {
 
     /// Trapezoidal integration with non-uniform spacing (np.trapezoid with x parameter).
     ///
-    /// `x` provides the sample points along the integration axis. Must be 1-D
-    /// with the same length as the integration axis.
+    /// `x` provides the sample points along the integration axis. It may be 1-D
+    /// or the same rank as `self` with non-axis dimensions broadcastable to `self`.
     pub fn trapezoid_x(&self, x: &Self, axis: Option<isize>) -> Result<Self, UFuncError> {
+        fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
+            let mut strides = vec![1; shape.len()];
+            let mut stride = 1usize;
+            for (idx, &dim) in shape.iter().enumerate().rev() {
+                strides[idx] = stride;
+                stride = stride.saturating_mul(dim);
+            }
+            strides
+        }
+
+        fn unravel_index(mut flat: usize, shape: &[usize], coords: &mut [usize]) {
+            for (coord, &dim) in coords.iter_mut().zip(shape).rev() {
+                if let (Some(remainder), Some(next_flat)) =
+                    (flat.checked_rem(dim), flat.checked_div(dim))
+                {
+                    *coord = remainder;
+                    flat = next_flat;
+                } else {
+                    *coord = 0;
+                }
+            }
+        }
+
         let ndim = self.shape.len();
         if ndim == 0 {
             return Err(UFuncError::Msg(
                 "trapezoid: input must have at least 1 dimension".to_string(),
             ));
         }
-        if x.shape.len() != 1 {
-            return Err(UFuncError::Msg("trapezoid: x must be 1-D".to_string()));
-        }
         let ax = match axis {
             Some(a) => normalize_axis(a, ndim)?,
             None => ndim - 1,
         };
         let axis_len = self.shape[ax];
-        if x.shape[0] != axis_len {
-            return Err(UFuncError::Msg(format!(
-                "trapezoid: x length {} must match axis length {axis_len}",
-                x.shape[0]
-            )));
-        }
+
+        let x_is_1d = x.shape.len() == 1;
+        let x_strides = if x_is_1d {
+            if x.shape[0] != axis_len {
+                return Err(UFuncError::Msg(format!(
+                    "trapezoid: x length {} must match axis length {axis_len}",
+                    x.shape[0]
+                )));
+            }
+            Vec::new()
+        } else {
+            if x.shape.len() != ndim {
+                return Err(UFuncError::Msg(format!(
+                    "trapezoid: x rank {} must be 1 or match input rank {ndim}",
+                    x.shape.len()
+                )));
+            }
+            if x.shape[ax] != axis_len {
+                return Err(UFuncError::Msg(format!(
+                    "trapezoid: x axis length {} must match input axis length {axis_len}",
+                    x.shape[ax]
+                )));
+            }
+            for (dim, (&x_dim, &y_dim)) in x.shape.iter().zip(&self.shape).enumerate() {
+                if dim != ax && x_dim != 1 && x_dim != y_dim {
+                    return Err(UFuncError::Msg(format!(
+                        "trapezoid: x dimension {dim} with length {x_dim} cannot broadcast to input length {y_dim}",
+                    )));
+                }
+            }
+            contiguous_strides(&x.shape)
+        };
+
         if axis_len < 2 {
             let mut out_shape: Vec<usize> = self.shape.clone();
             out_shape.remove(ax);
@@ -19961,14 +20008,41 @@ impl UFuncArray {
             fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
         let out_total = outer * inner;
         let mut out_values = vec![0.0f64; out_total];
+        let mut outer_coords = vec![0; ax];
+        let mut inner_coords = vec![0; ndim.saturating_sub(ax + 1)];
 
         for o in 0..outer {
+            if !x_is_1d {
+                unravel_index(o, &self.shape[..ax], &mut outer_coords);
+            }
             for i in 0..inner {
+                let x_base = if x_is_1d {
+                    0
+                } else {
+                    unravel_index(i, &self.shape[ax + 1..], &mut inner_coords);
+                    let mut base = 0usize;
+                    for (dim, &coord) in outer_coords.iter().enumerate() {
+                        let x_coord = if x.shape[dim] == 1 { 0 } else { coord };
+                        base += x_coord * x_strides[dim];
+                    }
+                    for (post_dim, &coord) in inner_coords.iter().enumerate() {
+                        let dim = ax + 1 + post_dim;
+                        let x_coord = if x.shape[dim] == 1 { 0 } else { coord };
+                        base += x_coord * x_strides[dim];
+                    }
+                    base
+                };
                 let mut sum = 0.0f64;
                 for k in 0..axis_len - 1 {
                     let idx0 = o * axis_len * inner + k * inner + i;
                     let idx1 = o * axis_len * inner + (k + 1) * inner + i;
-                    let dx = x.values[k + 1] - x.values[k];
+                    let dx = if x_is_1d {
+                        x.values[k + 1] - x.values[k]
+                    } else {
+                        let x0 = x_base + k * x_strides[ax];
+                        let x1 = x_base + (k + 1) * x_strides[ax];
+                        x.values[x1] - x.values[x0]
+                    };
                     sum += (self.values[idx0] + self.values[idx1]) / 2.0 * dx;
                 }
                 out_values[o * inner + i] = sum;
@@ -41520,6 +41594,42 @@ mod tests {
         let with_x = y.trapezoid_x(&x, None).unwrap();
         let with_dx = y.trapezoid(1.0, None).unwrap();
         assert!((with_x.values()[0] - with_dx.values()[0]).abs() < 1e-10);
+    }
+
+    #[test]
+    fn trapezoid_x_same_shape_uses_per_row_spacing() {
+        let y =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 4.0, 3.0, 5.0, 9.0], DType::F64).unwrap();
+        let x =
+            UFuncArray::new(vec![2, 3], vec![0.0, 1.0, 3.0, 0.0, 2.0, 5.0], DType::F64).unwrap();
+
+        let r = y.trapezoid_x(&x, Some(1)).unwrap();
+
+        assert_eq!(r.shape(), &[2]);
+        assert!((r.values()[0] - 7.5).abs() < 1e-10);
+        assert!((r.values()[1] - 29.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn trapezoid_x_broadcasts_non_axis_dimensions() {
+        let y =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 4.0, 3.0, 5.0, 9.0], DType::F64).unwrap();
+        let x = UFuncArray::new(vec![1, 3], vec![0.0, 1.0, 3.0], DType::F64).unwrap();
+
+        let r = y.trapezoid_x(&x, Some(1)).unwrap();
+
+        assert_eq!(r.shape(), &[2]);
+        assert!((r.values()[0] - 7.5).abs() < 1e-10);
+        assert!((r.values()[1] - 18.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn trapezoid_x_rejects_non_broadcastable_same_rank_spacing() {
+        let y =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 4.0, 3.0, 5.0, 9.0], DType::F64).unwrap();
+        let x = UFuncArray::new(vec![3, 3], vec![0.0; 9], DType::F64).unwrap();
+
+        assert!(y.trapezoid_x(&x, Some(1)).is_err());
     }
 
     #[test]
