@@ -16,7 +16,7 @@
 | FFT | 38 | — | — | 38 | Good - transform families, edge sizes, 2D non-square |
 | Datetime/timedelta | 41 | — | — | 41 | Good - arithmetic, busday, NaT, broadcast, abs |
 | Masked arrays | 36 | — | — | 36 | Good - reshape/concat/fill/broadcast/all-masked/argmin-max |
-| Iterator/transfer | 31 | 16 | 16 | 63 | Adequate - transfer/overlap/flatiter edges covered |
+| Iterator/transfer | 42 | 16 | 16 | 74 | Good - multi-operand, external loop, seek/reset covered |
 | Shape/stride (SCE) | 47 | — | — | 47 | Good - 0-D, empty, negative-stride, large shapes, 5D/6D transpose covered |
 | Dtype promotion | 198 | — | — | 198 | Good - full 14×14 type matrix coverage |
 | Runtime policy | 23 | — | 15 | 38 | Good - adversarial edge cases, clamping, injection attempts |
@@ -47,15 +47,12 @@ Remaining gaps:
 - Override audit event logging
 - Evidence ledger serialization
 
-### 4. Iterator/Transfer System (LOW)
+### 4. Iterator/Transfer System (COMPLETE)
 
-**Current state:** 63 cases (31 diff + 16 meta + 16 adversarial)
-**Covered:** Transfer class selection, overlap copy direction, flatiter read/write, error cases
+**Current state:** 74 cases (42 diff + 16 meta + 16 adversarial)
+**Covered:** Transfer class selection, overlap copy direction, flatiter read/write, error cases, multi-operand broadcast iteration, external loop chunking, seek/reset mid-iteration
 
-Remaining gaps:
-- Multi-operand iteration
-- External loop chunking
-- Seek/reset mid-iteration
+No remaining gaps.
 
 ## Fixture Provenance
 
@@ -87,10 +84,10 @@ Per the testing-conformance-harnesses skill:
 
 ## Next Actions
 
-1. [ ] Expand dtype_promotion_cases.json to cover all 18 DType pairs systematically
-2. [ ] Add shape_stride_cases for 0-D, empty, negative-stride edge cases
-3. [ ] Add runtime_policy_cases for all CompatibilityClass variants
-4. [ ] Add iterator differential cases for seek/reset/external-loop
+1. [x] Expand dtype_promotion_cases.json to cover all 14×14 type matrix (198 cases)
+2. [x] Add shape_stride_cases for 0-D, empty, negative-stride, 5D/6D transpose (47 cases)
+3. [x] Add runtime_policy_cases for all CompatibilityClass variants + adversarial (38 cases)
+4. [x] Add iterator differential cases for seek/reset/external-loop/multi-operand (74 cases)
 5. [ ] Wire up automated fixture regeneration from oracle
 6. [ ] Add CI coverage tracking (case count trends)
 

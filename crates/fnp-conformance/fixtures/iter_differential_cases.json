@@ -641,5 +641,185 @@
       "same_value_cast": false
     },
     "expected_transfer_class": "strided"
+  },
+  {
+    "id": "iter_multi_operand_2_arrays_broadcast",
+    "operation": "validate_multi_operand_iter",
+    "seed": 4132,
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "nditer_multi_operand_contract",
+    "expected_reason_code": "nditer_multi_operand_contract",
+    "operand_shapes": [[3, 4], [4]],
+    "expected_broadcast_shape": [3, 4],
+    "expected_total_iterations": 12
+  },
+  {
+    "id": "iter_multi_operand_3_arrays_broadcast",
+    "operation": "validate_multi_operand_iter",
+    "seed": 4133,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "nditer_multi_operand_contract",
+    "expected_reason_code": "nditer_multi_operand_contract",
+    "operand_shapes": [[2, 1, 4], [3, 1], [4]],
+    "expected_broadcast_shape": [2, 3, 4],
+    "expected_total_iterations": 24
+  },
+  {
+    "id": "iter_multi_operand_scalar_broadcast",
+    "operation": "validate_multi_operand_iter",
+    "seed": 4134,
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "nditer_multi_operand_contract",
+    "expected_reason_code": "nditer_multi_operand_contract",
+    "operand_shapes": [[], [3, 4]],
+    "expected_broadcast_shape": [3, 4],
+    "expected_total_iterations": 12
+  },
+  {
+    "id": "iter_external_loop_chunked",
+    "operation": "validate_external_loop",
+    "seed": 4135,
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "nditer_external_loop_contract",
+    "expected_reason_code": "nditer_external_loop_contract",
+    "shape": [10, 8],
+    "chunk_size": 8,
+    "expected_chunks": 10
+  },
+  {
+    "id": "iter_external_loop_contiguous_inner",
+    "operation": "validate_external_loop",
+    "seed": 4136,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "nditer_external_loop_contract",
+    "expected_reason_code": "nditer_external_loop_contract",
+    "shape": [4, 5, 6],
+    "chunk_size": 6,
+    "expected_chunks": 20
+  },
+  {
+    "id": "iter_external_loop_single_chunk",
+    "operation": "validate_external_loop",
+    "seed": 4137,
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "nditer_external_loop_contract",
+    "expected_reason_code": "nditer_external_loop_contract",
+    "shape": [16],
+    "chunk_size": 16,
+    "expected_chunks": 1
+  },
+  {
+    "id": "iter_seek_reset_to_start",
+    "operation": "validate_iter_seek",
+    "seed": 4138,
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "nditer_seek_contract",
+    "expected_reason_code": "nditer_seek_contract",
+    "total_elements": 24,
+    "advance_count": 10,
+    "seek_to": 0,
+    "expected_position": 0
+  },
+  {
+    "id": "iter_seek_forward_jump",
+    "operation": "validate_iter_seek",
+    "seed": 4139,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "nditer_seek_contract",
+    "expected_reason_code": "nditer_seek_contract",
+    "total_elements": 100,
+    "advance_count": 5,
+    "seek_to": 50,
+    "expected_position": 50
+  },
+  {
+    "id": "iter_seek_backward_jump",
+    "operation": "validate_iter_seek",
+    "seed": 4140,
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "nditer_seek_contract",
+    "expected_reason_code": "nditer_seek_contract",
+    "total_elements": 32,
+    "advance_count": 20,
+    "seek_to": 8,
+    "expected_position": 8
+  },
+  {
+    "id": "iter_seek_to_end",
+    "operation": "validate_iter_seek",
+    "seed": 4141,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "nditer_seek_contract",
+    "expected_reason_code": "nditer_seek_contract",
+    "total_elements": 16,
+    "advance_count": 3,
+    "seek_to": 15,
+    "expected_position": 15
+  },
+  {
+    "id": "iter_reset_mid_iteration",
+    "operation": "validate_iter_reset",
+    "seed": 4142,
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "nditer_reset_contract",
+    "expected_reason_code": "nditer_reset_contract",
+    "total_elements": 50,
+    "advance_count": 25,
+    "expected_position_after_reset": 0
   }
 ]
