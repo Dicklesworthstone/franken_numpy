@@ -708,5 +708,200 @@
     "env_fingerprint": "fnp-conformance-default-paths",
     "artifact_refs": ["artifacts/phase2c/FNP-P2C-001/fixture_manifest.json"],
     "reason_code": "0d_scalar_identity"
+  },
+  {
+    "id": "large_shape_overflow_risk",
+    "lhs": [65536, 65536],
+    "rhs": [65536, 65536],
+    "expected_broadcast": [65536, 65536],
+    "stride_shape": [65536, 65536],
+    "stride_item_size": 8,
+    "stride_order": "C",
+    "expected_strides": [524288, 8],
+    "seed": 136,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-001/fixture_manifest.json"],
+    "reason_code": "large_shape_product_4G_elements"
+  },
+  {
+    "id": "large_shape_high_dim_product",
+    "lhs": [256, 256, 256, 256],
+    "rhs": [256, 256, 256, 256],
+    "expected_broadcast": [256, 256, 256, 256],
+    "stride_shape": [256, 256, 256, 256],
+    "stride_item_size": 8,
+    "stride_order": "C",
+    "expected_strides": [134217728, 524288, 2048, 8],
+    "seed": 137,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-001/fixture_manifest.json"],
+    "reason_code": "large_shape_4d_product"
+  },
+  {
+    "id": "large_shape_single_axis",
+    "lhs": [1073741824],
+    "rhs": [1073741824],
+    "expected_broadcast": [1073741824],
+    "stride_shape": [1073741824],
+    "stride_item_size": 8,
+    "stride_order": "C",
+    "expected_strides": [8],
+    "seed": 138,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-001/fixture_manifest.json"],
+    "reason_code": "large_shape_1G_element_axis"
+  },
+  {
+    "id": "transpose_5d_reverse",
+    "lhs": [2, 3, 4, 5, 6],
+    "rhs": [2, 3, 4, 5, 6],
+    "expected_broadcast": [2, 3, 4, 5, 6],
+    "stride_shape": [2, 3, 4, 5, 6],
+    "stride_item_size": 8,
+    "stride_order": "C",
+    "expected_strides": [2880, 960, 240, 48, 8],
+    "transpose": {
+      "axes": [4, 3, 2, 1, 0],
+      "expected_shape": [6, 5, 4, 3, 2],
+      "expected_strides": [8, 48, 240, 960, 2880]
+    },
+    "seed": 139,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-006/fixture_manifest.json"],
+    "reason_code": "transpose_5d_full_reversal"
+  },
+  {
+    "id": "transpose_5d_partial",
+    "lhs": [2, 3, 4, 5, 6],
+    "rhs": [2, 3, 4, 5, 6],
+    "expected_broadcast": [2, 3, 4, 5, 6],
+    "stride_shape": [2, 3, 4, 5, 6],
+    "stride_item_size": 8,
+    "stride_order": "C",
+    "expected_strides": [2880, 960, 240, 48, 8],
+    "transpose": {
+      "axes": [0, 2, 4, 1, 3],
+      "expected_shape": [2, 4, 6, 3, 5],
+      "expected_strides": [2880, 240, 8, 960, 48]
+    },
+    "seed": 140,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-006/fixture_manifest.json"],
+    "reason_code": "transpose_5d_shuffle"
+  },
+  {
+    "id": "transpose_6d_reverse",
+    "lhs": [2, 3, 4, 5, 6, 7],
+    "rhs": [2, 3, 4, 5, 6, 7],
+    "expected_broadcast": [2, 3, 4, 5, 6, 7],
+    "stride_shape": [2, 3, 4, 5, 6, 7],
+    "stride_item_size": 8,
+    "stride_order": "C",
+    "expected_strides": [20160, 6720, 1680, 336, 56, 8],
+    "transpose": {
+      "axes": [5, 4, 3, 2, 1, 0],
+      "expected_shape": [7, 6, 5, 4, 3, 2],
+      "expected_strides": [8, 56, 336, 1680, 6720, 20160]
+    },
+    "seed": 141,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-006/fixture_manifest.json"],
+    "reason_code": "transpose_6d_full_reversal"
+  },
+  {
+    "id": "transpose_6d_cyclic",
+    "lhs": [2, 3, 4, 5, 6, 7],
+    "rhs": [2, 3, 4, 5, 6, 7],
+    "expected_broadcast": [2, 3, 4, 5, 6, 7],
+    "stride_shape": [2, 3, 4, 5, 6, 7],
+    "stride_item_size": 8,
+    "stride_order": "C",
+    "expected_strides": [20160, 6720, 1680, 336, 56, 8],
+    "transpose": {
+      "axes": [1, 2, 3, 4, 5, 0],
+      "expected_shape": [3, 4, 5, 6, 7, 2],
+      "expected_strides": [6720, 1680, 336, 56, 8, 20160]
+    },
+    "seed": 142,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-006/fixture_manifest.json"],
+    "reason_code": "transpose_6d_cyclic_shift"
+  },
+  {
+    "id": "non_contiguous_view_strided",
+    "lhs": [4, 8],
+    "rhs": [4, 8],
+    "expected_broadcast": [4, 8],
+    "stride_shape": [4, 8],
+    "stride_item_size": 8,
+    "stride_order": "C",
+    "expected_strides": [64, 8],
+    "as_strided": {
+      "shape": [4, 4],
+      "strides": [64, 16],
+      "expected_shape": [4, 4],
+      "expected_strides": [64, 16],
+      "expected_writeable": true,
+      "expected_has_internal_overlap": false
+    },
+    "seed": 143,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-006/fixture_manifest.json"],
+    "reason_code": "non_contiguous_every_other_column"
+  },
+  {
+    "id": "non_contiguous_view_transpose_strided",
+    "lhs": [3, 4],
+    "rhs": [3, 4],
+    "expected_broadcast": [3, 4],
+    "stride_shape": [3, 4],
+    "stride_item_size": 8,
+    "stride_order": "C",
+    "expected_strides": [32, 8],
+    "as_strided": {
+      "shape": [4, 3],
+      "strides": [8, 32],
+      "expected_shape": [4, 3],
+      "expected_strides": [8, 32],
+      "expected_writeable": true,
+      "expected_has_internal_overlap": false
+    },
+    "seed": 144,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-006/fixture_manifest.json"],
+    "reason_code": "transpose_view_non_contiguous"
+  },
+  {
+    "id": "stride_overflow_check_large_item",
+    "lhs": [1000000, 1000],
+    "rhs": [1000000, 1000],
+    "expected_broadcast": [1000000, 1000],
+    "stride_shape": [1000000, 1000],
+    "stride_item_size": 16,
+    "stride_order": "C",
+    "expected_strides": [16000, 16],
+    "seed": 145,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-001/fixture_manifest.json"],
+    "reason_code": "large_stride_complex128"
+  },
+  {
+    "id": "transpose_identity_5d",
+    "lhs": [2, 3, 4, 5, 6],
+    "rhs": [2, 3, 4, 5, 6],
+    "expected_broadcast": [2, 3, 4, 5, 6],
+    "stride_shape": [2, 3, 4, 5, 6],
+    "stride_item_size": 8,
+    "stride_order": "C",
+    "expected_strides": [2880, 960, 240, 48, 8],
+    "transpose": {
+      "axes": [0, 1, 2, 3, 4],
+      "expected_shape": [2, 3, 4, 5, 6],
+      "expected_strides": [2880, 960, 240, 48, 8]
+    },
+    "seed": 146,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-006/fixture_manifest.json"],
+    "reason_code": "transpose_identity_no_change"
   }
 ]

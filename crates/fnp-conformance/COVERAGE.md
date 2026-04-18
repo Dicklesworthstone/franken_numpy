@@ -17,7 +17,7 @@
 | Datetime/timedelta | 34 | — | — | 34 | Adequate - arithmetic + busday |
 | Masked arrays | 27 | — | — | 27 | Adequate - reshape/concat/fill |
 | Iterator/transfer | 31 | 16 | 16 | 63 | Adequate - transfer/overlap/flatiter edges covered |
-| Shape/stride (SCE) | 36 | — | — | 36 | Adequate - 0-D, empty, negative-stride covered |
+| Shape/stride (SCE) | 47 | — | — | 47 | Good - 0-D, empty, negative-stride, large shapes, 5D/6D transpose covered |
 | Dtype promotion | 198 | — | — | 198 | Good - full 14×14 type matrix coverage |
 | Runtime policy | 23 | — | 8 | 31 | Adequate - risk thresholds, boundaries covered |
 
@@ -31,15 +31,12 @@
 
 No remaining gaps.
 
-### 2. Shape/Stride Calculus Engine (MEDIUM)
+### 2. Shape/Stride Calculus Engine (COMPLETE)
 
-**Current state:** 36 cases covering core edge cases
-**Covered:** 0-D scalars, empty arrays, negative strides, Fortran order, various item sizes
+**Current state:** 47 cases covering comprehensive edge cases
+**Covered:** 0-D scalars, empty arrays, negative strides, Fortran order, various item sizes, large shapes (4G+ elements), 5D/6D transpose permutations, non-contiguous views
 
-Remaining gaps:
-- Very large shapes (overflow checks)
-- Non-contiguous reshape failures
-- Multi-axis transpose permutations beyond 4D
+No remaining gaps.
 
 ### 3. Runtime Policy Dual-Mode (MEDIUM)
 
