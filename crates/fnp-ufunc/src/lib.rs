@@ -22352,6 +22352,9 @@ fn sort_indices_by_kind_ord<T: Ord>(indices: &mut [usize], values: &[T], kind: &
 /// Compute C-order strides in elements (not bytes) for a given shape.
 fn c_strides_elems(shape: &[usize]) -> Vec<usize> {
     let ndim = shape.len();
+    if shape.contains(&0) {
+        return vec![0usize; ndim];
+    }
     let mut strides = vec![1usize; ndim];
     for i in (0..ndim.saturating_sub(1)).rev() {
         strides[i] = strides[i + 1] * shape[i + 1];
@@ -22361,6 +22364,9 @@ fn c_strides_elems(shape: &[usize]) -> Vec<usize> {
 
 fn f_strides_elems(shape: &[usize]) -> Vec<usize> {
     let ndim = shape.len();
+    if shape.contains(&0) {
+        return vec![0usize; ndim];
+    }
     let mut strides = vec![1usize; ndim];
     for i in 1..ndim {
         strides[i] = strides[i - 1] * shape[i - 1];
@@ -23117,6 +23123,9 @@ fn parse_signature_groups(raw: &str, side: &str) -> Result<Vec<Vec<String>>, UFu
 fn contiguous_strides_elems(shape: &[usize]) -> Vec<usize> {
     if shape.is_empty() {
         return Vec::new();
+    }
+    if shape.contains(&0) {
+        return vec![0usize; shape.len()];
     }
 
     let mut strides = vec![0usize; shape.len()];
@@ -35627,6 +35636,15 @@ mod tests {
     fn strides_property() {
         let a = UFuncArray::new(vec![2, 3], vec![0.0; 6], DType::F64).unwrap();
         assert_eq!(a.strides(), vec![3, 1]); // C-contiguous: row-major
+    }
+
+    #[test]
+    fn strides_zero_sized_arrays_match_numpy() {
+        let a = UFuncArray::new(vec![0, 3], Vec::new(), DType::F64).unwrap();
+        assert_eq!(a.strides(), vec![0, 0]);
+
+        let b = UFuncArray::new(vec![2, 0, 3], Vec::new(), DType::F64).unwrap();
+        assert_eq!(b.strides(), vec![0, 0, 0]);
     }
 
     #[test]
@@ -50004,6 +50022,19 @@ mod tests {
         assert_eq!(view.shape(), &[4, 0]);
         assert!(!view.is_writable());
         let mat = UFuncArray::from_shared_view(&view).unwrap();
+        assert!(mat.values().is_empty());
+    }
+
+    #[test]
+    fn test_sliding_window_shared_view_zero_sized_base_strides_match_numpy() {
+        let a = UFuncArray::new(vec![0, 3], Vec::new(), DType::F64).unwrap();
+        let view = a.sliding_window_shared_view(&[0, 1]).unwrap();
+        assert_eq!(view.shape(), &[1, 3, 0, 1]);
+        assert_eq!(view.strides(), &[0, 0, 0, 0]);
+        assert!(!view.is_writable());
+
+        let mat = UFuncArray::from_shared_view(&view).unwrap();
+        assert_eq!(mat.shape(), &[1, 3, 0, 1]);
         assert!(mat.values().is_empty());
     }
 

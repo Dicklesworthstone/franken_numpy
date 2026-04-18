@@ -1256,6 +1256,13 @@ mod tests {
     }
 
     #[test]
+    fn broadcast_scalar_with_zero_sized_target() {
+        // NumPy: np.broadcast_shapes((), (0, 3)) -> (0, 3)
+        let r = broadcast_shape(&[], &[0, 3]).unwrap();
+        assert_eq!(r, vec![0, 3]);
+    }
+
+    #[test]
     fn broadcast_scalar_with_scalar() {
         // () + () → ()
         let r = broadcast_shape(&[], &[]).unwrap();
@@ -1424,6 +1431,19 @@ mod tests {
         // Scalar () → (3, 4): strides all zero
         let out = broadcast_strides(&[], &[], &[3, 4]).unwrap();
         assert_eq!(out, vec![0, 0]);
+    }
+
+    #[test]
+    fn broadcast_strides_scalar_to_zero_sized_target() {
+        // NumPy: np.broadcast_to(np.array(7), (0, 3)).strides -> (0, 0)
+        let out = broadcast_strides(&[], &[], &[0, 3]).unwrap();
+        assert_eq!(out, vec![0, 0]);
+    }
+
+    #[test]
+    fn broadcast_strides_rejects_singleton_to_scalar_target() {
+        // NumPy broadcast_shapes((1,), ()) is (1,), but broadcast_to((1,), ()) fails.
+        assert!(broadcast_strides(&[1], &[8], &[]).is_err());
     }
 
     #[test]
