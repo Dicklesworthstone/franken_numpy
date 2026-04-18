@@ -1002,5 +1002,89 @@
     "expected_values": [1.0, 0.0, 0.0, 1.0],
     "abs_tol": 0.0,
     "rel_tol": 0.0
+  },
+  {
+    "id": "capitalize_empty_edge",
+    "operation": "capitalize",
+    "seed": 10027,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["", "   ", "123abc", "ALREADY"],
+    "expected_strings": ["", "   ", "123abc", "Already"]
+  },
+  {
+    "id": "upper_empty_and_numeric",
+    "operation": "upper",
+    "seed": 10028,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["", "123", "a1b2c3"],
+    "expected_strings": ["", "123", "A1B2C3"]
+  },
+  {
+    "id": "startswith_empty_pattern",
+    "operation": "startswith",
+    "seed": 10029,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["hello", "", "abc"],
+    "arg_string": "",
+    "expected_values": [1.0, 1.0, 1.0],
+    "abs_tol": 0.0,
+    "rel_tol": 0.0
+  },
+  {
+    "id": "endswith_empty_pattern",
+    "operation": "endswith",
+    "seed": 10030,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["hello", "", "abc"],
+    "arg_string": "",
+    "expected_values": [1.0, 1.0, 1.0],
+    "abs_tol": 0.0,
+    "rel_tol": 0.0
+  },
+  {
+    "id": "count_empty_pattern",
+    "operation": "count",
+    "seed": 10031,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["hello", "ab", ""],
+    "arg_string": "",
+    "expected_values": [6.0, 3.0, 1.0],
+    "abs_tol": 0.0,
+    "rel_tol": 0.0
   }
 ]

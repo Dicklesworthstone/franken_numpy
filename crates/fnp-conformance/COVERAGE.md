@@ -11,7 +11,7 @@
 | Polynomials | 88 | — | — | 88 | Good - all 5 families |
 | I/O (npy/npz/text) | 66 | 35 | 33 | 134 | Good - parser boundaries covered |
 | Linear algebra | 63 | 25 | 35 | 123 | Good - core decompositions, 1x1 edge cases, identity |
-| String arrays | 60 | — | — | 60 | Good - 33 char functions, empty/whitespace edge cases |
+| String arrays | 65 | — | — | 65 | Good - 33 char functions, empty/pattern edge cases |
 | RNG | 22 | 23 | 41 | 86 | Adequate + 39 statistical |
 | FFT | 41 | — | — | 41 | Good - transform families, edge sizes, 2D/3D, fftn/ifftn |
 | Datetime/timedelta | 42 | — | — | 42 | Good - arithmetic, busday, NaT, broadcast, abs, comparisons |
