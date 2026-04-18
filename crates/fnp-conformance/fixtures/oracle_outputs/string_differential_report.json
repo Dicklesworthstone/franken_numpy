@@ -1,7 +1,7 @@
 {
   "suite": "string_differential",
-  "total_cases": 52,
-  "passed_cases": 52,
+  "total_cases": 60,
+  "passed_cases": 60,
   "failed_cases": 0,
   "mismatches": []
 }

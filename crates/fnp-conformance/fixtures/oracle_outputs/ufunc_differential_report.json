@@ -4,8 +4,8 @@
   "generated_at_unix_ms": 1775432960550,
   "abs_tol": 1e-9,
   "rel_tol": 1e-9,
-  "total_cases": 378,
-  "passed_cases": 378,
+  "total_cases": 381,
+  "passed_cases": 381,
   "failed_cases": 0,
   "failures": []
 }

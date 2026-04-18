@@ -1,7 +1,7 @@
 {
   "suite": "linalg_differential",
-  "total_cases": 56,
-  "passed_cases": 56,
+  "total_cases": 63,
+  "passed_cases": 63,
   "failed_cases": 0,
   "mismatches": []
 }

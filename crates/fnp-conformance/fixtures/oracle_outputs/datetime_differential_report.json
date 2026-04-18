@@ -1,7 +1,7 @@
 {
   "suite": "datetime_differential",
-  "total_cases": 31,
-  "passed_cases": 31,
+  "total_cases": 38,
+  "passed_cases": 38,
   "failed_cases": 0,
   "mismatches": []
 }
