@@ -14,7 +14,7 @@
 | String arrays | 69 | — | — | 69 | Good - 33 char functions, empty/pattern edge cases, case conversion |
 | RNG | 24 | 26 | 43 | 93 | Adequate + 39 statistical, small bound, zero-fill |
 | FFT | 45 | — | — | 45 | Good - transform families, edge sizes, 2D/3D, fftn/ifftn, shifts, single-element |
-| Datetime/timedelta | 44 | — | — | 44 | Good - arithmetic, busday, NaT, broadcast, abs, comparisons |
+| Datetime/timedelta | 46 | — | — | 46 | Good - arithmetic, busday, NaT, broadcast, abs, comparisons, timedelta-add |
 | Masked arrays | 42 | — | — | 42 | Good - reshape/concat/fill/broadcast/all-masked/argmin-max/axis-aware |
 | Iterator/transfer | 35 | 19 | 18 | 72 | Good - transfer/overlap/flatiter/broadcast, empty slice, no-overlap |
 | Shape/stride (SCE) | 49 | — | — | 49 | Good - 0-D, empty, negative-stride, large shapes, 5D/6D transpose, scalar-to-5D |
