@@ -6,7 +6,7 @@
 
 | Domain | Differential | Metamorphic | Adversarial | Total Cases | Coverage Assessment |
 |--------|:-----------:|:-----------:|:-----------:|:-----------:|---------------------|
-| Ufunc operations | 381 | 25 | 60 | 466 | Good - core ops well covered |
+| Ufunc operations | 381 | 36 | 60 | 477 | Good - core ops, associativity, distributivity, identity, inverse |
 | Signal processing | 295 | — | — | 295 | Good - extensive conv/corr/fft |
 | Polynomials | 88 | — | — | 88 | Good - all 5 families |
 | I/O (npy/npz/text) | 66 | 35 | 33 | 134 | Good - parser boundaries covered |
