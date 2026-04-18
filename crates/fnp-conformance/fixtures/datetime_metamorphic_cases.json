@@ -1,0 +1,182 @@
+[
+  {
+    "id": "datetime_add_sub_inverse_days",
+    "relation": "datetime_add_sub_inverse",
+    "seed": 12101,
+    "mode": "strict",
+    "env_fingerprint": "fnp-datetime-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_metamorphic_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_metamorphic_add_sub_inverse_contract",
+    "base_datetime": "2024-06-15T12:30:00",
+    "delta_unit": "D",
+    "delta_value": 7
+  },
+  {
+    "id": "datetime_add_sub_inverse_hours",
+    "relation": "datetime_add_sub_inverse",
+    "seed": 12102,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-datetime-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_metamorphic_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_metamorphic_add_sub_inverse_contract",
+    "base_datetime": "2024-03-10T01:30:00",
+    "delta_unit": "h",
+    "delta_value": 48
+  },
+  {
+    "id": "timedelta_add_commutative_days",
+    "relation": "timedelta_add_commutative",
+    "seed": 12103,
+    "mode": "strict",
+    "env_fingerprint": "fnp-datetime-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_metamorphic_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_metamorphic_timedelta_commutative_contract",
+    "delta_a_unit": "D",
+    "delta_a_value": 5,
+    "delta_b_unit": "D",
+    "delta_b_value": 3
+  },
+  {
+    "id": "timedelta_sub_self_zero",
+    "relation": "timedelta_sub_self_zero",
+    "seed": 12104,
+    "mode": "strict",
+    "env_fingerprint": "fnp-datetime-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_metamorphic_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_metamorphic_sub_self_zero_contract",
+    "delta_unit": "h",
+    "delta_value": 24
+  },
+  {
+    "id": "timedelta_mul_one_identity",
+    "relation": "timedelta_mul_one_identity",
+    "seed": 12105,
+    "mode": "strict",
+    "env_fingerprint": "fnp-datetime-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_metamorphic_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_metamorphic_mul_one_contract",
+    "delta_unit": "m",
+    "delta_value": 90
+  },
+  {
+    "id": "timedelta_neg_neg_identity",
+    "relation": "timedelta_neg_neg_identity",
+    "seed": 12106,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-datetime-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_metamorphic_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_metamorphic_neg_neg_contract",
+    "delta_unit": "D",
+    "delta_value": 10
+  },
+  {
+    "id": "datetime_diff_add_inverse",
+    "relation": "datetime_diff_add_inverse",
+    "seed": 12107,
+    "mode": "strict",
+    "env_fingerprint": "fnp-datetime-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_metamorphic_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_metamorphic_diff_add_inverse_contract",
+    "datetime_a": "2024-06-15T12:00:00",
+    "datetime_b": "2024-06-20T18:00:00"
+  },
+  {
+    "id": "timedelta_add_associative",
+    "relation": "timedelta_add_associative",
+    "seed": 12108,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-datetime-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_metamorphic_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_metamorphic_associative_contract",
+    "delta_a_unit": "D",
+    "delta_a_value": 2,
+    "delta_b_unit": "D",
+    "delta_b_value": 3,
+    "delta_c_unit": "D",
+    "delta_c_value": 5
+  },
+  {
+    "id": "timedelta_mul_distributive",
+    "relation": "timedelta_mul_distributive",
+    "seed": 12109,
+    "mode": "strict",
+    "env_fingerprint": "fnp-datetime-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_metamorphic_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_metamorphic_mul_distributive_contract",
+    "delta_a_unit": "h",
+    "delta_a_value": 6,
+    "delta_b_unit": "h",
+    "delta_b_value": 4,
+    "scalar": 3
+  },
+  {
+    "id": "datetime_compare_transitivity",
+    "relation": "datetime_compare_transitivity",
+    "seed": 12110,
+    "mode": "strict",
+    "env_fingerprint": "fnp-datetime-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_metamorphic_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_metamorphic_compare_transitivity_contract",
+    "datetime_a": "2024-01-01T00:00:00",
+    "datetime_b": "2024-06-15T12:00:00",
+    "datetime_c": "2024-12-31T23:59:59"
+  },
+  {
+    "id": "timedelta_abs_idempotent",
+    "relation": "timedelta_abs_idempotent",
+    "seed": 12111,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-datetime-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_metamorphic_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_metamorphic_abs_idempotent_contract",
+    "delta_unit": "D",
+    "delta_value": -7
+  },
+  {
+    "id": "timedelta_add_zero_identity",
+    "relation": "timedelta_add_zero_identity",
+    "seed": 12112,
+    "mode": "strict",
+    "env_fingerprint": "fnp-datetime-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_metamorphic_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_metamorphic_add_zero_contract",
+    "delta_unit": "h",
+    "delta_value": 36
+  }
+]
