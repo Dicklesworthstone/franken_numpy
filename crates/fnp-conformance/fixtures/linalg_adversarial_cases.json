@@ -611,5 +611,44 @@
     "reason_code": "linalg_norm_det_rank_policy_violation",
     "rcond": 0.0,
     "search_depth": 256
+  },
+  {
+    "id": "linalg_cholesky_non_positive_definite",
+    "operation": "cholesky_2x2",
+    "expected_error_contains": "not positive definite",
+    "expected_reason_code": "linalg_cholesky_contract_violation",
+    "severity": "critical",
+    "seed": 8436,
+    "mode": "strict",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/risk_note.md",
+      "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json"
+    ],
+    "reason_code": "linalg_cholesky_contract_violation",
+    "matrix": [
+      [1.0, 2.0],
+      [2.0, 1.0]
+    ]
+  },
+  {
+    "id": "linalg_inv_nearly_singular",
+    "operation": "batch_inv",
+    "expected_error_contains": "singular matrix",
+    "expected_reason_code": "linalg_solver_singularity",
+    "severity": "critical",
+    "seed": 8437,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-linalg-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-008/risk_note.md",
+      "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json"
+    ],
+    "reason_code": "linalg_solver_singularity",
+    "shape": [2, 2],
+    "matrix": [
+      [1.0, 1.0],
+      [1.0, 1.0]
+    ]
   }
 ]
