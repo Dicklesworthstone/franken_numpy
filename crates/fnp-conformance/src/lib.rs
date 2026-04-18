@@ -984,6 +984,38 @@ struct FftMetamorphicCase {
 }
 
 #[derive(Debug, Deserialize)]
+struct FftAdversarialCase {
+    id: String,
+    operation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    input_shape: Vec<usize>,
+    #[serde(default)]
+    input_values: Vec<serde_json::Value>,
+    #[serde(default)]
+    n: Option<usize>,
+    #[serde(default)]
+    expected_behavior: String,
+    #[serde(default)]
+    expected_shape: Vec<usize>,
+    #[serde(default)]
+    expected_values: Vec<serde_json::Value>,
+    #[serde(default)]
+    abs_tol: f64,
+    #[serde(default)]
+    rel_tol: f64,
+}
+
+#[derive(Debug, Deserialize)]
 struct SignalDifferentialCase {
     id: String,
     operation: String,
@@ -2279,6 +2311,13 @@ fn load_fft_differential_cases(fixture_root: &Path) -> Result<Vec<FftDifferentia
 
 fn load_fft_metamorphic_cases(fixture_root: &Path) -> Result<Vec<FftMetamorphicCase>, String> {
     let path = fixture_root.join("fft_metamorphic_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
+}
+
+fn load_fft_adversarial_cases(fixture_root: &Path) -> Result<Vec<FftAdversarialCase>, String> {
+    let path = fixture_root.join("fft_adversarial_cases.json");
     let raw = fs::read_to_string(&path)
         .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
     serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
@@ -6838,6 +6877,336 @@ pub fn run_fft_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport, 
     }
 
     Ok(report)
+}
+
+pub fn run_fft_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let cases = load_fft_adversarial_cases(&config.fixture_root)?;
+
+    let mut report = SuiteReport {
+        suite: "fft_adversarial",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+
+        match execute_fft_adversarial_operation(&case)
+            .and_then(|outcome| validate_fft_adversarial_expectation(&case, &outcome))
+        {
+            Ok(()) => report.pass_count += 1,
+            Err(err) => {
+                report.failures.push(format!(
+                    "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} {} (actual_reason_code={})",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    err.message,
+                    err.reason_code
+                ));
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+fn execute_fft_adversarial_operation(
+    case: &FftAdversarialCase,
+) -> Result<FftOperationOutcome, FftSuiteError> {
+    let to_outcome = |array: UFuncArray| FftOperationOutcome::Array {
+        shape: array.shape().to_vec(),
+        values: array.values().to_vec(),
+    };
+    let input_values = fft_adversarial_values(&case.input_values, "input_values", case)?;
+    let input = UFuncArray::new(case.input_shape.clone(), input_values, DType::F64)
+        .map_err(map_ufunc_error_to_fft_suite)?;
+
+    let result = match case.operation.as_str() {
+        "fft" => input.fft(case.n),
+        "ifft" => input.ifft(),
+        "rfft" => input.rfft(case.n),
+        other => {
+            return Err(FftSuiteError::new(
+                "fft_policy_unknown_adversarial_operation",
+                format!("unsupported fft adversarial operation {other}"),
+            ));
+        }
+    }
+    .map_err(map_ufunc_error_to_fft_suite)?;
+    Ok(to_outcome(result))
+}
+
+fn validate_fft_adversarial_expectation(
+    case: &FftAdversarialCase,
+    outcome: &FftOperationOutcome,
+) -> Result<(), FftSuiteError> {
+    if !case.expected_behavior.trim().is_empty() {
+        return validate_fft_adversarial_behavior(case, outcome);
+    }
+    match outcome {
+        FftOperationOutcome::Array { shape, values } => {
+            if !case.expected_shape.is_empty() {
+                fft_adversarial_assert_shape(case, shape, &case.expected_shape)?;
+            }
+            if !case.expected_values.is_empty() {
+                let expected =
+                    fft_adversarial_values(&case.expected_values, "expected_values", case)?;
+                fft_adversarial_assert_values_equal(case, values, &expected, "values")?;
+            }
+            if !case.expected_shape.is_empty() || !case.expected_values.is_empty() {
+                return Ok(());
+            }
+        }
+    }
+    Err(FftSuiteError::new(
+        "fft_adversarial_fixture_invalid",
+        format!(
+            "{} has no expected_shape, expected_values, or expected_behavior",
+            case.id
+        ),
+    ))
+}
+
+fn validate_fft_adversarial_behavior(
+    case: &FftAdversarialCase,
+    outcome: &FftOperationOutcome,
+) -> Result<(), FftSuiteError> {
+    let FftOperationOutcome::Array { shape, values } = outcome;
+    match case.expected_behavior.trim() {
+        "empty_output" => {
+            let element_count = fft_adversarial_element_count(shape, case, "actual_shape")?;
+            if element_count == 0 && values.is_empty() {
+                return Ok(());
+            }
+            Err(FftSuiteError::new(
+                "fft_adversarial_mismatch",
+                format!(
+                    "{} expected empty output but got shape={shape:?} values={values:?}",
+                    case.id
+                ),
+            ))
+        }
+        "nan_propagates" => {
+            if values.iter().any(|value| value.is_nan()) {
+                return Ok(());
+            }
+            Err(FftSuiteError::new(
+                "fft_adversarial_mismatch",
+                format!("{} expected at least one NaN in {values:?}", case.id),
+            ))
+        }
+        "inf_propagates" => {
+            if values.iter().any(|value| !value.is_finite()) {
+                return Ok(());
+            }
+            Err(FftSuiteError::new(
+                "fft_adversarial_mismatch",
+                format!(
+                    "{} expected at least one non-finite value in {values:?}",
+                    case.id
+                ),
+            ))
+        }
+        "zero_padded" | "truncated" | "bluestein_fallback" => {
+            let expected = fft_adversarial_expected_fft(case)?;
+            fft_adversarial_assert_shape(case, shape, &[expected.len() / 2, 2])?;
+            fft_adversarial_assert_values_equal(
+                case,
+                values,
+                &expected,
+                case.expected_behavior.trim(),
+            )
+        }
+        "single_coefficient" => {
+            let expected = fft_adversarial_expected_fft(case)?;
+            fft_adversarial_assert_shape(case, shape, &[1, 2])?;
+            fft_adversarial_assert_values_equal(case, values, &expected, "single coefficient")
+        }
+        "all_zeros_output" => {
+            if values.is_empty() {
+                return Err(FftSuiteError::new(
+                    "fft_adversarial_mismatch",
+                    format!("{} expected non-empty zero output", case.id),
+                ));
+            }
+            let expected = vec![0.0; values.len()];
+            fft_adversarial_assert_values_equal(case, values, &expected, "zero output")
+        }
+        "nyquist_peak" => {
+            let expected = fft_adversarial_expected_fft(case)?;
+            fft_adversarial_assert_shape(case, shape, &[expected.len() / 2, 2])?;
+            fft_adversarial_assert_values_equal(case, values, &expected, "nyquist peak")
+        }
+        "hermitian_output" => {
+            let expected = fft_adversarial_expected_rfft(case)?;
+            fft_adversarial_assert_shape(case, shape, &[expected.len() / 2, 2])?;
+            fft_adversarial_assert_values_equal(case, values, &expected, "hermitian output")
+        }
+        other => Err(FftSuiteError::new(
+            "fft_adversarial_fixture_invalid",
+            format!("{} unsupported expected_behavior {other:?}", case.id),
+        )),
+    }
+}
+
+fn fft_adversarial_expected_fft(case: &FftAdversarialCase) -> Result<Vec<f64>, FftSuiteError> {
+    let real_values = fft_adversarial_real_values_with_n(case)?;
+    let complex_values = fft_adversarial_real_to_complex(&real_values);
+    fft_manual_complex_dft(&complex_values, false)
+}
+
+fn fft_adversarial_expected_rfft(case: &FftAdversarialCase) -> Result<Vec<f64>, FftSuiteError> {
+    let full = fft_adversarial_expected_fft(case)?;
+    let real_len = case
+        .n
+        .unwrap_or_else(|| case.input_shape.last().copied().unwrap_or(0));
+    let output_len = real_len / 2 + 1;
+    Ok(full[..output_len * 2].to_vec())
+}
+
+fn fft_adversarial_real_values_with_n(
+    case: &FftAdversarialCase,
+) -> Result<Vec<f64>, FftSuiteError> {
+    let mut values = fft_adversarial_values(&case.input_values, "input_values", case)?;
+    let len = case.n.unwrap_or(values.len());
+    values.resize(len, 0.0);
+    values.truncate(len);
+    Ok(values)
+}
+
+fn fft_adversarial_real_to_complex(values: &[f64]) -> Vec<f64> {
+    let mut complex = Vec::with_capacity(values.len() * 2);
+    for value in values {
+        complex.push(*value);
+        complex.push(0.0);
+    }
+    complex
+}
+
+fn fft_adversarial_values(
+    values: &[serde_json::Value],
+    field: &str,
+    case: &FftAdversarialCase,
+) -> Result<Vec<f64>, FftSuiteError> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| fft_adversarial_value(value, field, index, case))
+        .collect()
+}
+
+fn fft_adversarial_value(
+    value: &serde_json::Value,
+    field: &str,
+    index: usize,
+    case: &FftAdversarialCase,
+) -> Result<f64, FftSuiteError> {
+    match value {
+        serde_json::Value::Number(number) => number.as_f64().ok_or_else(|| {
+            FftSuiteError::new(
+                "fft_input_contract_violation",
+                format!("{} {field}[{index}] is not representable as f64", case.id),
+            )
+        }),
+        serde_json::Value::String(raw) => match raw.as_str() {
+            "NaN" | "nan" => Ok(f64::NAN),
+            "Inf" | "Infinity" | "inf" | "+inf" => Ok(f64::INFINITY),
+            "-Inf" | "-Infinity" | "-inf" => Ok(f64::NEG_INFINITY),
+            other => Err(FftSuiteError::new(
+                "fft_input_contract_violation",
+                format!(
+                    "{} {field}[{index}] has unsupported numeric sentinel {other:?}",
+                    case.id
+                ),
+            )),
+        },
+        other => Err(FftSuiteError::new(
+            "fft_input_contract_violation",
+            format!(
+                "{} {field}[{index}] must be number or numeric sentinel string, got {other:?}",
+                case.id
+            ),
+        )),
+    }
+}
+
+fn fft_adversarial_element_count(
+    shape: &[usize],
+    case: &FftAdversarialCase,
+    label: &str,
+) -> Result<usize, FftSuiteError> {
+    shape.iter().try_fold(1usize, |acc, dim| {
+        acc.checked_mul(*dim).ok_or_else(|| {
+            FftSuiteError::new(
+                "fft_input_contract_violation",
+                format!("{} {label} element count overflows usize", case.id),
+            )
+        })
+    })
+}
+
+fn fft_adversarial_assert_shape(
+    case: &FftAdversarialCase,
+    actual: &[usize],
+    expected: &[usize],
+) -> Result<(), FftSuiteError> {
+    if actual == expected {
+        return Ok(());
+    }
+    Err(FftSuiteError::new(
+        "fft_adversarial_mismatch",
+        format!(
+            "{} shape mismatch expected={expected:?} actual={actual:?}",
+            case.id
+        ),
+    ))
+}
+
+fn fft_adversarial_assert_values_equal(
+    case: &FftAdversarialCase,
+    actual: &[f64],
+    expected: &[f64],
+    label: &str,
+) -> Result<(), FftSuiteError> {
+    if actual.len() != expected.len() {
+        return Err(FftSuiteError::new(
+            "fft_adversarial_mismatch",
+            format!(
+                "{} {label} length mismatch expected={} actual={}",
+                case.id,
+                expected.len(),
+                actual.len()
+            ),
+        ));
+    }
+    let abs_tol = if case.abs_tol > 0.0 {
+        case.abs_tol
+    } else {
+        1e-8
+    };
+    let rel_tol = if case.rel_tol > 0.0 {
+        case.rel_tol
+    } else {
+        1e-8
+    };
+    if approx_equal_values(expected, actual, abs_tol, rel_tol) {
+        return Ok(());
+    }
+    Err(FftSuiteError::new(
+        "fft_adversarial_mismatch",
+        format!(
+            "{} {label} mismatch expected={expected:?} actual={actual:?} abs_tol={abs_tol} rel_tol={rel_tol}",
+            case.id
+        ),
+    ))
 }
 
 fn evaluate_fft_metamorphic_relation(case: &FftMetamorphicCase) -> Result<(), FftSuiteError> {
@@ -16260,6 +16629,7 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
         run_polynomial_differential_suite(config)?,
         run_fft_differential_suite(config)?,
         run_fft_metamorphic_suite(config)?,
+        run_fft_adversarial_suite(config)?,
         run_signal_differential_suite(config)?,
         run_signal_metamorphic_suite(config)?,
         run_signal_adversarial_suite(config)?,
@@ -18426,20 +18796,20 @@ mod tests {
         run_crash_signature_regression_suite, run_datetime_adversarial_suite,
         run_datetime_differential_suite, run_datetime_metamorphic_suite,
         run_dtype_adversarial_suite, run_dtype_differential_suite, run_dtype_metamorphic_suite,
-        run_dtype_promotion_suite, run_fft_differential_suite, run_fft_metamorphic_suite,
-        run_io_adversarial_suite, run_io_differential_suite, run_io_metamorphic_suite,
-        run_iter_adversarial_suite, run_iter_differential_suite, run_iter_metamorphic_suite,
-        run_linalg_adversarial_suite, run_linalg_differential_suite, run_linalg_metamorphic_suite,
-        run_masked_adversarial_suite, run_masked_differential_suite, run_masked_metamorphic_suite,
-        run_polynomial_differential_suite, run_rng_adversarial_suite, run_rng_differential_suite,
-        run_rng_metamorphic_suite, run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
-        run_runtime_policy_metamorphic_suite, run_shape_stride_adversarial_suite,
-        run_shape_stride_differential_suite, run_shape_stride_metamorphic_suite,
-        run_shape_stride_suite, run_signal_adversarial_suite, run_signal_differential_suite,
-        run_signal_metamorphic_suite, run_smoke, run_string_adversarial_suite,
-        run_string_differential_suite, run_string_metamorphic_suite, run_ufunc_adversarial_suite,
-        run_ufunc_differential_suite, run_ufunc_metamorphic_suite, set_dtype_promotion_log_path,
-        set_shape_stride_log_path,
+        run_dtype_promotion_suite, run_fft_adversarial_suite, run_fft_differential_suite,
+        run_fft_metamorphic_suite, run_io_adversarial_suite, run_io_differential_suite,
+        run_io_metamorphic_suite, run_iter_adversarial_suite, run_iter_differential_suite,
+        run_iter_metamorphic_suite, run_linalg_adversarial_suite, run_linalg_differential_suite,
+        run_linalg_metamorphic_suite, run_masked_adversarial_suite, run_masked_differential_suite,
+        run_masked_metamorphic_suite, run_polynomial_differential_suite, run_rng_adversarial_suite,
+        run_rng_differential_suite, run_rng_metamorphic_suite, run_rng_statistical_suite,
+        run_runtime_policy_adversarial_suite, run_runtime_policy_metamorphic_suite,
+        run_shape_stride_adversarial_suite, run_shape_stride_differential_suite,
+        run_shape_stride_metamorphic_suite, run_shape_stride_suite, run_signal_adversarial_suite,
+        run_signal_differential_suite, run_signal_metamorphic_suite, run_smoke,
+        run_string_adversarial_suite, run_string_differential_suite, run_string_metamorphic_suite,
+        run_ufunc_adversarial_suite, run_ufunc_differential_suite, run_ufunc_metamorphic_suite,
+        set_dtype_promotion_log_path, set_shape_stride_log_path,
     };
     use fnp_io::{IOSupportedDType, load as load_npy, save as save_npy};
     use fnp_iter::{
@@ -19422,6 +19792,13 @@ mod tests {
     fn fft_metamorphic_suite_is_green() {
         let cfg = HarnessConfig::default_paths();
         let suite = run_fft_metamorphic_suite(&cfg).expect("fft metamorphic suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn fft_adversarial_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite = run_fft_adversarial_suite(&cfg).expect("fft adversarial suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 
