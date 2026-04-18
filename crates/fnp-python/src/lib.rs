@@ -2811,9 +2811,9 @@ mod tests {
         fill_diagonal, flatnonzero, floor, fnp_python, frexp, hypot, indices, interp, isfinite,
         isinf, isnan, isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2, meshgrid, modf,
         nan_to_num, nextafter, place, put, put_along_axis, putmask, radians, ravel_multi_index,
-        rint, searchsorted, select, sign, signbit, sinc, spacing, take, take_along_axis,
-        tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc, unravel_index,
-        where_py,
+        rint, searchsorted, select, sign, signbit, sinc, spacing, take, take_along_axis, trapezoid,
+        trapz, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc,
+        unravel_index, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::exceptions::{PyTypeError, PyValueError};
