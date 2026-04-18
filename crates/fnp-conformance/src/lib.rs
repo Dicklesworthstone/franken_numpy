@@ -900,6 +900,44 @@ struct FftDifferentialCase {
 }
 
 #[derive(Debug, Deserialize)]
+struct FftMetamorphicCase {
+    id: String,
+    relation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    input_shape: Vec<usize>,
+    #[serde(default)]
+    input_values: Vec<f64>,
+    #[serde(default)]
+    x_shape: Vec<usize>,
+    #[serde(default)]
+    x_values: Vec<f64>,
+    #[serde(default)]
+    y_shape: Vec<usize>,
+    #[serde(default)]
+    y_values: Vec<f64>,
+    #[serde(default)]
+    alpha: Option<f64>,
+    #[serde(default)]
+    beta: Option<f64>,
+    #[serde(default)]
+    input_dtype: String,
+    #[serde(default)]
+    abs_tol: f64,
+    #[serde(default)]
+    rel_tol: f64,
+}
+
+#[derive(Debug, Deserialize)]
 struct SignalDifferentialCase {
     id: String,
     operation: String,
@@ -1908,6 +1946,13 @@ fn load_dtype_adversarial_cases(fixture_root: &Path) -> Result<Vec<DTypeAdversar
 
 fn load_fft_differential_cases(fixture_root: &Path) -> Result<Vec<FftDifferentialCase>, String> {
     let path = fixture_root.join("fft_differential_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
+}
+
+fn load_fft_metamorphic_cases(fixture_root: &Path) -> Result<Vec<FftMetamorphicCase>, String> {
+    let path = fixture_root.join("fft_metamorphic_cases.json");
     let raw = fs::read_to_string(&path)
         .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
     serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
@@ -6064,6 +6109,419 @@ pub fn run_fft_differential_suite(config: &HarnessConfig) -> Result<SuiteReport,
         .map_err(|err| format!("failed writing {}: {err}", report_path.display()))?;
 
     Ok(report)
+}
+
+pub fn run_fft_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let cases = load_fft_metamorphic_cases(&config.fixture_root)?;
+
+    let mut report = SuiteReport {
+        suite: "fft_metamorphic",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+
+        match evaluate_fft_metamorphic_relation(&case) {
+            Ok(()) => {
+                report.pass_count += 1;
+            }
+            Err(err) => {
+                report.failures.push(format!(
+                    "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} {} (actual_reason_code={})",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    err.message,
+                    err.reason_code
+                ));
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+fn evaluate_fft_metamorphic_relation(case: &FftMetamorphicCase) -> Result<(), FftSuiteError> {
+    match case.relation.as_str() {
+        "fft_ifft_inverse" => {
+            let input = fft_metamorphic_input_array(
+                &case.input_shape,
+                &case.input_values,
+                &case.input_dtype,
+            )?;
+            if fft_metamorphic_is_complex_dtype(&case.input_dtype) {
+                let recovered = input.ifft().map_err(map_ufunc_error_to_fft_suite)?;
+                if recovered.shape() != input.shape() {
+                    return Err(FftSuiteError::new(
+                        "fft_metamorphic_relation_failed",
+                        format!(
+                            "complex inverse shape mismatch expected={:?} actual={:?}",
+                            input.shape(),
+                            recovered.shape()
+                        ),
+                    ));
+                }
+                let reconstructed = fft_manual_complex_dft(recovered.values(), false)?;
+                fft_metamorphic_assert_values_equal(
+                    case,
+                    &reconstructed,
+                    input.values(),
+                    "manual_fft(ifft(x))",
+                )
+            } else {
+                let transformed = input.fft(None).map_err(map_ufunc_error_to_fft_suite)?;
+                let recovered = transformed.ifft().map_err(map_ufunc_error_to_fft_suite)?;
+                fft_metamorphic_assert_real_inverse(
+                    case,
+                    &recovered,
+                    &case.input_shape,
+                    &case.input_values,
+                    "ifft(fft(x))",
+                )
+            }
+        }
+        "fft_linearity" => {
+            let alpha = case.alpha.ok_or_else(|| {
+                FftSuiteError::new(
+                    "fft_input_contract_violation",
+                    "fft_linearity requires alpha",
+                )
+            })?;
+            let beta = case.beta.ok_or_else(|| {
+                FftSuiteError::new(
+                    "fft_input_contract_violation",
+                    "fft_linearity requires beta",
+                )
+            })?;
+            let x = fft_metamorphic_real_array(&case.x_shape, &case.x_values)?;
+            let y = fft_metamorphic_real_array(&case.y_shape, &case.y_values)?;
+            if x.shape() != y.shape() {
+                return Err(FftSuiteError::new(
+                    "fft_input_contract_violation",
+                    format!(
+                        "fft_linearity requires matching shapes, got {:?} and {:?}",
+                        x.shape(),
+                        y.shape()
+                    ),
+                ));
+            }
+            let combined_values = x
+                .values()
+                .iter()
+                .zip(y.values())
+                .map(|(lhs, rhs)| alpha.mul_add(*lhs, beta * *rhs))
+                .collect::<Vec<_>>();
+            let combined = fft_metamorphic_real_array(x.shape(), &combined_values)?;
+            let actual = combined.fft(None).map_err(map_ufunc_error_to_fft_suite)?;
+            let fft_x = x.fft(None).map_err(map_ufunc_error_to_fft_suite)?;
+            let fft_y = y.fft(None).map_err(map_ufunc_error_to_fft_suite)?;
+            let expected_values = fft_x
+                .values()
+                .iter()
+                .zip(fft_y.values())
+                .map(|(lhs, rhs)| alpha.mul_add(*lhs, beta * *rhs))
+                .collect::<Vec<_>>();
+            if actual.shape() != fft_x.shape() {
+                return Err(FftSuiteError::new(
+                    "fft_metamorphic_relation_failed",
+                    format!(
+                        "fft_linearity shape mismatch expected={:?} actual={:?}",
+                        fft_x.shape(),
+                        actual.shape()
+                    ),
+                ));
+            }
+            fft_metamorphic_assert_values_equal(
+                case,
+                actual.values(),
+                &expected_values,
+                "fft(alpha*x + beta*y)",
+            )
+        }
+        "fft_parseval" => {
+            let input = fft_metamorphic_real_array(&case.input_shape, &case.input_values)?;
+            let transformed = input.fft(None).map_err(map_ufunc_error_to_fft_suite)?;
+            let sample_count = input.values().len();
+            if sample_count == 0 {
+                return Err(FftSuiteError::new(
+                    "fft_input_contract_violation",
+                    "fft_parseval requires non-empty input",
+                ));
+            }
+            let time_energy = input
+                .values()
+                .iter()
+                .map(|value| value * value)
+                .sum::<f64>();
+            let freq_energy = transformed
+                .values()
+                .chunks_exact(2)
+                .map(|pair| pair[0] * pair[0] + pair[1] * pair[1])
+                .sum::<f64>()
+                / sample_count as f64;
+            fft_metamorphic_assert_scalar_equal(case, time_energy, freq_energy, "fft_parseval")
+        }
+        "fftshift_ifftshift_inverse" => {
+            let input = fft_metamorphic_real_array(&case.input_shape, &case.input_values)?;
+            let recovered = input
+                .fftshift()
+                .and_then(|shifted| shifted.ifftshift())
+                .map_err(map_ufunc_error_to_fft_suite)?;
+            fft_metamorphic_assert_array_equal(case, &recovered, &input, "ifftshift(fftshift(x))")
+        }
+        "rfft_hermitian_symmetry" => {
+            let input = fft_metamorphic_real_array(&case.input_shape, &case.input_values)?;
+            let full = input.fft(None).map_err(map_ufunc_error_to_fft_suite)?;
+            let half = input.rfft(None).map_err(map_ufunc_error_to_fft_suite)?;
+            fft_metamorphic_assert_values_equal(
+                case,
+                half.values(),
+                &full.values()[..half.values().len()],
+                "rfft prefix",
+            )?;
+            let n = input.values().len();
+            for k in 0..n {
+                let lhs = &full.values()[k * 2..k * 2 + 2];
+                let rhs = &full.values()[((n - k) % n) * 2..((n - k) % n) * 2 + 2];
+                fft_metamorphic_assert_scalar_equal(
+                    case,
+                    lhs[0],
+                    rhs[0],
+                    "rfft_hermitian_symmetry real",
+                )?;
+                fft_metamorphic_assert_scalar_equal(
+                    case,
+                    lhs[1],
+                    -rhs[1],
+                    "rfft_hermitian_symmetry imag",
+                )?;
+            }
+            Ok(())
+        }
+        "fft2_ifft2_inverse" => {
+            let input = fft_metamorphic_real_array(&case.input_shape, &case.input_values)?;
+            let recovered = input
+                .fft2()
+                .and_then(|transformed| transformed.ifft2())
+                .map_err(map_ufunc_error_to_fft_suite)?;
+            fft_metamorphic_assert_real_inverse(
+                case,
+                &recovered,
+                &case.input_shape,
+                &case.input_values,
+                "ifft2(fft2(x))",
+            )
+        }
+        "fftn_ifftn_inverse" => {
+            let input = fft_metamorphic_real_array(&case.input_shape, &case.input_values)?;
+            let recovered = input
+                .fftn()
+                .and_then(|transformed| transformed.ifftn())
+                .map_err(map_ufunc_error_to_fft_suite)?;
+            fft_metamorphic_assert_real_inverse(
+                case,
+                &recovered,
+                &case.input_shape,
+                &case.input_values,
+                "ifftn(fftn(x))",
+            )
+        }
+        other => Err(FftSuiteError::new(
+            "fft_policy_unknown_metamorphic_relation",
+            format!("unsupported fft metamorphic relation {other}"),
+        )),
+    }
+}
+
+fn fft_metamorphic_input_array(
+    shape: &[usize],
+    values: &[f64],
+    dtype_name: &str,
+) -> Result<UFuncArray, FftSuiteError> {
+    let dtype = if dtype_name.eq_ignore_ascii_case("c128")
+        || dtype_name.eq_ignore_ascii_case("complex128")
+    {
+        DType::Complex128
+    } else if dtype_name.eq_ignore_ascii_case("c64") || dtype_name.eq_ignore_ascii_case("complex64")
+    {
+        DType::Complex64
+    } else {
+        DType::F64
+    };
+    UFuncArray::new(shape.to_vec(), values.to_vec(), dtype).map_err(map_ufunc_error_to_fft_suite)
+}
+
+fn fft_metamorphic_real_array(
+    shape: &[usize],
+    values: &[f64],
+) -> Result<UFuncArray, FftSuiteError> {
+    UFuncArray::new(shape.to_vec(), values.to_vec(), DType::F64)
+        .map_err(map_ufunc_error_to_fft_suite)
+}
+
+fn fft_metamorphic_is_complex_dtype(dtype_name: &str) -> bool {
+    dtype_name.eq_ignore_ascii_case("c128")
+        || dtype_name.eq_ignore_ascii_case("complex128")
+        || dtype_name.eq_ignore_ascii_case("c64")
+        || dtype_name.eq_ignore_ascii_case("complex64")
+}
+
+fn fft_manual_complex_dft(values: &[f64], inverse: bool) -> Result<Vec<f64>, FftSuiteError> {
+    if !values.len().is_multiple_of(2) {
+        return Err(FftSuiteError::new(
+            "fft_input_contract_violation",
+            "complex DFT input must have interleaved real/imaginary pairs",
+        ));
+    }
+    let n = values.len() / 2;
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let direction = if inverse { 1.0 } else { -1.0 };
+    let scale = if inverse { n as f64 } else { 1.0 };
+    let mut output = vec![0.0; values.len()];
+    for (k, out_pair) in output.chunks_exact_mut(2).enumerate() {
+        let mut sum_re = 0.0;
+        let mut sum_im = 0.0;
+        for (t, in_pair) in values.chunks_exact(2).enumerate() {
+            let angle = direction * std::f64::consts::TAU * k as f64 * t as f64 / n as f64;
+            let cos = angle.cos();
+            let sin = angle.sin();
+            let re = in_pair[0];
+            let im = in_pair[1];
+            sum_re += re * cos - im * sin;
+            sum_im += re * sin + im * cos;
+        }
+        out_pair[0] = sum_re / scale;
+        out_pair[1] = sum_im / scale;
+    }
+    Ok(output)
+}
+
+fn fft_metamorphic_assert_real_inverse(
+    case: &FftMetamorphicCase,
+    recovered: &UFuncArray,
+    input_shape: &[usize],
+    input_values: &[f64],
+    label: &str,
+) -> Result<(), FftSuiteError> {
+    let mut expected_shape = input_shape.to_vec();
+    expected_shape.push(2);
+    if recovered.shape() != expected_shape {
+        return Err(FftSuiteError::new(
+            "fft_metamorphic_relation_failed",
+            format!(
+                "{label} shape mismatch expected={:?} actual={:?}",
+                expected_shape,
+                recovered.shape()
+            ),
+        ));
+    }
+    let mut real_parts = Vec::with_capacity(input_values.len());
+    for (index, pair) in recovered.values().chunks_exact(2).enumerate() {
+        real_parts.push(pair[0]);
+        fft_metamorphic_assert_scalar_equal(
+            case,
+            pair[1],
+            0.0,
+            &format!("{label} imaginary component {index}"),
+        )?;
+    }
+    fft_metamorphic_assert_values_equal(case, &real_parts, input_values, label)
+}
+
+fn fft_metamorphic_assert_array_equal(
+    case: &FftMetamorphicCase,
+    actual: &UFuncArray,
+    expected: &UFuncArray,
+    label: &str,
+) -> Result<(), FftSuiteError> {
+    if actual.shape() != expected.shape() {
+        return Err(FftSuiteError::new(
+            "fft_metamorphic_relation_failed",
+            format!(
+                "{label} shape mismatch expected={:?} actual={:?}",
+                expected.shape(),
+                actual.shape()
+            ),
+        ));
+    }
+    fft_metamorphic_assert_values_equal(case, actual.values(), expected.values(), label)
+}
+
+fn fft_metamorphic_assert_values_equal(
+    case: &FftMetamorphicCase,
+    actual: &[f64],
+    expected: &[f64],
+    label: &str,
+) -> Result<(), FftSuiteError> {
+    if actual.len() != expected.len() {
+        return Err(FftSuiteError::new(
+            "fft_metamorphic_relation_failed",
+            format!(
+                "{label} length mismatch expected={} actual={}",
+                expected.len(),
+                actual.len()
+            ),
+        ));
+    }
+    let abs_tol = if case.abs_tol > 0.0 {
+        case.abs_tol
+    } else {
+        1e-9
+    };
+    let rel_tol = if case.rel_tol > 0.0 {
+        case.rel_tol
+    } else {
+        1e-9
+    };
+    if !approx_equal_values(expected, actual, abs_tol, rel_tol) {
+        return Err(FftSuiteError::new(
+            "fft_metamorphic_relation_failed",
+            format!(
+                "{label} value mismatch expected={expected:?} actual={actual:?} abs_tol={abs_tol} rel_tol={rel_tol}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn fft_metamorphic_assert_scalar_equal(
+    case: &FftMetamorphicCase,
+    actual: f64,
+    expected: f64,
+    label: &str,
+) -> Result<(), FftSuiteError> {
+    let abs_tol = if case.abs_tol > 0.0 {
+        case.abs_tol
+    } else {
+        1e-9
+    };
+    let rel_tol = if case.rel_tol > 0.0 {
+        case.rel_tol
+    } else {
+        1e-9
+    };
+    let diff = (actual - expected).abs();
+    let scale = expected.abs().max(actual.abs());
+    if diff > abs_tol.max(rel_tol * scale) {
+        return Err(FftSuiteError::new(
+            "fft_metamorphic_relation_failed",
+            format!(
+                "{label} mismatch expected={expected} actual={actual} abs_tol={abs_tol} rel_tol={rel_tol}"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn execute_fft_differential_operation(
@@ -12449,6 +12907,7 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
         run_datetime_metamorphic_suite(config)?,
         run_polynomial_differential_suite(config)?,
         run_fft_differential_suite(config)?,
+        run_fft_metamorphic_suite(config)?,
         run_signal_differential_suite(config)?,
         run_linalg_differential_suite(config)?,
         run_linalg_metamorphic_suite(config)?,
@@ -14613,12 +15072,12 @@ mod tests {
         run_crash_signature_regression_suite, run_datetime_differential_suite,
         run_datetime_metamorphic_suite, run_dtype_adversarial_suite, run_dtype_differential_suite,
         run_dtype_metamorphic_suite, run_dtype_promotion_suite, run_fft_differential_suite,
-        run_io_adversarial_suite, run_io_differential_suite, run_io_metamorphic_suite,
-        run_iter_adversarial_suite, run_iter_differential_suite, run_iter_metamorphic_suite,
-        run_linalg_adversarial_suite, run_linalg_differential_suite, run_linalg_metamorphic_suite,
-        run_masked_differential_suite, run_polynomial_differential_suite,
-        run_rng_adversarial_suite, run_rng_differential_suite, run_rng_metamorphic_suite,
-        run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
+        run_fft_metamorphic_suite, run_io_adversarial_suite, run_io_differential_suite,
+        run_io_metamorphic_suite, run_iter_adversarial_suite, run_iter_differential_suite,
+        run_iter_metamorphic_suite, run_linalg_adversarial_suite, run_linalg_differential_suite,
+        run_linalg_metamorphic_suite, run_masked_differential_suite,
+        run_polynomial_differential_suite, run_rng_adversarial_suite, run_rng_differential_suite,
+        run_rng_metamorphic_suite, run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
         run_shape_stride_adversarial_suite, run_shape_stride_differential_suite,
         run_shape_stride_metamorphic_suite, run_shape_stride_suite, run_signal_differential_suite,
         run_smoke, run_string_differential_suite, run_string_metamorphic_suite,
@@ -15559,6 +16018,13 @@ mod tests {
     fn fft_differential_suite_is_green() {
         let cfg = HarnessConfig::default_paths();
         let suite = run_fft_differential_suite(&cfg).expect("fft differential suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn fft_metamorphic_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite = run_fft_metamorphic_suite(&cfg).expect("fft metamorphic suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 
