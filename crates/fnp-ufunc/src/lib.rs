@@ -19780,29 +19780,77 @@ impl UFuncArray {
     }
 
     /// `np.nanpercentile` — percentile ignoring NaN values.
-    /// q is in [0, 100]. Only `axis=None` (global) is supported; NaN elements
-    /// are removed before computing.
+    /// q is in [0, 100]. For axis reductions, NaN elements are removed from
+    /// each lane independently; empty/all-NaN lanes yield NaN.
     pub fn nanpercentile(&self, q: f64, axis: Option<isize>) -> Result<Self, UFuncError> {
         if !(0.0..=100.0).contains(&q) {
             return Err(UFuncError::Msg(format!(
                 "nanpercentile: q={q} must be in [0, 100]"
             )));
         }
-        if axis.is_some() {
-            return Err(UFuncError::Msg(
-                "nanpercentile: only axis=None is supported".to_string(),
-            ));
+        let fraction = q / 100.0;
+        match axis {
+            None => {
+                // Remove NaN values (flattens to 1-D), then compute percentile.
+                let mut values = self.nan_removed().values;
+                if values.is_empty() {
+                    return Ok(Self::scalar(f64::NAN, DType::F64));
+                }
+                values.sort_by(|a, b| a.total_cmp(b));
+                Ok(Self::scalar(
+                    interpolate_percentile(&values, fraction),
+                    DType::F64,
+                ))
+            }
+            Some(ax) => {
+                let ax = normalize_axis(ax, self.shape.len())?;
+                let axis_len = self.shape[ax];
+                if axis_len == 0 {
+                    let out_shape = reduced_shape(&self.shape, ax, false);
+                    let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+                    return Ok(Self {
+                        shape: out_shape,
+                        values: vec![f64::NAN; out_count],
+                        dtype: DType::F64,
+                        integer_sidecar: None,
+                    });
+                }
+                let outer: usize =
+                    fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
+                let inner: usize =
+                    fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
+                let mut out_shape = self.shape.clone();
+                out_shape.remove(ax);
+                let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+                let mut values = Vec::with_capacity(out_count);
+                for o in 0..outer {
+                    for i in 0..inner {
+                        let mut lane: Vec<f64> = (0..axis_len)
+                            .filter_map(|a| {
+                                let value = self.values[o * axis_len * inner + a * inner + i];
+                                (!value.is_nan()).then_some(value)
+                            })
+                            .collect();
+                        if lane.is_empty() {
+                            values.push(f64::NAN);
+                            continue;
+                        }
+                        lane.sort_by(|a, b| a.total_cmp(b));
+                        values.push(interpolate_percentile(&lane, fraction));
+                    }
+                }
+                Ok(Self {
+                    shape: out_shape,
+                    values,
+                    dtype: DType::F64,
+                    integer_sidecar: None,
+                })
+            }
         }
-        // Remove NaN values (flattens to 1-D), then compute percentile
-        let filtered = self.nan_removed();
-        if filtered.values.is_empty() {
-            return Ok(Self::scalar(f64::NAN, self.dtype));
-        }
-        filtered.percentile(q, None)
     }
 
     /// `np.nanquantile` — quantile ignoring NaN values.
-    /// q is in [0, 1]. Only `axis=None` (global) is supported.
+    /// q is in [0, 1].
     pub fn nanquantile(&self, q: f64, axis: Option<isize>) -> Result<Self, UFuncError> {
         self.nanpercentile(q * 100.0, axis)
     }
@@ -45566,6 +45614,44 @@ mod tests {
     }
 
     #[test]
+    fn nanpercentile_axis_filters_each_lane() {
+        let a = UFuncArray::new(
+            vec![2, 3],
+            vec![1.0, f64::NAN, 3.0, 4.0, 5.0, f64::NAN],
+            DType::F64,
+        )
+        .unwrap();
+
+        let axis0 = a.nanpercentile(50.0, Some(0)).unwrap();
+        assert_eq!(axis0.shape(), &[3]);
+        assert_eq!(axis0.values(), &[2.5, 5.0, 3.0]);
+
+        let axis1 = a.nanpercentile(50.0, Some(1)).unwrap();
+        assert_eq!(axis1.shape(), &[2]);
+        assert_eq!(axis1.values(), &[2.0, 4.5]);
+    }
+
+    #[test]
+    fn nanpercentile_axis_all_nan_lane_returns_nan() {
+        let a =
+            UFuncArray::new(vec![2, 2], vec![f64::NAN, f64::NAN, 1.0, 3.0], DType::F64).unwrap();
+
+        let result = a.nanpercentile(50.0, Some(1)).unwrap();
+        assert_eq!(result.shape(), &[2]);
+        assert!(result.values()[0].is_nan());
+        assert_eq!(result.values()[1], 2.0);
+    }
+
+    #[test]
+    fn nanpercentile_empty_axis_returns_nan_lanes() {
+        let a = UFuncArray::new(vec![0, 3], vec![], DType::F64).unwrap();
+
+        let result = a.nanpercentile(50.0, Some(0)).unwrap();
+        assert_eq!(result.shape(), &[3]);
+        assert!(result.values().iter().all(|value| value.is_nan()));
+    }
+
+    #[test]
     fn nanpercentile_out_of_range() {
         let a = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
         assert!(a.nanpercentile(101.0, None).is_err());
@@ -45578,6 +45664,15 @@ mod tests {
             UFuncArray::new(vec![5], vec![1.0, f64::NAN, 3.0, f64::NAN, 5.0], DType::F64).unwrap();
         let result = a.nanquantile(0.5, None).unwrap();
         assert!((result.values()[0] - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn nanquantile_negative_axis_matches_nanpercentile() {
+        let a = UFuncArray::new(vec![2, 2], vec![1.0, f64::NAN, 3.0, 5.0], DType::F64).unwrap();
+
+        let result = a.nanquantile(0.5, Some(-1)).unwrap();
+        assert_eq!(result.shape(), &[2]);
+        assert_eq!(result.values(), &[1.0, 4.0]);
     }
 
     #[test]
