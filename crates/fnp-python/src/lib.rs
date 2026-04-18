@@ -9,7 +9,7 @@ use fnp_ufunc::{
     spacing as ufunc_spacing, where_nonzero,
 };
 use pyo3::Bound;
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::exceptions::{PyTypeError, PyValueError, PyZeroDivisionError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyModule, PyTuple};
 use pyo3::wrap_pyfunction;
@@ -616,7 +616,7 @@ fn extract_split_sections(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<
         .call_method1("astype", ("int64",))?
         .call_method0("item")?
         .extract::<i64>()?;
-    if sections <= 0 {
+    if sections < 0 {
         return Err(PyValueError::new_err(
             "number sections must be larger than 0.",
         ));
@@ -665,6 +665,15 @@ fn split_helper_default(
     let Some(sections) = extract_split_sections(py, indices_or_sections.bind(py))? else {
         return split_helper_numpy_fallback(py, kind, ary, indices_or_sections, axis);
     };
+
+    if sections == 0 {
+        return match kind {
+            SplitHelperKind::Flexible => {
+                Err(PyValueError::new_err("number sections must be larger than 0."))
+            }
+            _ => Err(PyZeroDivisionError::new_err("integer modulo by zero")),
+        };
+    }
 
     let array = match extract_precise_numeric_array(py, ary.bind(py), kind.context()) {
         Ok(array) => array,
@@ -1964,7 +1973,6 @@ fn count_nonzero(
 ) -> PyResult<Py<PyAny>> {
     let a = extract_numeric_array(py, a.bind(py), "count_nonzero(a)")?;
     let axes = extract_axis_spec(py, axis, "count_nonzero")?;
-    let axis_is_none = axes.is_none();
     let result = match axes {
         None => a.count_nonzero(None, keepdims),
         Some(axes) if axes.len() == 1 => a.count_nonzero(Some(axes[0]), keepdims),
@@ -1974,11 +1982,7 @@ fn count_nonzero(
 
     let output = build_numpy_array_from_ufunc(py, &result)?;
     if result.shape().is_empty() {
-        return if axis_is_none {
-            Ok(output.bind(py).call_method0("item")?.unbind())
-        } else {
-            Ok(output.bind(py).get_item(PyTuple::empty(py))?.unbind())
-        };
+        return Ok(output.bind(py).get_item(PyTuple::empty(py))?.unbind());
     }
 
     Ok(output)
