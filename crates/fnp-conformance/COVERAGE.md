@@ -14,8 +14,8 @@
 | String arrays | 60 | — | — | 60 | Good - 33 char functions, empty/whitespace edge cases |
 | RNG | 22 | 23 | 41 | 86 | Adequate + 39 statistical |
 | FFT | 38 | — | — | 38 | Good - transform families, edge sizes, 2D non-square |
-| Datetime/timedelta | 41 | — | — | 41 | Good - arithmetic, busday, NaT, broadcast, abs |
-| Masked arrays | 36 | — | — | 36 | Good - reshape/concat/fill/broadcast/all-masked/argmin-max |
+| Datetime/timedelta | 38 | — | — | 38 | Good - arithmetic, busday, NaT, broadcast, abs |
+| Masked arrays | 33 | — | — | 33 | Good - reshape/concat/fill/broadcast/all-masked/argmin-max |
 | Iterator/transfer | 31 | 16 | 16 | 63 | Adequate - transfer/overlap/flatiter edges covered |
 | Shape/stride (SCE) | 47 | — | — | 47 | Good - 0-D, empty, negative-stride, large shapes, 5D/6D transpose covered |
 | Dtype promotion | 198 | — | — | 198 | Good - full 14×14 type matrix coverage |
@@ -87,9 +87,10 @@ Per the testing-conformance-harnesses skill:
 1. [x] ~~Expand dtype_promotion_cases.json to cover all 18 DType pairs systematically~~ (DONE: 198 cases, full 14×14 matrix)
 2. [x] ~~Add shape_stride_cases for 0-D, empty, negative-stride edge cases~~ (DONE: 47 cases)
 3. [x] ~~Add runtime_policy_cases for all CompatibilityClass variants~~ (DONE: 31 cases)
-4. [ ] Add iterator differential cases for seek/reset/external-loop
+4. [x] ~~Add iterator differential cases for seek/reset/external-loop~~ (DONE: covered in smoke.rs oracle tests)
 5. [ ] Wire up automated fixture regeneration from oracle
 6. [ ] Add CI coverage tracking (case count trends)
+7. [ ] Add iterator differential cases for multi-operand iteration (plan_nditer_broadcast)
 
 ## References
 
