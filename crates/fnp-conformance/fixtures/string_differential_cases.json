@@ -948,8 +948,8 @@
     "reason_code": "string_differential_expected_success",
     "expected_reason_code": "string_differential_expected_success",
     "lhs_strings": ["ab", "x", ""],
-    "rhs_values": [0, 3, 5],
-    "expected_strings": ["", "xxx", ""]
+    "repeat": 3,
+    "expected_strings": ["ababab", "xxx", ""]
   },
   {
     "id": "find_not_found",
@@ -970,7 +970,7 @@
     "rel_tol": 1e-12
   },
   {
-    "id": "replace_empty_pattern",
+    "id": "replace_basic",
     "operation": "replace",
     "seed": 10025,
     "mode": "strict",
@@ -982,8 +982,8 @@
     "reason_code": "string_differential_expected_success",
     "expected_reason_code": "string_differential_expected_success",
     "lhs_strings": ["hello", "ab"],
-    "old_pattern": "l",
-    "new_pattern": "LL",
+    "arg_string": "l",
+    "arg_alt_string": "LL",
     "expected_strings": ["heLLLLo", "ab"]
   },
   {

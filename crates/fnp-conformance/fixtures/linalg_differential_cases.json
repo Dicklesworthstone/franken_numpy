@@ -1016,7 +1016,7 @@
   },
   {
     "id": "linalg_solve_1x1_scalar",
-    "operation": "solve_2x2",
+    "operation": "batch_solve",
     "seed": 8270,
     "mode": "strict",
     "env_fingerprint": "fnp-linalg-packet-f",
@@ -1026,8 +1026,10 @@
     ],
     "reason_code": "linalg_differential_expected_success",
     "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [1, 1],
     "matrix": [[5.0]],
     "rhs": [15.0],
+    "rhs_shape": [1],
     "expected_solution": [3.0]
   },
   {
@@ -1061,7 +1063,7 @@
     "expected_reason_code": "linalg_differential_expected_success",
     "shape": [1, 1],
     "matrix": [[4.0]],
-    "expected_solution": [[0.25]],
+    "expected_solution": [0.25],
     "expected_tolerance": 1e-12
   },
   {
