@@ -196,6 +196,10 @@ pub fn contiguous_strides(
         return Err(ShapeError::InvalidItemSize);
     }
 
+    if shape.contains(&0) {
+        return Ok(vec![0; shape.len()]);
+    }
+
     let mut strides_bytes = vec![0usize; shape.len()];
 
     match order {
@@ -677,6 +681,17 @@ mod tests {
     fn contiguous_strides_rejects_zero_item_size() {
         let err = contiguous_strides(&[2, 3], 0, MemoryOrder::C).expect_err("must reject");
         assert!(matches!(err, ShapeError::InvalidItemSize));
+    }
+
+    #[test]
+    fn contiguous_strides_zero_sized_arrays_match_numpy() {
+        let cases: &[&[usize]] = &[&[0], &[0, 3], &[2, 0, 3]];
+        for shape in cases {
+            let c = contiguous_strides(shape, 8, MemoryOrder::C).expect("c-order");
+            let f = contiguous_strides(shape, 8, MemoryOrder::F).expect("f-order");
+            assert_eq!(c, vec![0; shape.len()], "C strides for shape {shape:?}");
+            assert_eq!(f, vec![0; shape.len()], "F strides for shape {shape:?}");
+        }
     }
 
     #[test]
@@ -1381,6 +1396,18 @@ mod tests {
     #[test]
     fn contiguous_strides_zero_item_size_fails() {
         assert!(contiguous_strides(&[2, 3], 0, MemoryOrder::C).is_err());
+    }
+
+    #[test]
+    fn contiguous_strides_zero_sized_c_and_f_orders() {
+        assert_eq!(
+            contiguous_strides(&[0, 3], 8, MemoryOrder::C).unwrap(),
+            vec![0, 0]
+        );
+        assert_eq!(
+            contiguous_strides(&[2, 0, 3], 8, MemoryOrder::F).unwrap(),
+            vec![0, 0, 0]
+        );
     }
 
     #[test]
