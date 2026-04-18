@@ -1,197 +1,412 @@
 [
   {
-    "id": "bool_i32",
-    "lhs": "bool",
-    "rhs": "i32",
-    "expected": "i32",
-    "seed": 201,
-    "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
-      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
-    ],
-    "reason_code": "promotion_matrix_core"
-  },
-  {
-    "id": "i32_i64",
-    "lhs": "i32",
-    "rhs": "i64",
-    "expected": "i64",
-    "seed": 202,
-    "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
-      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
-    ],
-    "reason_code": "promotion_matrix_core"
-  },
-  {
-    "id": "i32_f32",
-    "lhs": "i32",
-    "rhs": "f32",
-    "expected": "f64",
-    "seed": 203,
-    "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
-      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
-    ],
-    "reason_code": "promotion_matrix_core"
-  },
-  {
-    "id": "f32_f64",
-    "lhs": "f32",
-    "rhs": "f64",
-    "expected": "f64",
-    "seed": 204,
-    "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
-      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
-    ],
-    "reason_code": "promotion_matrix_core"
-  },
-  {
     "id": "bool_bool",
     "lhs": "bool",
     "rhs": "bool",
     "expected": "bool",
-    "seed": 205,
+    "seed": 201,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
-      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
-    ],
-    "reason_code": "promotion_matrix_core"
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_matrix_identity"
   },
   {
-    "id": "bool_i64",
+    "id": "bool_i32",
     "lhs": "bool",
-    "rhs": "i64",
-    "expected": "i64",
-    "seed": 206,
+    "rhs": "i32",
+    "expected": "i32",
+    "seed": 202,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
-      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
-    ],
-    "reason_code": "promotion_matrix_core"
-  },
-  {
-    "id": "bool_f32",
-    "lhs": "bool",
-    "rhs": "f32",
-    "expected": "f32",
-    "seed": 207,
-    "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
-      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
-    ],
-    "reason_code": "promotion_matrix_core"
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_bool_identity"
   },
   {
     "id": "bool_f64",
     "lhs": "bool",
     "rhs": "f64",
     "expected": "f64",
+    "seed": 203,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_bool_identity"
+  },
+  {
+    "id": "i8_i8",
+    "lhs": "int8",
+    "rhs": "int8",
+    "expected": "int8",
+    "seed": 204,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_signed_same"
+  },
+  {
+    "id": "i8_i16",
+    "lhs": "int8",
+    "rhs": "int16",
+    "expected": "int16",
+    "seed": 205,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_signed_widen"
+  },
+  {
+    "id": "i16_i32",
+    "lhs": "int16",
+    "rhs": "int32",
+    "expected": "int32",
+    "seed": 206,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_signed_widen"
+  },
+  {
+    "id": "i32_i64",
+    "lhs": "int32",
+    "rhs": "int64",
+    "expected": "int64",
+    "seed": 207,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_signed_widen"
+  },
+  {
+    "id": "u8_u8",
+    "lhs": "uint8",
+    "rhs": "uint8",
+    "expected": "uint8",
     "seed": 208,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
-      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
-    ],
-    "reason_code": "promotion_matrix_core"
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_unsigned_same"
   },
   {
-    "id": "i32_i32",
-    "lhs": "i32",
-    "rhs": "i32",
-    "expected": "i32",
+    "id": "u8_u16",
+    "lhs": "uint8",
+    "rhs": "uint16",
+    "expected": "uint16",
     "seed": 209,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
-      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
-    ],
-    "reason_code": "promotion_matrix_core"
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_unsigned_widen"
   },
   {
-    "id": "i32_f64",
-    "lhs": "i32",
-    "rhs": "f64",
-    "expected": "f64",
+    "id": "u16_u32",
+    "lhs": "uint16",
+    "rhs": "uint32",
+    "expected": "uint32",
     "seed": 210,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
-      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
-    ],
-    "reason_code": "promotion_matrix_core"
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_unsigned_widen"
+  },
+  {
+    "id": "u32_u64",
+    "lhs": "uint32",
+    "rhs": "uint64",
+    "expected": "uint64",
+    "seed": 211,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_unsigned_widen"
+  },
+  {
+    "id": "u8_i8_cross",
+    "lhs": "uint8",
+    "rhs": "int8",
+    "expected": "int16",
+    "seed": 212,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_cross_signed_unsigned_widen"
+  },
+  {
+    "id": "u16_i16_cross",
+    "lhs": "uint16",
+    "rhs": "int16",
+    "expected": "int32",
+    "seed": 213,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_cross_signed_unsigned_widen"
+  },
+  {
+    "id": "u32_i32_cross",
+    "lhs": "uint32",
+    "rhs": "int32",
+    "expected": "int64",
+    "seed": 214,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_cross_signed_unsigned_widen"
+  },
+  {
+    "id": "u64_i64_cross_to_f64",
+    "lhs": "uint64",
+    "rhs": "int64",
+    "expected": "float64",
+    "seed": 215,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_u64_signed_to_f64_counterintuitive"
+  },
+  {
+    "id": "u64_i8_cross_to_f64",
+    "lhs": "uint64",
+    "rhs": "int8",
+    "expected": "float64",
+    "seed": 216,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_u64_signed_to_f64_counterintuitive"
+  },
+  {
+    "id": "f16_f16",
+    "lhs": "float16",
+    "rhs": "float16",
+    "expected": "float16",
+    "seed": 217,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_float_same"
+  },
+  {
+    "id": "f16_f32",
+    "lhs": "float16",
+    "rhs": "float32",
+    "expected": "float32",
+    "seed": 218,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_float_widen"
+  },
+  {
+    "id": "f32_f64",
+    "lhs": "float32",
+    "rhs": "float64",
+    "expected": "float64",
+    "seed": 219,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_float_widen"
+  },
+  {
+    "id": "f16_i8",
+    "lhs": "float16",
+    "rhs": "int8",
+    "expected": "float16",
+    "seed": 220,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_f16_preserves_8bit"
+  },
+  {
+    "id": "f16_u8",
+    "lhs": "float16",
+    "rhs": "uint8",
+    "expected": "float16",
+    "seed": 221,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_f16_preserves_8bit"
+  },
+  {
+    "id": "f16_i16_widens",
+    "lhs": "float16",
+    "rhs": "int16",
+    "expected": "float32",
+    "seed": 222,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_f16_16bit_to_f32_mantissa"
+  },
+  {
+    "id": "f16_i32_widens",
+    "lhs": "float16",
+    "rhs": "int32",
+    "expected": "float64",
+    "seed": 223,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_f16_32bit_to_f64"
+  },
+  {
+    "id": "f32_i8",
+    "lhs": "float32",
+    "rhs": "int8",
+    "expected": "float32",
+    "seed": 224,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_f32_small_int_preserved"
+  },
+  {
+    "id": "f32_i16",
+    "lhs": "float32",
+    "rhs": "int16",
+    "expected": "float32",
+    "seed": 225,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_f32_small_int_preserved"
+  },
+  {
+    "id": "f32_i32_widens",
+    "lhs": "float32",
+    "rhs": "int32",
+    "expected": "float64",
+    "seed": 226,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_f32_large_int_to_f64"
+  },
+  {
+    "id": "f64_i64",
+    "lhs": "float64",
+    "rhs": "int64",
+    "expected": "float64",
+    "seed": 227,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_f64_absorbs_int"
+  },
+  {
+    "id": "complex64_complex64",
+    "lhs": "complex64",
+    "rhs": "complex64",
+    "expected": "complex64",
+    "seed": 228,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_complex_same"
+  },
+  {
+    "id": "complex64_complex128",
+    "lhs": "complex64",
+    "rhs": "complex128",
+    "expected": "complex128",
+    "seed": 229,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_complex_widen"
+  },
+  {
+    "id": "f32_complex64",
+    "lhs": "float32",
+    "rhs": "complex64",
+    "expected": "complex64",
+    "seed": 230,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_float_to_complex"
+  },
+  {
+    "id": "f64_complex64_widens",
+    "lhs": "float64",
+    "rhs": "complex64",
+    "expected": "complex128",
+    "seed": 231,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_f64_complex64_to_complex128"
+  },
+  {
+    "id": "i32_complex64_widens",
+    "lhs": "int32",
+    "rhs": "complex64",
+    "expected": "complex128",
+    "seed": 232,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_large_int_complex64_to_complex128"
+  },
+  {
+    "id": "i8_complex64",
+    "lhs": "int8",
+    "rhs": "complex64",
+    "expected": "complex64",
+    "seed": 233,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_small_int_complex64_preserved"
+  },
+  {
+    "id": "u8_i64",
+    "lhs": "uint8",
+    "rhs": "int64",
+    "expected": "int64",
+    "seed": 234,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_small_unsigned_large_signed"
+  },
+  {
+    "id": "u16_i64",
+    "lhs": "uint16",
+    "rhs": "int64",
+    "expected": "int64",
+    "seed": 235,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_small_unsigned_large_signed"
+  },
+  {
+    "id": "u32_i64",
+    "lhs": "uint32",
+    "rhs": "int64",
+    "expected": "int64",
+    "seed": 236,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_u32_i64_fits_i64"
+  },
+  {
+    "id": "bool_complex128",
+    "lhs": "bool",
+    "rhs": "complex128",
+    "expected": "complex128",
+    "seed": 237,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_bool_identity"
+  },
+  {
+    "id": "u64_complex64",
+    "lhs": "uint64",
+    "rhs": "complex64",
+    "expected": "complex128",
+    "seed": 238,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_u64_complex64_to_complex128"
+  },
+  {
+    "id": "f16_complex64",
+    "lhs": "float16",
+    "rhs": "complex64",
+    "expected": "complex64",
+    "seed": 239,
+    "env_fingerprint": "fnp-conformance-default-paths",
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_f16_complex64_preserved"
   },
   {
     "id": "i64_i64",
-    "lhs": "i64",
-    "rhs": "i64",
-    "expected": "i64",
-    "seed": 211,
+    "lhs": "int64",
+    "rhs": "int64",
+    "expected": "int64",
+    "seed": 240,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
-      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
-    ],
-    "reason_code": "promotion_matrix_core"
-  },
-  {
-    "id": "i64_f32",
-    "lhs": "i64",
-    "rhs": "f32",
-    "expected": "f64",
-    "seed": 212,
-    "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
-      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
-    ],
-    "reason_code": "promotion_matrix_core"
-  },
-  {
-    "id": "i64_f64",
-    "lhs": "i64",
-    "rhs": "f64",
-    "expected": "f64",
-    "seed": 213,
-    "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
-      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
-    ],
-    "reason_code": "promotion_matrix_core"
-  },
-  {
-    "id": "f32_f32",
-    "lhs": "f32",
-    "rhs": "f32",
-    "expected": "f32",
-    "seed": 214,
-    "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
-      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
-    ],
-    "reason_code": "promotion_matrix_core"
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_signed_same"
   },
   {
     "id": "f64_f64",
-    "lhs": "f64",
-    "rhs": "f64",
-    "expected": "f64",
-    "seed": 215,
+    "lhs": "float64",
+    "rhs": "float64",
+    "expected": "float64",
+    "seed": 241,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json",
-      "artifacts/phase2c/FNP-P2C-002/parity_gate.yaml"
-    ],
-    "reason_code": "promotion_matrix_core"
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
+    "reason_code": "promotion_float_same"
   }
 ]
