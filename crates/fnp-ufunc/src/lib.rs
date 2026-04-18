@@ -24488,6 +24488,22 @@ fn fftn_along_axis(shape: &[usize], re: &mut [f64], im: &mut [f64], axis: usize,
     }
 }
 
+/// Multiply that treats near-zero twiddle factors specially when paired with Inf/NaN.
+/// cos(k*π/2) produces values like 6e-17 instead of exact 0 due to floating point.
+/// This matches NumPy's FFT behavior for twiddle factors at multiples of π/2.
+#[inline]
+fn fft_mul(a: f64, b: f64) -> f64 {
+    // Threshold for "effectively zero" twiddle factor (covers cos/sin errors up to ~1e-14)
+    const EPS: f64 = 1e-14;
+    if a.abs() < EPS && !b.is_finite() {
+        0.0
+    } else if b.abs() < EPS && !a.is_finite() {
+        0.0
+    } else {
+        a * b
+    }
+}
+
 fn fft_dit(re: &mut [f64], im: &mut [f64], inverse: bool) {
     let n = re.len();
     if n <= 1 {
@@ -24517,8 +24533,8 @@ fn fft_dit(re: &mut [f64], im: &mut [f64], inverse: bool) {
         let mut a_re = vec![0.0; m];
         let mut a_im = vec![0.0; m];
         for k in 0..n {
-            a_re[k] = re[k] * chirp_re[k] - im[k] * chirp_im[k];
-            a_im[k] = re[k] * chirp_im[k] + im[k] * chirp_re[k];
+            a_re[k] = fft_mul(re[k], chirp_re[k]) - fft_mul(im[k], chirp_im[k]);
+            a_im[k] = fft_mul(re[k], chirp_im[k]) + fft_mul(im[k], chirp_re[k]);
         }
 
         // b[k] = conj(chirp[k]) for k=0..n-1, b[m-k] = conj(chirp[k]) for k=1..n-1, rest zero
@@ -24539,8 +24555,8 @@ fn fft_dit(re: &mut [f64], im: &mut [f64], inverse: bool) {
 
         // Pointwise complex multiply
         for k in 0..m {
-            let tr = a_re[k] * b_re[k] - a_im[k] * b_im[k];
-            let ti = a_re[k] * b_im[k] + a_im[k] * b_re[k];
+            let tr = fft_mul(a_re[k], b_re[k]) - fft_mul(a_im[k], b_im[k]);
+            let ti = fft_mul(a_re[k], b_im[k]) + fft_mul(a_im[k], b_re[k]);
             a_re[k] = tr;
             a_im[k] = ti;
         }
@@ -24551,8 +24567,8 @@ fn fft_dit(re: &mut [f64], im: &mut [f64], inverse: bool) {
         for k in 0..n {
             let cr = chirp_re[k];
             let ci = chirp_im[k];
-            re[k] = a_re[k] * cr - a_im[k] * ci;
-            im[k] = a_re[k] * ci + a_im[k] * cr;
+            re[k] = fft_mul(a_re[k], cr) - fft_mul(a_im[k], ci);
+            im[k] = fft_mul(a_re[k], ci) + fft_mul(a_im[k], cr);
         }
 
         if inverse {
@@ -24602,8 +24618,8 @@ fn fft_pow2(re: &mut [f64], im: &mut [f64], inverse: bool) {
             for k in 0..half {
                 let even = start + k;
                 let odd = start + k + half;
-                let tr = w_re * re[odd] - w_im * im[odd];
-                let ti = w_re * im[odd] + w_im * re[odd];
+                let tr = fft_mul(w_re, re[odd]) - fft_mul(w_im, im[odd]);
+                let ti = fft_mul(w_re, im[odd]) + fft_mul(w_im, re[odd]);
                 re[odd] = re[even] - tr;
                 im[odd] = im[even] - ti;
                 re[even] += tr;
@@ -42433,6 +42449,26 @@ mod tests {
                 v
             );
         }
+    }
+
+    #[test]
+    fn fft_inf_propagation_matches_numpy() {
+        // NumPy: np.fft.fft([1, inf, 3, -inf]) = [nan+0j, -2-infj, nan+0j, -2+infj]
+        let vals = vec![1.0, f64::INFINITY, 3.0, f64::NEG_INFINITY];
+        let a = UFuncArray::new(vec![4], vals, DType::F64).unwrap();
+        let f = a.fft(None).unwrap();
+        // Coefficient 0: nan + 0j (real = NaN, imag = 0)
+        assert!(f.values[0].is_nan(), "coeff[0] real should be NaN, got {}", f.values[0]);
+        assert_eq!(f.values[1], 0.0, "coeff[0] imag should be 0, got {}", f.values[1]);
+        // Coefficient 1: -2 - inf*j (real = -2, imag = -inf)
+        assert!((f.values[2] - (-2.0)).abs() < 1e-10, "coeff[1] real should be -2, got {}", f.values[2]);
+        assert!(f.values[3].is_infinite() && f.values[3] < 0.0, "coeff[1] imag should be -inf, got {}", f.values[3]);
+        // Coefficient 2: nan + 0j
+        assert!(f.values[4].is_nan(), "coeff[2] real should be NaN, got {}", f.values[4]);
+        assert_eq!(f.values[5], 0.0, "coeff[2] imag should be 0, got {}", f.values[5]);
+        // Coefficient 3: -2 + inf*j
+        assert!((f.values[6] - (-2.0)).abs() < 1e-10, "coeff[3] real should be -2, got {}", f.values[6]);
+        assert!(f.values[7].is_infinite() && f.values[7] > 0.0, "coeff[3] imag should be +inf, got {}", f.values[7]);
     }
 
     #[test]
