@@ -1092,6 +1092,40 @@ struct StringDifferentialCase {
 }
 
 #[derive(Debug, Deserialize)]
+struct StringMetamorphicCase {
+    id: String,
+    relation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    input_strings: Vec<String>,
+    #[serde(default)]
+    a_strings: Vec<String>,
+    #[serde(default)]
+    b_strings: Vec<String>,
+    #[serde(default)]
+    search_substr: String,
+    #[serde(default)]
+    search_char: String,
+    #[serde(default)]
+    old_substr: String,
+    #[serde(default)]
+    new_substr: String,
+    #[serde(default)]
+    multiply_factor: Option<usize>,
+    #[serde(default)]
+    width: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
 struct MaskedDifferentialCase {
     id: String,
     operation: String,
@@ -1855,6 +1889,15 @@ fn load_string_differential_cases(
     fixture_root: &Path,
 ) -> Result<Vec<StringDifferentialCase>, String> {
     let path = fixture_root.join("string_differential_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
+}
+
+fn load_string_metamorphic_cases(
+    fixture_root: &Path,
+) -> Result<Vec<StringMetamorphicCase>, String> {
+    let path = fixture_root.join("string_metamorphic_cases.json");
     let raw = fs::read_to_string(&path)
         .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
     serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
@@ -9458,6 +9501,45 @@ pub fn run_string_differential_suite(config: &HarnessConfig) -> Result<SuiteRepo
     Ok(report)
 }
 
+pub fn run_string_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let cases = load_string_metamorphic_cases(&config.fixture_root)?;
+
+    let mut report = SuiteReport {
+        suite: "string_metamorphic",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+
+        match evaluate_string_metamorphic_relation(&case) {
+            Ok(()) => {
+                report.pass_count += 1;
+            }
+            Err(err) => {
+                report.failures.push(format!(
+                    "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} {} (actual_reason_code={})",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    err.message,
+                    err.reason_code
+                ));
+            }
+        }
+    }
+
+    Ok(report)
+}
+
 fn execute_string_differential_operation(
     case: &StringDifferentialCase,
 ) -> Result<StringOperationOutcome, StringSuiteError> {
@@ -9731,6 +9813,285 @@ fn validate_string_differential_expectation(
             Ok(())
         }
     }
+}
+
+fn evaluate_string_metamorphic_relation(
+    case: &StringMetamorphicCase,
+) -> Result<(), StringSuiteError> {
+    match case.relation.as_str() {
+        "str_lower_idempotent" => {
+            let input = string_values_to_array(&case.input_strings)?;
+            let once = input.lower();
+            let twice = once.lower();
+            assert_string_metamorphic_values_equal(case, twice.values(), once.values())
+        }
+        "str_upper_idempotent" => {
+            let input = string_values_to_array(&case.input_strings)?;
+            let once = input.upper();
+            let twice = once.upper();
+            assert_string_metamorphic_values_equal(case, twice.values(), once.values())
+        }
+        "str_strip_idempotent" => {
+            let input = string_values_to_array(&case.input_strings)?;
+            let once = input.strip();
+            let twice = once.strip();
+            assert_string_metamorphic_values_equal(case, twice.values(), once.values())
+        }
+        "str_len_after_multiply" => {
+            let factor = case.multiply_factor.ok_or_else(|| {
+                StringSuiteError::new(
+                    "string_input_contract_violation",
+                    "str_len_after_multiply requires multiply_factor",
+                )
+            })?;
+            let input = string_values_to_array(&case.input_strings)?;
+            let multiplied_lengths = input.multiply(factor).str_len().values().to_vec();
+            let expected_lengths = input
+                .str_len()
+                .values()
+                .iter()
+                .map(|len| *len * factor as f64)
+                .collect::<Vec<_>>();
+            assert_numeric_metamorphic_values_equal(case, &multiplied_lengths, &expected_lengths)
+        }
+        "str_find_in_concat" => {
+            require_non_empty_string_field(case, "search_substr", &case.search_substr)?;
+            let (lhs, rhs) = string_pair_values_to_arrays(case)?;
+            let concatenated = lhs.add(&rhs).map_err(map_ufunc_error_to_string_suite)?;
+            let actual = concatenated.find(&case.search_substr).values().to_vec();
+            let expected = case
+                .a_strings
+                .iter()
+                .zip(case.b_strings.iter())
+                .map(|(a, b)| string_find_char_index(&format!("{a}{b}"), &case.search_substr))
+                .collect::<Vec<_>>();
+            assert_numeric_metamorphic_values_equal(case, &actual, &expected)
+        }
+        "str_replace_count_zero_unchanged" => {
+            require_non_empty_string_field(case, "old_substr", &case.old_substr)?;
+            let input = string_values_to_array(&case.input_strings)?;
+            let counts = input.count_substr(&case.old_substr);
+            if counts.values().iter().any(|count| *count != 0.0) {
+                return Err(StringSuiteError::new(
+                    "string_metamorphic_precondition_violation",
+                    format!(
+                        "str_replace_count_zero_unchanged requires absent old_substr='{}'",
+                        case.old_substr
+                    ),
+                ));
+            }
+            let replaced = input.replace(&case.old_substr, &case.new_substr);
+            assert_string_metamorphic_values_equal(case, replaced.values(), input.values())
+        }
+        "str_center_len_preserves_content" => {
+            let width = required_string_width(case)?;
+            let input = string_values_to_array(&case.input_strings)?;
+            let centered = input.center(width, ' ');
+            for (idx, (original, actual)) in case
+                .input_strings
+                .iter()
+                .zip(centered.values().iter())
+                .enumerate()
+            {
+                let expected_len = width.max(original.chars().count());
+                let actual_len = actual.chars().count();
+                if actual_len != expected_len || !actual.contains(original) {
+                    return Err(StringSuiteError::new(
+                        "string_metamorphic_relation_failed",
+                        format!(
+                            "str_center_len_preserves_content mismatch at index {idx}: original={original:?} actual={actual:?} expected_len={expected_len} actual_len={actual_len}"
+                        ),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        "str_count_additive_concat" => {
+            require_non_empty_string_field(case, "search_char", &case.search_char)?;
+            let (lhs, rhs) = string_pair_values_to_arrays(case)?;
+            let concatenated = lhs.add(&rhs).map_err(map_ufunc_error_to_string_suite)?;
+            let actual = concatenated
+                .count_substr(&case.search_char)
+                .values()
+                .to_vec();
+            let lhs_counts = lhs.count_substr(&case.search_char);
+            let rhs_counts = rhs.count_substr(&case.search_char);
+            let expected = lhs_counts
+                .values()
+                .iter()
+                .zip(rhs_counts.values().iter())
+                .map(|(left, right)| *left + *right)
+                .collect::<Vec<_>>();
+            assert_numeric_metamorphic_values_equal(case, &actual, &expected)
+        }
+        "str_swapcase_involution" => {
+            let input = string_values_to_array(&case.input_strings)?;
+            let swapped_twice = input.swapcase().swapcase();
+            assert_string_metamorphic_values_equal(case, swapped_twice.values(), input.values())
+        }
+        "str_startswith_after_ljust" => {
+            let width = required_string_width(case)?;
+            let input = string_values_to_array(&case.input_strings)?;
+            let padded = input.ljust(width, ' ');
+            let actual = padded
+                .values()
+                .iter()
+                .zip(case.input_strings.iter())
+                .map(|(value, original)| {
+                    if value.starts_with(original) {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect::<Vec<_>>();
+            let expected = vec![1.0; case.input_strings.len()];
+            assert_numeric_metamorphic_values_equal(case, &actual, &expected)
+        }
+        "str_endswith_after_rjust" => {
+            let width = required_string_width(case)?;
+            let input = string_values_to_array(&case.input_strings)?;
+            let padded = input.rjust(width, ' ');
+            let actual = padded
+                .values()
+                .iter()
+                .zip(case.input_strings.iter())
+                .map(
+                    |(value, original)| {
+                        if value.ends_with(original) { 1.0 } else { 0.0 }
+                    },
+                )
+                .collect::<Vec<_>>();
+            let expected = vec![1.0; case.input_strings.len()];
+            assert_numeric_metamorphic_values_equal(case, &actual, &expected)
+        }
+        "str_isalpha_subset_isalnum" => {
+            let input = string_values_to_array(&case.input_strings)?;
+            let alpha = input.isalpha();
+            let alnum = input.isalnum();
+            for (idx, (alpha_value, alnum_value)) in
+                alpha.values().iter().zip(alnum.values().iter()).enumerate()
+            {
+                if *alpha_value != 0.0 && *alnum_value == 0.0 {
+                    return Err(StringSuiteError::new(
+                        "string_metamorphic_relation_failed",
+                        format!(
+                            "str_isalpha_subset_isalnum failed at index {idx}: alpha={alpha_value} alnum={alnum_value}"
+                        ),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        other => Err(StringSuiteError::new(
+            "string_policy_unknown_metamorphic_relation",
+            format!("unsupported string metamorphic relation {other}"),
+        )),
+    }
+}
+
+fn string_pair_values_to_arrays(
+    case: &StringMetamorphicCase,
+) -> Result<(StringArray, StringArray), StringSuiteError> {
+    if case.a_strings.len() != case.b_strings.len() {
+        return Err(StringSuiteError::new(
+            "string_input_contract_violation",
+            format!(
+                "paired string inputs must have equal lengths: a_strings={} b_strings={}",
+                case.a_strings.len(),
+                case.b_strings.len()
+            ),
+        ));
+    }
+    Ok((
+        string_values_to_array(&case.a_strings)?,
+        string_values_to_array(&case.b_strings)?,
+    ))
+}
+
+fn required_string_width(case: &StringMetamorphicCase) -> Result<usize, StringSuiteError> {
+    case.width.ok_or_else(|| {
+        StringSuiteError::new(
+            "string_input_contract_violation",
+            format!("{} requires width", case.relation),
+        )
+    })
+}
+
+fn require_non_empty_string_field(
+    case: &StringMetamorphicCase,
+    field: &str,
+    value: &str,
+) -> Result<(), StringSuiteError> {
+    if value.is_empty() {
+        return Err(StringSuiteError::new(
+            "string_input_contract_violation",
+            format!("{} requires non-empty {field}", case.relation),
+        ));
+    }
+    Ok(())
+}
+
+fn string_find_char_index(haystack: &str, needle: &str) -> f64 {
+    haystack
+        .find(needle)
+        .map_or(-1.0, |byte_idx| haystack[..byte_idx].chars().count() as f64)
+}
+
+fn assert_string_metamorphic_values_equal(
+    case: &StringMetamorphicCase,
+    actual: &[String],
+    expected: &[String],
+) -> Result<(), StringSuiteError> {
+    if actual.len() != expected.len() {
+        return Err(StringSuiteError::new(
+            "string_metamorphic_relation_failed",
+            format!(
+                "{} length mismatch expected={} actual={}",
+                case.relation,
+                expected.len(),
+                actual.len()
+            ),
+        ));
+    }
+    if actual != expected {
+        return Err(StringSuiteError::new(
+            "string_metamorphic_relation_failed",
+            format!(
+                "{} mismatch expected={expected:?} actual={actual:?}",
+                case.relation
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn assert_numeric_metamorphic_values_equal(
+    case: &StringMetamorphicCase,
+    actual: &[f64],
+    expected: &[f64],
+) -> Result<(), StringSuiteError> {
+    if actual.len() != expected.len() {
+        return Err(StringSuiteError::new(
+            "string_metamorphic_relation_failed",
+            format!(
+                "{} length mismatch expected={} actual={}",
+                case.relation,
+                expected.len(),
+                actual.len()
+            ),
+        ));
+    }
+    if !approx_equal_values(expected, actual, 1e-9, 1e-9) {
+        return Err(StringSuiteError::new(
+            "string_metamorphic_relation_failed",
+            format!(
+                "{} mismatch expected={expected:?} actual={actual:?}",
+                case.relation
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn string_values_to_array(values: &[String]) -> Result<StringArray, StringSuiteError> {
@@ -11758,6 +12119,7 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
         run_rng_adversarial_suite(config)?,
         run_rng_statistical_suite(config)?,
         run_string_differential_suite(config)?,
+        run_string_metamorphic_suite(config)?,
         run_masked_differential_suite(config)?,
         run_datetime_differential_suite(config)?,
         run_polynomial_differential_suite(config)?,
@@ -13933,9 +14295,9 @@ mod tests {
         run_rng_metamorphic_suite, run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
         run_shape_stride_adversarial_suite, run_shape_stride_differential_suite,
         run_shape_stride_metamorphic_suite, run_shape_stride_suite, run_signal_differential_suite,
-        run_smoke, run_string_differential_suite, run_ufunc_adversarial_suite,
-        run_ufunc_differential_suite, run_ufunc_metamorphic_suite, set_dtype_promotion_log_path,
-        set_shape_stride_log_path,
+        run_smoke, run_string_differential_suite, run_string_metamorphic_suite,
+        run_ufunc_adversarial_suite, run_ufunc_differential_suite, run_ufunc_metamorphic_suite,
+        set_dtype_promotion_log_path, set_shape_stride_log_path,
     };
     use fnp_io::{IOSupportedDType, load as load_npy, save as save_npy};
     use fnp_iter::{
@@ -14832,6 +15194,14 @@ mod tests {
         let cfg = HarnessConfig::default_paths();
         let suite =
             run_string_differential_suite(&cfg).expect("string differential suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn string_metamorphic_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite =
+            run_string_metamorphic_suite(&cfg).expect("string metamorphic suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 
