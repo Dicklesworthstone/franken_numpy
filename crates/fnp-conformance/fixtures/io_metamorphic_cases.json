@@ -572,5 +572,36 @@
     "member_count": 8,
     "uncompressed_bytes": 4096,
     "dispatch_retries": 0
+  },
+  {
+    "id": "io_header_schema_descriptor_roundtrip_fortran",
+    "relation": "header_schema_descriptor_roundtrip",
+    "seed": 9964,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_metamorphic_cases.json"
+    ],
+    "reason_code": "io_header_schema_contract",
+    "shape": [3, 4],
+    "fortran_order": true,
+    "dtype_descr": "<f8",
+    "header_len": 128
+  },
+  {
+    "id": "io_npz_budget_idempotent_single_member",
+    "relation": "npz_budget_idempotent",
+    "seed": 9965,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_metamorphic_cases.json"
+    ],
+    "reason_code": "io_npz_archive_contract",
+    "member_count": 1,
+    "uncompressed_bytes": 256,
+    "dispatch_retries": 0
   }
 ]
