@@ -1,0 +1,222 @@
+[
+  {
+    "id": "convolve_commutative_len4_len3",
+    "relation": "convolve_commutative",
+    "seed": 10201,
+    "mode": "strict",
+    "env_fingerprint": "fnp-signal-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_metamorphic_convolve_commutative_contract",
+    "a_shape": [4],
+    "a_values": [1.0, 2.0, 3.0, 4.0],
+    "b_shape": [3],
+    "b_values": [0.5, 1.0, 0.5],
+    "convmode": "full",
+    "input_dtype": "f64",
+    "abs_tol": 1e-14
+  },
+  {
+    "id": "convolve_commutative_len8_len5",
+    "relation": "convolve_commutative",
+    "seed": 10202,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-signal-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_metamorphic_convolve_commutative_contract",
+    "a_shape": [8],
+    "a_values": [1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 4.0, -4.0],
+    "b_shape": [5],
+    "b_values": [0.1, 0.2, 0.4, 0.2, 0.1],
+    "convmode": "full",
+    "input_dtype": "f64",
+    "abs_tol": 1e-14
+  },
+  {
+    "id": "convolve_identity_delta_len6",
+    "relation": "convolve_identity",
+    "seed": 10203,
+    "mode": "strict",
+    "env_fingerprint": "fnp-signal-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_metamorphic_convolve_identity_contract",
+    "a_shape": [6],
+    "a_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "identity_kernel": [1.0],
+    "convmode": "same",
+    "input_dtype": "f64",
+    "abs_tol": 1e-15
+  },
+  {
+    "id": "correlate_autocorr_peak_at_zero_len8",
+    "relation": "autocorrelate_peak_at_zero",
+    "seed": 10204,
+    "mode": "strict",
+    "env_fingerprint": "fnp-signal-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_metamorphic_autocorr_peak_contract",
+    "a_shape": [8],
+    "a_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "input_dtype": "f64"
+  },
+  {
+    "id": "correlate_autocorr_symmetric_len6",
+    "relation": "autocorrelate_symmetric",
+    "seed": 10205,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-signal-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_metamorphic_autocorr_symmetric_contract",
+    "a_shape": [6],
+    "a_values": [1.0, -1.0, 2.0, -2.0, 3.0, -3.0],
+    "input_dtype": "f64",
+    "abs_tol": 1e-14
+  },
+  {
+    "id": "convolve_distributive_len4",
+    "relation": "convolve_distributive",
+    "seed": 10206,
+    "mode": "strict",
+    "env_fingerprint": "fnp-signal-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_metamorphic_convolve_distributive_contract",
+    "a_shape": [4],
+    "a_values": [1.0, 2.0, 3.0, 4.0],
+    "b_shape": [4],
+    "b_values": [0.5, 1.0, 1.5, 2.0],
+    "c_shape": [3],
+    "c_values": [1.0, 0.5, 0.25],
+    "convmode": "full",
+    "input_dtype": "f64",
+    "abs_tol": 1e-13
+  },
+  {
+    "id": "convolve_scaling_len5",
+    "relation": "convolve_scaling",
+    "seed": 10207,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-signal-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_metamorphic_convolve_scaling_contract",
+    "a_shape": [5],
+    "a_values": [1.0, 2.0, 3.0, 4.0, 5.0],
+    "b_shape": [3],
+    "b_values": [0.5, 1.0, 0.5],
+    "scale_factor": 2.5,
+    "convmode": "full",
+    "input_dtype": "f64",
+    "abs_tol": 1e-13
+  },
+  {
+    "id": "correlate_conjugate_symmetry_complex_len4",
+    "relation": "correlate_conjugate_symmetry",
+    "seed": 10208,
+    "mode": "strict",
+    "env_fingerprint": "fnp-signal-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_metamorphic_correlate_conjugate_contract",
+    "a_shape": [4, 2],
+    "a_values": [1.0, 0.5, 2.0, -0.5, 3.0, 1.0, 4.0, -1.0],
+    "b_shape": [3, 2],
+    "b_values": [0.5, 0.25, 1.0, -0.25, 0.5, 0.5],
+    "input_dtype": "c128",
+    "abs_tol": 1e-13
+  },
+  {
+    "id": "convolve_same_mode_center_len7_len3",
+    "relation": "convolve_same_mode_center",
+    "seed": 10209,
+    "mode": "strict",
+    "env_fingerprint": "fnp-signal-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_metamorphic_same_mode_center_contract",
+    "a_shape": [7],
+    "a_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+    "b_shape": [3],
+    "b_values": [1.0, 1.0, 1.0],
+    "convmode": "same",
+    "input_dtype": "f64"
+  },
+  {
+    "id": "convolve_valid_mode_subseq_len8_len3",
+    "relation": "convolve_valid_mode_subsequence",
+    "seed": 10210,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-signal-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_metamorphic_valid_mode_subseq_contract",
+    "a_shape": [8],
+    "a_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "b_shape": [3],
+    "b_values": [0.25, 0.5, 0.25],
+    "convmode": "valid",
+    "input_dtype": "f64",
+    "abs_tol": 1e-14
+  },
+  {
+    "id": "correlate_time_reversal_len6",
+    "relation": "correlate_time_reversal",
+    "seed": 10211,
+    "mode": "strict",
+    "env_fingerprint": "fnp-signal-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_metamorphic_correlate_time_reversal_contract",
+    "a_shape": [6],
+    "a_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "b_shape": [4],
+    "b_values": [0.5, 1.0, 1.5, 2.0],
+    "input_dtype": "f64",
+    "abs_tol": 1e-14
+  },
+  {
+    "id": "convolve_commutative_same_len5",
+    "relation": "convolve_commutative",
+    "seed": 10212,
+    "mode": "strict",
+    "env_fingerprint": "fnp-signal-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/signal.rs"
+    ],
+    "reason_code": "signal_metamorphic_convolve_commutative_contract",
+    "a_shape": [5],
+    "a_values": [1.0, -0.5, 2.0, -1.5, 3.0],
+    "b_shape": [5],
+    "b_values": [0.2, 0.4, 0.2, -0.1, 0.3],
+    "convmode": "same",
+    "input_dtype": "f64",
+    "abs_tol": 1e-14
+  }
+]

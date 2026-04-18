@@ -1,0 +1,200 @@
+[
+  {
+    "id": "fft_ifft_inverse_len4_real",
+    "relation": "fft_ifft_inverse",
+    "seed": 8901,
+    "mode": "strict",
+    "env_fingerprint": "fnp-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_metamorphic_inverse_contract",
+    "input_shape": [4],
+    "input_values": [1.0, 2.0, 3.0, 4.0],
+    "input_dtype": "f64",
+    "abs_tol": 1e-12
+  },
+  {
+    "id": "fft_ifft_inverse_len8_complex",
+    "relation": "fft_ifft_inverse",
+    "seed": 8902,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_metamorphic_inverse_contract",
+    "input_shape": [8, 2],
+    "input_values": [1.0, 0.5, 2.0, -0.5, 3.0, 1.0, 4.0, -1.0, 5.0, 0.25, 6.0, -0.25, 7.0, 0.75, 8.0, -0.75],
+    "input_dtype": "c128",
+    "abs_tol": 1e-12
+  },
+  {
+    "id": "fft_linearity_sum_len4",
+    "relation": "fft_linearity",
+    "seed": 8903,
+    "mode": "strict",
+    "env_fingerprint": "fnp-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_metamorphic_linearity_contract",
+    "x_shape": [4],
+    "x_values": [1.0, 2.0, 3.0, 4.0],
+    "y_shape": [4],
+    "y_values": [0.5, -0.5, 1.5, -1.5],
+    "alpha": 2.0,
+    "beta": 3.0,
+    "input_dtype": "f64",
+    "abs_tol": 1e-11
+  },
+  {
+    "id": "fft_linearity_scale_len8",
+    "relation": "fft_linearity",
+    "seed": 8904,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_metamorphic_linearity_contract",
+    "x_shape": [8],
+    "x_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "y_shape": [8],
+    "y_values": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+    "alpha": -1.5,
+    "beta": 2.5,
+    "input_dtype": "f64",
+    "abs_tol": 1e-11
+  },
+  {
+    "id": "fft_parseval_energy_len4",
+    "relation": "fft_parseval",
+    "seed": 8905,
+    "mode": "strict",
+    "env_fingerprint": "fnp-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_metamorphic_parseval_contract",
+    "input_shape": [4],
+    "input_values": [1.0, 2.0, 3.0, 4.0],
+    "input_dtype": "f64",
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "fft_parseval_energy_len16",
+    "relation": "fft_parseval",
+    "seed": 8906,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_metamorphic_parseval_contract",
+    "input_shape": [16],
+    "input_values": [1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 4.0, -4.0, 5.0, -5.0, 6.0, -6.0, 7.0, -7.0, 8.0, -8.0],
+    "input_dtype": "f64",
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "fftshift_ifftshift_inverse_len8",
+    "relation": "fftshift_ifftshift_inverse",
+    "seed": 8907,
+    "mode": "strict",
+    "env_fingerprint": "fnp-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_metamorphic_shift_inverse_contract",
+    "input_shape": [8],
+    "input_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "input_dtype": "f64"
+  },
+  {
+    "id": "fftshift_ifftshift_inverse_2d_4x4",
+    "relation": "fftshift_ifftshift_inverse",
+    "seed": 8908,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_metamorphic_shift_inverse_contract",
+    "input_shape": [4, 4],
+    "input_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
+    "input_dtype": "f64"
+  },
+  {
+    "id": "rfft_hermitian_symmetry_len8",
+    "relation": "rfft_hermitian_symmetry",
+    "seed": 8909,
+    "mode": "strict",
+    "env_fingerprint": "fnp-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_metamorphic_hermitian_contract",
+    "input_shape": [8],
+    "input_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "input_dtype": "f64",
+    "abs_tol": 1e-14
+  },
+  {
+    "id": "fft_ifft_inverse_prime_len7",
+    "relation": "fft_ifft_inverse",
+    "seed": 8910,
+    "mode": "strict",
+    "env_fingerprint": "fnp-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_metamorphic_inverse_contract",
+    "input_shape": [7],
+    "input_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+    "input_dtype": "f64",
+    "abs_tol": 1e-11
+  },
+  {
+    "id": "fft2_ifft2_inverse_3x3",
+    "relation": "fft2_ifft2_inverse",
+    "seed": 8911,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_metamorphic_2d_inverse_contract",
+    "input_shape": [3, 3],
+    "input_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+    "input_dtype": "f64",
+    "abs_tol": 1e-11
+  },
+  {
+    "id": "fftn_ifftn_inverse_2x2x2",
+    "relation": "fftn_ifftn_inverse",
+    "seed": 8912,
+    "mode": "strict",
+    "env_fingerprint": "fnp-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_metamorphic_nd_inverse_contract",
+    "input_shape": [2, 2, 2],
+    "input_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "input_dtype": "f64",
+    "abs_tol": 1e-11
+  }
+]
