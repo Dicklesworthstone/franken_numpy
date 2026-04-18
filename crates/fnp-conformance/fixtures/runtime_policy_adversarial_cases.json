@@ -118,5 +118,35 @@
       "artifacts/contracts/hardened_mode_allowlist_v1.yaml"
     ],
     "reason_code": "empty_compatibility_class"
+  },
+  {
+    "id": "wire_risk_above_threshold_unknown_class_fail_closed",
+    "mode_raw": "strict",
+    "class_raw": "experimental_parser",
+    "risk_score": 0.85,
+    "threshold": 0.7,
+    "expected_action": "fail_closed",
+    "seed": 209,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md",
+      "artifacts/contracts/security_control_checks_v1.yaml"
+    ],
+    "reason_code": "unknown_class_risk_above_threshold"
+  },
+  {
+    "id": "wire_empty_mode_known_compat_fail_closed",
+    "mode_raw": "",
+    "class_raw": "known_compatible",
+    "risk_score": 0.3,
+    "threshold": 0.7,
+    "expected_action": "fail_closed",
+    "seed": 210,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md",
+      "artifacts/contracts/security_control_checks_v1.yaml"
+    ],
+    "reason_code": "empty_runtime_mode"
   }
 ]
