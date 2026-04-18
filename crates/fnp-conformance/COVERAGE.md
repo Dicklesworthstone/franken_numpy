@@ -19,7 +19,7 @@
 | Iterator/transfer | 31 | 16 | 16 | 63 | Adequate - transfer/overlap/flatiter edges covered |
 | Shape/stride (SCE) | 47 | — | — | 47 | Good - 0-D, empty, negative-stride, large shapes, 5D/6D transpose covered |
 | Dtype promotion | 198 | — | — | 198 | Good - full 14×14 type matrix coverage |
-| Runtime policy | 23 | — | 8 | 31 | Adequate - risk thresholds, boundaries covered |
+| Runtime policy | 23 | — | 15 | 38 | Good - adversarial edge cases, clamping, injection attempts |
 
 ## Priority Coverage Gaps
 
