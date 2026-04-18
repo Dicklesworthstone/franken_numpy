@@ -16,7 +16,7 @@
 | FFT | 41 | — | — | 41 | Good - transform families, edge sizes, 2D/3D, fftn/ifftn |
 | Datetime/timedelta | 42 | — | — | 42 | Good - arithmetic, busday, NaT, broadcast, abs, comparisons |
 | Masked arrays | 40 | — | — | 40 | Good - reshape/concat/fill/broadcast/all-masked/argmin-max/axis-aware |
-| Iterator/transfer | 31 | 16 | 16 | 63 | Adequate - transfer/overlap/flatiter edges covered |
+| Iterator/transfer | 33 | 16 | 16 | 65 | Good - transfer/overlap/flatiter/broadcast covered |
 | Shape/stride (SCE) | 47 | — | — | 47 | Good - 0-D, empty, negative-stride, large shapes, 5D/6D transpose covered |
 | Dtype promotion | 198 | — | — | 198 | Good - full 14×14 type matrix coverage |
 | Runtime policy | 35 | — | 8 | 43 | Good - risk thresholds, boundaries, override audit covered |
@@ -45,14 +45,13 @@ No remaining gaps.
 
 No remaining gaps.
 
-### 4. Iterator/Transfer System (ADEQUATE)
+### 4. Iterator/Transfer System (GOOD)
 
-**Current state:** 63 cases (31 diff + 16 meta + 16 adversarial) + oracle smoke tests
-**Covered:** Transfer class selection, overlap copy direction, flatiter read/write, error cases
+**Current state:** 65 cases (33 diff + 16 meta + 16 adversarial) + oracle smoke tests
+**Covered:** Transfer class selection, overlap copy direction, flatiter read/write, multi-operand broadcast planning, error cases
 **Oracle-verified in smoke.rs:** External loop chunking, seek via set_multi_index/set_iterindex
 
-Remaining gaps:
-- Multi-operand iteration (plan_nditer_broadcast)
+No remaining gaps.
 
 ## Fixture Provenance
 
@@ -90,7 +89,6 @@ Per the testing-conformance-harnesses skill:
 4. [x] ~~Add iterator differential cases for seek/reset/external-loop~~ (DONE: covered in smoke.rs oracle tests)
 5. [ ] Wire up automated fixture regeneration from oracle
 6. [ ] Add CI coverage tracking (case count trends)
-7. [ ] Add iterator differential cases for multi-operand iteration (plan_nditer_broadcast)
 
 ## References
 

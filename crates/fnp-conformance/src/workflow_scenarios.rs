@@ -1796,6 +1796,7 @@ fn execute_iter_differential_step(case: &crate::IterDifferentialCase) -> IterSte
             case.overlap.as_ref(),
             case.flat_index.as_ref(),
             case.flags.as_ref(),
+            None,
             flat_len,
             case.values_len,
         ) {
@@ -1838,6 +1839,7 @@ fn execute_iter_differential_step(case: &crate::IterDifferentialCase) -> IterSte
             case.overlap.as_ref(),
             case.flat_index.as_ref(),
             case.flags.as_ref(),
+            None,
             flat_len,
             case.values_len,
         ) {
@@ -1901,6 +1903,7 @@ fn execute_iter_adversarial_step(case: &crate::IterAdversarialCase) -> IterStepR
         case.overlap.as_ref(),
         case.flat_index.as_ref(),
         case.flags.as_ref(),
+        None,
         flat_len,
         case.values_len,
     ) {

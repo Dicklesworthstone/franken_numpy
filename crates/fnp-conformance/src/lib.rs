@@ -18,8 +18,9 @@ use fnp_io::{
     validate_memmap_contract, validate_npz_archive_budget, validate_read_payload,
 };
 use fnp_iter::{
-    FlatIterIndex, NditerTransferFlags, OverlapAction, TransferClass, TransferError,
-    TransferSelectorInput, overlap_copy_policy, select_transfer_class, validate_flatiter_read,
+    FlatIterIndex, NditerBroadcastPlan, NditerError, NditerOperandSpec, NditerOrder,
+    NditerTransferFlags, OverlapAction, TransferClass, TransferError, TransferSelectorInput,
+    overlap_copy_policy, plan_nditer_broadcast, select_transfer_class, validate_flatiter_read,
     validate_flatiter_write, validate_nditer_flags,
 };
 use fnp_linalg::{
@@ -1235,6 +1236,30 @@ struct IterFlagsFixtureInput {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+struct IterBroadcastOperandInput {
+    shape: Vec<usize>,
+    #[serde(default)]
+    no_broadcast: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct IterBroadcastFixtureInput {
+    operands: Vec<IterBroadcastOperandInput>,
+    #[serde(default = "default_item_size")]
+    item_size: usize,
+    #[serde(default = "default_order_c")]
+    order: String,
+}
+
+fn default_item_size() -> usize {
+    8
+}
+
+fn default_order_c() -> String {
+    "C".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct IterDifferentialCase {
     id: String,
     operation: String,
@@ -1261,6 +1286,8 @@ struct IterDifferentialCase {
     #[serde(default)]
     flags: Option<IterFlagsFixtureInput>,
     #[serde(default)]
+    broadcast: Option<IterBroadcastFixtureInput>,
+    #[serde(default)]
     len: Option<usize>,
     #[serde(default)]
     values_len: Option<usize>,
@@ -1270,6 +1297,8 @@ struct IterDifferentialCase {
     expected_overlap_action: Option<String>,
     #[serde(default)]
     expected_selected: Option<usize>,
+    #[serde(default)]
+    expected_broadcast_shape: Option<Vec<usize>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2761,6 +2790,7 @@ enum IterOperationOutcome {
     TransferClass(TransferClass),
     OverlapAction(OverlapAction),
     SelectedCount(usize),
+    BroadcastPlan(NditerBroadcastPlan),
     Unit,
 }
 
@@ -2803,6 +2833,17 @@ fn classify_iter_transfer_error(operation: &str, error: &TransferError) -> Strin
             "flatiter_indexing_contract_violation".to_string()
         }
         _ => "nditer_transition_precondition_failed".to_string(),
+    }
+}
+
+fn classify_nditer_broadcast_error(error: &NditerError) -> String {
+    let msg = error.to_string().to_lowercase();
+    if msg.contains("no_broadcast") {
+        "nditer_no_broadcast_violation".to_string()
+    } else if msg.contains("broadcast") {
+        "nditer_constructor_invalid_configuration".to_string()
+    } else {
+        "nditer_constructor_invalid_configuration".to_string()
     }
 }
 
@@ -2869,6 +2910,7 @@ fn execute_iter_operation(
     selector: Option<&IterSelectorFixtureInput>,
     overlap: Option<&IterOverlapFixtureInput>,
     flags: Option<&IterFlagsFixtureInput>,
+    broadcast: Option<&IterBroadcastFixtureInput>,
     _values_len: Option<usize>,
 ) -> Result<IterOperationOutcome, IterSuiteError> {
     match operation {
@@ -2938,6 +2980,34 @@ fn execute_iter_operation(
             "flatiter_indexing_contract_violation",
             format!("{case_id}: operation '{operation}' requires explicit len/value parameters"),
         )),
+        "plan_nditer_broadcast" => {
+            let Some(bcast) = broadcast else {
+                return Err(IterSuiteError::new(
+                    "nditer_constructor_invalid_configuration",
+                    format!("{case_id}: missing broadcast payload"),
+                ));
+            };
+            let operands: Vec<NditerOperandSpec> = bcast
+                .operands
+                .iter()
+                .map(|op| NditerOperandSpec {
+                    shape: op.shape.clone(),
+                    no_broadcast: op.no_broadcast,
+                })
+                .collect();
+            let order = match bcast.order.as_str() {
+                "F" | "f" => NditerOrder::F,
+                _ => NditerOrder::C,
+            };
+            plan_nditer_broadcast(&operands, bcast.item_size, order)
+                .map(IterOperationOutcome::BroadcastPlan)
+                .map_err(|error| {
+                    IterSuiteError::new(
+                        classify_nditer_broadcast_error(&error),
+                        error.to_string(),
+                    )
+                })
+        }
         other => Err(IterSuiteError::new(
             "nditer_constructor_invalid_configuration",
             format!("{case_id}: unsupported iter operation '{other}'"),
@@ -2953,6 +3023,7 @@ fn execute_iter_operation_with_len(
     overlap: Option<&IterOverlapFixtureInput>,
     flat_index: Option<&IterFlatIndexFixtureInput>,
     flags: Option<&IterFlagsFixtureInput>,
+    broadcast: Option<&IterBroadcastFixtureInput>,
     len: usize,
     values_len: Option<usize>,
 ) -> Result<IterOperationOutcome, IterSuiteError> {
@@ -2992,7 +3063,7 @@ fn execute_iter_operation_with_len(
                     )
                 })
         }
-        _ => execute_iter_operation(case_id, operation, selector, overlap, flags, values_len),
+        _ => execute_iter_operation(case_id, operation, selector, overlap, flags, broadcast, values_len),
     }
 }
 
@@ -3063,6 +3134,25 @@ fn validate_iter_success_expectations(
         }
     }
 
+    if let Some(expected_shape) = &case.expected_broadcast_shape {
+        match outcome {
+            IterOperationOutcome::BroadcastPlan(plan) if plan.broadcast_shape == *expected_shape => {
+            }
+            IterOperationOutcome::BroadcastPlan(plan) => {
+                return Err(format!(
+                    "broadcast shape mismatch expected={expected_shape:?} actual={:?}",
+                    plan.broadcast_shape
+                ));
+            }
+            _ => {
+                return Err(
+                    "expected broadcast plan outcome but operation returned different outcome type"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -3103,6 +3193,7 @@ pub fn run_iter_differential_suite(config: &HarnessConfig) -> Result<SuiteReport
             case.overlap.as_ref(),
             case.flat_index.as_ref(),
             case.flags.as_ref(),
+            case.broadcast.as_ref(),
             flat_len,
             case.values_len,
         ) {
@@ -3317,11 +3408,13 @@ pub fn run_iter_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport,
                     None,
                     None,
                     None,
+                    None,
                 );
                 let second = execute_iter_operation(
                     &case.id,
                     "select_transfer_class",
                     case.selector.as_ref(),
+                    None,
                     None,
                     None,
                     None,
@@ -3336,12 +3429,14 @@ pub fn run_iter_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport,
                     case.overlap.as_ref(),
                     None,
                     None,
+                    None,
                 );
                 let second = execute_iter_operation(
                     &case.id,
                     "overlap_copy_policy",
                     None,
                     case.overlap.as_ref(),
+                    None,
                     None,
                     None,
                 );
@@ -3370,6 +3465,7 @@ pub fn run_iter_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport,
                         None,
                         Some(flat_index),
                         None,
+                        None,
                         len,
                         None,
                     )
@@ -3392,6 +3488,7 @@ pub fn run_iter_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport,
                         None,
                         None,
                         Some(flat_index),
+                        None,
                         None,
                         len,
                         Some(selected),
@@ -3446,6 +3543,7 @@ pub fn run_iter_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport,
                         None,
                         Some(flat_index),
                         None,
+                        None,
                         len,
                         None,
                     )
@@ -3471,6 +3569,7 @@ pub fn run_iter_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport,
                     None,
                     case.flags.as_ref(),
                     None,
+                    None,
                 );
                 let second = execute_iter_operation(
                     &case.id,
@@ -3478,6 +3577,7 @@ pub fn run_iter_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport,
                     None,
                     None,
                     case.flags.as_ref(),
+                    None,
                     None,
                 );
                 first == second
@@ -3580,6 +3680,7 @@ pub fn run_iter_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport,
             case.overlap.as_ref(),
             case.flat_index.as_ref(),
             case.flags.as_ref(),
+            None,
             flat_len,
             case.values_len,
         ) {
