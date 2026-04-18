@@ -345,5 +345,34 @@
     "reason_code": "random_fill_length_contract",
     "expected_reason_code": "random_fill_length_contract",
     "fill_len": 0
+  },
+  {
+    "id": "rng_bounded_u64_upper_bound_one",
+    "operation": "bounded_u64_grid",
+    "seed": 7026,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_differential_cases.json"
+    ],
+    "reason_code": "random_bounded_output_contract",
+    "expected_reason_code": "random_bounded_output_contract",
+    "upper_bound": 1,
+    "draws": 64
+  },
+  {
+    "id": "rng_fill_len_one_witness",
+    "operation": "fill_len_contract",
+    "seed": 7027,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_differential_cases.json"
+    ],
+    "reason_code": "random_fill_length_contract",
+    "expected_reason_code": "random_fill_length_contract",
+    "fill_len": 1
   }
 ]
