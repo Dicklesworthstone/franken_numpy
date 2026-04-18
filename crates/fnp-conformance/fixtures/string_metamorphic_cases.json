@@ -1,0 +1,168 @@
+[
+  {
+    "id": "str_lower_idempotent",
+    "relation": "str_lower_idempotent",
+    "seed": 10101,
+    "mode": "strict",
+    "env_fingerprint": "fnp-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_metamorphic_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_metamorphic_lower_idempotent_contract",
+    "input_strings": ["HELLO", "World", "MIXED Case", "already lower", "123"]
+  },
+  {
+    "id": "str_upper_idempotent",
+    "relation": "str_upper_idempotent",
+    "seed": 10102,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_metamorphic_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_metamorphic_upper_idempotent_contract",
+    "input_strings": ["hello", "World", "mixed CASE", "ALREADY UPPER", "456"]
+  },
+  {
+    "id": "str_strip_idempotent",
+    "relation": "str_strip_idempotent",
+    "seed": 10103,
+    "mode": "strict",
+    "env_fingerprint": "fnp-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_metamorphic_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_metamorphic_strip_idempotent_contract",
+    "input_strings": ["  hello  ", "\tworld\n", "   spaces   ", "nostrip", "  \t  "]
+  },
+  {
+    "id": "str_len_after_multiply",
+    "relation": "str_len_after_multiply",
+    "seed": 10104,
+    "mode": "strict",
+    "env_fingerprint": "fnp-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_metamorphic_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_metamorphic_len_multiply_contract",
+    "input_strings": ["ab", "xyz", "hello"],
+    "multiply_factor": 3
+  },
+  {
+    "id": "str_find_in_concat",
+    "relation": "str_find_in_concat",
+    "seed": 10105,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_metamorphic_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_metamorphic_find_concat_contract",
+    "a_strings": ["hello", "world", "test"],
+    "b_strings": [" world", "!", "ing"],
+    "search_substr": "ld"
+  },
+  {
+    "id": "str_replace_count_zero_unchanged",
+    "relation": "str_replace_count_zero_unchanged",
+    "seed": 10106,
+    "mode": "strict",
+    "env_fingerprint": "fnp-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_metamorphic_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_metamorphic_replace_count_zero_contract",
+    "input_strings": ["hello world", "testing 123", "abc def"],
+    "old_substr": "xyz",
+    "new_substr": "replaced"
+  },
+  {
+    "id": "str_center_len_preserves_content",
+    "relation": "str_center_len_preserves_content",
+    "seed": 10107,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_metamorphic_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_metamorphic_center_preserves_contract",
+    "input_strings": ["hi", "test", "hello"],
+    "width": 10
+  },
+  {
+    "id": "str_count_additive_concat",
+    "relation": "str_count_additive_concat",
+    "seed": 10108,
+    "mode": "strict",
+    "env_fingerprint": "fnp-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_metamorphic_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_metamorphic_count_additive_contract",
+    "a_strings": ["aaa", "abab", "test"],
+    "b_strings": ["aa", "baba", "best"],
+    "search_char": "a"
+  },
+  {
+    "id": "str_swapcase_involution",
+    "relation": "str_swapcase_involution",
+    "seed": 10109,
+    "mode": "strict",
+    "env_fingerprint": "fnp-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_metamorphic_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_metamorphic_swapcase_involution_contract",
+    "input_strings": ["Hello World", "UPPER lower", "MiXeD CaSe", "123 ABC def"]
+  },
+  {
+    "id": "str_startswith_after_ljust",
+    "relation": "str_startswith_after_ljust",
+    "seed": 10110,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_metamorphic_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_metamorphic_startswith_ljust_contract",
+    "input_strings": ["hello", "world", "test"],
+    "width": 10
+  },
+  {
+    "id": "str_endswith_after_rjust",
+    "relation": "str_endswith_after_rjust",
+    "seed": 10111,
+    "mode": "strict",
+    "env_fingerprint": "fnp-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_metamorphic_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_metamorphic_endswith_rjust_contract",
+    "input_strings": ["hello", "world", "test"],
+    "width": 10
+  },
+  {
+    "id": "str_isalpha_subset_isalnum",
+    "relation": "str_isalpha_subset_isalnum",
+    "seed": 10112,
+    "mode": "strict",
+    "env_fingerprint": "fnp-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_metamorphic_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_metamorphic_isalpha_isalnum_contract",
+    "input_strings": ["hello", "hello123", "123", "abc", ""]
+  }
+]
