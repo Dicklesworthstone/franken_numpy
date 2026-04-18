@@ -13,7 +13,7 @@
 | Linear algebra | 56 | 25 | 35 | 116 | Adequate - core decompositions |
 | String arrays | 52 | — | — | 52 | Adequate - 33 char functions |
 | RNG | 22 | 23 | 41 | 86 | Adequate + 39 statistical |
-| FFT | 30 | — | — | 30 | Adequate - transform families |
+| FFT | 38 | — | — | 38 | Good - transform families, edge sizes, 2D non-square |
 | Datetime/timedelta | 34 | — | — | 34 | Adequate - arithmetic + busday |
 | Masked arrays | 36 | — | — | 36 | Good - reshape/concat/fill/broadcast/all-masked/argmin-max |
 | Iterator/transfer | 31 | 16 | 16 | 63 | Adequate - transfer/overlap/flatiter edges covered |
