@@ -183,6 +183,7 @@
     "reason_code": "fft_adversarial_rfft_odd",
     "input_shape": [5],
     "input_values": [1.0, 2.0, 3.0, 4.0, 5.0],
-    "expected_behavior": "hermitian_output"
+    "expected_shape": [3, 2],
+    "expected_values": [15.0, 0.0, -2.5, 3.4409548011779334, -2.5, 0.8122992405822659]
   }
 ]
