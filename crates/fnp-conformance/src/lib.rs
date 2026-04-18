@@ -1250,6 +1250,40 @@ struct StringMetamorphicCase {
 }
 
 #[derive(Debug, Deserialize)]
+struct StringAdversarialCase {
+    id: String,
+    operation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    input_strings: Vec<String>,
+    #[serde(default)]
+    search_substr: String,
+    #[serde(default)]
+    old_substr: String,
+    #[serde(default)]
+    new_substr: String,
+    #[serde(default)]
+    separator: String,
+    #[serde(default)]
+    expected_behavior: String,
+    #[serde(default)]
+    expected_strings: Vec<String>,
+    #[serde(default)]
+    expected_values: Vec<serde_json::Value>,
+    width: Option<usize>,
+    multiplier: Option<isize>,
+}
+
+#[derive(Debug, Deserialize)]
 struct MaskedDifferentialCase {
     id: String,
     operation: String,
@@ -2152,6 +2186,15 @@ fn load_string_metamorphic_cases(
     fixture_root: &Path,
 ) -> Result<Vec<StringMetamorphicCase>, String> {
     let path = fixture_root.join("string_metamorphic_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
+}
+
+fn load_string_adversarial_cases(
+    fixture_root: &Path,
+) -> Result<Vec<StringAdversarialCase>, String> {
+    let path = fixture_root.join("string_adversarial_cases.json");
     let raw = fs::read_to_string(&path)
         .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
     serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
@@ -10717,6 +10760,13 @@ enum StringOperationOutcome {
     Text { values: Vec<String> },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum StringAdversarialOutcome {
+    Numeric { values: Vec<f64> },
+    Text { values: Vec<String> },
+    Split { values: Vec<Vec<String>> },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StringSuiteError {
     reason_code: String,
@@ -10938,6 +10988,319 @@ pub fn run_string_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteRepor
     }
 
     Ok(report)
+}
+
+pub fn run_string_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let cases = load_string_adversarial_cases(&config.fixture_root)?;
+
+    let mut report = SuiteReport {
+        suite: "string_adversarial",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+
+        match execute_string_adversarial_operation(&case)
+            .and_then(|outcome| validate_string_adversarial_expectation(&case, &outcome))
+        {
+            Ok(()) => report.pass_count += 1,
+            Err(err) => {
+                report.failures.push(format!(
+                    "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} {} (actual_reason_code={})",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    err.message,
+                    err.reason_code
+                ));
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+fn execute_string_adversarial_operation(
+    case: &StringAdversarialCase,
+) -> Result<StringAdversarialOutcome, StringSuiteError> {
+    let input = string_values_to_array(&case.input_strings)?;
+    match case.operation.as_str() {
+        "str_lower" => Ok(StringAdversarialOutcome::Text {
+            values: input.lower().values().to_vec(),
+        }),
+        "str_strip" => Ok(StringAdversarialOutcome::Text {
+            values: input.strip().values().to_vec(),
+        }),
+        "str_find" => Ok(StringAdversarialOutcome::Numeric {
+            values: input.find(&case.search_substr).values().to_vec(),
+        }),
+        "str_replace" => Ok(StringAdversarialOutcome::Text {
+            values: input
+                .replace(&case.old_substr, &case.new_substr)
+                .values()
+                .to_vec(),
+        }),
+        "str_split" => Ok(StringAdversarialOutcome::Split {
+            values: input.split(Some(&case.separator), None),
+        }),
+        "str_zfill" => Ok(StringAdversarialOutcome::Text {
+            values: input
+                .zfill(required_string_adversarial_width(case)?)
+                .values()
+                .to_vec(),
+        }),
+        "str_center" => Ok(StringAdversarialOutcome::Text {
+            values: input
+                .center(required_string_adversarial_width(case)?, ' ')
+                .values()
+                .to_vec(),
+        }),
+        "str_count" => Ok(StringAdversarialOutcome::Numeric {
+            values: input.count_substr(&case.search_substr).values().to_vec(),
+        }),
+        "str_multiply" => Ok(StringAdversarialOutcome::Text {
+            values: input
+                .multiply(string_adversarial_repeat_count(case)?)
+                .values()
+                .to_vec(),
+        }),
+        "str_isdigit" => Ok(StringAdversarialOutcome::Numeric {
+            values: input.isdigit().values().to_vec(),
+        }),
+        other => Err(StringSuiteError::new(
+            "string_policy_unknown_adversarial_operation",
+            format!("unsupported string adversarial operation {other}"),
+        )),
+    }
+}
+
+fn validate_string_adversarial_expectation(
+    case: &StringAdversarialCase,
+    outcome: &StringAdversarialOutcome,
+) -> Result<(), StringSuiteError> {
+    if !case.expected_behavior.trim().is_empty() {
+        return validate_string_adversarial_behavior(case, outcome);
+    }
+    if !case.expected_strings.is_empty() {
+        return validate_string_adversarial_strings(case, outcome, &case.expected_strings);
+    }
+    if !case.expected_values.is_empty() {
+        let expected = string_adversarial_expected_values(case)?;
+        return validate_string_adversarial_numbers(case, outcome, &expected);
+    }
+    Err(StringSuiteError::new(
+        "string_adversarial_fixture_invalid",
+        format!(
+            "{} has no expected_strings, expected_values, or expected_behavior",
+            case.id
+        ),
+    ))
+}
+
+fn validate_string_adversarial_behavior(
+    case: &StringAdversarialCase,
+    outcome: &StringAdversarialOutcome,
+) -> Result<(), StringSuiteError> {
+    match case.expected_behavior.as_str() {
+        "returns_zero" => {
+            let expected = vec![0.0; case.input_strings.len()];
+            validate_string_adversarial_numbers(case, outcome, &expected)
+        }
+        "insert_between_chars" => {
+            let expected = case
+                .input_strings
+                .iter()
+                .map(|value| string_adversarial_insert_between_chars(value, &case.new_substr))
+                .collect::<Vec<_>>();
+            validate_string_adversarial_strings(case, outcome, &expected)
+        }
+        "split_chars" => {
+            let expected = case
+                .input_strings
+                .iter()
+                .map(|value| value.chars().map(|ch| ch.to_string()).collect::<Vec<_>>())
+                .collect::<Vec<_>>();
+            validate_string_adversarial_split(case, outcome, &expected)
+        }
+        "non_overlapping_count" => {
+            if case.search_substr.is_empty() {
+                return Err(StringSuiteError::new(
+                    "string_adversarial_fixture_invalid",
+                    format!("{} non_overlapping_count requires search_substr", case.id),
+                ));
+            }
+            let expected = case
+                .input_strings
+                .iter()
+                .map(|value| value.matches(&case.search_substr).count() as f64)
+                .collect::<Vec<_>>();
+            validate_string_adversarial_numbers(case, outcome, &expected)
+        }
+        other => Err(StringSuiteError::new(
+            "string_policy_unknown_adversarial_behavior",
+            format!("unsupported string adversarial expected_behavior {other}"),
+        )),
+    }
+}
+
+fn validate_string_adversarial_strings(
+    case: &StringAdversarialCase,
+    outcome: &StringAdversarialOutcome,
+    expected: &[String],
+) -> Result<(), StringSuiteError> {
+    let StringAdversarialOutcome::Text { values } = outcome else {
+        return Err(StringSuiteError::new(
+            "string_adversarial_type_mismatch",
+            format!(
+                "{} expected text outcome for operation {} but got {outcome:?}",
+                case.id, case.operation
+            ),
+        ));
+    };
+    if values == expected {
+        Ok(())
+    } else {
+        Err(StringSuiteError::new(
+            "string_adversarial_mismatch",
+            format!(
+                "{} expected_strings={expected:?} actual={values:?}",
+                case.id
+            ),
+        ))
+    }
+}
+
+fn validate_string_adversarial_numbers(
+    case: &StringAdversarialCase,
+    outcome: &StringAdversarialOutcome,
+    expected: &[f64],
+) -> Result<(), StringSuiteError> {
+    let StringAdversarialOutcome::Numeric { values } = outcome else {
+        return Err(StringSuiteError::new(
+            "string_adversarial_type_mismatch",
+            format!(
+                "{} expected numeric outcome for operation {} but got {outcome:?}",
+                case.id, case.operation
+            ),
+        ));
+    };
+    if values.len() != expected.len() {
+        return Err(StringSuiteError::new(
+            "string_adversarial_mismatch",
+            format!(
+                "{} numeric length mismatch expected={} actual={}",
+                case.id,
+                expected.len(),
+                values.len()
+            ),
+        ));
+    }
+    if approx_equal_values(expected, values, 1e-9, 1e-9) {
+        Ok(())
+    } else {
+        Err(StringSuiteError::new(
+            "string_adversarial_mismatch",
+            format!("{} expected_values={expected:?} actual={values:?}", case.id),
+        ))
+    }
+}
+
+fn validate_string_adversarial_split(
+    case: &StringAdversarialCase,
+    outcome: &StringAdversarialOutcome,
+    expected: &[Vec<String>],
+) -> Result<(), StringSuiteError> {
+    let StringAdversarialOutcome::Split { values } = outcome else {
+        return Err(StringSuiteError::new(
+            "string_adversarial_type_mismatch",
+            format!(
+                "{} expected split outcome for operation {} but got {outcome:?}",
+                case.id, case.operation
+            ),
+        ));
+    };
+    if values == expected {
+        Ok(())
+    } else {
+        Err(StringSuiteError::new(
+            "string_adversarial_mismatch",
+            format!("{} expected_split={expected:?} actual={values:?}", case.id),
+        ))
+    }
+}
+
+fn string_adversarial_expected_values(
+    case: &StringAdversarialCase,
+) -> Result<Vec<f64>, StringSuiteError> {
+    case.expected_values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| match value {
+            serde_json::Value::Bool(flag) => Ok(if *flag { 1.0 } else { 0.0 }),
+            serde_json::Value::Number(number) => number.as_f64().ok_or_else(|| {
+                StringSuiteError::new(
+                    "string_adversarial_fixture_invalid",
+                    format!(
+                        "{} expected_values[{idx}] is not representable as f64",
+                        case.id
+                    ),
+                )
+            }),
+            other => Err(StringSuiteError::new(
+                "string_adversarial_fixture_invalid",
+                format!(
+                    "{} expected_values[{idx}] must be bool or number, got {other}",
+                    case.id
+                ),
+            )),
+        })
+        .collect()
+}
+
+fn string_adversarial_insert_between_chars(value: &str, new_substr: &str) -> String {
+    let mut output = String::new();
+    output.push_str(new_substr);
+    for ch in value.chars() {
+        output.push(ch);
+        output.push_str(new_substr);
+    }
+    output
+}
+
+fn required_string_adversarial_width(
+    case: &StringAdversarialCase,
+) -> Result<usize, StringSuiteError> {
+    case.width.ok_or_else(|| {
+        StringSuiteError::new(
+            "string_input_contract_violation",
+            format!("{} requires width", case.operation),
+        )
+    })
+}
+
+fn string_adversarial_repeat_count(
+    case: &StringAdversarialCase,
+) -> Result<usize, StringSuiteError> {
+    let multiplier = case.multiplier.unwrap_or(1);
+    if multiplier < 0 {
+        Ok(0)
+    } else {
+        usize::try_from(multiplier).map_err(|_| {
+            StringSuiteError::new(
+                "string_input_contract_violation",
+                format!("{} multiplier is out of range", case.operation),
+            )
+        })
+    }
 }
 
 fn execute_string_differential_operation(
@@ -14249,6 +14612,7 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
         run_rng_statistical_suite(config)?,
         run_string_differential_suite(config)?,
         run_string_metamorphic_suite(config)?,
+        run_string_adversarial_suite(config)?,
         run_masked_differential_suite(config)?,
         run_masked_metamorphic_suite(config)?,
         run_datetime_differential_suite(config)?,
@@ -16430,9 +16794,9 @@ mod tests {
         run_runtime_policy_metamorphic_suite, run_shape_stride_adversarial_suite,
         run_shape_stride_differential_suite, run_shape_stride_metamorphic_suite,
         run_shape_stride_suite, run_signal_differential_suite, run_signal_metamorphic_suite,
-        run_smoke, run_string_differential_suite, run_string_metamorphic_suite,
-        run_ufunc_adversarial_suite, run_ufunc_differential_suite, run_ufunc_metamorphic_suite,
-        set_dtype_promotion_log_path, set_shape_stride_log_path,
+        run_smoke, run_string_adversarial_suite, run_string_differential_suite,
+        run_string_metamorphic_suite, run_ufunc_adversarial_suite, run_ufunc_differential_suite,
+        run_ufunc_metamorphic_suite, set_dtype_promotion_log_path, set_shape_stride_log_path,
     };
     use fnp_io::{IOSupportedDType, load as load_npy, save as save_npy};
     use fnp_iter::{
@@ -17345,6 +17709,14 @@ mod tests {
         let cfg = HarnessConfig::default_paths();
         let suite =
             run_string_metamorphic_suite(&cfg).expect("string metamorphic suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn string_adversarial_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite =
+            run_string_adversarial_suite(&cfg).expect("string adversarial suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 

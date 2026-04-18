@@ -29720,6 +29720,57 @@ fn rsplit_whitespace_python(s: &str, maxsplit: usize) -> Vec<String> {
     parts
 }
 
+fn split_chars_python(s: &str, maxsplit: Option<usize>) -> Vec<String> {
+    let Some(maxsplit) = maxsplit else {
+        return s.chars().map(|ch| ch.to_string()).collect();
+    };
+    if maxsplit == 0 {
+        return vec![s.to_string()];
+    }
+
+    let mut parts = Vec::new();
+    let mut remainder_start = None;
+    for (split_count, (idx, ch)) in s.char_indices().enumerate() {
+        if split_count == maxsplit {
+            remainder_start = Some(idx);
+            break;
+        }
+        parts.push(ch.to_string());
+    }
+    let Some(remainder_start) = remainder_start else {
+        return parts;
+    };
+    parts.push(s[remainder_start..].to_string());
+    parts
+}
+
+fn rsplit_chars_python(s: &str, maxsplit: Option<usize>) -> Vec<String> {
+    let Some(maxsplit) = maxsplit else {
+        return s.chars().map(|ch| ch.to_string()).collect();
+    };
+    if maxsplit == 0 {
+        return vec![s.to_string()];
+    }
+
+    let mut right_parts = Vec::new();
+    let mut remainder_end = None;
+    for (split_count, (idx, ch)) in s.char_indices().rev().enumerate() {
+        if split_count == maxsplit {
+            remainder_end = Some(idx + ch.len_utf8());
+            break;
+        }
+        right_parts.push(ch.to_string());
+    }
+    let Some(remainder_end) = remainder_end else {
+        right_parts.reverse();
+        return right_parts;
+    };
+
+    right_parts.push(s[..remainder_end].to_string());
+    right_parts.reverse();
+    right_parts
+}
+
 fn masked_sort_order(
     lhs_masked: bool,
     lhs_value: f64,
@@ -30313,6 +30364,7 @@ impl StringArray {
             .map(|s| match (sep, maxsplit) {
                 (None, None) => s.split_whitespace().map(String::from).collect(),
                 (None, Some(n)) => split_whitespace_python(s, n),
+                (Some(""), maxsplit) => split_chars_python(s, maxsplit),
                 (Some(sep), None) => s.split(sep).map(String::from).collect(),
                 (Some(sep), Some(n)) => s.splitn(n + 1, sep).map(String::from).collect(),
             })
@@ -30327,6 +30379,7 @@ impl StringArray {
             .map(|s| match (sep, maxsplit) {
                 (None, None) => s.split_whitespace().map(String::from).collect(),
                 (None, Some(n)) => rsplit_whitespace_python(s, n),
+                (Some(""), maxsplit) => rsplit_chars_python(s, maxsplit),
                 (Some(sep), None) => s.split(sep).map(String::from).collect(),
                 (Some(sep), Some(n)) => {
                     let mut parts: Vec<String> = s.rsplitn(n + 1, sep).map(String::from).collect();
@@ -45621,6 +45674,27 @@ mod tests {
         let sa = StringArray::from_strs(vec![1], &["a,b,c,d"]).unwrap();
         let result = sa.split(Some(","), None);
         assert_eq!(result[0], vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn string_split_empty_separator_splits_chars() {
+        let sa = StringArray::from_strs(vec![1], &["hello"]).unwrap();
+        let result = sa.split(Some(""), None);
+        assert_eq!(result[0], vec!["h", "e", "l", "l", "o"]);
+    }
+
+    #[test]
+    fn string_split_empty_separator_maxsplit_keeps_remainder() {
+        let sa = StringArray::from_strs(vec![1], &["hello"]).unwrap();
+        let result = sa.split(Some(""), Some(2));
+        assert_eq!(result[0], vec!["h", "e", "llo"]);
+    }
+
+    #[test]
+    fn string_rsplit_empty_separator_maxsplit_keeps_remainder() {
+        let sa = StringArray::from_strs(vec![1], &["hello"]).unwrap();
+        let result = sa.rsplit(Some(""), Some(2));
+        assert_eq!(result[0], vec!["hel", "l", "o"]);
     }
 
     #[test]
