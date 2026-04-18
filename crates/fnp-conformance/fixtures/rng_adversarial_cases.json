@@ -672,5 +672,38 @@
       "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
     ],
     "reason_code": "rng_policy_unknown_metadata"
+  },
+  {
+    "id": "rng_seedsequence_pool_size_zero_strict",
+    "operation": "seedsequence_pool_size_invalid",
+    "expected_error_contains": "seed sequence state generation contract violated",
+    "expected_reason_code": "rng_seedsequence_generate_state_failed",
+    "severity": "critical",
+    "seed": 7245,
+    "pool_size": 0,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_seedsequence_generate_state_failed"
+  },
+  {
+    "id": "rng_policy_metadata_whitespace_mode",
+    "operation": "policy_metadata_unknown",
+    "expected_error_contains": "unknown mode/class metadata rejected fail-closed",
+    "expected_reason_code": "rng_policy_unknown_metadata",
+    "severity": "medium",
+    "seed": 7246,
+    "mode": "hardened",
+    "mode_raw": "   ",
+    "class_raw": "known_compatible_low_risk",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_adversarial_cases.json"
+    ],
+    "reason_code": "rng_policy_unknown_metadata"
   }
 ]
