@@ -969,5 +969,50 @@
     "expected_dtype": "bool",
     "abs_tol": 1e-12,
     "rel_tol": 1e-12
+  },
+  {
+    "id": "timedelta_abs_negative",
+    "operation": "timedelta_abs",
+    "seed": 12047,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-datetime-packet-h",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "datetime_differential_expected_success",
+    "expected_reason_code": "datetime_differential_expected_success",
+    "lhs_shape": [4],
+    "lhs_values": [-10.0, -1.0, 0.0, 5.0],
+    "lhs_dtype": "timedelta64",
+    "expected_shape": [4],
+    "expected_values": [10.0, 1.0, 0.0, 5.0],
+    "expected_dtype": "timedelta64",
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "datetime_add_scalar_broadcast",
+    "operation": "datetime_add",
+    "seed": 12048,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-datetime-packet-h",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "datetime_differential_expected_success",
+    "expected_reason_code": "datetime_differential_expected_success",
+    "lhs_shape": [3],
+    "lhs_values": [100.0, 200.0, 300.0],
+    "lhs_dtype": "datetime64",
+    "rhs_shape": [],
+    "rhs_values": [5.0],
+    "rhs_dtype": "timedelta64",
+    "expected_shape": [3],
+    "expected_values": [105.0, 205.0, 305.0],
+    "expected_dtype": "datetime64",
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
   }
 ]
