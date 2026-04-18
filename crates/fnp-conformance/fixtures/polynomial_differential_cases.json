@@ -1586,5 +1586,39 @@
     "expected_values": [0.0, 0.0, 0.0],
     "abs_tol": 1e-12,
     "rel_tol": 1e-12
+  },
+  {
+    "id": "polyint_quadratic_golden",
+    "operation": "polyint",
+    "seed": 10003,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-polynomial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "polynomial_differential_expected_success",
+    "expected_reason_code": "polynomial_differential_expected_success",
+    "lhs_values": [3.0, 2.0, 1.0],
+    "expected_values": [1.0, 1.0, 1.0, 0.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "polyder_constant_zero",
+    "operation": "polyder",
+    "seed": 10004,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-polynomial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "polynomial_differential_expected_success",
+    "expected_reason_code": "polynomial_differential_expected_success",
+    "lhs_values": [5.0],
+    "expected_values": [0.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
   }
 ]
