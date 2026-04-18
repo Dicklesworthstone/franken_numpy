@@ -5798,5 +5798,37 @@
     "expected_values": [5.0, 5.0, 5.0, 5.0],
     "abs_tol": 1e-12,
     "rel_tol": 1e-12
+  },
+  {
+    "id": "reciprocal_mixed_signs_golden",
+    "operation": "reciprocal",
+    "seed": 10170,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [4],
+    "input_values": [0.5, 2.0, -4.0, 0.25],
+    "expected_shape": [4],
+    "expected_values": [2.0, 0.5, -0.25, 4.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "sign_mixed_values_golden",
+    "operation": "sign",
+    "seed": 10171,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [5],
+    "input_values": [-5.0, -0.1, 0.0, 0.1, 5.0],
+    "expected_shape": [5],
+    "expected_values": [-1.0, -1.0, 0.0, 1.0, 1.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
   }
 ]
