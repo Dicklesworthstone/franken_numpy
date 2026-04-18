@@ -76,7 +76,8 @@
     "input_shape": [3],
     "input_values": [1.0, 2.0, 3.0],
     "n": 8,
-    "expected_behavior": "zero_padded"
+    "expected_shape": [8, 2],
+    "expected_values": [6.0, 0.0, 2.414213562373095, -4.414213562373095, -2.0, -2.0, -0.41421356237309515, 1.5857864376269049, 2.0, 0.0, -0.41421356237309515, -1.5857864376269049, -2.0, 2.0, 2.414213562373095, 4.414213562373095]
   },
   {
     "id": "fft_n_smaller_than_input",
@@ -92,7 +93,8 @@
     "input_shape": [8],
     "input_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
     "n": 4,
-    "expected_behavior": "truncated"
+    "expected_shape": [4, 2],
+    "expected_values": [10.0, 0.0, -2.0, 2.0, -2.0, 0.0, -2.0, -2.0]
   },
   {
     "id": "fft_n_equals_one",
@@ -108,7 +110,8 @@
     "input_shape": [4],
     "input_values": [1.0, 2.0, 3.0, 4.0],
     "n": 1,
-    "expected_behavior": "single_coefficient"
+    "expected_shape": [1, 2],
+    "expected_values": [1.0, 0.0]
   },
   {
     "id": "fft_all_zeros",
@@ -123,7 +126,8 @@
     "reason_code": "fft_adversarial_all_zeros",
     "input_shape": [4],
     "input_values": [0.0, 0.0, 0.0, 0.0],
-    "expected_behavior": "all_zeros_output"
+    "expected_shape": [4, 2],
+    "expected_values": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   },
   {
     "id": "fft_alternating_sign",
@@ -138,7 +142,8 @@
     "reason_code": "fft_adversarial_alternating",
     "input_shape": [4],
     "input_values": [1.0, -1.0, 1.0, -1.0],
-    "expected_behavior": "nyquist_peak"
+    "expected_shape": [4, 2],
+    "expected_values": [0.0, 0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0]
   },
   {
     "id": "fft_prime_length",
@@ -153,7 +158,8 @@
     "reason_code": "fft_adversarial_prime_bluestein",
     "input_shape": [17],
     "input_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0],
-    "expected_behavior": "bluestein_fallback"
+    "expected_shape": [17, 2],
+    "expected_values": [153.0, 0.0, -8.5, 45.4709837968331, -8.499999999999996, 21.941029210707654, -8.5, 13.727971357603728, -8.499999999999996, 9.324055833840486, -8.499999999999995, 6.418902041352611, -8.499999999999996, 4.232497088174023, -8.499999999999998, 2.4184585138938175, -8.499999999999996, 0.7876409930572528, -8.499999999999996, -0.7876409930572528, -8.499999999999998, -2.4184585138938175, -8.499999999999996, -4.232497088174023, -8.499999999999995, -6.418902041352611, -8.499999999999996, -9.324055833840486, -8.5, -13.727971357603728, -8.499999999999996, -21.941029210707654, -8.5, -45.4709837968331]
   },
   {
     "id": "ifft_empty_input",
