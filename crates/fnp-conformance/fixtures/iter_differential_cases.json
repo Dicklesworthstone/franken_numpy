@@ -685,5 +685,45 @@
       "order": "C"
     },
     "expected_broadcast_shape": [4, 5, 3]
+  },
+  {
+    "id": "iter_flatiter_empty_slice_read",
+    "operation": "validate_flatiter_read",
+    "seed": 4134,
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "flatiter_indexing_contract",
+    "expected_reason_code": "flatiter_indexing_contract",
+    "len": 10,
+    "flat_index": {
+      "kind": "slice",
+      "start": 5,
+      "stop": 5,
+      "step": 1
+    },
+    "expected_selected": 0
+  },
+  {
+    "id": "iter_overlap_no_overlap",
+    "operation": "overlap_copy_policy",
+    "seed": 4135,
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_differential_cases.json"
+    ],
+    "reason_code": "nditer_overlap_policy_contract",
+    "expected_reason_code": "nditer_overlap_policy_contract",
+    "overlap": {
+      "src_offset": 0,
+      "dst_offset": 100,
+      "byte_len": 8
+    },
+    "expected_overlap_action": "no_copy"
   }
 ]
