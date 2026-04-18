@@ -1121,5 +1121,35 @@
     "skip_header": 1,
     "expected_shape": [2, 2],
     "expected_values": [1.0, 2.0, 3.0, 4.0]
+  },
+  {
+    "id": "io_dtype_decode_uint16_golden",
+    "operation": "dtype_decode",
+    "seed": 9978,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_dtype_descriptor_contract",
+    "expected_reason_code": "io_dtype_descriptor_contract",
+    "dtype_descr": "<u2"
+  },
+  {
+    "id": "io_genfromtxt_tab_delimiter_golden",
+    "operation": "genfromtxt_full",
+    "seed": 9979,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.2.5",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/io_differential_cases.json"
+    ],
+    "reason_code": "io_genfromtxt_contract",
+    "expected_reason_code": "io_genfromtxt_contract",
+    "text": "1\t2\t3\n4\t5\t6\n",
+    "delimiter": "\t",
+    "expected_shape": [2, 3],
+    "expected_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
   }
 ]
