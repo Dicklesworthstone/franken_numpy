@@ -1653,6 +1653,10 @@ struct DateTimeMetamorphicCase {
     #[serde(default)]
     delta_c_value: i64,
     #[serde(default)]
+    shift_unit: String,
+    #[serde(default)]
+    shift_value: i64,
+    #[serde(default)]
     scalar: Option<f64>,
     #[serde(default)]
     abs_tol: f64,
@@ -16613,6 +16617,77 @@ fn evaluate_datetime_metamorphic_relation(
                 .timedelta_add(&zero)
                 .map_err(map_ufunc_error_to_datetime_suite)?;
             assert_datetime_metamorphic_array_equal(case, &actual, &delta)
+        }
+        "timedelta_mul_zero" => {
+            let delta = datetime_metamorphic_timedelta(case.delta_value, &case.delta_unit)?;
+            let zero = datetime_metamorphic_timedelta(0, &case.delta_unit)?;
+            let actual = delta
+                .timedelta_mul(0.0)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            assert_datetime_metamorphic_array_equal(case, &actual, &zero)
+        }
+        "timedelta_mul_neg_one" => {
+            let delta = datetime_metamorphic_timedelta(case.delta_value, &case.delta_unit)?;
+            let actual = delta
+                .timedelta_mul(-1.0)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            let expected = delta.timedelta_neg();
+            assert_datetime_metamorphic_array_equal(case, &actual, &expected)
+        }
+        "datetime_order_shift_preserved" => {
+            let datetime_a = datetime_metamorphic_datetime(&case.datetime_a, &case.shift_unit)?;
+            let datetime_b = datetime_metamorphic_datetime(&case.datetime_b, &case.shift_unit)?;
+            let shift = datetime_metamorphic_timedelta(case.shift_value, &case.shift_unit)?;
+            let shifted_a = datetime_a
+                .datetime_add(&shift)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            let shifted_b = datetime_b
+                .datetime_add(&shift)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            let before = datetime_a
+                .elementwise_binary(&datetime_b, BinaryOp::Less)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            let after = shifted_a
+                .elementwise_binary(&shifted_b, BinaryOp::Less)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            if datetime_metamorphic_single_true(&before) == datetime_metamorphic_single_true(&after) {
+                Ok(())
+            } else {
+                Err(DateTimeSuiteError::new(
+                    "datetime_metamorphic_relation_failed",
+                    format!(
+                        "datetime_order_shift_preserved failed: before={:?} after={:?}",
+                        before.values(),
+                        after.values()
+                    ),
+                ))
+            }
+        }
+        "timedelta_double_neg" => {
+            let delta = datetime_metamorphic_timedelta(case.delta_value, &case.delta_unit)?;
+            let once = delta.timedelta_neg();
+            let twice = once.timedelta_neg();
+            assert_datetime_metamorphic_array_equal(case, &twice, &delta)
+        }
+        "datetime_sub_self_zero" => {
+            let datetime = datetime_metamorphic_datetime(&case.base_datetime, "s")?;
+            let zero = datetime_metamorphic_timedelta(0, "s")?;
+            let actual = datetime
+                .datetime_sub(&datetime)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            assert_datetime_metamorphic_array_equal(case, &actual, &zero)
+        }
+        "timedelta_add_neg_sub" => {
+            let delta_a = datetime_metamorphic_timedelta(case.delta_a_value, &case.delta_a_unit)?;
+            let delta_b = datetime_metamorphic_timedelta(case.delta_b_value, &case.delta_b_unit)?;
+            let neg_b = delta_b.timedelta_neg();
+            let add_neg = delta_a
+                .timedelta_add(&neg_b)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            let sub = delta_a
+                .timedelta_sub(&delta_b)
+                .map_err(map_ufunc_error_to_datetime_suite)?;
+            assert_datetime_metamorphic_array_equal(case, &add_neg, &sub)
         }
         other => Err(DateTimeSuiteError::new(
             "datetime_policy_unknown_metamorphic_relation",

@@ -14,7 +14,7 @@
 | String arrays | 71 | 12 | 12 | 95 | Good - 33 char functions, empty/pattern edge cases, case/title conversion, isdigit, idempotence/involution metamorphic, empty/whitespace/overlap adversarial |
 | RNG | 38 | 28 | 43 | 109 | Adequate + 39 statistical, 12 distribution differential (XFAIL: seeding mismatch), small bound, zero-fill, single-step jump |
 | FFT | 47 | 18 | 12 | 77 | Good - transform families, edge sizes, 2D/3D, fftn/ifftn, shifts, fftfreq, inverse/linearity/parseval/rfft-roundtrip/conjugate-symmetry/scale metamorphic, edge-case adversarial |
-| Datetime/timedelta | 48 | 12 | 12 | 72 | Good - arithmetic, busday, NaT, broadcast, abs, comparisons, neg, mul-zero, add/sub inverse metamorphic, NaT/epoch/y2038 adversarial |
+| Datetime/timedelta | 48 | 18 | 12 | 78 | Good - arithmetic, busday, NaT, broadcast, abs, comparisons, neg, mul-zero/neg-one, add/sub inverse, order-shift-preserved, double-neg metamorphic, NaT/epoch/y2038 adversarial |
 | Masked arrays | 44 | 12 | 12 | 68 | Good - reshape/concat/fill/broadcast/all-masked/argmin-max/axis-aware, min/max axis partial, mask preservation metamorphic, hardmask/compress adversarial |
 | Iterator/transfer | 37 | 21 | 18 | 76 | Good - transfer/overlap/flatiter/broadcast, single-element, copy-overlap flags |
 | Shape/stride (SCE) | 51 | 12 | 12 | 75 | Good - 0-D, empty, negative-stride, large shapes, 5D/6D transpose, scalar-to-5D, F-order, reshape/transpose roundtrip metamorphic, incompatible/negative-infer adversarial |
