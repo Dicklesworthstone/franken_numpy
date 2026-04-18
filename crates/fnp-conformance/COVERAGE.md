@@ -8,12 +8,12 @@
 |--------|:-----------:|:-----------:|:-----------:|:-----------:|---------------------|
 | Ufunc operations | 381 | 39 | 62 | 482 | Good - core ops well covered, 3D commutative, identity scalar, neg/abs/max metamorphic |
 | Signal processing | 305 | 12 | 12 | 329 | Good - extensive conv/corr/fft, atleast_nd, reciprocal/sign edge cases, convolve commutative/distributive, empty/nan/inf adversarial |
-| Polynomials | 96 | 12 | 12 | 120 | Good - all 5 families, edge cases, add-zero, sub-self, int/der edge, commutative/identity metamorphic, empty/nan/constant adversarial |
+| Polynomials | 96 | 18 | 12 | 126 | Good - all 5 families, edge cases, add-zero, sub-self, int/der edge, commutative/identity/associative/distributive metamorphic, empty/nan/constant adversarial |
 | I/O (npy/npz/text) | 70 | 40 | 35 | 145 | Good - parser boundaries, complex128, quoted fields, F-order, single-member npz |
 | Linear algebra | 67 | 36 | 37 | 140 | Good - core decompositions, 1x1 edge cases, identity, wide QR, fractional solve, det/inv metamorphic invariants |
 | String arrays | 71 | 12 | 12 | 95 | Good - 33 char functions, empty/pattern edge cases, case/title conversion, isdigit, idempotence/involution metamorphic, empty/whitespace/overlap adversarial |
 | RNG | 38 | 28 | 43 | 109 | Adequate + 39 statistical, 12 distribution differential (XFAIL: seeding mismatch), small bound, zero-fill, single-step jump |
-| FFT | 47 | 12 | 12 | 71 | Good - transform families, edge sizes, 2D/3D, fftn/ifftn, shifts, fftfreq, inverse/linearity/parseval metamorphic, edge-case adversarial |
+| FFT | 47 | 18 | 12 | 77 | Good - transform families, edge sizes, 2D/3D, fftn/ifftn, shifts, fftfreq, inverse/linearity/parseval/rfft-roundtrip/conjugate-symmetry/scale metamorphic, edge-case adversarial |
 | Datetime/timedelta | 48 | 12 | 12 | 72 | Good - arithmetic, busday, NaT, broadcast, abs, comparisons, neg, mul-zero, add/sub inverse metamorphic, NaT/epoch/y2038 adversarial |
 | Masked arrays | 44 | 12 | 12 | 68 | Good - reshape/concat/fill/broadcast/all-masked/argmin-max/axis-aware, min/max axis partial, mask preservation metamorphic, hardmask/compress adversarial |
 | Iterator/transfer | 37 | 21 | 18 | 76 | Good - transfer/overlap/flatiter/broadcast, single-element, copy-overlap flags |

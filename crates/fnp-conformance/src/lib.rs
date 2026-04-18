@@ -1019,6 +1019,8 @@ struct FftMetamorphicCase {
     #[serde(default)]
     beta: Option<f64>,
     #[serde(default)]
+    scale_factor: Option<f64>,
+    #[serde(default)]
     input_dtype: String,
     #[serde(default)]
     abs_tol: f64,
@@ -7871,6 +7873,66 @@ fn evaluate_fft_metamorphic_relation(case: &FftMetamorphicCase) -> Result<(), Ff
                 "ifftn(fftn(x))",
             )
         }
+        "rfft_irfft_inverse" => {
+            let input = fft_metamorphic_real_array(&case.input_shape, &case.input_values)?;
+            let n = input.values().len();
+            let recovered = input
+                .rfft(None)
+                .and_then(|transformed| transformed.irfft(Some(n)))
+                .map_err(map_ufunc_error_to_fft_suite)?;
+            if recovered.shape() != input.shape() {
+                return Err(FftSuiteError::new(
+                    "fft_metamorphic_relation_failed",
+                    format!(
+                        "irfft(rfft(x)) shape mismatch expected={:?} actual={:?}",
+                        input.shape(),
+                        recovered.shape()
+                    ),
+                ));
+            }
+            fft_metamorphic_assert_values_equal(
+                case,
+                recovered.values(),
+                &case.input_values,
+                "irfft(rfft(x))",
+            )
+        }
+        "fft_scale_reciprocal" => {
+            let scale = case.scale_factor.ok_or_else(|| {
+                FftSuiteError::new(
+                    "fft_input_contract_violation",
+                    "fft_scale_reciprocal requires scale_factor",
+                )
+            })?;
+            let input = fft_metamorphic_real_array(&case.input_shape, &case.input_values)?;
+            let scaled_values: Vec<f64> = input.values().iter().map(|v| v / scale).collect();
+            let scaled = fft_metamorphic_real_array(&case.input_shape, &scaled_values)?;
+            let fft_orig = input.fft(None).map_err(map_ufunc_error_to_fft_suite)?;
+            let fft_scaled = scaled.fft(None).map_err(map_ufunc_error_to_fft_suite)?;
+            let expected: Vec<f64> = fft_orig.values().iter().map(|v| v / scale).collect();
+            fft_metamorphic_assert_values_equal(case, fft_scaled.values(), &expected, "fft(x/k)")
+        }
+        "fft_real_dc_component" => {
+            let input = fft_metamorphic_real_array(&case.input_shape, &case.input_values)?;
+            let transformed = input.fft(None).map_err(map_ufunc_error_to_fft_suite)?;
+            let dc_imag = transformed.values().get(1).copied().unwrap_or(0.0);
+            fft_metamorphic_assert_scalar_equal(case, dc_imag.abs(), 0.0, "DC imaginary component")
+        }
+        "fft_conjugate_symmetry" => {
+            let input = fft_metamorphic_real_array(&case.input_shape, &case.input_values)?;
+            let transformed = input.fft(None).map_err(map_ufunc_error_to_fft_suite)?;
+            let n = input.values().len();
+            for k in 1..n / 2 {
+                let pos_re = transformed.values()[k * 2];
+                let pos_im = transformed.values()[k * 2 + 1];
+                let neg_idx = n - k;
+                let neg_re = transformed.values()[neg_idx * 2];
+                let neg_im = transformed.values()[neg_idx * 2 + 1];
+                fft_metamorphic_assert_scalar_equal(case, pos_re, neg_re, "conjugate symmetry real")?;
+                fft_metamorphic_assert_scalar_equal(case, pos_im, -neg_im, "conjugate symmetry imag")?;
+            }
+            Ok(())
+        }
         other => Err(FftSuiteError::new(
             "fft_policy_unknown_metamorphic_relation",
             format!("unsupported fft metamorphic relation {other}"),
@@ -12210,6 +12272,445 @@ fn polynomial_values_to_array(values: &[f64]) -> Result<UFuncArray, PolynomialSu
 
 fn map_ufunc_error_to_polynomial_suite(error: UFuncError) -> PolynomialSuiteError {
     PolynomialSuiteError::new(error.reason_code(), error.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+struct PolynomialMetamorphicCase {
+    id: String,
+    relation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    coefficients: Vec<f64>,
+    #[serde(default)]
+    coefficients_a: Vec<f64>,
+    #[serde(default)]
+    coefficients_b: Vec<f64>,
+    #[serde(default)]
+    coefficients_c: Vec<f64>,
+    #[serde(default)]
+    eval_point: f64,
+    #[serde(default)]
+    alpha: f64,
+    #[serde(default)]
+    beta: f64,
+    #[serde(default)]
+    poly_family: String,
+    #[serde(default)]
+    abs_tol: f64,
+}
+
+fn load_polynomial_metamorphic_cases(
+    fixture_root: &Path,
+) -> Result<Vec<PolynomialMetamorphicCase>, String> {
+    let path = fixture_root.join("polynomial_metamorphic_cases.json");
+    let contents = fs::read_to_string(&path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    serde_json::from_str(&contents)
+        .map_err(|err| format!("failed to parse {}: {err}", path.display()))
+}
+
+pub fn run_polynomial_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let cases = load_polynomial_metamorphic_cases(&config.fixture_root)?;
+    let total = cases.len();
+    let mut report = SuiteReport {
+        suite: "polynomial_metamorphic",
+        case_count: total,
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in &cases {
+        match evaluate_polynomial_metamorphic_relation(case) {
+            Ok(()) => report.pass_count += 1,
+            Err(err) => report.failures.push(format!("{}: {}", case.id, err.message)),
+        }
+    }
+    Ok(report)
+}
+
+fn evaluate_polynomial_metamorphic_relation(
+    case: &PolynomialMetamorphicCase,
+) -> Result<(), PolynomialSuiteError> {
+    let abs_tol = if case.abs_tol > 0.0 { case.abs_tol } else { 1e-12 };
+
+    match case.relation.as_str() {
+        "poly_add_zero_identity" => {
+            let p = polynomial_values_to_array(&case.coefficients)?;
+            let zero = polynomial_values_to_array(&vec![0.0; case.coefficients.len()])?;
+            let result = poly_family_add(&case.poly_family, &p, &zero)?;
+            poly_metamorphic_assert_eq(case, result.values(), &case.coefficients, abs_tol, "p + 0")
+        }
+        "poly_sub_self_zero" => {
+            let p = polynomial_values_to_array(&case.coefficients)?;
+            let result = poly_family_sub(&case.poly_family, &p, &p)?;
+            let expected = vec![0.0; result.values().len()];
+            poly_metamorphic_assert_eq(case, result.values(), &expected, abs_tol, "p - p")
+        }
+        "poly_mul_one_identity" => {
+            let p = polynomial_values_to_array(&case.coefficients)?;
+            let one = polynomial_values_to_array(&[1.0])?;
+            let result = poly_family_mul(&case.poly_family, &p, &one)?;
+            poly_metamorphic_assert_eq(case, result.values(), &case.coefficients, abs_tol, "p * 1")
+        }
+        "poly_deriv_integral_inverse" => {
+            let p = polynomial_values_to_array(&case.coefficients)?;
+            let integrated = poly_family_int(&case.poly_family, &p)?;
+            let derived = poly_family_deriv(&case.poly_family, &integrated)?;
+            poly_metamorphic_assert_eq(case, derived.values(), &case.coefficients, abs_tol, "deriv(int(p))")
+        }
+        "poly_add_commutative" => {
+            let a = polynomial_values_to_array(&case.coefficients_a)?;
+            let b = polynomial_values_to_array(&case.coefficients_b)?;
+            let ab = poly_family_add(&case.poly_family, &a, &b)?;
+            let ba = poly_family_add(&case.poly_family, &b, &a)?;
+            poly_metamorphic_assert_eq(case, ab.values(), ba.values(), abs_tol, "a+b == b+a")
+        }
+        "poly_mul_commutative" => {
+            let a = polynomial_values_to_array(&case.coefficients_a)?;
+            let b = polynomial_values_to_array(&case.coefficients_b)?;
+            let ab = poly_family_mul(&case.poly_family, &a, &b)?;
+            let ba = poly_family_mul(&case.poly_family, &b, &a)?;
+            poly_metamorphic_assert_eq(case, ab.values(), ba.values(), abs_tol, "a*b == b*a")
+        }
+        "poly_eval_linearity" => {
+            let a = polynomial_values_to_array(&case.coefficients_a)?;
+            let b = polynomial_values_to_array(&case.coefficients_b)?;
+            let x = case.eval_point;
+            let alpha = case.alpha;
+            let beta = case.beta;
+            let val_a = poly_family_val(&case.poly_family, &a, x)?;
+            let val_b = poly_family_val(&case.poly_family, &b, x)?;
+            let scaled_a = scale_coefficients(&case.coefficients_a, alpha);
+            let scaled_b = scale_coefficients(&case.coefficients_b, beta);
+            let combined = add_coefficients(&scaled_a, &scaled_b);
+            let combined_arr = polynomial_values_to_array(&combined)?;
+            let val_combined = poly_family_val(&case.poly_family, &combined_arr, x)?;
+            let expected = alpha * val_a + beta * val_b;
+            poly_metamorphic_assert_scalar_eq(case, val_combined, expected, abs_tol, "eval linearity")
+        }
+        "poly_double_derivative_consistent" => {
+            let p = polynomial_values_to_array(&case.coefficients)?;
+            let d1 = poly_family_deriv(&case.poly_family, &p)?;
+            let d2 = poly_family_deriv(&case.poly_family, &d1)?;
+            let d2_direct = poly_family_deriv_m(&case.poly_family, &p, 2)?;
+            poly_metamorphic_assert_eq(case, d2.values(), d2_direct.values(), abs_tol, "deriv(deriv(p)) == deriv(p, 2)")
+        }
+        "poly_mul_associative" => {
+            let a = polynomial_values_to_array(&case.coefficients_a)?;
+            let b = polynomial_values_to_array(&case.coefficients_b)?;
+            let c = polynomial_values_to_array(&case.coefficients_c)?;
+            let ab = poly_family_mul(&case.poly_family, &a, &b)?;
+            let ab_c = poly_family_mul(&case.poly_family, &ab, &c)?;
+            let bc = poly_family_mul(&case.poly_family, &b, &c)?;
+            let a_bc = poly_family_mul(&case.poly_family, &a, &bc)?;
+            poly_metamorphic_assert_eq(case, ab_c.values(), a_bc.values(), abs_tol, "(a*b)*c == a*(b*c)")
+        }
+        "poly_add_associative" => {
+            let a = polynomial_values_to_array(&case.coefficients_a)?;
+            let b = polynomial_values_to_array(&case.coefficients_b)?;
+            let c = polynomial_values_to_array(&case.coefficients_c)?;
+            let ab = poly_family_add(&case.poly_family, &a, &b)?;
+            let ab_c = poly_family_add(&case.poly_family, &ab, &c)?;
+            let bc = poly_family_add(&case.poly_family, &b, &c)?;
+            let a_bc = poly_family_add(&case.poly_family, &a, &bc)?;
+            poly_metamorphic_assert_eq(case, ab_c.values(), a_bc.values(), abs_tol, "(a+b)+c == a+(b+c)")
+        }
+        "poly_distributive" => {
+            let a = polynomial_values_to_array(&case.coefficients_a)?;
+            let b = polynomial_values_to_array(&case.coefficients_b)?;
+            let c = polynomial_values_to_array(&case.coefficients_c)?;
+            let bc = poly_family_add(&case.poly_family, &b, &c)?;
+            let a_bc = poly_family_mul(&case.poly_family, &a, &bc)?;
+            let ab = poly_family_mul(&case.poly_family, &a, &b)?;
+            let ac = poly_family_mul(&case.poly_family, &a, &c)?;
+            let ab_ac = poly_family_add(&case.poly_family, &ab, &ac)?;
+            poly_metamorphic_assert_eq(case, a_bc.values(), ab_ac.values(), abs_tol, "a*(b+c) == a*b + a*c")
+        }
+        "poly_neg_involution" => {
+            let p = polynomial_values_to_array(&case.coefficients)?;
+            let neg: Vec<f64> = case.coefficients.iter().map(|c| -c).collect();
+            let neg_arr = polynomial_values_to_array(&neg)?;
+            let neg_neg: Vec<f64> = neg.iter().map(|c| -c).collect();
+            poly_metamorphic_assert_eq(case, &neg_neg, &case.coefficients, abs_tol, "-(-p) == p")?;
+            let sum = poly_family_add(&case.poly_family, &p, &neg_arr)?;
+            let expected = vec![0.0; sum.values().len()];
+            poly_metamorphic_assert_eq(case, sum.values(), &expected, abs_tol, "p + (-p) == 0")
+        }
+        other => Err(PolynomialSuiteError::new(
+            "polynomial_policy_unknown_metamorphic_relation",
+            format!("unsupported polynomial metamorphic relation {other}"),
+        )),
+    }
+}
+
+fn poly_family_add(
+    family: &str,
+    a: &UFuncArray,
+    b: &UFuncArray,
+) -> Result<UFuncArray, PolynomialSuiteError> {
+    match family {
+        "polynomial1d" => a.polyadd(b).map_err(map_ufunc_error_to_polynomial_suite),
+        "chebyshev" => {
+            let v = chebadd(a.values(), b.values());
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        "legendre" => {
+            let v = legadd(a.values(), b.values());
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        "hermite" => {
+            let v = hermadd(a.values(), b.values());
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        "laguerre" => {
+            let v = lagadd(a.values(), b.values());
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        _ => Err(PolynomialSuiteError::new(
+            "polynomial_unknown_family",
+            format!("unknown polynomial family {family}"),
+        )),
+    }
+}
+
+fn poly_family_sub(
+    family: &str,
+    a: &UFuncArray,
+    b: &UFuncArray,
+) -> Result<UFuncArray, PolynomialSuiteError> {
+    match family {
+        "polynomial1d" => a.polysub(b).map_err(map_ufunc_error_to_polynomial_suite),
+        "chebyshev" => {
+            let v = chebsub(a.values(), b.values());
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        "legendre" => {
+            let v = legsub(a.values(), b.values());
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        "hermite" => {
+            let v = hermsub(a.values(), b.values());
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        "laguerre" => {
+            let v = lagsub(a.values(), b.values());
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        _ => Err(PolynomialSuiteError::new(
+            "polynomial_unknown_family",
+            format!("unknown polynomial family {family}"),
+        )),
+    }
+}
+
+fn poly_family_mul(
+    family: &str,
+    a: &UFuncArray,
+    b: &UFuncArray,
+) -> Result<UFuncArray, PolynomialSuiteError> {
+    match family {
+        "polynomial1d" => a.polymul(b).map_err(map_ufunc_error_to_polynomial_suite),
+        "chebyshev" => {
+            let v = chebmul(a.values(), b.values());
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        "legendre" => {
+            let v = legmul(a.values(), b.values());
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        "hermite" => {
+            let v = hermmul(a.values(), b.values());
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        "laguerre" => {
+            let v = lagmul(a.values(), b.values());
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        _ => Err(PolynomialSuiteError::new(
+            "polynomial_unknown_family",
+            format!("unknown polynomial family {family}"),
+        )),
+    }
+}
+
+fn poly_family_deriv(family: &str, p: &UFuncArray) -> Result<UFuncArray, PolynomialSuiteError> {
+    match family {
+        "polynomial1d" => p.polyder().map_err(map_ufunc_error_to_polynomial_suite),
+        "chebyshev" => {
+            let v = chebder(p.values(), 1);
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        "legendre" => {
+            let v = legder(p.values(), 1);
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        "hermite" => {
+            let v = hermder(p.values(), 1);
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        "laguerre" => {
+            let v = lagder(p.values(), 1);
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        _ => Err(PolynomialSuiteError::new(
+            "polynomial_unknown_family",
+            format!("unknown polynomial family {family}"),
+        )),
+    }
+}
+
+fn poly_family_deriv_m(
+    family: &str,
+    p: &UFuncArray,
+    m: usize,
+) -> Result<UFuncArray, PolynomialSuiteError> {
+    match family {
+        "polynomial1d" => {
+            let mut result = p.clone();
+            for _ in 0..m {
+                result = result.polyder().map_err(map_ufunc_error_to_polynomial_suite)?;
+            }
+            Ok(result)
+        }
+        "chebyshev" => {
+            let v = chebder(p.values(), m);
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        "legendre" => {
+            let v = legder(p.values(), m);
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        "hermite" => {
+            let v = hermder(p.values(), m);
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        "laguerre" => {
+            let v = lagder(p.values(), m);
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        _ => Err(PolynomialSuiteError::new(
+            "polynomial_unknown_family",
+            format!("unknown polynomial family {family}"),
+        )),
+    }
+}
+
+fn poly_family_int(family: &str, p: &UFuncArray) -> Result<UFuncArray, PolynomialSuiteError> {
+    match family {
+        "polynomial1d" => p.polyint().map_err(map_ufunc_error_to_polynomial_suite),
+        "chebyshev" => {
+            let v = chebint(p.values(), 1);
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        "legendre" => {
+            let v = legint(p.values(), 1);
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        "hermite" => {
+            let v = hermint(p.values(), 1);
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        "laguerre" => {
+            let v = lagint(p.values(), 1);
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+        }
+        _ => Err(PolynomialSuiteError::new(
+            "polynomial_unknown_family",
+            format!("unknown polynomial family {family}"),
+        )),
+    }
+}
+
+fn poly_family_val(family: &str, p: &UFuncArray, x: f64) -> Result<f64, PolynomialSuiteError> {
+    let x_arr = UFuncArray::new(vec![1], vec![x], DType::F64).unwrap();
+    match family {
+        "polynomial1d" => {
+            let result = UFuncArray::polyval(p, &x_arr).map_err(map_ufunc_error_to_polynomial_suite)?;
+            Ok(result.values()[0])
+        }
+        "chebyshev" => Ok(chebval(&[x], p.values())[0]),
+        "legendre" => Ok(legval(&[x], p.values())[0]),
+        "hermite" => Ok(hermval(&[x], p.values())[0]),
+        "laguerre" => Ok(lagval(&[x], p.values())[0]),
+        _ => Err(PolynomialSuiteError::new(
+            "polynomial_unknown_family",
+            format!("unknown polynomial family {family}"),
+        )),
+    }
+}
+
+fn scale_coefficients(coeffs: &[f64], scale: f64) -> Vec<f64> {
+    coeffs.iter().map(|c| c * scale).collect()
+}
+
+fn add_coefficients(a: &[f64], b: &[f64]) -> Vec<f64> {
+    let max_len = a.len().max(b.len());
+    let mut result = vec![0.0; max_len];
+    for (i, &v) in a.iter().enumerate() {
+        result[i] += v;
+    }
+    for (i, &v) in b.iter().enumerate() {
+        result[i] += v;
+    }
+    result
+}
+
+fn poly_metamorphic_assert_eq(
+    case: &PolynomialMetamorphicCase,
+    actual: &[f64],
+    expected: &[f64],
+    abs_tol: f64,
+    label: &str,
+) -> Result<(), PolynomialSuiteError> {
+    if actual.len() != expected.len() {
+        return Err(PolynomialSuiteError::new(
+            "polynomial_metamorphic_length_mismatch",
+            format!(
+                "{} {} length mismatch expected={} actual={}",
+                case.id, label, expected.len(), actual.len()
+            ),
+        ));
+    }
+    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+        if (a - e).abs() > abs_tol {
+            return Err(PolynomialSuiteError::new(
+                "polynomial_metamorphic_value_mismatch",
+                format!(
+                    "{} {} value mismatch at index {}: expected={e} actual={a} abs_tol={abs_tol}",
+                    case.id, label, i
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn poly_metamorphic_assert_scalar_eq(
+    case: &PolynomialMetamorphicCase,
+    actual: f64,
+    expected: f64,
+    abs_tol: f64,
+    label: &str,
+) -> Result<(), PolynomialSuiteError> {
+    if (actual - expected).abs() > abs_tol {
+        return Err(PolynomialSuiteError::new(
+            "polynomial_metamorphic_scalar_mismatch",
+            format!(
+                "{} {} scalar mismatch expected={expected} actual={actual} abs_tol={abs_tol}",
+                case.id, label
+            ),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -19587,7 +20088,8 @@ mod tests {
         run_io_metamorphic_suite, run_iter_adversarial_suite, run_iter_differential_suite,
         run_iter_metamorphic_suite, run_linalg_adversarial_suite, run_linalg_differential_suite,
         run_linalg_metamorphic_suite, run_masked_adversarial_suite, run_masked_differential_suite,
-        run_masked_metamorphic_suite, run_polynomial_differential_suite, run_rng_adversarial_suite,
+        run_masked_metamorphic_suite, run_polynomial_differential_suite,
+        run_polynomial_metamorphic_suite, run_rng_adversarial_suite,
         run_rng_differential_suite, run_rng_distribution_differential_suite,
         run_rng_metamorphic_suite, run_rng_statistical_suite,
         run_runtime_policy_adversarial_suite, run_runtime_policy_metamorphic_suite,
@@ -20502,6 +21004,14 @@ mod tests {
         let cfg = HarnessConfig::default_paths();
         let suite = run_polynomial_differential_suite(&cfg)
             .expect("polynomial differential suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn polynomial_metamorphic_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite = run_polynomial_metamorphic_suite(&cfg)
+            .expect("polynomial metamorphic suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 

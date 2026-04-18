@@ -176,5 +176,103 @@
     "reason_code": "poly_metamorphic_double_deriv_contract",
     "coefficients": [1.0, 2.0, 3.0, 4.0, 5.0],
     "poly_family": "polynomial1d"
+  },
+  {
+    "id": "poly_mul_associative_deg2",
+    "relation": "poly_mul_associative",
+    "seed": 10063,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-poly-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/polynomial.rs"
+    ],
+    "reason_code": "poly_metamorphic_mul_assoc_contract",
+    "coefficients_a": [1.0, 2.0],
+    "coefficients_b": [0.5, -0.5, 1.0],
+    "coefficients_c": [1.0, 1.0],
+    "poly_family": "polynomial1d",
+    "abs_tol": 1e-13
+  },
+  {
+    "id": "poly_add_associative_deg3",
+    "relation": "poly_add_associative",
+    "seed": 10064,
+    "mode": "strict",
+    "env_fingerprint": "fnp-poly-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/polynomial.rs"
+    ],
+    "reason_code": "poly_metamorphic_add_assoc_contract",
+    "coefficients_a": [1.0, 2.0, 3.0, 4.0],
+    "coefficients_b": [-0.5, 1.0, -1.5, 2.0],
+    "coefficients_c": [0.25, -0.25, 0.5, -0.5],
+    "poly_family": "polynomial1d"
+  },
+  {
+    "id": "poly_distribute_deg2",
+    "relation": "poly_distributive",
+    "seed": 10065,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-poly-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/polynomial.rs"
+    ],
+    "reason_code": "poly_metamorphic_distribute_contract",
+    "coefficients_a": [1.0, 2.0, 3.0],
+    "coefficients_b": [0.5, 1.0],
+    "coefficients_c": [-0.5, 0.5],
+    "poly_family": "polynomial1d",
+    "abs_tol": 1e-14
+  },
+  {
+    "id": "poly_neg_double_deg3",
+    "relation": "poly_neg_involution",
+    "seed": 10066,
+    "mode": "strict",
+    "env_fingerprint": "fnp-poly-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/polynomial.rs"
+    ],
+    "reason_code": "poly_metamorphic_neg_involution_contract",
+    "coefficients": [1.0, -2.0, 3.0, -4.0],
+    "poly_family": "polynomial1d"
+  },
+  {
+    "id": "cheb_mul_associative_deg2",
+    "relation": "poly_mul_associative",
+    "seed": 10067,
+    "mode": "strict",
+    "env_fingerprint": "fnp-poly-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/polynomial.rs"
+    ],
+    "reason_code": "poly_metamorphic_mul_assoc_contract",
+    "coefficients_a": [1.0, 0.5],
+    "coefficients_b": [0.25, 0.5, 0.25],
+    "coefficients_c": [0.5, -0.5],
+    "poly_family": "chebyshev",
+    "abs_tol": 1e-12
+  },
+  {
+    "id": "legendre_distribute_deg2",
+    "relation": "poly_distributive",
+    "seed": 10068,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-poly-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/polynomial.rs"
+    ],
+    "reason_code": "poly_metamorphic_distribute_contract",
+    "coefficients_a": [1.0, 1.0],
+    "coefficients_b": [0.5, 0.5, 0.5],
+    "coefficients_c": [-0.25, 0.25, -0.25],
+    "poly_family": "legendre",
+    "abs_tol": 1e-12
   }
 ]

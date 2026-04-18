@@ -196,5 +196,102 @@
     "input_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
     "input_dtype": "f64",
     "abs_tol": 1e-11
+  },
+  {
+    "id": "rfft_irfft_inverse_len8",
+    "relation": "rfft_irfft_inverse",
+    "seed": 8913,
+    "mode": "strict",
+    "env_fingerprint": "fnp-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_metamorphic_rfft_inverse_contract",
+    "input_shape": [8],
+    "input_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "input_dtype": "f64",
+    "abs_tol": 1e-12
+  },
+  {
+    "id": "rfft_irfft_inverse_len16",
+    "relation": "rfft_irfft_inverse",
+    "seed": 8914,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_metamorphic_rfft_inverse_contract",
+    "input_shape": [16],
+    "input_values": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6],
+    "input_dtype": "f64",
+    "abs_tol": 1e-12
+  },
+  {
+    "id": "fft_scale_reciprocal_len4",
+    "relation": "fft_scale_reciprocal",
+    "seed": 8915,
+    "mode": "strict",
+    "env_fingerprint": "fnp-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_metamorphic_scale_contract",
+    "input_shape": [4],
+    "input_values": [2.0, 4.0, 6.0, 8.0],
+    "scale_factor": 2.0,
+    "input_dtype": "f64",
+    "abs_tol": 1e-13
+  },
+  {
+    "id": "fft_real_dc_component_len8",
+    "relation": "fft_real_dc_component",
+    "seed": 8916,
+    "mode": "strict",
+    "env_fingerprint": "fnp-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_metamorphic_dc_real_contract",
+    "input_shape": [8],
+    "input_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "input_dtype": "f64",
+    "abs_tol": 1e-14
+  },
+  {
+    "id": "fft_conjugate_symmetry_len8",
+    "relation": "fft_conjugate_symmetry",
+    "seed": 8917,
+    "mode": "strict",
+    "env_fingerprint": "fnp-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_metamorphic_conjugate_symmetry_contract",
+    "input_shape": [8],
+    "input_values": [1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 4.0, -4.0],
+    "input_dtype": "f64",
+    "abs_tol": 1e-14
+  },
+  {
+    "id": "fft_zero_input_len4",
+    "relation": "fft_ifft_inverse",
+    "seed": 8918,
+    "mode": "strict",
+    "env_fingerprint": "fnp-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_metamorphic_cases.json",
+      "crates/fnp-ufunc/src/fft.rs"
+    ],
+    "reason_code": "fft_metamorphic_zero_inverse_contract",
+    "input_shape": [4],
+    "input_values": [0.0, 0.0, 0.0, 0.0],
+    "input_dtype": "f64",
+    "abs_tol": 1e-14
   }
 ]
