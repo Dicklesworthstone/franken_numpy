@@ -16,7 +16,7 @@
 | FFT | 30 | — | — | 30 | Adequate - transform families |
 | Datetime/timedelta | 34 | — | — | 34 | Adequate - arithmetic + busday |
 | Masked arrays | 27 | — | — | 27 | Adequate - reshape/concat/fill |
-| Iterator/transfer | 22 | 16 | 16 | 54 | Thin - complex NDIter system |
+| Iterator/transfer | 31 | 16 | 16 | 63 | Adequate - transfer/overlap/flatiter edges covered |
 | Shape/stride (SCE) | 36 | — | — | 36 | Adequate - 0-D, empty, negative-stride covered |
 | Dtype promotion | 59 | — | — | 59 | Adequate - 59/324 pairs (18.2%), key edge cases covered |
 | Runtime policy | 23 | — | 8 | 31 | Adequate - risk thresholds, boundaries covered |
@@ -52,17 +52,15 @@ Remaining gaps:
 - Override audit event logging
 - Evidence ledger serialization
 
-### 4. Iterator/Transfer System (MEDIUM)
+### 4. Iterator/Transfer System (LOW)
 
-**Current state:** 54 cases
-**Gap:** NDIter is a complex state machine
+**Current state:** 63 cases (31 diff + 16 meta + 16 adversarial)
+**Covered:** Transfer class selection, overlap copy direction, flatiter read/write, error cases
 
-Missing coverage:
+Remaining gaps:
 - Multi-operand iteration
 - External loop chunking
-- Seek operations
-- Reset mid-iteration
-- Overlap copy direction selection
+- Seek/reset mid-iteration
 
 ## Fixture Provenance
 
