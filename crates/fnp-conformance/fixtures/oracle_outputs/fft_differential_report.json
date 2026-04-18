@@ -1,7 +1,7 @@
 {
   "suite": "fft_differential",
-  "total_cases": 30,
-  "passed_cases": 30,
+  "total_cases": 38,
+  "passed_cases": 38,
   "failed_cases": 0,
   "mismatches": []
 }
