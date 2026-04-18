@@ -1148,5 +1148,37 @@
     "expected_values": [1.0, 0.0, 0.0],
     "abs_tol": 0.0,
     "rel_tol": 0.0
+  },
+  {
+    "id": "isdigit_mixed",
+    "operation": "isdigit",
+    "seed": 10036,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["123", "12a", "abc", ""],
+    "expected_values": [1.0, 0.0, 0.0, 0.0],
+    "abs_tol": 0.0,
+    "rel_tol": 0.0
+  },
+  {
+    "id": "title_case_conversion",
+    "operation": "title",
+    "seed": 10037,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["hello world", "HELLO WORLD", "hElLo WoRlD"],
+    "expected_strings": ["Hello World", "Hello World", "Hello World"]
   }
 ]
