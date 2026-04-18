@@ -871,5 +871,136 @@
     "expected_values": [3.0, 3.0],
     "abs_tol": 1e-12,
     "rel_tol": 1e-12
+  },
+  {
+    "id": "str_len_empty_strings",
+    "operation": "str_len",
+    "seed": 10019,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["", " ", "  ", "\t", "\n"],
+    "expected_values": [0.0, 1.0, 2.0, 1.0, 1.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "strip_whitespace_varieties",
+    "operation": "strip",
+    "seed": 10020,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["  hello  ", "\thello\t", "\nhello\n", "  hello"],
+    "expected_strings": ["hello", "hello", "hello", "hello"]
+  },
+  {
+    "id": "upper_empty_string",
+    "operation": "upper",
+    "seed": 10021,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["", " ", "123", "!@#"],
+    "expected_strings": ["", " ", "123", "!@#"]
+  },
+  {
+    "id": "add_empty_strings",
+    "operation": "add",
+    "seed": 10022,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["", "hello", ""],
+    "rhs_strings": ["world", "", ""],
+    "expected_strings": ["world", "hello", ""]
+  },
+  {
+    "id": "multiply_edge_cases",
+    "operation": "multiply",
+    "seed": 10023,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["ab", "x", ""],
+    "rhs_values": [0, 3, 5],
+    "expected_strings": ["", "xxx", ""]
+  },
+  {
+    "id": "find_not_found",
+    "operation": "find",
+    "seed": 10024,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["hello", "world", ""],
+    "arg_string": "xyz",
+    "expected_values": [-1.0, -1.0, -1.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "replace_empty_pattern",
+    "operation": "replace",
+    "seed": 10025,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["hello", "ab"],
+    "old_pattern": "l",
+    "new_pattern": "LL",
+    "expected_strings": ["heLLLLo", "ab"]
+  },
+  {
+    "id": "isalnum_mixed",
+    "operation": "isalnum",
+    "seed": 10026,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "string_differential_expected_success",
+    "expected_reason_code": "string_differential_expected_success",
+    "lhs_strings": ["abc123", "abc 123", "", "αβγ123"],
+    "expected_values": [1.0, 0.0, 0.0, 1.0],
+    "abs_tol": 0.0,
+    "rel_tol": 0.0
   }
 ]
