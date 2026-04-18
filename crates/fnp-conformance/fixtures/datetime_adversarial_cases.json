@@ -1,0 +1,185 @@
+[
+  {
+    "id": "datetime_nat_arithmetic",
+    "operation": "datetime_add",
+    "seed": 12201,
+    "mode": "strict",
+    "env_fingerprint": "fnp-datetime-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_adversarial_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_adversarial_nat_propagation",
+    "base_datetime": "NaT",
+    "delta_unit": "D",
+    "delta_value": 5,
+    "expected_behavior": "nat_result"
+  },
+  {
+    "id": "timedelta_nat_arithmetic",
+    "operation": "timedelta_add",
+    "seed": 12202,
+    "mode": "strict",
+    "env_fingerprint": "fnp-datetime-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_adversarial_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_adversarial_timedelta_nat",
+    "delta_a": "NaT",
+    "delta_b_unit": "h",
+    "delta_b_value": 24,
+    "expected_behavior": "nat_result"
+  },
+  {
+    "id": "datetime_compare_with_nat",
+    "operation": "datetime_compare",
+    "seed": 12203,
+    "mode": "strict",
+    "env_fingerprint": "fnp-datetime-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_adversarial_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_adversarial_nat_compare",
+    "datetime_a": "2024-06-15T12:00:00",
+    "datetime_b": "NaT",
+    "expected_behavior": "comparison_with_nat"
+  },
+  {
+    "id": "datetime_zero_timedelta",
+    "operation": "datetime_add",
+    "seed": 12204,
+    "mode": "strict",
+    "env_fingerprint": "fnp-datetime-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_adversarial_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_adversarial_zero_delta",
+    "base_datetime": "2024-06-15T12:00:00",
+    "delta_unit": "D",
+    "delta_value": 0,
+    "expected_datetime": "2024-06-15T12:00:00"
+  },
+  {
+    "id": "timedelta_negative_large",
+    "operation": "timedelta_create",
+    "seed": 12205,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-datetime-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_adversarial_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_adversarial_large_negative",
+    "delta_unit": "D",
+    "delta_value": -365000,
+    "expected_behavior": "valid_negative_delta"
+  },
+  {
+    "id": "datetime_epoch_boundary",
+    "operation": "datetime_create",
+    "seed": 12206,
+    "mode": "strict",
+    "env_fingerprint": "fnp-datetime-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_adversarial_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_adversarial_epoch",
+    "datetime": "1970-01-01T00:00:00",
+    "expected_behavior": "unix_epoch"
+  },
+  {
+    "id": "datetime_year_2038_boundary",
+    "operation": "datetime_create",
+    "seed": 12207,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-datetime-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_adversarial_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_adversarial_y2038",
+    "datetime": "2038-01-19T03:14:08",
+    "expected_behavior": "valid_datetime"
+  },
+  {
+    "id": "datetime_leap_second_boundary",
+    "operation": "datetime_create",
+    "seed": 12208,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-datetime-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_adversarial_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_adversarial_leap_second",
+    "datetime": "2016-12-31T23:59:60",
+    "expected_behavior": "leap_second_handling"
+  },
+  {
+    "id": "busday_empty_holidays",
+    "operation": "busday_offset",
+    "seed": 12209,
+    "mode": "strict",
+    "env_fingerprint": "fnp-datetime-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_adversarial_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_adversarial_busday_no_holidays",
+    "base_date": "2024-06-10",
+    "offset": 5,
+    "holidays": [],
+    "expected_behavior": "standard_weekdays"
+  },
+  {
+    "id": "busday_all_holidays",
+    "operation": "busday_offset",
+    "seed": 12210,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-datetime-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_adversarial_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_adversarial_busday_all_holidays",
+    "base_date": "2024-06-10",
+    "offset": 1,
+    "holidays": ["2024-06-10", "2024-06-11", "2024-06-12", "2024-06-13", "2024-06-14", "2024-06-17", "2024-06-18"],
+    "expected_behavior": "skip_all_holidays"
+  },
+  {
+    "id": "timedelta_mul_by_zero",
+    "operation": "timedelta_mul",
+    "seed": 12211,
+    "mode": "strict",
+    "env_fingerprint": "fnp-datetime-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_adversarial_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_adversarial_mul_zero",
+    "delta_unit": "h",
+    "delta_value": 24,
+    "multiplier": 0,
+    "expected_behavior": "zero_timedelta"
+  },
+  {
+    "id": "datetime_sub_same",
+    "operation": "datetime_sub",
+    "seed": 12212,
+    "mode": "strict",
+    "env_fingerprint": "fnp-datetime-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/datetime_adversarial_cases.json",
+      "crates/fnp-datetime/src/lib.rs"
+    ],
+    "reason_code": "datetime_adversarial_sub_same",
+    "datetime_a": "2024-06-15T12:00:00",
+    "datetime_b": "2024-06-15T12:00:00",
+    "expected_behavior": "zero_timedelta"
+  }
+]
