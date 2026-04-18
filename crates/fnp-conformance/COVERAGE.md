@@ -8,7 +8,7 @@
 |--------|:-----------:|:-----------:|:-----------:|:-----------:|---------------------|
 | Ufunc operations | 381 | 25 | 60 | 466 | Good - core ops well covered |
 | Signal processing | 295 | — | — | 295 | Good - extensive conv/corr/fft |
-| Polynomials | 88 | — | — | 88 | Good - all 5 families |
+| Polynomials | 92 | — | — | 92 | Good - all 5 families, edge cases |
 | I/O (npy/npz/text) | 66 | 35 | 33 | 134 | Good - parser boundaries covered |
 | Linear algebra | 63 | 25 | 35 | 123 | Good - core decompositions, 1x1 edge cases, identity |
 | String arrays | 65 | — | — | 65 | Good - 33 char functions, empty/pattern edge cases |
