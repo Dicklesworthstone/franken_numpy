@@ -1,0 +1,170 @@
+[
+  {
+    "id": "reshape_flatten_roundtrip_2d",
+    "relation": "reshape_flatten_roundtrip",
+    "seed": 201,
+    "mode": "strict",
+    "env_fingerprint": "fnp-sce-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_metamorphic_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_metamorphic_reshape_roundtrip_contract",
+    "original_shape": [3, 4],
+    "element_count": 12
+  },
+  {
+    "id": "reshape_flatten_roundtrip_3d",
+    "relation": "reshape_flatten_roundtrip",
+    "seed": 202,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-sce-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_metamorphic_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_metamorphic_reshape_roundtrip_contract",
+    "original_shape": [2, 3, 4],
+    "element_count": 24
+  },
+  {
+    "id": "transpose_transpose_identity_2d",
+    "relation": "transpose_transpose_identity",
+    "seed": 203,
+    "mode": "strict",
+    "env_fingerprint": "fnp-sce-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_metamorphic_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_metamorphic_transpose_identity_contract",
+    "shape": [4, 5]
+  },
+  {
+    "id": "transpose_transpose_identity_3d",
+    "relation": "transpose_transpose_identity",
+    "seed": 204,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-sce-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_metamorphic_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_metamorphic_transpose_identity_contract",
+    "shape": [2, 3, 4],
+    "axes": [2, 1, 0]
+  },
+  {
+    "id": "broadcast_scalar_idempotent",
+    "relation": "broadcast_scalar_idempotent",
+    "seed": 205,
+    "mode": "strict",
+    "env_fingerprint": "fnp-sce-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_metamorphic_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_metamorphic_broadcast_idempotent_contract",
+    "target_shape": [3, 4, 5]
+  },
+  {
+    "id": "broadcast_commutative_shapes",
+    "relation": "broadcast_commutative",
+    "seed": 206,
+    "mode": "strict",
+    "env_fingerprint": "fnp-sce-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_metamorphic_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_metamorphic_broadcast_commutative_contract",
+    "shape_a": [3, 1],
+    "shape_b": [1, 4]
+  },
+  {
+    "id": "squeeze_expand_inverse",
+    "relation": "squeeze_expand_inverse",
+    "seed": 207,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-sce-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_metamorphic_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_metamorphic_squeeze_expand_contract",
+    "original_shape": [1, 3, 1, 4, 1],
+    "axis_to_expand": 0
+  },
+  {
+    "id": "ravel_reshape_equivalence",
+    "relation": "ravel_reshape_equivalence",
+    "seed": 208,
+    "mode": "strict",
+    "env_fingerprint": "fnp-sce-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_metamorphic_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_metamorphic_ravel_reshape_contract",
+    "shape": [2, 3, 4]
+  },
+  {
+    "id": "contiguous_stride_product",
+    "relation": "contiguous_stride_product",
+    "seed": 209,
+    "mode": "strict",
+    "env_fingerprint": "fnp-sce-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_metamorphic_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_metamorphic_contiguous_stride_contract",
+    "shape": [3, 4, 5],
+    "itemsize": 8,
+    "order": "C"
+  },
+  {
+    "id": "fortran_stride_product",
+    "relation": "contiguous_stride_product",
+    "seed": 210,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-sce-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_metamorphic_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_metamorphic_contiguous_stride_contract",
+    "shape": [3, 4, 5],
+    "itemsize": 8,
+    "order": "F"
+  },
+  {
+    "id": "newaxis_dimension_increment",
+    "relation": "newaxis_dimension_increment",
+    "seed": 211,
+    "mode": "strict",
+    "env_fingerprint": "fnp-sce-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_metamorphic_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_metamorphic_newaxis_increment_contract",
+    "original_shape": [3, 4],
+    "axis": 1
+  },
+  {
+    "id": "broadcast_associative_shapes",
+    "relation": "broadcast_associative",
+    "seed": 212,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-sce-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/shape_stride_metamorphic_cases.json",
+      "crates/fnp-sce/src/lib.rs"
+    ],
+    "reason_code": "sce_metamorphic_broadcast_associative_contract",
+    "shape_a": [3, 1, 1],
+    "shape_b": [1, 4, 1],
+    "shape_c": [1, 1, 5]
+  }
+]
