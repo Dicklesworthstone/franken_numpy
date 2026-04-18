@@ -204,5 +204,46 @@
       "crates/fnp-conformance/fixtures/workflow_scenario_corpus.json"
     ],
     "reason_code": "dtype_safe_subset_same_kind"
+  },
+  {
+    "id": "dtype002_commutative_u64_f64",
+    "relation": "commutative",
+    "lhs": "u64",
+    "rhs": "f64",
+    "seed": 2215,
+    "mode": "strict",
+    "env_fingerprint": "fnp-dtype-packet002-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-002/contract_table.md",
+      "crates/fnp-conformance/fixtures/packet002_dtype/dtype_metamorphic_cases.json"
+    ],
+    "reason_code": "dtype_permutation_invariant"
+  },
+  {
+    "id": "dtype002_idempotent_complex64",
+    "relation": "idempotent",
+    "lhs": "complex64",
+    "seed": 2216,
+    "mode": "strict",
+    "env_fingerprint": "fnp-dtype-packet002-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-002/contract_table.md",
+      "crates/fnp-conformance/fixtures/packet002_dtype/dtype_metamorphic_cases.json"
+    ],
+    "reason_code": "dtype_idempotent"
+  },
+  {
+    "id": "dtype002_lossless_cast_destination_u8_u32",
+    "relation": "lossless_cast_destination",
+    "lhs": "u8",
+    "rhs": "u32",
+    "seed": 2217,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-dtype-packet002-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-002/contract_table.md",
+      "crates/fnp-conformance/fixtures/packet002_dtype/dtype_metamorphic_cases.json"
+    ],
+    "reason_code": "dtype_lossless_cast_destination"
   }
 ]
