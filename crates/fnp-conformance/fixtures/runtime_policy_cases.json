@@ -343,5 +343,35 @@
       "artifacts/contracts/security_control_checks_v1.yaml"
     ],
     "reason_code": "zero_threshold_all_validate"
+  },
+  {
+    "id": "strict_unknown_class_fail_closed",
+    "mode": "strict",
+    "class": "unknown",
+    "risk_score": 0.5,
+    "threshold": 0.7,
+    "expected_action": "fail_closed",
+    "seed": 124,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md",
+      "artifacts/contracts/hardened_mode_allowlist_v1.yaml"
+    ],
+    "reason_code": "unknown_class_strict_fails"
+  },
+  {
+    "id": "hardened_compatible_exactly_at_threshold",
+    "mode": "hardened",
+    "class": "known_compatible",
+    "risk_score": 0.7,
+    "threshold": 0.7,
+    "expected_action": "full_validate",
+    "seed": 125,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md",
+      "artifacts/contracts/security_control_checks_v1.yaml"
+    ],
+    "reason_code": "boundary_exact_threshold"
   }
 ]
