@@ -233,9 +233,9 @@
     "reason_code": "dtype_idempotent"
   },
   {
-    "id": "dtype002_lossless_cast_destination_u8_u32",
+    "id": "dtype002_lossless_cast_destination_uint8_u32",
     "relation": "lossless_cast_destination",
-    "lhs": "u8",
+    "lhs": "uint8",
     "rhs": "u32",
     "seed": 2217,
     "mode": "hardened",
