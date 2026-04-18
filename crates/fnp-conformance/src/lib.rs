@@ -5978,7 +5978,9 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     expected_reason_code: reason_code.clone(),
                     expected_error_contains: String::new(),
                 };
-                let Ok((neg_shape, neg_values, _)) = ufunc_differential::execute_input_case(&neg_case) else {
+                let Ok((neg_shape, neg_values, _)) =
+                    ufunc_differential::execute_input_case(&neg_case)
+                else {
                     report.failures.push(format!(
                         "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} failed evaluating neg(x)",
                         case.id, case.seed, mode, reason_code, env_fingerprint, artifact_refs.join(",")
@@ -6014,14 +6016,19 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     expected_reason_code: reason_code.clone(),
                     expected_error_contains: String::new(),
                 };
-                let Ok((_, neg_neg_values, _)) = ufunc_differential::execute_input_case(&neg_neg_case) else {
+                let Ok((_, neg_neg_values, _)) =
+                    ufunc_differential::execute_input_case(&neg_neg_case)
+                else {
                     report.failures.push(format!(
                         "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} failed evaluating neg(neg(x))",
                         case.id, case.seed, mode, reason_code, env_fingerprint, artifact_refs.join(",")
                     ));
                     continue;
                 };
-                let max_diff = case.lhs_values.iter().zip(neg_neg_values.iter())
+                let max_diff = case
+                    .lhs_values
+                    .iter()
+                    .zip(neg_neg_values.iter())
                     .map(|(a, b)| (a - b).abs())
                     .fold(0.0_f64, f64::max);
                 if max_diff > 1e-12 {
@@ -6064,7 +6071,9 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     expected_reason_code: reason_code.clone(),
                     expected_error_contains: String::new(),
                 };
-                let Ok((abs_shape, abs_values, _)) = ufunc_differential::execute_input_case(&abs_case) else {
+                let Ok((abs_shape, abs_values, _)) =
+                    ufunc_differential::execute_input_case(&abs_case)
+                else {
                     report.failures.push(format!(
                         "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} failed evaluating abs(x)",
                         case.id, case.seed, mode, reason_code, env_fingerprint, artifact_refs.join(",")
@@ -6100,14 +6109,18 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     expected_reason_code: reason_code.clone(),
                     expected_error_contains: String::new(),
                 };
-                let Ok((_, abs_abs_values, _)) = ufunc_differential::execute_input_case(&abs_abs_case) else {
+                let Ok((_, abs_abs_values, _)) =
+                    ufunc_differential::execute_input_case(&abs_abs_case)
+                else {
                     report.failures.push(format!(
                         "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} failed evaluating abs(abs(x))",
                         case.id, case.seed, mode, reason_code, env_fingerprint, artifact_refs.join(",")
                     ));
                     continue;
                 };
-                let max_diff = abs_values.iter().zip(abs_abs_values.iter())
+                let max_diff = abs_values
+                    .iter()
+                    .zip(abs_abs_values.iter())
                     .map(|(a, b)| (a - b).abs())
                     .fold(0.0_f64, f64::max);
                 if max_diff > 1e-12 {
@@ -6135,7 +6148,10 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     ));
                     continue;
                 };
-                let rhs_dtype = case.rhs_dtype.clone().unwrap_or_else(default_f64_dtype_name);
+                let rhs_dtype = case
+                    .rhs_dtype
+                    .clone()
+                    .unwrap_or_else(default_f64_dtype_name);
                 let lhs_rhs = UFuncInputCase {
                     id: format!("{}::lhs_rhs", case.id),
                     op: UFuncOperation::Maximum,
@@ -6194,7 +6210,17 @@ pub fn run_ufunc_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport
                     expected_reason_code: reason_code.clone(),
                     expected_error_contains: String::new(),
                 };
-                evaluate_commutative_pair(&case.id, case.seed, &mode, &reason_code, &env_fingerprint, &artifact_refs, lhs_rhs, rhs_lhs, &mut report)
+                evaluate_commutative_pair(
+                    &case.id,
+                    case.seed,
+                    &mode,
+                    &reason_code,
+                    &env_fingerprint,
+                    &artifact_refs,
+                    lhs_rhs,
+                    rhs_lhs,
+                    &mut report,
+                )
             }
             other => {
                 report.failures.push(format!(
@@ -6863,7 +6889,9 @@ pub fn run_linalg_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteRepor
                     }
                 };
                 let matrix_ref = &case.matrix;
-                let transposed: Vec<f64> = (0..n).flat_map(|i| (0..n).map(move |j| matrix_ref[j][i])).collect();
+                let transposed: Vec<f64> = (0..n)
+                    .flat_map(|i| (0..n).map(move |j| matrix_ref[j][i]))
+                    .collect();
                 let det_at = match fnp_linalg::det_nxn(&transposed, n) {
                     Ok(v) => v,
                     Err(e) => {
@@ -6957,7 +6985,11 @@ pub fn run_linalg_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteRepor
                         continue;
                     }
                 };
-                let max_diff = flat.iter().zip(inv_inv_a.iter()).map(|(a, b)| (a - b).abs()).fold(0.0_f64, f64::max);
+                let max_diff = flat
+                    .iter()
+                    .zip(inv_inv_a.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0_f64, f64::max);
                 if max_diff > 1e-9 {
                     report.failures.push(format!(
                         "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} inv_involutive mismatch max_diff={max_diff}",
@@ -7932,8 +7964,18 @@ fn evaluate_fft_metamorphic_relation(case: &FftMetamorphicCase) -> Result<(), Ff
                 let neg_idx = n - k;
                 let neg_re = transformed.values()[neg_idx * 2];
                 let neg_im = transformed.values()[neg_idx * 2 + 1];
-                fft_metamorphic_assert_scalar_equal(case, pos_re, neg_re, "conjugate symmetry real")?;
-                fft_metamorphic_assert_scalar_equal(case, pos_im, -neg_im, "conjugate symmetry imag")?;
+                fft_metamorphic_assert_scalar_equal(
+                    case,
+                    pos_re,
+                    neg_re,
+                    "conjugate symmetry real",
+                )?;
+                fft_metamorphic_assert_scalar_equal(
+                    case,
+                    pos_im,
+                    -neg_im,
+                    "conjugate symmetry imag",
+                )?;
             }
             Ok(())
         }
@@ -12335,7 +12377,9 @@ pub fn run_polynomial_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteR
     for case in &cases {
         match evaluate_polynomial_metamorphic_relation(case) {
             Ok(()) => report.pass_count += 1,
-            Err(err) => report.failures.push(format!("{}: {}", case.id, err.message)),
+            Err(err) => report
+                .failures
+                .push(format!("{}: {}", case.id, err.message)),
         }
     }
     Ok(report)
@@ -12344,7 +12388,11 @@ pub fn run_polynomial_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteR
 fn evaluate_polynomial_metamorphic_relation(
     case: &PolynomialMetamorphicCase,
 ) -> Result<(), PolynomialSuiteError> {
-    let abs_tol = if case.abs_tol > 0.0 { case.abs_tol } else { 1e-12 };
+    let abs_tol = if case.abs_tol > 0.0 {
+        case.abs_tol
+    } else {
+        1e-12
+    };
 
     match case.relation.as_str() {
         "poly_add_zero_identity" => {
@@ -12369,7 +12417,13 @@ fn evaluate_polynomial_metamorphic_relation(
             let p = polynomial_values_to_array(&case.coefficients)?;
             let integrated = poly_family_int(&case.poly_family, &p)?;
             let derived = poly_family_deriv(&case.poly_family, &integrated)?;
-            poly_metamorphic_assert_eq(case, derived.values(), &case.coefficients, abs_tol, "deriv(int(p))")
+            poly_metamorphic_assert_eq(
+                case,
+                derived.values(),
+                &case.coefficients,
+                abs_tol,
+                "deriv(int(p))",
+            )
         }
         "poly_add_commutative" => {
             let a = polynomial_values_to_array(&case.coefficients_a)?;
@@ -12399,14 +12453,26 @@ fn evaluate_polynomial_metamorphic_relation(
             let combined_arr = polynomial_values_to_array(&combined)?;
             let val_combined = poly_family_val(&case.poly_family, &combined_arr, x)?;
             let expected = alpha * val_a + beta * val_b;
-            poly_metamorphic_assert_scalar_eq(case, val_combined, expected, abs_tol, "eval linearity")
+            poly_metamorphic_assert_scalar_eq(
+                case,
+                val_combined,
+                expected,
+                abs_tol,
+                "eval linearity",
+            )
         }
         "poly_double_derivative_consistent" => {
             let p = polynomial_values_to_array(&case.coefficients)?;
             let d1 = poly_family_deriv(&case.poly_family, &p)?;
             let d2 = poly_family_deriv(&case.poly_family, &d1)?;
             let d2_direct = poly_family_deriv_m(&case.poly_family, &p, 2)?;
-            poly_metamorphic_assert_eq(case, d2.values(), d2_direct.values(), abs_tol, "deriv(deriv(p)) == deriv(p, 2)")
+            poly_metamorphic_assert_eq(
+                case,
+                d2.values(),
+                d2_direct.values(),
+                abs_tol,
+                "deriv(deriv(p)) == deriv(p, 2)",
+            )
         }
         "poly_mul_associative" => {
             let a = polynomial_values_to_array(&case.coefficients_a)?;
@@ -12416,7 +12482,13 @@ fn evaluate_polynomial_metamorphic_relation(
             let ab_c = poly_family_mul(&case.poly_family, &ab, &c)?;
             let bc = poly_family_mul(&case.poly_family, &b, &c)?;
             let a_bc = poly_family_mul(&case.poly_family, &a, &bc)?;
-            poly_metamorphic_assert_eq(case, ab_c.values(), a_bc.values(), abs_tol, "(a*b)*c == a*(b*c)")
+            poly_metamorphic_assert_eq(
+                case,
+                ab_c.values(),
+                a_bc.values(),
+                abs_tol,
+                "(a*b)*c == a*(b*c)",
+            )
         }
         "poly_add_associative" => {
             let a = polynomial_values_to_array(&case.coefficients_a)?;
@@ -12426,7 +12498,13 @@ fn evaluate_polynomial_metamorphic_relation(
             let ab_c = poly_family_add(&case.poly_family, &ab, &c)?;
             let bc = poly_family_add(&case.poly_family, &b, &c)?;
             let a_bc = poly_family_add(&case.poly_family, &a, &bc)?;
-            poly_metamorphic_assert_eq(case, ab_c.values(), a_bc.values(), abs_tol, "(a+b)+c == a+(b+c)")
+            poly_metamorphic_assert_eq(
+                case,
+                ab_c.values(),
+                a_bc.values(),
+                abs_tol,
+                "(a+b)+c == a+(b+c)",
+            )
         }
         "poly_distributive" => {
             let a = polynomial_values_to_array(&case.coefficients_a)?;
@@ -12437,7 +12515,13 @@ fn evaluate_polynomial_metamorphic_relation(
             let ab = poly_family_mul(&case.poly_family, &a, &b)?;
             let ac = poly_family_mul(&case.poly_family, &a, &c)?;
             let ab_ac = poly_family_add(&case.poly_family, &ab, &ac)?;
-            poly_metamorphic_assert_eq(case, a_bc.values(), ab_ac.values(), abs_tol, "a*(b+c) == a*b + a*c")
+            poly_metamorphic_assert_eq(
+                case,
+                a_bc.values(),
+                ab_ac.values(),
+                abs_tol,
+                "a*(b+c) == a*b + a*c",
+            )
         }
         "poly_neg_involution" => {
             let p = polynomial_values_to_array(&case.coefficients)?;
@@ -12581,7 +12665,9 @@ fn poly_family_deriv_m(
         "polynomial1d" => {
             let mut result = p.clone();
             for _ in 0..m {
-                result = result.polyder().map_err(map_ufunc_error_to_polynomial_suite)?;
+                result = result
+                    .polyder()
+                    .map_err(map_ufunc_error_to_polynomial_suite)?;
             }
             Ok(result)
         }
@@ -12638,7 +12724,8 @@ fn poly_family_val(family: &str, p: &UFuncArray, x: f64) -> Result<f64, Polynomi
     let x_arr = UFuncArray::new(vec![1], vec![x], DType::F64).unwrap();
     match family {
         "polynomial1d" => {
-            let result = UFuncArray::polyval(p, &x_arr).map_err(map_ufunc_error_to_polynomial_suite)?;
+            let result =
+                UFuncArray::polyval(p, &x_arr).map_err(map_ufunc_error_to_polynomial_suite)?;
             Ok(result.values()[0])
         }
         "chebyshev" => Ok(chebval(&[x], p.values())[0]),
@@ -12680,7 +12767,10 @@ fn poly_metamorphic_assert_eq(
             "polynomial_metamorphic_length_mismatch",
             format!(
                 "{} {} length mismatch expected={} actual={}",
-                case.id, label, expected.len(), actual.len()
+                case.id,
+                label,
+                expected.len(),
+                actual.len()
             ),
         ));
     }
@@ -14731,6 +14821,118 @@ fn evaluate_masked_metamorphic_relation(
                 "softened mask values",
             )
         }
+        "masked_add_commutative" => {
+            let lhs = masked_metamorphic_array_from_parts(
+                case,
+                &case.a_shape,
+                &case.a_values,
+                &case.a_mask,
+                case.fill_value,
+            )?;
+            let rhs = masked_metamorphic_array_from_parts(
+                case,
+                &case.b_shape,
+                &case.b_values,
+                &case.b_mask,
+                case.fill_value,
+            )?;
+            let lhs_rhs = lhs
+                .elementwise_binary(&rhs, BinaryOp::Add)
+                .map_err(map_ma_error_to_masked_suite)?;
+            let rhs_lhs = rhs
+                .elementwise_binary(&lhs, BinaryOp::Add)
+                .map_err(map_ma_error_to_masked_suite)?;
+            masked_metamorphic_assert_values_equal(
+                case,
+                lhs_rhs.data().values(),
+                rhs_lhs.data().values(),
+                "a+b == b+a data",
+            )?;
+            masked_metamorphic_assert_values_equal(
+                case,
+                &masked_metamorphic_array_mask_values(&lhs_rhs),
+                &masked_metamorphic_array_mask_values(&rhs_lhs),
+                "a+b == b+a mask",
+            )
+        }
+        "masked_mul_one_identity" => {
+            let array = masked_metamorphic_array(case)?;
+            let one_data = vec![1.0; array.size()];
+            let one_mask = vec![false; array.size()];
+            let one = masked_metamorphic_array_from_parts(
+                case,
+                &case.data_shape,
+                &one_data,
+                &one_mask,
+                case.fill_value,
+            )?;
+            let result = array
+                .elementwise_binary(&one, BinaryOp::Mul)
+                .map_err(map_ma_error_to_masked_suite)?;
+            masked_metamorphic_assert_values_equal(
+                case,
+                result.data().values(),
+                array.data().values(),
+                "a*1 == a data",
+            )?;
+            masked_metamorphic_assert_values_equal(
+                case,
+                &masked_metamorphic_array_mask_values(&result),
+                &masked_metamorphic_mask_to_f64(&case.mask),
+                "a*1 == a mask",
+            )
+        }
+        "masked_count_complement" => {
+            let array = masked_metamorphic_array(case)?;
+            let total = array.size();
+            let masked_count = array.count_masked();
+            let expected_masked = case.mask.iter().filter(|m| **m).count();
+            if masked_count != expected_masked {
+                return Err(MaskedSuiteError::new(
+                    "masked_metamorphic_relation_failed",
+                    format!(
+                        "masked count mismatch: {} != {}",
+                        masked_count, expected_masked
+                    ),
+                ));
+            }
+            if masked_count > total {
+                return Err(MaskedSuiteError::new(
+                    "masked_metamorphic_relation_failed",
+                    format!(
+                        "masked count exceeds total: {} > {}",
+                        masked_count, total
+                    ),
+                ));
+            }
+            Ok(())
+        }
+        "masked_filled_unmasked_unchanged" => {
+            let array = masked_metamorphic_unmasked_array(case)?;
+            let fill_value = case.fill_value.unwrap_or(0.0);
+            let filled = array
+                .filled(fill_value)
+                .map_err(map_ufunc_error_to_masked_suite)?;
+            masked_metamorphic_assert_values_equal(
+                case,
+                filled.values(),
+                &case.data_values,
+                "filled unmasked unchanged",
+            )
+        }
+        "masked_mean_unmasked_equals_regular" => {
+            let array = masked_metamorphic_unmasked_array(case)?;
+            let ma_mean = array.mean(None, false).map_err(map_ma_error_to_masked_suite)?;
+            let regular_mean: f64 =
+                case.data_values.iter().sum::<f64>() / case.data_values.len() as f64;
+            let actual = ma_mean.data().values().first().copied().ok_or_else(|| {
+                MaskedSuiteError::new(
+                    "masked_metamorphic_relation_failed",
+                    "mean returned empty array",
+                )
+            })?;
+            masked_metamorphic_assert_scalar_equal(case, actual, regular_mean, "unmasked mean")
+        }
         other => Err(MaskedSuiteError::new(
             "masked_policy_unknown_metamorphic_relation",
             format!("unsupported masked metamorphic relation {other}"),
@@ -16650,7 +16852,8 @@ fn evaluate_datetime_metamorphic_relation(
             let after = shifted_a
                 .elementwise_binary(&shifted_b, BinaryOp::Less)
                 .map_err(map_ufunc_error_to_datetime_suite)?;
-            if datetime_metamorphic_single_true(&before) == datetime_metamorphic_single_true(&after) {
+            if datetime_metamorphic_single_true(&before) == datetime_metamorphic_single_true(&after)
+            {
                 Ok(())
             } else {
                 Err(DateTimeSuiteError::new(
@@ -19211,15 +19414,16 @@ fn compare_f64_sequence(
         ));
     }
     for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
-        let exp_val = e
-            .as_f64()
-            .ok_or_else(|| RngSuiteError::new("random_distribution_parity_contract", format!("{case_id}: expected value at index {i} is not f64")))?;
+        let exp_val = e.as_f64().ok_or_else(|| {
+            RngSuiteError::new(
+                "random_distribution_parity_contract",
+                format!("{case_id}: expected value at index {i} is not f64"),
+            )
+        })?;
         if (a - exp_val).abs() > 1e-14 {
             return Err(RngSuiteError::new(
                 "random_distribution_parity_contract",
-                format!(
-                    "{case_id}: mismatch at index {i} expected={exp_val} actual={a}"
-                ),
+                format!("{case_id}: mismatch at index {i} expected={exp_val} actual={a}"),
             ));
         }
     }
@@ -19242,15 +19446,16 @@ fn compare_u64_sequence(
         ));
     }
     for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
-        let exp_val = e
-            .as_u64()
-            .ok_or_else(|| RngSuiteError::new("random_distribution_parity_contract", format!("{case_id}: expected value at index {i} is not u64")))?;
+        let exp_val = e.as_u64().ok_or_else(|| {
+            RngSuiteError::new(
+                "random_distribution_parity_contract",
+                format!("{case_id}: expected value at index {i} is not u64"),
+            )
+        })?;
         if *a != exp_val {
             return Err(RngSuiteError::new(
                 "random_distribution_parity_contract",
-                format!(
-                    "{case_id}: mismatch at index {i} expected={exp_val} actual={a}"
-                ),
+                format!("{case_id}: mismatch at index {i} expected={exp_val} actual={a}"),
             ));
         }
     }
@@ -19273,15 +19478,16 @@ fn compare_i64_sequence(
         ));
     }
     for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
-        let exp_val = e
-            .as_i64()
-            .ok_or_else(|| RngSuiteError::new("random_distribution_parity_contract", format!("{case_id}: expected value at index {i} is not i64")))?;
+        let exp_val = e.as_i64().ok_or_else(|| {
+            RngSuiteError::new(
+                "random_distribution_parity_contract",
+                format!("{case_id}: expected value at index {i} is not i64"),
+            )
+        })?;
         if *a != exp_val {
             return Err(RngSuiteError::new(
                 "random_distribution_parity_contract",
-                format!(
-                    "{case_id}: mismatch at index {i} expected={exp_val} actual={a}"
-                ),
+                format!("{case_id}: mismatch at index {i} expected={exp_val} actual={a}"),
             ));
         }
     }
@@ -19305,16 +19511,16 @@ fn compare_usize_sequence(
         ));
     }
     for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
-        let exp_val = e
-            .as_u64()
-            .ok_or_else(|| RngSuiteError::new("random_distribution_parity_contract", format!("{case_id}: expected value at index {i} is not u64")))?
-            as usize;
+        let exp_val = e.as_u64().ok_or_else(|| {
+            RngSuiteError::new(
+                "random_distribution_parity_contract",
+                format!("{case_id}: expected value at index {i} is not u64"),
+            )
+        })? as usize;
         if *a != exp_val {
             return Err(RngSuiteError::new(
                 "random_distribution_parity_contract",
-                format!(
-                    "{case_id}: mismatch at index {i} expected={exp_val} actual={a}"
-                ),
+                format!("{case_id}: mismatch at index {i} expected={exp_val} actual={a}"),
             ));
         }
     }
@@ -20164,16 +20370,16 @@ mod tests {
         run_iter_metamorphic_suite, run_linalg_adversarial_suite, run_linalg_differential_suite,
         run_linalg_metamorphic_suite, run_masked_adversarial_suite, run_masked_differential_suite,
         run_masked_metamorphic_suite, run_polynomial_differential_suite,
-        run_polynomial_metamorphic_suite, run_rng_adversarial_suite,
-        run_rng_differential_suite, run_rng_distribution_differential_suite,
-        run_rng_metamorphic_suite, run_rng_statistical_suite,
-        run_runtime_policy_adversarial_suite, run_runtime_policy_metamorphic_suite,
-        run_shape_stride_adversarial_suite, run_shape_stride_differential_suite,
-        run_shape_stride_metamorphic_suite, run_shape_stride_suite, run_signal_adversarial_suite,
-        run_signal_differential_suite, run_signal_metamorphic_suite, run_smoke,
-        run_string_adversarial_suite, run_string_differential_suite, run_string_metamorphic_suite,
-        run_ufunc_adversarial_suite, run_ufunc_differential_suite, run_ufunc_metamorphic_suite,
-        set_dtype_promotion_log_path, set_shape_stride_log_path,
+        run_polynomial_metamorphic_suite, run_rng_adversarial_suite, run_rng_differential_suite,
+        run_rng_distribution_differential_suite, run_rng_metamorphic_suite,
+        run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
+        run_runtime_policy_metamorphic_suite, run_shape_stride_adversarial_suite,
+        run_shape_stride_differential_suite, run_shape_stride_metamorphic_suite,
+        run_shape_stride_suite, run_signal_adversarial_suite, run_signal_differential_suite,
+        run_signal_metamorphic_suite, run_smoke, run_string_adversarial_suite,
+        run_string_differential_suite, run_string_metamorphic_suite, run_ufunc_adversarial_suite,
+        run_ufunc_differential_suite, run_ufunc_metamorphic_suite, set_dtype_promotion_log_path,
+        set_shape_stride_log_path,
     };
     use fnp_io::{IOSupportedDType, load as load_npy, save as save_npy};
     use fnp_iter::{

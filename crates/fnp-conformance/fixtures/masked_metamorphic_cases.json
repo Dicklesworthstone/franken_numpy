@@ -204,5 +204,89 @@
     "mask": [false, true, false, true, false],
     "hardmask": false,
     "data_dtype": "f64"
+  },
+  {
+    "id": "masked_add_commutative",
+    "relation": "masked_add_commutative",
+    "seed": 11113,
+    "mode": "strict",
+    "env_fingerprint": "fnp-masked-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_metamorphic_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_metamorphic_add_commutative_contract",
+    "a_shape": [6],
+    "a_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "a_mask": [false, true, false, false, true, false],
+    "b_shape": [6],
+    "b_values": [0.5, 1.0, 1.5, 2.0, 2.5, 3.0],
+    "b_mask": [false, false, true, false, false, true],
+    "data_dtype": "f64"
+  },
+  {
+    "id": "masked_mul_one_identity",
+    "relation": "masked_mul_one_identity",
+    "seed": 11114,
+    "mode": "strict",
+    "env_fingerprint": "fnp-masked-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_metamorphic_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_metamorphic_mul_one_contract",
+    "data_shape": [5],
+    "data_values": [1.0, 2.0, 3.0, 4.0, 5.0],
+    "mask": [false, true, false, true, false],
+    "data_dtype": "f64"
+  },
+  {
+    "id": "masked_count_complement",
+    "relation": "masked_count_complement",
+    "seed": 11115,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-masked-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_metamorphic_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_metamorphic_count_complement_contract",
+    "data_shape": [8],
+    "data_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "mask": [false, true, true, false, true, false, false, true],
+    "data_dtype": "f64"
+  },
+  {
+    "id": "masked_filled_unmasked_unchanged",
+    "relation": "masked_filled_unmasked_unchanged",
+    "seed": 11116,
+    "mode": "strict",
+    "env_fingerprint": "fnp-masked-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_metamorphic_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_metamorphic_filled_unmasked_contract",
+    "data_shape": [4],
+    "data_values": [1.0, 2.0, 3.0, 4.0],
+    "mask": [false, false, false, false],
+    "fill_value": 999.0,
+    "data_dtype": "f64"
+  },
+  {
+    "id": "masked_mean_unmasked_equals_regular",
+    "relation": "masked_mean_unmasked_equals_regular",
+    "seed": 11117,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-masked-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_metamorphic_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_metamorphic_mean_unmasked_contract",
+    "data_shape": [5],
+    "data_values": [2.0, 4.0, 6.0, 8.0, 10.0],
+    "mask": [false, false, false, false, false],
+    "data_dtype": "f64"
   }
 ]
