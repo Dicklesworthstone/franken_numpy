@@ -58,7 +58,8 @@
     "reason_code": "fft_adversarial_inf_handling",
     "input_shape": [4],
     "input_values": [1.0, "Inf", 3.0, "-Inf"],
-    "expected_behavior": "inf_propagates"
+    "expected_shape": [4, 2],
+    "expected_values": ["NaN", 0.0, -2.0, "-Inf", "NaN", 0.0, -2.0, "Inf"]
   },
   {
     "id": "fft_n_larger_than_input",
