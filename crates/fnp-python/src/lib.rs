@@ -668,9 +668,9 @@ fn split_helper_default(
 
     if sections == 0 {
         return match kind {
-            SplitHelperKind::Flexible => {
-                Err(PyValueError::new_err("number sections must be larger than 0."))
-            }
+            SplitHelperKind::Flexible => Err(PyValueError::new_err(
+                "number sections must be larger than 0.",
+            )),
             _ => Err(PyZeroDivisionError::new_err("integer modulo by zero")),
         };
     }
