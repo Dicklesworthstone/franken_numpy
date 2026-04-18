@@ -1204,6 +1204,8 @@ struct SignalMetamorphicCase {
     abs_tol: f64,
     #[serde(default)]
     rel_tol: f64,
+    #[serde(default)]
+    zero_len: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -9145,6 +9147,143 @@ fn evaluate_signal_metamorphic_relation(
                 "correlate time reversal",
             )
         }
+        "convolve_associative" => {
+            let mode = signal_metamorphic_mode(case);
+            let a = signal_metamorphic_real_array(&case.a_shape, &case.a_values)?;
+            let b = signal_metamorphic_real_array(&case.b_shape, &case.b_values)?;
+            let c = signal_metamorphic_real_array(&case.c_shape, &case.c_values)?;
+            let ab = a
+                .convolve_mode(&b, mode)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let left = ab
+                .convolve_mode(&c, mode)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let bc = b
+                .convolve_mode(&c, mode)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let right = a
+                .convolve_mode(&bc, mode)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            signal_metamorphic_assert_array_equal(case, &left, &right, "convolve associative")
+        }
+        "convolve_zero_input" => {
+            let zero_len = case.zero_len.ok_or_else(|| {
+                SignalSuiteError::new(
+                    "signal_input_contract_violation",
+                    "convolve_zero_input requires zero_len",
+                )
+            })?;
+            let zeros = UFuncArray::new(vec![zero_len], vec![0.0; zero_len], DType::F64)
+                .map_err(|e| SignalSuiteError::new("signal_array_construction", e.to_string()))?;
+            let b = signal_metamorphic_real_array(&case.b_shape, &case.b_values)?;
+            let mode = signal_metamorphic_mode(case);
+            let result = zeros
+                .convolve_mode(&b, mode)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let tol = signal_metamorphic_abs_tol(case);
+            for (idx, val) in result.values().iter().enumerate() {
+                if val.abs() > tol {
+                    return Err(SignalSuiteError::new(
+                        "signal_metamorphic_relation_failed",
+                        format!("convolve_zero_input: expected zeros, got {} at index {}", val, idx),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        "convolve_length_relation" => {
+            let a = signal_metamorphic_real_array(&case.a_shape, &case.a_values)?;
+            let b = signal_metamorphic_real_array(&case.b_shape, &case.b_values)?;
+            let result = a
+                .convolve_mode(&b, "full")
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let expected_len = a.values().len() + b.values().len() - 1;
+            if result.values().len() != expected_len {
+                return Err(SignalSuiteError::new(
+                    "signal_metamorphic_relation_failed",
+                    format!(
+                        "convolve_length_relation: expected len {}, got {}",
+                        expected_len,
+                        result.values().len()
+                    ),
+                ));
+            }
+            Ok(())
+        }
+        "correlate_energy_preservation" => {
+            let a = signal_metamorphic_real_array(&case.a_shape, &case.a_values)?;
+            let corr = a
+                .correlate_mode(&a, "full")
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let center = a.values().len() - 1;
+            let autocorr_at_zero = corr.values()[center];
+            let energy: f64 = a.values().iter().map(|x| x * x).sum();
+            let tol = signal_metamorphic_abs_tol(case);
+            if (autocorr_at_zero - energy).abs() > tol {
+                return Err(SignalSuiteError::new(
+                    "signal_metamorphic_relation_failed",
+                    format!(
+                        "correlate_energy_preservation: autocorr[0]={} != energy={}",
+                        autocorr_at_zero, energy
+                    ),
+                ));
+            }
+            Ok(())
+        }
+        "convolve_sum_preservation" => {
+            let a = signal_metamorphic_real_array(&case.a_shape, &case.a_values)?;
+            let b = signal_metamorphic_real_array(&case.b_shape, &case.b_values)?;
+            let result = a
+                .convolve_mode(&b, "full")
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let sum_a: f64 = a.values().iter().sum();
+            let sum_b: f64 = b.values().iter().sum();
+            let sum_result: f64 = result.values().iter().sum();
+            let expected = sum_a * sum_b;
+            let tol = signal_metamorphic_abs_tol(case);
+            if (sum_result - expected).abs() > tol {
+                return Err(SignalSuiteError::new(
+                    "signal_metamorphic_relation_failed",
+                    format!(
+                        "convolve_sum_preservation: sum(conv)={} != sum(a)*sum(b)={}",
+                        sum_result, expected
+                    ),
+                ));
+            }
+            Ok(())
+        }
+        "correlate_shift_invariant" => {
+            let a = signal_metamorphic_real_array(&case.a_shape, &case.a_values)?;
+            let b = signal_metamorphic_real_array(&case.b_shape, &case.b_values)?;
+            let corr = a
+                .correlate_mode(&b, "full")
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            if corr.values().is_empty() {
+                return Err(SignalSuiteError::new(
+                    "signal_metamorphic_relation_failed",
+                    "correlate_shift_invariant: empty correlation result",
+                ));
+            }
+            let max_idx = corr
+                .values()
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+            let expected_shift = (a.values().len() as isize) - 1;
+            let actual_shift = max_idx as isize;
+            if (actual_shift - expected_shift).abs() > 2 {
+                return Err(SignalSuiteError::new(
+                    "signal_metamorphic_relation_failed",
+                    format!(
+                        "correlate_shift_invariant: max correlation at {} but expected near {}",
+                        actual_shift, expected_shift
+                    ),
+                ));
+            }
+            Ok(())
+        }
         other => Err(SignalSuiteError::new(
             "signal_policy_unknown_metamorphic_relation",
             format!("unsupported signal metamorphic relation {other}"),
@@ -13837,7 +13976,11 @@ fn evaluate_string_metamorphic_relation(
                 .zip(case.input_strings.iter())
                 .map(|(filled_str, orig)| {
                     let expected_len = std::cmp::max(width, orig.len());
-                    if filled_str.len() == expected_len { 1.0 } else { 0.0 }
+                    if filled_str.len() == expected_len {
+                        1.0
+                    } else {
+                        0.0
+                    }
                 })
                 .collect();
             let expected = vec![1.0; case.input_strings.len()];
@@ -13860,8 +14003,11 @@ fn evaluate_string_metamorphic_relation(
             let input = string_values_to_array(&case.input_strings)?;
             let digit = input.isdigit();
             let numeric = input.isnumeric();
-            for (idx, (digit_val, numeric_val)) in
-                digit.values().iter().zip(numeric.values().iter()).enumerate()
+            for (idx, (digit_val, numeric_val)) in digit
+                .values()
+                .iter()
+                .zip(numeric.values().iter())
+                .enumerate()
             {
                 if *digit_val != 0.0 && *numeric_val == 0.0 {
                     return Err(StringSuiteError::new(
@@ -13883,8 +14029,11 @@ fn evaluate_string_metamorphic_relation(
             }
             let input = string_values_to_array(&case.input_strings)?;
             let replaced = input.replace("", &case.insert_char);
-            for (idx, (replaced_str, orig)) in
-                replaced.values().iter().zip(case.input_strings.iter()).enumerate()
+            for (idx, (replaced_str, orig)) in replaced
+                .values()
+                .iter()
+                .zip(case.input_strings.iter())
+                .enumerate()
             {
                 let expected_len = orig.len() + (orig.len() + 1) * case.insert_char.len();
                 if replaced_str.len() != expected_len {
