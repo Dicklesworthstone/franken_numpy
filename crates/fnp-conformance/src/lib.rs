@@ -37,8 +37,8 @@ use fnp_random::{
 };
 use fnp_runtime::{
     CompatibilityClass, DecisionAction, DecisionAuditContext, EvidenceLedger, OverrideAuditEvent,
-    RuntimeMode, decide_and_record_with_context, decide_compatibility_from_wire,
-    evaluate_policy_override,
+    RuntimeMode, decide_and_record_with_context, decide_compatibility,
+    decide_compatibility_from_wire, evaluate_policy_override,
 };
 use fnp_ufunc::{
     BinaryOp, MAError, MaskedArray, QuantileInterp, StringArray, UFuncArray, UFuncError, UnaryOp,
@@ -298,6 +298,52 @@ struct PolicyAdversarialFixtureCase {
     artifact_refs: Vec<String>,
     #[serde(default)]
     reason_code: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimePolicyMetamorphicCase {
+    id: String,
+    relation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    risk_score: f64,
+    #[serde(default)]
+    threshold_low: f64,
+    #[serde(default)]
+    threshold_high: f64,
+    #[serde(default)]
+    risk_a: f64,
+    #[serde(default)]
+    risk_b: f64,
+    #[serde(default)]
+    threshold: f64,
+    #[serde(default)]
+    compatibility_class: String,
+    #[serde(default)]
+    override_key: String,
+    #[serde(default)]
+    override_value: bool,
+    #[serde(default)]
+    class_a: String,
+    #[serde(default)]
+    class_b: String,
+    #[serde(default)]
+    class_c: String,
+    #[serde(default)]
+    expected_decision: String,
+    #[serde(default)]
+    operation: String,
+    #[serde(default)]
+    description: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1980,6 +2026,24 @@ fn load_iter_adversarial_cases(fixture_root: &Path) -> Result<Vec<IterAdversaria
     let raw = fs::read_to_string(&path)
         .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
     serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
+}
+
+fn load_runtime_policy_metamorphic_cases(
+    fixture_root: &Path,
+) -> Result<Vec<RuntimePolicyMetamorphicCase>, String> {
+    let path = fixture_root.join("runtime_policy_metamorphic_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))?;
+    let cases = value
+        .as_array()
+        .ok_or_else(|| "runtime policy metamorphic fixture must be an array".to_string())?;
+    cases
+        .iter()
+        .cloned()
+        .map(|case| serde_json::from_value(case).map_err(|err| format!("invalid json: {err}")))
+        .collect()
 }
 
 fn resolve_packet_fixture_path(fixture_root: &Path, packet_dir: &str, file_name: &str) -> PathBuf {
@@ -4752,6 +4816,316 @@ pub fn run_runtime_policy_adversarial_suite(config: &HarnessConfig) -> Result<Su
     validate_runtime_policy_log_fields(&mut report, ledger.events());
 
     Ok(report)
+}
+
+pub fn run_runtime_policy_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let cases = load_runtime_policy_metamorphic_cases(&config.fixture_root)?;
+
+    let mut report = SuiteReport {
+        suite: "runtime_policy_metamorphic",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+        let description = case.description.trim();
+
+        match evaluate_runtime_policy_metamorphic_relation(&case) {
+            Ok(()) => {
+                report.pass_count += 1;
+            }
+            Err(message) => {
+                report.failures.push(format!(
+                    "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} description={} {}",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    description,
+                    message
+                ));
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+fn evaluate_runtime_policy_metamorphic_relation(
+    case: &RuntimePolicyMetamorphicCase,
+) -> Result<(), String> {
+    match case.relation.as_str() {
+        "threshold_monotonicity" => {
+            let mode = runtime_policy_metamorphic_mode(case)?;
+            let class = CompatibilityClass::KnownCompatible;
+            let low = decide_compatibility(mode, class, case.risk_score, case.threshold_low);
+            let high = decide_compatibility(mode, class, case.risk_score, case.threshold_high);
+            if runtime_policy_metamorphic_is_accept(low)
+                && !runtime_policy_metamorphic_is_accept(high)
+            {
+                return Err(format!(
+                    "threshold monotonicity violated: threshold_low={} action_low={low:?} threshold_high={} action_high={high:?}",
+                    case.threshold_low, case.threshold_high
+                ));
+            }
+            Ok(())
+        }
+        "risk_ordering" => {
+            let mode = runtime_policy_metamorphic_mode(case)?;
+            let class = CompatibilityClass::KnownCompatible;
+            let lower = decide_compatibility(mode, class, case.risk_a, case.threshold);
+            let higher = decide_compatibility(mode, class, case.risk_b, case.threshold);
+            if runtime_policy_metamorphic_is_accept(higher)
+                && !runtime_policy_metamorphic_is_accept(lower)
+            {
+                return Err(format!(
+                    "risk ordering violated: risk_a={} action_a={lower:?} risk_b={} action_b={higher:?} threshold={}",
+                    case.risk_a, case.risk_b, case.threshold
+                ));
+            }
+            Ok(())
+        }
+        "mode_subsumption" => {
+            let class = runtime_policy_metamorphic_class(&case.compatibility_class);
+            let strict = decide_compatibility(RuntimeMode::Strict, class, 1.0, 0.0);
+            let hardened = decide_compatibility(RuntimeMode::Hardened, class, 1.0, 0.0);
+            if runtime_policy_metamorphic_is_reject(hardened)
+                && !runtime_policy_metamorphic_is_reject(strict)
+            {
+                return Err(format!(
+                    "mode subsumption violated: class={} strict={strict:?} hardened={hardened:?}",
+                    case.compatibility_class
+                ));
+            }
+            Ok(())
+        }
+        "override_idempotent" => {
+            let mode = runtime_policy_metamorphic_mode(case)?;
+            let allowlisted = if case.override_value {
+                vec![case.override_key.as_str()]
+            } else {
+                Vec::new()
+            };
+            let first = evaluate_policy_override(
+                mode,
+                CompatibilityClass::KnownCompatible,
+                &case.override_key,
+                &allowlisted,
+                &case.id,
+                "runtime_policy_metamorphic",
+                &case.reason_code,
+            );
+            let second = evaluate_policy_override(
+                mode,
+                CompatibilityClass::KnownCompatible,
+                &case.override_key,
+                &allowlisted,
+                &case.id,
+                "runtime_policy_metamorphic",
+                &case.reason_code,
+            );
+            if first.approved != second.approved
+                || first.action != second.action
+                || first.audit_ref != second.audit_ref
+            {
+                return Err(format!(
+                    "override idempotence violated: first approved={} action={:?} audit_ref={} second approved={} action={:?} audit_ref={}",
+                    first.approved,
+                    first.action,
+                    first.audit_ref,
+                    second.approved,
+                    second.action,
+                    second.audit_ref
+                ));
+            }
+            Ok(())
+        }
+        "class_hierarchy_transitive" => {
+            let a = runtime_policy_metamorphic_class_rank(&case.class_a)?;
+            let b = runtime_policy_metamorphic_class_rank(&case.class_b)?;
+            let c = runtime_policy_metamorphic_class_rank(&case.class_c)?;
+            if a <= b && b <= c && a <= c {
+                Ok(())
+            } else {
+                Err(format!(
+                    "class hierarchy not transitive: {}({a}) {}({b}) {}({c})",
+                    case.class_a, case.class_b, case.class_c
+                ))
+            }
+        }
+        "threshold_boundary" => {
+            let action = decide_compatibility(
+                RuntimeMode::Hardened,
+                CompatibilityClass::KnownCompatible,
+                case.risk_score,
+                case.threshold,
+            );
+            if runtime_policy_metamorphic_expected_decision_matches(action, &case.expected_decision)
+            {
+                Ok(())
+            } else {
+                Err(format!(
+                    "threshold boundary mismatch: risk={} threshold={} expected_decision={} actual_action={action:?}",
+                    case.risk_score, case.threshold, case.expected_decision
+                ))
+            }
+        }
+        "class_acceptance" | "class_rejection" => {
+            let mode = runtime_policy_metamorphic_mode(case)?;
+            let class = runtime_policy_metamorphic_class(&case.compatibility_class);
+            let action = decide_compatibility(mode, class, case.risk_score, case.threshold);
+            if runtime_policy_metamorphic_expected_decision_matches(action, &case.expected_decision)
+            {
+                Ok(())
+            } else {
+                Err(format!(
+                    "class decision mismatch: class={} expected_decision={} actual_action={action:?}",
+                    case.compatibility_class, case.expected_decision
+                ))
+            }
+        }
+        "audit_deterministic" => {
+            let mode = runtime_policy_metamorphic_mode(case)?;
+            let class = CompatibilityClass::KnownCompatible;
+            let mut first_ledger = EvidenceLedger::new();
+            let mut second_ledger = EvidenceLedger::new();
+            let context = runtime_policy_metamorphic_audit_context(case);
+            let first_action = decide_and_record_with_context(
+                &mut first_ledger,
+                mode,
+                class,
+                case.risk_score,
+                case.threshold,
+                context.clone(),
+                case.operation.clone(),
+            );
+            let second_action = decide_and_record_with_context(
+                &mut second_ledger,
+                mode,
+                class,
+                case.risk_score,
+                case.threshold,
+                context,
+                case.operation.clone(),
+            );
+            let first = first_ledger
+                .last()
+                .ok_or_else(|| "first audit call did not record an event".to_string())?;
+            let second = second_ledger
+                .last()
+                .ok_or_else(|| "second audit call did not record an event".to_string())?;
+            if first_action != second_action
+                || first.mode != second.mode
+                || first.class != second.class
+                || first.risk_score != second.risk_score
+                || first.action != second.action
+                || first.fixture_id != second.fixture_id
+                || first.seed != second.seed
+                || first.env_fingerprint != second.env_fingerprint
+                || first.artifact_refs != second.artifact_refs
+                || first.reason_code != second.reason_code
+                || first.note != second.note
+            {
+                return Err("audit determinism violated for stable fields".to_string());
+            }
+            Ok(())
+        }
+        "decision_audit_order" => {
+            let mode = runtime_policy_metamorphic_mode(case)?;
+            let class = CompatibilityClass::KnownCompatible;
+            let direct = decide_compatibility(mode, class, case.risk_score, case.threshold);
+            let mut ledger = EvidenceLedger::new();
+            let audited = decide_and_record_with_context(
+                &mut ledger,
+                mode,
+                class,
+                case.risk_score,
+                case.threshold,
+                runtime_policy_metamorphic_audit_context(case),
+                "decision_audit_order",
+            );
+            if direct == audited {
+                Ok(())
+            } else {
+                Err(format!(
+                    "decision changed when audited: direct={direct:?} audited={audited:?}"
+                ))
+            }
+        }
+        other => Err(format!(
+            "unsupported runtime policy metamorphic relation {other}"
+        )),
+    }
+}
+
+fn runtime_policy_metamorphic_mode(
+    case: &RuntimePolicyMetamorphicCase,
+) -> Result<RuntimeMode, String> {
+    RuntimeMode::from_wire(case.mode.trim())
+        .ok_or_else(|| format!("invalid runtime policy mode {}", case.mode))
+}
+
+fn runtime_policy_metamorphic_class(raw: &str) -> CompatibilityClass {
+    match raw.trim() {
+        "compatible" => CompatibilityClass::KnownCompatible,
+        "minor_incompatible" | "major_incompatible" => CompatibilityClass::KnownIncompatible,
+        "breaking" => CompatibilityClass::KnownIncompatible,
+        other => CompatibilityClass::from_wire(other),
+    }
+}
+
+fn runtime_policy_metamorphic_class_rank(raw: &str) -> Result<u8, String> {
+    match raw.trim() {
+        "compatible" | "known_compatible" => Ok(0),
+        "minor_incompatible" | "unknown" | "unknown_semantics" => Ok(1),
+        "major_incompatible" | "known_incompatible" | "known_incompatible_semantics" => Ok(2),
+        "breaking" => Ok(3),
+        other => Err(format!("unknown policy class {other}")),
+    }
+}
+
+fn runtime_policy_metamorphic_is_accept(action: DecisionAction) -> bool {
+    matches!(action, DecisionAction::Allow)
+}
+
+fn runtime_policy_metamorphic_is_reject(action: DecisionAction) -> bool {
+    matches!(
+        action,
+        DecisionAction::FailClosed | DecisionAction::FullValidate
+    )
+}
+
+fn runtime_policy_metamorphic_expected_decision_matches(
+    action: DecisionAction,
+    expected: &str,
+) -> bool {
+    match expected.trim() {
+        "accept" => runtime_policy_metamorphic_is_accept(action),
+        "reject" => runtime_policy_metamorphic_is_reject(action),
+        "allow" => matches!(action, DecisionAction::Allow),
+        "full_validate" => matches!(action, DecisionAction::FullValidate),
+        "fail_closed" => matches!(action, DecisionAction::FailClosed),
+        _ => false,
+    }
+}
+
+fn runtime_policy_metamorphic_audit_context(
+    case: &RuntimePolicyMetamorphicCase,
+) -> DecisionAuditContext {
+    DecisionAuditContext {
+        fixture_id: case.id.clone(),
+        seed: case.seed,
+        env_fingerprint: normalize_env_fingerprint(&case.env_fingerprint),
+        artifact_refs: normalize_artifact_refs(case.artifact_refs.clone()),
+        reason_code: normalize_reason_code(&case.reason_code),
+    }
 }
 
 pub fn run_override_audit_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
@@ -13867,6 +14241,7 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
         run_dtype_promotion_suite(config)?,
         run_runtime_policy_suite(config)?,
         run_runtime_policy_adversarial_suite(config)?,
+        run_runtime_policy_metamorphic_suite(config)?,
         run_override_audit_suite(config)?,
         run_rng_differential_suite(config)?,
         run_rng_metamorphic_suite(config)?,
@@ -16052,11 +16427,12 @@ mod tests {
         run_linalg_metamorphic_suite, run_masked_differential_suite, run_masked_metamorphic_suite,
         run_polynomial_differential_suite, run_rng_adversarial_suite, run_rng_differential_suite,
         run_rng_metamorphic_suite, run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
-        run_shape_stride_adversarial_suite, run_shape_stride_differential_suite,
-        run_shape_stride_metamorphic_suite, run_shape_stride_suite, run_signal_differential_suite,
-        run_signal_metamorphic_suite, run_smoke, run_string_differential_suite,
-        run_string_metamorphic_suite, run_ufunc_adversarial_suite, run_ufunc_differential_suite,
-        run_ufunc_metamorphic_suite, set_dtype_promotion_log_path, set_shape_stride_log_path,
+        run_runtime_policy_metamorphic_suite, run_shape_stride_adversarial_suite,
+        run_shape_stride_differential_suite, run_shape_stride_metamorphic_suite,
+        run_shape_stride_suite, run_signal_differential_suite, run_signal_metamorphic_suite,
+        run_smoke, run_string_differential_suite, run_string_metamorphic_suite,
+        run_ufunc_adversarial_suite, run_ufunc_differential_suite, run_ufunc_metamorphic_suite,
+        set_dtype_promotion_log_path, set_shape_stride_log_path,
     };
     use fnp_io::{IOSupportedDType, load as load_npy, save as save_npy};
     use fnp_iter::{
@@ -16400,6 +16776,14 @@ mod tests {
         let cfg = HarnessConfig::default_paths();
         let suite =
             run_runtime_policy_adversarial_suite(&cfg).expect("adversarial suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn runtime_policy_metamorphic_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite = run_runtime_policy_metamorphic_suite(&cfg)
+            .expect("runtime policy metamorphic suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 
