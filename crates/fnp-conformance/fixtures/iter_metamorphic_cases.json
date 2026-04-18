@@ -290,5 +290,61 @@
       "dst_offset": 16,
       "byte_len": 16
     }
+  },
+  {
+    "id": "iter_selector_deterministic_unaligned",
+    "relation": "selector_deterministic",
+    "seed": 4217,
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_metamorphic_cases.json"
+    ],
+    "reason_code": "nditer_constructor_contract",
+    "selector": {
+      "src_stride": 4,
+      "dst_stride": 8,
+      "item_size": 4,
+      "element_count": 128,
+      "aligned": false,
+      "cast_is_lossless": true,
+      "same_value_cast": false
+    }
+  },
+  {
+    "id": "iter_nditer_flags_broadcast_enabled",
+    "relation": "nditer_flags_idempotent",
+    "seed": 4218,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_metamorphic_cases.json"
+    ],
+    "reason_code": "nditer_overlap_policy_contract",
+    "flags": {
+      "copy_if_overlap": false,
+      "no_broadcast": false,
+      "observed_overlap": false,
+      "observed_broadcast": true
+    }
+  },
+  {
+    "id": "iter_overlap_repeatable_zero_length",
+    "relation": "overlap_repeatable",
+    "seed": 4219,
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_metamorphic_cases.json"
+    ],
+    "reason_code": "nditer_overlap_policy_contract",
+    "overlap": {
+      "src_offset": 0,
+      "dst_offset": 0,
+      "byte_len": 0
+    }
   }
 ]
