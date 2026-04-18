@@ -1040,6 +1040,46 @@ struct SignalDifferentialCase {
 }
 
 #[derive(Debug, Deserialize)]
+struct SignalMetamorphicCase {
+    id: String,
+    relation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    a_shape: Vec<usize>,
+    #[serde(default)]
+    a_values: Vec<f64>,
+    #[serde(default)]
+    b_shape: Vec<usize>,
+    #[serde(default)]
+    b_values: Vec<f64>,
+    #[serde(default)]
+    c_shape: Vec<usize>,
+    #[serde(default)]
+    c_values: Vec<f64>,
+    #[serde(default)]
+    identity_kernel: Vec<f64>,
+    #[serde(default)]
+    convmode: String,
+    #[serde(default)]
+    input_dtype: String,
+    #[serde(default)]
+    scale_factor: Option<f64>,
+    #[serde(default)]
+    abs_tol: f64,
+    #[serde(default)]
+    rel_tol: f64,
+}
+
+#[derive(Debug, Deserialize)]
 struct PolynomialDifferentialCase {
     id: String,
     operation: String,
@@ -1962,6 +2002,15 @@ fn load_signal_differential_cases(
     fixture_root: &Path,
 ) -> Result<Vec<SignalDifferentialCase>, String> {
     let path = fixture_root.join("signal_differential_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
+}
+
+fn load_signal_metamorphic_cases(
+    fixture_root: &Path,
+) -> Result<Vec<SignalMetamorphicCase>, String> {
+    let path = fixture_root.join("signal_metamorphic_cases.json");
     let raw = fs::read_to_string(&path)
         .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
     serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
@@ -6824,6 +6873,411 @@ pub fn run_signal_differential_suite(config: &HarnessConfig) -> Result<SuiteRepo
         .map_err(|err| format!("failed writing {}: {err}", report_path.display()))?;
 
     Ok(report)
+}
+
+pub fn run_signal_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let cases = load_signal_metamorphic_cases(&config.fixture_root)?;
+
+    let mut report = SuiteReport {
+        suite: "signal_metamorphic",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+
+        match evaluate_signal_metamorphic_relation(&case) {
+            Ok(()) => {
+                report.pass_count += 1;
+            }
+            Err(err) => {
+                report.failures.push(format!(
+                    "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} {} (actual_reason_code={})",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    err.message,
+                    err.reason_code
+                ));
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+fn evaluate_signal_metamorphic_relation(
+    case: &SignalMetamorphicCase,
+) -> Result<(), SignalSuiteError> {
+    match case.relation.as_str() {
+        "convolve_commutative" => {
+            let mode = signal_metamorphic_mode(case);
+            let a = signal_metamorphic_real_array(&case.a_shape, &case.a_values)?;
+            let b = signal_metamorphic_real_array(&case.b_shape, &case.b_values)?;
+            let left = a
+                .convolve_mode(&b, mode)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let right = b
+                .convolve_mode(&a, mode)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            signal_metamorphic_assert_array_equal(case, &left, &right, "convolve commutative")
+        }
+        "convolve_identity" => {
+            let mode = signal_metamorphic_mode(case);
+            let a = signal_metamorphic_real_array(&case.a_shape, &case.a_values)?;
+            let kernel = signal_metamorphic_real_array(
+                &[case.identity_kernel.len()],
+                &case.identity_kernel,
+            )?;
+            let actual = a
+                .convolve_mode(&kernel, mode)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            signal_metamorphic_assert_array_equal(case, &actual, &a, "convolve identity")
+        }
+        "autocorrelate_peak_at_zero" => {
+            let a = signal_metamorphic_real_array(&case.a_shape, &case.a_values)?;
+            let corr = a
+                .correlate_mode(&a, "full")
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let center = a.values().len().checked_sub(1).ok_or_else(|| {
+                SignalSuiteError::new(
+                    "signal_input_contract_violation",
+                    "autocorrelation requires non-empty input",
+                )
+            })?;
+            let peak = corr.values()[center].abs();
+            let tolerance = signal_metamorphic_abs_tol(case);
+            if corr
+                .values()
+                .iter()
+                .enumerate()
+                .any(|(index, value)| index != center && value.abs() > peak + tolerance)
+            {
+                return Err(SignalSuiteError::new(
+                    "signal_metamorphic_relation_failed",
+                    format!(
+                        "autocorrelation zero-lag peak was not maximal: center={} values={:?}",
+                        corr.values()[center],
+                        corr.values()
+                    ),
+                ));
+            }
+            Ok(())
+        }
+        "autocorrelate_symmetric" => {
+            let a = signal_metamorphic_real_array(&case.a_shape, &case.a_values)?;
+            let corr = a
+                .correlate_mode(&a, "full")
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let reversed = signal_metamorphic_reversed_values(corr.values());
+            signal_metamorphic_assert_values_equal(
+                case,
+                corr.values(),
+                &reversed,
+                "autocorrelation symmetric",
+            )
+        }
+        "convolve_distributive" => {
+            let mode = signal_metamorphic_mode(case);
+            let a = signal_metamorphic_real_array(&case.a_shape, &case.a_values)?;
+            let b = signal_metamorphic_real_array(&case.b_shape, &case.b_values)?;
+            let c = signal_metamorphic_real_array(&case.c_shape, &case.c_values)?;
+            let a_plus_b = signal_metamorphic_add_arrays(case, &a, &b)?;
+            let left = a_plus_b
+                .convolve_mode(&c, mode)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let a_conv = a
+                .convolve_mode(&c, mode)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let b_conv = b
+                .convolve_mode(&c, mode)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let right = signal_metamorphic_add_arrays(case, &a_conv, &b_conv)?;
+            signal_metamorphic_assert_array_equal(case, &left, &right, "convolve distributive")
+        }
+        "convolve_scaling" => {
+            let mode = signal_metamorphic_mode(case);
+            let scale = case.scale_factor.ok_or_else(|| {
+                SignalSuiteError::new(
+                    "signal_input_contract_violation",
+                    "convolve_scaling requires scale_factor",
+                )
+            })?;
+            let a = signal_metamorphic_real_array(&case.a_shape, &case.a_values)?;
+            let b = signal_metamorphic_real_array(&case.b_shape, &case.b_values)?;
+            let scaled_a = signal_metamorphic_scale_array(&a, scale)?;
+            let left = scaled_a
+                .convolve_mode(&b, mode)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let base = a
+                .convolve_mode(&b, mode)
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let right = signal_metamorphic_scale_array(&base, scale)?;
+            signal_metamorphic_assert_array_equal(case, &left, &right, "convolve scaling")
+        }
+        "correlate_conjugate_symmetry" => {
+            if !case.input_dtype.eq_ignore_ascii_case("c128")
+                && !case.input_dtype.eq_ignore_ascii_case("complex128")
+            {
+                return Err(SignalSuiteError::new(
+                    "signal_input_contract_violation",
+                    "correlate_conjugate_symmetry requires c128 input_dtype",
+                ));
+            }
+            let a = signal_metamorphic_complex_pairs(&case.a_shape, &case.a_values)?;
+            let b = signal_metamorphic_complex_pairs(&case.b_shape, &case.b_values)?;
+            let corr_ab = signal_metamorphic_complex_correlate(&a, &b);
+            let corr_ba = signal_metamorphic_complex_correlate(&b, &a);
+            let expected = signal_metamorphic_conjugate_reversed(&corr_ba);
+            signal_metamorphic_assert_values_equal(
+                case,
+                &corr_ab,
+                &expected,
+                "correlate conjugate symmetry",
+            )
+        }
+        "convolve_same_mode_center" => {
+            let a = signal_metamorphic_real_array(&case.a_shape, &case.a_values)?;
+            let b = signal_metamorphic_real_array(&case.b_shape, &case.b_values)?;
+            let full = a
+                .convolve_mode(&b, "full")
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let same = a
+                .convolve_mode(&b, "same")
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let start = b.values().len().saturating_sub(1) / 2;
+            let end = start + a.values().len();
+            signal_metamorphic_assert_values_equal(
+                case,
+                same.values(),
+                &full.values()[start..end],
+                "convolve same center slice",
+            )
+        }
+        "convolve_valid_mode_subsequence" => {
+            let a = signal_metamorphic_real_array(&case.a_shape, &case.a_values)?;
+            let b = signal_metamorphic_real_array(&case.b_shape, &case.b_values)?;
+            let full = a
+                .convolve_mode(&b, "full")
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let valid = a
+                .convolve_mode(&b, "valid")
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let valid_len =
+                a.values().len().max(b.values().len()) - a.values().len().min(b.values().len()) + 1;
+            let start = a.values().len().min(b.values().len()) - 1;
+            let end = start + valid_len;
+            signal_metamorphic_assert_values_equal(
+                case,
+                valid.values(),
+                &full.values()[start..end],
+                "convolve valid subsequence",
+            )
+        }
+        "correlate_time_reversal" => {
+            let a = signal_metamorphic_real_array(&case.a_shape, &case.a_values)?;
+            let b = signal_metamorphic_real_array(&case.b_shape, &case.b_values)?;
+            let corr = a
+                .correlate_mode(&b, "full")
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let reversed_a = signal_metamorphic_reverse_array(&a)?;
+            let reversed_b = signal_metamorphic_reverse_array(&b)?;
+            let reversed_corr = reversed_a
+                .correlate_mode(&reversed_b, "full")
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            let expected = signal_metamorphic_reversed_values(corr.values());
+            signal_metamorphic_assert_values_equal(
+                case,
+                reversed_corr.values(),
+                &expected,
+                "correlate time reversal",
+            )
+        }
+        other => Err(SignalSuiteError::new(
+            "signal_policy_unknown_metamorphic_relation",
+            format!("unsupported signal metamorphic relation {other}"),
+        )),
+    }
+}
+
+fn signal_metamorphic_mode(case: &SignalMetamorphicCase) -> &str {
+    if case.convmode.trim().is_empty() {
+        "full"
+    } else {
+        case.convmode.trim()
+    }
+}
+
+fn signal_metamorphic_real_array(
+    shape: &[usize],
+    values: &[f64],
+) -> Result<UFuncArray, SignalSuiteError> {
+    UFuncArray::new(shape.to_vec(), values.to_vec(), DType::F64)
+        .map_err(map_ufunc_error_to_signal_suite)
+}
+
+fn signal_metamorphic_add_arrays(
+    case: &SignalMetamorphicCase,
+    lhs: &UFuncArray,
+    rhs: &UFuncArray,
+) -> Result<UFuncArray, SignalSuiteError> {
+    if lhs.shape() != rhs.shape() {
+        return Err(SignalSuiteError::new(
+            "signal_input_contract_violation",
+            format!(
+                "{} requires matching shapes, got {:?} and {:?}",
+                case.relation,
+                lhs.shape(),
+                rhs.shape()
+            ),
+        ));
+    }
+    let values = lhs
+        .values()
+        .iter()
+        .zip(rhs.values())
+        .map(|(left, right)| left + right)
+        .collect::<Vec<_>>();
+    signal_metamorphic_real_array(lhs.shape(), &values)
+}
+
+fn signal_metamorphic_scale_array(
+    array: &UFuncArray,
+    scale: f64,
+) -> Result<UFuncArray, SignalSuiteError> {
+    let values = array
+        .values()
+        .iter()
+        .map(|value| value * scale)
+        .collect::<Vec<_>>();
+    signal_metamorphic_real_array(array.shape(), &values)
+}
+
+fn signal_metamorphic_reverse_array(array: &UFuncArray) -> Result<UFuncArray, SignalSuiteError> {
+    let values = signal_metamorphic_reversed_values(array.values());
+    signal_metamorphic_real_array(array.shape(), &values)
+}
+
+fn signal_metamorphic_reversed_values(values: &[f64]) -> Vec<f64> {
+    values.iter().rev().copied().collect()
+}
+
+fn signal_metamorphic_complex_pairs(
+    shape: &[usize],
+    values: &[f64],
+) -> Result<Vec<(f64, f64)>, SignalSuiteError> {
+    if shape.last() != Some(&2) || !values.len().is_multiple_of(2) {
+        return Err(SignalSuiteError::new(
+            "signal_input_contract_violation",
+            "complex signal fixtures must use trailing dimension 2 with interleaved values",
+        ));
+    }
+    Ok(values
+        .chunks_exact(2)
+        .map(|pair| (pair[0], pair[1]))
+        .collect())
+}
+
+fn signal_metamorphic_complex_correlate(a: &[(f64, f64)], b: &[(f64, f64)]) -> Vec<f64> {
+    let n = a.len();
+    let m = b.len();
+    let mut values = Vec::with_capacity((n + m).saturating_sub(1) * 2);
+    for output_index in 0..(n + m).saturating_sub(1) {
+        let lag = output_index as isize - (m as isize - 1);
+        let mut sum_re = 0.0;
+        let mut sum_im = 0.0;
+        for (a_index, &(a_re, a_im)) in a.iter().enumerate() {
+            let b_index = a_index as isize - lag;
+            if (0..m as isize).contains(&b_index) {
+                let (b_re, b_im) = b[b_index as usize];
+                sum_re += a_re * b_re + a_im * b_im;
+                sum_im += a_im * b_re - a_re * b_im;
+            }
+        }
+        values.push(sum_re);
+        values.push(sum_im);
+    }
+    values
+}
+
+fn signal_metamorphic_conjugate_reversed(values: &[f64]) -> Vec<f64> {
+    values
+        .chunks_exact(2)
+        .rev()
+        .flat_map(|pair| [pair[0], -pair[1]])
+        .collect()
+}
+
+fn signal_metamorphic_abs_tol(case: &SignalMetamorphicCase) -> f64 {
+    if case.abs_tol > 0.0 {
+        case.abs_tol
+    } else {
+        1e-9
+    }
+}
+
+fn signal_metamorphic_rel_tol(case: &SignalMetamorphicCase) -> f64 {
+    if case.rel_tol > 0.0 {
+        case.rel_tol
+    } else {
+        1e-9
+    }
+}
+
+fn signal_metamorphic_assert_array_equal(
+    case: &SignalMetamorphicCase,
+    actual: &UFuncArray,
+    expected: &UFuncArray,
+    label: &str,
+) -> Result<(), SignalSuiteError> {
+    if actual.shape() != expected.shape() {
+        return Err(SignalSuiteError::new(
+            "signal_metamorphic_relation_failed",
+            format!(
+                "{label} shape mismatch expected={:?} actual={:?}",
+                expected.shape(),
+                actual.shape()
+            ),
+        ));
+    }
+    signal_metamorphic_assert_values_equal(case, actual.values(), expected.values(), label)
+}
+
+fn signal_metamorphic_assert_values_equal(
+    case: &SignalMetamorphicCase,
+    actual: &[f64],
+    expected: &[f64],
+    label: &str,
+) -> Result<(), SignalSuiteError> {
+    if actual.len() != expected.len() {
+        return Err(SignalSuiteError::new(
+            "signal_metamorphic_relation_failed",
+            format!(
+                "{label} length mismatch expected={} actual={}",
+                expected.len(),
+                actual.len()
+            ),
+        ));
+    }
+    let abs_tol = signal_metamorphic_abs_tol(case);
+    let rel_tol = signal_metamorphic_rel_tol(case);
+    if !approx_equal_values(expected, actual, abs_tol, rel_tol) {
+        return Err(SignalSuiteError::new(
+            "signal_metamorphic_relation_failed",
+            format!(
+                "{label} value mismatch expected={expected:?} actual={actual:?} abs_tol={abs_tol} rel_tol={rel_tol}"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn execute_signal_differential_operation(
@@ -12909,6 +13363,7 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
         run_fft_differential_suite(config)?,
         run_fft_metamorphic_suite(config)?,
         run_signal_differential_suite(config)?,
+        run_signal_metamorphic_suite(config)?,
         run_linalg_differential_suite(config)?,
         run_linalg_metamorphic_suite(config)?,
         run_linalg_adversarial_suite(config)?,
@@ -15080,9 +15535,9 @@ mod tests {
         run_rng_metamorphic_suite, run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
         run_shape_stride_adversarial_suite, run_shape_stride_differential_suite,
         run_shape_stride_metamorphic_suite, run_shape_stride_suite, run_signal_differential_suite,
-        run_smoke, run_string_differential_suite, run_string_metamorphic_suite,
-        run_ufunc_adversarial_suite, run_ufunc_differential_suite, run_ufunc_metamorphic_suite,
-        set_dtype_promotion_log_path, set_shape_stride_log_path,
+        run_signal_metamorphic_suite, run_smoke, run_string_differential_suite,
+        run_string_metamorphic_suite, run_ufunc_adversarial_suite, run_ufunc_differential_suite,
+        run_ufunc_metamorphic_suite, set_dtype_promotion_log_path, set_shape_stride_log_path,
     };
     use fnp_io::{IOSupportedDType, load as load_npy, save as save_npy};
     use fnp_iter::{
@@ -16033,6 +16488,14 @@ mod tests {
         let cfg = HarnessConfig::default_paths();
         let suite =
             run_signal_differential_suite(&cfg).expect("signal differential suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn signal_metamorphic_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite =
+            run_signal_metamorphic_suite(&cfg).expect("signal metamorphic suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 
