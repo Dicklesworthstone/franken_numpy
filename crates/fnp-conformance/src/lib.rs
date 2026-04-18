@@ -1126,6 +1126,46 @@ struct SignalMetamorphicCase {
 }
 
 #[derive(Debug, Deserialize)]
+struct SignalAdversarialCase {
+    id: String,
+    operation: String,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    env_fingerprint: String,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+    #[serde(default)]
+    reason_code: String,
+    #[serde(default)]
+    a_shape: Vec<usize>,
+    #[serde(default)]
+    a_values: Vec<serde_json::Value>,
+    #[serde(default)]
+    b_shape: Vec<usize>,
+    #[serde(default)]
+    b_values: Vec<serde_json::Value>,
+    #[serde(default)]
+    b_values_generator: String,
+    #[serde(default)]
+    convmode: String,
+    #[serde(default)]
+    n: Option<usize>,
+    #[serde(default)]
+    expected_behavior: String,
+    #[serde(default)]
+    expected_shape: Vec<usize>,
+    #[serde(default)]
+    expected_values: Vec<serde_json::Value>,
+    #[serde(default)]
+    abs_tol: f64,
+    #[serde(default)]
+    rel_tol: f64,
+}
+
+#[derive(Debug, Deserialize)]
 struct PolynomialDifferentialCase {
     id: String,
     operation: String,
@@ -2257,6 +2297,15 @@ fn load_signal_metamorphic_cases(
     fixture_root: &Path,
 ) -> Result<Vec<SignalMetamorphicCase>, String> {
     let path = fixture_root.join("signal_metamorphic_cases.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
+}
+
+fn load_signal_adversarial_cases(
+    fixture_root: &Path,
+) -> Result<Vec<SignalAdversarialCase>, String> {
+    let path = fixture_root.join("signal_adversarial_cases.json");
     let raw = fs::read_to_string(&path)
         .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
     serde_json::from_str(&raw).map_err(|err| format!("invalid json: {err}"))
@@ -7504,6 +7553,401 @@ pub fn run_signal_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteRepor
     }
 
     Ok(report)
+}
+
+pub fn run_signal_adversarial_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    let cases = load_signal_adversarial_cases(&config.fixture_root)?;
+
+    let mut report = SuiteReport {
+        suite: "signal_adversarial",
+        case_count: cases.len(),
+        pass_count: 0,
+        failures: Vec::new(),
+    };
+
+    for case in cases {
+        let mode = resolve_case_mode(&case.mode, config.strict_mode);
+        let env_fingerprint = normalize_env_fingerprint(&case.env_fingerprint);
+        let artifact_refs = normalize_artifact_refs(case.artifact_refs.clone());
+        let reason_code = normalize_reason_code(&case.reason_code);
+
+        match execute_signal_adversarial_operation(&case)
+            .and_then(|outcome| validate_signal_adversarial_expectation(&case, &outcome))
+        {
+            Ok(()) => report.pass_count += 1,
+            Err(err) => {
+                report.failures.push(format!(
+                    "{}: seed={} mode={} reason_code={} env_fingerprint={} artifact_refs={} {} (actual_reason_code={})",
+                    case.id,
+                    case.seed,
+                    mode,
+                    reason_code,
+                    env_fingerprint,
+                    artifact_refs.join(","),
+                    err.message,
+                    err.reason_code
+                ));
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+fn execute_signal_adversarial_operation(
+    case: &SignalAdversarialCase,
+) -> Result<SignalOperationOutcome, SignalSuiteError> {
+    let to_outcome = |array: UFuncArray| SignalOperationOutcome::Array {
+        shape: array.shape().to_vec(),
+        values: array.values().to_vec(),
+    };
+
+    match case.operation.as_str() {
+        "convolve" => {
+            let lhs = signal_adversarial_array(&case.a_shape, &case.a_values, "", case, "a")?;
+            let rhs = signal_adversarial_array(
+                &case.b_shape,
+                &case.b_values,
+                &case.b_values_generator,
+                case,
+                "b",
+            )?;
+            let result = lhs
+                .convolve_mode(&rhs, signal_adversarial_convmode(case))
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "correlate" => {
+            let lhs = signal_adversarial_array(&case.a_shape, &case.a_values, "", case, "a")?;
+            let rhs = signal_adversarial_array(
+                &case.b_shape,
+                &case.b_values,
+                &case.b_values_generator,
+                case,
+                "b",
+            )?;
+            let result = lhs
+                .correlate_mode(&rhs, signal_adversarial_convmode(case))
+                .map_err(map_ufunc_error_to_signal_suite)?;
+            Ok(to_outcome(result))
+        }
+        "bartlett" => {
+            let n = case.n.ok_or_else(|| {
+                SignalSuiteError::new("signal_input_contract_violation", "bartlett requires 'n'")
+            })?;
+            Ok(to_outcome(UFuncArray::bartlett(n)))
+        }
+        "hamming" => {
+            let n = case.n.ok_or_else(|| {
+                SignalSuiteError::new("signal_input_contract_violation", "hamming requires 'n'")
+            })?;
+            Ok(to_outcome(UFuncArray::hamming(n)))
+        }
+        other => Err(SignalSuiteError::new(
+            "signal_policy_unknown_adversarial_operation",
+            format!("unsupported signal adversarial operation {other}"),
+        )),
+    }
+}
+
+fn validate_signal_adversarial_expectation(
+    case: &SignalAdversarialCase,
+    outcome: &SignalOperationOutcome,
+) -> Result<(), SignalSuiteError> {
+    if !case.expected_behavior.trim().is_empty() {
+        return validate_signal_adversarial_behavior(case, outcome);
+    }
+    match outcome {
+        SignalOperationOutcome::Array { shape, values } => {
+            if !case.expected_shape.is_empty() {
+                signal_adversarial_assert_shape(case, shape, &case.expected_shape)?;
+            }
+            if !case.expected_values.is_empty() {
+                let expected =
+                    signal_adversarial_values(&case.expected_values, "expected_values", case)?;
+                signal_adversarial_assert_values_equal(case, values, &expected, "values")?;
+            }
+            if !case.expected_shape.is_empty() || !case.expected_values.is_empty() {
+                return Ok(());
+            }
+        }
+    }
+    Err(SignalSuiteError::new(
+        "signal_adversarial_fixture_invalid",
+        format!(
+            "{} has no expected_shape, expected_values, or expected_behavior",
+            case.id
+        ),
+    ))
+}
+
+fn validate_signal_adversarial_behavior(
+    case: &SignalAdversarialCase,
+    outcome: &SignalOperationOutcome,
+) -> Result<(), SignalSuiteError> {
+    let SignalOperationOutcome::Array { shape, values } = outcome;
+    match case.expected_behavior.trim() {
+        "empty_output" => {
+            signal_adversarial_assert_shape(case, shape, &[0])?;
+            signal_adversarial_assert_values_equal(case, values, &[], "empty output")
+        }
+        "nan_propagates" => {
+            if values.iter().any(|value| value.is_nan()) {
+                return Ok(());
+            }
+            Err(SignalSuiteError::new(
+                "signal_adversarial_mismatch",
+                format!("{} expected at least one NaN in {values:?}", case.id),
+            ))
+        }
+        "inf_propagates" => {
+            if values.iter().any(|value| value.is_infinite()) {
+                return Ok(());
+            }
+            Err(SignalSuiteError::new(
+                "signal_adversarial_mismatch",
+                format!("{} expected at least one infinity in {values:?}", case.id),
+            ))
+        }
+        "valid_output" => {
+            if values.is_empty() {
+                return Err(SignalSuiteError::new(
+                    "signal_adversarial_mismatch",
+                    format!("{} expected non-empty output", case.id),
+                ));
+            }
+            let element_count = signal_adversarial_element_count(shape, case, "actual_shape")?;
+            if element_count != values.len() {
+                return Err(SignalSuiteError::new(
+                    "signal_adversarial_mismatch",
+                    format!(
+                        "{} shape {shape:?} implies {element_count} elements but output has {}",
+                        case.id,
+                        values.len()
+                    ),
+                ));
+            }
+            Ok(())
+        }
+        "all_zeros_output" => {
+            if values.is_empty() {
+                return Err(SignalSuiteError::new(
+                    "signal_adversarial_mismatch",
+                    format!("{} expected non-empty zero output", case.id),
+                ));
+            }
+            let expected = vec![0.0; values.len()];
+            signal_adversarial_assert_values_equal(case, values, &expected, "zero output")
+        }
+        "moving_sum" => {
+            let expected = signal_adversarial_expected_moving_sum(case)?;
+            signal_adversarial_assert_shape(case, shape, &[expected.len()])?;
+            signal_adversarial_assert_values_equal(case, values, &expected, "moving sum")
+        }
+        other => Err(SignalSuiteError::new(
+            "signal_adversarial_fixture_invalid",
+            format!("{} unsupported expected_behavior {other:?}", case.id),
+        )),
+    }
+}
+
+fn signal_adversarial_convmode(case: &SignalAdversarialCase) -> &str {
+    let mode = case.convmode.trim();
+    if mode.is_empty() { "full" } else { mode }
+}
+
+fn signal_adversarial_array(
+    shape: &[usize],
+    values: &[serde_json::Value],
+    generator: &str,
+    case: &SignalAdversarialCase,
+    label: &str,
+) -> Result<UFuncArray, SignalSuiteError> {
+    let values = signal_adversarial_values_for_shape(shape, values, generator, case, label)?;
+    UFuncArray::new(shape.to_vec(), values, DType::F64).map_err(map_ufunc_error_to_signal_suite)
+}
+
+fn signal_adversarial_values_for_shape(
+    shape: &[usize],
+    values: &[serde_json::Value],
+    generator: &str,
+    case: &SignalAdversarialCase,
+    label: &str,
+) -> Result<Vec<f64>, SignalSuiteError> {
+    if !values.is_empty() {
+        return signal_adversarial_values(values, &format!("{label}_values"), case);
+    }
+    match generator.trim() {
+        "" => Ok(Vec::new()),
+        "ones" => Ok(vec![
+            1.0;
+            signal_adversarial_element_count(
+                shape,
+                case,
+                &format!("{label}_shape")
+            )?
+        ]),
+        other => Err(SignalSuiteError::new(
+            "signal_input_contract_violation",
+            format!("{} unsupported {label}_values_generator {other:?}", case.id),
+        )),
+    }
+}
+
+fn signal_adversarial_values(
+    values: &[serde_json::Value],
+    field: &str,
+    case: &SignalAdversarialCase,
+) -> Result<Vec<f64>, SignalSuiteError> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| signal_adversarial_value(value, field, index, case))
+        .collect()
+}
+
+fn signal_adversarial_value(
+    value: &serde_json::Value,
+    field: &str,
+    index: usize,
+    case: &SignalAdversarialCase,
+) -> Result<f64, SignalSuiteError> {
+    match value {
+        serde_json::Value::Number(number) => number.as_f64().ok_or_else(|| {
+            SignalSuiteError::new(
+                "signal_input_contract_violation",
+                format!("{} {field}[{index}] is not representable as f64", case.id),
+            )
+        }),
+        serde_json::Value::String(raw) => match raw.as_str() {
+            "NaN" | "nan" => Ok(f64::NAN),
+            "Inf" | "Infinity" | "inf" | "+inf" => Ok(f64::INFINITY),
+            "-Inf" | "-Infinity" | "-inf" => Ok(f64::NEG_INFINITY),
+            other => Err(SignalSuiteError::new(
+                "signal_input_contract_violation",
+                format!(
+                    "{} {field}[{index}] has unsupported numeric sentinel {other:?}",
+                    case.id
+                ),
+            )),
+        },
+        other => Err(SignalSuiteError::new(
+            "signal_input_contract_violation",
+            format!(
+                "{} {field}[{index}] must be number or numeric sentinel string, got {other:?}",
+                case.id
+            ),
+        )),
+    }
+}
+
+fn signal_adversarial_element_count(
+    shape: &[usize],
+    case: &SignalAdversarialCase,
+    label: &str,
+) -> Result<usize, SignalSuiteError> {
+    shape.iter().try_fold(1usize, |acc, dim| {
+        acc.checked_mul(*dim).ok_or_else(|| {
+            SignalSuiteError::new(
+                "signal_input_contract_violation",
+                format!("{} {label} element count overflows usize", case.id),
+            )
+        })
+    })
+}
+
+fn signal_adversarial_expected_moving_sum(
+    case: &SignalAdversarialCase,
+) -> Result<Vec<f64>, SignalSuiteError> {
+    let lhs = signal_adversarial_values(&case.a_values, "a_values", case)?;
+    let rhs = signal_adversarial_values_for_shape(
+        &case.b_shape,
+        &case.b_values,
+        &case.b_values_generator,
+        case,
+        "b",
+    )?;
+    if signal_adversarial_convmode(case) != "same" {
+        return Err(SignalSuiteError::new(
+            "signal_adversarial_fixture_invalid",
+            format!("{} moving_sum behavior requires convmode='same'", case.id),
+        ));
+    }
+    let mut full = vec![0.0; lhs.len().saturating_add(rhs.len()).saturating_sub(1)];
+    for (lhs_index, lhs_value) in lhs.iter().enumerate() {
+        for (rhs_index, rhs_value) in rhs.iter().enumerate() {
+            full[lhs_index + rhs_index] += lhs_value * rhs_value;
+        }
+    }
+    let start = rhs.len().saturating_sub(1) / 2;
+    let end = start.saturating_add(lhs.len());
+    if end > full.len() {
+        return Err(SignalSuiteError::new(
+            "signal_adversarial_fixture_invalid",
+            format!(
+                "{} moving_sum slice start={start} end={end} exceeds full convolution len={}",
+                case.id,
+                full.len()
+            ),
+        ));
+    }
+    Ok(full[start..end].to_vec())
+}
+
+fn signal_adversarial_assert_shape(
+    case: &SignalAdversarialCase,
+    actual: &[usize],
+    expected: &[usize],
+) -> Result<(), SignalSuiteError> {
+    if actual == expected {
+        return Ok(());
+    }
+    Err(SignalSuiteError::new(
+        "signal_adversarial_mismatch",
+        format!(
+            "{} shape mismatch expected={expected:?} actual={actual:?}",
+            case.id
+        ),
+    ))
+}
+
+fn signal_adversarial_assert_values_equal(
+    case: &SignalAdversarialCase,
+    actual: &[f64],
+    expected: &[f64],
+    label: &str,
+) -> Result<(), SignalSuiteError> {
+    if actual.len() != expected.len() {
+        return Err(SignalSuiteError::new(
+            "signal_adversarial_mismatch",
+            format!(
+                "{} {label} length mismatch expected={} actual={}",
+                case.id,
+                expected.len(),
+                actual.len()
+            ),
+        ));
+    }
+    let abs_tol = if case.abs_tol > 0.0 {
+        case.abs_tol
+    } else {
+        1e-9
+    };
+    let rel_tol = if case.rel_tol > 0.0 {
+        case.rel_tol
+    } else {
+        1e-9
+    };
+    if approx_equal_values(expected, actual, abs_tol, rel_tol) {
+        return Ok(());
+    }
+    Err(SignalSuiteError::new(
+        "signal_adversarial_mismatch",
+        format!(
+            "{} {label} mismatch expected={expected:?} actual={actual:?} abs_tol={abs_tol} rel_tol={rel_tol}",
+            case.id
+        ),
+    ))
 }
 
 fn evaluate_signal_metamorphic_relation(
@@ -15818,6 +16262,7 @@ pub fn run_all_core_suites(config: &HarnessConfig) -> Result<Vec<SuiteReport>, S
         run_fft_metamorphic_suite(config)?,
         run_signal_differential_suite(config)?,
         run_signal_metamorphic_suite(config)?,
+        run_signal_adversarial_suite(config)?,
         run_linalg_differential_suite(config)?,
         run_linalg_metamorphic_suite(config)?,
         run_linalg_adversarial_suite(config)?,
@@ -17990,10 +18435,11 @@ mod tests {
         run_rng_metamorphic_suite, run_rng_statistical_suite, run_runtime_policy_adversarial_suite,
         run_runtime_policy_metamorphic_suite, run_shape_stride_adversarial_suite,
         run_shape_stride_differential_suite, run_shape_stride_metamorphic_suite,
-        run_shape_stride_suite, run_signal_differential_suite, run_signal_metamorphic_suite,
-        run_smoke, run_string_adversarial_suite, run_string_differential_suite,
-        run_string_metamorphic_suite, run_ufunc_adversarial_suite, run_ufunc_differential_suite,
-        run_ufunc_metamorphic_suite, set_dtype_promotion_log_path, set_shape_stride_log_path,
+        run_shape_stride_suite, run_signal_adversarial_suite, run_signal_differential_suite,
+        run_signal_metamorphic_suite, run_smoke, run_string_adversarial_suite,
+        run_string_differential_suite, run_string_metamorphic_suite, run_ufunc_adversarial_suite,
+        run_ufunc_differential_suite, run_ufunc_metamorphic_suite, set_dtype_promotion_log_path,
+        set_shape_stride_log_path,
     };
     use fnp_io::{IOSupportedDType, load as load_npy, save as save_npy};
     use fnp_iter::{
@@ -18992,6 +19438,14 @@ mod tests {
         let cfg = HarnessConfig::default_paths();
         let suite =
             run_signal_metamorphic_suite(&cfg).expect("signal metamorphic suite should run");
+        assert!(suite.all_passed(), "failures={:?}", suite.failures);
+    }
+
+    #[test]
+    fn signal_adversarial_suite_is_green() {
+        let cfg = HarnessConfig::default_paths();
+        let suite =
+            run_signal_adversarial_suite(&cfg).expect("signal adversarial suite should run");
         assert!(suite.all_passed(), "failures={:?}", suite.failures);
     }
 

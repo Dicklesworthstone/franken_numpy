@@ -124,7 +124,8 @@
     "b_shape": [5],
     "b_values": [1.0, 1.0, 1.0, 1.0, 1.0],
     "convmode": "valid",
-    "expected_behavior": "empty_output"
+    "expected_shape": [3],
+    "expected_values": [6.0, 6.0, 6.0]
   },
   {
     "id": "correlate_empty_input",
