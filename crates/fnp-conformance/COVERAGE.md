@@ -16,7 +16,7 @@
 | FFT | 47 | — | — | 47 | Good - transform families, edge sizes, 2D/3D, fftn/ifftn, shifts, fftfreq |
 | Datetime/timedelta | 48 | — | — | 48 | Good - arithmetic, busday, NaT, broadcast, abs, comparisons, neg, mul-zero |
 | Masked arrays | 44 | — | — | 44 | Good - reshape/concat/fill/broadcast/all-masked/argmin-max/axis-aware, min/max axis partial |
-| Iterator/transfer | 37 | 19 | 18 | 74 | Good - transfer/overlap/flatiter/broadcast, empty slice, no-overlap, cast class |
+| Iterator/transfer | 37 | 21 | 18 | 76 | Good - transfer/overlap/flatiter/broadcast, single-element, copy-overlap flags |
 | Shape/stride (SCE) | 51 | — | — | 51 | Good - 0-D, empty, negative-stride, large shapes, 5D/6D transpose, scalar-to-5D, F-order |
 | Dtype promotion | 198 | 17 | 20 | 235 | Good - full 14×14 type matrix + metamorphic + adversarial, title-case/trailing-space |
 | Runtime policy | 37 | — | 12 | 49 | Good - risk thresholds, boundaries, override audit, unknown-class, exact-threshold |

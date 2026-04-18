@@ -346,5 +346,44 @@
       "dst_offset": 0,
       "byte_len": 0
     }
+  },
+  {
+    "id": "iter_selector_deterministic_single_element",
+    "relation": "selector_deterministic",
+    "seed": 4220,
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_metamorphic_cases.json"
+    ],
+    "reason_code": "nditer_constructor_contract",
+    "selector": {
+      "src_stride": 8,
+      "dst_stride": 8,
+      "item_size": 8,
+      "element_count": 1,
+      "aligned": true,
+      "cast_is_lossless": true,
+      "same_value_cast": true
+    }
+  },
+  {
+    "id": "iter_nditer_flags_copy_overlap_enabled",
+    "relation": "nditer_flags_idempotent",
+    "seed": 4221,
+    "mode": "strict",
+    "env_fingerprint": "fnp-iter-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-004/contract_table.md",
+      "crates/fnp-conformance/fixtures/iter_metamorphic_cases.json"
+    ],
+    "reason_code": "nditer_overlap_policy_contract",
+    "flags": {
+      "copy_if_overlap": true,
+      "no_broadcast": true,
+      "observed_overlap": true,
+      "observed_broadcast": false
+    }
   }
 ]
