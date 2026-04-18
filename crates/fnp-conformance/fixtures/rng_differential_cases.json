@@ -316,5 +316,34 @@
     ],
     "reason_code": "rng_policy_unknown_metadata",
     "expected_reason_code": "rng_policy_unknown_metadata"
+  },
+  {
+    "id": "rng_bounded_u64_small_upper_bound_witness",
+    "operation": "bounded_u64_grid",
+    "seed": 7024,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_differential_cases.json"
+    ],
+    "reason_code": "random_bounded_output_contract",
+    "expected_reason_code": "random_bounded_output_contract",
+    "upper_bound": 2,
+    "draws": 128
+  },
+  {
+    "id": "rng_fill_len_zero_witness",
+    "operation": "fill_len_contract",
+    "seed": 7025,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_differential_cases.json"
+    ],
+    "reason_code": "random_fill_length_contract",
+    "expected_reason_code": "random_fill_length_contract",
+    "fill_len": 0
   }
 ]

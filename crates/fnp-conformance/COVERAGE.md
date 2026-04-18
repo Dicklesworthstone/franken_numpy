@@ -12,7 +12,7 @@
 | I/O (npy/npz/text) | 66 | 38 | 35 | 139 | Good - parser boundaries covered |
 | Linear algebra | 63 | 28 | 37 | 128 | Good - core decompositions, 1x1 edge cases, identity |
 | String arrays | 67 | — | — | 67 | Good - 33 char functions, empty/pattern edge cases |
-| RNG | 22 | 26 | 43 | 91 | Adequate + 39 statistical |
+| RNG | 24 | 26 | 43 | 93 | Adequate + 39 statistical, small bound, zero-fill |
 | FFT | 45 | — | — | 45 | Good - transform families, edge sizes, 2D/3D, fftn/ifftn, shifts, single-element |
 | Datetime/timedelta | 44 | — | — | 44 | Good - arithmetic, busday, NaT, broadcast, abs, comparisons |
 | Masked arrays | 42 | — | — | 42 | Good - reshape/concat/fill/broadcast/all-masked/argmin-max/axis-aware |
