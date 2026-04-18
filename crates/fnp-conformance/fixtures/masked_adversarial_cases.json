@@ -1,0 +1,201 @@
+[
+  {
+    "id": "masked_all_masked_sum",
+    "operation": "masked_sum",
+    "seed": 11201,
+    "mode": "strict",
+    "env_fingerprint": "fnp-masked-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_adversarial_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_adversarial_all_masked_reduction",
+    "data_shape": [4],
+    "data_values": [1.0, 2.0, 3.0, 4.0],
+    "mask": [true, true, true, true],
+    "expected_behavior": "masked_result"
+  },
+  {
+    "id": "masked_empty_array",
+    "operation": "masked_array_create",
+    "seed": 11202,
+    "mode": "strict",
+    "env_fingerprint": "fnp-masked-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_adversarial_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_adversarial_empty",
+    "data_shape": [0],
+    "data_values": [],
+    "mask": [],
+    "expected_behavior": "empty_masked_array"
+  },
+  {
+    "id": "masked_nomask_singleton",
+    "operation": "masked_array_create",
+    "seed": 11203,
+    "mode": "strict",
+    "env_fingerprint": "fnp-masked-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_adversarial_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_adversarial_nomask",
+    "data_shape": [1],
+    "data_values": [42.0],
+    "mask": "nomask",
+    "expected_behavior": "no_mask_scalar"
+  },
+  {
+    "id": "masked_fill_value_nan",
+    "operation": "masked_filled",
+    "seed": 11204,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-masked-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_adversarial_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_adversarial_fill_nan",
+    "data_shape": [4],
+    "data_values": [1.0, 2.0, 3.0, 4.0],
+    "mask": [false, true, false, true],
+    "fill_value": "NaN",
+    "expected_behavior": "nan_fill"
+  },
+  {
+    "id": "masked_data_contains_nan",
+    "operation": "masked_sum",
+    "seed": 11205,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-masked-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_adversarial_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_adversarial_data_nan",
+    "data_shape": [4],
+    "data_values": [1.0, "NaN", 3.0, 4.0],
+    "mask": [false, true, false, false],
+    "expected_behavior": "nan_masked_out"
+  },
+  {
+    "id": "masked_hardmask_unset_attempt",
+    "operation": "masked_setitem",
+    "seed": 11206,
+    "mode": "strict",
+    "env_fingerprint": "fnp-masked-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_adversarial_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_adversarial_hardmask",
+    "data_shape": [4],
+    "data_values": [1.0, 2.0, 3.0, 4.0],
+    "mask": [false, true, false, false],
+    "hardmask": true,
+    "set_index": 1,
+    "set_value": 99.0,
+    "expected_behavior": "hardmask_preserves"
+  },
+  {
+    "id": "masked_compress_all_false",
+    "operation": "masked_compress",
+    "seed": 11207,
+    "mode": "strict",
+    "env_fingerprint": "fnp-masked-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_adversarial_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_adversarial_compress_all",
+    "data_shape": [4],
+    "data_values": [1.0, 2.0, 3.0, 4.0],
+    "mask": [true, true, true, true],
+    "expected_behavior": "empty_result"
+  },
+  {
+    "id": "masked_argmax_all_masked",
+    "operation": "masked_argmax",
+    "seed": 11208,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-masked-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_adversarial_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_adversarial_argmax_all_masked",
+    "data_shape": [4],
+    "data_values": [1.0, 5.0, 3.0, 2.0],
+    "mask": [true, true, true, true],
+    "expected_behavior": "masked_argmax_result"
+  },
+  {
+    "id": "masked_broadcast_scalar_mask",
+    "operation": "masked_add",
+    "seed": 11209,
+    "mode": "strict",
+    "env_fingerprint": "fnp-masked-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_adversarial_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_adversarial_broadcast_mask",
+    "a_shape": [3, 4],
+    "a_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+    "a_mask": [false, true, false, false, false, false, true, false, false, false, false, true],
+    "b_value": 10.0,
+    "b_mask": false,
+    "expected_behavior": "broadcast_preserves_mask"
+  },
+  {
+    "id": "masked_reshape_invalid",
+    "operation": "masked_reshape",
+    "seed": 11210,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-masked-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_adversarial_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_adversarial_reshape_invalid",
+    "data_shape": [3, 4],
+    "data_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+    "mask": [false, true, false, false, false, false, true, false, false, false, false, true],
+    "new_shape": [5, 3],
+    "expected_behavior": "reshape_error"
+  },
+  {
+    "id": "masked_count_all_valid",
+    "operation": "masked_count",
+    "seed": 11211,
+    "mode": "strict",
+    "env_fingerprint": "fnp-masked-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_adversarial_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_adversarial_count_all_valid",
+    "data_shape": [4],
+    "data_values": [1.0, 2.0, 3.0, 4.0],
+    "mask": [false, false, false, false],
+    "expected_count": 4
+  },
+  {
+    "id": "masked_getmask_shared",
+    "operation": "masked_getmask",
+    "seed": 11212,
+    "mode": "strict",
+    "env_fingerprint": "fnp-masked-adversarial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_adversarial_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_adversarial_getmask_view",
+    "data_shape": [4],
+    "data_values": [1.0, 2.0, 3.0, 4.0],
+    "mask": [false, true, false, true],
+    "expected_behavior": "mask_view_not_copy"
+  }
+]
