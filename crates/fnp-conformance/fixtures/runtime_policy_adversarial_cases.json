@@ -148,5 +148,35 @@
       "artifacts/contracts/security_control_checks_v1.yaml"
     ],
     "reason_code": "empty_runtime_mode"
+  },
+  {
+    "id": "wire_injection_mode_fail_closed",
+    "mode_raw": "strict'; DROP TABLE policies;--",
+    "class_raw": "known_compatible",
+    "risk_score": 0.1,
+    "threshold": 0.7,
+    "expected_action": "fail_closed",
+    "seed": 211,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md",
+      "artifacts/contracts/security_control_checks_v1.yaml"
+    ],
+    "reason_code": "injection_attempt_rejected"
+  },
+  {
+    "id": "wire_null_embedded_class_fail_closed",
+    "mode_raw": "strict",
+    "class_raw": "known\u0000compatible",
+    "risk_score": 0.2,
+    "threshold": 0.7,
+    "expected_action": "fail_closed",
+    "seed": 212,
+    "env_fingerprint": "linux-x86_64-rust2024",
+    "artifact_refs": [
+      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md",
+      "artifacts/contracts/security_control_checks_v1.yaml"
+    ],
+    "reason_code": "null_byte_in_class"
   }
 ]
