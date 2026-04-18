@@ -301,6 +301,7 @@ struct PolicyAdversarialFixtureCase {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct OverrideAuditFixtureCase {
     id: String,
     mode: String,
@@ -2840,8 +2841,6 @@ fn classify_nditer_broadcast_error(error: &NditerError) -> String {
     let msg = error.to_string().to_lowercase();
     if msg.contains("no_broadcast") {
         "nditer_no_broadcast_violation".to_string()
-    } else if msg.contains("broadcast") {
-        "nditer_constructor_invalid_configuration".to_string()
     } else {
         "nditer_constructor_invalid_configuration".to_string()
     }
@@ -3002,10 +3001,7 @@ fn execute_iter_operation(
             plan_nditer_broadcast(&operands, bcast.item_size, order)
                 .map(IterOperationOutcome::BroadcastPlan)
                 .map_err(|error| {
-                    IterSuiteError::new(
-                        classify_nditer_broadcast_error(&error),
-                        error.to_string(),
-                    )
+                    IterSuiteError::new(classify_nditer_broadcast_error(&error), error.to_string())
                 })
         }
         other => Err(IterSuiteError::new(
@@ -3063,7 +3059,9 @@ fn execute_iter_operation_with_len(
                     )
                 })
         }
-        _ => execute_iter_operation(case_id, operation, selector, overlap, flags, broadcast, values_len),
+        _ => execute_iter_operation(
+            case_id, operation, selector, overlap, flags, broadcast, values_len,
+        ),
     }
 }
 
@@ -3136,8 +3134,8 @@ fn validate_iter_success_expectations(
 
     if let Some(expected_shape) = &case.expected_broadcast_shape {
         match outcome {
-            IterOperationOutcome::BroadcastPlan(plan) if plan.broadcast_shape == *expected_shape => {
-            }
+            IterOperationOutcome::BroadcastPlan(plan)
+                if plan.broadcast_shape == *expected_shape => {}
             IterOperationOutcome::BroadcastPlan(plan) => {
                 return Err(format!(
                     "broadcast shape mismatch expected={expected_shape:?} actual={:?}",
@@ -4502,9 +4500,7 @@ pub fn run_runtime_policy_adversarial_suite(config: &HarnessConfig) -> Result<Su
 }
 
 pub fn run_override_audit_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
-    let path = config
-        .fixture_root
-        .join("override_audit_cases.json");
+    let path = config.fixture_root.join("override_audit_cases.json");
     let raw = fs::read_to_string(&path)
         .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
     let cases: Vec<OverrideAuditFixtureCase> =
@@ -4519,11 +4515,17 @@ pub fn run_override_audit_suite(config: &HarnessConfig) -> Result<SuiteReport, S
 
     for case in cases {
         let Some(mode) = RuntimeMode::from_wire(&case.mode) else {
-            report.failures.push(format!("{}: invalid mode {}", case.id, case.mode));
+            report
+                .failures
+                .push(format!("{}: invalid mode {}", case.id, case.mode));
             continue;
         };
         let class = CompatibilityClass::from_wire(&case.class);
-        let allowlist_refs: Vec<&str> = case.allowlisted_classes.iter().map(|s| s.as_str()).collect();
+        let allowlist_refs: Vec<&str> = case
+            .allowlisted_classes
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         let expected_action = parse_expected_action(&case.id, &case.expected_action)?;
 
         let event: OverrideAuditEvent = evaluate_policy_override(
@@ -4557,11 +4559,9 @@ pub fn run_override_audit_suite(config: &HarnessConfig) -> Result<SuiteReport, S
         if passed {
             report.pass_count += 1;
         } else {
-            report.failures.push(format!(
-                "{}: {}",
-                case.id,
-                failure_reasons.join("; ")
-            ));
+            report
+                .failures
+                .push(format!("{}: {}", case.id, failure_reasons.join("; ")));
         }
     }
 

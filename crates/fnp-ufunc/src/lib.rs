@@ -20405,18 +20405,19 @@ impl UFuncArray {
             for outer_idx in 0..outer {
                 let base = outer_idx * axis_len * inner;
                 for inner_idx in 0..inner {
-                    let mut offset = 0.0;
+                    let mut correction = 0.0;
                     for k in 1..axis_len {
                         let prev = base + (k - 1) * inner + inner_idx;
                         let current = base + k * inner + inner_idx;
-                        let diff = values[current] - values[prev] + offset;
-                        offset = 0.0;
+                        let diff = self.values[current] - self.values[prev];
+                        let mut offset = 0.0;
                         if diff > disc {
                             offset = -p * ((diff + half_p) / p).floor();
                         } else if diff < -disc {
                             offset = p * ((-diff + half_p) / p).floor();
                         }
-                        values[current] += offset;
+                        correction += offset;
+                        values[current] += correction;
                     }
                 }
             }
@@ -36367,6 +36368,79 @@ mod tests {
             rep.values(),
             &[1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0]
         );
+    }
+
+    fn assert_values_close(actual: &[f64], expected: &[f64]) {
+        assert_eq!(actual.len(), expected.len());
+        for (got, exp) in actual.iter().zip(expected) {
+            assert!((got - exp).abs() < 1e-12, "got {got}, expected {exp}");
+        }
+    }
+
+    #[test]
+    fn unwrap_defaults_to_last_axis_for_nd_arrays() {
+        let period = 2.0 * std::f64::consts::PI;
+        let arr = UFuncArray::new(
+            vec![2, 3],
+            vec![
+                0.0,
+                period + 0.2,
+                period + 0.4,
+                1.0,
+                1.0 + period + 0.2,
+                1.0 + period + 0.4,
+            ],
+            DType::F64,
+        )
+        .unwrap();
+
+        let out = arr.unwrap(None).unwrap();
+
+        assert_eq!(out.shape(), &[2, 3]);
+        assert_values_close(out.values(), &[0.0, 0.2, 0.4, 1.0, 1.2, 1.4]);
+    }
+
+    #[test]
+    fn unwrap_axis_zero_traverses_column_lanes() {
+        let period = 2.0 * std::f64::consts::PI;
+        let arr = UFuncArray::new(
+            vec![3, 2],
+            vec![
+                0.0,
+                1.0,
+                period + 0.2,
+                1.0 - period - 0.2,
+                period + 0.4,
+                1.0 - period - 0.4,
+            ],
+            DType::F64,
+        )
+        .unwrap();
+
+        let out = arr.unwrap_axis(None, 0).unwrap();
+
+        assert_eq!(out.shape(), &[3, 2]);
+        assert_values_close(out.values(), &[0.0, 1.0, 0.2, 0.8, 0.4, 0.6]);
+    }
+
+    #[test]
+    fn unwrap_period_axis_honors_custom_period_and_negative_axis() {
+        let arr =
+            UFuncArray::new(vec![2, 3], vec![0.0, 4.5, 9.0, 1.0, -3.5, -8.0], DType::F64).unwrap();
+
+        let out = arr.unwrap_period_axis(None, Some(4.0), -1).unwrap();
+
+        assert_eq!(out.shape(), &[2, 3]);
+        assert_values_close(out.values(), &[0.0, 0.5, 1.0, 1.0, 0.5, 0.0]);
+    }
+
+    #[test]
+    fn unwrap_axis_rejects_out_of_range_axis() {
+        let arr = UFuncArray::new(vec![2, 2], vec![0.0, 1.0, 2.0, 3.0], DType::F64).unwrap();
+
+        let err = arr.unwrap_axis(None, 2).unwrap_err();
+
+        assert!(err.to_string().contains("axis"));
     }
 
     #[test]
