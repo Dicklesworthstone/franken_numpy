@@ -360,5 +360,34 @@
     ],
     "reason_code": "random_fill_length_contract",
     "fill_len": 1
+  },
+  {
+    "id": "rng_bounded_repeatability_small_bound_3",
+    "relation": "bounded_repeatability",
+    "seed": 7127,
+    "alt_seed": 7127,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_metamorphic_cases.json"
+    ],
+    "reason_code": "random_bounded_output_contract",
+    "draws": 64,
+    "upper_bound": 3
+  },
+  {
+    "id": "rng_jump_partition_additivity_single_step",
+    "relation": "jump_partition_additivity",
+    "seed": 7128,
+    "mode": "strict",
+    "env_fingerprint": "fnp-random-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-007/contract_table.md",
+      "crates/fnp-conformance/fixtures/rng_metamorphic_cases.json"
+    ],
+    "reason_code": "random_jump_ahead_contract",
+    "steps": 1,
+    "extra_steps": 1
   }
 ]
