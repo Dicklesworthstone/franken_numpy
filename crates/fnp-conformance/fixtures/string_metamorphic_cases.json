@@ -164,5 +164,85 @@
     ],
     "reason_code": "string_metamorphic_isalpha_isalnum_contract",
     "input_strings": ["hello", "hello123", "123", "abc", ""]
+  },
+  {
+    "id": "str_title_idempotent",
+    "relation": "str_title_idempotent",
+    "seed": 10113,
+    "mode": "strict",
+    "env_fingerprint": "fnp-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_metamorphic_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_metamorphic_title_idempotent_contract",
+    "input_strings": ["hello world", "HELLO WORLD", "Hello World", "mixed CASE words"]
+  },
+  {
+    "id": "str_capitalize_idempotent",
+    "relation": "str_capitalize_idempotent",
+    "seed": 10114,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_metamorphic_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_metamorphic_capitalize_idempotent_contract",
+    "input_strings": ["hello", "HELLO", "Hello", "hELLO wORLD"]
+  },
+  {
+    "id": "str_zfill_len_correct",
+    "relation": "str_zfill_len_correct",
+    "seed": 10115,
+    "mode": "strict",
+    "env_fingerprint": "fnp-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_metamorphic_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_metamorphic_zfill_len_contract",
+    "input_strings": ["42", "-5", "123", "7"],
+    "width": 5
+  },
+  {
+    "id": "str_lstrip_rstrip_strip",
+    "relation": "str_lstrip_rstrip_strip",
+    "seed": 10116,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_metamorphic_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_metamorphic_lstrip_rstrip_contract",
+    "input_strings": ["  hello  ", "\tworld\n", "   test   ", "nowhitespace"]
+  },
+  {
+    "id": "str_isdigit_isnumeric_subset",
+    "relation": "str_isdigit_isnumeric_subset",
+    "seed": 10117,
+    "mode": "strict",
+    "env_fingerprint": "fnp-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_metamorphic_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_metamorphic_isdigit_isnumeric_contract",
+    "input_strings": ["123", "12.5", "abc", ""]
+  },
+  {
+    "id": "str_replace_empty_insert",
+    "relation": "str_replace_empty_insert",
+    "seed": 10118,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-string-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/string_metamorphic_cases.json",
+      "crates/fnp-string/src/lib.rs"
+    ],
+    "reason_code": "string_metamorphic_replace_empty_contract",
+    "input_strings": ["abc", "hello"],
+    "insert_char": "-"
   }
 ]

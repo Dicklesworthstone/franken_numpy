@@ -1372,6 +1372,8 @@ struct StringMetamorphicCase {
     multiply_factor: Option<usize>,
     #[serde(default)]
     width: Option<usize>,
+    #[serde(default)]
+    insert_char: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -13799,6 +13801,104 @@ fn evaluate_string_metamorphic_relation(
             }
             Ok(())
         }
+        "str_title_idempotent" => {
+            let input = string_values_to_array(&case.input_strings)?;
+            let once = input.title();
+            let twice = once.title();
+            let actual: Vec<f64> = once
+                .values()
+                .iter()
+                .zip(twice.values().iter())
+                .map(|(a, b)| if a == b { 1.0 } else { 0.0 })
+                .collect();
+            let expected = vec![1.0; case.input_strings.len()];
+            assert_numeric_metamorphic_values_equal(case, &actual, &expected)
+        }
+        "str_capitalize_idempotent" => {
+            let input = string_values_to_array(&case.input_strings)?;
+            let once = input.capitalize();
+            let twice = once.capitalize();
+            let actual: Vec<f64> = once
+                .values()
+                .iter()
+                .zip(twice.values().iter())
+                .map(|(a, b)| if a == b { 1.0 } else { 0.0 })
+                .collect();
+            let expected = vec![1.0; case.input_strings.len()];
+            assert_numeric_metamorphic_values_equal(case, &actual, &expected)
+        }
+        "str_zfill_len_correct" => {
+            let width = required_string_width(case)?;
+            let input = string_values_to_array(&case.input_strings)?;
+            let filled = input.zfill(width);
+            let actual: Vec<f64> = filled
+                .values()
+                .iter()
+                .zip(case.input_strings.iter())
+                .map(|(filled_str, orig)| {
+                    let expected_len = std::cmp::max(width, orig.len());
+                    if filled_str.len() == expected_len { 1.0 } else { 0.0 }
+                })
+                .collect();
+            let expected = vec![1.0; case.input_strings.len()];
+            assert_numeric_metamorphic_values_equal(case, &actual, &expected)
+        }
+        "str_lstrip_rstrip_strip" => {
+            let input = string_values_to_array(&case.input_strings)?;
+            let via_both = input.lstrip().rstrip();
+            let via_strip = input.strip();
+            let actual: Vec<f64> = via_both
+                .values()
+                .iter()
+                .zip(via_strip.values().iter())
+                .map(|(a, b)| if a == b { 1.0 } else { 0.0 })
+                .collect();
+            let expected = vec![1.0; case.input_strings.len()];
+            assert_numeric_metamorphic_values_equal(case, &actual, &expected)
+        }
+        "str_isdigit_isnumeric_subset" => {
+            let input = string_values_to_array(&case.input_strings)?;
+            let digit = input.isdigit();
+            let numeric = input.isnumeric();
+            for (idx, (digit_val, numeric_val)) in
+                digit.values().iter().zip(numeric.values().iter()).enumerate()
+            {
+                if *digit_val != 0.0 && *numeric_val == 0.0 {
+                    return Err(StringSuiteError::new(
+                        "string_metamorphic_relation_failed",
+                        format!(
+                            "str_isdigit_isnumeric_subset failed at index {idx}: isdigit={digit_val} isnumeric={numeric_val}"
+                        ),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        "str_replace_empty_insert" => {
+            if case.insert_char.is_empty() {
+                return Err(StringSuiteError::new(
+                    "string_input_contract_violation",
+                    "str_replace_empty_insert requires insert_char".to_string(),
+                ));
+            }
+            let input = string_values_to_array(&case.input_strings)?;
+            let replaced = input.replace("", &case.insert_char);
+            for (idx, (replaced_str, orig)) in
+                replaced.values().iter().zip(case.input_strings.iter()).enumerate()
+            {
+                let expected_len = orig.len() + (orig.len() + 1) * case.insert_char.len();
+                if replaced_str.len() != expected_len {
+                    return Err(StringSuiteError::new(
+                        "string_metamorphic_relation_failed",
+                        format!(
+                            "str_replace_empty_insert failed at index {idx}: expected len {expected_len}, got {}",
+                            replaced_str.len()
+                        ),
+                    ));
+                }
+            }
+            Ok(())
+        }
         other => Err(StringSuiteError::new(
             "string_policy_unknown_metamorphic_relation",
             format!("unsupported string metamorphic relation {other}"),
@@ -14899,10 +14999,7 @@ fn evaluate_masked_metamorphic_relation(
             if masked_count > total {
                 return Err(MaskedSuiteError::new(
                     "masked_metamorphic_relation_failed",
-                    format!(
-                        "masked count exceeds total: {} > {}",
-                        masked_count, total
-                    ),
+                    format!("masked count exceeds total: {} > {}", masked_count, total),
                 ));
             }
             Ok(())
@@ -14922,7 +15019,9 @@ fn evaluate_masked_metamorphic_relation(
         }
         "masked_mean_unmasked_equals_regular" => {
             let array = masked_metamorphic_unmasked_array(case)?;
-            let ma_mean = array.mean(None, false).map_err(map_ma_error_to_masked_suite)?;
+            let ma_mean = array
+                .mean(None, false)
+                .map_err(map_ma_error_to_masked_suite)?;
             let regular_mean: f64 =
                 case.data_values.iter().sum::<f64>() / case.data_values.len() as f64;
             let actual = ma_mean.data().values().first().copied().ok_or_else(|| {

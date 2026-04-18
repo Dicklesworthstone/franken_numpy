@@ -11,7 +11,7 @@
 | Polynomials | 96 | 18 | 12 | 126 | Good - all 5 families, edge cases, add-zero, sub-self, int/der edge, commutative/identity/associative/distributive metamorphic, empty/nan/constant adversarial |
 | I/O (npy/npz/text) | 70 | 40 | 35 | 145 | Good - parser boundaries, complex128, quoted fields, F-order, single-member npz |
 | Linear algebra | 67 | 36 | 37 | 140 | Good - core decompositions, 1x1 edge cases, identity, wide QR, fractional solve, det/inv metamorphic invariants |
-| String arrays | 71 | 12 | 12 | 95 | Good - 33 char functions, empty/pattern edge cases, case/title conversion, isdigit, idempotence/involution metamorphic, empty/whitespace/overlap adversarial |
+| String arrays | 71 | 18 | 12 | 101 | Good - 33 char functions, empty/pattern edge cases, case/title conversion, isdigit, idempotence/involution/zfill/lstrip-rstrip-strip/isdigit-isnumeric/replace-empty metamorphic, empty/whitespace/overlap adversarial |
 | RNG | 38 | 28 | 43 | 109 | Adequate + 39 statistical, 12 distribution differential (XFAIL: seeding mismatch), small bound, zero-fill, single-step jump |
 | FFT | 47 | 18 | 12 | 77 | Good - transform families, edge sizes, 2D/3D, fftn/ifftn, shifts, fftfreq, inverse/linearity/parseval/rfft-roundtrip/conjugate-symmetry/scale metamorphic, edge-case adversarial |
 | Datetime/timedelta | 48 | 18 | 12 | 78 | Good - arithmetic, busday, NaT, broadcast, abs, comparisons, neg, mul-zero/neg-one, add/sub inverse, order-shift-preserved, double-neg metamorphic, NaT/epoch/y2038 adversarial |
