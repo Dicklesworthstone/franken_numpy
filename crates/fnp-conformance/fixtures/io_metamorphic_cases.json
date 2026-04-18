@@ -527,5 +527,50 @@
     "reason_code": "io_policy_metadata_contract",
     "mode_raw": " strict ",
     "class_raw": " unknown "
+  },
+  {
+    "id": "io_header_schema_descriptor_roundtrip_high_dim",
+    "relation": "header_schema_descriptor_roundtrip",
+    "seed": 9961,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_metamorphic_cases.json"
+    ],
+    "reason_code": "io_header_schema_contract",
+    "shape": [2, 3, 4, 5],
+    "fortran_order": false,
+    "dtype_descr": "<f4",
+    "header_len": 128
+  },
+  {
+    "id": "io_dispatch_stability_npy_v2_prefix",
+    "relation": "dispatch_stability",
+    "seed": 9962,
+    "mode": "strict",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_metamorphic_cases.json"
+    ],
+    "reason_code": "io_load_dispatch_contract",
+    "payload_prefix": [147, 78, 85, 77, 80, 89, 2, 0],
+    "allow_pickle": false
+  },
+  {
+    "id": "io_npz_budget_idempotent_many_members",
+    "relation": "npz_budget_idempotent",
+    "seed": 9963,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-io-packet-f",
+    "artifact_refs": [
+      "artifacts/phase2c/FNP-P2C-009/contract_table.md",
+      "crates/fnp-conformance/fixtures/io_metamorphic_cases.json"
+    ],
+    "reason_code": "io_npz_archive_contract",
+    "member_count": 8,
+    "uncompressed_bytes": 4096,
+    "dispatch_retries": 0
   }
 ]
