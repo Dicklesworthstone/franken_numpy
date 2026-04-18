@@ -1418,5 +1418,46 @@
     "lhs_dtype": "f64",
     "expect_success": true,
     "expected_shape": [2]
+  },
+  {
+    "id": "sum_negative_axis_out_of_bounds",
+    "seed": 461,
+    "severity": "critical",
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-packet-g",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "ufunc_reduction_contract_violation",
+    "expected_reason_code": "ufunc_reduction_contract_violation",
+    "op": "sum",
+    "lhs_shape": [2, 3],
+    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_dtype": "f64",
+    "axis": -5,
+    "keepdims": false,
+    "expected_error_contains": "axis"
+  },
+  {
+    "id": "div_broadcast_incompatible_2x3_vs_4x5",
+    "seed": 462,
+    "severity": "high",
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-packet-g",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "ufunc_dispatch_resolution_failed",
+    "expected_reason_code": "ufunc_dispatch_resolution_failed",
+    "op": "div",
+    "lhs_shape": [2, 3],
+    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [4, 5],
+    "rhs_values": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+    "rhs_dtype": "f64",
+    "expected_error_contains": "cannot broadcast"
   }
 ]
