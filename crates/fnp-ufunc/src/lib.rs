@@ -39912,6 +39912,46 @@ mod tests {
     }
 
     #[test]
+    fn roots_with_leading_and_trailing_zeros_and_repeated_roots() {
+        // [0, 0, 1, 1, -16, 20, 0, 0] -> x^2 (x - 2)^2 (x + 5)
+        let p = UFuncArray::new(
+            vec![8],
+            vec![0.0, 0.0, 1.0, 1.0, -16.0, 20.0, 0.0, 0.0],
+            DType::F64,
+        )
+        .unwrap();
+        let r = p.roots().unwrap();
+        assert_eq!(r.shape(), &[5]);
+        let mut roots = r.values().to_vec();
+        roots.sort_by(|a, b| a.total_cmp(b));
+        assert!(
+            (roots[0] - (-5.0)).abs() < 1e-6,
+            "expected root near -5, got {}",
+            roots[0]
+        );
+        assert!(
+            roots[1].abs() < 1e-12,
+            "expected first zero root, got {}",
+            roots[1]
+        );
+        assert!(
+            roots[2].abs() < 1e-12,
+            "expected second zero root, got {}",
+            roots[2]
+        );
+        assert!(
+            (roots[3] - 2.0).abs() < 1e-6,
+            "expected repeated root near 2, got {}",
+            roots[3]
+        );
+        assert!(
+            (roots[4] - 2.0).abs() < 1e-6,
+            "expected repeated root near 2, got {}",
+            roots[4]
+        );
+    }
+
+    #[test]
     fn roots_degree5() {
         // (x-1)(x-2)(x-3)(x-4)(x-5) = x^5 - 15x^4 + 85x^3 - 225x^2 + 274x - 120
         let p = UFuncArray::new(

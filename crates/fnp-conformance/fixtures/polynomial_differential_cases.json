@@ -162,6 +162,24 @@
     "rel_tol": 1e-6
   },
   {
+    "id": "roots_leading_trailing_repeated_numpy_golden",
+    "operation": "roots",
+    "seed": 9953,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.4.3",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "polynomial_differential_expected_success",
+    "expected_reason_code": "polynomial_differential_expected_success",
+    "lhs_values": [0.0, 0.0, 1.0, 1.0, -16.0, 20.0, 0.0, 0.0],
+    "expected_values": [-5.000000000000007, 1.9999999999999991, 1.9999999999999991, 0.0, 0.0],
+    "sort_values": true,
+    "abs_tol": 1e-6,
+    "rel_tol": 1e-6
+  },
+  {
     "id": "poly_from_roots_golden",
     "operation": "poly",
     "seed": 9908,
