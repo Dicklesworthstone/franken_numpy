@@ -15286,16 +15286,57 @@ impl UFuncArray {
     /// Count occurrences of each non-negative integer value (np.bincount).
     /// Input values are treated as non-negative integers.
     pub fn bincount(&self) -> Result<Self, UFuncError> {
+        self.bincount_with(None, 0)
+    }
+
+    /// `np.bincount(x, weights=None, minlength=0)` with full parameter parity.
+    ///
+    /// When `weights` is `Some`, the returned array accumulates weight values
+    /// (not occurrence counts) and has dtype `F64`. When `minlength` exceeds
+    /// `max(x) + 1`, the output is zero-padded up to `minlength`. Passing an
+    /// empty input with `minlength = 0` returns an empty array; with a
+    /// positive `minlength`, an all-zero array of that length is returned
+    /// (matching NumPy's contract). Weight arrays whose length does not
+    /// match the input length yield a shape-mismatch error equivalent to
+    /// NumPy's `"The weights and list don't have the same length."`.
+    pub fn bincount_with(
+        &self,
+        weights: Option<&Self>,
+        minlength: usize,
+    ) -> Result<Self, UFuncError> {
         if self.shape.len() != 1 {
             return Err(UFuncError::Msg(
                 "bincount: only 1-D arrays supported".to_string(),
             ));
         }
+        if let Some(w) = weights {
+            if w.shape.len() != 1 {
+                return Err(UFuncError::Msg("bincount: weights must be 1-D".to_string()));
+            }
+            if w.values.len() != self.values.len() {
+                return Err(UFuncError::Msg(
+                    "The weights and list don't have the same length.".to_string(),
+                ));
+            }
+        }
+        let dtype = if weights.is_some() {
+            DType::F64
+        } else {
+            DType::I64
+        };
         if self.values.is_empty() {
+            if minlength == 0 {
+                return Ok(Self {
+                    shape: vec![0],
+                    values: Vec::new(),
+                    dtype,
+                    integer_sidecar: None,
+                });
+            }
             return Ok(Self {
-                shape: vec![0],
-                values: Vec::new(),
-                dtype: DType::I64,
+                shape: vec![minlength],
+                values: vec![0.0; minlength],
+                dtype,
                 integer_sidecar: None,
             });
         }
@@ -15321,9 +15362,10 @@ impl UFuncArray {
                 max_val = iv;
             }
         }
-        let len = max_val
+        let data_len = max_val
             .checked_add(1)
             .ok_or_else(|| UFuncError::Msg("bincount: max value too large".to_string()))?;
+        let len = data_len.max(minlength);
         if len > isize::MAX as usize / 8 {
             return Err(UFuncError::Msg(
                 "bincount: resulting array size would exceed maximum allowed allocation"
@@ -15331,14 +15373,23 @@ impl UFuncArray {
             ));
         }
         let mut counts = vec![0.0f64; len];
-        for &v in &self.values {
-            counts[v as usize] += 1.0;
+        match weights {
+            None => {
+                for &v in &self.values {
+                    counts[v as usize] += 1.0;
+                }
+            }
+            Some(w) => {
+                for (&v, &wv) in self.values.iter().zip(w.values.iter()) {
+                    counts[v as usize] += wv;
+                }
+            }
         }
         let n = counts.len();
         Ok(Self {
             shape: vec![n],
             values: counts,
-            dtype: DType::I64,
+            dtype,
             integer_sidecar: None,
         })
     }
@@ -38173,6 +38224,75 @@ mod tests {
     fn bincount_rejects_negative() {
         let a = UFuncArray::new(vec![2], vec![-1.0, 0.0], DType::I64).unwrap();
         assert!(a.bincount().is_err());
+    }
+
+    #[test]
+    fn bincount_with_weights_matches_numpy() {
+        // np.bincount([0, 1, 1, 2], weights=[1, 2, 3, 4]) → [1.0, 5.0, 4.0]
+        let a = UFuncArray::new(vec![4], vec![0.0, 1.0, 1.0, 2.0], DType::I64).unwrap();
+        let w = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let r = a.bincount_with(Some(&w), 0).unwrap();
+        assert_eq!(r.shape(), &[3]);
+        assert_eq!(r.values(), &[1.0, 5.0, 4.0]);
+        assert_eq!(r.dtype(), DType::F64);
+    }
+
+    #[test]
+    fn bincount_with_weights_supports_negative_weights() {
+        // np.bincount([0, 1], weights=[-1.5, 2.5]) → [-1.5, 2.5]
+        let a = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::I64).unwrap();
+        let w = UFuncArray::new(vec![2], vec![-1.5, 2.5], DType::F64).unwrap();
+        let r = a.bincount_with(Some(&w), 0).unwrap();
+        assert_eq!(r.values(), &[-1.5, 2.5]);
+    }
+
+    #[test]
+    fn bincount_with_minlength_pads_output() {
+        // np.bincount([0, 1, 2], minlength=5) → [1, 1, 1, 0, 0]
+        let a = UFuncArray::new(vec![3], vec![0.0, 1.0, 2.0], DType::I64).unwrap();
+        let r = a.bincount_with(None, 5).unwrap();
+        assert_eq!(r.shape(), &[5]);
+        assert_eq!(r.values(), &[1.0, 1.0, 1.0, 0.0, 0.0]);
+        assert_eq!(r.dtype(), DType::I64);
+    }
+
+    #[test]
+    fn bincount_with_minlength_smaller_than_max_uses_max() {
+        // np.bincount([0, 5], minlength=2) → length 6 (max+1), not 2
+        let a = UFuncArray::new(vec![2], vec![0.0, 5.0], DType::I64).unwrap();
+        let r = a.bincount_with(None, 2).unwrap();
+        assert_eq!(r.shape(), &[6]);
+        assert_eq!(r.values(), &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn bincount_with_empty_input_honors_minlength() {
+        let empty = UFuncArray::new(vec![0], Vec::<f64>::new(), DType::I64).unwrap();
+        // np.bincount([]) → []
+        let r_zero = empty.bincount_with(None, 0).unwrap();
+        assert_eq!(r_zero.shape(), &[0]);
+        assert_eq!(r_zero.dtype(), DType::I64);
+        // np.bincount([], minlength=3) → [0, 0, 0]
+        let r_min = empty.bincount_with(None, 3).unwrap();
+        assert_eq!(r_min.shape(), &[3]);
+        assert_eq!(r_min.values(), &[0.0, 0.0, 0.0]);
+        assert_eq!(r_min.dtype(), DType::I64);
+        // With weights + minlength on empty input, output dtype is F64
+        let empty_w = UFuncArray::new(vec![0], Vec::<f64>::new(), DType::F64).unwrap();
+        let r_min_w = empty.bincount_with(Some(&empty_w), 3).unwrap();
+        assert_eq!(r_min_w.shape(), &[3]);
+        assert_eq!(r_min_w.dtype(), DType::F64);
+    }
+
+    #[test]
+    fn bincount_with_weights_length_mismatch_errors() {
+        let a = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::I64).unwrap();
+        let w = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let err = a.bincount_with(Some(&w), 0).unwrap_err();
+        assert!(
+            err.to_string().contains("weights") && err.to_string().contains("length"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
