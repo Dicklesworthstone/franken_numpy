@@ -38319,6 +38319,71 @@ mod tests {
     }
 
     #[test]
+    fn convolve_mode_same_parity_variants_match_numpy() {
+        // Oracle values captured from NumPy 2.x `np.convolve(a, v, mode='same')`
+        // to pin parity across the `(len(a), len(v))` parity matrix. Covers all
+        // combinations of (even/odd a, even/odd v, shorter/equal/longer v).
+        let cases: &[(&[f64], &[f64], &[f64])] = &[
+            // even_n, even_longer_m: n=2, m=4
+            (&[1.0, 2.0], &[1.0, 2.0, 3.0, 4.0], &[1.0, 4.0, 7.0, 10.0]),
+            // odd_n, even_longer_m: n=3, m=4
+            (
+                &[1.0, 2.0, 3.0],
+                &[1.0, 2.0, 3.0, 4.0],
+                &[4.0, 10.0, 16.0, 17.0],
+            ),
+            // odd_n, odd_longer_m: n=3, m=5
+            (
+                &[1.0, 2.0, 3.0],
+                &[1.0, 1.0, 1.0, 1.0, 1.0],
+                &[3.0, 6.0, 6.0, 6.0, 5.0],
+            ),
+            // even_n, odd_shorter_m: n=4, m=3
+            (
+                &[1.0, 2.0, 3.0, 4.0],
+                &[1.0, 2.0, 3.0],
+                &[4.0, 10.0, 16.0, 17.0],
+            ),
+            // equal_even: n=m=4
+            (
+                &[1.0, 2.0, 3.0, 4.0],
+                &[1.0, 1.0, 1.0, 1.0],
+                &[3.0, 6.0, 10.0, 9.0],
+            ),
+            // equal_odd: n=m=3
+            (&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &[4.0, 10.0, 12.0]),
+            // scalar_a_long_kernel: n=1, m=5 → kernel passes through
+            (
+                &[1.0],
+                &[1.0, 2.0, 3.0, 4.0, 5.0],
+                &[1.0, 2.0, 3.0, 4.0, 5.0],
+            ),
+            // kernel_len_1: n=3, m=1 → input passes through
+            (&[1.0, 2.0, 3.0], &[1.0], &[1.0, 2.0, 3.0]),
+        ];
+        for (idx, (a_vals, v_vals, expected)) in cases.iter().enumerate() {
+            let a = UFuncArray::new(vec![a_vals.len()], a_vals.to_vec(), DType::F64).unwrap();
+            let v = UFuncArray::new(vec![v_vals.len()], v_vals.to_vec(), DType::F64).unwrap();
+            let r = a.convolve_mode(&v, "same").unwrap();
+            let expected_len = a_vals.len().max(v_vals.len());
+            assert_eq!(
+                r.shape(),
+                &[expected_len],
+                "case {idx}: shape mismatch (n={}, m={})",
+                a_vals.len(),
+                v_vals.len()
+            );
+            assert_eq!(
+                r.values(),
+                *expected,
+                "case {idx}: values mismatch (n={}, m={})",
+                a_vals.len(),
+                v_vals.len()
+            );
+        }
+    }
+
+    #[test]
     fn convolve_mode_valid() {
         // np.convolve([1,2,3,4,5], [1,2,3], mode='valid') → [10, 16, 22]
         let a = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
