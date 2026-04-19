@@ -1501,6 +1501,22 @@
     "rel_tol": 1e-12
   },
   {
+    "id": "polytrim_negative_tolerance_error",
+    "operation": "polytrim",
+    "seed": 99945,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.4.3",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "polynomial_differential_expected_error",
+    "expected_reason_code": "ufunc_operation_error",
+    "expected_error_contains": "tol must be non-negative",
+    "lhs_values": [1.0, 2.0, 0.0],
+    "abs_tol": -1.0
+  },
+  {
     "id": "polyvander_deg2_golden",
     "operation": "polyvander",
     "seed": 9995,

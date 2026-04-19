@@ -16545,6 +16545,11 @@ impl UFuncArray {
                 "polytrim: coefficients must be 1-D".to_string(),
             ));
         }
+        if tol < 0.0 {
+            return Err(UFuncError::Msg(
+                "polytrim: tol must be non-negative".to_string(),
+            ));
+        }
         let mut end = self.values.len();
         while end > 1 && self.values[end - 1].abs() <= tol {
             end -= 1;
@@ -53694,6 +53699,16 @@ mod tests {
         let r = c.polytrim(0.0).unwrap();
         assert_eq!(r.shape(), &[1]);
         assert_eq!(r.values(), &[0.0]);
+    }
+
+    #[test]
+    fn polytrim_rejects_negative_tolerance() {
+        let c = UFuncArray::new(vec![3], vec![1.0, 2.0, 0.0], DType::F64).unwrap();
+        let err = c
+            .polytrim(-1.0)
+            .expect_err("negative tolerance should fail");
+        assert_eq!(err.reason_code(), "ufunc_operation_error");
+        assert_eq!(err.to_string(), "polytrim: tol must be non-negative");
     }
 
     #[test]
