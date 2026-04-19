@@ -106,6 +106,9 @@ storage.sqlite3-wal.corrupt-*
 .beads/*.repair_candidate_*
 .beads/*.rebuild_*
 .beads/*.bak-corrupt
+.beads/*.bad_*
+.beads/recovery_*/
+.beads_snapshot_*/
 
 # Root-level agent-generated scripts and scratch output
 /*.txt
