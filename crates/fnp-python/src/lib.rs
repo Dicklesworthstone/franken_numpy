@@ -2152,6 +2152,27 @@ fn digitize(py: Python<'_>, x: Py<PyAny>, bins: Py<PyAny>, right: bool) -> PyRes
 }
 
 #[pyfunction]
+#[pyo3(signature = (x, weights=None, minlength=0))]
+fn bincount(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    weights: Option<Py<PyAny>>,
+    minlength: i64,
+) -> PyResult<Py<PyAny>> {
+    if minlength < 0 {
+        return Err(PyValueError::new_err("'minlength' must not be negative"));
+    }
+    let x = extract_numeric_array(py, x.bind(py), "bincount(x)")?;
+    let weights = weights
+        .map(|w| extract_numeric_array(py, w.bind(py), "bincount(weights)"))
+        .transpose()?;
+    let result = x
+        .bincount_with(weights.as_ref(), minlength as usize)
+        .map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(signature = (x, xp, fp, left=None, right=None))]
 fn interp(
     py: Python<'_>,
@@ -3101,6 +3122,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(frompyfunc, m)?)?;
     m.add_function(wrap_pyfunction!(vectorize, m)?)?;
     m.add_function(wrap_pyfunction!(digitize, m)?)?;
+    m.add_function(wrap_pyfunction!(bincount, m)?)?;
     m.add_function(wrap_pyfunction!(interp, m)?)?;
     m.add_function(wrap_pyfunction!(trapezoid, m)?)?;
     m.add_function(wrap_pyfunction!(trapz, m)?)?;
@@ -3173,14 +3195,14 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PyFromPyFunc, PyVectorize, argwhere, ceil, choose, compress, copysign, count_nonzero,
-        degrees, diag, diag_indices, diag_indices_from, diagflat, diagonal, digitize, extract,
-        fill_diagonal, flatnonzero, floor, fnp_python, frexp, hypot, indices, interp, isfinite,
-        isinf, isnan, isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2, meshgrid, modf,
-        nan_to_num, nextafter, place, put, put_along_axis, putmask, radians, ravel_multi_index,
-        rint, searchsorted, select, sign, signbit, sinc, spacing, take, take_along_axis, trapezoid,
-        trapz, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc,
-        unravel_index, where_py,
+        PyFromPyFunc, PyVectorize, argwhere, bincount, ceil, choose, compress, copysign,
+        count_nonzero, degrees, diag, diag_indices, diag_indices_from, diagflat, diagonal,
+        digitize, extract, fill_diagonal, flatnonzero, floor, fnp_python, frexp, hypot, indices,
+        interp, isfinite, isinf, isnan, isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2,
+        meshgrid, modf, nan_to_num, nextafter, place, put, put_along_axis, putmask, radians,
+        ravel_multi_index, rint, searchsorted, select, sign, signbit, sinc, spacing, take,
+        take_along_axis, trapezoid, trapz, tril_indices, tril_indices_from, triu_indices,
+        triu_indices_from, trunc, unravel_index, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -4093,6 +4115,106 @@ mod tests {
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn bincount_matches_numpy_defaults_weights_and_minlength() {
+        // Live-NumPy conformance for the newly exposed fnp-python bincount
+        // binding. Covers default (count) mode, weighted sums (F64 output),
+        // minlength padding beyond max(x)+1, minlength smaller than max+1
+        // (max wins), empty input with minlength, and the length-mismatch
+        // error path.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+
+            // Default: counts, int64 output
+            let x = numeric_array(py, vec![0, 1, 1, 2, 2, 2, 3], "int64");
+            let actual = bincount(py, x.clone().unbind(), None, 0)?;
+            let expected = numpy.call_method1("bincount", (x.clone(),))?;
+            assert_eq!(
+                actual
+                    .bind(py)
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                expected.getattr("dtype")?.str()?.extract::<String>()?
+            );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+
+            // Weighted sums, float64 output
+            let x_w = numeric_array(py, vec![0, 1, 1, 2], "int64");
+            let weights = numeric_array(py, vec![1.0, 2.0, 3.0, 4.0], "float64");
+            let actual_w = bincount(py, x_w.clone().unbind(), Some(weights.clone().unbind()), 0)?;
+            let kwargs_w = PyDict::new(py);
+            kwargs_w.set_item("weights", weights)?;
+            let expected_w = numpy.call_method("bincount", (x_w.clone(),), Some(&kwargs_w))?;
+            assert_eq!(
+                actual_w
+                    .bind(py)
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                expected_w.getattr("dtype")?.str()?.extract::<String>()?
+            );
+            assert_eq!(
+                repr_string(&actual_w.bind(py).call_method0("tolist")?),
+                repr_string(&expected_w.call_method0("tolist")?)
+            );
+
+            // minlength larger than max(x)+1 pads with zeros
+            let x_pad = numeric_array(py, vec![0, 1, 2], "int64");
+            let actual_pad = bincount(py, x_pad.clone().unbind(), None, 5)?;
+            let kwargs_pad = PyDict::new(py);
+            kwargs_pad.set_item("minlength", 5)?;
+            let expected_pad =
+                numpy.call_method("bincount", (x_pad.clone(),), Some(&kwargs_pad))?;
+            assert_eq!(
+                repr_string(&actual_pad.bind(py).call_method0("tolist")?),
+                repr_string(&expected_pad.call_method0("tolist")?)
+            );
+
+            // minlength smaller than max(x)+1 is ignored; max wins
+            let x_max = numeric_array(py, vec![0, 5], "int64");
+            let actual_max = bincount(py, x_max.clone().unbind(), None, 2)?;
+            let kwargs_max = PyDict::new(py);
+            kwargs_max.set_item("minlength", 2)?;
+            let expected_max =
+                numpy.call_method("bincount", (x_max.clone(),), Some(&kwargs_max))?;
+            assert_eq!(
+                repr_string(&actual_max.bind(py).call_method0("tolist")?),
+                repr_string(&expected_max.call_method0("tolist")?)
+            );
+
+            // Empty input with minlength returns zeros of that length
+            let empty = numeric_array(py, Vec::<i64>::new(), "int64");
+            let actual_empty = bincount(py, empty.clone().unbind(), None, 3)?;
+            let kwargs_empty = PyDict::new(py);
+            kwargs_empty.set_item("minlength", 3)?;
+            let expected_empty = numpy.call_method("bincount", (empty,), Some(&kwargs_empty))?;
+            assert_eq!(
+                repr_string(&actual_empty.bind(py).call_method0("tolist")?),
+                repr_string(&expected_empty.call_method0("tolist")?)
+            );
+
+            // Length-mismatch weights raise ValueError in NumPy; we propagate
+            // the same error category via UFuncError::Msg.
+            let x_mm = numeric_array(py, vec![0, 1], "int64");
+            let w_mm = numeric_array(py, vec![1.0, 2.0, 3.0], "float64");
+            let err = bincount(py, x_mm.unbind(), Some(w_mm.unbind()), 0).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("weights") && msg.contains("length"),
+                "unexpected error: {msg}"
+            );
+
             Ok(())
         });
     }
