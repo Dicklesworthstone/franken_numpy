@@ -3540,7 +3540,7 @@
     "rel_tol": 1e-10
   },
   {
-    "id": "bincount_weighted_golden",
+    "id": "bincount_with_gap_golden",
     "operation": "bincount",
     "seed": 10030,
     "mode": "strict",
@@ -3555,6 +3555,67 @@
     "input_values": [0.0, 1.0, 1.0, 3.0, 3.0],
     "expected_shape": [4],
     "expected_values": [1.0, 2.0, 0.0, 2.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "bincount_weights_golden",
+    "operation": "bincount",
+    "seed": 10031,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [5],
+    "input_values": [0.0, 1.0, 1.0, 3.0, 3.0],
+    "weights": [1.0, 2.0, 3.0, 4.0, 5.0],
+    "expected_shape": [4],
+    "expected_values": [1.0, 5.0, 0.0, 9.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "bincount_minlength_pads_golden",
+    "operation": "bincount",
+    "seed": 10032,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [3],
+    "input_values": [0.0, 1.0, 2.0],
+    "minlength": 5,
+    "expected_shape": [5],
+    "expected_values": [1.0, 1.0, 1.0, 0.0, 0.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "bincount_weights_and_minlength_golden",
+    "operation": "bincount",
+    "seed": 10033,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-signal-packet",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "signal_differential_expected_success",
+    "expected_reason_code": "signal_differential_expected_success",
+    "input_shape": [3],
+    "input_values": [0.0, 2.0, 2.0],
+    "weights": [1.5, 2.5, 3.5],
+    "minlength": 6,
+    "expected_shape": [6],
+    "expected_values": [1.5, 0.0, 6.0, 0.0, 0.0, 0.0],
     "abs_tol": 1e-10,
     "rel_tol": 1e-10
   },

@@ -1207,6 +1207,11 @@ struct SignalDifferentialCase {
     // reshape parameters
     #[serde(default)]
     reshape_shape: Vec<isize>,
+    // bincount parameters
+    #[serde(default)]
+    weights: Vec<f64>,
+    #[serde(default)]
+    minlength: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -10845,7 +10850,17 @@ fn execute_signal_differential_operation(
                 DType::F64,
             )
             .map_err(map_ufunc_error_to_signal_suite)?;
-            let result = input.bincount().map_err(map_ufunc_error_to_signal_suite)?;
+            let weights = if case.weights.is_empty() {
+                None
+            } else {
+                Some(
+                    UFuncArray::new(vec![case.weights.len()], case.weights.clone(), DType::F64)
+                        .map_err(map_ufunc_error_to_signal_suite)?,
+                )
+            };
+            let result = input
+                .bincount_with(weights.as_ref(), case.minlength)
+                .map_err(map_ufunc_error_to_signal_suite)?;
             Ok(to_outcome(result))
         }
         "einsum" => {
