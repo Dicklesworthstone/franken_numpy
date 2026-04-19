@@ -3815,6 +3815,72 @@ mod tests {
     }
 
     #[test]
+    fn frompyfunc_live_callable_matches_numpy_reduce_negative_axis() {
+        // Locks parity for frompyfunc.reduce() when the axis is specified as a
+        // negative integer (-1/-2) or a single-element tuple containing a
+        // negative integer — both forms are accepted by NumPy's underlying
+        // reduce path and collapse to the same axis as their positive
+        // counterpart. Multi-axis negative tuples are not exercised here
+        // because NumPy rejects them for non-reorderable ufuncs (covered via
+        // the existing error-parity test in identity_and_reduce).
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+
+            let operator = py.import("operator")?;
+            let numpy = py.import("numpy")?;
+            let callable = operator.getattr("add")?.unbind();
+            let reduce_input = object_array(
+                py,
+                vec![vec![1_i64, 2_i64, 3_i64], vec![4_i64, 5_i64, 6_i64]],
+            );
+
+            let actual = module
+                .getattr("frompyfunc")?
+                .call1((callable.bind(py), 2, 1))?;
+            let expected = numpy
+                .getattr("frompyfunc")?
+                .call1((callable.bind(py), 2, 1))?;
+
+            for axis_value in [-1_i64, -2_i64] {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("axis", axis_value)?;
+                assert_eq!(
+                    reduce_outcome(py, &actual, &reduce_input, Some(&kwargs))?,
+                    reduce_outcome(py, &expected, &reduce_input, Some(&kwargs))?,
+                    "axis={axis_value}",
+                );
+            }
+
+            for axis_value in [-1_i64, -2_i64] {
+                let kwargs = PyDict::new(py);
+                let axis_tuple = PyTuple::new(py, [axis_value])?;
+                kwargs.set_item("axis", axis_tuple)?;
+                assert_eq!(
+                    reduce_outcome(py, &actual, &reduce_input, Some(&kwargs))?,
+                    reduce_outcome(py, &expected, &reduce_input, Some(&kwargs))?,
+                    "axis=({axis_value},)",
+                );
+            }
+
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("axis", -1_i64)?;
+            kwargs.set_item("keepdims", true)?;
+            assert_eq!(
+                reduce_outcome(py, &actual, &reduce_input, Some(&kwargs))?,
+                reduce_outcome(py, &expected, &reduce_input, Some(&kwargs))?,
+                "axis=-1 keepdims=True",
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn frompyfunc_reduce_does_not_delegate_to_numpy_frompyfunc() {
         with_python(|py| {
             if !numpy_available(py) {
