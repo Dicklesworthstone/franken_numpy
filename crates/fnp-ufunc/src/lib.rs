@@ -39686,6 +39686,47 @@ mod tests {
     }
 
     #[test]
+    fn roots_with_repeated_one_root() {
+        // (x - 1)^3 = x^3 - 3x^2 + 3x - 1
+        let p = UFuncArray::new(vec![4], vec![1.0, -3.0, 3.0, -1.0], DType::F64).unwrap();
+        let r = p.roots().unwrap();
+        assert_eq!(r.shape(), &[3]);
+        let mut roots = r.values().to_vec();
+        roots.sort_by(|a, b| a.total_cmp(b));
+        for root in roots {
+            assert!(
+                (root - 1.0).abs() < 1e-5,
+                "expected repeated root near 1, got {root}"
+            );
+        }
+    }
+
+    #[test]
+    fn roots_with_repeated_two_root_and_negative_root() {
+        // (x - 2)^2 (x + 5) = x^3 + x^2 - 16x + 20
+        let p = UFuncArray::new(vec![4], vec![1.0, 1.0, -16.0, 20.0], DType::F64).unwrap();
+        let r = p.roots().unwrap();
+        assert_eq!(r.shape(), &[3]);
+        let mut roots = r.values().to_vec();
+        roots.sort_by(|a, b| a.total_cmp(b));
+        assert!(
+            (roots[0] - (-5.0)).abs() < 1e-6,
+            "expected root near -5, got {}",
+            roots[0]
+        );
+        assert!(
+            (roots[1] - 2.0).abs() < 1e-6,
+            "expected repeated root near 2, got {}",
+            roots[1]
+        );
+        assert!(
+            (roots[2] - 2.0).abs() < 1e-6,
+            "expected repeated root near 2, got {}",
+            roots[2]
+        );
+    }
+
+    #[test]
     fn roots_degree5() {
         // (x-1)(x-2)(x-3)(x-4)(x-5) = x^5 - 15x^4 + 85x^3 - 225x^2 + 274x - 120
         let p = UFuncArray::new(
