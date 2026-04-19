@@ -4911,6 +4911,121 @@ mod tests {
     }
 
     #[test]
+    fn count_nonzero_matches_numpy_empty_array_keepdims_extra_variants() {
+        // Extends the primary empty+keepdims test with broader parity coverage:
+        // 1-D empty input, axis=None on 2-D empty, non-keepdims on 2-D empty,
+        // and 3-D empty arrays where the zero-size dim is interior. Each case
+        // locks both the output shape and the flattened payload against
+        // NumPy's oracle output.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let numpy = py.import("numpy")?;
+
+            let assert_matches = |py: Python<'_>,
+                                  input: &pyo3::Bound<'_, pyo3::types::PyAny>,
+                                  axis: Option<Py<PyAny>>,
+                                  keepdims: bool,
+                                  label: &str|
+             -> PyResult<()> {
+                let actual = count_nonzero(
+                    py,
+                    input.clone().unbind(),
+                    axis.as_ref().map(|a| a.clone_ref(py)),
+                    keepdims,
+                )?;
+                let kwargs = PyDict::new(py);
+                if let Some(ref ax) = axis {
+                    kwargs.set_item("axis", ax.bind(py))?;
+                } else {
+                    kwargs.set_item("axis", py.None())?;
+                }
+                kwargs.set_item("keepdims", keepdims)?;
+                let expected =
+                    numpy.call_method("count_nonzero", (input.clone(),), Some(&kwargs))?;
+
+                let actual_bound = actual.bind(py);
+                let actual_shape = actual_bound.getattr("shape")?.extract::<Vec<usize>>()?;
+                let expected_shape = expected.getattr("shape")?.extract::<Vec<usize>>()?;
+                assert_eq!(actual_shape, expected_shape, "{label}: shape mismatch");
+                assert_eq!(
+                    repr_string(&actual_bound.call_method0("tolist")?),
+                    repr_string(&expected.call_method0("tolist")?),
+                    "{label}: values mismatch"
+                );
+                Ok(())
+            };
+
+            let empty_1d = numeric_array(py, Vec::<i64>::new(), "int64");
+            let axis0 = 0_i32.into_pyobject(py)?.unbind();
+            assert_matches(
+                py,
+                &empty_1d,
+                Some(axis0.into()),
+                true,
+                "1d_empty_axis0_keepdims",
+            )?;
+            assert_matches(py, &empty_1d, None, true, "1d_empty_axis_none_keepdims")?;
+
+            let empty_rows = numeric_array(py, Vec::<i64>::new(), "int64")
+                .call_method1("reshape", (0_usize, 3_usize))?;
+            assert_matches(
+                py,
+                &empty_rows,
+                None,
+                true,
+                "2d_empty_rows_axis_none_keepdims",
+            )?;
+            let axis0_2d = 0_i32.into_pyobject(py)?.unbind();
+            assert_matches(
+                py,
+                &empty_rows,
+                Some(axis0_2d.into()),
+                false,
+                "2d_empty_rows_axis0_no_keepdims",
+            )?;
+            let axis1_2d = 1_i32.into_pyobject(py)?.unbind();
+            assert_matches(
+                py,
+                &empty_rows,
+                Some(axis1_2d.into()),
+                true,
+                "2d_empty_rows_axis1_keepdims",
+            )?;
+
+            let empty_3d = numeric_array(py, Vec::<i64>::new(), "int64")
+                .call_method1("reshape", (2_usize, 0_usize, 3_usize))?;
+            let axis0_3d = 0_i32.into_pyobject(py)?.unbind();
+            assert_matches(
+                py,
+                &empty_3d,
+                Some(axis0_3d.into()),
+                true,
+                "3d_empty_middle_axis0_keepdims",
+            )?;
+            let axis_tuple = PyTuple::new(py, [0_isize, 2_isize])?.unbind();
+            assert_matches(
+                py,
+                &empty_3d,
+                Some(axis_tuple.into()),
+                true,
+                "3d_empty_middle_axis_tuple_keepdims",
+            )?;
+            assert_matches(
+                py,
+                &empty_3d,
+                None,
+                true,
+                "3d_empty_middle_axis_none_keepdims",
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn isposinf_matches_numpy() {
         with_python(|py| {
             if !numpy_available(py) {
