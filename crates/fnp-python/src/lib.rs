@@ -2371,6 +2371,23 @@ fn count_nonzero(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, b, lower=false, unit_diagonal=false))]
+fn solve_triangular(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    b: Py<PyAny>,
+    lower: bool,
+    unit_diagonal: bool,
+) -> PyResult<Py<PyAny>> {
+    let a = extract_numeric_array(py, a.bind(py), "solve_triangular(a)")?;
+    let b = extract_numeric_array(py, b.bind(py), "solve_triangular(b)")?;
+    let result = a
+        .solve_triangular(&b, lower, unit_diagonal)
+        .map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
 fn isposinf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x = extract_numeric_array(py, x.bind(py), "isposinf(x)")?;
     let result = ufunc_isposinf(&x).map_err(map_ufunc_error)?;
@@ -3130,6 +3147,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(flatnonzero, m)?)?;
     m.add_function(wrap_pyfunction!(argwhere, m)?)?;
     m.add_function(wrap_pyfunction!(count_nonzero, m)?)?;
+    m.add_function(wrap_pyfunction!(solve_triangular, m)?)?;
     m.add_function(wrap_pyfunction!(isposinf, m)?)?;
     m.add_function(wrap_pyfunction!(isneginf, m)?)?;
     m.add_function(wrap_pyfunction!(signbit, m)?)?;
@@ -3200,9 +3218,9 @@ mod tests {
         digitize, extract, fill_diagonal, flatnonzero, floor, fnp_python, frexp, hypot, indices,
         interp, isfinite, isinf, isnan, isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2,
         meshgrid, modf, nan_to_num, nextafter, place, put, put_along_axis, putmask, radians,
-        ravel_multi_index, rint, searchsorted, select, sign, signbit, sinc, spacing, take,
-        take_along_axis, trapezoid, trapz, tril_indices, tril_indices_from, triu_indices,
-        triu_indices_from, trunc, unravel_index, where_py,
+        ravel_multi_index, rint, searchsorted, select, sign, signbit, sinc, solve_triangular,
+        spacing, take, take_along_axis, trapezoid, trapz, tril_indices, tril_indices_from,
+        triu_indices, triu_indices_from, trunc, unravel_index, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -3375,6 +3393,7 @@ mod tests {
             assert!(module.getattr("flatnonzero").is_ok());
             assert!(module.getattr("argwhere").is_ok());
             assert!(module.getattr("count_nonzero").is_ok());
+            assert!(module.getattr("solve_triangular").is_ok());
             assert!(module.getattr("isposinf").is_ok());
             assert!(module.getattr("isneginf").is_ok());
             assert!(module.getattr("signbit").is_ok());
@@ -4997,6 +5016,77 @@ mod tests {
             );
 
             Ok(())
+        });
+    }
+
+    #[test]
+    fn solve_triangular_matches_numpy_unit_diagonal_variants() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let linalg = numpy.getattr("linalg")?;
+            let eye3 = numpy.getattr("eye")?.call1((3,))?;
+
+            let lower = numeric_array(
+                py,
+                vec![
+                    vec![9.0, 0.0, 0.0],
+                    vec![2.0, -7.0, 0.0],
+                    vec![4.0, -3.0, 11.0],
+                ],
+                "float64",
+            );
+            let lower_rhs = numeric_array(py, vec![1.0, 2.0, 3.0], "float64");
+            let lower_actual = solve_triangular(
+                py,
+                lower.clone().unbind(),
+                lower_rhs.clone().unbind(),
+                true,
+                true,
+            )?;
+            let lower_unit = numpy
+                .call_method1("tril", (lower.clone(), -1_i32))?
+                .call_method1("__add__", (eye3.clone(),))?;
+            let lower_expected = linalg.call_method1("solve", (lower_unit, lower_rhs))?;
+            assert_array_matches_numpy(lower_actual.bind(py), &lower_expected)?;
+
+            let upper = numeric_array(
+                py,
+                vec![
+                    vec![5.0, 2.0, -1.0],
+                    vec![0.0, 8.0, 3.0],
+                    vec![0.0, 0.0, -4.0],
+                ],
+                "float64",
+            );
+            let upper_rhs = numeric_array(py, vec![4.0, 5.0, 6.0], "float64");
+            let upper_actual = solve_triangular(
+                py,
+                upper.clone().unbind(),
+                upper_rhs.clone().unbind(),
+                false,
+                true,
+            )?;
+            let upper_unit = numpy
+                .call_method1("triu", (upper.clone(), 1_i32))?
+                .call_method1("__add__", (eye3,))?;
+            let upper_expected = linalg.call_method1("solve", (upper_unit, upper_rhs.clone()))?;
+            assert_array_matches_numpy(upper_actual.bind(py), &upper_expected)?;
+
+            let upper_full_actual = solve_triangular(
+                py,
+                upper.clone().unbind(),
+                upper_rhs.clone().unbind(),
+                false,
+                false,
+            )?;
+            let upper_full_expected = linalg.call_method1("solve", (upper, upper_rhs))?;
+            assert_array_matches_numpy(upper_full_actual.bind(py), &upper_full_expected)
         });
     }
 
