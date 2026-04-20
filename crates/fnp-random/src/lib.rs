@@ -7050,6 +7050,20 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn integers_endpoint_near_i64_min_stays_inclusive() {
+        let mut rng = oracle_gen();
+        let low = i64::MIN;
+        let high = i64::MIN + 2;
+        let samples = rng
+            .integers_endpoint(low, high, 128)
+            .expect("near-min inclusive range should succeed");
+        assert_eq!(samples.len(), 128);
+        assert!(samples.iter().all(|&x| (low..=high).contains(&x)));
+        assert!(samples.contains(&low));
+        assert!(samples.contains(&high));
+    }
+
+    #[test]
     fn integers_endpoint_zero_size_allows_inverted_bounds() {
         let mut rng = test_generator();
         assert_eq!(rng.integers_endpoint(5, 5, 0).unwrap(), Vec::<i64>::new());
@@ -7806,6 +7820,50 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn oracle_integers_endpoint_near_i64_min() {
+        let mut g = oracle_gen();
+        let vals = g
+            .integers_endpoint(i64::MIN, i64::MIN + 2, 20)
+            .expect("near-min inclusive range should succeed");
+        let expected = vec![
+            i64::MIN,
+            i64::MIN + 2,
+            i64::MIN,
+            i64::MIN + 1,
+            i64::MIN + 2,
+            i64::MIN,
+            i64::MIN + 2,
+            i64::MIN + 1,
+            i64::MIN + 2,
+            i64::MIN + 1,
+            i64::MIN + 1,
+            i64::MIN + 2,
+            i64::MIN,
+            i64::MIN + 2,
+            i64::MIN,
+            i64::MIN,
+            i64::MIN + 1,
+            i64::MIN + 1,
+            i64::MIN,
+            i64::MIN,
+        ];
+        assert_eq!(vals, expected, "near-min endpoint oracle mismatch");
+    }
+
+    #[test]
+    fn oracle_integers_endpoint_single_i64_min_value() {
+        let mut g = oracle_gen();
+        let vals = g
+            .integers_endpoint(i64::MIN, i64::MIN, 8)
+            .expect("singleton near-min endpoint range should succeed");
+        assert_eq!(
+            vals,
+            vec![i64::MIN; 8],
+            "singleton i64::MIN oracle mismatch"
+        );
+    }
+
+    #[test]
     fn oracle_laplace() {
         let mut g = oracle_gen();
         let vals = g.laplace(0.0, 1.0, 10).unwrap();
@@ -8517,6 +8575,56 @@ for child in rng.spawn(n_children):
                 9_223_372_036_854_775_805,
                 9_223_372_036_854_775_805,
             ]
+        );
+
+        let near_min_low = i64::MIN;
+        let near_min_high = i64::MIN + 2;
+        let expected_near_min =
+            numpy_oracle_integers_outcome(near_min_low, near_min_high, 20, true);
+        assert_eq!(
+            expected_near_min,
+            "ok:-9223372036854775808,-9223372036854775806,-9223372036854775808,-9223372036854775807,-9223372036854775806,-9223372036854775808,-9223372036854775806,-9223372036854775807,-9223372036854775806,-9223372036854775807,-9223372036854775807,-9223372036854775806,-9223372036854775808,-9223372036854775806,-9223372036854775808,-9223372036854775808,-9223372036854775807,-9223372036854775807,-9223372036854775808,-9223372036854775808"
+        );
+        let mut near_min_g = oracle_gen();
+        assert_eq!(
+            near_min_g
+                .integers_endpoint(near_min_low, near_min_high, 20)
+                .unwrap(),
+            vec![
+                i64::MIN,
+                i64::MIN + 2,
+                i64::MIN,
+                i64::MIN + 1,
+                i64::MIN + 2,
+                i64::MIN,
+                i64::MIN + 2,
+                i64::MIN + 1,
+                i64::MIN + 2,
+                i64::MIN + 1,
+                i64::MIN + 1,
+                i64::MIN + 2,
+                i64::MIN,
+                i64::MIN + 2,
+                i64::MIN,
+                i64::MIN,
+                i64::MIN + 1,
+                i64::MIN + 1,
+                i64::MIN,
+                i64::MIN,
+            ]
+        );
+
+        let expected_singleton_min = numpy_oracle_integers_outcome(i64::MIN, i64::MIN, 8, true);
+        assert_eq!(
+            expected_singleton_min,
+            "ok:-9223372036854775808,-9223372036854775808,-9223372036854775808,-9223372036854775808,-9223372036854775808,-9223372036854775808,-9223372036854775808,-9223372036854775808"
+        );
+        let mut singleton_min_g = oracle_gen();
+        assert_eq!(
+            singleton_min_g
+                .integers_endpoint(i64::MIN, i64::MIN, 8)
+                .unwrap(),
+            vec![i64::MIN; 8]
         );
     }
 
