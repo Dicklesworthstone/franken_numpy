@@ -5882,6 +5882,118 @@ mm.flush()
         assert_eq!(loaded_dtype, IOSupportedDType::F64);
     }
 
+    #[test]
+    fn save_load_scalar_zero_dim_roundtrip() {
+        // np.save/np.load round-trip for a 0-d scalar array: shape=[] with one value.
+        let shape: &[usize] = &[];
+        let values = &[42.5_f64];
+        let bytes = save(shape, values, IOSupportedDType::F64).unwrap();
+        let (loaded_shape, loaded_values, loaded_dtype) = load(&bytes).unwrap();
+        assert_eq!(loaded_shape, shape);
+        assert_eq!(loaded_values, values);
+        assert_eq!(loaded_dtype, IOSupportedDType::F64);
+    }
+
+    #[test]
+    fn save_load_empty_1d_roundtrip() {
+        // Empty 1-D array: shape=[0], zero values. Header must still survive.
+        let shape: &[usize] = &[0];
+        let values: &[f64] = &[];
+        let bytes = save(shape, values, IOSupportedDType::F64).unwrap();
+        let (loaded_shape, loaded_values, loaded_dtype) = load(&bytes).unwrap();
+        assert_eq!(loaded_shape, shape);
+        assert!(loaded_values.is_empty());
+        assert_eq!(loaded_dtype, IOSupportedDType::F64);
+    }
+
+    #[test]
+    fn save_load_empty_2d_roundtrip() {
+        // Non-zero dim * zero dim -> still empty but shape preserved.
+        let shape: &[usize] = &[3, 0];
+        let values: &[f64] = &[];
+        let bytes = save(shape, values, IOSupportedDType::F64).unwrap();
+        let (loaded_shape, loaded_values, loaded_dtype) = load(&bytes).unwrap();
+        assert_eq!(loaded_shape, shape);
+        assert!(loaded_values.is_empty());
+        assert_eq!(loaded_dtype, IOSupportedDType::F64);
+    }
+
+    #[test]
+    fn save_load_4d_roundtrip_preserves_shape() {
+        let shape: &[usize] = &[2, 3, 4, 5];
+        let values: Vec<f64> = (0..120).map(f64::from).collect();
+        let bytes = save(shape, &values, IOSupportedDType::F64).unwrap();
+        let (loaded_shape, loaded_values, loaded_dtype) = load(&bytes).unwrap();
+        assert_eq!(loaded_shape, shape);
+        assert_eq!(loaded_values, values);
+        assert_eq!(loaded_dtype, IOSupportedDType::F64);
+    }
+
+    #[test]
+    fn save_load_preserves_nan_inf_and_negative_zero() {
+        // Exotic IEEE-754 values must round-trip bit-exactly through NPY.
+        let shape = &[5];
+        let values = &[f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.0_f64, 0.0_f64];
+        let bytes = save(shape, values, IOSupportedDType::F64).unwrap();
+        let (loaded_shape, loaded_values, _) = load(&bytes).unwrap();
+        assert_eq!(loaded_shape, shape);
+        assert!(loaded_values[0].is_nan(), "NaN must round-trip");
+        assert_eq!(loaded_values[1], f64::INFINITY);
+        assert_eq!(loaded_values[2], f64::NEG_INFINITY);
+        // -0.0 vs +0.0 preserved via bit pattern (== equates them, so test bits).
+        assert_eq!(loaded_values[3].to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(loaded_values[4].to_bits(), 0.0_f64.to_bits());
+    }
+
+    #[test]
+    fn save_load_i32_dtype_roundtrip() {
+        let shape = &[4];
+        let values = &[-2.0_f64, -1.0, 0.0, 1.0];
+        let bytes = save(shape, values, IOSupportedDType::I32).unwrap();
+        let (loaded_shape, loaded_values, loaded_dtype) = load(&bytes).unwrap();
+        assert_eq!(loaded_shape, shape);
+        assert_eq!(loaded_values, values);
+        assert_eq!(loaded_dtype, IOSupportedDType::I32);
+    }
+
+    #[test]
+    fn save_load_u8_dtype_roundtrip() {
+        let shape = &[3];
+        let values = &[0.0_f64, 127.0, 255.0];
+        let bytes = save(shape, values, IOSupportedDType::U8).unwrap();
+        let (loaded_shape, loaded_values, loaded_dtype) = load(&bytes).unwrap();
+        assert_eq!(loaded_shape, shape);
+        assert_eq!(loaded_values, values);
+        assert_eq!(loaded_dtype, IOSupportedDType::U8);
+    }
+
+    #[test]
+    fn save_load_bool_dtype_roundtrip() {
+        let shape = &[4];
+        let values = &[0.0_f64, 1.0, 0.0, 1.0];
+        let bytes = save(shape, values, IOSupportedDType::Bool).unwrap();
+        let (loaded_shape, loaded_values, loaded_dtype) = load(&bytes).unwrap();
+        assert_eq!(loaded_shape, shape);
+        assert_eq!(loaded_values, values);
+        assert_eq!(loaded_dtype, IOSupportedDType::Bool);
+    }
+
+    #[test]
+    fn save_load_f32_dtype_roundtrip_within_tolerance() {
+        // f32 storage truncates precision; round-trip must stay within 1 ULP.
+        let shape = &[4];
+        let values = &[1.25_f64, -3.5, 100000.0, 1e-5];
+        let bytes = save(shape, values, IOSupportedDType::F32).unwrap();
+        let (loaded_shape, loaded_values, loaded_dtype) = load(&bytes).unwrap();
+        assert_eq!(loaded_shape, shape);
+        assert_eq!(loaded_dtype, IOSupportedDType::F32);
+        for (a, b) in loaded_values.iter().zip(values.iter()) {
+            let f32_a = *a as f32;
+            let f32_b = *b as f32;
+            assert_eq!(f32_a, f32_b, "f32 round-trip mismatch {a} vs {b}");
+        }
+    }
+
     fn native_endian_f64_dtype() -> IOSupportedDType {
         if cfg!(target_endian = "little") {
             IOSupportedDType::F64
