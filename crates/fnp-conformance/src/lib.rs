@@ -20422,6 +20422,58 @@ fn evaluate_rng_metamorphic_relation(case: &RngMetamorphicCase) -> Result<(), Rn
             }
             Ok(())
         }
+        "jump_zero_is_identity" => {
+            // jump_ahead(0) must not advance the stream.
+            let mut baseline = DeterministicRng::new(case.seed);
+            let mut jumped = DeterministicRng::new(case.seed);
+            jumped.jump_ahead(0);
+            if baseline.next_u64() == jumped.next_u64() {
+                Ok(())
+            } else {
+                Err(RngSuiteError::new(
+                    "rng_jump_contract_violation",
+                    "jump_ahead(0) must leave the stream position unchanged",
+                ))
+            }
+        }
+        "fill_then_iterate_resumes" => {
+            // After fill_u64(N), next_u64() must equal the (N+1)th draw from a
+            // fresh RNG iterated position-by-position.
+            let len = case.fill_len.max(DEFAULT_RNG_REPLAY_DRAWS);
+            let mut filled_rng = DeterministicRng::new(case.seed);
+            let _ = filled_rng.fill_u64(len);
+            let resumed = filled_rng.next_u64();
+            let mut iter_rng = DeterministicRng::new(case.seed);
+            for _ in 0..len {
+                iter_rng.next_u64();
+            }
+            let expected_next = iter_rng.next_u64();
+            if resumed == expected_next {
+                Ok(())
+            } else {
+                Err(RngSuiteError::new(
+                    "rng_fill_length_contract",
+                    "next_u64() after fill_u64(N) must equal the (N+1)th iterative draw",
+                ))
+            }
+        }
+        "jump_composition_commutative" => {
+            // jump_ahead is an abelian group action: jump(a) ∘ jump(b) = jump(b) ∘ jump(a).
+            let mut ab = DeterministicRng::new(case.seed);
+            ab.jump_ahead(case.steps.max(DEFAULT_RNG_JUMP_STEPS));
+            ab.jump_ahead(case.extra_steps.max(17));
+            let mut ba = DeterministicRng::new(case.seed);
+            ba.jump_ahead(case.extra_steps.max(17));
+            ba.jump_ahead(case.steps.max(DEFAULT_RNG_JUMP_STEPS));
+            if ab.next_u64() == ba.next_u64() {
+                Ok(())
+            } else {
+                Err(RngSuiteError::new(
+                    "rng_jump_contract_violation",
+                    "jump_ahead composition must commute",
+                ))
+            }
+        }
         other => Err(RngSuiteError::new(
             "rng_policy_unknown_metadata",
             format!("unsupported rng metamorphic relation {other}"),
