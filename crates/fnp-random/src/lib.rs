@@ -2574,8 +2574,9 @@ impl Generator {
         let mut result = Vec::with_capacity(size);
         for _ in 0..size {
             let val = if rng == u64::MAX {
-                // Full u64 range — just use raw
-                self.next_u64() as i64
+                // Full u64 range — still apply the lower-bound offset so
+                // `[i64::MIN, i64::MAX]` matches NumPy's signed remapping.
+                off.wrapping_add(self.next_u64()) as i64
             } else {
                 (off.wrapping_add(self.numpy_bounded_uint64(rng))) as i64
             };
@@ -7025,6 +7026,30 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn integers_endpoint_full_i64_range_is_bounded() {
+        let mut rng = oracle_gen();
+        let samples = rng
+            .integers_endpoint(i64::MIN, i64::MAX, 16)
+            .expect("full i64 range should succeed");
+        assert_eq!(samples.len(), 16);
+        assert!(samples.iter().all(|&x| (i64::MIN..=i64::MAX).contains(&x)));
+    }
+
+    #[test]
+    fn integers_endpoint_near_i64_max_stays_inclusive() {
+        let mut rng = oracle_gen();
+        let low = i64::MAX - 2;
+        let high = i64::MAX;
+        let samples = rng
+            .integers_endpoint(low, high, 128)
+            .expect("near-max inclusive range should succeed");
+        assert_eq!(samples.len(), 128);
+        assert!(samples.iter().all(|&x| (low..=high).contains(&x)));
+        assert!(samples.contains(&low));
+        assert!(samples.contains(&high));
+    }
+
+    #[test]
     fn integers_endpoint_zero_size_allows_inverted_bounds() {
         let mut rng = test_generator();
         assert_eq!(rng.integers_endpoint(5, 5, 0).unwrap(), Vec::<i64>::new());
@@ -7736,6 +7761,51 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn oracle_integers_endpoint_full_i64_range() {
+        let mut g = oracle_gen();
+        let vals = g
+            .integers_endpoint(i64::MIN, i64::MAX, 3)
+            .expect("full i64 range should succeed");
+        let expected = vec![
+            7_970_500_360_266_585_199,
+            -2_997_492_589_593_491_325,
+            -5_220_761_164_058_139_971,
+        ];
+        assert_eq!(vals, expected, "full-range endpoint oracle mismatch");
+    }
+
+    #[test]
+    fn oracle_integers_endpoint_near_i64_max() {
+        let mut g = oracle_gen();
+        let vals = g
+            .integers_endpoint(i64::MAX - 2, i64::MAX, 20)
+            .expect("near-max inclusive range should succeed");
+        let expected = vec![
+            9_223_372_036_854_775_805,
+            9_223_372_036_854_775_807,
+            9_223_372_036_854_775_805,
+            9_223_372_036_854_775_806,
+            9_223_372_036_854_775_807,
+            9_223_372_036_854_775_805,
+            9_223_372_036_854_775_807,
+            9_223_372_036_854_775_806,
+            9_223_372_036_854_775_807,
+            9_223_372_036_854_775_806,
+            9_223_372_036_854_775_806,
+            9_223_372_036_854_775_807,
+            9_223_372_036_854_775_805,
+            9_223_372_036_854_775_807,
+            9_223_372_036_854_775_805,
+            9_223_372_036_854_775_805,
+            9_223_372_036_854_775_806,
+            9_223_372_036_854_775_806,
+            9_223_372_036_854_775_805,
+            9_223_372_036_854_775_805,
+        ];
+        assert_eq!(vals, expected, "near-max endpoint oracle mismatch");
+    }
+
+    #[test]
     fn oracle_laplace() {
         let mut g = oracle_gen();
         let vals = g.laplace(0.0, 1.0, 10).unwrap();
@@ -8389,6 +8459,65 @@ for child in rng.spawn(n_children):
         assert_eq!(g.integers(5, 4, 0).unwrap(), Vec::<i64>::new());
         assert_eq!(g.integers_endpoint(5, 5, 0).unwrap(), Vec::<i64>::new());
         assert_eq!(g.integers_endpoint(5, 4, 0).unwrap(), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn integers_endpoint_extreme_ranges_match_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let expected_full_range = numpy_oracle_integers_outcome(i64::MIN, i64::MAX, 3, true);
+        assert_eq!(
+            expected_full_range,
+            "ok:7970500360266585199,-2997492589593491325,-5220761164058139971"
+        );
+        let mut g = oracle_gen();
+        assert_eq!(
+            g.integers_endpoint(i64::MIN, i64::MAX, 3).unwrap(),
+            vec![
+                7_970_500_360_266_585_199,
+                -2_997_492_589_593_491_325,
+                -5_220_761_164_058_139_971,
+            ]
+        );
+
+        let near_max_low = i64::MAX - 2;
+        let near_max_high = i64::MAX;
+        let expected_near_max =
+            numpy_oracle_integers_outcome(near_max_low, near_max_high, 20, true);
+        assert_eq!(
+            expected_near_max,
+            "ok:9223372036854775805,9223372036854775807,9223372036854775805,9223372036854775806,9223372036854775807,9223372036854775805,9223372036854775807,9223372036854775806,9223372036854775807,9223372036854775806,9223372036854775806,9223372036854775807,9223372036854775805,9223372036854775807,9223372036854775805,9223372036854775805,9223372036854775806,9223372036854775806,9223372036854775805,9223372036854775805"
+        );
+        let mut near_max_g = oracle_gen();
+        assert_eq!(
+            near_max_g
+                .integers_endpoint(near_max_low, near_max_high, 20)
+                .unwrap(),
+            vec![
+                9_223_372_036_854_775_805,
+                9_223_372_036_854_775_807,
+                9_223_372_036_854_775_805,
+                9_223_372_036_854_775_806,
+                9_223_372_036_854_775_807,
+                9_223_372_036_854_775_805,
+                9_223_372_036_854_775_807,
+                9_223_372_036_854_775_806,
+                9_223_372_036_854_775_807,
+                9_223_372_036_854_775_806,
+                9_223_372_036_854_775_806,
+                9_223_372_036_854_775_807,
+                9_223_372_036_854_775_805,
+                9_223_372_036_854_775_807,
+                9_223_372_036_854_775_805,
+                9_223_372_036_854_775_805,
+                9_223_372_036_854_775_806,
+                9_223_372_036_854_775_806,
+                9_223_372_036_854_775_805,
+                9_223_372_036_854_775_805,
+            ]
+        );
     }
 
     #[test]
