@@ -4344,6 +4344,119 @@ print(",".join(str(float(v)) for v in out.reshape(-1)))
             .collect()
     }
 
+    fn numpy_oracle_seed_sequence_spawn_words(
+        entropy: &[u32],
+        first_batch: usize,
+        second_batch: usize,
+    ) -> Vec<(Vec<u32>, Vec<u32>)> {
+        let entropy_arg = entropy
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let script = r#"
+import sys
+import numpy as np
+
+entropy = [int(part) for part in sys.argv[1].split(",") if part]
+first_batch = int(sys.argv[2])
+second_batch = int(sys.argv[3])
+seed = entropy[0] if len(entropy) == 1 else entropy
+ss = np.random.SeedSequence(seed)
+children = ss.spawn(first_batch)
+children.extend(ss.spawn(second_batch))
+for child in children:
+    spawn_key = ",".join(str(value) for value in child.spawn_key)
+    state = ",".join(str(int(value)) for value in child.generate_state(8).tolist())
+    print(f"{spawn_key}|{state}")
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(entropy_arg)
+            .arg(first_batch.to_string())
+            .arg(second_batch.to_string())
+            .output()
+            .expect("python oracle should launch");
+        assert!(
+            output.status.success(),
+            "NumPy SeedSequence.spawn oracle must succeed"
+        );
+        String::from_utf8(output.stdout)
+            .expect("oracle stdout must be utf-8")
+            .lines()
+            .map(|line| {
+                let (spawn_key, state) = line
+                    .split_once('|')
+                    .expect("oracle line must contain spawn key and state");
+                let spawn_key = if spawn_key.is_empty() {
+                    Vec::new()
+                } else {
+                    spawn_key
+                        .split(',')
+                        .map(|value| value.parse::<u32>().expect("oracle spawn key"))
+                        .collect()
+                };
+                let state = if state.is_empty() {
+                    Vec::new()
+                } else {
+                    state
+                        .split(',')
+                        .map(|value| value.parse::<u32>().expect("oracle state"))
+                        .collect()
+                };
+                (spawn_key, state)
+            })
+            .collect()
+    }
+
+    fn numpy_oracle_generator_spawn_raw(
+        entropy: &[u32],
+        n_children: usize,
+        words: usize,
+    ) -> Vec<Vec<u64>> {
+        let entropy_arg = entropy
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let script = r#"
+import sys
+import numpy as np
+
+entropy = [int(part) for part in sys.argv[1].split(",") if part]
+n_children = int(sys.argv[2])
+words = int(sys.argv[3])
+seed = entropy[0] if len(entropy) == 1 else entropy
+ss = np.random.SeedSequence(seed)
+rng = np.random.Generator(np.random.PCG64DXSM(ss))
+for child in rng.spawn(n_children):
+    print(",".join(str(int(value)) for value in child.bit_generator.random_raw(words).tolist()))
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(entropy_arg)
+            .arg(n_children.to_string())
+            .arg(words.to_string())
+            .output()
+            .expect("python oracle should launch");
+        assert!(
+            output.status.success(),
+            "NumPy Generator.spawn oracle must succeed"
+        );
+        String::from_utf8(output.stdout)
+            .expect("oracle stdout must be utf-8")
+            .lines()
+            .map(|line| {
+                line.split(',')
+                    .filter(|token| !token.is_empty())
+                    .map(|token| token.parse::<u64>().expect("oracle raw word"))
+                    .collect()
+            })
+            .collect()
+    }
+
     #[test]
     fn reason_code_registry_matches_packet_contract() {
         assert_eq!(
@@ -4610,6 +4723,132 @@ print(",".join(str(float(v)) for v in out.reshape(-1)))
             too_many.reason_code(),
             "rng_seedsequence_spawn_contract_violation"
         );
+    }
+
+    #[test]
+    fn seed_sequence_spawn_matches_numpy_seed_12345_reference() {
+        let mut root = SeedSequence::new(&[12345]).expect("root");
+        let first_children = root.spawn(3).expect("first spawn");
+        let second_children = root.spawn(2).expect("second spawn");
+
+        let expected_first: [(&[u32], &[u32]); 3] = [
+            (
+                &[0],
+                &[
+                    959_183_449,
+                    3_196_577_012,
+                    2_719_720_162,
+                    1_792_540_688,
+                    4_210_643_451,
+                    161_689_488,
+                    2_223_833_396,
+                    3_139_330_310,
+                ],
+            ),
+            (
+                &[1],
+                &[
+                    1_457_248_422,
+                    358_904_087,
+                    711_457_119,
+                    482_272_698,
+                    2_884_697_037,
+                    68_710_443,
+                    77_169_265,
+                    2_657_238_038,
+                ],
+            ),
+            (
+                &[2],
+                &[
+                    642_571_064,
+                    3_843_934_530,
+                    1_770_119_126,
+                    1_685_408_148,
+                    2_016_457_908,
+                    3_630_565_817,
+                    935_809_840,
+                    858_553_581,
+                ],
+            ),
+        ];
+        let expected_second: [(&[u32], &[u32]); 2] = [
+            (
+                &[3],
+                &[
+                    3_609_844_797,
+                    1_102_929_138,
+                    1_660_579_046,
+                    2_056_729_905,
+                    575_306_158,
+                    2_670_191_432,
+                    1_184_629_392,
+                    2_825_097_045,
+                ],
+            ),
+            (
+                &[4],
+                &[
+                    1_067_841_243,
+                    1_074_700_622,
+                    4_277_799_263,
+                    207_906_991,
+                    2_646_164_919,
+                    2_269_553_654,
+                    598_561_128,
+                    1_970_099_910,
+                ],
+            ),
+        ];
+
+        assert_eq!(root.spawn_counter(), 5);
+        for (child, (spawn_key, state)) in first_children.iter().zip(expected_first.iter()) {
+            assert_eq!(child.spawn_key(), *spawn_key);
+            assert_eq!(child.generate_state_u32(8).unwrap(), *state);
+        }
+        for (child, (spawn_key, state)) in second_children.iter().zip(expected_second.iter()) {
+            assert_eq!(child.spawn_key(), *spawn_key);
+            assert_eq!(child.generate_state_u32(8).unwrap(), *state);
+        }
+    }
+
+    #[test]
+    fn seed_sequence_spawn_matches_numpy_list_entropy_reference() {
+        let mut root = SeedSequence::new(&[1, 2, 3]).expect("root");
+        let children = root.spawn(2).expect("spawn");
+        let expected: [(&[u32], &[u32]); 2] = [
+            (
+                &[0],
+                &[
+                    231_967_115,
+                    299_383_237,
+                    2_987_783_097,
+                    2_908_150_571,
+                    834_795_113,
+                    3_625_391_018,
+                    250_114_644,
+                    206_593_069,
+                ],
+            ),
+            (
+                &[1],
+                &[
+                    956_539_761,
+                    3_600_538_202,
+                    3_398_694_662,
+                    2_982_641_888,
+                    2_000_443_198,
+                    2_257_681_808,
+                    3_810_005_645,
+                    1_242_537_320,
+                ],
+            ),
+        ];
+
+        for (child, (spawn_key, state)) in children.iter().zip(expected.iter()) {
+            assert_eq!(child.spawn_key(), *spawn_key);
+            assert_eq!(child.generate_state_u32(8).unwrap(), *state);
+        }
     }
 
     #[test]
@@ -4936,6 +5175,104 @@ print(",".join(str(float(v)) for v in out.reshape(-1)))
 
         let next_batch = lhs.spawn(1).expect("next batch");
         assert_ne!(lhs_children[0].state(), next_batch[0].state());
+    }
+
+    #[test]
+    fn generator_spawn_matches_numpy_pcg64dxsm_reference() {
+        let root = SeedSequence::new(&[12345]).expect("seed sequence");
+        let mut generator =
+            Generator::from_seed_sequence(BitGeneratorKind::Pcg64, &root).expect("generator");
+        let mut children = generator.spawn(3).expect("spawn children");
+        let expected: [&[u64]; 3] = [
+            &[
+                2_200_516_532_192_980_437,
+                4_161_482_641_097_408_010,
+                8_252_466_299_466_180_484,
+                13_346_021_809_819_476_580,
+                7_797_442_349_405_549_206,
+                12_404_377_654_512_563_436,
+            ],
+            &[
+                15_973_472_848_157_220_562,
+                6_595_761_104_610_863_534,
+                4_781_051_709_214_724_155,
+                4_650_127_122_996_825_720,
+                607_321_442_220_489_178,
+                11_424_307_440_023_841_594,
+            ],
+            &[
+                3_630_127_626_566_264_255,
+                14_678_413_081_440_072_679,
+                17_487_494_085_757_640_946,
+                13_609_397_124_369_525_435,
+                17_404_614_185_626_143_740,
+                18_263_028_108_381_265_677,
+            ],
+        ];
+
+        for (index, (child, expected_words)) in children.iter_mut().zip(expected.iter()).enumerate()
+        {
+            let actual = (0..expected_words.len())
+                .map(|_| child.next_u64())
+                .collect::<Vec<_>>();
+            assert_u64_seq(
+                &format!("generator_spawn_child_{index}"),
+                &actual,
+                expected_words,
+            );
+        }
+    }
+
+    #[test]
+    fn seed_sequence_spawn_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let mut root = SeedSequence::new(&[12345]).expect("root");
+        let mut actual = root
+            .spawn(3)
+            .expect("first spawn")
+            .into_iter()
+            .map(|child| {
+                (
+                    child.spawn_key().to_vec(),
+                    child.generate_state_u32(8).expect("state words"),
+                )
+            })
+            .collect::<Vec<_>>();
+        actual.extend(
+            root.spawn(2)
+                .expect("second spawn")
+                .into_iter()
+                .map(|child| {
+                    (
+                        child.spawn_key().to_vec(),
+                        child.generate_state_u32(8).expect("state words"),
+                    )
+                }),
+        );
+
+        let expected = numpy_oracle_seed_sequence_spawn_words(&[12345], 3, 2);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn generator_spawn_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let root = SeedSequence::new(&[12345]).expect("seed sequence");
+        let mut generator =
+            Generator::from_seed_sequence(BitGeneratorKind::Pcg64, &root).expect("generator");
+        let mut actual = Vec::new();
+        for mut child in generator.spawn(3).expect("spawn children") {
+            actual.push((0..6).map(|_| child.next_u64()).collect::<Vec<_>>());
+        }
+
+        let expected = numpy_oracle_generator_spawn_raw(&[12345], 3, 6);
+        assert_eq!(actual, expected);
     }
 
     #[test]
