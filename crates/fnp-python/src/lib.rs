@@ -2390,6 +2390,48 @@ fn count_nonzero(
     Ok(output)
 }
 
+fn extract_expand_dims_axes(
+    py: Python<'_>,
+    axis: Py<PyAny>,
+    input_ndim: usize,
+) -> PyResult<Vec<isize>> {
+    let Some(axes) = extract_axis_spec(py, Some(axis), "expand_dims")? else {
+        return Err(PyTypeError::new_err(
+            "'NoneType' object cannot be interpreted as an integer",
+        ));
+    };
+
+    let new_ndim = input_ndim + axes.len();
+    let mut seen = std::collections::HashSet::with_capacity(axes.len());
+    for &axis in &axes {
+        let normalized = if axis < 0 {
+            match isize::try_from(new_ndim) {
+                Ok(new_ndim) => new_ndim + axis,
+                Err(_) => axis,
+            }
+        } else {
+            axis
+        };
+
+        if normalized >= 0 && !seen.insert(normalized) {
+            return Err(PyValueError::new_err("repeated axis"));
+        }
+    }
+
+    Ok(axes)
+}
+
+#[pyfunction]
+fn expand_dims(py: Python<'_>, a: Py<PyAny>, axis: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let a = extract_numeric_array(py, a.bind(py), "expand_dims(a)")?;
+    let axes = extract_expand_dims_axes(py, axis, a.shape().len())?;
+    let result = match axes.as_slice() {
+        [axis] => a.expand_dims(*axis).map_err(map_ufunc_error)?,
+        axes => a.expand_dims_axes(axes).map_err(map_ufunc_error)?,
+    };
+    build_numpy_array_from_ufunc(py, &result)
+}
+
 fn validate_trim_zeros_mode(trim: &str) -> PyResult<()> {
     if trim.is_empty() || trim.chars().any(|ch| ch != 'f' && ch != 'b') {
         return Err(PyValueError::new_err(format!(
@@ -3244,6 +3286,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(flatnonzero, m)?)?;
     m.add_function(wrap_pyfunction!(argwhere, m)?)?;
     m.add_function(wrap_pyfunction!(count_nonzero, m)?)?;
+    m.add_function(wrap_pyfunction!(expand_dims, m)?)?;
     m.add_function(wrap_pyfunction!(tensorinv, m)?)?;
     m.add_function(wrap_pyfunction!(solve_triangular, m)?)?;
     m.add_function(wrap_pyfunction!(isposinf, m)?)?;
@@ -3495,6 +3538,7 @@ mod tests {
             assert!(module.getattr("flatnonzero").is_ok());
             assert!(module.getattr("argwhere").is_ok());
             assert!(module.getattr("count_nonzero").is_ok());
+            assert!(module.getattr("expand_dims").is_ok());
             assert!(module.getattr("tensorinv").is_ok());
             assert!(module.getattr("solve_triangular").is_ok());
             assert!(module.getattr("isposinf").is_ok());
@@ -5209,6 +5253,55 @@ mod tests {
 
             let actual_err = trim_zeros_fn.call1((list_input.clone(), "x")).unwrap_err();
             let expected_err = numpy_trim_zeros.call1((list_input, "x")).unwrap_err();
+            assert_eq!(
+                actual_err.get_type(py).name()?.extract::<String>()?,
+                expected_err.get_type(py).name()?.extract::<String>()?
+            );
+            assert_eq!(
+                actual_err.value(py).str()?.extract::<String>()?,
+                expected_err.value(py).str()?.extract::<String>()?
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn expand_dims_matches_numpy_list_axes_and_repeated_axis_error() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let expand_dims_fn = module.getattr("expand_dims")?;
+            let numpy_expand_dims = py.import("numpy")?.getattr("expand_dims")?;
+
+            let values = numeric_array(py, vec![1_i64, 2, 3], "int64");
+            let list_axes = PyList::new(py, [0_isize, 2_isize])?;
+            let actual_list = expand_dims_fn.call1((values.clone(), list_axes))?;
+            let expected_list =
+                numpy_expand_dims.call1((values.clone(), PyList::new(py, [0_isize, 2_isize])?))?;
+            assert_array_matches_numpy(&actual_list, &expected_list)?;
+
+            let negative_axes = PyList::new(py, [-1_isize, -2_isize])?;
+            let actual_negative = expand_dims_fn.call1((values.clone(), negative_axes))?;
+            let expected_negative = numpy_expand_dims
+                .call1((values.clone(), PyList::new(py, [-1_isize, -2_isize])?))?;
+            assert_array_matches_numpy(&actual_negative, &expected_negative)?;
+
+            let actual_empty = expand_dims_fn.call1((values.clone(), PyList::empty(py)))?;
+            let expected_empty = numpy_expand_dims.call1((values.clone(), PyList::empty(py)))?;
+            assert_array_matches_numpy(&actual_empty, &expected_empty)?;
+
+            let repeated_axis = PyList::new(py, [0_isize, 0_isize])?;
+            let actual_err = expand_dims_fn
+                .call1((values.clone(), repeated_axis))
+                .unwrap_err();
+            let expected_err = numpy_expand_dims
+                .call1((values, PyList::new(py, [0_isize, 0_isize])?))
+                .unwrap_err();
             assert_eq!(
                 actual_err.get_type(py).name()?.extract::<String>()?,
                 expected_err.get_type(py).name()?.extract::<String>()?
