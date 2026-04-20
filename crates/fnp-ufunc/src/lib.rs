@@ -11949,12 +11949,12 @@ impl UFuncArray {
 
     /// Solve a tensor equation (np.linalg.tensorsolve).
     pub fn tensorsolve(&self, b: &Self) -> Result<Self, UFuncError> {
-        let result = fnp_linalg::tensorsolve(&self.values, &self.shape, &b.values, &b.shape)
-            .map_err(|e| UFuncError::Msg(format!("{e}")))?;
-        let n = result.len();
+        let (values, out_shape) =
+            fnp_linalg::tensorsolve(&self.values, &self.shape, &b.values, &b.shape)
+                .map_err(|e| UFuncError::Msg(format!("{e}")))?;
         Ok(Self {
-            shape: vec![n],
-            values: result,
+            shape: out_shape,
+            values,
             dtype: DType::F64,
             integer_sidecar: None,
         })
@@ -17798,12 +17798,12 @@ impl UFuncArray {
             ));
         }
         let input_part = parts[0];
-        let input_subs: Vec<&str> = input_part.split(',').collect();
+        let raw_input_subs: Vec<&str> = input_part.split(',').collect();
 
-        if input_subs.len() != operands.len() {
+        if raw_input_subs.len() != operands.len() {
             return Err(UFuncError::Msg(format!(
                 "einsum: {} input subscripts but {} operands",
-                input_subs.len(),
+                raw_input_subs.len(),
                 operands.len()
             )));
         }
@@ -17813,27 +17813,123 @@ impl UFuncArray {
             ));
         }
 
+        // ── Resolve ellipsis (`...`) into private-use-area placeholder labels.
+        // Each input ellipsis represents (op.ndim - explicit_label_count) dimensions.
+        // All ellipses must describe broadcast dims of the same shape; fully general
+        // size-1 broadcasting is not yet supported.
+        let raw_output_sub: Option<&str> =
+            if parts.len() == 2 { Some(parts[1]) } else { None };
+        let any_input_ellipsis = raw_input_subs.iter().any(|s| s.contains("..."));
+        let any_output_ellipsis = raw_output_sub.is_some_and(|s| s.contains("..."));
+
+        let mut bcast_dims: Option<Vec<usize>> = None;
+        if any_input_ellipsis {
+            for (sub, op) in raw_input_subs.iter().zip(operands.iter()) {
+                if sub.contains("...") {
+                    if sub.matches("...").count() > 1 {
+                        return Err(UFuncError::Msg(format!(
+                            "einsum: subscript '{sub}' contains multiple ellipses"
+                        )));
+                    }
+                    let stripped = sub.replace("...", "");
+                    if stripped.contains('.') {
+                        return Err(UFuncError::Msg(format!(
+                            "einsum: subscript '{sub}' has stray '.' outside of ellipsis"
+                        )));
+                    }
+                    let explicit_count = stripped.chars().count();
+                    if explicit_count > op.shape.len() {
+                        return Err(UFuncError::Msg(format!(
+                            "einsum: subscript '{}' has {} explicit indices but operand has {} dimensions",
+                            sub,
+                            explicit_count,
+                            op.shape.len()
+                        )));
+                    }
+                    let n_bcast = op.shape.len() - explicit_count;
+                    let (prefix, _) = sub.split_once("...").unwrap();
+                    let prefix_len = prefix.chars().count();
+                    let dims: Vec<usize> =
+                        op.shape[prefix_len..prefix_len + n_bcast].to_vec();
+                    match &bcast_dims {
+                        None => bcast_dims = Some(dims),
+                        Some(existing) => {
+                            if *existing != dims {
+                                return Err(UFuncError::Msg(format!(
+                                    "einsum: ellipsis broadcast shapes differ: {existing:?} vs {dims:?}"
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for sub in &raw_input_subs {
+            if !sub.contains("...") && sub.contains('.') {
+                return Err(UFuncError::Msg(format!(
+                    "einsum: subscript '{sub}' has stray '.' outside of ellipsis"
+                )));
+            }
+        }
+        if let Some(out) = raw_output_sub {
+            let out_stripped = out.replace("...", "");
+            if out_stripped.contains('.') {
+                return Err(UFuncError::Msg(format!(
+                    "einsum: output subscript '{out}' has stray '.' outside of ellipsis"
+                )));
+            }
+            if any_output_ellipsis && out.matches("...").count() > 1 {
+                return Err(UFuncError::Msg(format!(
+                    "einsum: output subscript '{out}' contains multiple ellipses"
+                )));
+            }
+        }
+        let bcast_shape = bcast_dims.unwrap_or_default();
+        let placeholders: String = (0..bcast_shape.len())
+            .map(|i| char::from_u32(0xE000 + u32::try_from(i).unwrap_or(0)).unwrap_or('\u{E000}'))
+            .collect();
+
+        let processed_input_subs: Vec<String> = raw_input_subs
+            .iter()
+            .map(|s| {
+                if s.contains("...") {
+                    s.replace("...", &placeholders)
+                } else {
+                    (*s).to_string()
+                }
+            })
+            .collect();
+        let processed_output_sub: Option<String> = raw_output_sub.map(|s| {
+            if s.contains("...") {
+                s.replace("...", &placeholders)
+            } else {
+                s.to_string()
+            }
+        });
+        let input_subs: Vec<&str> = processed_input_subs.iter().map(String::as_str).collect();
+
         // Determine output labels
-        let output_labels: Vec<char> = if parts.len() == 2 {
+        let output_labels: Vec<char> = if let Some(out) = processed_output_sub.as_deref() {
             // Explicit output
-            parts[1].chars().filter(|c| *c != '.').collect()
+            out.chars().collect()
         } else {
-            // Implicit mode: output indices are those appearing exactly once, sorted
+            // Implicit mode: ellipsis broadcast labels come first (in operand order),
+            // followed by indices that appear exactly once, sorted.
+            let mut labels: Vec<char> = placeholders.chars().collect();
             let mut counts: std::collections::HashMap<char, usize> =
                 std::collections::HashMap::new();
             for sub in &input_subs {
                 for c in sub.chars() {
-                    if c != '.' {
-                        *counts.entry(c).or_insert(0) += 1;
-                    }
+                    *counts.entry(c).or_insert(0) += 1;
                 }
             }
-            let mut labels: Vec<char> = counts
+            let mut singletons: Vec<char> = counts
                 .into_iter()
-                .filter(|(_c, count)| *count == 1)
+                .filter(|(c, count)| *count == 1 && !placeholders.contains(*c))
                 .map(|(c, _)| c)
                 .collect();
-            labels.sort();
+            singletons.sort();
+            labels.extend(singletons);
             labels
         };
 
@@ -53563,6 +53659,25 @@ print(json.dumps(payload))
         assert!((a2.values()[3] - 1.0).abs() < 1e-12);
     }
 
+    #[test]
+    fn test_linalg_tensorsolve_preserves_tensor_output_shape() {
+        let mut values = vec![0.0; 64];
+        for i in 0..8 {
+            values[i * 8 + i] = 1.0;
+        }
+        let a = UFuncArray::new(vec![2, 2, 2, 2, 2, 2], values, DType::F64).unwrap();
+        let b = UFuncArray::new(
+            vec![2, 2, 2],
+            vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+            DType::F64,
+        )
+        .unwrap();
+
+        let result = a.tensorsolve(&b).unwrap();
+        assert_eq!(result.shape(), &[2, 2, 2]);
+        assert_eq!(result.values(), b.values());
+    }
+
     // ── Real-world workflow integration tests ──────────────────
 
     #[test]
@@ -54585,6 +54700,83 @@ print(json.dumps(payload))
             err.to_string()
                 .contains("2 input subscripts but 1 operands")
         );
+    }
+
+    #[test]
+    fn einsum_ellipsis_batch_matmul() {
+        // "...ij,...jk->...ik" with leading batch dim = 2
+        let a = UFuncArray::new(
+            vec![2, 2, 3],
+            (1..=12).map(f64::from).collect(),
+            DType::F64,
+        )
+        .unwrap();
+        let b = UFuncArray::new(
+            vec![2, 3, 2],
+            (1..=12).map(f64::from).collect(),
+            DType::F64,
+        )
+        .unwrap();
+        let c = UFuncArray::einsum("...ij,...jk->...ik", &[&a, &b]).unwrap();
+        assert_eq!(c.shape, vec![2, 2, 2]);
+        let expected = [22.0, 28.0, 49.0, 64.0, 220.0, 244.0, 301.0, 334.0];
+        for (got, want) in c.values.iter().zip(expected.iter()) {
+            assert!((got - want).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn einsum_ellipsis_transpose_last_two() {
+        // "...ij->...ji" transposes last two axes over a batch
+        let a = UFuncArray::new(
+            vec![2, 2, 3],
+            (1..=12).map(f64::from).collect(),
+            DType::F64,
+        )
+        .unwrap();
+        let c = UFuncArray::einsum("...ij->...ji", &[&a]).unwrap();
+        assert_eq!(c.shape, vec![2, 3, 2]);
+        // Batch 0 [[1,2,3],[4,5,6]] -> [[1,4],[2,5],[3,6]]
+        // Batch 1 [[7,8,9],[10,11,12]] -> [[7,10],[8,11],[9,12]]
+        let expected = [
+            1.0, 4.0, 2.0, 5.0, 3.0, 6.0, 7.0, 10.0, 8.0, 11.0, 9.0, 12.0,
+        ];
+        for (got, want) in c.values.iter().zip(expected.iter()) {
+            assert!((got - want).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn einsum_ellipsis_implicit_output() {
+        // Implicit "ij...->ij" collapses trailing broadcast dims (sum over them)
+        let a = UFuncArray::new(
+            vec![2, 2, 3],
+            (1..=12).map(f64::from).collect(),
+            DType::F64,
+        )
+        .unwrap();
+        // Implicit mode places ellipsis labels first; here only one operand, no
+        // repeated labels, so output is "...ij" placed first. That equals the input.
+        let c = UFuncArray::einsum("...ij", &[&a]).unwrap();
+        assert_eq!(c.shape, vec![2, 2, 3]);
+        for (got, want) in c.values.iter().zip(a.values.iter()) {
+            assert!((got - want).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn einsum_ellipsis_stray_dot_rejected() {
+        let a = UFuncArray::new(vec![2, 2], vec![1.0; 4], DType::F64).unwrap();
+        let err = UFuncArray::einsum("i.j", &[&a]).unwrap_err();
+        assert!(err.to_string().contains("stray '.'"));
+    }
+
+    #[test]
+    fn einsum_ellipsis_shape_mismatch_rejected() {
+        let a = UFuncArray::new(vec![2, 2, 3], vec![1.0; 12], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3, 3, 2], vec![1.0; 18], DType::F64).unwrap();
+        let err = UFuncArray::einsum("...ij,...jk->...ik", &[&a, &b]).unwrap_err();
+        assert!(err.to_string().contains("ellipsis broadcast shapes differ"));
     }
 
     // ── NumPy behavioral edge-case parity tests ────────
