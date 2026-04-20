@@ -18069,14 +18069,18 @@ impl UFuncArray {
                 "einsum_path: subscripts must contain exactly one '->'".to_string(),
             ));
         }
-        let input_subs: Vec<&str> = parts[0].split(',').collect();
-        if input_subs.len() != operands.len() {
+        let raw_input_subs: Vec<&str> = parts[0].split(',').collect();
+        if raw_input_subs.len() != operands.len() {
             return Err(UFuncError::Msg(format!(
                 "einsum_path: {} subscript groups but {} operands",
-                input_subs.len(),
+                raw_input_subs.len(),
                 operands.len()
             )));
         }
+
+        let raw_output_sub: Option<&str> = Some(parts[1]);
+        let (processed_input_subs, processed_output_sub, _placeholders) =
+            Self::resolve_einsum_ellipsis(&raw_input_subs, raw_output_sub, operands)?;
 
         let n = operands.len();
         if n <= 2 {
@@ -18090,14 +18094,18 @@ impl UFuncArray {
             return Ok((path, desc));
         }
 
-        let output_labels: Vec<char> = parts[1].chars().filter(|c| *c != '.').collect();
+        let output_labels: Vec<char> = processed_output_sub
+            .as_deref()
+            .unwrap_or("")
+            .chars()
+            .collect();
         let output_str: String = output_labels.iter().collect();
 
         // Greedy algorithm: repeatedly contract the pair that removes the most
         // intermediate work, matching NumPy's preference for inner contractions
         // before Hadamard- or outer-style steps.
         let mut path = Vec::new();
-        let mut current_subs: Vec<String> = input_subs.iter().map(|s| s.to_string()).collect();
+        let mut current_subs: Vec<String> = processed_input_subs.clone();
         let mut current_shapes: Vec<Vec<usize>> =
             operands.iter().map(|o| o.shape.clone()).collect();
 
@@ -54794,6 +54802,19 @@ print(json.dumps(payload))
         let b = UFuncArray::new(vec![3, 3, 2], vec![1.0; 18], DType::F64).unwrap();
         let err = UFuncArray::einsum("...ij,...jk->...ik", &[&a, &b]).unwrap_err();
         assert!(err.to_string().contains("ellipsis broadcast shapes differ"));
+    }
+
+    #[test]
+    fn einsum_path_accepts_ellipsis() {
+        let a = UFuncArray::new(vec![2, 2, 3], vec![1.0; 12], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![2, 3, 2], vec![1.0; 12], DType::F64).unwrap();
+        let c = UFuncArray::new(vec![2, 2, 4], vec![1.0; 16], DType::F64).unwrap();
+        let (path, _desc) = UFuncArray::einsum_path(
+            "...ij,...jk,...kl->...il",
+            &[&a, &b, &c],
+        )
+        .unwrap();
+        assert!(!path.is_empty());
     }
 
     #[test]
