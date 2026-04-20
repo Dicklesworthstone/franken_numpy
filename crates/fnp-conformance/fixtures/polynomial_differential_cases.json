@@ -2032,5 +2032,221 @@
     "sort_values": true,
     "abs_tol": 1e-10,
     "rel_tol": 1e-10
+  },
+  {
+    "id": "chebadd_equal_length",
+    "operation": "chebadd",
+    "seed": 10100,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-polynomial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "polynomial_differential_expected_success",
+    "expected_reason_code": "polynomial_differential_expected_success",
+    "lhs_values": [1.0, 2.0, 3.0],
+    "rhs_values": [4.0, 5.0, 6.0],
+    "expected_values": [5.0, 7.0, 9.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "chebadd_short_plus_long_pads_left",
+    "operation": "chebadd",
+    "seed": 10101,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-polynomial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "polynomial_differential_expected_success",
+    "expected_reason_code": "polynomial_differential_expected_success",
+    "lhs_values": [1.0, 2.0],
+    "rhs_values": [10.0, 20.0, 30.0, 40.0],
+    "expected_values": [11.0, 22.0, 30.0, 40.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "chebadd_long_plus_short_symmetric",
+    "operation": "chebadd",
+    "seed": 10102,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-polynomial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "polynomial_differential_expected_success",
+    "expected_reason_code": "polynomial_differential_expected_success",
+    "lhs_values": [10.0, 20.0, 30.0, 40.0],
+    "rhs_values": [1.0, 2.0],
+    "expected_values": [11.0, 22.0, 30.0, 40.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "chebsub_equal_length",
+    "operation": "chebsub",
+    "seed": 10103,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-polynomial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "polynomial_differential_expected_success",
+    "expected_reason_code": "polynomial_differential_expected_success",
+    "lhs_values": [5.0, 7.0, 9.0],
+    "rhs_values": [1.0, 2.0, 3.0],
+    "expected_values": [4.0, 5.0, 6.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "chebsub_short_minus_long_sign_flips",
+    "operation": "chebsub",
+    "seed": 10104,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-polynomial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "polynomial_differential_expected_success",
+    "expected_reason_code": "polynomial_differential_expected_success",
+    "lhs_values": [1.0, 2.0],
+    "rhs_values": [0.0, 0.0, 5.0],
+    "expected_values": [1.0, 2.0, -5.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "chebsub_long_minus_short_keeps_tail",
+    "operation": "chebsub",
+    "seed": 10105,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-polynomial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "polynomial_differential_expected_success",
+    "expected_reason_code": "polynomial_differential_expected_success",
+    "lhs_values": [1.0, 2.0, 3.0],
+    "rhs_values": [1.0, 2.0],
+    "expected_values": [0.0, 0.0, 3.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "chebmul_scalar_scales_coefficients",
+    "operation": "chebmul",
+    "seed": 10106,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-polynomial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "polynomial_differential_expected_success",
+    "expected_reason_code": "polynomial_differential_expected_success",
+    "lhs_values": [2.0],
+    "rhs_values": [1.0, 2.0, 3.0],
+    "expected_values": [2.0, 4.0, 6.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "chebmul_T0_plus_T1_squared_identity",
+    "operation": "chebmul",
+    "seed": 10107,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-polynomial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "polynomial_differential_expected_success",
+    "expected_reason_code": "polynomial_differential_expected_success",
+    "lhs_values": [1.0, 1.0],
+    "rhs_values": [1.0, 1.0],
+    "expected_values": [1.5, 2.0, 0.5],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "chebmul_quadratic_quadratic_degree_four",
+    "operation": "chebmul",
+    "seed": 10108,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-polynomial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "polynomial_differential_expected_success",
+    "expected_reason_code": "polynomial_differential_expected_success",
+    "lhs_values": [1.0, 2.0, 3.0],
+    "rhs_values": [4.0, 5.0, 6.0],
+    "expected_values": [18.0, 26.5, 23.0, 13.5, 9.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "chebmul_linear_cubic_degree_four",
+    "operation": "chebmul",
+    "seed": 10109,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-polynomial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "polynomial_differential_expected_success",
+    "expected_reason_code": "polynomial_differential_expected_success",
+    "lhs_values": [1.0, 1.0],
+    "rhs_values": [1.0, 2.0, 3.0, 4.0],
+    "expected_values": [2.0, 4.5, 6.0, 5.5, 2.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "chebval_at_symmetric_points_T2",
+    "operation": "chebval",
+    "seed": 10110,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-polynomial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "polynomial_differential_expected_success",
+    "expected_reason_code": "polynomial_differential_expected_success",
+    "lhs_values": [0.0, 0.0, 1.0],
+    "rhs_values": [-1.0, 0.0, 1.0],
+    "expected_values": [1.0, -1.0, 1.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "chebval_at_single_point_full_series",
+    "operation": "chebval",
+    "seed": 10111,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-polynomial-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/polynomial_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "polynomial_differential_expected_success",
+    "expected_reason_code": "polynomial_differential_expected_success",
+    "lhs_values": [1.0, 2.0, 3.0],
+    "rhs_values": [0.5],
+    "expected_values": [0.5],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
   }
 ]
