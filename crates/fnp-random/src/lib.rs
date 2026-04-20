@@ -3485,16 +3485,16 @@ impl Generator {
 
     /// Randomly permute elements of `x` along a given axis (np.random.Generator.permuted).
     ///
-    /// Unlike `permutation`, this operates on a specific axis and permutes
-    /// each 1-D slice along that axis independently.
+    /// With `axis=None`, this matches NumPy's flattened-array behavior. With
+    /// `Some(axis)`, it permutes each 1-D slice along that axis independently.
     /// `x` is a flat row-major array with the given `shape`.
     pub fn permuted(
         &mut self,
         x: &[f64],
         shape: &[usize],
-        axis: usize,
+        axis: Option<usize>,
     ) -> Result<Vec<f64>, RandomError> {
-        if shape.is_empty() || axis >= shape.len() {
+        if shape.is_empty() {
             return Err(RandomError::InvalidUpperBound);
         }
         let total: usize =
@@ -3504,6 +3504,21 @@ impl Generator {
         }
 
         let mut result = x.to_vec();
+        if total <= 1 {
+            return Ok(result);
+        }
+
+        if axis.is_none() {
+            for i in (1..total).rev() {
+                let j = self.random_interval(i as u64) as usize;
+                result.swap(i, j);
+            }
+            return Ok(result);
+        }
+        let axis = axis.expect("checked above");
+        if axis >= shape.len() {
+            return Err(RandomError::InvalidUpperBound);
+        }
 
         // Compute strides for row-major layout
         let ndim = shape.len();
@@ -4251,6 +4266,8 @@ impl RandomLogRecord {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::{
         BIT_GENERATOR_STATE_SCHEMA_VERSION, BitGenerator, BitGeneratorError, BitGeneratorKind,
         DEFAULT_RNG_SEED, DeterministicRng, Generator, GeneratorPicklePayload,
@@ -4266,6 +4283,65 @@ mod tests {
             "artifacts/phase2c/FNP-P2C-007/fixture_manifest.json".to_string(),
             "artifacts/phase2c/FNP-P2C-007/parity_gate.yaml".to_string(),
         ]
+    }
+
+    fn oracle_python_bin() -> String {
+        std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".to_string())
+    }
+
+    fn numpy_oracle_available() -> bool {
+        Command::new(oracle_python_bin())
+            .args(["-c", "import numpy"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    fn numpy_oracle_permuted(shape: &[usize], axis: Option<usize>) -> Vec<f64> {
+        let shape_arg = format!(
+            "[{}]",
+            shape
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let axis_arg = axis
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "__none__".to_string());
+        let script = r#"
+import json
+import sys
+import numpy as np
+
+shape = tuple(json.loads(sys.argv[1]))
+axis = sys.argv[2]
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+arr = np.arange(np.prod(shape), dtype=float).reshape(shape)
+if axis == "__none__":
+    out = rng.permuted(arr, axis=None)
+else:
+    out = rng.permuted(arr, axis=int(axis))
+print(",".join(str(float(v)) for v in out.reshape(-1)))
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(shape_arg)
+            .arg(axis_arg)
+            .output()
+            .expect("python oracle should launch");
+        assert!(
+            output.status.success(),
+            "NumPy permuted oracle must succeed"
+        );
+        String::from_utf8(output.stdout)
+            .expect("oracle stdout must be utf-8")
+            .trim()
+            .split(',')
+            .filter(|token| !token.is_empty())
+            .map(|token| token.parse::<f64>().expect("oracle float"))
+            .collect()
     }
 
     #[test]
@@ -5920,7 +5996,7 @@ mod tests {
     fn permuted_1d() {
         let mut rng = test_generator();
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let result = rng.permuted(&x, &[5], 0).unwrap();
+        let result = rng.permuted(&x, &[5], Some(0)).unwrap();
         assert_eq!(result.len(), 5);
         // Same elements, possibly reordered
         let mut sorted = result.clone();
@@ -5932,7 +6008,7 @@ mod tests {
     fn permuted_invalid_axis() {
         let mut rng = test_generator();
         let x = vec![1.0, 2.0, 3.0];
-        assert!(rng.permuted(&x, &[3], 1).is_err());
+        assert!(rng.permuted(&x, &[3], Some(1)).is_err());
     }
 
     // ── NumPy-oracle SeedSequence validation tests ──
@@ -7117,7 +7193,7 @@ mod tests {
     fn permuted_2d_axis0() {
         let mut rng = Generator::from_pcg64_dxsm(42).unwrap();
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let result = rng.permuted(&data, &[3, 2], 0).unwrap();
+        let result = rng.permuted(&data, &[3, 2], Some(0)).unwrap();
         assert_eq!(result.len(), 6);
         let col0: Vec<f64> = vec![result[0], result[2], result[4]];
         let mut sorted0 = col0.clone();
@@ -7133,14 +7209,14 @@ mod tests {
     fn permuted_axis_out_of_bounds() {
         let mut rng = Generator::from_pcg64_dxsm(42).unwrap();
         let data = vec![1.0, 2.0, 3.0];
-        assert!(rng.permuted(&data, &[3], 1).is_err());
+        assert!(rng.permuted(&data, &[3], Some(1)).is_err());
     }
 
     #[test]
     fn permuted_single_element_axis() {
         let mut rng = Generator::from_pcg64_dxsm(42).unwrap();
         let data = vec![1.0, 2.0, 3.0];
-        let result = rng.permuted(&data, &[1, 3], 0).unwrap();
+        let result = rng.permuted(&data, &[1, 3], Some(0)).unwrap();
         assert_eq!(result, data);
     }
 
@@ -7149,8 +7225,8 @@ mod tests {
         let mut rng1 = Generator::from_pcg64_dxsm(999).unwrap();
         let mut rng2 = Generator::from_pcg64_dxsm(999).unwrap();
         let data = vec![10.0, 20.0, 30.0, 40.0, 50.0];
-        let r1 = rng1.permuted(&data, &[5], 0).unwrap();
-        let r2 = rng2.permuted(&data, &[5], 0).unwrap();
+        let r1 = rng1.permuted(&data, &[5], Some(0)).unwrap();
+        let r2 = rng2.permuted(&data, &[5], Some(0)).unwrap();
         assert_eq!(r1, r2, "Same seed should produce identical permutations");
     }
 
@@ -7158,6 +7234,30 @@ mod tests {
     fn permuted_shape_mismatch() {
         let mut rng = Generator::from_pcg64_dxsm(42).unwrap();
         let data = vec![1.0, 2.0, 3.0];
-        assert!(rng.permuted(&data, &[4], 0).is_err());
+        assert!(rng.permuted(&data, &[4], Some(0)).is_err());
+    }
+
+    #[test]
+    fn permuted_axis_none_flattens_before_shuffling() {
+        let mut rng = Generator::from_pcg64_dxsm(12345).unwrap();
+        let data: Vec<f64> = (0..12).map(|value| value as f64).collect();
+        let result = rng.permuted(&data, &[3, 4], None).unwrap();
+        let expected = vec![0.0, 10.0, 8.0, 7.0, 5.0, 2.0, 4.0, 6.0, 11.0, 1.0, 3.0, 9.0];
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn permuted_matches_numpy_oracle_for_axis_none_and_named_axes() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let data: Vec<f64> = (0..12).map(|value| value as f64).collect();
+        for axis in [None, Some(0), Some(1)] {
+            let mut rng = Generator::from_pcg64_dxsm(12345).unwrap();
+            let actual = rng.permuted(&data, &[3, 4], axis).unwrap();
+            let expected = numpy_oracle_permuted(&[3, 4], axis);
+            assert_eq!(actual, expected, "axis={axis:?}");
+        }
     }
 }
