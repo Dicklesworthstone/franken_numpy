@@ -47189,6 +47189,38 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn masked_cumsum_axis0_2d() {
+        let data = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
+            .unwrap();
+        let mask = UFuncArray::new(vec![2, 3], vec![0.0, 1.0, 0.0, 1.0, 0.0, 0.0], DType::Bool)
+            .unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        let cs = ma.cumsum(Some(0)).unwrap();
+        assert_eq!(cs.data().shape(), &[2, 3]);
+        assert_eq!(cs.data().values(), &[1.0, 0.0, 3.0, 1.0, 5.0, 9.0]);
+        assert_eq!(
+            cs.mask().expect("mask preserved").values(),
+            &[0.0, 1.0, 0.0, 1.0, 0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn masked_cumsum_axis1_2d() {
+        let data = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
+            .unwrap();
+        let mask = UFuncArray::new(vec![2, 3], vec![0.0, 1.0, 0.0, 1.0, 0.0, 0.0], DType::Bool)
+            .unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        let cs = ma.cumsum(Some(1)).unwrap();
+        assert_eq!(cs.data().shape(), &[2, 3]);
+        assert_eq!(cs.data().values(), &[1.0, 1.0, 4.0, 0.0, 5.0, 11.0]);
+        assert_eq!(
+            cs.mask().expect("mask preserved").values(),
+            &[0.0, 1.0, 0.0, 1.0, 0.0, 0.0]
+        );
+    }
+
+    #[test]
     fn masked_cumprod() {
         let data = UFuncArray::new(vec![3], vec![2.0, 3.0, 4.0], DType::F64).unwrap();
         let mask = UFuncArray::new(vec![3], vec![0.0, 1.0, 0.0], DType::Bool).unwrap();
