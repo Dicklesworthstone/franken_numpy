@@ -16566,26 +16566,45 @@ impl UFuncArray {
     ///
     /// Mimics `np.polyder(p)`. Coefficients in descending degree order.
     pub fn polyder(&self) -> Result<Self, UFuncError> {
+        self.polyder_order(1)
+    }
+
+    /// Compute the derivative of a polynomial with an explicit order.
+    ///
+    /// Mimics `np.polyder(p, m=...)` for ndarray-like coefficient inputs.
+    pub fn polyder_order(&self, m: i64) -> Result<Self, UFuncError> {
         if self.shape.len() != 1 {
             return Err(UFuncError::Msg(
                 "polyder: coefficients must be 1-D".to_string(),
             ));
         }
-        let n = self.values.len();
-        if n <= 1 {
-            return Ok(Self {
-                shape: vec![1],
-                values: vec![0.0],
-                dtype: DType::F64,
-                integer_sidecar: None,
-            });
+
+        if m < 0 {
+            return Err(UFuncError::Msg(
+                "Order of derivative must be positive (see polyint)".to_string(),
+            ));
         }
-        let deg = n - 1;
-        let values: Vec<f64> = (0..deg)
-            .map(|i| self.values[i] * (deg - i) as f64)
-            .collect();
+
+        if m == 0 {
+            return Ok(self.clone());
+        }
+
+        let mut values = self.values.clone();
+        let mut remaining = usize::try_from(m)
+            .map_err(|_| UFuncError::Msg("polyder: invalid derivative order".to_string()))?;
+        while remaining > 0 {
+            let degree = values.len().saturating_sub(1);
+            values = values
+                .iter()
+                .take(degree)
+                .enumerate()
+                .map(|(index, value)| *value * (degree - index) as f64)
+                .collect();
+            remaining -= 1;
+        }
+
         Ok(Self {
-            shape: vec![deg],
+            shape: vec![values.len()],
             values,
             dtype: DType::F64,
             integer_sidecar: None,
@@ -31820,6 +31839,40 @@ else:
         }
     }
 
+    fn numpy_oracle_polyder(coeffs: &[f64], m: i64) -> Result<Vec<f64>, String> {
+        let coeffs = coeffs
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let output = Command::new(oracle_python_bin())
+            .args([
+                "-c",
+                r#"
+import json
+import sys
+import numpy as np
+
+coeffs = [float(value) for value in sys.argv[1].split(",")] if sys.argv[1] else []
+order = int(sys.argv[2])
+result = np.polyder(coeffs, m=order)
+print(json.dumps(result.tolist()))
+"#,
+                &coeffs,
+                &m.to_string(),
+            ])
+            .output()
+            .map_err(|err| format!("failed to launch NumPy polyder oracle: {err}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "NumPy polyder oracle failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        serde_json::from_slice::<Vec<f64>>(&output.stdout)
+            .map_err(|err| format!("oracle json: {err}"))
+    }
+
     #[test]
     fn broadcasted_add_matches_expected_values() {
         let lhs = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
@@ -40173,7 +40226,72 @@ else:
     fn polyder_constant() {
         let p = UFuncArray::new(vec![1], vec![5.0], DType::F64).unwrap();
         let dp = p.polyder().unwrap();
-        assert_eq!(dp.values(), &[0.0]);
+        assert_eq!(dp.shape(), &[0]);
+        assert!(dp.values().is_empty());
+    }
+
+    #[test]
+    fn polyder_order_zero_returns_original() {
+        let p = UFuncArray::new(vec![3], vec![3.0, 2.0, 1.0], DType::F64).unwrap();
+        let dp = p.polyder_order(0).unwrap();
+        assert_eq!(dp.shape(), &[3]);
+        assert_eq!(dp.values(), &[3.0, 2.0, 1.0]);
+    }
+
+    #[test]
+    fn polyder_high_order() {
+        let p = UFuncArray::new(vec![4], vec![1.0, 1.0, 1.0, 1.0], DType::F64).unwrap();
+
+        let second = p.polyder_order(2).unwrap();
+        assert_eq!(second.shape(), &[2]);
+        assert_eq!(second.values(), &[6.0, 2.0]);
+
+        let third = p.polyder_order(3).unwrap();
+        assert_eq!(third.shape(), &[1]);
+        assert_eq!(third.values(), &[6.0]);
+
+        let fourth = p.polyder_order(4).unwrap();
+        assert_eq!(fourth.shape(), &[0]);
+        assert!(fourth.values().is_empty());
+    }
+
+    #[test]
+    fn polyder_rejects_negative_order() {
+        let p = UFuncArray::new(vec![3], vec![3.0, 2.0, 1.0], DType::F64).unwrap();
+        let err = p
+            .polyder_order(-1)
+            .expect_err("negative derivative order should fail");
+        assert_eq!(
+            err.to_string(),
+            "Order of derivative must be positive (see polyint)"
+        );
+    }
+
+    #[test]
+    fn polyder_high_order_matches_numpy() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let cases = [
+            (vec![3.0, 2.0, 1.0], 0_i64),
+            (vec![3.0, 2.0, 1.0], 1_i64),
+            (vec![3.0, 2.0, 1.0], 2_i64),
+            (vec![3.0, 2.0, 1.0], 3_i64),
+            (vec![5.0], 1_i64),
+            (vec![5.0], 2_i64),
+        ];
+
+        for (coeffs, order) in cases {
+            let actual = UFuncArray::new(vec![coeffs.len()], coeffs.clone(), DType::F64)
+                .unwrap()
+                .polyder_order(order)
+                .unwrap();
+            let expected =
+                numpy_oracle_polyder(&coeffs, order).expect("numpy polyder oracle should succeed");
+            assert_eq!(actual.shape(), &[expected.len()]);
+            assert_eq!(actual.values(), expected.as_slice());
+        }
     }
 
     #[test]
