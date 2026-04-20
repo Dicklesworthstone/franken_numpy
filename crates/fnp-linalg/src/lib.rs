@@ -5276,6 +5276,7 @@ mod tests {
         lstsq_2x2,
         lstsq_nxn,
         lstsq_output_shapes,
+        lstsq_svd,
         lu_factor_nxn,
         lu_solve,
         mat_mul_flat,
@@ -9670,6 +9671,44 @@ except Exception as exc:
         let a = [1.0, 1.0, 1.0, 2.0, 1.0, 3.0];
         let result = lstsq_nxn(&a, &[1.0, 2.0, 2.0], 3, 2).unwrap();
         assert_oracle_vec("lstsq_x", &result, &[0.6666666666666666, 0.5]);
+    }
+
+    #[test]
+    fn lstsq_negative_rcond_matches_numpy_default_and_none() {
+        let a = [1.0, 0.0, 0.0, 2e-16];
+        let b = [1.0, 2e-16];
+
+        // NumPy 2.0 reference for this boundary case:
+        // - omitted rcond / rcond=None => rank 1, x = [1, 0]
+        // - explicit rcond=0.0       => rank 2, x = [1, 1]
+        let actual_default = lstsq_svd(&a, &b, 2, 2, -1.0).expect("default rcond");
+        assert_oracle_vec("lstsq default x", &actual_default.0, &[1.0, 0.0]);
+        assert!(
+            actual_default.1.is_empty(),
+            "default residuals should be empty"
+        );
+        assert_eq!(
+            actual_default.2, 1,
+            "default rank should match NumPy omitted/None"
+        );
+        assert_oracle_vec(
+            "lstsq default singular_values",
+            &actual_default.3,
+            &[1.0, 2e-16],
+        );
+
+        let explicit_zero = lstsq_svd(&a, &b, 2, 2, 0.0).expect("explicit zero rcond");
+        assert_oracle_vec("lstsq zero x", &explicit_zero.0, &[1.0, 1.0]);
+        assert!(
+            explicit_zero.1.is_empty(),
+            "explicit-zero residuals should be empty"
+        );
+        assert_eq!(explicit_zero.2, 2, "explicit zero should keep full rank");
+        assert_oracle_vec(
+            "lstsq zero singular_values",
+            &explicit_zero.3,
+            &[1.0, 2e-16],
+        );
     }
 
     #[test]
