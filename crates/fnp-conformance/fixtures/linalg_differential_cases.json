@@ -1203,5 +1203,35 @@
     "matrix": [[3.0, 2.0, 1.0, 4.0]],
     "expected_solution": [10.0],
     "expected_tolerance": 1e-10
+  },
+  {
+    "id": "linalg_tensorsolve_identity_tensor_2x2x2",
+    "operation": "tensorsolve",
+    "seed": 8281,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.4.3",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json",
+      "crates/fnp-linalg/src/lib.rs",
+      "crates/fnp-python/src/lib.rs",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [2, 2, 2, 2, 2, 2],
+    "rhs_shape": [2, 2, 2],
+    "matrix": [
+      [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+      [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+      [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+      [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+      [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+      [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+      [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+      [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    ],
+    "rhs": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+    "expected_solution": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+    "expected_tolerance": 1e-12
   }
 ]

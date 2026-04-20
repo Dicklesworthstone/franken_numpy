@@ -1016,7 +1016,7 @@ pub fn tensorsolve(
     a_shape: &[usize],
     b_data: &[f64],
     b_shape: &[usize],
-) -> Result<Vec<f64>, LinAlgError> {
+) -> Result<(Vec<f64>, Vec<usize>), LinAlgError> {
     // The equation a x = b: a has shape (b_shape..., x_shape...) and
     // x has shape x_shape such that contracting the last len(x_shape) dims of a
     // with x produces b.
@@ -1062,7 +1062,7 @@ pub fn tensorsolve(
     }
 
     // Now solve the n×n system
-    solve_nxn(a_data, b_data, n)
+    Ok((solve_nxn(a_data, b_data, n)?, x_shape.to_vec()))
 }
 
 /// Compute the inverse of an N-dimensional array.
@@ -8395,7 +8395,8 @@ mod tests {
         // tensorsolve reduces to standard linear solve.
         let a = [2.0, 1.0, 1.0, 3.0];
         let b = [5.0, 7.0];
-        let x = tensorsolve(&a, &[2, 2], &b, &[2]).unwrap();
+        let (x, x_shape) = tensorsolve(&a, &[2, 2], &b, &[2]).unwrap();
+        assert_eq!(x_shape, vec![2]);
         // Verify A*x = b
         let r0 = a[0] * x[0] + a[1] * x[1];
         let r1 = a[2] * x[0] + a[3] * x[1];
@@ -8415,18 +8416,32 @@ mod tests {
     #[test]
     fn tensorsolve_matches_numpy_non_finite_semantics() {
         let inf_matrix = [f64::INFINITY, 1.0, 0.0, 0.0, 3.0, 1.0, 2.0, 0.0, 3.0];
-        let solved =
+        let (solved, solved_shape) =
             tensorsolve(&inf_matrix, &[3, 3], &[1.0, 2.0, 3.0], &[3]).expect("inf tensorsolve");
+        assert_eq!(solved_shape, vec![3]);
         assert!(approx_equal(solved[0], 0.0, 1e-12));
         assert!(approx_equal(solved[1], 0.3333333333333333, 1e-12));
         assert!(approx_equal(solved[2], 1.0, 1e-12));
 
         let nan_matrix = [f64::NAN, 1.0, 0.0, 0.0, 3.0, 1.0, 2.0, 0.0, 3.0];
-        let solved =
+        let (solved, solved_shape) =
             tensorsolve(&nan_matrix, &[3, 3], &[1.0, 2.0, 3.0], &[3]).expect("nan tensorsolve");
+        assert_eq!(solved_shape, vec![3]);
         assert!(solved[0].is_nan());
         assert!(approx_equal(solved[1], 0.45454545454545453, 1e-12));
         assert!(approx_equal(solved[2], 0.6363636363636364, 1e-12));
+    }
+
+    #[test]
+    fn tensorsolve_preserves_tensor_output_shape() {
+        let mut a = vec![0.0; 64];
+        for i in 0..8 {
+            a[i * 8 + i] = 1.0;
+        }
+        let b = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
+        let (x, x_shape) = tensorsolve(&a, &[2, 2, 2, 2, 2, 2], &b, &[2, 2, 2]).unwrap();
+        assert_eq!(x_shape, vec![2, 2, 2]);
+        assert_eq!(x, b);
     }
 
     // ── tensorinv tests ──

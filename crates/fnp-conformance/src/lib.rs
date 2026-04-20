@@ -26,7 +26,7 @@ use fnp_iter::{
 use fnp_linalg::{
     LinAlgError, QrMode, batch_det, batch_inv, batch_solve, batch_trace, cholesky_2x2, cond_mxn,
     eigvals_2x2, lstsq_output_shapes, matrix_power_nxn, pinv_2x2, qr_2x2, qr_output_shapes,
-    slogdet_2x2, solve_2x2, svd_2x2, svd_output_shapes, validate_backend_bridge,
+    slogdet_2x2, solve_2x2, svd_2x2, svd_output_shapes, tensorsolve, validate_backend_bridge,
     validate_policy_metadata as validate_linalg_policy_metadata, validate_spectral_branch,
     validate_tolerance_policy,
 };
@@ -18986,6 +18986,12 @@ fn execute_linalg_operation(
                 input.rhs_shape.len() < input.shape.len() || input.rhs_shape.len() == 1,
             )?))
         }
+        "tensorsolve" => {
+            let data = flatten_matrix_fixture(input.matrix)?;
+            let (solution, _) =
+                tensorsolve(data.as_slice(), input.shape, input.rhs, input.rhs_shape)?;
+            Ok(LinalgOperationOutcome::SolveVector(solution))
+        }
         "spectral_branch" => {
             validate_spectral_branch(input.uplo, input.converged)?;
             Ok(LinalgOperationOutcome::Unit)
@@ -19078,7 +19084,7 @@ fn validate_linalg_differential_expectation(
             Ok(())
         }
         (
-            "batch_det" | "batch_trace" | "batch_inv" | "batch_solve",
+            "batch_det" | "batch_trace" | "batch_inv" | "batch_solve" | "tensorsolve",
             LinalgOperationOutcome::SolveVector(actual),
         ) => {
             if case.expected_solution.len() != actual.len() {

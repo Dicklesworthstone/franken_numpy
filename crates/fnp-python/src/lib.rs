@@ -2477,6 +2477,14 @@ fn trim_zeros(py: Python<'_>, filt: Py<PyAny>, trim: &str) -> PyResult<Py<PyAny>
 }
 
 #[pyfunction]
+fn tensorsolve(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let a = extract_numeric_array(py, a.bind(py), "tensorsolve(a)")?;
+    let b = extract_numeric_array(py, b.bind(py), "tensorsolve(b)")?;
+    let result = a.tensorsolve(&b).map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, ind=2))]
 fn tensorinv(py: Python<'_>, a: Py<PyAny>, ind: usize) -> PyResult<Py<PyAny>> {
     let a = extract_numeric_array(py, a.bind(py), "tensorinv(a)")?;
@@ -3287,6 +3295,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(argwhere, m)?)?;
     m.add_function(wrap_pyfunction!(count_nonzero, m)?)?;
     m.add_function(wrap_pyfunction!(expand_dims, m)?)?;
+    m.add_function(wrap_pyfunction!(trim_zeros, m)?)?;
+    m.add_function(wrap_pyfunction!(tensorsolve, m)?)?;
     m.add_function(wrap_pyfunction!(tensorinv, m)?)?;
     m.add_function(wrap_pyfunction!(solve_triangular, m)?)?;
     m.add_function(wrap_pyfunction!(isposinf, m)?)?;
@@ -3348,7 +3358,6 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tril_indices_from, m)?)?;
     m.add_function(wrap_pyfunction!(triu_indices, m)?)?;
     m.add_function(wrap_pyfunction!(triu_indices_from, m)?)?;
-    m.add_function(wrap_pyfunction!(trim_zeros, m)?)?;
     m.add_function(wrap_pyfunction!(put_along_axis, m)?)?;
     m.add_function(wrap_pyfunction!(take_along_axis, m)?)?;
     Ok(())
@@ -3363,9 +3372,9 @@ mod tests {
         interp, isfinite, isinf, isnan, isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2,
         meshgrid, modf, nan_to_num, nextafter, place, put, put_along_axis, putmask, radians,
         ravel_multi_index, rfftfreq, rint, searchsorted, select, sign, signbit, sinc,
-        solve_triangular, spacing, take, take_along_axis, tensorinv, trapezoid, trapz, tri,
-        tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc, unravel_index,
-        where_py,
+        solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid, trapz,
+        tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc,
+        unravel_index, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::exceptions::{PyTypeError, PyValueError, PyZeroDivisionError};
@@ -3539,6 +3548,8 @@ mod tests {
             assert!(module.getattr("argwhere").is_ok());
             assert!(module.getattr("count_nonzero").is_ok());
             assert!(module.getattr("expand_dims").is_ok());
+            assert!(module.getattr("trim_zeros").is_ok());
+            assert!(module.getattr("tensorsolve").is_ok());
             assert!(module.getattr("tensorinv").is_ok());
             assert!(module.getattr("solve_triangular").is_ok());
             assert!(module.getattr("isposinf").is_ok());
@@ -3604,7 +3615,6 @@ mod tests {
             assert!(module.getattr("tril_indices_from").is_ok());
             assert!(module.getattr("triu_indices").is_ok());
             assert!(module.getattr("triu_indices_from").is_ok());
-            assert!(module.getattr("trim_zeros").is_ok());
             assert!(module.getattr("put_along_axis").is_ok());
             assert!(module.getattr("take_along_axis").is_ok());
             assert!(module.getattr("Nditer").is_ok());
@@ -5166,6 +5176,39 @@ mod tests {
             );
 
             Ok(())
+        });
+    }
+
+    #[test]
+    fn tensorsolve_matches_numpy_for_tensor_output_shape() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            let a = numpy
+                .getattr("eye")?
+                .call1((8,))?
+                .call_method1("reshape", ((2, 2, 2, 2, 2, 2),))?;
+            let b = numeric_array(
+                py,
+                vec![
+                    vec![vec![0.0, 1.0], vec![2.0, 3.0]],
+                    vec![vec![4.0, 5.0], vec![6.0, 7.0]],
+                ],
+                "float64",
+            );
+
+            let actual = tensorsolve(py, a.clone().unbind(), b.clone().unbind())?;
+            let expected = numpy
+                .getattr("linalg")?
+                .call_method1("tensorsolve", (a, b))?;
+
+            assert_array_matches_numpy(actual.bind(py), &expected)
         });
     }
 
