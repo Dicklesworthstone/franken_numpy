@@ -17790,35 +17790,15 @@ impl UFuncArray {
     /// - Single operand: "ii->" (trace), "ij->ji" (transpose)
     /// - Multiple operands: "ij,jk,kl->il"
     /// - Ellipsis: "...ij,...jk->...ik"
-    pub fn einsum(subscripts: &str, operands: &[&Self]) -> Result<Self, UFuncError> {
-        let parts: Vec<&str> = subscripts.split("->").collect();
-        if parts.len() > 2 {
-            return Err(UFuncError::Msg(
-                "einsum: subscripts must contain at most one '->'".to_string(),
-            ));
-        }
-        let input_part = parts[0];
-        let raw_input_subs: Vec<&str> = input_part.split(',').collect();
-
-        if raw_input_subs.len() != operands.len() {
-            return Err(UFuncError::Msg(format!(
-                "einsum: {} input subscripts but {} operands",
-                raw_input_subs.len(),
-                operands.len()
-            )));
-        }
-        if operands.is_empty() {
-            return Err(UFuncError::Msg(
-                "einsum: need at least one operand".to_string(),
-            ));
-        }
-
-        // ── Resolve ellipsis (`...`) into private-use-area placeholder labels.
-        // Each input ellipsis represents (op.ndim - explicit_label_count) dimensions.
-        // All ellipses must describe broadcast dims of the same shape; fully general
-        // size-1 broadcasting is not yet supported.
-        let raw_output_sub: Option<&str> =
-            if parts.len() == 2 { Some(parts[1]) } else { None };
+    /// Resolve einsum ellipsis (`...`) into Private-Use-Area placeholder labels.
+    /// Each operand ellipsis captures (op.ndim - explicit_label_count) dimensions;
+    /// all operand ellipses must describe broadcast dims of the same shape.
+    /// Returns (processed_input_subs, processed_output_sub, placeholders_string).
+    fn resolve_einsum_ellipsis(
+        raw_input_subs: &[&str],
+        raw_output_sub: Option<&str>,
+        operands: &[&Self],
+    ) -> Result<(Vec<String>, Option<String>, String), UFuncError> {
         let any_input_ellipsis = raw_input_subs.iter().any(|s| s.contains("..."));
         let any_output_ellipsis = raw_output_sub.is_some_and(|s| s.contains("..."));
 
@@ -17849,8 +17829,7 @@ impl UFuncArray {
                     let n_bcast = op.shape.len() - explicit_count;
                     let (prefix, _) = sub.split_once("...").unwrap();
                     let prefix_len = prefix.chars().count();
-                    let dims: Vec<usize> =
-                        op.shape[prefix_len..prefix_len + n_bcast].to_vec();
+                    let dims: Vec<usize> = op.shape[prefix_len..prefix_len + n_bcast].to_vec();
                     match &bcast_dims {
                         None => bcast_dims = Some(dims),
                         Some(existing) => {
@@ -17864,7 +17843,7 @@ impl UFuncArray {
                 }
             }
         }
-        for sub in &raw_input_subs {
+        for sub in raw_input_subs {
             if !sub.contains("...") && sub.contains('.') {
                 return Err(UFuncError::Msg(format!(
                     "einsum: subscript '{sub}' has stray '.' outside of ellipsis"
@@ -17884,8 +17863,8 @@ impl UFuncArray {
                 )));
             }
         }
-        let bcast_shape = bcast_dims.unwrap_or_default();
-        let placeholders: String = (0..bcast_shape.len())
+        let bcast_len = bcast_dims.unwrap_or_default().len();
+        let placeholders: String = (0..bcast_len)
             .map(|i| char::from_u32(0xE000 + u32::try_from(i).unwrap_or(0)).unwrap_or('\u{E000}'))
             .collect();
 
@@ -17906,6 +17885,36 @@ impl UFuncArray {
                 s.to_string()
             }
         });
+
+        Ok((processed_input_subs, processed_output_sub, placeholders))
+    }
+
+    pub fn einsum(subscripts: &str, operands: &[&Self]) -> Result<Self, UFuncError> {
+        let parts: Vec<&str> = subscripts.split("->").collect();
+        if parts.len() > 2 {
+            return Err(UFuncError::Msg(
+                "einsum: subscripts must contain at most one '->'".to_string(),
+            ));
+        }
+        let input_part = parts[0];
+        let raw_input_subs: Vec<&str> = input_part.split(',').collect();
+
+        if raw_input_subs.len() != operands.len() {
+            return Err(UFuncError::Msg(format!(
+                "einsum: {} input subscripts but {} operands",
+                raw_input_subs.len(),
+                operands.len()
+            )));
+        }
+        if operands.is_empty() {
+            return Err(UFuncError::Msg(
+                "einsum: need at least one operand".to_string(),
+            ));
+        }
+
+        let raw_output_sub: Option<&str> = if parts.len() == 2 { Some(parts[1]) } else { None };
+        let (processed_input_subs, processed_output_sub, placeholders) =
+            Self::resolve_einsum_ellipsis(&raw_input_subs, raw_output_sub, operands)?;
         let input_subs: Vec<&str> = processed_input_subs.iter().map(String::as_str).collect();
 
         // Determine output labels
@@ -18153,41 +18162,49 @@ impl UFuncArray {
             ));
         }
         let input_part = parts[0];
-        let input_subs: Vec<&str> = input_part.split(',').collect();
-        if input_subs.len() != operands.len() {
+        let raw_input_subs: Vec<&str> = input_part.split(',').collect();
+        if raw_input_subs.len() != operands.len() {
             return Err(UFuncError::Msg(format!(
                 "einsum_optimized: {} subscript groups but {} operands",
-                input_subs.len(),
+                raw_input_subs.len(),
                 operands.len()
             )));
         }
 
+        // Resolve ellipsis before any label-based logic so greedy cost calculations
+        // treat each broadcast dim as a real named axis instead of a stray '.'.
+        let raw_output_sub: Option<&str> = if parts.len() == 2 { Some(parts[1]) } else { None };
+        let (processed_input_subs, processed_output_sub, placeholders) =
+            Self::resolve_einsum_ellipsis(&raw_input_subs, raw_output_sub, operands)?;
+        let input_subs: Vec<&str> = processed_input_subs.iter().map(String::as_str).collect();
+
         // Determine output labels
-        let output_labels: Vec<char> = if parts.len() == 2 {
-            parts[1].chars().filter(|c| *c != '.').collect()
+        let output_labels: Vec<char> = if let Some(out) = processed_output_sub.as_deref() {
+            out.chars().collect()
         } else {
+            // Implicit output: ellipsis broadcast labels first, then singletons sorted.
+            let mut labels: Vec<char> = placeholders.chars().collect();
             let mut counts: std::collections::HashMap<char, usize> =
                 std::collections::HashMap::new();
             for sub in &input_subs {
                 for c in sub.chars() {
-                    if c != '.' {
-                        *counts.entry(c).or_insert(0) += 1;
-                    }
+                    *counts.entry(c).or_insert(0) += 1;
                 }
             }
-            let mut labels: Vec<char> = counts
+            let mut singletons: Vec<char> = counts
                 .into_iter()
-                .filter(|(_c, count)| *count == 1)
+                .filter(|(c, count)| *count == 1 && !placeholders.contains(*c))
                 .map(|(c, _)| c)
                 .collect();
-            labels.sort();
+            singletons.sort();
+            labels.extend(singletons);
             labels
         };
         let output_str: String = output_labels.iter().collect();
 
         // Inline greedy contraction: repeatedly pick and contract the cheapest pair
         let mut current_ops: Vec<Self> = operands.iter().map(|o| (*o).clone()).collect();
-        let mut current_subs: Vec<String> = input_subs.iter().map(|s| s.to_string()).collect();
+        let mut current_subs: Vec<String> = processed_input_subs.clone();
 
         while current_ops.len() > 1 {
             // Pick the best pair to contract
@@ -54777,6 +54794,40 @@ print(json.dumps(payload))
         let b = UFuncArray::new(vec![3, 3, 2], vec![1.0; 18], DType::F64).unwrap();
         let err = UFuncArray::einsum("...ij,...jk->...ik", &[&a, &b]).unwrap_err();
         assert!(err.to_string().contains("ellipsis broadcast shapes differ"));
+    }
+
+    #[test]
+    fn einsum_optimized_ellipsis_three_operand_chain() {
+        // Three-operand batched matmul via greedy path: "...ij,...jk,...kl->...il"
+        let a = UFuncArray::new(
+            vec![2, 2, 2],
+            (1..=8).map(f64::from).collect(),
+            DType::F64,
+        )
+        .unwrap();
+        let b = UFuncArray::new(
+            vec![2, 2, 2],
+            vec![1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0],
+            DType::F64,
+        )
+        .unwrap();
+        let c = UFuncArray::new(
+            vec![2, 2, 2],
+            vec![1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0],
+            DType::F64,
+        )
+        .unwrap();
+        let r = UFuncArray::einsum_optimized(
+            "...ij,...jk,...kl->...il",
+            &[&a, &b, &c],
+            "greedy",
+        )
+        .unwrap();
+        // With identity kernels in b and c, result equals a.
+        assert_eq!(r.shape, vec![2, 2, 2]);
+        for (got, want) in r.values.iter().zip(a.values.iter()) {
+            assert!((got - want).abs() < 1e-10);
+        }
     }
 
     // ── NumPy behavioral edge-case parity tests ────────
