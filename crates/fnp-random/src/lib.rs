@@ -4594,6 +4594,58 @@ except Exception as exc:
             .to_string()
     }
 
+    fn numpy_oracle_exponential_then_random(
+        scale: f64,
+        exp_size: usize,
+        random_size: usize,
+    ) -> (Vec<f64>, Vec<f64>) {
+        let script = r#"
+import sys
+import numpy as np
+
+scale = float(sys.argv[1])
+exp_size = int(sys.argv[2])
+random_size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+exp = rng.exponential(scale, size=exp_size)
+after = rng.random(random_size)
+print("exp:" + ",".join(str(float(value)) for value in exp.tolist()))
+print("after:" + ",".join(str(float(value)) for value in after.tolist()))
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(scale.to_string())
+            .arg(exp_size.to_string())
+            .arg(random_size.to_string())
+            .output()
+            .expect("python oracle should launch");
+        assert!(
+            output.status.success(),
+            "NumPy exponential oracle must succeed"
+        );
+        let stdout = String::from_utf8(output.stdout).expect("oracle stdout must be utf-8");
+        let mut lines = stdout.lines();
+        let exp_line = lines
+            .next()
+            .and_then(|line| line.strip_prefix("exp:"))
+            .expect("oracle exponential prefix must be present");
+        let after_line = lines
+            .next()
+            .and_then(|line| line.strip_prefix("after:"))
+            .expect("oracle random prefix must be present");
+        let parse_line = |line: &str| {
+            if line.is_empty() {
+                Vec::new()
+            } else {
+                line.split(',')
+                    .map(|token| token.parse::<f64>().expect("oracle float"))
+                    .collect()
+            }
+        };
+        (parse_line(exp_line), parse_line(after_line))
+    }
+
     fn numpy_oracle_vonmises(mu: f64, kappa: f64, size: usize) -> Vec<f64> {
         let script = r#"
 import sys
@@ -6016,6 +6068,43 @@ for child in rng.spawn(n_children):
         let vals = rng.exponential(1.0, 100).unwrap();
         assert_eq!(vals.len(), 100);
         assert!(vals.iter().all(|&v| v > 0.0));
+    }
+
+    #[test]
+    fn exponential_zero_scale_returns_zeros_and_preserves_size_zero_state() {
+        let mut rng = oracle_gen();
+        let vals = rng
+            .exponential(0.0, 5)
+            .expect("scale=0 should produce zeros");
+        assert_eq!(vals, vec![0.0; 5]);
+        let after = rng.random(5);
+        let expected_after = [
+            0.8831674052732996,
+            0.8883371973100436,
+            0.3033192453525694,
+            0.4400329555858611,
+            0.32925844288816175,
+        ];
+        assert_f64_seq("exponential_zero_scale_after", &after, &expected_after);
+
+        let mut empty_rng = oracle_gen();
+        let empty = empty_rng
+            .exponential(0.0, 0)
+            .expect("size=0 should succeed");
+        assert!(empty.is_empty());
+        let after_empty = empty_rng.random(5);
+        let expected_after_empty = [
+            0.9320816903198763,
+            0.3375056011176768,
+            0.21698197019501064,
+            0.3527062497665462,
+            0.5501051021142127,
+        ];
+        assert_f64_seq(
+            "exponential_zero_scale_size_zero_after",
+            &after_empty,
+            &expected_after_empty,
+        );
     }
 
     #[test]
@@ -7525,6 +7614,14 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn oracle_exponential_zero_scale() {
+        let mut g = oracle_gen();
+        let vals = g.exponential(0.0, 5).expect("scale=0 should succeed");
+        let expected = [0.0, 0.0, 0.0, 0.0, 0.0];
+        assert_f64_seq("exponential_zero_scale", &vals, &expected);
+    }
+
+    #[test]
     fn oracle_bytes_sequential_lengths() {
         let mut g = oracle_gen();
         let first = g.bytes(3);
@@ -8082,6 +8179,39 @@ for child in rng.spawn(n_children):
         assert_eq!(zero_expected, "ok:");
         let zero_actual = g.geometric(1.0, 0).expect("size=0 should succeed");
         assert!(zero_actual.is_empty());
+    }
+
+    #[test]
+    fn exponential_zero_scale_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let (expected_exp, expected_after) = numpy_oracle_exponential_then_random(0.0, 5, 5);
+        assert_eq!(expected_exp, vec![0.0; 5]);
+
+        let mut g = oracle_gen();
+        let actual_exp = g.exponential(0.0, 5).expect("scale=0 should succeed");
+        let actual_after = g.random(5);
+        assert_eq!(actual_exp, expected_exp, "scale=0 outputs must match NumPy");
+        assert_f64_seq(
+            "exponential_zero_scale_live_numpy_after",
+            &actual_after,
+            &expected_after,
+        );
+
+        let (expected_empty, expected_after_empty) =
+            numpy_oracle_exponential_then_random(0.0, 0, 5);
+        assert!(expected_empty.is_empty());
+        let mut empty_g = oracle_gen();
+        let actual_empty = empty_g.exponential(0.0, 0).expect("size=0 should succeed");
+        let actual_after_empty = empty_g.random(5);
+        assert!(actual_empty.is_empty());
+        assert_f64_seq(
+            "exponential_zero_scale_size_zero_live_numpy_after",
+            &actual_after_empty,
+            &expected_after_empty,
+        );
     }
 
     #[test]
