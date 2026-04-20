@@ -2391,6 +2391,14 @@ fn count_nonzero(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, ind=2))]
+fn tensorinv(py: Python<'_>, a: Py<PyAny>, ind: usize) -> PyResult<Py<PyAny>> {
+    let a = extract_numeric_array(py, a.bind(py), "tensorinv(a)")?;
+    let result = a.tensorinv(ind).map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, b, lower=false, unit_diagonal=false))]
 fn solve_triangular(
     py: Python<'_>,
@@ -3192,6 +3200,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(flatnonzero, m)?)?;
     m.add_function(wrap_pyfunction!(argwhere, m)?)?;
     m.add_function(wrap_pyfunction!(count_nonzero, m)?)?;
+    m.add_function(wrap_pyfunction!(tensorinv, m)?)?;
     m.add_function(wrap_pyfunction!(solve_triangular, m)?)?;
     m.add_function(wrap_pyfunction!(isposinf, m)?)?;
     m.add_function(wrap_pyfunction!(isneginf, m)?)?;
@@ -3266,8 +3275,9 @@ mod tests {
         interp, isfinite, isinf, isnan, isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2,
         meshgrid, modf, nan_to_num, nextafter, place, put, put_along_axis, putmask, radians,
         ravel_multi_index, rfftfreq, rint, searchsorted, select, sign, signbit, sinc,
-        solve_triangular, spacing, take, take_along_axis, trapezoid, trapz, tri, tril_indices,
-        tril_indices_from, triu_indices, triu_indices_from, trunc, unravel_index, where_py,
+        solve_triangular, spacing, take, take_along_axis, tensorinv, trapezoid, trapz, tri,
+        tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc, unravel_index,
+        where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::exceptions::{PyTypeError, PyValueError, PyZeroDivisionError};
@@ -3440,6 +3450,7 @@ mod tests {
             assert!(module.getattr("flatnonzero").is_ok());
             assert!(module.getattr("argwhere").is_ok());
             assert!(module.getattr("count_nonzero").is_ok());
+            assert!(module.getattr("tensorinv").is_ok());
             assert!(module.getattr("solve_triangular").is_ok());
             assert!(module.getattr("isposinf").is_ok());
             assert!(module.getattr("isneginf").is_ok());
@@ -5065,6 +5076,44 @@ mod tests {
             );
 
             Ok(())
+        });
+    }
+
+    #[test]
+    fn tensorinv_matches_numpy_default_and_ind_kwarg() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let linalg = numpy.getattr("linalg")?;
+
+            let default_input = numpy
+                .getattr("eye")?
+                .call1((4,))?
+                .call_method1("reshape", ((2, 2, 2, 2),))?;
+            let actual_default = tensorinv(py, default_input.clone().unbind(), 2)?;
+            let expected_default = linalg.call_method1("tensorinv", (default_input,))?;
+            assert_array_matches_numpy(actual_default.bind(py), &expected_default)?;
+
+            let ind_input = numpy
+                .getattr("eye")?
+                .call1((4,))?
+                .call_method1("reshape", ((4, 2, 2),))?;
+            let actual_ind = tensorinv(py, ind_input.clone().unbind(), 1)?;
+            let expected_ind = linalg.call_method(
+                "tensorinv",
+                (ind_input,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("ind", 1)?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(actual_ind.bind(py), &expected_ind)
         });
     }
 
