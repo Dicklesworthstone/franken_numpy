@@ -2551,7 +2551,7 @@ pub fn eig_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
         ));
     }
     if a.iter().any(|v| !v.is_finite()) {
-        return Err(LinAlgError::SpectralConvergenceFailed);
+        return Err(spectral_non_finite_input_error());
     }
 
     // Hessenberg reduction + implicit shifted QR
@@ -2745,7 +2745,7 @@ pub fn eig_nxn_full(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgE
         ));
     }
     if a.iter().any(|v| !v.is_finite()) {
-        return Err(LinAlgError::SpectralConvergenceFailed);
+        return Err(spectral_non_finite_input_error());
     }
 
     // Hessenberg reduction + implicit shifted QR accumulating Schur vectors
@@ -3626,9 +3626,13 @@ fn singular_values_2x2(matrix: [[f64; 2]; 2]) -> Result<[f64; 2], LinAlgError> {
 
 fn validate_finite_spectral_matrix_2x2(matrix: [[f64; 2]; 2]) -> Result<(), LinAlgError> {
     if matrix.iter().flatten().any(|value| !value.is_finite()) {
-        return Err(LinAlgError::SpectralConvergenceFailed);
+        return Err(spectral_non_finite_input_error());
     }
     Ok(())
+}
+
+fn spectral_non_finite_input_error() -> LinAlgError {
+    LinAlgError::NormDetRankPolicyViolation("Array must not contain infs or NaNs")
 }
 
 fn real_eigenvalues_2x2(matrix: [[f64; 2]; 2]) -> Result<[f64; 2], LinAlgError> {
@@ -6053,13 +6057,24 @@ mod tests {
         assert_eq!(err.reason_code(), "linalg_spectral_convergence_failed");
 
         let err = eigvals_2x2([[f64::NAN, 0.0], [0.0, 1.0]], true).expect_err("nan matrix");
-        assert_eq!(err.reason_code(), "linalg_spectral_convergence_failed");
+        assert_eq!(format!("{err}"), "Array must not contain infs or NaNs");
 
         let err = eigvals_2x2([[0.0, -1.0], [1.0, 0.0]], true).expect_err("complex spectrum");
         assert_eq!(err.reason_code(), "linalg_spectral_convergence_failed");
 
         let err = eigh_2x2([[1.0, 0.0], [0.0, 1.0]], "X", true).expect_err("invalid uplo");
         assert_eq!(err.reason_code(), "linalg_spectral_convergence_failed");
+    }
+
+    #[test]
+    fn eig_non_finite_inputs_match_numpy_error_surface() {
+        let matrix = [f64::NAN, 0.0, 0.0, 1.0];
+
+        let err = eig_nxn(&matrix, 2).expect_err("eigvals nan matrix");
+        assert_eq!(format!("{err}"), "Array must not contain infs or NaNs");
+
+        let err = eig_nxn_full(&matrix, 2).expect_err("eig nan matrix");
+        assert_eq!(format!("{err}"), "Array must not contain infs or NaNs");
     }
 
     #[test]
