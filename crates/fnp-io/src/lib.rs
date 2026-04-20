@@ -5933,7 +5933,13 @@ mm.flush()
     fn save_load_preserves_nan_inf_and_negative_zero() {
         // Exotic IEEE-754 values must round-trip bit-exactly through NPY.
         let shape = &[5];
-        let values = &[f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.0_f64, 0.0_f64];
+        let values = &[
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -0.0_f64,
+            0.0_f64,
+        ];
         let bytes = save(shape, values, IOSupportedDType::F64).unwrap();
         let (loaded_shape, loaded_values, _) = load(&bytes).unwrap();
         assert_eq!(loaded_shape, shape);

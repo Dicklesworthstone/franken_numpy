@@ -1236,6 +1236,40 @@ fn build_numpy_array_from_ufunc(py: Python<'_>, array: &UFuncArray) -> PyResult<
     build_numpy_array_from_storage(py, array.shape(), storage)
 }
 
+fn build_numpy_complex_array_from_interleaved(
+    py: Python<'_>,
+    array: &UFuncArray,
+) -> PyResult<Py<PyAny>> {
+    let Some((&2, logical_shape)) = array.shape().split_last() else {
+        return Err(PyTypeError::new_err(
+            "complex output must use an interleaved trailing dimension of size 2",
+        ));
+    };
+
+    let numpy = py.import("numpy")?;
+    let builtins = py.import("builtins")?;
+    let complex_values = array
+        .values()
+        .chunks_exact(2)
+        .map(|chunk| builtins.getattr("complex")?.call1((chunk[0], chunk[1])))
+        .collect::<PyResult<Vec<_>>>()?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", numpy.getattr("complex128")?)?;
+    let result = numpy
+        .getattr("array")?
+        .call((PyList::new(py, complex_values.iter())?,), Some(&kwargs))?;
+    if logical_shape.len() <= 1 {
+        Ok(result.unbind())
+    } else {
+        Ok(result
+            .call_method1(
+                "reshape",
+                (PyTuple::new(py, logical_shape.iter().copied())?,),
+            )?
+            .unbind())
+    }
+}
+
 fn build_numpy_tuple_from_ufuncs(py: Python<'_>, arrays: &[UFuncArray]) -> PyResult<Py<PyAny>> {
     let arrays = arrays
         .iter()
@@ -2997,6 +3031,39 @@ fn rfftfreq(py: Python<'_>, n: usize, d: f64, device: Option<Py<PyAny>>) -> PyRe
     build_numpy_array_from_ufunc(py, &result)
 }
 
+fn rfft_norm_scale(norm: Option<&str>, n: usize) -> PyResult<f64> {
+    match norm {
+        None | Some("backward") => Ok(1.0),
+        Some("ortho") => Ok(1.0 / (n as f64).sqrt()),
+        Some("forward") => Ok(1.0 / n as f64),
+        Some(other) => Err(PyValueError::new_err(format!(
+            "Invalid norm value {other}; should be \"backward\",\"ortho\" or \"forward\"."
+        ))),
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, n=None, norm=None))]
+fn rfft(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    n: Option<usize>,
+    norm: Option<String>,
+) -> PyResult<Py<PyAny>> {
+    let array = extract_precise_numeric_array(py, a.bind(py), "rfft(a)")?;
+    let input_n = n.unwrap_or_else(|| array.values().len());
+    let result = array.rfft(n).map_err(map_ufunc_error)?;
+    let scale = rfft_norm_scale(norm.as_deref(), input_n)?;
+    if scale == 1.0 {
+        build_numpy_complex_array_from_interleaved(py, &result)
+    } else {
+        let scaled_values = result.values().iter().map(|value| value * scale).collect();
+        let scaled = UFuncArray::new(result.shape().to_vec(), scaled_values, result.dtype())
+            .map_err(map_ufunc_error)?;
+        build_numpy_complex_array_from_interleaved(py, &scaled)
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (v, k=0))]
 fn diag(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
@@ -3343,6 +3410,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(putmask, m)?)?;
     m.add_function(wrap_pyfunction!(indices, m)?)?;
     m.add_function(wrap_pyfunction!(tri, m)?)?;
+    m.add_function(wrap_pyfunction!(rfft, m)?)?;
     m.add_function(wrap_pyfunction!(rfftfreq, m)?)?;
     m.add_function(wrap_pyfunction!(diag, m)?)?;
     m.add_function(wrap_pyfunction!(diagflat, m)?)?;
@@ -3549,6 +3617,7 @@ mod tests {
             assert!(module.getattr("count_nonzero").is_ok());
             assert!(module.getattr("expand_dims").is_ok());
             assert!(module.getattr("trim_zeros").is_ok());
+            assert!(module.getattr("rfft").is_ok());
             assert!(module.getattr("tensorsolve").is_ok());
             assert!(module.getattr("tensorinv").is_ok());
             assert!(module.getattr("solve_triangular").is_ok());
@@ -8814,6 +8883,80 @@ mod tests {
             assert_eq!(
                 zero_d_err.value(py).str()?.extract::<String>()?,
                 "float division by zero"
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn rfft_matches_numpy_norm_variants() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let numpy = py.import("numpy")?;
+            let input = numpy.call_method1("array", (vec![1.0_f64, 2.0, 3.0, 4.0],))?;
+
+            let actual_default = crate::rfft(py, input.clone().unbind(), None, None)?;
+            let expected_default = numpy
+                .getattr("fft")?
+                .call_method1("rfft", (input.clone(),))?;
+            assert_array_matches_numpy(actual_default.bind(py), &expected_default)?;
+
+            let actual_backward = crate::rfft(
+                py,
+                input.clone().unbind(),
+                None,
+                Some("backward".to_string()),
+            )?;
+            let expected_backward = numpy.getattr("fft")?.call_method(
+                "rfft",
+                (input.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("norm", "backward")?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(actual_backward.bind(py), &expected_backward)?;
+
+            let actual_ortho =
+                crate::rfft(py, input.clone().unbind(), None, Some("ortho".to_string()))?;
+            let expected_ortho = numpy.getattr("fft")?.call_method(
+                "rfft",
+                (input.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("norm", "ortho")?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(actual_ortho.bind(py), &expected_ortho)?;
+
+            let actual_forward = crate::rfft(
+                py,
+                input.clone().unbind(),
+                None,
+                Some("forward".to_string()),
+            )?;
+            let expected_forward = numpy.getattr("fft")?.call_method(
+                "rfft",
+                (input.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("norm", "forward")?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(actual_forward.bind(py), &expected_forward)?;
+
+            let err = crate::rfft(py, input.unbind(), None, Some("bad".to_string())).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            assert_eq!(
+                err.value(py).str()?.extract::<String>()?,
+                "Invalid norm value bad; should be \"backward\",\"ortho\" or \"forward\"."
             );
 
             Ok(())
