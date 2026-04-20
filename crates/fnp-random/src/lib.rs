@@ -2497,6 +2497,9 @@ impl Generator {
     /// Uses NumPy-compatible Lemire bounded integer algorithm with
     /// automatic 32/64-bit dispatch.
     pub fn integers(&mut self, low: i64, high: i64, size: usize) -> Result<Vec<i64>, RandomError> {
+        if size == 0 {
+            return Ok(Vec::new());
+        }
         if high <= low {
             return Err(RandomError::InvalidUpperBound);
         }
@@ -2521,6 +2524,9 @@ impl Generator {
         high: i64,
         size: usize,
     ) -> Result<Vec<i64>, RandomError> {
+        if size == 0 {
+            return Ok(Vec::new());
+        }
         if high < low {
             return Err(RandomError::InvalidUpperBound);
         }
@@ -4437,6 +4443,41 @@ except Exception as exc:
             .to_string()
     }
 
+    fn numpy_oracle_integers_outcome(low: i64, high: i64, size: usize, endpoint: bool) -> String {
+        let script = r#"
+import sys
+import numpy as np
+
+low = int(sys.argv[1])
+high = int(sys.argv[2])
+size = int(sys.argv[3])
+endpoint = sys.argv[4] == "true"
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+try:
+    out = rng.integers(low, high, size=size, endpoint=endpoint)
+    print("ok:" + ",".join(str(int(value)) for value in out.tolist()))
+except Exception as exc:
+    print(f"err:{type(exc).__name__}:{exc}")
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(low.to_string())
+            .arg(high.to_string())
+            .arg(size.to_string())
+            .arg(if endpoint { "true" } else { "false" })
+            .output()
+            .expect("python oracle should launch");
+        assert!(
+            output.status.success(),
+            "NumPy integers oracle must succeed"
+        );
+        String::from_utf8(output.stdout)
+            .expect("oracle stdout must be utf-8")
+            .trim()
+            .to_string()
+    }
+
     fn numpy_oracle_seed_sequence_spawn_words(
         entropy: &[u32],
         first_batch: usize,
@@ -5654,6 +5695,13 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn integers_zero_size_allows_degenerate_bounds() {
+        let mut rng = test_generator();
+        assert_eq!(rng.integers(5, 5, 0).unwrap(), Vec::<i64>::new());
+        assert_eq!(rng.integers(5, 4, 0).unwrap(), Vec::<i64>::new());
+    }
+
+    #[test]
     fn standard_normal_basic_stats() {
         let mut rng = test_generator();
         let vals = rng.standard_normal(10000);
@@ -6442,6 +6490,13 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn integers_endpoint_zero_size_allows_inverted_bounds() {
+        let mut rng = test_generator();
+        assert_eq!(rng.integers_endpoint(5, 5, 0).unwrap(), Vec::<i64>::new());
+        assert_eq!(rng.integers_endpoint(5, 4, 0).unwrap(), Vec::<i64>::new());
+    }
+
+    #[test]
     fn f_alias_matches_f_distribution() {
         let mut rng1 = test_generator();
         let mut rng2 = test_generator();
@@ -7109,6 +7164,16 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn oracle_integers_endpoint() {
+        let mut g = oracle_gen();
+        let vals = g
+            .integers_endpoint(0, 5, 10)
+            .expect("integers endpoint should succeed");
+        let expected: Vec<i64> = vec![0, 5, 0, 2, 4, 1, 5, 2, 5, 3];
+        assert_eq!(vals, expected, "integers endpoint oracle mismatch");
+    }
+
+    #[test]
     fn oracle_laplace() {
         let mut g = oracle_gen();
         let vals = g.laplace(0.0, 1.0, 10).unwrap();
@@ -7526,6 +7591,24 @@ for child in rng.spawn(n_children):
         assert_eq!(expected, "ok:1,1,1");
         let mut g = oracle_gen();
         assert_eq!(g.zipf(f64::INFINITY, 3).unwrap(), vec![1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn integers_zero_size_range_validation_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        assert_eq!(numpy_oracle_integers_outcome(5, 5, 0, false), "ok:");
+        assert_eq!(numpy_oracle_integers_outcome(5, 4, 0, false), "ok:");
+        assert_eq!(numpy_oracle_integers_outcome(5, 5, 0, true), "ok:");
+        assert_eq!(numpy_oracle_integers_outcome(5, 4, 0, true), "ok:");
+
+        let mut g = oracle_gen();
+        assert_eq!(g.integers(5, 5, 0).unwrap(), Vec::<i64>::new());
+        assert_eq!(g.integers(5, 4, 0).unwrap(), Vec::<i64>::new());
+        assert_eq!(g.integers_endpoint(5, 5, 0).unwrap(), Vec::<i64>::new());
+        assert_eq!(g.integers_endpoint(5, 4, 0).unwrap(), Vec::<i64>::new());
     }
 
     #[test]
