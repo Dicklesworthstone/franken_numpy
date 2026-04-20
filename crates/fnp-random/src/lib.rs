@@ -6,6 +6,10 @@ const GOLDEN_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
 const MIX_CONST1: u64 = 0xBF58_476D_1CE4_E5B9;
 const MIX_CONST2: u64 = 0x94D0_49BB_1331_11EB;
 
+fn wrap_angle_to_pi(angle: f64) -> f64 {
+    (angle + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
+}
+
 /// Precomputed log(k!) for k = 0..125, matching NumPy's `logfactorial.c`.
 /// Values are verbatim from NumPy's lookup table for bit-exact parity.
 #[allow(clippy::excessive_precision, clippy::approx_constant)]
@@ -3675,7 +3679,7 @@ impl Generator {
         Ok((0..size)
             .map(|_| {
                 if kappa < 1e-6 {
-                    return mu + std::f64::consts::PI * (2.0 * self.next_f64() - 1.0);
+                    return std::f64::consts::PI * (2.0 * self.next_f64() - 1.0);
                 }
                 let tau = 1.0 + (1.0 + 4.0 * kappa * kappa).sqrt();
                 let rho = (tau - (2.0 * tau).sqrt()) / (2.0 * kappa);
@@ -3689,7 +3693,7 @@ impl Generator {
                     if u2 < c * (2.0 - c) || u2 <= c * (-c).exp() {
                         let u3 = self.next_f64();
                         let theta = if u3 > 0.5 { f.acos() } else { -f.acos() };
-                        return mu + theta;
+                        return wrap_angle_to_pi(mu + theta);
                     }
                 }
             })
@@ -4476,6 +4480,39 @@ except Exception as exc:
             .expect("oracle stdout must be utf-8")
             .trim()
             .to_string()
+    }
+
+    fn numpy_oracle_vonmises(mu: f64, kappa: f64, size: usize) -> Vec<f64> {
+        let script = r#"
+import sys
+import numpy as np
+
+mu = float(sys.argv[1])
+kappa = float(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+out = rng.vonmises(mu, kappa, size)
+print(",".join(str(float(value)) for value in out.tolist()))
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(mu.to_string())
+            .arg(kappa.to_string())
+            .arg(size.to_string())
+            .output()
+            .expect("python oracle should launch");
+        assert!(
+            output.status.success(),
+            "NumPy vonmises oracle must succeed"
+        );
+        String::from_utf8(output.stdout)
+            .expect("oracle stdout must be utf-8")
+            .trim()
+            .split(',')
+            .filter(|token| !token.is_empty())
+            .map(|token| token.parse::<f64>().expect("oracle float"))
+            .collect()
     }
 
     fn numpy_oracle_seed_sequence_spawn_words(
@@ -6043,6 +6080,17 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn vonmises_zero_kappa_stays_within_wrapped_range() {
+        let mut rng = test_generator();
+        let samples = rng.vonmises(10.0, 0.0, 1000).unwrap();
+        assert!(
+            samples
+                .iter()
+                .all(|&x| (-std::f64::consts::PI..=std::f64::consts::PI).contains(&x))
+        );
+    }
+
+    #[test]
     fn rayleigh_positive_and_expected_mean() {
         let mut rng = test_generator();
         let scale = 2.0;
@@ -7565,6 +7613,25 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn oracle_vonmises_zero_kappa_with_nonzero_mu() {
+        let mut g = oracle_gen();
+        let vals = g.vonmises(1.5, 0.0, 10).unwrap();
+        let expected = [
+            2.714849328119167,
+            -1.0209824195563921,
+            -1.7782547265376234,
+            -0.9254739273062167,
+            0.3148196414187541,
+            2.4075118110033222,
+            2.439994572369766,
+            -1.2357816278057292,
+            -0.3767840523779033,
+            -1.0728008429700662,
+        ];
+        assert_f64_seq("vonmises_zero_kappa", &vals, &expected);
+    }
+
+    #[test]
     fn oracle_zipf() {
         let mut g = oracle_gen();
         let vals = g.zipf(2.0, 10).unwrap();
@@ -7609,6 +7676,18 @@ for child in rng.spawn(n_children):
         assert_eq!(g.integers(5, 4, 0).unwrap(), Vec::<i64>::new());
         assert_eq!(g.integers_endpoint(5, 5, 0).unwrap(), Vec::<i64>::new());
         assert_eq!(g.integers_endpoint(5, 4, 0).unwrap(), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn vonmises_zero_kappa_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let expected = numpy_oracle_vonmises(1.5, 0.0, 10);
+        let mut g = oracle_gen();
+        let actual = g.vonmises(1.5, 0.0, 10).unwrap();
+        assert_f64_seq("vonmises_zero_kappa_live", &actual, &expected);
     }
 
     #[test]
