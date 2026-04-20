@@ -25837,6 +25837,18 @@ fn flat_index_to_index_path(mut index: usize, shape: &[usize]) -> Result<Vec<i64
     Ok(path)
 }
 
+/// Result container for `MaskedArray::notmasked_edges`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MaskedArrayEdges {
+    /// Flattened first/last valid indices.
+    Flat([i64; 2]),
+    /// Coordinate arrays for the first/last valid entry along an axis.
+    AlongAxis {
+        first: Vec<Vec<i64>>,
+        last: Vec<Vec<i64>>,
+    },
+}
+
 /// A masked array analogous to `numpy.ma.MaskedArray`.
 ///
 /// Mask convention (matching NumPy): `true` (1.0) = element is **masked** (excluded/invalid),
@@ -26132,6 +26144,118 @@ impl MaskedArray {
                 }
             }
         }
+    }
+
+    fn flatnotmasked_edges(&self) -> Result<Option<[i64; 2]>, MAError> {
+        let last_index = if self.data.values().is_empty() {
+            -1
+        } else {
+            i64::try_from(self.data.values().len() - 1)
+                .map_err(|_| MAError::Msg("flat edge index overflow".to_string()))?
+        };
+        match &self.mask {
+            None => Ok(Some([0, last_index])),
+            Some(mask) => {
+                if !mask.values().iter().any(|&value| value != 0.0) {
+                    return Ok(Some([0, last_index]));
+                }
+                let mut first = None;
+                let mut last = None;
+                for (index, &masked) in mask.values().iter().enumerate() {
+                    if masked == 0.0 {
+                        let index = i64::try_from(index)
+                            .map_err(|_| MAError::Msg("flat edge index overflow".to_string()))?;
+                        first.get_or_insert(index);
+                        last = Some(index);
+                    }
+                }
+                Ok(first.zip(last).map(|(first, last)| [first, last]))
+            }
+        }
+    }
+
+    /// Find the first and last non-masked values along an axis (`np.ma.notmasked_edges`).
+    pub fn notmasked_edges(
+        &self,
+        axis: Option<isize>,
+    ) -> Result<Option<MaskedArrayEdges>, MAError> {
+        let ndim = self.data.shape().len();
+        if axis.is_none() || ndim == 1 {
+            return Ok(self.flatnotmasked_edges()?.map(MaskedArrayEdges::Flat));
+        }
+
+        if ndim == 0 {
+            return Ok(Some(MaskedArrayEdges::AlongAxis {
+                first: Vec::new(),
+                last: Vec::new(),
+            }));
+        }
+
+        let axis = normalize_axis(axis.unwrap_or_default(), ndim)?;
+        if self.data.shape()[axis] == 0 {
+            return Err(MAError::Msg(
+                "zero-size array to reduction operation minimum which has no identity".to_string(),
+            ));
+        }
+
+        let outer =
+            fnp_ndarray::element_count(&self.data.shape()[..axis]).map_err(UFuncError::Shape)?;
+        let inner = fnp_ndarray::element_count(&self.data.shape()[axis + 1..])
+            .map_err(UFuncError::Shape)?;
+        let axis_len = self.data.shape()[axis];
+        let mut first = vec![Vec::new(); ndim];
+        let mut last = vec![Vec::new(); ndim];
+
+        for outer_index in 0..outer {
+            let prefix = flat_index_to_index_path(outer_index, &self.data.shape()[..axis])?;
+            for inner_index in 0..inner {
+                let suffix = flat_index_to_index_path(inner_index, &self.data.shape()[axis + 1..])?;
+                let mut first_axis = None;
+                let mut last_axis = None;
+
+                for axis_index in 0..axis_len {
+                    let flat = outer_index
+                        .checked_mul(axis_len)
+                        .and_then(|value| value.checked_mul(inner))
+                        .and_then(|value| value.checked_add(axis_index.checked_mul(inner)?))
+                        .and_then(|value| value.checked_add(inner_index))
+                        .ok_or_else(|| {
+                            MAError::Msg("notmasked_edges flat index overflow".to_string())
+                        })?;
+                    let masked = self
+                        .mask
+                        .as_ref()
+                        .is_some_and(|mask| mask.values()[flat] != 0.0);
+                    if !masked {
+                        let axis_index = i64::try_from(axis_index)
+                            .map_err(|_| MAError::Msg("axis coordinate overflow".to_string()))?;
+                        first_axis.get_or_insert(axis_index);
+                        last_axis = Some(axis_index);
+                    }
+                }
+
+                if let Some(first_axis) = first_axis {
+                    let last_axis = last_axis
+                        .ok_or_else(|| MAError::Msg("missing trailing edge".to_string()))?;
+                    let mut first_coords = Vec::with_capacity(ndim);
+                    first_coords.extend_from_slice(&prefix);
+                    first_coords.push(first_axis);
+                    first_coords.extend_from_slice(&suffix);
+
+                    let mut last_coords = Vec::with_capacity(ndim);
+                    last_coords.extend_from_slice(&prefix);
+                    last_coords.push(last_axis);
+                    last_coords.extend_from_slice(&suffix);
+
+                    for coord_axis in 0..ndim {
+                        first[coord_axis].push(first_coords[coord_axis]);
+                        last[coord_axis].push(last_coords[coord_axis]);
+                    }
+                }
+            }
+        }
+
+        Ok(Some(MaskedArrayEdges::AlongAxis { first, last }))
     }
 
     /// Count valid (non-masked) elements along an axis.
@@ -31382,33 +31506,34 @@ mod tests {
     use super::{
         AxisSlice, BinaryDispatchMethod, BinaryOp, FloatErrorKind, FloatErrorMode,
         FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
-        FromPyFuncReduceOptions, GridSpec, MAError, MaskedArray, OverrideDispatchDecision,
-        OverrideOperand, OverridePayloadClass, PrintOptions, PyObjectArray, PyObjectValue,
-        QuantileInterp, ShapeError, StringArray, UFUNC_PACKET_REASON_CODES, UFuncArray,
-        UFuncArrayView, UFuncError, UFuncLogRecord, UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp,
-        bitwise_count, busday_count, busday_offset, busday_offset_with_holidays, cheb2poly,
-        chebadd, chebder, chebdiv, chebfit, chebfromroots, chebint, chebmul, chebroots, chebsub,
-        chebval, checked_window_total, copysign, datetime_as_string, divmod_arrays, errstate,
-        financial_fv, financial_ipmt, financial_irr, financial_mirr, financial_nper, financial_npv,
-        financial_pmt, financial_ppmt, financial_pv, financial_rate, frexp, frompyfunc,
-        frompyfunc_object, frompyfunc_python, frompyfunc_python_import,
-        frompyfunc_python_import_with_interpreter, frompyfunc_python_with_interpreter, gcd_arrays,
-        geterr, herm2poly, hermadd, hermder, hermdiv, herme2poly, hermeadd, hermediv, hermefit,
-        hermefromroots, hermemul, hermeroots, hermesub, hermeval, hermfit, hermfromroots, hermint,
-        hermmul, hermroots, hermsub, hermval, hypot, is_busday, isnat, isneginf, isposinf,
-        lag2poly, lagadd, lagder, lagdiv, lagfit, lagfromroots, lagint, lagmul, lagroots, lagsub,
-        lagval, lcm_arrays, ldexp, leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint,
-        legmul, legroots, legsub, legval, logaddexp, logaddexp2, ma_is_mask, ma_is_masked,
-        ma_make_mask, ma_mask_or, mediate_ufunc_runtime_policy, modf, nextafter,
-        normalize_fixed_signature_keywords, normalize_signature_keywords, pad_empty,
-        pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
-        plan_binary_dispatch, plan_binary_dispatch_with_registry,
-        plan_binary_dispatch_with_signature, poly2cheb, poly2herm, poly2herme, poly2lag, poly2leg,
-        reduce_frompyfunc_values, register_custom_loop, resolve_override_dispatch, scimath_arccos,
-        scimath_arcsin, scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_logn,
-        scimath_power, scimath_sqrt, seterr, seterr_state, seterrcall, signbit, sort_complex,
-        spacing, take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
-        validate_override_payload_class, where_nonzero,
+        FromPyFuncReduceOptions, GridSpec, MAError, MaskedArray, MaskedArrayEdges,
+        OverrideDispatchDecision, OverrideOperand, OverridePayloadClass, PrintOptions,
+        PyObjectArray, PyObjectValue, QuantileInterp, ShapeError, StringArray,
+        UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncArrayView, UFuncError, UFuncLogRecord,
+        UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp, bitwise_count, busday_count, busday_offset,
+        busday_offset_with_holidays, cheb2poly, chebadd, chebder, chebdiv, chebfit, chebfromroots,
+        chebint, chebmul, chebroots, chebsub, chebval, checked_window_total, copysign,
+        datetime_as_string, divmod_arrays, errstate, financial_fv, financial_ipmt, financial_irr,
+        financial_mirr, financial_nper, financial_npv, financial_pmt, financial_ppmt, financial_pv,
+        financial_rate, frexp, frompyfunc, frompyfunc_object, frompyfunc_python,
+        frompyfunc_python_import, frompyfunc_python_import_with_interpreter,
+        frompyfunc_python_with_interpreter, gcd_arrays, geterr, herm2poly, hermadd, hermder,
+        hermdiv, herme2poly, hermeadd, hermediv, hermefit, hermefromroots, hermemul, hermeroots,
+        hermesub, hermeval, hermfit, hermfromroots, hermint, hermmul, hermroots, hermsub, hermval,
+        hypot, is_busday, isnat, isneginf, isposinf, lag2poly, lagadd, lagder, lagdiv, lagfit,
+        lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, lcm_arrays, ldexp, leg2poly,
+        legadd, legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub, legval,
+        logaddexp, logaddexp2, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or,
+        mediate_ufunc_runtime_policy, modf, nextafter, normalize_fixed_signature_keywords,
+        normalize_signature_keywords, pad_empty, pad_linear_ramp, pad_stat,
+        parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch,
+        plan_binary_dispatch_with_registry, plan_binary_dispatch_with_signature, poly2cheb,
+        poly2herm, poly2herme, poly2lag, poly2leg, reduce_frompyfunc_values, register_custom_loop,
+        resolve_override_dispatch, scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log,
+        scimath_log2, scimath_log10, scimath_logn, scimath_power, scimath_sqrt, seterr,
+        seterr_state, seterrcall, signbit, sort_complex, spacing, take_float_error_events,
+        unique_all, unique_counts, unique_inverse, unique_values, validate_override_payload_class,
+        where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
@@ -31539,6 +31664,160 @@ print(",".join(str(float(value)) for value in dst.reshape(-1)))
                     .map_err(|err| format!("oracle float parse failed for {token:?}: {err}"))
             })
             .collect()
+    }
+
+    fn numpy_oracle_notmasked_edges(
+        masked: &MaskedArray,
+        axis: Option<isize>,
+    ) -> Result<Result<Option<MaskedArrayEdges>, String>, String> {
+        fn parse_i64_nested(value: &serde_json::Value) -> Result<Vec<Vec<i64>>, String> {
+            value
+                .as_array()
+                .ok_or_else(|| "expected nested array".to_string())?
+                .iter()
+                .map(|row| {
+                    row.as_array()
+                        .ok_or_else(|| "expected row array".to_string())?
+                        .iter()
+                        .map(|item| item.as_i64().ok_or_else(|| "expected integer".to_string()))
+                        .collect()
+                })
+                .collect()
+        }
+
+        let data_values = masked
+            .data()
+            .values()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let shape = masked
+            .shape()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mask_values = masked.mask().map_or_else(
+            || "__none__".to_string(),
+            |mask| {
+                mask.values()
+                    .iter()
+                    .map(|value| {
+                        if *value != 0.0 {
+                            "1".to_string()
+                        } else {
+                            "0".to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            },
+        );
+        let axis_arg = axis.map_or_else(|| "__none__".to_string(), |axis| axis.to_string());
+        let script = r#"
+import json
+import sys
+import numpy as np
+import numpy.ma as ma
+
+def parse_values(arg):
+    if not arg:
+        return []
+    return [float(part) for part in arg.split(",") if part]
+
+def parse_shape(arg):
+    if not arg:
+        return ()
+    return tuple(int(part) for part in arg.split(",") if part)
+
+data = np.array(parse_values(sys.argv[1]), dtype=float).reshape(parse_shape(sys.argv[2]))
+mask_arg = sys.argv[3]
+if mask_arg == "__none__":
+    masked = ma.asarray(data)
+else:
+    mask = np.array([part != "0" for part in mask_arg.split(",") if part], dtype=bool)
+    masked = ma.array(data, mask=mask.reshape(parse_shape(sys.argv[2])))
+axis_arg = None if sys.argv[4] == "__none__" else int(sys.argv[4])
+
+try:
+    result = ma.notmasked_edges(masked, axis=axis_arg)
+except Exception as exc:
+    print(json.dumps({"kind": "error", "message": str(exc)}))
+    raise SystemExit(0)
+
+if result is None:
+    print(json.dumps({"kind": "none"}))
+elif isinstance(result, np.ndarray):
+    print(json.dumps({"kind": "flat", "values": [int(value) for value in result.tolist()]}))
+else:
+    def encode_tuple(item):
+        return [[int(value) for value in axis_values.tolist()] for axis_values in item]
+
+    print(json.dumps({
+        "kind": "axis",
+        "first": encode_tuple(result[0]),
+        "last": encode_tuple(result[1]),
+    }))
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(data_values)
+            .arg(shape)
+            .arg(mask_values)
+            .arg(axis_arg)
+            .output()
+            .map_err(|err| format!("failed to launch NumPy notmasked_edges oracle: {err}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "NumPy notmasked_edges oracle failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|err| format!("oracle stdout must be utf-8: {err}"))?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(stdout.trim()).map_err(|err| format!("oracle json: {err}"))?;
+        match parsed
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "oracle missing kind".to_string())?
+        {
+            "none" => Ok(Ok(None)),
+            "flat" => {
+                let values = parsed
+                    .get("values")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| "oracle missing flat values".to_string())?
+                    .iter()
+                    .map(|value| value.as_i64().ok_or_else(|| "expected integer".to_string()))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let values = values
+                    .try_into()
+                    .map_err(|_| "expected exactly two flat edge values".to_string())?;
+                Ok(Ok(Some(MaskedArrayEdges::Flat(values))))
+            }
+            "axis" => {
+                let first = parse_i64_nested(
+                    parsed
+                        .get("first")
+                        .ok_or_else(|| "oracle missing first".to_string())?,
+                )?;
+                let last = parse_i64_nested(
+                    parsed
+                        .get("last")
+                        .ok_or_else(|| "oracle missing last".to_string())?,
+                )?;
+                Ok(Ok(Some(MaskedArrayEdges::AlongAxis { first, last })))
+            }
+            "error" => Ok(Err(parsed
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "oracle missing error message".to_string())?
+                .to_string())),
+            other => Err(format!("unexpected oracle kind: {other}")),
+        }
     }
 
     #[test]
@@ -45391,6 +45670,191 @@ print(",".join(str(float(value)) for value in dst.reshape(-1)))
         let ma = MaskedArray::new(data, Some(mask), None).unwrap();
         let c = ma.count(None).unwrap();
         assert_eq!(c.values(), &[2.0]); // 2 valid elements
+    }
+
+    #[test]
+    fn masked_array_notmasked_edges_1d_ignores_axis() {
+        let data = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![3], vec![0.0, 1.0, 0.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+
+        assert_eq!(
+            ma.notmasked_edges(None).unwrap(),
+            Some(MaskedArrayEdges::Flat([0, 2]))
+        );
+        assert_eq!(
+            ma.notmasked_edges(Some(99)).unwrap(),
+            Some(MaskedArrayEdges::Flat([0, 2]))
+        );
+        assert_eq!(
+            ma.notmasked_edges(Some(-99)).unwrap(),
+            Some(MaskedArrayEdges::Flat([0, 2]))
+        );
+    }
+
+    #[test]
+    fn masked_array_notmasked_edges_axis_returns_coordinate_arrays() {
+        let data =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let mask =
+            UFuncArray::new(vec![2, 3], vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+
+        assert_eq!(
+            ma.notmasked_edges(Some(0)).unwrap(),
+            Some(MaskedArrayEdges::AlongAxis {
+                first: vec![vec![0, 1, 0], vec![0, 1, 2]],
+                last: vec![vec![0, 1, 0], vec![0, 1, 2]],
+            })
+        );
+        assert_eq!(
+            ma.notmasked_edges(Some(1)).unwrap(),
+            Some(MaskedArrayEdges::AlongAxis {
+                first: vec![vec![0, 1], vec![0, 1]],
+                last: vec![vec![0, 1], vec![2, 1]],
+            })
+        );
+    }
+
+    #[test]
+    fn masked_array_notmasked_edges_all_masked_flat_returns_none() {
+        let data = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![3], vec![1.0, 1.0, 1.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+
+        assert_eq!(ma.notmasked_edges(None).unwrap(), None);
+        assert_eq!(ma.notmasked_edges(Some(0)).unwrap(), None);
+    }
+
+    #[test]
+    fn masked_array_notmasked_edges_all_masked_axis_returns_empty_coordinate_arrays() {
+        let data =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let mask =
+            UFuncArray::new(vec![2, 3], vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+
+        assert_eq!(
+            ma.notmasked_edges(Some(0)).unwrap(),
+            Some(MaskedArrayEdges::AlongAxis {
+                first: vec![vec![], vec![]],
+                last: vec![vec![], vec![]],
+            })
+        );
+        assert_eq!(
+            ma.notmasked_edges(Some(1)).unwrap(),
+            Some(MaskedArrayEdges::AlongAxis {
+                first: vec![vec![], vec![]],
+                last: vec![vec![], vec![]],
+            })
+        );
+    }
+
+    #[test]
+    fn masked_array_notmasked_edges_zero_length_axis_errors() {
+        let data = UFuncArray::new(vec![0, 3], vec![], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![0, 3], vec![], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+
+        let err = ma.notmasked_edges(Some(0)).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "zero-size array to reduction operation minimum which has no identity"
+        );
+        assert_eq!(
+            ma.notmasked_edges(Some(1)).unwrap(),
+            Some(MaskedArrayEdges::AlongAxis {
+                first: vec![vec![], vec![]],
+                last: vec![vec![], vec![]],
+            })
+        );
+    }
+
+    #[test]
+    fn masked_array_notmasked_edges_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let cases = vec![
+            (
+                MaskedArray::new(
+                    UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap(),
+                    Some(UFuncArray::new(vec![3], vec![0.0, 1.0, 0.0], DType::Bool).unwrap()),
+                    None,
+                )
+                .unwrap(),
+                None,
+            ),
+            (
+                MaskedArray::new(
+                    UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap(),
+                    Some(UFuncArray::new(vec![3], vec![0.0, 1.0, 0.0], DType::Bool).unwrap()),
+                    None,
+                )
+                .unwrap(),
+                Some(99),
+            ),
+            (
+                MaskedArray::new(
+                    UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
+                        .unwrap(),
+                    Some(
+                        UFuncArray::new(
+                            vec![2, 3],
+                            vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+                            DType::Bool,
+                        )
+                        .unwrap(),
+                    ),
+                    None,
+                )
+                .unwrap(),
+                Some(0),
+            ),
+            (
+                MaskedArray::new(
+                    UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
+                        .unwrap(),
+                    Some(
+                        UFuncArray::new(
+                            vec![2, 3],
+                            vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+                            DType::Bool,
+                        )
+                        .unwrap(),
+                    ),
+                    None,
+                )
+                .unwrap(),
+                Some(-1),
+            ),
+            (
+                MaskedArray::new(
+                    UFuncArray::new(vec![0, 3], vec![], DType::F64).unwrap(),
+                    Some(UFuncArray::new(vec![0, 3], vec![], DType::Bool).unwrap()),
+                    None,
+                )
+                .unwrap(),
+                Some(0),
+            ),
+        ];
+
+        for (masked, axis) in cases {
+            let expected = numpy_oracle_notmasked_edges(&masked, axis);
+            let expected_error = expected
+                .as_ref()
+                .err()
+                .cloned()
+                .unwrap_or_else(|| "NumPy notmasked_edges oracle failed".to_string());
+            assert!(expected.is_ok(), "{expected_error}");
+            let expected = match expected {
+                Ok(expected) => expected,
+                Err(_) => return,
+            };
+            let actual = masked.notmasked_edges(axis).map_err(|err| err.to_string());
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]
