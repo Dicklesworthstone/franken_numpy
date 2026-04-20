@@ -1,7 +1,7 @@
 {
   "suite": "masked_differential",
-  "total_cases": 44,
-  "passed_cases": 44,
+  "total_cases": 55,
+  "passed_cases": 55,
   "failed_cases": 0,
   "mismatches": []
 }

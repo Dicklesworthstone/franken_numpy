@@ -1512,6 +1512,10 @@ struct MaskedDifferentialCase {
     #[serde(default)]
     expect_mask_none: bool,
     #[serde(default)]
+    expected_nan_indices: Vec<usize>,
+    #[serde(default)]
+    expected_inf_indices: Vec<usize>,
+    #[serde(default)]
     expected_scalar: Option<f64>,
     #[serde(default)]
     abs_tol: f64,
@@ -14963,6 +14967,14 @@ fn execute_masked_differential_operation(
             let result = lhs.anom().map_err(map_ma_error_to_masked_suite)?;
             Ok(masked_array_to_outcome(&result))
         }
+        "cov" => {
+            let result = lhs.cov().map_err(map_ma_error_to_masked_suite)?;
+            Ok(masked_array_to_outcome(&result))
+        }
+        "corrcoef" => {
+            let result = lhs.corrcoef().map_err(map_ma_error_to_masked_suite)?;
+            Ok(masked_array_to_outcome(&result))
+        }
         "sum" => {
             let result = lhs
                 .sum(case.axis, false)
@@ -15108,7 +15120,48 @@ fn validate_masked_differential_expectation(
                 actual.len()
             ));
         }
-        if !approx_equal_values(expected, actual, abs_tol, rel_tol) {
+        let mut expected_normalized = expected.to_vec();
+        let mut actual_normalized = actual.to_vec();
+        if label == "values" {
+            for &idx in &case.expected_nan_indices {
+                if idx >= actual.len() {
+                    return Err(format!(
+                        "{label} expected_nan_indices contains out-of-bounds index {idx} for len {}",
+                        actual.len()
+                    ));
+                }
+                if !actual[idx].is_nan() {
+                    return Err(format!(
+                        "{label} expected NaN at index {idx} but found {}",
+                        actual[idx]
+                    ));
+                }
+                expected_normalized[idx] = 0.0;
+                actual_normalized[idx] = 0.0;
+            }
+            for &idx in &case.expected_inf_indices {
+                if idx >= actual.len() {
+                    return Err(format!(
+                        "{label} expected_inf_indices contains out-of-bounds index {idx} for len {}",
+                        actual.len()
+                    ));
+                }
+                if !actual[idx].is_infinite() {
+                    return Err(format!(
+                        "{label} expected infinity at index {idx} but found {}",
+                        actual[idx]
+                    ));
+                }
+                let normalized = if actual[idx].is_sign_negative() {
+                    -1.0
+                } else {
+                    1.0
+                };
+                expected_normalized[idx] = normalized;
+                actual_normalized[idx] = normalized;
+            }
+        }
+        if !approx_equal_values(&expected_normalized, &actual_normalized, abs_tol, rel_tol) {
             return Err(format!(
                 "{label} mismatch expected={expected:?} actual={actual:?} abs_tol={abs_tol} rel_tol={rel_tol}"
             ));

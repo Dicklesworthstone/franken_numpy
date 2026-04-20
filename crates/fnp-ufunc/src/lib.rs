@@ -17912,7 +17912,11 @@ impl UFuncArray {
             ));
         }
 
-        let raw_output_sub: Option<&str> = if parts.len() == 2 { Some(parts[1]) } else { None };
+        let raw_output_sub: Option<&str> = if parts.len() == 2 {
+            Some(parts[1])
+        } else {
+            None
+        };
         let (processed_input_subs, processed_output_sub, placeholders) =
             Self::resolve_einsum_ellipsis(&raw_input_subs, raw_output_sub, operands)?;
         let input_subs: Vec<&str> = processed_input_subs.iter().map(String::as_str).collect();
@@ -18181,7 +18185,11 @@ impl UFuncArray {
 
         // Resolve ellipsis before any label-based logic so greedy cost calculations
         // treat each broadcast dim as a real named axis instead of a stray '.'.
-        let raw_output_sub: Option<&str> = if parts.len() == 2 { Some(parts[1]) } else { None };
+        let raw_output_sub: Option<&str> = if parts.len() == 2 {
+            Some(parts[1])
+        } else {
+            None
+        };
         let (processed_input_subs, processed_output_sub, placeholders) =
             Self::resolve_einsum_ellipsis(&raw_input_subs, raw_output_sub, operands)?;
         let input_subs: Vec<&str> = processed_input_subs.iter().map(String::as_str).collect();
@@ -27677,20 +27685,26 @@ impl MaskedArray {
     /// Treats each row as a variable and each column as an observation.
     /// Masked elements are excluded from the calculation.
     pub fn cov(&self) -> Result<Self, MAError> {
-        if self.data.shape().len() != 2 {
-            return Err(MAError::Msg("cov: input must be 2-D".into()));
-        }
-        let rows = self.data.shape()[0];
-        let cols = self.data.shape()[1];
-        // Compute means per row, excluding masked elements
+        let (rows, cols, output_shape) = match self.data.shape().len() {
+            1 => (1, self.data.shape()[0], vec![]),
+            2 => (
+                self.data.shape()[0],
+                self.data.shape()[1],
+                vec![self.data.shape()[0], self.data.shape()[0]],
+            ),
+            _ => return Err(MAError::Msg("cov: input must be 1-D or 2-D".into())),
+        };
+
+        let data_values = self.data.values();
+        let mask_values = self.mask.as_ref().map(UFuncArray::values);
         let mut means = vec![0.0; rows];
         let mut counts = vec![0usize; rows];
         for i in 0..rows {
             for j in 0..cols {
                 let idx = i * cols + j;
-                let masked = self.mask.as_ref().is_some_and(|m| m.values()[idx] != 0.0);
+                let masked = mask_values.is_some_and(|mask| mask[idx] != 0.0);
                 if !masked {
-                    means[i] += self.data.values()[idx];
+                    means[i] += data_values[idx];
                     counts[i] += 1;
                 }
             }
@@ -27698,32 +27712,43 @@ impl MaskedArray {
                 means[i] /= counts[i] as f64;
             }
         }
-        // Compute covariance matrix
+
         let mut cov_vals = vec![0.0; rows * rows];
+        let mut cov_mask = vec![0.0; rows * rows];
         for i in 0..rows {
             for j in i..rows {
                 let mut sum = 0.0;
-                let mut n = 0usize;
+                let mut overlap = 0usize;
                 for k in 0..cols {
                     let idx_i = i * cols + k;
                     let idx_j = j * cols + k;
-                    let masked_i = self.mask.as_ref().is_some_and(|m| m.values()[idx_i] != 0.0);
-                    let masked_j = self.mask.as_ref().is_some_and(|m| m.values()[idx_j] != 0.0);
+                    let masked_i = mask_values.is_some_and(|mask| mask[idx_i] != 0.0);
+                    let masked_j = mask_values.is_some_and(|mask| mask[idx_j] != 0.0);
                     if !masked_i && !masked_j {
-                        sum += (self.data.values()[idx_i] - means[i])
-                            * (self.data.values()[idx_j] - means[j]);
-                        n += 1;
+                        sum += (data_values[idx_i] - means[i]) * (data_values[idx_j] - means[j]);
+                        overlap += 1;
                     }
                 }
-                let val = if n > 1 { sum / (n - 1) as f64 } else { 0.0 };
+                let val = sum / (overlap as f64 - 1.0);
+                let masked = overlap <= 1;
                 cov_vals[i * rows + j] = val;
                 cov_vals[j * rows + i] = val;
+                if masked {
+                    cov_mask[i * rows + j] = 1.0;
+                    cov_mask[j * rows + i] = 1.0;
+                }
             }
         }
-        let cov_data = UFuncArray::new(vec![rows, rows], cov_vals, DType::F64)?;
+
+        let cov_data = UFuncArray::new(output_shape.clone(), cov_vals, DType::F64)?;
+        let cov_mask = if cov_mask.iter().any(|&value| value != 0.0) {
+            Some(UFuncArray::new(output_shape, cov_mask, DType::Bool)?)
+        } else {
+            None
+        };
         Ok(Self {
             data: cov_data,
-            mask: None,
+            mask: cov_mask,
             fill_value: self.fill_value,
             hard_mask: false,
         })
@@ -27734,21 +27759,51 @@ impl MaskedArray {
     /// Normalizes the covariance matrix: `corrcoef[i,j] = cov[i,j] / sqrt(cov[i,i] * cov[j,j])`.
     pub fn corrcoef(&self) -> Result<Self, MAError> {
         let cov = self.cov()?;
+        if cov.data.shape().is_empty() {
+            return Ok(Self {
+                data: UFuncArray::new(vec![], vec![0.0], DType::F64)?,
+                mask: Some(UFuncArray::new(vec![], vec![1.0], DType::Bool)?),
+                fill_value: self.fill_value,
+                hard_mask: false,
+            });
+        }
+
         let rows = cov.data.shape()[0];
+        let cov_values = cov.data.values();
+        let cov_mask_values = cov.mask.as_ref().map(UFuncArray::values);
         let mut corr_vals = vec![0.0; rows * rows];
+        let mut corr_mask = vec![0.0; rows * rows];
         for i in 0..rows {
+            let diag_i_index = i * rows + i;
+            let cii = cov_values[diag_i_index];
+            let diag_i_masked = cov_mask_values.is_some_and(|mask| mask[diag_i_index] != 0.0);
             for j in 0..rows {
-                let cii = cov.data.values()[i * rows + i];
-                let cjj = cov.data.values()[j * rows + j];
-                let cij = cov.data.values()[i * rows + j];
+                let diag_j_index = j * rows + j;
+                let cjj = cov_values[diag_j_index];
+                let cij = cov_values[i * rows + j];
+                let entry_masked = cov_mask_values.is_some_and(|mask| mask[i * rows + j] != 0.0)
+                    || diag_i_masked
+                    || cov_mask_values.is_some_and(|mask| mask[diag_j_index] != 0.0);
                 let denom = (cii * cjj).sqrt();
-                corr_vals[i * rows + j] = if denom > 0.0 { cij / denom } else { 0.0 };
+                corr_vals[i * rows + j] = if i == j && !entry_masked {
+                    1.0
+                } else {
+                    cij / denom
+                };
+                if entry_masked {
+                    corr_mask[i * rows + j] = 1.0;
+                }
             }
         }
         let corr_data = UFuncArray::new(vec![rows, rows], corr_vals, DType::F64)?;
+        let corr_mask = if corr_mask.iter().any(|&value| value != 0.0) {
+            Some(UFuncArray::new(vec![rows, rows], corr_mask, DType::Bool)?)
+        } else {
+            None
+        };
         Ok(Self {
             data: corr_data,
-            mask: None,
+            mask: corr_mask,
             fill_value: self.fill_value,
             hard_mask: false,
         })
@@ -54063,7 +54118,64 @@ print(json.dumps(payload))
         let ma = MaskedArray::new(data, Some(mask), None).unwrap();
         let cov = ma.cov().unwrap();
         assert_eq!(cov.data().shape(), &[2, 2]);
-        // Should compute using only unmasked-in-both-rows observations
+        assert!((cov.data().values()[0] - 1.0).abs() < 1e-12);
+        assert!(cov.data().values()[1].abs() < 1e-12);
+        assert!(cov.data().values()[2].abs() < 1e-12);
+        assert!((cov.data().values()[3] - 100.0).abs() < 1e-12);
+        assert!(cov.mask().is_none());
+    }
+
+    #[test]
+    fn masked_cov_masks_pairs_with_insufficient_overlap() {
+        let data =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 1.0, 5.0, 7.0], DType::F64).unwrap();
+        let mask =
+            UFuncArray::new(vec![2, 3], vec![0.0, 1.0, 0.0, 0.0, 0.0, 1.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        let cov = ma.cov().unwrap();
+
+        assert_eq!(cov.data().shape(), &[2, 2]);
+        assert_eq!(cov.mask().unwrap().values(), &[0.0, 1.0, 1.0, 0.0]);
+        assert!((cov.data().values()[0] - 2.0).abs() < 1e-12);
+        assert!(cov.data().values()[1].is_infinite());
+        assert!(cov.data().values()[2].is_infinite());
+        assert!((cov.data().values()[3] - 8.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn masked_corrcoef_preserves_pairwise_mask_and_no_clamp() {
+        let data = UFuncArray::new(
+            vec![2, 4],
+            vec![1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0],
+            DType::F64,
+        )
+        .unwrap();
+        let mask = UFuncArray::new(
+            vec![2, 4],
+            vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            DType::Bool,
+        )
+        .unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        let corr = ma.corrcoef().unwrap();
+
+        assert_eq!(corr.data().shape(), &[2, 2]);
+        assert!(corr.mask().is_none());
+        assert!((corr.data().values()[0] - 1.0).abs() < 1e-12);
+        assert!((corr.data().values()[1] - 1.9047619047619044).abs() < 1e-12);
+        assert!((corr.data().values()[2] - 1.9047619047619044).abs() < 1e-12);
+        assert!((corr.data().values()[3] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn masked_corrcoef_one_dimensional_input_returns_masked_scalar() {
+        let data = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let ma = MaskedArray::new(data, None, None).unwrap();
+        let corr = ma.corrcoef().unwrap();
+
+        assert!(corr.data().shape().is_empty());
+        assert_eq!(corr.data().values(), &[0.0]);
+        assert_eq!(corr.mask().unwrap().values(), &[1.0]);
     }
 
     // ── iinfo/finfo/binary_repr/base_repr tests (br-rd0) ────────
@@ -54730,18 +54842,10 @@ print(json.dumps(payload))
     #[test]
     fn einsum_ellipsis_batch_matmul() {
         // "...ij,...jk->...ik" with leading batch dim = 2
-        let a = UFuncArray::new(
-            vec![2, 2, 3],
-            (1..=12).map(f64::from).collect(),
-            DType::F64,
-        )
-        .unwrap();
-        let b = UFuncArray::new(
-            vec![2, 3, 2],
-            (1..=12).map(f64::from).collect(),
-            DType::F64,
-        )
-        .unwrap();
+        let a =
+            UFuncArray::new(vec![2, 2, 3], (1..=12).map(f64::from).collect(), DType::F64).unwrap();
+        let b =
+            UFuncArray::new(vec![2, 3, 2], (1..=12).map(f64::from).collect(), DType::F64).unwrap();
         let c = UFuncArray::einsum("...ij,...jk->...ik", &[&a, &b]).unwrap();
         assert_eq!(c.shape, vec![2, 2, 2]);
         let expected = [22.0, 28.0, 49.0, 64.0, 220.0, 244.0, 301.0, 334.0];
@@ -54753,12 +54857,8 @@ print(json.dumps(payload))
     #[test]
     fn einsum_ellipsis_transpose_last_two() {
         // "...ij->...ji" transposes last two axes over a batch
-        let a = UFuncArray::new(
-            vec![2, 2, 3],
-            (1..=12).map(f64::from).collect(),
-            DType::F64,
-        )
-        .unwrap();
+        let a =
+            UFuncArray::new(vec![2, 2, 3], (1..=12).map(f64::from).collect(), DType::F64).unwrap();
         let c = UFuncArray::einsum("...ij->...ji", &[&a]).unwrap();
         assert_eq!(c.shape, vec![2, 3, 2]);
         // Batch 0 [[1,2,3],[4,5,6]] -> [[1,4],[2,5],[3,6]]
@@ -54774,12 +54874,8 @@ print(json.dumps(payload))
     #[test]
     fn einsum_ellipsis_implicit_output() {
         // Implicit "ij...->ij" collapses trailing broadcast dims (sum over them)
-        let a = UFuncArray::new(
-            vec![2, 2, 3],
-            (1..=12).map(f64::from).collect(),
-            DType::F64,
-        )
-        .unwrap();
+        let a =
+            UFuncArray::new(vec![2, 2, 3], (1..=12).map(f64::from).collect(), DType::F64).unwrap();
         // Implicit mode places ellipsis labels first; here only one operand, no
         // repeated labels, so output is "...ij" placed first. That equals the input.
         let c = UFuncArray::einsum("...ij", &[&a]).unwrap();
@@ -54809,23 +54905,16 @@ print(json.dumps(payload))
         let a = UFuncArray::new(vec![2, 2, 3], vec![1.0; 12], DType::F64).unwrap();
         let b = UFuncArray::new(vec![2, 3, 2], vec![1.0; 12], DType::F64).unwrap();
         let c = UFuncArray::new(vec![2, 2, 4], vec![1.0; 16], DType::F64).unwrap();
-        let (path, _desc) = UFuncArray::einsum_path(
-            "...ij,...jk,...kl->...il",
-            &[&a, &b, &c],
-        )
-        .unwrap();
+        let (path, _desc) =
+            UFuncArray::einsum_path("...ij,...jk,...kl->...il", &[&a, &b, &c]).unwrap();
         assert!(!path.is_empty());
     }
 
     #[test]
     fn einsum_optimized_ellipsis_three_operand_chain() {
         // Three-operand batched matmul via greedy path: "...ij,...jk,...kl->...il"
-        let a = UFuncArray::new(
-            vec![2, 2, 2],
-            (1..=8).map(f64::from).collect(),
-            DType::F64,
-        )
-        .unwrap();
+        let a =
+            UFuncArray::new(vec![2, 2, 2], (1..=8).map(f64::from).collect(), DType::F64).unwrap();
         let b = UFuncArray::new(
             vec![2, 2, 2],
             vec![1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0],
@@ -54838,12 +54927,8 @@ print(json.dumps(payload))
             DType::F64,
         )
         .unwrap();
-        let r = UFuncArray::einsum_optimized(
-            "...ij,...jk,...kl->...il",
-            &[&a, &b, &c],
-            "greedy",
-        )
-        .unwrap();
+        let r = UFuncArray::einsum_optimized("...ij,...jk,...kl->...il", &[&a, &b, &c], "greedy")
+            .unwrap();
         // With identity kernels in b and c, result equals a.
         assert_eq!(r.shape, vec![2, 2, 2]);
         for (got, want) in r.values.iter().zip(a.values.iter()) {
