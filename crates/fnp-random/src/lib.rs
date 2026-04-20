@@ -3885,7 +3885,7 @@ impl Generator {
     /// Matches `random_zipf()` in NumPy's `distributions.c`.
     /// Returns integer-valued floats (zipf values are positive integers).
     pub fn zipf(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if a <= 1.0 {
+        if a.is_nan() || a <= 1.0 {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -4390,6 +4390,51 @@ for row in out:
                     .collect::<Vec<_>>()
             })
             .collect()
+    }
+
+    fn numpy_oracle_zipf_outcome(a: f64, size: usize) -> String {
+        let a_arg = if a.is_nan() {
+            "__nan__".to_string()
+        } else if a.is_infinite() && a.is_sign_positive() {
+            "__inf__".to_string()
+        } else if a.is_infinite() && a.is_sign_negative() {
+            "__ninf__".to_string()
+        } else {
+            a.to_string()
+        };
+        let script = r#"
+import sys
+import numpy as np
+
+a = sys.argv[1]
+if a == "__nan__":
+    a = float("nan")
+elif a == "__inf__":
+    a = float("inf")
+elif a == "__ninf__":
+    a = float("-inf")
+else:
+    a = float(a)
+size = int(sys.argv[2])
+rng = np.random.default_rng(12345)
+try:
+    out = rng.zipf(a, size)
+    print("ok:" + ",".join(str(int(value)) for value in out.tolist()))
+except Exception as exc:
+    print(f"err:{type(exc).__name__}:{exc}")
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(a_arg)
+            .arg(size.to_string())
+            .output()
+            .expect("python oracle should launch");
+        assert!(output.status.success(), "NumPy zipf oracle must succeed");
+        String::from_utf8(output.stdout)
+            .expect("oracle stdout must be utf-8")
+            .trim()
+            .to_string()
     }
 
     fn numpy_oracle_seed_sequence_spawn_words(
@@ -6025,6 +6070,14 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn zipf_rejects_nan_and_boundary_parameters() {
+        let mut rng = test_generator();
+        for invalid in [f64::NAN, 1.0, 0.999_999_999, 0.0, -1.0] {
+            assert_eq!(rng.zipf(invalid, 3), Err(RandomError::InvalidParameter));
+        }
+    }
+
+    #[test]
     fn wald_positive_and_expected_mean() {
         let mut rng = test_generator();
         let mu = 2.0;
@@ -7453,6 +7506,26 @@ for child in rng.spawn(n_children):
         // NumPy returns integers: [14, 1, 8, 1, 1, 8, 1, 1, 3, 1]
         let expected = [14.0, 1.0, 8.0, 1.0, 1.0, 8.0, 1.0, 1.0, 3.0, 1.0];
         assert_f64_seq("zipf", &vals, &expected);
+    }
+
+    #[test]
+    fn zipf_parameter_ranges_match_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let error_cases = [f64::NAN, 1.0, 0.999_999_999, 0.0, -1.0];
+        for a in error_cases {
+            let expected = numpy_oracle_zipf_outcome(a, 3);
+            assert_eq!(expected, "err:ValueError:a <= 1 or a is NaN");
+            let mut g = oracle_gen();
+            assert_eq!(g.zipf(a, 3), Err(RandomError::InvalidParameter));
+        }
+
+        let expected = numpy_oracle_zipf_outcome(f64::INFINITY, 3);
+        assert_eq!(expected, "ok:1,1,1");
+        let mut g = oracle_gen();
+        assert_eq!(g.zipf(f64::INFINITY, 3).unwrap(), vec![1.0, 1.0, 1.0]);
     }
 
     #[test]
