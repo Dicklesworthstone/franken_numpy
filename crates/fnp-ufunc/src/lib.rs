@@ -26417,6 +26417,11 @@ impl MaskedArray {
         self.fill_value
     }
 
+    #[must_use]
+    pub fn minimum_fill_value(&self) -> Option<UFuncArray> {
+        ma_minimum_fill_value(&self.data)
+    }
+
     /// Return data with masked elements replaced by `fill_value`.
     pub fn filled(&self, fill_value: f64) -> Result<UFuncArray, UFuncError> {
         match &self.mask {
@@ -27896,6 +27901,72 @@ pub fn ma_is_masked(a: &MaskedArray) -> bool {
     a.mask
         .as_ref()
         .is_some_and(|m| m.values().iter().any(|&v| v != 0.0))
+}
+
+/// Return the NumPy-style minimum fill value sentinel for a dtype.
+///
+/// This is the scalar used by `np.ma.minimum_fill_value`, i.e. the identity that
+/// keeps masked entries from affecting a minimum reduction.
+#[must_use]
+pub fn ma_minimum_fill_value_for_dtype(dtype: DType) -> Option<UFuncArray> {
+    match dtype {
+        DType::Bool => {
+            UFuncArray::from_storage_with_dtype(vec![], ArrayStorage::Bool(vec![true]), dtype).ok()
+        }
+        DType::I8 => {
+            UFuncArray::from_storage_with_dtype(vec![], ArrayStorage::I8(vec![i8::MAX]), dtype).ok()
+        }
+        DType::I16 => {
+            UFuncArray::from_storage_with_dtype(vec![], ArrayStorage::I16(vec![i16::MAX]), dtype)
+                .ok()
+        }
+        DType::I32 => {
+            UFuncArray::from_storage_with_dtype(vec![], ArrayStorage::I32(vec![i32::MAX]), dtype)
+                .ok()
+        }
+        DType::I64 => {
+            UFuncArray::from_storage_with_dtype(vec![], ArrayStorage::I64(vec![i64::MAX]), dtype)
+                .ok()
+        }
+        DType::U8 => {
+            UFuncArray::from_storage_with_dtype(vec![], ArrayStorage::U8(vec![u8::MAX]), dtype).ok()
+        }
+        DType::U16 => {
+            UFuncArray::from_storage_with_dtype(vec![], ArrayStorage::U16(vec![u16::MAX]), dtype)
+                .ok()
+        }
+        DType::U32 => {
+            UFuncArray::from_storage_with_dtype(vec![], ArrayStorage::U32(vec![u32::MAX]), dtype)
+                .ok()
+        }
+        DType::U64 => {
+            UFuncArray::from_storage_with_dtype(vec![], ArrayStorage::U64(vec![u64::MAX]), dtype)
+                .ok()
+        }
+        DType::F16 | DType::F32 | DType::F64 => Some(UFuncArray {
+            shape: vec![],
+            values: vec![f64::INFINITY],
+            dtype,
+            integer_sidecar: None,
+        }),
+        DType::Complex64 | DType::Complex128 => Some(UFuncArray {
+            shape: vec![2],
+            values: vec![f64::INFINITY, f64::INFINITY],
+            dtype,
+            integer_sidecar: None,
+        }),
+        DType::DateTime64 | DType::TimeDelta64 => {
+            UFuncArray::from_storage_with_dtype(vec![], ArrayStorage::I64(vec![i64::MAX]), dtype)
+                .ok()
+        }
+        DType::Str | DType::Structured => None,
+    }
+}
+
+/// Return the NumPy-style minimum fill value sentinel for an array's dtype.
+#[must_use]
+pub fn ma_minimum_fill_value(a: &UFuncArray) -> Option<UFuncArray> {
+    ma_minimum_fill_value_for_dtype(a.dtype())
 }
 
 /// Check whether an array qualifies as a boolean mask (np.ma.is_mask).
@@ -32009,16 +32080,16 @@ mod tests {
         lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, lcm_arrays, ldexp, leg2poly,
         legadd, legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub, legval,
         logaddexp, logaddexp2, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or,
-        mediate_ufunc_runtime_policy, modf, nextafter, normalize_fixed_signature_keywords,
-        normalize_signature_keywords, pad_empty, pad_linear_ramp, pad_stat,
-        parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch,
-        plan_binary_dispatch_with_registry, plan_binary_dispatch_with_signature, poly2cheb,
-        poly2herm, poly2herme, poly2lag, poly2leg, reduce_frompyfunc_values, register_custom_loop,
-        resolve_override_dispatch, scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log,
-        scimath_log2, scimath_log10, scimath_logn, scimath_power, scimath_sqrt, seterr,
-        seterr_state, seterrcall, signbit, sort_complex, spacing, take_float_error_events,
-        unique_all, unique_counts, unique_inverse, unique_values, validate_override_payload_class,
-        where_nonzero,
+        ma_minimum_fill_value, ma_minimum_fill_value_for_dtype, mediate_ufunc_runtime_policy, modf,
+        nextafter, normalize_fixed_signature_keywords, normalize_signature_keywords, pad_empty,
+        pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
+        plan_binary_dispatch, plan_binary_dispatch_with_registry,
+        plan_binary_dispatch_with_signature, poly2cheb, poly2herm, poly2herme, poly2lag, poly2leg,
+        reduce_frompyfunc_values, register_custom_loop, resolve_override_dispatch, scimath_arccos,
+        scimath_arcsin, scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_logn,
+        scimath_power, scimath_sqrt, seterr, seterr_state, seterrcall, signbit, sort_complex,
+        spacing, take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
+        validate_override_payload_class, where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
@@ -32043,6 +32114,74 @@ mod tests {
             .status()
             .map(|status| status.success())
             .unwrap_or(false)
+    }
+
+    fn normalize_minimum_fill_value(result: Option<UFuncArray>) -> String {
+        match result {
+            None => "none".to_string(),
+            Some(arr) => match arr.dtype() {
+                DType::Bool => format!("bool:{}", arr.values()[0] != 0.0),
+                DType::I8 => format!("int:{}", arr.values()[0] as i8),
+                DType::I16 => format!("int:{}", arr.values()[0] as i16),
+                DType::I32 => format!("int:{}", arr.values()[0] as i32),
+                DType::I64 | DType::DateTime64 | DType::TimeDelta64 => match &arr.integer_sidecar {
+                    Some(super::IntegerSidecar::I64(values)) => format!("int:{}", values[0]),
+                    _ => format!("int:{}", arr.values()[0] as i64),
+                },
+                DType::U8 => format!("uint:{}", arr.values()[0] as u8),
+                DType::U16 => format!("uint:{}", arr.values()[0] as u16),
+                DType::U32 => format!("uint:{}", arr.values()[0] as u32),
+                DType::U64 => match &arr.integer_sidecar {
+                    Some(super::IntegerSidecar::U64(values)) => format!("uint:{}", values[0]),
+                    _ => format!("uint:{}", arr.values()[0] as u64),
+                },
+                DType::F16 | DType::F32 | DType::F64 => "float:inf".to_string(),
+                DType::Complex64 | DType::Complex128 => {
+                    format!("complex:{},{}", arr.values()[0], arr.values()[1])
+                }
+                DType::Str | DType::Structured => "none".to_string(),
+            },
+        }
+    }
+
+    fn numpy_oracle_minimum_fill_value(dtype: &str) -> String {
+        let script = r#"
+import json
+import sys
+import numpy as np
+
+dtype_name = sys.argv[1]
+arr = np.ma.array([0], dtype=np.dtype(dtype_name))
+value = np.ma.minimum_fill_value(arr)
+dt = arr.dtype
+
+if value is None:
+    print("none")
+elif np.issubdtype(dt, np.bool_):
+    print(f"bool:{bool(value)}")
+elif np.issubdtype(dt, np.unsignedinteger):
+    print(f"uint:{int(value)}")
+elif np.issubdtype(dt, np.integer) or np.issubdtype(dt, np.datetime64) or np.issubdtype(dt, np.timedelta64):
+    print(f"int:{int(value)}")
+elif np.issubdtype(dt, np.complexfloating):
+    print(f"complex:{float(value.real)},{float(value.imag)}")
+else:
+    print(f"float:{float(value)}")
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(dtype)
+            .output()
+            .expect("python oracle should launch");
+        assert!(
+            output.status.success(),
+            "NumPy minimum_fill_value oracle must succeed"
+        );
+        String::from_utf8(output.stdout)
+            .expect("oracle stdout must be utf-8")
+            .trim()
+            .to_string()
     }
 
     fn numpy_oracle_copyto(
@@ -46947,6 +47086,95 @@ print(json.dumps(payload))
         assert!((ma.fill_value() - 42.0).abs() < f64::EPSILON);
         ma.set_fill_value(-1.0);
         assert!((ma.fill_value() - (-1.0)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn masked_minimum_fill_value_supported_dtypes() {
+        assert_eq!(
+            normalize_minimum_fill_value(ma_minimum_fill_value_for_dtype(DType::Bool)),
+            "bool:true"
+        );
+        assert_eq!(
+            normalize_minimum_fill_value(ma_minimum_fill_value_for_dtype(DType::I8)),
+            format!("int:{}", i8::MAX)
+        );
+        assert_eq!(
+            normalize_minimum_fill_value(ma_minimum_fill_value_for_dtype(DType::U64)),
+            format!("uint:{}", u64::MAX)
+        );
+        assert_eq!(
+            normalize_minimum_fill_value(ma_minimum_fill_value_for_dtype(DType::F64)),
+            "float:inf"
+        );
+        assert_eq!(
+            normalize_minimum_fill_value(ma_minimum_fill_value_for_dtype(DType::Complex128)),
+            "complex:inf,inf"
+        );
+        assert_eq!(
+            normalize_minimum_fill_value(ma_minimum_fill_value_for_dtype(DType::DateTime64)),
+            format!("int:{}", i64::MAX)
+        );
+        assert_eq!(
+            normalize_minimum_fill_value(ma_minimum_fill_value_for_dtype(DType::TimeDelta64)),
+            format!("int:{}", i64::MAX)
+        );
+        assert!(ma_minimum_fill_value_for_dtype(DType::Str).is_none());
+        assert!(ma_minimum_fill_value_for_dtype(DType::Structured).is_none());
+    }
+
+    #[test]
+    fn masked_array_minimum_fill_value_uses_underlying_dtype() {
+        let int_data =
+            UFuncArray::from_storage_with_dtype(vec![1], ArrayStorage::I64(vec![7]), DType::I64)
+                .expect("i64 array");
+        let int_masked = MaskedArray::new(int_data.clone(), None, None).expect("masked int");
+        assert_eq!(
+            normalize_minimum_fill_value(int_masked.minimum_fill_value()),
+            format!("int:{}", i64::MAX)
+        );
+        assert_eq!(
+            normalize_minimum_fill_value(ma_minimum_fill_value(&int_data)),
+            format!("int:{}", i64::MAX)
+        );
+
+        let complex_data = UFuncArray {
+            shape: vec![2],
+            values: vec![1.0, -2.0],
+            dtype: DType::Complex128,
+            integer_sidecar: None,
+        };
+        let complex_masked = MaskedArray::new(complex_data, None, None).expect("masked complex");
+        assert_eq!(
+            normalize_minimum_fill_value(complex_masked.minimum_fill_value()),
+            "complex:inf,inf"
+        );
+    }
+
+    #[test]
+    fn masked_minimum_fill_value_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let cases = [
+            (DType::Bool, "bool"),
+            (DType::I8, "int8"),
+            (DType::U64, "uint64"),
+            (DType::F64, "float64"),
+            (DType::Complex128, "complex128"),
+            (DType::DateTime64, "datetime64[ns]"),
+            (DType::TimeDelta64, "timedelta64[ns]"),
+            (DType::Str, "U1"),
+        ];
+
+        for (dtype, numpy_name) in cases {
+            assert_eq!(
+                normalize_minimum_fill_value(ma_minimum_fill_value_for_dtype(dtype)),
+                numpy_oracle_minimum_fill_value(numpy_name),
+                "minimum_fill_value mismatch for {:?}",
+                dtype
+            );
+        }
     }
 
     #[test]
