@@ -7355,6 +7355,92 @@ pub fn run_linalg_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteRepor
                     true
                 }
             }
+            "inv_right_identity" => {
+                // Metamorphic: A · inv(A) == I  (within numerical tolerance)
+                let n = case.matrix.len();
+                if n == 0 || case.matrix.iter().any(|row| row.len() != n) {
+                    report.failures.push(format!(
+                        "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} matrix must be square for inv_right_identity",
+                        case.id, case.seed, reason_code, env_fingerprint, artifact_refs.join(",")
+                    ));
+                    continue;
+                }
+                let flat: Vec<f64> = case.matrix.iter().flatten().copied().collect();
+                let inv_a = match fnp_linalg::inv_nxn(&flat, n) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        report.failures.push(format!(
+                            "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} inv(A) failed: {e}",
+                            case.id, case.seed, reason_code, env_fingerprint, artifact_refs.join(",")
+                        ));
+                        continue;
+                    }
+                };
+                let product = square_matmul_flat(&flat, &inv_a, n);
+                let tol = 1e-9 * (flat.iter().map(|v| v.abs()).fold(1.0_f64, f64::max));
+                let mut ok = true;
+                for i in 0..n {
+                    for j in 0..n {
+                        let expected = if i == j { 1.0 } else { 0.0 };
+                        if (product[i * n + j] - expected).abs() > tol {
+                            report.failures.push(format!(
+                                "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} inv_right_identity mismatch at ({i},{j}) expected={expected} got={}",
+                                case.id, case.seed, reason_code, env_fingerprint, artifact_refs.join(","), product[i * n + j]
+                            ));
+                            ok = false;
+                        }
+                    }
+                }
+                ok
+            }
+            "cholesky_reconstructs_spd" => {
+                // Metamorphic: L = cholesky(A);  L · L^T == A for 2x2 SPD matrices.
+                let matrix = match decode_matrix_2x2(&case.matrix) {
+                    Ok(m) => m,
+                    Err(err) => {
+                        report.failures.push(format!(
+                            "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} invalid 2x2 fixture: {err}",
+                            case.id, case.seed, reason_code, env_fingerprint, artifact_refs.join(",")
+                        ));
+                        continue;
+                    }
+                };
+                let l_mat = match cholesky_2x2(matrix, "L") {
+                    Ok(m) => m,
+                    Err(err) => {
+                        report.failures.push(format!(
+                            "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} cholesky_2x2 failed: {err}",
+                            case.id, case.seed, reason_code, env_fingerprint, artifact_refs.join(",")
+                        ));
+                        continue;
+                    }
+                };
+                // LL^T: product[i][j] = sum_k L[i][k] * L[j][k]
+                let mut product = [[0.0_f64; 2]; 2];
+                for i in 0..2 {
+                    for j in 0..2 {
+                        let mut sum = 0.0;
+                        for k in 0..2 {
+                            sum += l_mat[i][k] * l_mat[j][k];
+                        }
+                        product[i][j] = sum;
+                    }
+                }
+                let mut ok = true;
+                for i in 0..2 {
+                    for j in 0..2 {
+                        let expected = matrix[i][j];
+                        if (product[i][j] - expected).abs() > 1e-9 * expected.abs().max(1.0) {
+                            report.failures.push(format!(
+                                "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} cholesky_reconstructs_spd mismatch at ({i},{j}) A={expected} LLᵀ={}",
+                                case.id, case.seed, reason_code, env_fingerprint, artifact_refs.join(","), product[i][j]
+                            ));
+                            ok = false;
+                        }
+                    }
+                }
+                ok
+            }
             other => {
                 report.failures.push(format!(
                     "{}: seed={} reason_code={} env_fingerprint={} artifact_refs={} unsupported relation {}",
@@ -18812,6 +18898,22 @@ fn classify_ufunc_reason_code(op: UFuncOperation, detail: &str) -> String {
     } else {
         "ufunc_dispatch_resolution_failed".to_string()
     }
+}
+
+/// Row-major n×n matmul for two flat square matrices. Used by linalg
+/// metamorphic relations that verify A · inv(A) == I.
+fn square_matmul_flat(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
+    let mut result = vec![0.0_f64; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            let mut sum = 0.0;
+            for k in 0..n {
+                sum += a[i * n + k] * b[k * n + j];
+            }
+            result[i * n + j] = sum;
+        }
+    }
+    result
 }
 
 fn decode_matrix_2x2(matrix: &[Vec<f64>]) -> Result<[[f64; 2]; 2], LinAlgError> {

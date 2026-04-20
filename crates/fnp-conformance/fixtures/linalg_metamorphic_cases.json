@@ -521,5 +521,113 @@
       [0.0, 1.0, 2.0],
       [1.0, 0.0, 1.0]
     ]
+  },
+  {
+    "id": "linalg_inv_right_identity_2x2",
+    "relation": "inv_right_identity",
+    "seed": 8400,
+    "env_fingerprint": "fnp-linalg-metamorphic-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_metamorphic_inv_right_identity",
+    "matrix": [
+      [4.0, 7.0],
+      [2.0, 6.0]
+    ]
+  },
+  {
+    "id": "linalg_inv_right_identity_2x2_ill_conditioned",
+    "relation": "inv_right_identity",
+    "seed": 8401,
+    "env_fingerprint": "fnp-linalg-metamorphic-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_metamorphic_inv_right_identity",
+    "matrix": [
+      [1.0, 1.0],
+      [1.0, 1.0001]
+    ]
+  },
+  {
+    "id": "linalg_inv_right_identity_3x3",
+    "relation": "inv_right_identity",
+    "seed": 8402,
+    "env_fingerprint": "fnp-linalg-metamorphic-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_metamorphic_inv_right_identity",
+    "matrix": [
+      [1.0, 2.0, 1.0],
+      [0.0, 1.0, 2.0],
+      [1.0, 0.0, 1.0]
+    ]
+  },
+  {
+    "id": "linalg_inv_right_identity_4x4_diagonal_heavy",
+    "relation": "inv_right_identity",
+    "seed": 8403,
+    "env_fingerprint": "fnp-linalg-metamorphic-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_metamorphic_inv_right_identity",
+    "matrix": [
+      [5.0, 1.0, 0.0, 0.0],
+      [1.0, 5.0, 1.0, 0.0],
+      [0.0, 1.0, 5.0, 1.0],
+      [0.0, 0.0, 1.0, 5.0]
+    ]
+  },
+  {
+    "id": "linalg_cholesky_reconstructs_spd_simple",
+    "relation": "cholesky_reconstructs_spd",
+    "seed": 8410,
+    "env_fingerprint": "fnp-linalg-metamorphic-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_metamorphic_cholesky_reconstructs",
+    "matrix": [
+      [2.0, 1.0],
+      [1.0, 2.0]
+    ]
+  },
+  {
+    "id": "linalg_cholesky_reconstructs_spd_positive_definite",
+    "relation": "cholesky_reconstructs_spd",
+    "seed": 8411,
+    "env_fingerprint": "fnp-linalg-metamorphic-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_metamorphic_cholesky_reconstructs",
+    "matrix": [
+      [4.0, 12.0],
+      [12.0, 37.0]
+    ]
+  },
+  {
+    "id": "linalg_cholesky_reconstructs_spd_near_identity",
+    "relation": "cholesky_reconstructs_spd",
+    "seed": 8412,
+    "env_fingerprint": "fnp-linalg-metamorphic-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_metamorphic_cholesky_reconstructs",
+    "matrix": [
+      [1.01, 0.5],
+      [0.5, 1.01]
+    ]
   }
 ]
