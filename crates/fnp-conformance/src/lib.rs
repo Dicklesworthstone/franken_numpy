@@ -14947,6 +14947,39 @@ fn execute_masked_differential_operation(
                 values: result.values().to_vec(),
             })
         }
+        "count" => {
+            let result = lhs.count(case.axis).map_err(map_ma_error_to_masked_suite)?;
+            Ok(MaskedOperationOutcome::Array {
+                shape: result.shape().to_vec(),
+                values: result.values().to_vec(),
+            })
+        }
+        "cumsum" => {
+            let result = lhs
+                .cumsum(case.axis)
+                .map_err(map_ma_error_to_masked_suite)?;
+            Ok(masked_array_to_outcome(&result))
+        }
+        "cumprod" => {
+            let result = lhs
+                .cumprod(case.axis)
+                .map_err(map_ma_error_to_masked_suite)?;
+            Ok(masked_array_to_outcome(&result))
+        }
+        "median" => {
+            let scalar = lhs.median().map_err(map_ma_error_to_masked_suite)?;
+            Ok(MaskedOperationOutcome::Array {
+                shape: vec![],
+                values: vec![scalar],
+            })
+        }
+        "ptp" => {
+            let scalar = lhs.ptp().map_err(map_ma_error_to_masked_suite)?;
+            Ok(MaskedOperationOutcome::Array {
+                shape: vec![],
+                values: vec![scalar],
+            })
+        }
         other => Err(MaskedSuiteError::new(
             "masked_policy_unknown_operation",
             format!("unsupported masked differential operation {other}"),
