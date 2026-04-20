@@ -2851,6 +2851,20 @@ fn indices(
 }
 
 #[pyfunction]
+#[pyo3(signature = (n, m=None, k=0, dtype=None))]
+fn tri(
+    py: Python<'_>,
+    n: usize,
+    m: Option<usize>,
+    k: i64,
+    dtype: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let dtype = extract_python_dtype(py, dtype, DType::F64, "tri(dtype)")?;
+    let result = UFuncArray::tri(n, m, k, dtype);
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(signature = (v, k=0))]
 fn diag(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
     let v = extract_precise_numeric_array(py, v.bind(py), "diag(v)")?;
@@ -3191,6 +3205,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(place, m)?)?;
     m.add_function(wrap_pyfunction!(putmask, m)?)?;
     m.add_function(wrap_pyfunction!(indices, m)?)?;
+    m.add_function(wrap_pyfunction!(tri, m)?)?;
     m.add_function(wrap_pyfunction!(diag, m)?)?;
     m.add_function(wrap_pyfunction!(diagflat, m)?)?;
     m.add_function(wrap_pyfunction!(diagonal, m)?)?;
@@ -3219,8 +3234,8 @@ mod tests {
         interp, isfinite, isinf, isnan, isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2,
         meshgrid, modf, nan_to_num, nextafter, place, put, put_along_axis, putmask, radians,
         ravel_multi_index, rint, searchsorted, select, sign, signbit, sinc, solve_triangular,
-        spacing, take, take_along_axis, trapezoid, trapz, tril_indices, tril_indices_from,
-        triu_indices, triu_indices_from, trunc, unravel_index, where_py,
+        spacing, take, take_along_axis, trapezoid, trapz, tri, tril_indices,
+        tril_indices_from, triu_indices, triu_indices_from, trunc, unravel_index, where_py,
     };
     use pyo3::IntoPyObject;
     use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -3437,6 +3452,7 @@ mod tests {
             assert!(module.getattr("place").is_ok());
             assert!(module.getattr("putmask").is_ok());
             assert!(module.getattr("indices").is_ok());
+            assert!(module.getattr("tri").is_ok());
             assert!(module.getattr("diag").is_ok());
             assert!(module.getattr("diagflat").is_ok());
             assert!(module.getattr("diagonal").is_ok());
@@ -8372,6 +8388,47 @@ mod tests {
             assert_index_tuple_matches_numpy(actual_default.bind(py), &expected_default)?;
             assert_index_tuple_matches_numpy(actual_ndim.bind(py), &expected_ndim)?;
             Ok(())
+        });
+    }
+
+    #[test]
+    fn tri_matches_numpy_offsets_and_dtype() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let numpy = py.import("numpy")?;
+
+            let actual_default = tri(py, 3, None, 0, None)?;
+            let expected_default = numpy.call_method1("tri", (3,))?;
+            assert_array_matches_numpy(actual_default.bind(py), &expected_default)?;
+
+            let actual_neg = tri(py, 3, Some(5), -1, Some(numpy.getattr("int32")?.unbind()))?;
+            let expected_neg = numpy.call_method(
+                "tri",
+                (3, 5),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("k", -1)?;
+                    kwargs.set_item("dtype", numpy.getattr("int32")?)?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(actual_neg.bind(py), &expected_neg)?;
+
+            let actual_pos = tri(py, 4, Some(2), 1, Some(numpy.getattr("bool_")?.unbind()))?;
+            let expected_pos = numpy.call_method(
+                "tri",
+                (4, 2),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("k", 1)?;
+                    kwargs.set_item("dtype", numpy.getattr("bool_")?)?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(actual_pos.bind(py), &expected_pos)
         });
     }
 
