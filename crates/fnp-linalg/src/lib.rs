@@ -1747,6 +1747,66 @@ pub fn trace_nxn(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
     Ok((0..n).map(|i| a[i * n + i]).sum())
 }
 
+fn validate_matrix_rank_tol(tol: Option<f64>) -> Result<(), LinAlgError> {
+    if let Some(tol) = tol
+        && (!tol.is_finite() || tol < 0.0)
+    {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "tol must be finite and >= 0",
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_matrix_rank_threshold(sigma_max: f64, m: usize, n: usize, tol: Option<f64>) -> f64 {
+    tol.unwrap_or_else(|| sigma_max * (m.max(n) as f64) * f64::EPSILON)
+}
+
+fn count_matrix_rank(sigmas: &[f64], threshold: f64) -> usize {
+    sigmas.iter().filter(|&&sigma| sigma > threshold).count()
+}
+
+/// Matrix rank via SVD for MxN matrices with NumPy-compatible tolerance semantics.
+///
+/// When `tol` is `None`, the threshold matches NumPy's default:
+/// `sigma_max * max(m, n) * eps`.
+/// When `tol` is `Some`, it is treated as an absolute threshold.
+pub fn matrix_rank_mxn_tol(
+    a: &[f64],
+    m: usize,
+    n: usize,
+    tol: Option<f64>,
+) -> Result<usize, LinAlgError> {
+    if Some(a.len()) != m.checked_mul(n) || m == 0 || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "matrix_rank_mxn: input must be m*n with m,n > 0",
+        ));
+    }
+    validate_matrix_rank_tol(tol)?;
+    let has_nan = a.iter().any(|value| value.is_nan());
+    let has_inf = a.iter().any(|value| value.is_infinite());
+    if has_nan {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "matrix entries must be finite for rank",
+        ));
+    }
+    if has_inf {
+        return Ok(0);
+    }
+
+    let sigmas = svd_mxn(a, m, n)?;
+    let sigma_max = sigmas.first().copied().unwrap_or(0.0);
+    if sigma_max == 0.0 {
+        return Ok(0);
+    }
+    let threshold = resolve_matrix_rank_threshold(sigma_max, m, n, tol);
+    Ok(count_matrix_rank(&sigmas, threshold))
+}
+
+pub fn matrix_rank_nxn_tol(a: &[f64], n: usize, tol: Option<f64>) -> Result<usize, LinAlgError> {
+    matrix_rank_mxn_tol(a, n, n, tol)
+}
+
 /// Matrix rank via SVD for MxN matrices.
 /// Returns the number of singular values above `rcond * sigma_max`.
 pub fn matrix_rank_mxn(a: &[f64], m: usize, n: usize, rcond: f64) -> Result<usize, LinAlgError> {
@@ -1777,7 +1837,7 @@ pub fn matrix_rank_mxn(a: &[f64], m: usize, n: usize, rcond: f64) -> Result<usiz
         return Ok(0);
     }
     let threshold = sigma_max * rcond;
-    Ok(sigmas.iter().filter(|&&s| s >= threshold).count())
+    Ok(count_matrix_rank(&sigmas, threshold))
 }
 
 pub fn matrix_rank_nxn(a: &[f64], n: usize, rcond: f64) -> Result<usize, LinAlgError> {
@@ -3390,17 +3450,34 @@ pub fn matrix_rank_2x2(matrix: [[f64; 2]; 2], rcond: f64) -> Result<usize, LinAl
     if flat.iter().any(|value| value.is_infinite()) {
         return Ok(0);
     }
-    let singular_values = singular_values_2x2(matrix)?;
+    let singular_values = svd_mxn(&flat, 2, 2)?;
     let sigma_max = singular_values[0];
     if sigma_max == 0.0 {
         return Ok(0);
     }
 
     let threshold = sigma_max * rcond;
-    Ok(singular_values
-        .iter()
-        .filter(|&&sigma| sigma > threshold)
-        .count())
+    Ok(count_matrix_rank(&singular_values, threshold))
+}
+
+pub fn matrix_rank_2x2_tol(matrix: [[f64; 2]; 2], tol: Option<f64>) -> Result<usize, LinAlgError> {
+    validate_matrix_rank_tol(tol)?;
+    let flat = [matrix[0][0], matrix[0][1], matrix[1][0], matrix[1][1]];
+    if flat.iter().any(|value| value.is_nan()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "matrix entries must be finite for rank",
+        ));
+    }
+    if flat.iter().any(|value| value.is_infinite()) {
+        return Ok(0);
+    }
+    let singular_values = svd_mxn(&flat, 2, 2)?;
+    let sigma_max = singular_values[0];
+    if sigma_max == 0.0 {
+        return Ok(0);
+    }
+    let threshold = resolve_matrix_rank_threshold(sigma_max, 2, 2, tol);
+    Ok(count_matrix_rank(&singular_values, threshold))
 }
 
 pub fn pinv_2x2(matrix: [[f64; 2]; 2], rcond: f64) -> Result<[[f64; 2]; 2], LinAlgError> {
@@ -5025,7 +5102,10 @@ mod tests {
         matrix_norm_nxn,
         matrix_power_nxn,
         matrix_rank_2x2,
+        matrix_rank_2x2_tol,
+        matrix_rank_mxn_tol,
         matrix_rank_nxn,
+        matrix_rank_nxn_tol,
         multi_dot,
         pinv_2x2,
         pinv_nxn,
@@ -5059,6 +5139,7 @@ mod tests {
         validate_tolerance_policy,
         vector_norm,
     };
+    use std::process::Command;
 
     fn packet008_artifacts() -> Vec<String> {
         vec![
@@ -5330,6 +5411,43 @@ mod tests {
         let err = matrix_rank_2x2([[f64::NAN, 1.0], [2.0, 3.0]], 1e-12).expect_err("nan rank");
         assert_eq!(err.reason_code(), "linalg_norm_det_rank_policy_violation");
         let err = matrix_rank_nxn(&[f64::NAN, 1.0, 2.0, 3.0], 2, 1e-12).expect_err("nan rank nxn");
+        assert_eq!(err.reason_code(), "linalg_norm_det_rank_policy_violation");
+    }
+
+    #[test]
+    fn matrix_rank_tol_matches_numpy_default_and_explicit_cases() {
+        let diag2_small = [1.0, 0.0, 0.0, 1e-18];
+        assert_eq!(
+            matrix_rank_2x2_tol([[1.0, 0.0], [0.0, 1e-18]], None).unwrap(),
+            1
+        );
+        assert_eq!(
+            matrix_rank_2x2_tol([[1.0, 0.0], [0.0, 1e-18]], Some(0.0)).unwrap(),
+            2
+        );
+        assert_eq!(
+            matrix_rank_2x2_tol([[1.0, 0.0], [0.0, 1e-18]], Some(1e-18)).unwrap(),
+            1
+        );
+        assert_eq!(
+            matrix_rank_mxn_tol(&diag2_small, 2, 2, Some(1e-17)).unwrap(),
+            1
+        );
+
+        let diag3 = [1.0, 0.0, 0.0, 0.0, 1e-14, 0.0, 0.0, 0.0, 1e-16];
+        assert_eq!(matrix_rank_nxn_tol(&diag3, 3, None).unwrap(), 2);
+        assert_eq!(matrix_rank_nxn_tol(&diag3, 3, Some(0.0)).unwrap(), 3);
+        assert_eq!(matrix_rank_nxn_tol(&diag3, 3, Some(1e-13)).unwrap(), 1);
+    }
+
+    #[test]
+    fn matrix_rank_tol_rejects_invalid_tolerances() {
+        let err =
+            matrix_rank_2x2_tol([[1.0, 0.0], [0.0, 1.0]], Some(-1.0)).expect_err("negative tol");
+        assert_eq!(err.reason_code(), "linalg_norm_det_rank_policy_violation");
+
+        let err =
+            matrix_rank_nxn_tol(&[1.0, 0.0, 0.0, 1.0], 2, Some(f64::NAN)).expect_err("nan tol");
         assert_eq!(err.reason_code(), "linalg_norm_det_rank_policy_violation");
     }
 
@@ -8946,6 +9064,65 @@ mod tests {
 
     const ORACLE_TOL: f64 = 1e-12;
 
+    fn oracle_python_bin() -> String {
+        std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".to_string())
+    }
+
+    fn numpy_oracle_available() -> bool {
+        Command::new(oracle_python_bin())
+            .args(["-c", "import numpy"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    fn numpy_oracle_matrix_rank_tol(a: &[f64], m: usize, n: usize, tol: Option<f64>) -> usize {
+        let matrix_arg = format!(
+            "[{}]",
+            a.iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let tol_arg = tol
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "__none__".to_string());
+        let script = r#"
+import json
+import sys
+import numpy as np
+
+data = json.loads(sys.argv[1])
+m = int(sys.argv[2])
+n = int(sys.argv[3])
+tol = sys.argv[4]
+matrix = np.array(data, dtype=float).reshape((m, n))
+if tol == "__none__":
+    rank = np.linalg.matrix_rank(matrix)
+else:
+    rank = np.linalg.matrix_rank(matrix, tol=float(tol))
+print(int(rank))
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(matrix_arg)
+            .arg(m.to_string())
+            .arg(n.to_string())
+            .arg(tol_arg)
+            .output()
+            .expect("python oracle should launch");
+        assert!(
+            output.status.success(),
+            "NumPy matrix_rank oracle must succeed"
+        );
+        String::from_utf8(output.stdout)
+            .expect("oracle stdout must be utf-8")
+            .trim()
+            .parse::<usize>()
+            .expect("oracle rank")
+    }
+
     fn assert_oracle(label: &str, got: f64, expected: f64) {
         assert!(
             (got - expected).abs() < ORACLE_TOL,
@@ -9092,6 +9269,46 @@ mod tests {
     fn numpy_oracle_matrix_rank() {
         assert_eq!(matrix_rank_2x2([[1.0, 2.0], [3.0, 4.0]], 1e-10).unwrap(), 2);
         assert_eq!(matrix_rank_2x2([[1.0, 2.0], [2.0, 4.0]], 1e-10).unwrap(), 1);
+    }
+
+    #[test]
+    fn numpy_oracle_matrix_rank_tol_reference() {
+        let diag2_small = [1.0, 0.0, 0.0, 1e-18];
+        assert_eq!(matrix_rank_mxn_tol(&diag2_small, 2, 2, None).unwrap(), 1);
+        assert_eq!(
+            matrix_rank_mxn_tol(&diag2_small, 2, 2, Some(0.0)).unwrap(),
+            2
+        );
+        assert_eq!(
+            matrix_rank_mxn_tol(&diag2_small, 2, 2, Some(1e-18)).unwrap(),
+            1
+        );
+
+        let diag3 = [1.0, 0.0, 0.0, 0.0, 1e-14, 0.0, 0.0, 0.0, 1e-16];
+        assert_eq!(matrix_rank_nxn_tol(&diag3, 3, None).unwrap(), 2);
+        assert_eq!(matrix_rank_nxn_tol(&diag3, 3, Some(0.0)).unwrap(), 3);
+        assert_eq!(matrix_rank_nxn_tol(&diag3, 3, Some(1e-13)).unwrap(), 1);
+    }
+
+    #[test]
+    fn matrix_rank_tol_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let diag2_small = [1.0, 0.0, 0.0, 1e-18];
+        for tol in [None, Some(0.0), Some(1e-18), Some(1e-17)] {
+            let actual = matrix_rank_mxn_tol(&diag2_small, 2, 2, tol).expect("rank");
+            let expected = numpy_oracle_matrix_rank_tol(&diag2_small, 2, 2, tol);
+            assert_eq!(actual, expected, "diag2_small tol={tol:?}");
+        }
+
+        let diag3 = [1.0, 0.0, 0.0, 0.0, 1e-14, 0.0, 0.0, 0.0, 1e-16];
+        for tol in [None, Some(0.0), Some(1e-15), Some(1e-13)] {
+            let actual = matrix_rank_nxn_tol(&diag3, 3, tol).expect("rank");
+            let expected = numpy_oracle_matrix_rank_tol(&diag3, 3, 3, tol);
+            assert_eq!(actual, expected, "diag3 tol={tol:?}");
+        }
     }
 
     #[test]
