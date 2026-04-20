@@ -4041,6 +4041,57 @@ mm.flush()
         );
     }
 
+    fn write_numpy_open_memmap_delta_write(
+        path: &std::path::Path,
+        shape: &[usize],
+        initial_values: &[f64],
+        update_indices: &[usize],
+        update_values: &[f64],
+    ) {
+        let script = r#"
+import json
+import sys
+import numpy as np
+from numpy.lib.format import open_memmap
+
+path = sys.argv[1]
+shape = tuple(json.loads(sys.argv[2]))
+initial_values = json.loads(sys.argv[3])
+update_indices = json.loads(sys.argv[4])
+update_values = json.loads(sys.argv[5])
+
+mm = open_memmap(path, mode="w+", dtype="float64", shape=shape, fortran_order=False, version=(1, 0))
+mm[...] = np.array(initial_values, dtype=np.float64).reshape(shape)
+mm.flush()
+mm = open_memmap(
+    path,
+    mode="r+",
+    dtype="int8",
+    shape=(999,),
+    fortran_order=True,
+    version=(1, 0),
+)
+flat = mm.reshape(-1)
+for idx, value in zip(update_indices, update_values):
+    flat[idx] = value
+mm.flush()
+"#;
+        let status = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(path)
+            .arg(json_shape(shape))
+            .arg(format!("{initial_values:?}"))
+            .arg(format!("{update_indices:?}"))
+            .arg(format!("{update_values:?}"))
+            .status()
+            .expect("python oracle should launch");
+        assert!(
+            status.success(),
+            "numpy oracle open_memmap delta write run must succeed"
+        );
+    }
+
     fn make_manual_npy_payload(header_literal: &str, body: &[u8]) -> Vec<u8> {
         let mut header_bytes = header_literal.as_bytes().to_vec();
         if !header_bytes.ends_with(b"\n") {
@@ -6764,6 +6815,110 @@ mm.flush()
     }
 
     #[test]
+    fn open_memmap_rplus_delta_write_round_trip() {
+        // open_memmap(path, mode='r+') opens an existing .npy file with a
+        // writable mapping; scalar delta writes must persist after flush.
+        let dir = std::env::temp_dir().join("fnp_open_memmap_rplus_round_trip");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("rplus_round_trip.npy");
+        let bytes = save(&[4], &[1.0, 2.0, 3.0, 4.0], IOSupportedDType::F64).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+
+        let mut arr = open_memmap(&path, MemmapMode::ReadWrite, None, None, false, None)
+            .expect("open_memmap r+");
+        assert!(arr.is_writable());
+        assert_eq!(arr.shape, vec![4]);
+        assert_eq!(arr.dtype, IOSupportedDType::F64);
+        let payload = arr.as_bytes_mut().unwrap();
+        payload[16..24].copy_from_slice(&99.5_f64.to_le_bytes());
+        arr.flush().expect("flush r+ delta");
+
+        let reread = std::fs::read(&path).unwrap();
+        let (_shape, values, _hdr) = load(&reread).unwrap();
+        assert_eq!(values, vec![1.0, 2.0, 99.5, 4.0]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_memmap_rplus_2d_row_update_persists() {
+        // 2D row update round-trip via open_memmap r+.
+        let dir = std::env::temp_dir().join("fnp_open_memmap_rplus_2d");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("rplus_2d.npy");
+        let initial = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let bytes = save(&[2, 3], &initial, IOSupportedDType::F64).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+
+        let mut arr = open_memmap(&path, MemmapMode::ReadWrite, None, None, false, None)
+            .expect("open_memmap r+ 2D");
+        assert_eq!(arr.shape, vec![2, 3]);
+        let payload = arr.as_bytes_mut().unwrap();
+        // Overwrite second row (indices 3..6) with -7.0, -8.0, -9.0
+        for (slot, value) in [-7.0_f64, -8.0, -9.0].into_iter().enumerate() {
+            let off = (3 + slot) * 8;
+            payload[off..off + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        arr.flush().expect("flush 2D");
+
+        let reopen =
+            memmap_npy(&path, MemmapMode::ReadOnly).expect("reopen as readonly for check");
+        assert_eq!(reopen.shape, vec![2, 3]);
+        assert_eq!(
+            reopen.to_f64_values().unwrap(),
+            vec![1.0, 2.0, 3.0, -7.0, -8.0, -9.0]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_memmap_rplus_preserves_fortran_order() {
+        // Fortran-order files opened in r+ must re-expose fortran_order=true.
+        let dir = std::env::temp_dir().join("fnp_open_memmap_rplus_fortran");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("rplus_fortran.npy");
+
+        let mut created = open_memmap(
+            &path,
+            MemmapMode::Write,
+            Some(IOSupportedDType::F64),
+            Some(&[2, 2]),
+            true,
+            Some((1, 0)),
+        )
+        .expect("create fortran-order file");
+        created.flush().expect("flush create");
+
+        let reopened = open_memmap(&path, MemmapMode::ReadWrite, None, None, false, None)
+            .expect("open fortran-order r+");
+        assert!(reopened.fortran_order);
+        assert!(reopened.is_writable());
+        assert_eq!(reopened.shape, vec![2, 2]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_memmap_rplus_missing_file_fails_closed() {
+        // numpy.lib.format.open_memmap(path, mode='r+') raises when the file
+        // does not exist. Our r+ path must not silently create a file.
+        let dir = std::env::temp_dir().join("fnp_open_memmap_rplus_missing");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("does_not_exist.npy");
+        let err = open_memmap(&path, MemmapMode::ReadWrite, None, None, false, None)
+            .expect_err("r+ on missing file must fail closed");
+        assert!(!path.exists(), "r+ must not create a new file");
+        let code = err.reason_code();
+        assert!(
+            code == "io_memmap_contract_violation" || code == "io_header_schema_invalid",
+            "unexpected reason code {code}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn open_memmap_recreates_header_with_new_shape() {
         let dir = std::env::temp_dir().join("fnp_open_memmap_test_shape_change");
         let _ = std::fs::create_dir_all(&dir);
@@ -6843,6 +6998,80 @@ mm.flush()
         assert_eq!(
             rust_bytes, numpy_bytes,
             "open_memmap file bytes must match NumPy"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_memmap_readwrite_delta_writes_match_numpy_oracle() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let dir = std::env::temp_dir().join("fnp_open_memmap_test_readwrite_delta");
+        let _ = std::fs::create_dir_all(&dir);
+        let rust_path = dir.join("rust_delta.npy");
+        let numpy_path = dir.join("numpy_delta.npy");
+        let shape = [2, 2];
+        let initial_values = [1.0_f64, 2.0, 3.0, 4.0];
+        let update_indices = [1_usize, 2_usize];
+        let update_values = [9.5_f64, -7.25];
+
+        let mut created = open_memmap(
+            &rust_path,
+            MemmapMode::Write,
+            Some(IOSupportedDType::F64),
+            Some(&shape),
+            false,
+            Some((1, 0)),
+        )
+        .expect("create rust open_memmap");
+        let created_bytes = created.as_bytes_mut().expect("writable create memmap");
+        for (index, value) in initial_values.iter().enumerate() {
+            let start = index * 8;
+            created_bytes[start..start + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        created.flush().expect("flush created rust memmap");
+
+        let mut reopened = open_memmap(
+            &rust_path,
+            MemmapMode::ReadWrite,
+            Some(IOSupportedDType::I8),
+            Some(&[999]),
+            true,
+            Some((2, 0)),
+        )
+        .expect("reopen rust open_memmap in r+");
+        assert_eq!(reopened.shape, vec![2, 2]);
+        assert_eq!(reopened.dtype, IOSupportedDType::F64);
+        assert!(!reopened.fortran_order);
+        assert!(reopened.is_writable());
+
+        let reopened_bytes = reopened.as_bytes_mut().expect("writable reopened memmap");
+        for (&index, &value) in update_indices.iter().zip(update_values.iter()) {
+            let start = index * 8;
+            reopened_bytes[start..start + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        reopened.flush().expect("flush reopened rust memmap");
+
+        let (_, rust_values, _) = load(&std::fs::read(&rust_path).expect("read rust npy"))
+            .expect("load rust npy after delta write");
+        assert_eq!(rust_values, vec![1.0, 9.5, -7.25, 4.0]);
+
+        write_numpy_open_memmap_delta_write(
+            &numpy_path,
+            &shape,
+            &initial_values,
+            &update_indices,
+            &update_values,
+        );
+
+        let rust_bytes = std::fs::read(&rust_path).expect("read rust delta npy");
+        let numpy_bytes = std::fs::read(&numpy_path).expect("read numpy delta npy");
+        assert_eq!(
+            rust_bytes, numpy_bytes,
+            "open_memmap r+ delta writes must match NumPy bytes"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
