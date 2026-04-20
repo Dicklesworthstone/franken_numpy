@@ -819,6 +819,26 @@ fn extract_python_dtype(
         .ok_or_else(|| PyTypeError::new_err(format!("{context}: unsupported dtype {name}")))
 }
 
+fn validate_cpu_device_kwarg(py: Python<'_>, device: Option<Py<PyAny>>) -> PyResult<()> {
+    let Some(device) = device else {
+        return Ok(());
+    };
+
+    let device = device.bind(py);
+    if device.is_none() {
+        return Ok(());
+    }
+
+    let device_text = device.str()?.extract::<String>()?;
+    if device_text == "cpu" {
+        return Ok(());
+    }
+
+    Err(PyValueError::new_err(format!(
+        "Device not understood. Only \"cpu\" is allowed, but received: {device_text}",
+    )))
+}
+
 fn extract_ix_array(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
@@ -2865,6 +2885,17 @@ fn tri(
 }
 
 #[pyfunction]
+#[pyo3(signature = (n, d=1.0, device=None))]
+fn rfftfreq(py: Python<'_>, n: usize, d: f64, device: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    validate_cpu_device_kwarg(py, device)?;
+    if n == 0 || d == 0.0 {
+        return Err(PyZeroDivisionError::new_err("float division by zero"));
+    }
+    let result = UFuncArray::rfftfreq(n, d);
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(signature = (v, k=0))]
 fn diag(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
     let v = extract_precise_numeric_array(py, v.bind(py), "diag(v)")?;
@@ -3206,6 +3237,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(putmask, m)?)?;
     m.add_function(wrap_pyfunction!(indices, m)?)?;
     m.add_function(wrap_pyfunction!(tri, m)?)?;
+    m.add_function(wrap_pyfunction!(rfftfreq, m)?)?;
     m.add_function(wrap_pyfunction!(diag, m)?)?;
     m.add_function(wrap_pyfunction!(diagflat, m)?)?;
     m.add_function(wrap_pyfunction!(diagonal, m)?)?;
@@ -3233,12 +3265,12 @@ mod tests {
         digitize, extract, fill_diagonal, flatnonzero, floor, fnp_python, frexp, hypot, indices,
         interp, isfinite, isinf, isnan, isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2,
         meshgrid, modf, nan_to_num, nextafter, place, put, put_along_axis, putmask, radians,
-        ravel_multi_index, rint, searchsorted, select, sign, signbit, sinc, solve_triangular,
-        spacing, take, take_along_axis, trapezoid, trapz, tri, tril_indices,
+        ravel_multi_index, rfftfreq, rint, searchsorted, select, sign, signbit, sinc,
+        solve_triangular, spacing, take, take_along_axis, trapezoid, trapz, tri, tril_indices,
         tril_indices_from, triu_indices, triu_indices_from, trunc, unravel_index, where_py,
     };
     use pyo3::IntoPyObject;
-    use pyo3::exceptions::{PyTypeError, PyValueError};
+    use pyo3::exceptions::{PyTypeError, PyValueError, PyZeroDivisionError};
     use pyo3::types::{
         PyAny, PyAnyMethods, PyDict, PyDictMethods, PyList, PyModule, PyTuple, PyTypeMethods,
     };
@@ -3453,6 +3485,7 @@ mod tests {
             assert!(module.getattr("putmask").is_ok());
             assert!(module.getattr("indices").is_ok());
             assert!(module.getattr("tri").is_ok());
+            assert!(module.getattr("rfftfreq").is_ok());
             assert!(module.getattr("diag").is_ok());
             assert!(module.getattr("diagflat").is_ok());
             assert!(module.getattr("diagonal").is_ok());
@@ -8429,6 +8462,71 @@ mod tests {
                 }),
             )?;
             assert_array_matches_numpy(actual_pos.bind(py), &expected_pos)
+        });
+    }
+
+    #[test]
+    fn rfftfreq_matches_numpy_device_and_zero_division() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let numpy = py.import("numpy")?;
+            let cpu_device = "cpu".into_pyobject(py)?.into_any().unbind();
+            let cuda_device = "cuda".into_pyobject(py)?.into_any().unbind();
+
+            let actual_default = rfftfreq(py, 8, 1.0, None)?;
+            let expected_default = numpy.getattr("fft")?.call_method1("rfftfreq", (8,))?;
+            assert_array_matches_numpy(actual_default.bind(py), &expected_default)?;
+
+            let actual_none = rfftfreq(py, 8, 2.0, Some(py.None()))?;
+            let expected_none = numpy.getattr("fft")?.call_method(
+                "rfftfreq",
+                (8,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("d", 2.0)?;
+                    kwargs.set_item("device", py.None())?;
+                    kwargs
+                }),
+            )?;
+            let expected_cpu = numpy.getattr("fft")?.call_method(
+                "rfftfreq",
+                (8,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("d", 2.0)?;
+                    kwargs.set_item("device", "cpu")?;
+                    kwargs
+                }),
+            )?;
+            let actual_cpu_kw = rfftfreq(py, 8, 2.0, Some(cpu_device))?;
+            assert_array_matches_numpy(actual_none.bind(py), &expected_none)?;
+            assert_array_matches_numpy(actual_cpu_kw.bind(py), &expected_cpu)?;
+
+            let err = rfftfreq(py, 8, 1.0, Some(cuda_device)).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            assert_eq!(
+                err.value(py).str()?.extract::<String>()?,
+                "Device not understood. Only \"cpu\" is allowed, but received: cuda"
+            );
+
+            let zero_n_err = rfftfreq(py, 0, 1.0, None).unwrap_err();
+            assert!(zero_n_err.is_instance_of::<PyZeroDivisionError>(py));
+            assert_eq!(
+                zero_n_err.value(py).str()?.extract::<String>()?,
+                "float division by zero"
+            );
+
+            let zero_d_err = rfftfreq(py, 8, 0.0, None).unwrap_err();
+            assert!(zero_d_err.is_instance_of::<PyZeroDivisionError>(py));
+            assert_eq!(
+                zero_d_err.value(py).str()?.extract::<String>()?,
+                "float division by zero"
+            );
+
+            Ok(())
         });
     }
 
