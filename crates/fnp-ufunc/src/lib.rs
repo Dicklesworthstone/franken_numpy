@@ -17790,6 +17790,7 @@ impl UFuncArray {
     /// - Single operand: "ii->" (trace), "ij->ji" (transpose)
     /// - Multiple operands: "ij,jk,kl->il"
     /// - Ellipsis: "...ij,...jk->...ik"
+    ///
     /// Resolve einsum ellipsis (`...`) into Private-Use-Area placeholder labels.
     /// Each operand ellipsis captures (op.ndim - explicit_label_count) dimensions;
     /// all operand ellipses must describe broadcast dims of the same shape.
@@ -26862,26 +26863,67 @@ impl MaskedArray {
         };
         let sum_sq = masked_sq.sum(axis, keepdims)?;
         let count_result = self.count(axis)?;
-        // Subtract ddof from count
-        let ddof_val = UFuncArray::scalar(ddof as f64, DType::F64);
-        let adjusted_count = count_result.elementwise_binary(&ddof_val, BinaryOp::Sub)?;
-        let adjusted_broadcast = if keepdims {
+        let count_broadcast = if keepdims {
             let target: Vec<isize> = sum_sq
                 .data
                 .shape()
                 .iter()
                 .map(|&d| isize::try_from(d).unwrap_or(isize::MAX))
                 .collect();
-            adjusted_count.reshape(&target)?
+            count_result.reshape(&target)?
         } else {
-            adjusted_count
+            count_result.clone()
         };
-        let result_data = sum_sq
+        let ddof_val = UFuncArray::scalar(ddof as f64, DType::F64);
+        let adjusted_broadcast = count_broadcast.elementwise_binary(&ddof_val, BinaryOp::Sub)?;
+        let raw_result_data = sum_sq
             .data
             .elementwise_binary(&adjusted_broadcast, BinaryOp::Div)?;
+        let scalar_full_reduction =
+            axis.is_none() && !keepdims && raw_result_data.shape().is_empty();
+        let sum_sq_mask = sum_sq.mask.as_ref().map(UFuncArray::values);
+        let mut result_values = raw_result_data.values().to_vec();
+        let mut result_mask_values = vec![0.0; result_values.len()];
+        let mut any_masked = false;
+
+        for (idx, value) in result_values.iter_mut().enumerate() {
+            let count = count_broadcast.values()[idx];
+            let count_is_zero = count == 0.0;
+            let count_le_ddof = count <= ddof as f64;
+            let count_eq_ddof = count == ddof as f64;
+            let existing_masked = sum_sq_mask.is_some_and(|mask| mask[idx] != 0.0);
+            let masked = if scalar_full_reduction {
+                existing_masked || count_is_zero || count_eq_ddof
+            } else {
+                existing_masked || count_le_ddof
+            };
+
+            if count_is_zero || (scalar_full_reduction && count_eq_ddof) {
+                *value = 0.0;
+            } else if count_eq_ddof {
+                *value = sum_sq.data.values()[idx];
+            }
+            if masked {
+                result_mask_values[idx] = 1.0;
+                any_masked = true;
+            }
+        }
+
+        let result_data = UFuncArray {
+            shape: raw_result_data.shape().to_vec(),
+            values: result_values,
+            dtype: raw_result_data.dtype(),
+            integer_sidecar: None,
+        };
+        let result_mask = any_masked.then(|| UFuncArray {
+            shape: result_data.shape().to_vec(),
+            values: result_mask_values,
+            dtype: DType::Bool,
+            integer_sidecar: None,
+        });
         Ok(Self {
             data: result_data,
-            mask: None,
+            mask: result_mask,
             fill_value: self.fill_value,
             hard_mask: false,
         })
@@ -26890,10 +26932,49 @@ impl MaskedArray {
     /// Standard deviation of non-masked elements.
     pub fn std(&self, axis: Option<isize>, keepdims: bool, ddof: usize) -> Result<Self, MAError> {
         let variance = self.var(axis, keepdims, ddof)?;
-        let result_data = variance.data.elementwise_unary(UnaryOp::Sqrt);
+        let scalar_full_reduction = axis.is_none() && !keepdims && variance.data.shape().is_empty();
+
+        if scalar_full_reduction {
+            let variance_value = variance.data.values()[0];
+            if variance
+                .mask
+                .as_ref()
+                .is_some_and(|mask| mask.values()[0] != 0.0)
+                || variance_value < 0.0
+            {
+                return Ok(Self {
+                    data: UFuncArray::scalar(0.0, variance.data.dtype()),
+                    mask: Some(UFuncArray::scalar(1.0, DType::Bool)),
+                    fill_value: self.fill_value,
+                    hard_mask: false,
+                });
+            }
+        }
+
+        let mut result_values = variance.data.values().to_vec();
+        match variance.mask.as_ref() {
+            Some(mask) => {
+                for (value, &mask_value) in result_values.iter_mut().zip(mask.values()) {
+                    if mask_value == 0.0 {
+                        *value = value.sqrt();
+                    }
+                }
+            }
+            None => {
+                for value in &mut result_values {
+                    *value = value.sqrt();
+                }
+            }
+        }
+        let result_data = UFuncArray {
+            shape: variance.data.shape().to_vec(),
+            values: result_values,
+            dtype: variance.data.dtype(),
+            integer_sidecar: None,
+        };
         Ok(Self {
             data: result_data,
-            mask: None,
+            mask: variance.mask.clone(),
             fill_value: self.fill_value,
             hard_mask: false,
         })
@@ -46694,6 +46775,79 @@ print(json.dumps(payload))
         let ma = MaskedArray::new(data, Some(mask), None).unwrap();
         let result = ma.mean(None, false).unwrap();
         assert_eq!(result.data().values(), &[2.0]); // (1+3)/2
+    }
+
+    #[test]
+    fn masked_array_var_scalar_ddof_equal_count_returns_masked_zero() {
+        let data = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![4], vec![0.0, 1.0, 0.0, 0.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+
+        let result = ma.var(None, false, 3).unwrap();
+
+        assert_eq!(result.data().values(), &[0.0]);
+        assert_eq!(result.mask().map(UFuncArray::values), Some(&[1.0][..]));
+    }
+
+    #[test]
+    fn masked_array_var_scalar_ddof_greater_than_count_keeps_negative_value() {
+        let data = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![4], vec![0.0, 1.0, 0.0, 0.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+
+        let result = ma.var(None, false, 4).unwrap();
+
+        assert_eq!(result.mask(), None);
+        assert!((result.data().values()[0] - (-4.666_666_666_666_666)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn masked_array_var_axis_masks_lanes_where_count_le_ddof() {
+        let data = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![2, 2], vec![0.0, 1.0, 0.0, 0.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+
+        let result = ma.var(Some(1), false, 2).unwrap();
+
+        assert_eq!(result.data().values(), &[0.0, 0.5]);
+        assert_eq!(result.mask().map(UFuncArray::values), Some(&[1.0, 1.0][..]));
+    }
+
+    #[test]
+    fn masked_array_var_keepdims_full_reduction_masks_when_count_le_ddof() {
+        let data = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![4], vec![0.0, 1.0, 0.0, 0.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+
+        let result = ma.var(None, true, 4).unwrap();
+
+        assert_eq!(result.shape(), &[1]);
+        assert_eq!(result.data().values(), &[-4.666_666_666_666_666]);
+        assert_eq!(result.mask().map(UFuncArray::values), Some(&[1.0][..]));
+    }
+
+    #[test]
+    fn masked_array_std_scalar_negative_variance_becomes_masked_zero() {
+        let data = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![4], vec![0.0, 1.0, 0.0, 0.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+
+        let result = ma.std(None, false, 4).unwrap();
+
+        assert_eq!(result.data().values(), &[0.0]);
+        assert_eq!(result.mask().map(UFuncArray::values), Some(&[1.0][..]));
+    }
+
+    #[test]
+    fn masked_array_std_axis_preserves_masked_hidden_data() {
+        let data = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![2, 2], vec![0.0, 1.0, 0.0, 0.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+
+        let result = ma.std(Some(1), false, 2).unwrap();
+
+        assert_eq!(result.data().values(), &[0.0, 0.5]);
+        assert_eq!(result.mask().map(UFuncArray::values), Some(&[1.0, 1.0][..]));
     }
 
     #[test]

@@ -510,6 +510,118 @@
     "rel_tol": 1e-12
   },
   {
+    "id": "masked_var_scalar_ddof_equal_count_masks_zero",
+    "operation": "var",
+    "seed": 11024,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-masked-packet-g",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "masked_differential_expected_success",
+    "expected_reason_code": "masked_differential_expected_success",
+    "lhs_shape": [4],
+    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_mask": [0.0, 1.0, 0.0, 0.0],
+    "ddof": 3,
+    "expected_shape": [],
+    "expected_values": [0.0],
+    "expected_mask": [1.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "masked_var_scalar_ddof_greater_than_count_keeps_negative_value",
+    "operation": "var",
+    "seed": 11025,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-masked-packet-g",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "masked_differential_expected_success",
+    "expected_reason_code": "masked_differential_expected_success",
+    "lhs_shape": [4],
+    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_mask": [0.0, 1.0, 0.0, 0.0],
+    "ddof": 4,
+    "expected_shape": [],
+    "expected_values": [-4.666666666666666],
+    "expect_mask_none": true,
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "masked_var_axis_ddof_masks_lanes_where_count_le_ddof",
+    "operation": "var",
+    "seed": 11026,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-masked-packet-g",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "masked_differential_expected_success",
+    "expected_reason_code": "masked_differential_expected_success",
+    "lhs_shape": [2, 2],
+    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_mask": [0.0, 1.0, 0.0, 0.0],
+    "axis": 1,
+    "ddof": 2,
+    "expected_shape": [2],
+    "expected_values": [0.0, 0.5],
+    "expected_mask": [1.0, 1.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "masked_std_scalar_negative_variance_becomes_masked_zero",
+    "operation": "std",
+    "seed": 11027,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-masked-packet-g",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "masked_differential_expected_success",
+    "expected_reason_code": "masked_differential_expected_success",
+    "lhs_shape": [4],
+    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_mask": [0.0, 1.0, 0.0, 0.0],
+    "ddof": 4,
+    "expected_shape": [],
+    "expected_values": [0.0],
+    "expected_mask": [1.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
+    "id": "masked_std_axis_preserves_masked_hidden_data",
+    "operation": "std",
+    "seed": 11028,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-masked-packet-g",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "masked_differential_expected_success",
+    "expected_reason_code": "masked_differential_expected_success",
+    "lhs_shape": [2, 2],
+    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_mask": [0.0, 1.0, 0.0, 0.0],
+    "axis": 1,
+    "ddof": 2,
+    "expected_shape": [2],
+    "expected_values": [0.0, 0.5],
+    "expected_mask": [1.0, 1.0],
+    "abs_tol": 1e-12,
+    "rel_tol": 1e-12
+  },
+  {
     "id": "masked_2d_min_axis1_row_min",
     "operation": "min",
     "seed": 11025,
