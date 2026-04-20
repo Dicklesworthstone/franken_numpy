@@ -3399,14 +3399,18 @@ impl Generator {
     /// Dirichlet distribution (np.random.dirichlet).
     /// Returns `size` samples, each a vector of length `alpha.len()`.
     pub fn dirichlet(&mut self, alpha: &[f64], size: usize) -> Result<Vec<Vec<f64>>, RandomError> {
-        if alpha.iter().any(|&a| a <= 0.0) {
+        if alpha.iter().any(|&a| a.is_nan() || a < 0.0) {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
             .map(|_| {
                 let gamma_samples: Vec<f64> = alpha.iter().map(|&a| self.sample_gamma(a)).collect();
                 let sum: f64 = gamma_samples.iter().sum();
-                gamma_samples.into_iter().map(|g| g / sum).collect()
+                if sum == 0.0 {
+                    vec![0.0; gamma_samples.len()]
+                } else {
+                    gamma_samples.into_iter().map(|g| g / sum).collect()
+                }
             })
             .collect())
     }
@@ -4341,6 +4345,50 @@ print(",".join(str(float(v)) for v in out.reshape(-1)))
             .split(',')
             .filter(|token| !token.is_empty())
             .map(|token| token.parse::<f64>().expect("oracle float"))
+            .collect()
+    }
+
+    fn numpy_oracle_dirichlet(alpha: &[f64], size: usize) -> Vec<Vec<f64>> {
+        let alpha_arg = format!(
+            "[{}]",
+            alpha
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let script = r#"
+import json
+import sys
+import numpy as np
+
+alpha = json.loads(sys.argv[1])
+size = int(sys.argv[2])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+out = rng.dirichlet(alpha, size=size)
+for row in out:
+    print(",".join(str(float(value)) for value in row.tolist()))
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(alpha_arg)
+            .arg(size.to_string())
+            .output()
+            .expect("python oracle should launch");
+        assert!(
+            output.status.success(),
+            "NumPy dirichlet oracle must succeed"
+        );
+        String::from_utf8(output.stdout)
+            .expect("oracle stdout must be utf-8")
+            .lines()
+            .map(|line| {
+                line.split(',')
+                    .filter(|token| !token.is_empty())
+                    .map(|token| token.parse::<f64>().expect("oracle float"))
+                    .collect::<Vec<_>>()
+            })
             .collect()
     }
 
@@ -5823,6 +5871,26 @@ for child in rng.spawn(n_children):
             assert!((sum - 1.0).abs() < 1e-10); // Must sum to 1
             assert!(sample.iter().all(|&v| v >= 0.0));
         }
+    }
+
+    #[test]
+    fn dirichlet_zero_alpha_preserves_zero_coordinates() {
+        let mut rng = test_generator();
+        let samples = rng.dirichlet(&[0.5, 0.0, 2.0], 10).unwrap();
+        assert_eq!(samples.len(), 10);
+        for sample in &samples {
+            assert_eq!(sample.len(), 3);
+            assert_eq!(sample[1], 0.0);
+            let sum: f64 = sample.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn dirichlet_all_zero_alpha_returns_all_zero_samples() {
+        let mut rng = test_generator();
+        let samples = rng.dirichlet(&[0.0, 0.0], 4).unwrap();
+        assert_eq!(samples, vec![vec![0.0, 0.0]; 4]);
     }
 
     #[test]
@@ -7520,6 +7588,74 @@ for child in rng.spawn(n_children):
                     "dirichlet[{i}][{j}]: got {g_val}, expected {e_val}, diff {}",
                     (g_val - e_val).abs()
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn oracle_dirichlet_zero_alpha_edges() {
+        let mut g = oracle_gen();
+
+        let alpha_zero = g.dirichlet(&[0.0, 1.0], 3).unwrap();
+        assert_eq!(alpha_zero, vec![vec![0.0, 1.0]; 3]);
+
+        let trailing_zero = g.dirichlet(&[1.0, 0.0], 3).unwrap();
+        assert_eq!(trailing_zero, vec![vec![1.0, 0.0]; 3]);
+
+        let all_zero = g.dirichlet(&[0.0, 0.0], 3).unwrap();
+        assert_eq!(all_zero, vec![vec![0.0, 0.0]; 3]);
+
+        let mixed = g.dirichlet(&[0.5, 0.0, 2.0], 3).unwrap();
+        let expected = [
+            vec![0.6357556543741558, 0.0, 0.36424434562584407],
+            vec![0.34837779130894964, 0.0, 0.6516222086910504],
+            vec![0.07453613306355736, 0.0, 0.9254638669364426],
+        ];
+        assert_eq!(
+            mixed.len(),
+            expected.len(),
+            "dirichlet zero-alpha: sample count mismatch"
+        );
+        for (i, (got, exp)) in mixed.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(
+                got.len(),
+                exp.len(),
+                "dirichlet zero-alpha[{i}]: dim mismatch"
+            );
+            for (j, (&g_val, &e_val)) in got.iter().zip(exp.iter()).enumerate() {
+                assert!(
+                    (g_val - e_val).abs() < 1e-12,
+                    "dirichlet zero-alpha[{i}][{j}]: got {g_val}, expected {e_val}, diff {}",
+                    (g_val - e_val).abs()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dirichlet_zero_alpha_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let cases: [&[f64]; 4] = [&[0.0, 1.0], &[1.0, 0.0], &[0.0, 0.0], &[0.5, 0.0, 2.0]];
+        for alpha in cases {
+            let mut g = oracle_gen();
+            let actual = g.dirichlet(alpha, 3).expect("dirichlet should succeed");
+            let expected = numpy_oracle_dirichlet(alpha, 3);
+            assert_eq!(actual.len(), expected.len());
+            for (row_idx, (got_row, exp_row)) in actual.iter().zip(expected.iter()).enumerate() {
+                assert_eq!(
+                    got_row.len(),
+                    exp_row.len(),
+                    "dirichlet live oracle row {row_idx}: dim mismatch"
+                );
+                for (col_idx, (&got, &exp)) in got_row.iter().zip(exp_row.iter()).enumerate() {
+                    assert!(
+                        (got - exp).abs() < 1e-12,
+                        "dirichlet live oracle[{row_idx}][{col_idx}]: got {got}, expected {exp}"
+                    );
+                }
             }
         }
     }
