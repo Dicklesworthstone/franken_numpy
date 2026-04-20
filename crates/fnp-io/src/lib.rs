@@ -3245,6 +3245,90 @@ pub fn memmap_npy(path: &std::path::Path, mode: MemmapMode) -> Result<MemmapArra
     Ok(mapped)
 }
 
+/// Open or create a `.npy` memory-mapped array.
+///
+/// Equivalent to `numpy.lib.format.open_memmap`. In write mode this creates a
+/// new `.npy` file with the requested header and returns a read-write mapping
+/// over the payload region. In non-write modes this opens an existing `.npy`
+/// file and ignores the creation-only arguments.
+pub fn open_memmap(
+    path: &std::path::Path,
+    mode: MemmapMode,
+    dtype: Option<IOSupportedDType>,
+    shape: Option<&[usize]>,
+    fortran_order: bool,
+    version: Option<(u8, u8)>,
+) -> Result<MemmapArray, IOError> {
+    if mode != MemmapMode::Write {
+        return memmap_npy(path, mode);
+    }
+
+    let dtype = dtype.unwrap_or(IOSupportedDType::F64);
+    let shape = shape.ok_or(IOError::MemmapContractViolation(
+        "open_memmap: shape is required when creating a new file",
+    ))?;
+    if dtype == IOSupportedDType::Object {
+        return Err(IOError::MemmapContractViolation(
+            "object dtype is invalid for memmap path",
+        ));
+    }
+
+    let header = NpyHeader {
+        shape: shape.to_vec(),
+        fortran_order,
+        descr: dtype,
+    };
+    let version = if let Some(version) = version {
+        validate_npy_version(version)?;
+        version
+    } else {
+        let v1_header = encode_npy_header_bytes(&header, (1, 0))?;
+        if u16::try_from(v1_header.len()).is_ok() {
+            (1, 0)
+        } else {
+            (2, 0)
+        }
+    };
+    let header_bytes = encode_npy_header_bytes(&header, version)?;
+    let item_size = dtype.item_size().ok_or(IOError::MemmapContractViolation(
+        "unsupported dtype for memmap",
+    ))?;
+    let payload_bytes =
+        element_count(shape)?
+            .checked_mul(item_size)
+            .ok_or(IOError::MemmapContractViolation(
+                "array byte size overflowed",
+            ))?;
+
+    let mut prefix = Vec::new();
+    write_npy_preamble(&mut prefix, version, header_bytes.len())?;
+    let offset = prefix
+        .len()
+        .checked_add(header_bytes.len())
+        .ok_or(IOError::MemmapContractViolation("file size overflowed"))?;
+    let total_len = offset
+        .checked_add(payload_bytes)
+        .ok_or(IOError::MemmapContractViolation("file size overflowed"))?;
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|_| IOError::MemmapContractViolation("failed to create file"))?;
+    file.write_all(&prefix)
+        .map_err(|_| IOError::MemmapContractViolation("failed to write file header"))?;
+    file.write_all(&header_bytes)
+        .map_err(|_| IOError::MemmapContractViolation("failed to write file header"))?;
+    file.set_len(total_len as u64)
+        .map_err(|_| IOError::MemmapContractViolation("failed to set file length"))?;
+    memmap(path, dtype, MemmapMode::ReadWrite, offset, shape).map(|mut mapped| {
+        mapped.fortran_order = fortran_order;
+        mapped
+    })
+}
+
 // ── Structured / Record Dtype NPY support ──
 
 /// A field in a structured/record dtype descriptor.
@@ -3862,6 +3946,7 @@ mod tests {
     use bytemuck::cast_slice;
     use flate2::{Compression, write::DeflateEncoder};
     use std::io::Write;
+    use std::process::Command;
 
     use super::{
         GenFromTxtConfig, IO_PACKET_ID, IO_PACKET_REASON_CODES, IOError, IOLogRecord,
@@ -3873,8 +3958,8 @@ mod tests {
         fromfile_strings, fromfile_structured, fromfile_text, fromfile_text_with_budget,
         fromstring, genfromtxt, genfromtxt_full, load, load_auto, load_complex, load_npz,
         load_strings, load_structured, loadtxt, loadtxt_unpack, loadtxt_usecols, memmap,
-        memmap_npy, parse_structured_descr, read_npy_bytes, read_npz_bytes, save, save_complex,
-        save_strings, save_structured, savetxt, savez, savez_compressed,
+        memmap_npy, open_memmap, parse_structured_descr, read_npy_bytes, read_npz_bytes, save,
+        save_complex, save_strings, save_structured, savetxt, savez, savez_compressed,
         synthesize_npz_member_names, tobytes, tofile, tofile_complex, tofile_strings,
         tofile_structured, tofile_text, tostring, validate_descriptor_roundtrip,
         validate_header_schema, validate_io_policy_metadata, validate_magic_version,
@@ -3888,6 +3973,72 @@ mod tests {
             "artifacts/phase2c/FNP-P2C-009/contract_table.md".to_string(),
             "artifacts/phase2c/FNP-P2C-009/unit_property_evidence.json".to_string(),
         ]
+    }
+
+    fn oracle_python_bin() -> String {
+        std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".to_string())
+    }
+
+    fn numpy_oracle_available() -> bool {
+        Command::new(oracle_python_bin())
+            .args(["-c", "import numpy"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    fn json_shape(shape: &[usize]) -> String {
+        format!(
+            "[{}]",
+            shape
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+
+    fn write_numpy_open_memmap_shape_change(
+        path: &std::path::Path,
+        initial_shape: &[usize],
+        final_shape: &[usize],
+        fortran_order: bool,
+    ) {
+        let script = r#"
+import json
+import sys
+from numpy.lib.format import open_memmap
+
+path = sys.argv[1]
+initial_shape = tuple(json.loads(sys.argv[2]))
+final_shape = tuple(json.loads(sys.argv[3]))
+fortran_order = sys.argv[4] == "True"
+
+mm = open_memmap(path, mode="w+", dtype="float64", shape=initial_shape)
+mm.flush()
+mm = open_memmap(
+    path,
+    mode="w+",
+    dtype="float64",
+    shape=final_shape,
+    fortran_order=fortran_order,
+    version=(1, 0),
+)
+mm.flush()
+"#;
+        let status = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(path)
+            .arg(json_shape(initial_shape))
+            .arg(json_shape(final_shape))
+            .arg(if fortran_order { "True" } else { "False" })
+            .status()
+            .expect("python oracle should launch");
+        assert!(
+            status.success(),
+            "numpy oracle open_memmap run must succeed"
+        );
     }
 
     fn make_manual_npy_payload(header_literal: &str, body: &[u8]) -> Vec<u8> {
@@ -6609,6 +6760,91 @@ mod tests {
             persisted, npy_bytes,
             "rejecting write mode must not mutate file"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_memmap_recreates_header_with_new_shape() {
+        let dir = std::env::temp_dir().join("fnp_open_memmap_test_shape_change");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("shape_change.npy");
+
+        let mut initial = open_memmap(
+            &path,
+            MemmapMode::Write,
+            Some(IOSupportedDType::F64),
+            Some(&[2]),
+            false,
+            Some((1, 0)),
+        )
+        .expect("initial open_memmap");
+        initial.flush().expect("flush initial memmap");
+
+        let recreated = open_memmap(
+            &path,
+            MemmapMode::Write,
+            Some(IOSupportedDType::F64),
+            Some(&[2, 3]),
+            true,
+            Some((1, 0)),
+        )
+        .expect("recreate open_memmap with new shape");
+
+        assert_eq!(recreated.shape, vec![2, 3]);
+        assert!(recreated.fortran_order);
+        assert!(recreated.is_writable());
+        assert_eq!(recreated.nbytes().expect("nbytes"), 48);
+
+        let reread = memmap_npy(&path, MemmapMode::ReadOnly).expect("reopen npy");
+        assert_eq!(reread.shape, vec![2, 3]);
+        assert!(reread.fortran_order);
+        assert_eq!(reread.dtype, IOSupportedDType::F64);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_memmap_shape_change_matches_numpy_oracle() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let dir = std::env::temp_dir().join("fnp_open_memmap_test_numpy_oracle");
+        let _ = std::fs::create_dir_all(&dir);
+        let rust_path = dir.join("rust_shape_change.npy");
+        let numpy_path = dir.join("numpy_shape_change.npy");
+
+        let mut initial = open_memmap(
+            &rust_path,
+            MemmapMode::Write,
+            Some(IOSupportedDType::F64),
+            Some(&[2]),
+            false,
+            Some((1, 0)),
+        )
+        .expect("initial rust open_memmap");
+        initial.flush().expect("flush initial rust memmap");
+
+        let mut recreated = open_memmap(
+            &rust_path,
+            MemmapMode::Write,
+            Some(IOSupportedDType::F64),
+            Some(&[2, 3]),
+            true,
+            Some((1, 0)),
+        )
+        .expect("recreate rust open_memmap");
+        recreated.flush().expect("flush recreated rust memmap");
+
+        write_numpy_open_memmap_shape_change(&numpy_path, &[2], &[2, 3], true);
+
+        let rust_bytes = std::fs::read(&rust_path).expect("read rust npy");
+        let numpy_bytes = std::fs::read(&numpy_path).expect("read numpy npy");
+        assert_eq!(
+            rust_bytes, numpy_bytes,
+            "open_memmap file bytes must match NumPy"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
