@@ -10,6 +10,40 @@ fn wrap_angle_to_pi(angle: f64) -> f64 {
     (angle + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
 }
 
+fn c_order_strides(shape: &[usize]) -> Vec<usize> {
+    if shape.is_empty() {
+        return Vec::new();
+    }
+    let mut strides = vec![1usize; shape.len()];
+    for axis in (0..shape.len() - 1).rev() {
+        strides[axis] = strides[axis + 1] * shape[axis + 1];
+    }
+    strides
+}
+
+fn broadcast_flat_index(flat_index: usize, output_shape: &[usize], input_shape: &[usize]) -> usize {
+    if input_shape.is_empty() {
+        return 0;
+    }
+    let output_strides = c_order_strides(output_shape);
+    let input_strides = c_order_strides(input_shape);
+    let leading_axes = output_shape.len() - input_shape.len();
+    let mut remaining = flat_index;
+    let mut input_index = 0usize;
+    for (axis, &out_stride) in output_strides.iter().enumerate() {
+        let coord = remaining / out_stride;
+        remaining %= out_stride;
+        if axis < leading_axes {
+            continue;
+        }
+        let input_axis = axis - leading_axes;
+        if input_shape[input_axis] != 1 {
+            input_index += coord * input_strides[input_axis];
+        }
+    }
+    input_index
+}
+
 /// Precomputed log(k!) for k = 0..125, matching NumPy's `logfactorial.c`.
 /// Values are verbatim from NumPy's lookup table for bit-exact parity.
 #[allow(clippy::excessive_precision, clippy::approx_constant)]
@@ -3230,6 +3264,9 @@ impl Generator {
         if p <= 0.0 || p > 1.0 || p.is_nan() {
             return Err(RandomError::InvalidParameter);
         }
+        if p == 1.0 {
+            return Ok(vec![1; size]);
+        }
         Ok((0..size)
             .map(|_| {
                 if p >= 1.0 / 3.0 {
@@ -3330,17 +3367,57 @@ impl Generator {
     ///
     /// NumPy requires `scale >= 0`.
     pub fn laplace(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if scale < 0.0 || scale.is_nan() {
+        self.laplace_broadcast(&[loc], &[], &[scale], &[], Some(&[size]))
+    }
+
+    /// Broadcasted Laplace (double exponential) distribution matching NumPy's
+    /// `Generator.laplace(loc, scale, size)` parameter broadcasting rules.
+    pub fn laplace_broadcast(
+        &mut self,
+        loc: &[f64],
+        loc_shape: &[usize],
+        scale: &[f64],
+        scale_shape: &[usize],
+        size: Option<&[usize]>,
+    ) -> Result<Vec<f64>, RandomError> {
+        let loc_count =
+            fnp_ndarray::element_count(loc_shape).map_err(|_| RandomError::InvalidParameter)?;
+        let scale_count =
+            fnp_ndarray::element_count(scale_shape).map_err(|_| RandomError::InvalidParameter)?;
+        if loc.len() != loc_count || scale.len() != scale_count {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| {
+        if scale.iter().any(|&value| value < 0.0 || value.is_nan()) {
+            return Err(RandomError::InvalidParameter);
+        }
+
+        let parameter_shape = fnp_ndarray::broadcast_shape(loc_shape, scale_shape)
+            .map_err(|_| RandomError::InvalidParameter)?;
+        let output_shape = if let Some(size_shape) = size {
+            let merged = fnp_ndarray::broadcast_shape(&parameter_shape, size_shape)
+                .map_err(|_| RandomError::InvalidParameter)?;
+            if merged != size_shape {
+                return Err(RandomError::InvalidParameter);
+            }
+            merged
+        } else {
+            parameter_shape
+        };
+        let total =
+            fnp_ndarray::element_count(&output_shape).map_err(|_| RandomError::InvalidParameter)?;
+
+        Ok((0..total)
+            .map(|flat_index| {
+                let loc_index = broadcast_flat_index(flat_index, &output_shape, loc_shape);
+                let scale_index = broadcast_flat_index(flat_index, &output_shape, scale_shape);
+                let loc_value = loc[loc_index];
+                let scale_value = scale[scale_index];
                 loop {
                     let u = self.next_f64();
                     if u >= 0.5 {
-                        return loc - scale * (2.0 - u - u).ln();
+                        return loc_value - scale_value * (2.0 - u - u).ln();
                     } else if u > 0.0 {
-                        return loc + scale * (u + u).ln();
+                        return loc_value + scale_value * (u + u).ln();
                     }
                 }
             })
@@ -4486,6 +4563,37 @@ except Exception as exc:
             .to_string()
     }
 
+    fn numpy_oracle_geometric_outcome(p: f64, size: usize) -> String {
+        let script = r#"
+import sys
+import numpy as np
+
+p = float(sys.argv[1])
+size = int(sys.argv[2])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+try:
+    out = rng.geometric(p, size=size)
+    print("ok:" + ",".join(str(int(value)) for value in out.tolist()))
+except Exception as exc:
+    print(f"err:{type(exc).__name__}:{exc}")
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(p.to_string())
+            .arg(size.to_string())
+            .output()
+            .expect("python oracle should launch");
+        assert!(
+            output.status.success(),
+            "NumPy geometric oracle must succeed"
+        );
+        String::from_utf8(output.stdout)
+            .expect("oracle stdout must be utf-8")
+            .trim()
+            .to_string()
+    }
+
     fn numpy_oracle_vonmises(mu: f64, kappa: f64, size: usize) -> Vec<f64> {
         let script = r#"
 import sys
@@ -4556,6 +4664,109 @@ for length in lengths:
                 }
             })
             .collect()
+    }
+
+    fn numpy_oracle_laplace_broadcast(
+        loc: &[f64],
+        loc_shape: &[usize],
+        scale: &[f64],
+        scale_shape: &[usize],
+        size: Option<&[usize]>,
+    ) -> Result<(Vec<usize>, Vec<f64>), String> {
+        let encode_floats = |values: &[f64]| {
+            values
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let encode_shape = |shape: &[usize]| {
+            if shape.is_empty() {
+                "__scalar__".to_string()
+            } else {
+                shape
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            }
+        };
+        let size_arg = size
+            .map(encode_shape)
+            .unwrap_or_else(|| "__none__".to_string());
+        let script = r#"
+import sys
+import numpy as np
+
+def parse_floats(arg):
+    if not arg:
+        return []
+    return [float(token) for token in arg.split(",") if token]
+
+def parse_shape(arg):
+    if arg == "__none__":
+        return None
+    if arg == "__scalar__":
+        return ()
+    return tuple(int(token) for token in arg.split(",") if token)
+
+loc_vals = parse_floats(sys.argv[1])
+loc_shape = parse_shape(sys.argv[2])
+scale_vals = parse_floats(sys.argv[3])
+scale_shape = parse_shape(sys.argv[4])
+size = parse_shape(sys.argv[5])
+
+loc = np.array(loc_vals, dtype=float).reshape(loc_shape)
+scale = np.array(scale_vals, dtype=float).reshape(scale_shape)
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+try:
+    out = np.asarray(rng.laplace(loc, scale, size=size))
+    print("ok_shape:" + ",".join(str(int(dim)) for dim in out.shape))
+    print("ok_values:" + ",".join(str(float(value)) for value in out.reshape(-1).tolist()))
+except Exception as exc:
+    print(f"err:{type(exc).__name__}:{exc}")
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(encode_floats(loc))
+            .arg(encode_shape(loc_shape))
+            .arg(encode_floats(scale))
+            .arg(encode_shape(scale_shape))
+            .arg(size_arg)
+            .output()
+            .expect("python oracle should launch");
+        assert!(output.status.success(), "NumPy laplace oracle must succeed");
+        let stdout = String::from_utf8(output.stdout).expect("oracle stdout must be utf-8");
+        let mut lines = stdout.lines();
+        let first = lines.next().unwrap_or_default();
+        if let Some(err) = first.strip_prefix("err:") {
+            return Err(err.to_string());
+        }
+        let shape_line = first
+            .strip_prefix("ok_shape:")
+            .expect("oracle shape prefix must be present");
+        let values_line = lines
+            .next()
+            .and_then(|line| line.strip_prefix("ok_values:"))
+            .expect("oracle values prefix must be present");
+        let shape = if shape_line.is_empty() {
+            Vec::new()
+        } else {
+            shape_line
+                .split(',')
+                .map(|token| token.parse::<usize>().expect("oracle dim"))
+                .collect()
+        };
+        let values = if values_line.is_empty() {
+            Vec::new()
+        } else {
+            values_line
+                .split(',')
+                .map(|token| token.parse::<f64>().expect("oracle float"))
+                .collect()
+        };
+        Ok((shape, values))
     }
 
     fn numpy_oracle_seed_sequence_spawn_words(
@@ -5948,6 +6159,15 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn geometric_p_one_returns_ones() {
+        let mut rng = oracle_gen();
+        let samples = rng.geometric(1.0, 8).expect("p=1 should succeed");
+        assert_eq!(samples, vec![1; 8]);
+        let zero_samples = rng.geometric(1.0, 0).expect("size=0 should succeed");
+        assert!(zero_samples.is_empty());
+    }
+
+    #[test]
     fn lognormal_basic() {
         let mut rng = test_generator();
         let samples = rng.lognormal(0.0, 1.0, 1000).unwrap();
@@ -5988,6 +6208,49 @@ for child in rng.spawn(n_children):
         let samples = rng.laplace(0.0, 1.0, 1000).unwrap();
         let mean: f64 = samples.iter().sum::<f64>() / 1000.0;
         assert!(mean.abs() < 0.3);
+    }
+
+    #[test]
+    fn laplace_broadcast_uses_parameter_shape_when_size_is_none() {
+        let mut rng = oracle_gen();
+        let samples = rng
+            .laplace_broadcast(&[1.0, 2.0], &[2], &[0.5], &[1], None)
+            .expect("broadcasted laplace should succeed");
+        let expected = [1.9981512218263793, 1.803487003828455];
+        assert_f64_seq("laplace_broadcast_parameter_shape", &samples, &expected);
+    }
+
+    #[test]
+    fn laplace_broadcast_matches_numpy_with_explicit_size() {
+        let mut rng = oracle_gen();
+        let samples = rng
+            .laplace_broadcast(&[1.0, 2.0], &[2], &[0.5, 2.0], &[2], Some(&[2, 2]))
+            .expect("broadcasted laplace should succeed");
+        let expected = [
+            1.9981512218263793,
+            1.2139480153138198,
+            0.5826030825037215,
+            1.302054916886437,
+        ];
+        assert_f64_seq("laplace_broadcast_explicit_size", &samples, &expected);
+    }
+
+    #[test]
+    fn laplace_broadcast_rejects_incompatible_size() {
+        let mut rng = oracle_gen();
+        let err = rng
+            .laplace_broadcast(&[1.0, 2.0], &[2], &[0.5, 2.0], &[2], Some(&[]))
+            .expect_err("scalar output cannot hold broadcasted parameters");
+        assert_eq!(err, RandomError::InvalidParameter);
+    }
+
+    #[test]
+    fn laplace_broadcast_rejects_negative_scale_anywhere() {
+        let mut rng = oracle_gen();
+        let err = rng
+            .laplace_broadcast(&[1.0, 2.0], &[2], &[0.5, -2.0], &[2], None)
+            .expect_err("negative broadcast scale must fail");
+        assert_eq!(err, RandomError::InvalidParameter);
     }
 
     #[test]
@@ -7318,6 +7581,21 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn oracle_laplace_broadcast() {
+        let mut g = oracle_gen();
+        let vals = g
+            .laplace_broadcast(&[1.0, 2.0], &[2], &[0.5, 2.0], &[2], Some(&[2, 2]))
+            .expect("broadcasted laplace should succeed");
+        let expected = [
+            1.9981512218263793,
+            1.2139480153138198,
+            0.5826030825037215,
+            1.302054916886437,
+        ];
+        assert_f64_seq("laplace_broadcast", &vals, &expected);
+    }
+
+    #[test]
     fn oracle_gumbel() {
         let mut g = oracle_gen();
         let vals = g.gumbel(0.0, 1.0, 10).unwrap();
@@ -7494,6 +7772,14 @@ for child in rng.spawn(n_children):
         let vals = g.geometric(0.5, 10).unwrap();
         let expected: Vec<u64> = vec![4, 1, 1, 1, 2, 4, 4, 1, 1, 1];
         assert_u64_seq("geometric", &vals, &expected);
+    }
+
+    #[test]
+    fn oracle_geometric_p_one() {
+        let mut g = oracle_gen();
+        let vals = g.geometric(1.0, 10).expect("p=1 should succeed");
+        let expected: Vec<u64> = vec![1; 10];
+        assert_u64_seq("geometric_p_one", &vals, &expected);
     }
 
     #[test]
@@ -7722,6 +8008,80 @@ for child in rng.spawn(n_children):
             .map(|&length| g.bytes(length))
             .collect::<Vec<_>>();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn laplace_broadcast_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let cases = [
+            (vec![1.0, 2.0], vec![2usize], vec![0.5], vec![1usize], None),
+            (
+                vec![1.0, 2.0],
+                vec![2usize],
+                vec![0.5, 2.0],
+                vec![2usize],
+                Some(vec![2usize, 2usize]),
+            ),
+        ];
+        for (loc, loc_shape, scale, scale_shape, size) in cases {
+            let (expected_shape, expected_values) = numpy_oracle_laplace_broadcast(
+                &loc,
+                &loc_shape,
+                &scale,
+                &scale_shape,
+                size.as_deref(),
+            )
+            .expect("NumPy laplace broadcast case should succeed");
+            let mut g = oracle_gen();
+            let actual = g
+                .laplace_broadcast(&loc, &loc_shape, &scale, &scale_shape, size.as_deref())
+                .expect("local laplace broadcast case should succeed");
+            let actual_shape = size.unwrap_or(expected_shape.clone());
+            assert_eq!(
+                actual_shape, expected_shape,
+                "shape mismatch for laplace broadcast"
+            );
+            assert_f64_seq("laplace_broadcast_live_numpy", &actual, &expected_values);
+        }
+
+        let expected_error =
+            numpy_oracle_laplace_broadcast(&[1.0, 2.0], &[2], &[0.5, 2.0], &[2], Some(&[]))
+                .expect_err("NumPy must reject incompatible size");
+        assert!(
+            expected_error.starts_with("ValueError:"),
+            "unexpected NumPy error: {expected_error}"
+        );
+        let mut g = oracle_gen();
+        assert_eq!(
+            g.laplace_broadcast(&[1.0, 2.0], &[2], &[0.5, 2.0], &[2], Some(&[])),
+            Err(RandomError::InvalidParameter)
+        );
+    }
+
+    #[test]
+    fn geometric_p_one_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let expected = numpy_oracle_geometric_outcome(1.0, 10);
+        assert_eq!(expected, "ok:1,1,1,1,1,1,1,1,1,1");
+
+        let mut g = oracle_gen();
+        let actual = g.geometric(1.0, 10).expect("p=1 should succeed");
+        assert_eq!(
+            actual,
+            vec![1; 10],
+            "local geometric(p=1) must match NumPy exactly"
+        );
+
+        let zero_expected = numpy_oracle_geometric_outcome(1.0, 0);
+        assert_eq!(zero_expected, "ok:");
+        let zero_actual = g.geometric(1.0, 0).expect("size=0 should succeed");
+        assert!(zero_actual.is_empty());
     }
 
     #[test]
