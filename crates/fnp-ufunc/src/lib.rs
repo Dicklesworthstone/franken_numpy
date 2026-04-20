@@ -21811,25 +21811,32 @@ impl UFuncArray {
                 src.dtype, self.dtype,
             )));
         }
-        if self.values.len() != src.values.len() {
-            return Err(UFuncError::Msg(
-                "copyto: src and dst must have the same size".to_string(),
-            ));
-        }
+        let broadcast_src = src.broadcast_to(&self.shape).map_err(|_| {
+            UFuncError::Msg(format!(
+                "copyto: could not broadcast input array from shape {:?} into shape {:?}",
+                src.shape, self.shape
+            ))
+        })?;
         match mask {
             Some(m) => {
-                if m.values.len() != self.values.len() {
+                if m.dtype != DType::Bool {
                     return Err(UFuncError::Msg(
-                        "copyto: mask must have the same size as dst".to_string(),
+                        "copyto: where mask must have boolean dtype".to_string(),
                     ));
                 }
+                let broadcast_mask = m.broadcast_to(&self.shape).map_err(|_| {
+                    UFuncError::Msg(format!(
+                        "copyto: could not broadcast where mask from shape {:?} into shape {:?}",
+                        m.shape, self.shape
+                    ))
+                })?;
                 for i in 0..self.values.len() {
-                    if m.values[i] != 0.0 {
-                        self.values[i] = src.values[i];
+                    if broadcast_mask.values[i] != 0.0 {
+                        self.values[i] = broadcast_src.values[i];
                         self.write_integer_mutation(
                             i,
-                            src.values[i],
-                            src.integer_sidecar.as_ref(),
+                            broadcast_src.values[i],
+                            broadcast_src.integer_sidecar.as_ref(),
                             i,
                             "copyto",
                         )?;
@@ -21837,12 +21844,12 @@ impl UFuncArray {
                 }
             }
             None => {
-                self.values.copy_from_slice(&src.values);
+                self.values.copy_from_slice(&broadcast_src.values);
                 for i in 0..self.values.len() {
                     self.write_integer_mutation(
                         i,
-                        src.values[i],
-                        src.integer_sidecar.as_ref(),
+                        broadcast_src.values[i],
+                        broadcast_src.integer_sidecar.as_ref(),
                         i,
                         "copyto",
                     )?;
@@ -31414,6 +31421,124 @@ mod tests {
             "artifacts/phase2c/FNP-P2C-005/fixture_manifest.json".to_string(),
             "artifacts/phase2c/FNP-P2C-005/parity_gate.yaml".to_string(),
         ]
+    }
+
+    fn oracle_python_bin() -> String {
+        std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".to_string())
+    }
+
+    fn numpy_oracle_available() -> bool {
+        Command::new(oracle_python_bin())
+            .args(["-c", "import numpy"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    fn numpy_oracle_copyto(
+        dst: &UFuncArray,
+        src: &UFuncArray,
+        mask: Option<&UFuncArray>,
+    ) -> Result<Vec<f64>, String> {
+        let dst_values = dst
+            .values()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let dst_shape = dst
+            .shape()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let src_values = src
+            .values()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let src_shape = src
+            .shape()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let (mask_values, mask_shape) = match mask {
+            Some(mask) => (
+                mask.values()
+                    .iter()
+                    .map(|value| {
+                        if *value != 0.0 {
+                            "1".to_string()
+                        } else {
+                            "0".to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(","),
+                mask.shape()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            None => ("__none__".to_string(), "__none__".to_string()),
+        };
+        let script = r#"
+import sys
+import numpy as np
+
+def parse_values(arg):
+    if not arg:
+        return []
+    return [float(part) for part in arg.split(",") if part]
+
+def parse_shape(arg):
+    if not arg:
+        return ()
+    return tuple(int(part) for part in arg.split(",") if part)
+
+dst = np.array(parse_values(sys.argv[1]), dtype=float).reshape(parse_shape(sys.argv[2]))
+src = np.array(parse_values(sys.argv[3]), dtype=float).reshape(parse_shape(sys.argv[4]))
+mask_values = sys.argv[5]
+mask_shape = sys.argv[6]
+if mask_values == "__none__":
+    np.copyto(dst, src)
+else:
+    where = np.array([part != "0" for part in mask_values.split(",") if part], dtype=bool)
+    where = where.reshape(parse_shape(mask_shape))
+    np.copyto(dst, src, where=where)
+print(",".join(str(float(value)) for value in dst.reshape(-1)))
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(dst_values)
+            .arg(dst_shape)
+            .arg(src_values)
+            .arg(src_shape)
+            .arg(mask_values)
+            .arg(mask_shape)
+            .output()
+            .map_err(|err| format!("failed to launch NumPy copyto oracle: {err}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "NumPy copyto oracle failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        String::from_utf8(output.stdout)
+            .map_err(|err| format!("oracle stdout must be utf-8: {err}"))?
+            .trim()
+            .split(',')
+            .filter(|token| !token.is_empty())
+            .map(|token| {
+                token
+                    .parse::<f64>()
+                    .map_err(|err| format!("oracle float parse failed for {token:?}: {err}"))
+            })
+            .collect()
     }
 
     #[test]
@@ -44326,6 +44451,106 @@ mod tests {
         assert!((dst.values()[0] - 10.0).abs() < 1e-10);
         assert!((dst.values()[1] - 0.0).abs() < 1e-10); // mask false, unchanged
         assert!((dst.values()[2] - 30.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn copyto_broadcasts_bool_mask_columns() {
+        let mut dst = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let src = UFuncArray::new(vec![2, 2], vec![9.0, 8.0, 7.0, 6.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![2, 1], vec![1.0, 0.0], DType::Bool).unwrap();
+        dst.copyto(&src, Some(&mask), None).unwrap();
+        assert_eq!(dst.values(), &[9.0, 8.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn copyto_broadcasts_scalar_src_through_bool_mask() {
+        let mut dst = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let src = UFuncArray::scalar(5.0, DType::F64);
+        let mask = UFuncArray::new(vec![2, 1], vec![1.0, 0.0], DType::Bool).unwrap();
+        dst.copyto(&src, Some(&mask), None).unwrap();
+        assert_eq!(dst.values(), &[5.0, 5.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn copyto_bool_scalar_mask_controls_full_copy() {
+        let src = UFuncArray::new(vec![3], vec![9.0, 8.0, 7.0], DType::F64).unwrap();
+
+        let mut dst_true = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let mask_true = UFuncArray::scalar(1.0, DType::Bool);
+        dst_true.copyto(&src, Some(&mask_true), None).unwrap();
+        assert_eq!(dst_true.values(), &[9.0, 8.0, 7.0]);
+
+        let mut dst_false = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let mask_false = UFuncArray::scalar(0.0, DType::Bool);
+        dst_false.copyto(&src, Some(&mask_false), None).unwrap();
+        assert_eq!(dst_false.values(), &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn copyto_rejects_non_bool_where_masks() {
+        let mut dst = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let src = UFuncArray::new(vec![3], vec![9.0, 8.0, 7.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![3], vec![1.0, 0.0, 1.0], DType::I32).unwrap();
+        let err = dst.copyto(&src, Some(&mask), None).unwrap_err();
+        assert!(
+            matches!(err, UFuncError::Msg(message) if message.contains("where mask must have boolean dtype"))
+        );
+    }
+
+    #[test]
+    fn copyto_rejects_non_broadcastable_masks() {
+        let mut dst = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let src = UFuncArray::new(vec![3], vec![9.0, 8.0, 7.0], DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![2, 1], vec![1.0, 0.0], DType::Bool).unwrap();
+        let err = dst.copyto(&src, Some(&mask), None).unwrap_err();
+        assert!(
+            matches!(err, UFuncError::Msg(message) if message.contains("could not broadcast where mask"))
+        );
+    }
+
+    #[test]
+    fn copyto_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let cases = vec![
+            (
+                UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap(),
+                UFuncArray::new(vec![3], vec![9.0, 8.0, 7.0], DType::F64).unwrap(),
+                Some(UFuncArray::scalar(1.0, DType::Bool)),
+            ),
+            (
+                UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap(),
+                UFuncArray::new(vec![3], vec![9.0, 8.0, 7.0], DType::F64).unwrap(),
+                Some(UFuncArray::scalar(0.0, DType::Bool)),
+            ),
+            (
+                UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap(),
+                UFuncArray::new(vec![2, 2], vec![9.0, 8.0, 7.0, 6.0], DType::F64).unwrap(),
+                Some(UFuncArray::new(vec![2, 1], vec![1.0, 0.0], DType::Bool).unwrap()),
+            ),
+            (
+                UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap(),
+                UFuncArray::scalar(5.0, DType::F64),
+                Some(UFuncArray::new(vec![2, 1], vec![1.0, 0.0], DType::Bool).unwrap()),
+            ),
+        ];
+
+        for (mut dst, src, mask) in cases {
+            let expected = numpy_oracle_copyto(&dst, &src, mask.as_ref());
+            assert!(
+                expected.is_ok(),
+                "{}",
+                expected
+                    .as_deref()
+                    .err()
+                    .map_or("NumPy copyto oracle failed", |err| err)
+            );
+            let expected = expected.unwrap_or_default();
+            dst.copyto(&src, mask.as_ref(), None).unwrap();
+            assert_eq!(dst.values(), expected.as_slice());
+        }
     }
 
     #[test]
