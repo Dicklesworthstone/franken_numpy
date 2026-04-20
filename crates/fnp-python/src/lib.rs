@@ -1,4 +1,4 @@
-use fnp_dtype::{ArrayStorage, DType, f16};
+use fnp_dtype::{ArrayStorage, DType, can_cast, f16, promote};
 use fnp_iter::{Nditer, NditerOptions, NditerOrder};
 use fnp_ndarray::{broadcast_shapes, element_count};
 use fnp_ufunc::{
@@ -819,6 +819,480 @@ fn extract_python_dtype(
         .ok_or_else(|| PyTypeError::new_err(format!("{context}: unsupported dtype {name}")))
 }
 
+fn extract_storage_from_flat_array(
+    flat: &Bound<'_, PyAny>,
+    parsed_dtype: DType,
+    context: &str,
+) -> PyResult<ArrayStorage> {
+    match parsed_dtype {
+        DType::Bool => Ok(ArrayStorage::Bool(
+            flat.call_method0("tolist")?.extract::<Vec<bool>>()?,
+        )),
+        DType::I8 => Ok(ArrayStorage::I8(
+            flat.call_method1("astype", ("int8",))?
+                .call_method0("tolist")?
+                .extract::<Vec<i8>>()?,
+        )),
+        DType::I16 => Ok(ArrayStorage::I16(
+            flat.call_method1("astype", ("int16",))?
+                .call_method0("tolist")?
+                .extract::<Vec<i16>>()?,
+        )),
+        DType::I32 => Ok(ArrayStorage::I32(
+            flat.call_method1("astype", ("int32",))?
+                .call_method0("tolist")?
+                .extract::<Vec<i32>>()?,
+        )),
+        DType::I64 => Ok(ArrayStorage::I64(
+            flat.call_method1("astype", ("int64",))?
+                .call_method0("tolist")?
+                .extract::<Vec<i64>>()?,
+        )),
+        DType::U8 => Ok(ArrayStorage::U8(
+            flat.call_method1("astype", ("uint8",))?
+                .call_method0("tolist")?
+                .extract::<Vec<u8>>()?,
+        )),
+        DType::U16 => Ok(ArrayStorage::U16(
+            flat.call_method1("astype", ("uint16",))?
+                .call_method0("tolist")?
+                .extract::<Vec<u16>>()?,
+        )),
+        DType::U32 => Ok(ArrayStorage::U32(
+            flat.call_method1("astype", ("uint32",))?
+                .call_method0("tolist")?
+                .extract::<Vec<u32>>()?,
+        )),
+        DType::U64 => Ok(ArrayStorage::U64(
+            flat.call_method1("astype", ("uint64",))?
+                .call_method0("tolist")?
+                .extract::<Vec<u64>>()?,
+        )),
+        DType::F16 => Ok(ArrayStorage::F16(
+            flat.call_method1("astype", ("float16",))?
+                .call_method0("tolist")?
+                .extract::<Vec<f32>>()?
+                .into_iter()
+                .map(f16::from_f32)
+                .collect(),
+        )),
+        DType::F32 => Ok(ArrayStorage::F32(
+            flat.call_method1("astype", ("float32",))?
+                .call_method0("tolist")?
+                .extract::<Vec<f32>>()?,
+        )),
+        DType::F64 => Ok(ArrayStorage::F64(
+            flat.call_method1("astype", ("float64",))?
+                .call_method0("tolist")?
+                .extract::<Vec<f64>>()?,
+        )),
+        DType::Complex64 => {
+            let complex = flat.call_method1("astype", ("complex64",))?;
+            let real = complex
+                .getattr("real")?
+                .call_method0("tolist")?
+                .extract::<Vec<f32>>()?;
+            let imag = complex
+                .getattr("imag")?
+                .call_method0("tolist")?
+                .extract::<Vec<f32>>()?;
+            Ok(ArrayStorage::Complex64(
+                real.into_iter().zip(imag).collect(),
+            ))
+        }
+        DType::Complex128 => {
+            let complex = flat.call_method1("astype", ("complex128",))?;
+            let real = complex
+                .getattr("real")?
+                .call_method0("tolist")?
+                .extract::<Vec<f64>>()?;
+            let imag = complex
+                .getattr("imag")?
+                .call_method0("tolist")?
+                .extract::<Vec<f64>>()?;
+            Ok(ArrayStorage::Complex128(
+                real.into_iter().zip(imag).collect(),
+            ))
+        }
+        DType::Str => Ok(ArrayStorage::String(
+            flat.call_method0("tolist")?.extract::<Vec<String>>()?,
+        )),
+        unsupported => Err(PyTypeError::new_err(format!(
+            "{context}: unsupported structured field dtype {}",
+            unsupported.name()
+        ))),
+    }
+}
+
+fn extract_structured_leaf_columns(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    base_ndim: usize,
+    context: &str,
+) -> PyResult<Vec<(DType, ArrayStorage, usize)>> {
+    let numpy = py.import("numpy")?;
+    let array = numpy.call_method1("asarray", (value,))?;
+    let dtype = array.getattr("dtype")?;
+    let names = dtype.getattr("names")?;
+
+    if names.is_none() {
+        let dtype_name = dtype.getattr("name")?.extract::<String>()?;
+        let parsed_dtype = DType::parse(&dtype_name).ok_or_else(|| {
+            PyTypeError::new_err(format!(
+                "{context}: unsupported structured field dtype {dtype_name}"
+            ))
+        })?;
+        let shape = array.getattr("shape")?.extract::<Vec<usize>>()?;
+        let width = shape
+            .iter()
+            .skip(base_ndim)
+            .copied()
+            .product::<usize>()
+            .max(1);
+        let flat = array.call_method1("reshape", (-1,))?;
+        let storage = extract_storage_from_flat_array(&flat, parsed_dtype, context)?;
+        return Ok(vec![(parsed_dtype, storage, width)]);
+    }
+
+    let field_names = names.extract::<Vec<String>>()?;
+    let mut columns = Vec::new();
+    for field_name in field_names {
+        let field_array = array.get_item(field_name.as_str())?;
+        columns.extend(extract_structured_leaf_columns(
+            py,
+            &field_array,
+            base_ndim,
+            context,
+        )?);
+    }
+    Ok(columns)
+}
+
+fn promote_structured_leaf_dtypes(dtypes: &[DType]) -> Option<DType> {
+    let mut iter = dtypes.iter().copied();
+    let first = iter.next()?;
+    Some(iter.fold(first, promote))
+}
+
+fn build_numpy_array_from_interleaved_storage(
+    py: Python<'_>,
+    shape: &[usize],
+    columns: &[(ArrayStorage, usize)],
+    num_records: usize,
+    target_dtype: DType,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let total_width = columns.iter().map(|(_, width)| *width).sum::<usize>();
+    let total_len = num_records.saturating_mul(total_width);
+    let kwargs = PyDict::new(py);
+
+    let array = match target_dtype {
+        DType::Bool => {
+            let mut values = Vec::with_capacity(total_len);
+            for record in 0..num_records {
+                for (column, width) in columns {
+                    let ArrayStorage::Bool(column_values) = column else {
+                        unreachable!("bool target must use bool storage");
+                    };
+                    let base = record * *width;
+                    for component in 0..*width {
+                        values.push(column_values[base + component]);
+                    }
+                }
+            }
+            kwargs.set_item("dtype", "bool_")?;
+            numpy.call_method(
+                "array",
+                (PyList::new(py, values.iter().copied())?,),
+                Some(&kwargs),
+            )?
+        }
+        DType::I8 => {
+            let mut values = Vec::with_capacity(total_len);
+            for record in 0..num_records {
+                for (column, width) in columns {
+                    let ArrayStorage::I8(column_values) = column else {
+                        unreachable!("int8 target must use int8 storage");
+                    };
+                    let base = record * *width;
+                    for component in 0..*width {
+                        values.push(column_values[base + component]);
+                    }
+                }
+            }
+            kwargs.set_item("dtype", "int8")?;
+            numpy.call_method(
+                "array",
+                (PyList::new(py, values.iter().copied())?,),
+                Some(&kwargs),
+            )?
+        }
+        DType::I16 => {
+            let mut values = Vec::with_capacity(total_len);
+            for record in 0..num_records {
+                for (column, width) in columns {
+                    let ArrayStorage::I16(column_values) = column else {
+                        unreachable!("int16 target must use int16 storage");
+                    };
+                    let base = record * *width;
+                    for component in 0..*width {
+                        values.push(column_values[base + component]);
+                    }
+                }
+            }
+            kwargs.set_item("dtype", "int16")?;
+            numpy.call_method(
+                "array",
+                (PyList::new(py, values.iter().copied())?,),
+                Some(&kwargs),
+            )?
+        }
+        DType::I32 => {
+            let mut values = Vec::with_capacity(total_len);
+            for record in 0..num_records {
+                for (column, width) in columns {
+                    let ArrayStorage::I32(column_values) = column else {
+                        unreachable!("int32 target must use int32 storage");
+                    };
+                    let base = record * *width;
+                    for component in 0..*width {
+                        values.push(column_values[base + component]);
+                    }
+                }
+            }
+            kwargs.set_item("dtype", "int32")?;
+            numpy.call_method(
+                "array",
+                (PyList::new(py, values.iter().copied())?,),
+                Some(&kwargs),
+            )?
+        }
+        DType::I64 => {
+            let mut values = Vec::with_capacity(total_len);
+            for record in 0..num_records {
+                for (column, width) in columns {
+                    let ArrayStorage::I64(column_values) = column else {
+                        unreachable!("int64 target must use int64 storage");
+                    };
+                    let base = record * *width;
+                    for component in 0..*width {
+                        values.push(column_values[base + component]);
+                    }
+                }
+            }
+            kwargs.set_item("dtype", "int64")?;
+            numpy.call_method(
+                "array",
+                (PyList::new(py, values.iter().copied())?,),
+                Some(&kwargs),
+            )?
+        }
+        DType::U8 => {
+            let mut values = Vec::with_capacity(total_len);
+            for record in 0..num_records {
+                for (column, width) in columns {
+                    let ArrayStorage::U8(column_values) = column else {
+                        unreachable!("uint8 target must use uint8 storage");
+                    };
+                    let base = record * *width;
+                    for component in 0..*width {
+                        values.push(column_values[base + component]);
+                    }
+                }
+            }
+            kwargs.set_item("dtype", "uint8")?;
+            numpy.call_method(
+                "array",
+                (PyList::new(py, values.iter().copied())?,),
+                Some(&kwargs),
+            )?
+        }
+        DType::U16 => {
+            let mut values = Vec::with_capacity(total_len);
+            for record in 0..num_records {
+                for (column, width) in columns {
+                    let ArrayStorage::U16(column_values) = column else {
+                        unreachable!("uint16 target must use uint16 storage");
+                    };
+                    let base = record * *width;
+                    for component in 0..*width {
+                        values.push(column_values[base + component]);
+                    }
+                }
+            }
+            kwargs.set_item("dtype", "uint16")?;
+            numpy.call_method(
+                "array",
+                (PyList::new(py, values.iter().copied())?,),
+                Some(&kwargs),
+            )?
+        }
+        DType::U32 => {
+            let mut values = Vec::with_capacity(total_len);
+            for record in 0..num_records {
+                for (column, width) in columns {
+                    let ArrayStorage::U32(column_values) = column else {
+                        unreachable!("uint32 target must use uint32 storage");
+                    };
+                    let base = record * *width;
+                    for component in 0..*width {
+                        values.push(column_values[base + component]);
+                    }
+                }
+            }
+            kwargs.set_item("dtype", "uint32")?;
+            numpy.call_method(
+                "array",
+                (PyList::new(py, values.iter().copied())?,),
+                Some(&kwargs),
+            )?
+        }
+        DType::U64 => {
+            let mut values = Vec::with_capacity(total_len);
+            for record in 0..num_records {
+                for (column, width) in columns {
+                    let ArrayStorage::U64(column_values) = column else {
+                        unreachable!("uint64 target must use uint64 storage");
+                    };
+                    let base = record * *width;
+                    for component in 0..*width {
+                        values.push(column_values[base + component]);
+                    }
+                }
+            }
+            kwargs.set_item("dtype", "uint64")?;
+            numpy.call_method(
+                "array",
+                (PyList::new(py, values.iter().copied())?,),
+                Some(&kwargs),
+            )?
+        }
+        DType::F16 => {
+            let mut values = Vec::with_capacity(total_len);
+            for record in 0..num_records {
+                for (column, width) in columns {
+                    let ArrayStorage::F16(column_values) = column else {
+                        unreachable!("float16 target must use float16 storage");
+                    };
+                    let base = record * *width;
+                    for component in 0..*width {
+                        values.push(f32::from(column_values[base + component]));
+                    }
+                }
+            }
+            kwargs.set_item("dtype", "float16")?;
+            numpy.call_method(
+                "array",
+                (PyList::new(py, values.iter().copied())?,),
+                Some(&kwargs),
+            )?
+        }
+        DType::F32 => {
+            let mut values = Vec::with_capacity(total_len);
+            for record in 0..num_records {
+                for (column, width) in columns {
+                    let ArrayStorage::F32(column_values) = column else {
+                        unreachable!("float32 target must use float32 storage");
+                    };
+                    let base = record * *width;
+                    for component in 0..*width {
+                        values.push(column_values[base + component]);
+                    }
+                }
+            }
+            kwargs.set_item("dtype", "float32")?;
+            numpy.call_method(
+                "array",
+                (PyList::new(py, values.iter().copied())?,),
+                Some(&kwargs),
+            )?
+        }
+        DType::F64 => {
+            let mut values = Vec::with_capacity(total_len);
+            for record in 0..num_records {
+                for (column, width) in columns {
+                    let ArrayStorage::F64(column_values) = column else {
+                        unreachable!("float64 target must use float64 storage");
+                    };
+                    let base = record * *width;
+                    for component in 0..*width {
+                        values.push(column_values[base + component]);
+                    }
+                }
+            }
+            kwargs.set_item("dtype", "float64")?;
+            numpy.call_method(
+                "array",
+                (PyList::new(py, values.iter().copied())?,),
+                Some(&kwargs),
+            )?
+        }
+        DType::Complex64 => {
+            let builtins = py.import("builtins")?;
+            let mut values = Vec::with_capacity(total_len);
+            for record in 0..num_records {
+                for (column, width) in columns {
+                    let ArrayStorage::Complex64(column_values) = column else {
+                        unreachable!("complex64 target must use complex64 storage");
+                    };
+                    let base = record * *width;
+                    for component in 0..*width {
+                        let (re, im) = column_values[base + component];
+                        values.push(builtins.getattr("complex")?.call1((re, im))?.unbind());
+                    }
+                }
+            }
+            kwargs.set_item("dtype", "complex64")?;
+            numpy.call_method("array", (PyList::new(py, values.iter())?,), Some(&kwargs))?
+        }
+        DType::Complex128 => {
+            let builtins = py.import("builtins")?;
+            let mut values = Vec::with_capacity(total_len);
+            for record in 0..num_records {
+                for (column, width) in columns {
+                    let ArrayStorage::Complex128(column_values) = column else {
+                        unreachable!("complex128 target must use complex128 storage");
+                    };
+                    let base = record * *width;
+                    for component in 0..*width {
+                        let (re, im) = column_values[base + component];
+                        values.push(builtins.getattr("complex")?.call1((re, im))?.unbind());
+                    }
+                }
+            }
+            kwargs.set_item("dtype", "complex128")?;
+            numpy.call_method("array", (PyList::new(py, values.iter())?,), Some(&kwargs))?
+        }
+        DType::Str => {
+            let mut values = Vec::with_capacity(total_len);
+            for record in 0..num_records {
+                for (column, width) in columns {
+                    let ArrayStorage::String(column_values) = column else {
+                        unreachable!("str target must use string storage");
+                    };
+                    let base = record * *width;
+                    for component in 0..*width {
+                        values.push(column_values[base + component].clone());
+                    }
+                }
+            }
+            kwargs.set_item("dtype", "str")?;
+            numpy.call_method("array", (PyList::new(py, values.iter())?,), Some(&kwargs))?
+        }
+        unsupported => {
+            return Err(PyTypeError::new_err(format!(
+                "structured_to_unstructured: unsupported output dtype {}",
+                unsupported.name()
+            )));
+        }
+    };
+
+    let mut output_shape = shape.to_vec();
+    output_shape.push(total_width);
+    let output_shape = PyTuple::new(py, output_shape.iter().copied())?;
+    Ok(array.call_method1("reshape", (&output_shape,))?.unbind())
+}
+
 fn validate_cpu_device_kwarg(py: Python<'_>, device: Option<Py<PyAny>>) -> PyResult<()> {
     let Some(device) = device else {
         return Ok(());
@@ -837,6 +1311,83 @@ fn validate_cpu_device_kwarg(py: Python<'_>, device: Option<Py<PyAny>>) -> PyRes
     Err(PyValueError::new_err(format!(
         "Device not understood. Only \"cpu\" is allowed, but received: {device_text}",
     )))
+}
+
+#[pyfunction]
+#[pyo3(signature = (arr, dtype=None, copy=false, casting="unsafe"))]
+fn structured_to_unstructured(
+    py: Python<'_>,
+    arr: Py<PyAny>,
+    dtype: Option<Py<PyAny>>,
+    copy: bool,
+    casting: &str,
+) -> PyResult<Py<PyAny>> {
+    let _ = copy;
+    let numpy = py.import("numpy")?;
+    let array = numpy.call_method1("asarray", (arr.bind(py),))?;
+    let array_dtype = array.getattr("dtype")?;
+    let dtype_name = array_dtype.str()?.extract::<String>()?;
+
+    if array_dtype.getattr("names")?.is_none() {
+        return Err(PyTypeError::new_err(format!(
+            "structured_to_unstructured(arr): expected a structured array, got dtype {dtype_name}",
+        )));
+    }
+
+    if !matches!(casting, "no" | "equiv" | "safe" | "same_kind" | "unsafe") {
+        return Err(PyValueError::new_err(format!(
+            "structured_to_unstructured: unsupported casting rule '{casting}'",
+        )));
+    }
+
+    let shape = array.getattr("shape")?.extract::<Vec<usize>>()?;
+    let base_ndim = shape.len();
+    let num_records = if shape.is_empty() {
+        1
+    } else {
+        element_count(&shape).map_err(|err| PyValueError::new_err(err.to_string()))?
+    };
+
+    let extracted =
+        extract_structured_leaf_columns(py, &array, base_ndim, "structured_to_unstructured(arr)")?;
+    if extracted.is_empty() {
+        return Err(PyValueError::new_err("arr with no fields is not supported"));
+    }
+
+    let leaf_dtypes = extracted
+        .iter()
+        .map(|(field_dtype, _, _)| *field_dtype)
+        .collect::<Vec<_>>();
+    let default_dtype = promote_structured_leaf_dtypes(&leaf_dtypes)
+        .ok_or_else(|| PyValueError::new_err("arr with no fields is not supported"))?;
+    let target_dtype = extract_python_dtype(
+        py,
+        dtype,
+        default_dtype,
+        "structured_to_unstructured(dtype)",
+    )?;
+
+    for &field_dtype in &leaf_dtypes {
+        if !can_cast(field_dtype, target_dtype, casting) {
+            return Err(PyTypeError::new_err(format!(
+                "Cannot cast array data from field dtype {} to {} according to the rule '{casting}'",
+                field_dtype.name(),
+                target_dtype.name()
+            )));
+        }
+    }
+
+    let cast_columns = extracted
+        .into_iter()
+        .map(|(_, storage, width)| {
+            storage
+                .cast_to(target_dtype)
+                .map(|casted| (casted, width))
+                .map_err(|err| PyTypeError::new_err(format!("structured_to_unstructured: {err}")))
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+
+    build_numpy_array_from_interleaved_storage(py, &shape, &cast_columns, num_records, target_dtype)
 }
 
 fn extract_ix_array(
@@ -3427,6 +3978,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(argwhere, m)?)?;
     m.add_function(wrap_pyfunction!(count_nonzero, m)?)?;
     m.add_function(wrap_pyfunction!(expand_dims, m)?)?;
+    m.add_function(wrap_pyfunction!(structured_to_unstructured, m)?)?;
     m.add_function(wrap_pyfunction!(trim_zeros, m)?)?;
     m.add_function(wrap_pyfunction!(tensorsolve, m)?)?;
     m.add_function(wrap_pyfunction!(tensorinv, m)?)?;
@@ -3682,6 +4234,7 @@ mod tests {
             assert!(module.getattr("argwhere").is_ok());
             assert!(module.getattr("count_nonzero").is_ok());
             assert!(module.getattr("expand_dims").is_ok());
+            assert!(module.getattr("structured_to_unstructured").is_ok());
             assert!(module.getattr("trim_zeros").is_ok());
             assert!(module.getattr("rfft").is_ok());
             assert!(module.getattr("irfft").is_ok());
@@ -5489,6 +6042,101 @@ mod tests {
                 actual_err.value(py).str()?.extract::<String>()?,
                 expected_err.value(py).str()?.extract::<String>()?
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn structured_to_unstructured_matches_numpy_mixed_dtype_and_dtype_kwarg() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let recfunctions = py.import("numpy.lib.recfunctions")?;
+
+            let mixed_dtype = numpy
+                .getattr("dtype")?
+                .call1((PyList::new(py, [("x", "<i4"), ("y", "<f8")])?,))?;
+            let array_kwargs = PyDict::new(py);
+            array_kwargs.set_item("dtype", mixed_dtype.clone())?;
+            let structured = numpy.getattr("array")?.call(
+                (PyList::new(py, [(1_i32, 2.5_f64), (3_i32, 4.5_f64)])?,),
+                Some(&array_kwargs),
+            )?;
+
+            let actual_default = module
+                .getattr("structured_to_unstructured")?
+                .call1((structured.clone(),))?;
+            let expected_default = recfunctions
+                .getattr("structured_to_unstructured")?
+                .call1((structured.clone(),))?;
+            assert_array_matches_numpy(&actual_default, &expected_default)?;
+
+            let typed_kwargs = PyDict::new(py);
+            typed_kwargs.set_item("dtype", numpy.getattr("float32")?)?;
+            typed_kwargs.set_item("casting", "unsafe")?;
+            let actual_typed = module
+                .getattr("structured_to_unstructured")?
+                .call((structured.clone(),), Some(&typed_kwargs))?;
+            let expected_typed = recfunctions
+                .getattr("structured_to_unstructured")?
+                .call((structured.clone(),), Some(&typed_kwargs))?;
+            assert_array_matches_numpy(&actual_typed, &expected_typed)?;
+
+            let scalar = numpy
+                .getattr("array")?
+                .call(((1_i32, 2.5_f64),), Some(&array_kwargs))?
+                .get_item(0)?;
+            let actual_scalar = module
+                .getattr("structured_to_unstructured")?
+                .call1((scalar.clone(),))?;
+            let expected_scalar = recfunctions
+                .getattr("structured_to_unstructured")?
+                .call1((scalar.clone(),))?;
+            assert_array_matches_numpy(&actual_scalar, &expected_scalar)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn structured_to_unstructured_matches_numpy_subarray_fields() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let recfunctions = py.import("numpy.lib.recfunctions")?;
+
+            let builtins = py.import("builtins")?;
+            let subarray_dtype = numpy.getattr("dtype")?.call1((builtins
+                .getattr("eval")?
+                .call1(("[('xy', '<i4', (2,)), ('z', '<i4')]",))?,))?;
+            let array_kwargs = PyDict::new(py);
+            array_kwargs.set_item("dtype", subarray_dtype)?;
+            let structured = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [(vec![1_i32, 2_i32], 3_i32), (vec![4_i32, 5_i32], 6_i32)],
+                )?,),
+                Some(&array_kwargs),
+            )?;
+
+            let actual = module
+                .getattr("structured_to_unstructured")?
+                .call1((structured.clone(),))?;
+            let expected = recfunctions
+                .getattr("structured_to_unstructured")?
+                .call1((structured.clone(),))?;
+            assert_array_matches_numpy(&actual, &expected)?;
 
             Ok(())
         });
