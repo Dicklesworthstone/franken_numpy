@@ -950,5 +950,141 @@
     "expected_values": [0.0, 0.25, -0.5, -0.25],
     "abs_tol": 1e-12,
     "rel_tol": 1e-12
+  },
+  {
+    "id": "irfft_len8_roundtrip_golden",
+    "operation": "irfft",
+    "seed": 8900,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [5, 2],
+    "input_values": [36.0, 0.0, -4.0, 9.65685424949238, -4.0, 4.0, -4.0, 1.6568542494923797, -4.0, 0.0],
+    "output_n": 8,
+    "expected_shape": [8],
+    "expected_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "abs_tol": 1e-9,
+    "rel_tol": 1e-9
+  },
+  {
+    "id": "hfft_n4_from_3complex_golden",
+    "operation": "hfft",
+    "seed": 8901,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [3, 2],
+    "input_values": [1.0, 0.0, 2.0, -1.0, 3.0, 0.0],
+    "n": 4,
+    "expected_shape": [4],
+    "expected_values": [8.0, -4.0, 0.0, 0.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "ihfft_len6_golden",
+    "operation": "ihfft",
+    "seed": 8902,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [6],
+    "input_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "expected_shape": [4, 2],
+    "expected_values": [3.5, 0.0, -0.5, -0.8660254037844386, -0.5, -0.28867513459481287, -0.5, 0.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "ihfft_len8_golden",
+    "operation": "ihfft",
+    "seed": 8903,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [8],
+    "input_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "expected_shape": [5, 2],
+    "expected_values": [4.5, 0.0, -0.5, -1.2071067811865475, -0.5, -0.5, -0.5, -0.20710678118654746, -0.5, 0.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "rfft2_2x4_golden",
+    "operation": "rfft2",
+    "seed": 8904,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [2, 4],
+    "input_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "expected_shape": [2, 3, 2],
+    "expected_values": [36.0, 0.0, -4.0, 4.0, -4.0, 0.0, -16.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
+  },
+  {
+    "id": "irfft2_roundtrip_2x4_golden",
+    "operation": "irfft2",
+    "seed": 8905,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [2, 3, 2],
+    "input_values": [36.0, 0.0, -4.0, 4.0, -4.0, 0.0, -16.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "output_n": 4,
+    "expected_shape": [2, 4],
+    "expected_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "abs_tol": 1e-9,
+    "rel_tol": 1e-9
+  },
+  {
+    "id": "ifft2_roundtrip_from_fft2_2x2_golden",
+    "operation": "ifft2",
+    "seed": 8906,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-fft-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/fft_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
+    "reason_code": "fft_differential_expected_success",
+    "expected_reason_code": "fft_differential_expected_success",
+    "input_shape": [2, 2, 2],
+    "input_values": [10.0, 0.0, -2.0, 0.0, -4.0, 0.0, 0.0, 0.0],
+    "expected_shape": [2, 2, 2],
+    "expected_values": [1.0, 0.0, 2.0, 0.0, 3.0, 0.0, 4.0, 0.0],
+    "abs_tol": 1e-10,
+    "rel_tol": 1e-10
   }
 ]
