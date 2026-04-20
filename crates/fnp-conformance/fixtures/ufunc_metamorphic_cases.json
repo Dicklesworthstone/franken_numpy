@@ -683,5 +683,140 @@
     "rhs_shape": [2],
     "rhs_values": [2.5, 3.5],
     "rhs_dtype": "f64"
+  },
+  {
+    "id": "neg_involution_1d_zeros_and_denormals",
+    "relation": "neg_involution",
+    "seed": 3400,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-metamorphic-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_metamorphic_neg_involution",
+    "lhs_shape": [5],
+    "lhs_values": [0.0, -0.0, 5e-324, -5e-324, 1.0],
+    "lhs_dtype": "f64"
+  },
+  {
+    "id": "neg_involution_large_magnitudes",
+    "relation": "neg_involution",
+    "seed": 3401,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-metamorphic-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_metamorphic_neg_involution",
+    "lhs_shape": [4],
+    "lhs_values": [1e300, -1e300, 1e-300, -1e-300],
+    "lhs_dtype": "f64"
+  },
+  {
+    "id": "neg_involution_empty_1d",
+    "relation": "neg_involution",
+    "seed": 3402,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-metamorphic-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_metamorphic_neg_involution",
+    "lhs_shape": [0],
+    "lhs_values": [],
+    "lhs_dtype": "f64"
+  },
+  {
+    "id": "abs_idempotent_all_negative_3d",
+    "relation": "abs_idempotent",
+    "seed": 3403,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-metamorphic-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_metamorphic_abs_idempotent",
+    "lhs_shape": [2, 2, 2],
+    "lhs_values": [-0.1, -0.2, -0.3, -0.4, -0.5, -0.6, -0.7, -0.8],
+    "lhs_dtype": "f64"
+  },
+  {
+    "id": "abs_idempotent_neg_zero_preserved",
+    "relation": "abs_idempotent",
+    "seed": 3404,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-metamorphic-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_metamorphic_abs_idempotent",
+    "lhs_shape": [6],
+    "lhs_values": [0.0, -0.0, 1.0, -1.0, 1e-10, -1e-10],
+    "lhs_dtype": "f64"
+  },
+  {
+    "id": "abs_idempotent_empty_2d",
+    "relation": "abs_idempotent",
+    "seed": 3405,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-metamorphic-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_metamorphic_abs_idempotent",
+    "lhs_shape": [0, 3],
+    "lhs_values": [],
+    "lhs_dtype": "f64"
+  },
+  {
+    "id": "max_commutative_equal_values",
+    "relation": "max_commutative",
+    "seed": 3406,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-metamorphic-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_metamorphic_max_commutative",
+    "lhs_shape": [4],
+    "lhs_values": [3.0, 3.0, 3.0, 3.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [4],
+    "rhs_values": [3.0, 3.0, 3.0, 3.0],
+    "rhs_dtype": "f64"
+  },
+  {
+    "id": "max_commutative_negative_dominant",
+    "relation": "max_commutative",
+    "seed": 3407,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-ufunc-metamorphic-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_metamorphic_max_commutative",
+    "lhs_shape": [3],
+    "lhs_values": [-10.0, -20.0, -30.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [3],
+    "rhs_values": [-15.0, -5.0, -25.0],
+    "rhs_dtype": "f64"
+  },
+  {
+    "id": "max_commutative_scalar_broadcast",
+    "relation": "max_commutative",
+    "seed": 3408,
+    "mode": "strict",
+    "env_fingerprint": "fnp-ufunc-metamorphic-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
+    ],
+    "reason_code": "ufunc_metamorphic_max_commutative",
+    "lhs_shape": [2, 3],
+    "lhs_values": [1.0, 5.0, 2.0, 7.0, 3.0, 6.0],
+    "lhs_dtype": "f64",
+    "rhs_shape": [],
+    "rhs_values": [4.0],
+    "rhs_dtype": "f64"
   }
 ]
