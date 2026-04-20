@@ -25,10 +25,10 @@ use fnp_iter::{
 };
 use fnp_linalg::{
     LinAlgError, QrMode, batch_det, batch_inv, batch_solve, batch_trace, cholesky_2x2, cond_mxn,
-    eigvals_2x2, lstsq_output_shapes, matrix_power_nxn, pinv_2x2, qr_2x2, qr_output_shapes,
-    slogdet_2x2, solve_2x2, svd_2x2, svd_output_shapes, tensorsolve, validate_backend_bridge,
-    validate_policy_metadata as validate_linalg_policy_metadata, validate_spectral_branch,
-    validate_tolerance_policy,
+    cross_product, eigvals_2x2, lstsq_output_shapes, matrix_power_nxn, pinv_2x2, qr_2x2,
+    qr_output_shapes, slogdet_2x2, solve_2x2, svd_2x2, svd_output_shapes, tensorsolve,
+    validate_backend_bridge, validate_policy_metadata as validate_linalg_policy_metadata,
+    validate_spectral_branch, validate_tolerance_policy,
 };
 use fnp_ndarray::{MemoryOrder, NdLayout, broadcast_shape, contiguous_strides};
 use fnp_random::{
@@ -19056,6 +19056,12 @@ fn execute_linalg_operation(
                 pinv[0][0], pinv[0][1], pinv[1][0], pinv[1][1],
             ]))
         }
+        "cross_product" => {
+            // matrix[0] encodes vector `a`; rhs encodes vector `b`.
+            let a = input.matrix.first().cloned().unwrap_or_default();
+            let result = cross_product(&a, input.rhs)?;
+            Ok(LinalgOperationOutcome::SolveVector(result))
+        }
         _ => Err(LinAlgError::PolicyUnknownMetadata(
             "unsupported linalg operation",
         )),
@@ -19084,7 +19090,8 @@ fn validate_linalg_differential_expectation(
             Ok(())
         }
         (
-            "batch_det" | "batch_trace" | "batch_inv" | "batch_solve" | "tensorsolve",
+            "batch_det" | "batch_trace" | "batch_inv" | "batch_solve" | "tensorsolve"
+            | "cross_product",
             LinalgOperationOutcome::SolveVector(actual),
         ) => {
             if case.expected_solution.len() != actual.len() {
