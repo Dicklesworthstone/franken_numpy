@@ -24,11 +24,12 @@ use fnp_iter::{
     validate_flatiter_write, validate_nditer_flags,
 };
 use fnp_linalg::{
-    LinAlgError, QrMode, batch_det, batch_inv, batch_solve, batch_trace, cholesky_2x2, cond_mxn,
-    cross_product, eigvals_2x2, kron_nxn, lstsq_output_shapes, matrix_power_nxn, pinv_2x2, qr_2x2,
-    qr_output_shapes, slogdet_2x2, solve_2x2, svd_2x2, svd_output_shapes, tensorsolve,
-    validate_backend_bridge, validate_policy_metadata as validate_linalg_policy_metadata,
-    validate_spectral_branch, validate_tolerance_policy,
+    LinAlgError, QrMode, batch_det, batch_inv, batch_solve, batch_trace, cholesky_2x2,
+    cholesky_solve, cond_mxn, cross_product, eigvals_2x2, kron_nxn, lstsq_output_shapes,
+    matrix_power_nxn, pinv_2x2, qr_2x2, qr_output_shapes, slogdet_2x2, solve_2x2, svd_2x2,
+    svd_output_shapes, tensorsolve, validate_backend_bridge,
+    validate_policy_metadata as validate_linalg_policy_metadata, validate_spectral_branch,
+    validate_tolerance_policy,
 };
 use fnp_ndarray::{MemoryOrder, NdLayout, broadcast_shape, contiguous_strides};
 use fnp_random::{
@@ -19074,6 +19075,15 @@ fn execute_linalg_operation(
             let result = kron_nxn(&a, m, n, &b, p, q)?;
             Ok(LinalgOperationOutcome::SolveVector(result))
         }
+        "cholesky_solve" => {
+            // matrix[0] is the flat lower Cholesky factor L (n x n);
+            // rhs is the right-hand side vector b of length n;
+            // shape = [n, n].
+            let l = input.matrix.first().cloned().unwrap_or_default();
+            let n = input.shape.first().copied().unwrap_or(0);
+            let x = cholesky_solve(&l, input.rhs, n)?;
+            Ok(LinalgOperationOutcome::SolveVector(x))
+        }
         _ => Err(LinAlgError::PolicyUnknownMetadata(
             "unsupported linalg operation",
         )),
@@ -19103,7 +19113,7 @@ fn validate_linalg_differential_expectation(
         }
         (
             "batch_det" | "batch_trace" | "batch_inv" | "batch_solve" | "tensorsolve"
-            | "cross_product" | "kron",
+            | "cross_product" | "kron" | "cholesky_solve",
             LinalgOperationOutcome::SolveVector(actual),
         ) => {
             if case.expected_solution.len() != actual.len() {

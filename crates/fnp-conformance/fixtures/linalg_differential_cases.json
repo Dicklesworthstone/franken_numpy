@@ -1451,5 +1451,77 @@
       0.0, 0.0, 0.0, 0.0, 0.0, 1.0
     ],
     "expected_tolerance": 1e-12
+  },
+  {
+    "id": "linalg_cholesky_solve_1x1",
+    "operation": "cholesky_solve",
+    "seed": 8340,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.4.3",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [1, 1],
+    "matrix": [[3.0]],
+    "rhs": [27.0],
+    "expected_solution": [3.0],
+    "expected_tolerance": 1e-12
+  },
+  {
+    "id": "linalg_cholesky_solve_2x2_spd",
+    "operation": "cholesky_solve",
+    "seed": 8341,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.4.3",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [2, 2],
+    "matrix": [[1.4142135623730951, 0.0, 0.7071067811865475, 1.224744871391589]],
+    "rhs": [3.0, 4.0],
+    "expected_solution": [0.6666666666666666, 1.6666666666666667],
+    "expected_tolerance": 1e-10
+  },
+  {
+    "id": "linalg_cholesky_solve_3x3_spd",
+    "operation": "cholesky_solve",
+    "seed": 8342,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.4.3",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [3, 3],
+    "matrix": [[2.0, 0.0, 0.0, 6.0, 1.0, 0.0, -8.0, 5.0, 3.0]],
+    "rhs": [1.0, 2.0, 3.0],
+    "expected_solution": [28.58333333333338, -7.666666666666679, 1.3333333333333353],
+    "expected_tolerance": 1e-8
+  },
+  {
+    "id": "linalg_cholesky_solve_identity_L_returns_b",
+    "operation": "cholesky_solve",
+    "seed": 8343,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.4.3",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [3, 3],
+    "matrix": [[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]],
+    "rhs": [5.0, -2.0, 7.0],
+    "expected_solution": [5.0, -2.0, 7.0],
+    "expected_tolerance": 1e-12
   }
 ]
