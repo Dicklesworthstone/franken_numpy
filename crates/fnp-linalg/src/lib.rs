@@ -3523,6 +3523,73 @@ pub fn pinv_mxn_with_tolerance_aliases(
     pinv_mxn(a, m, n, resolved_rcond)
 }
 
+fn hermitian_from_lower_triangle(a: &[f64], n: usize) -> Vec<f64> {
+    let mut hermitian = vec![0.0; n * n];
+    for row in 0..n {
+        for col in 0..=row {
+            let value = a[row * n + col];
+            hermitian[row * n + col] = value;
+            hermitian[col * n + row] = value;
+        }
+    }
+    hermitian
+}
+
+/// Pseudoinverse of a real Hermitian NxN matrix (NumPy `pinv(..., hermitian=True)` semantics).
+///
+/// NumPy uses only the lower triangle when `hermitian=True`; the upper triangle is ignored.
+pub fn pinv_hermitian_nxn(a: &[f64], n: usize, rcond: f64) -> Result<Vec<f64>, LinAlgError> {
+    if Some(a.len()) != n.checked_mul(n) || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "pinv_hermitian_nxn: input must be n*n with n > 0",
+        ));
+    }
+    if a.iter().any(|v| !v.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "entries must be finite for pinv",
+        ));
+    }
+
+    let hermitian = hermitian_from_lower_triangle(a, n);
+    let (eigenvalues, eigenvectors) = eigh_nxn(&hermitian, n)?;
+    let sigma_max = eigenvalues
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0, f64::max);
+    let threshold = pinv_singular_value_cutoff(sigma_max, n, n, rcond);
+
+    let mut inverted = vec![0.0; n];
+    for (index, eigenvalue) in eigenvalues.iter().copied().enumerate() {
+        if eigenvalue.abs() > threshold {
+            inverted[index] = 1.0 / eigenvalue;
+        }
+    }
+
+    let mut result = vec![0.0; n * n];
+    for row in 0..n {
+        for col in 0..n {
+            let mut sum = 0.0;
+            for k in 0..n {
+                if inverted[k] != 0.0 {
+                    sum += eigenvectors[row * n + k] * inverted[k] * eigenvectors[col * n + k];
+                }
+            }
+            result[row * n + col] = sum;
+        }
+    }
+    Ok(result)
+}
+
+pub fn pinv_hermitian_nxn_with_tolerance_aliases(
+    a: &[f64],
+    n: usize,
+    rcond: Option<f64>,
+    rtol: Option<Option<f64>>,
+) -> Result<Vec<f64>, LinAlgError> {
+    let resolved_rcond = resolve_pinv_tolerance_aliases(rcond, rtol)?;
+    pinv_hermitian_nxn(a, n, resolved_rcond)
+}
+
 /// Helper: flat NxN matrix multiply C = A * B (row-major).
 fn mat_mul_flat(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
     let mut c = vec![0.0; n * n];
@@ -5293,6 +5360,8 @@ mod tests {
         multi_dot,
         pinv_2x2,
         pinv_2x2_with_tolerance_aliases,
+        pinv_hermitian_nxn,
+        pinv_hermitian_nxn_with_tolerance_aliases,
         pinv_mxn_with_tolerance_aliases,
         pinv_nxn,
         polar_nxn,
@@ -5695,6 +5764,25 @@ mod tests {
                 .expect("mxn default");
         assert!(approx_equal(mxn_default[0], 1.0, 1e-12));
         assert!(approx_equal(mxn_default[3], 1e12, 1.0));
+    }
+
+    #[test]
+    fn pinv_hermitian_uses_lower_triangle_like_numpy() {
+        let matrix = [2.0, 4.0, 1.0, 2.0];
+        let pinv = pinv_hermitian_nxn(&matrix, 2, -1.0).expect("hermitian pinv");
+        let expected = [2.0 / 3.0, -1.0 / 3.0, -1.0 / 3.0, 2.0 / 3.0];
+        for (index, (&got, &want)) in pinv.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                approx_equal(got, want, 1e-12),
+                "pinv[{index}] mismatch: got {got}, want {want}"
+            );
+        }
+
+        let cutoff =
+            pinv_hermitian_nxn_with_tolerance_aliases(&[1.0, 0.0, 0.0, 1e-12], 2, Some(1e-9), None)
+                .expect("hermitian cutoff");
+        assert!(approx_equal(cutoff[0], 1.0, 1e-12));
+        assert!(approx_equal(cutoff[3], 0.0, 1e-12));
     }
 
     #[test]
@@ -9517,6 +9605,86 @@ except Exception as exc:
         }
     }
 
+    fn numpy_oracle_pinv_hermitian(
+        a: &[f64],
+        n: usize,
+        rcond: Option<f64>,
+        rtol: Option<Option<f64>>,
+    ) -> PinvOracleOutcome {
+        let matrix_arg = format!(
+            "[{}]",
+            a.iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let rcond_arg = rcond
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "__omitted__".to_string());
+        let (rtol_state, rtol_value) = match rtol {
+            None => ("omitted".to_string(), String::new()),
+            Some(None) => ("none".to_string(), String::new()),
+            Some(Some(value)) => ("value".to_string(), value.to_string()),
+        };
+        let script = r#"
+import json
+import sys
+import numpy as np
+
+data = json.loads(sys.argv[1])
+n = int(sys.argv[2])
+rcond_arg = sys.argv[3]
+rtol_state = sys.argv[4]
+rtol_value = sys.argv[5]
+matrix = np.array(data, dtype=float).reshape((n, n))
+kwargs = {"hermitian": True}
+if rcond_arg != "__omitted__":
+    kwargs["rcond"] = float(rcond_arg)
+if rtol_state == "none":
+    kwargs["rtol"] = None
+elif rtol_state == "value":
+    kwargs["rtol"] = float(rtol_value)
+try:
+    result = np.linalg.pinv(matrix, **kwargs)
+    print("ok\t" + ",".join(str(value) for value in result.reshape(-1).tolist()))
+except Exception as exc:
+    print("err\t" + str(exc))
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(matrix_arg)
+            .arg(n.to_string())
+            .arg(rcond_arg)
+            .arg(rtol_state)
+            .arg(rtol_value)
+            .output()
+            .expect("python hermitian pinv oracle should launch");
+        assert!(
+            output.status.success(),
+            "NumPy hermitian pinv oracle must succeed"
+        );
+        let payload = String::from_utf8(output.stdout).expect("oracle stdout must be utf-8");
+        let trimmed = payload.trim();
+        let (kind, body) = trimmed
+            .split_once('\t')
+            .expect("oracle payload must include kind and body");
+        match kind {
+            "ok" => {
+                let values = if body.is_empty() {
+                    Vec::new()
+                } else {
+                    body.split(',')
+                        .map(|value| value.parse::<f64>().expect("oracle float"))
+                        .collect::<Vec<_>>()
+                };
+                PinvOracleOutcome::Values(values)
+            }
+            "err" => PinvOracleOutcome::Error(body.to_string()),
+            _ => panic!("unknown oracle payload kind: {kind}"),
+        }
+    }
+
     fn assert_oracle(label: &str, got: f64, expected: f64) {
         assert!(
             (got - expected).abs() < ORACLE_TOL,
@@ -9812,6 +9980,35 @@ except Exception as exc:
             assert_pinv_oracle_outcome(
                 &format!("mxn rcond={rcond:?} rtol={rtol:?}"),
                 &actual_mxn,
+                &expected,
+            );
+        }
+    }
+
+    #[test]
+    fn pinv_hermitian_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let matrix = [2.0, 4.0, 1.0, 2.0];
+        let cases = [
+            (None, None),
+            (Some(1e-9), None),
+            (None, Some(None)),
+            (None, Some(Some(1e-9))),
+            (Some(1e-9), Some(None)),
+        ];
+
+        for (rcond, rtol) in cases {
+            let expected = numpy_oracle_pinv_hermitian(&matrix, 2, rcond, rtol);
+            let actual = match pinv_hermitian_nxn_with_tolerance_aliases(&matrix, 2, rcond, rtol) {
+                Ok(values) => PinvOracleOutcome::Values(values),
+                Err(err) => PinvOracleOutcome::Error(format!("{err}")),
+            };
+            assert_pinv_oracle_outcome(
+                &format!("hermitian rcond={rcond:?} rtol={rtol:?}"),
+                &actual,
                 &expected,
             );
         }
