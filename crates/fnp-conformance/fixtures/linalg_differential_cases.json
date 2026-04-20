@@ -1523,5 +1523,181 @@
     "rhs": [5.0, -2.0, 7.0],
     "expected_solution": [5.0, -2.0, 7.0],
     "expected_tolerance": 1e-12
+  },
+  {
+    "id": "linalg_pinv_2x2_identity",
+    "operation": "pinv_2x2",
+    "seed": 8400,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.4.3",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "matrix": [[1.0, 0.0], [0.0, 1.0]],
+    "rcond": 1e-15,
+    "expected_solution": [1.0, 0.0, 0.0, 1.0],
+    "expected_tolerance": 1e-12
+  },
+  {
+    "id": "linalg_pinv_2x2_diagonal_scales_reciprocate",
+    "operation": "pinv_2x2",
+    "seed": 8401,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.4.3",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "matrix": [[2.0, 0.0], [0.0, 4.0]],
+    "rcond": 1e-15,
+    "expected_solution": [0.5, 0.0, 0.0, 0.25],
+    "expected_tolerance": 1e-12
+  },
+  {
+    "id": "linalg_pinv_2x2_rank_one_min_norm_solution",
+    "operation": "pinv_2x2",
+    "seed": 8402,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.4.3",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "matrix": [[1.0, 2.0], [2.0, 4.0]],
+    "rcond": 1e-15,
+    "expected_solution": [0.04, 0.08, 0.08, 0.16],
+    "expected_tolerance": 1e-10
+  },
+  {
+    "id": "linalg_pinv_2x2_zero_matrix_returns_zero",
+    "operation": "pinv_2x2",
+    "seed": 8403,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.4.3",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "matrix": [[0.0, 0.0], [0.0, 0.0]],
+    "rcond": 1e-15,
+    "expected_solution": [0.0, 0.0, 0.0, 0.0],
+    "expected_tolerance": 1e-12
+  },
+  {
+    "id": "linalg_matrix_power_zero_returns_identity",
+    "operation": "matrix_power",
+    "seed": 8404,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.4.3",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [2],
+    "matrix": [[1.0, 1.0, 0.0, 1.0]],
+    "rhs": [0.0],
+    "expected_solution": [1.0, 0.0, 0.0, 1.0],
+    "expected_tolerance": 1e-12
+  },
+  {
+    "id": "linalg_matrix_power_one_returns_self",
+    "operation": "matrix_power",
+    "seed": 8405,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.4.3",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [2],
+    "matrix": [[1.0, 1.0, 0.0, 1.0]],
+    "rhs": [1.0],
+    "expected_solution": [1.0, 1.0, 0.0, 1.0],
+    "expected_tolerance": 1e-12
+  },
+  {
+    "id": "linalg_matrix_power_rotation_squared_negates",
+    "operation": "matrix_power",
+    "seed": 8406,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.4.3",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [2],
+    "matrix": [[0.0, -1.0, 1.0, 0.0]],
+    "rhs": [2.0],
+    "expected_solution": [-1.0, 0.0, 0.0, -1.0],
+    "expected_tolerance": 1e-12
+  },
+  {
+    "id": "linalg_matrix_power_rotation_fourth_cycles_to_identity",
+    "operation": "matrix_power",
+    "seed": 8407,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.4.3",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [2],
+    "matrix": [[0.0, -1.0, 1.0, 0.0]],
+    "rhs": [4.0],
+    "expected_solution": [1.0, 0.0, 0.0, 1.0],
+    "expected_tolerance": 1e-12
+  },
+  {
+    "id": "linalg_matrix_power_negative_one_inverts_diagonal",
+    "operation": "matrix_power",
+    "seed": 8408,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.4.3",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [2],
+    "matrix": [[2.0, 0.0, 0.0, 3.0]],
+    "rhs": [-1.0],
+    "expected_solution": [0.5, 0.0, 0.0, 0.3333333333333333],
+    "expected_tolerance": 1e-10
+  },
+  {
+    "id": "linalg_matrix_power_negative_two_squares_inverse",
+    "operation": "matrix_power",
+    "seed": 8409,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.4.3",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [2],
+    "matrix": [[2.0, 0.0, 0.0, 3.0]],
+    "rhs": [-2.0],
+    "expected_solution": [0.25, 0.0, 0.0, 0.1111111111111111],
+    "expected_tolerance": 1e-10
   }
 ]
