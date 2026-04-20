@@ -3455,11 +3455,7 @@ pub fn pinv_mxn(a: &[f64], m: usize, n: usize, rcond: f64) -> Result<Vec<f64>, L
     let (u, s, vt) = svd_mxn_full(a, m, n)?;
     let k = s.len();
     let sigma_max = s.first().copied().unwrap_or(0.0);
-    let threshold = if rcond < 0.0 {
-        f64::EPSILON * (m.max(n) as f64) * sigma_max
-    } else {
-        rcond * sigma_max
-    };
+    let threshold = pinv_singular_value_cutoff(sigma_max, m, n, rcond);
 
     let mut s_inv = vec![0.0; k];
     for i in 0..k {
@@ -3487,6 +3483,44 @@ pub fn pinv_mxn(a: &[f64], m: usize, n: usize, rcond: f64) -> Result<Vec<f64>, L
 
 pub fn pinv_nxn(a: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgError> {
     pinv_mxn(a, m, n, -1.0)
+}
+
+fn resolve_pinv_tolerance_aliases(
+    rcond: Option<f64>,
+    rtol: Option<Option<f64>>,
+) -> Result<f64, LinAlgError> {
+    if rcond.is_some() && rtol.is_some() {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "`rtol` and `rcond` can't be both set.",
+        ));
+    }
+
+    Ok(match rtol {
+        Some(Some(value)) => value,
+        Some(None) => -1.0,
+        None => rcond.unwrap_or(-1.0),
+    })
+}
+
+fn pinv_singular_value_cutoff(sigma_max: f64, m: usize, n: usize, rcond: f64) -> f64 {
+    if rcond.is_nan() {
+        f64::INFINITY
+    } else if rcond < 0.0 {
+        f64::EPSILON * (m.max(n) as f64) * sigma_max
+    } else {
+        rcond * sigma_max
+    }
+}
+
+pub fn pinv_mxn_with_tolerance_aliases(
+    a: &[f64],
+    m: usize,
+    n: usize,
+    rcond: Option<f64>,
+    rtol: Option<Option<f64>>,
+) -> Result<Vec<f64>, LinAlgError> {
+    let resolved_rcond = resolve_pinv_tolerance_aliases(rcond, rtol)?;
+    pinv_mxn(a, m, n, resolved_rcond)
 }
 
 /// Helper: flat NxN matrix multiply C = A * B (row-major).
@@ -3692,80 +3726,18 @@ pub fn matrix_rank_2x2_tol(matrix: [[f64; 2]; 2], tol: Option<f64>) -> Result<us
 }
 
 pub fn pinv_2x2(matrix: [[f64; 2]; 2], rcond: f64) -> Result<[[f64; 2]; 2], LinAlgError> {
-    validate_tolerance_policy(rcond, 0)?;
-    validate_finite_matrix_2x2(matrix)?;
+    let flat = [matrix[0][0], matrix[0][1], matrix[1][0], matrix[1][1]];
+    let pinv = pinv_mxn(&flat, 2, 2, rcond)?;
+    Ok([[pinv[0], pinv[1]], [pinv[2], pinv[3]]])
+}
 
-    let a = matrix[0][0];
-    let b = matrix[0][1];
-    let c = matrix[1][0];
-    let d = matrix[1][1];
-
-    // Right-singular vectors are eigenvectors of A^T A.
-    let m00 = a.mul_add(a, c * c);
-    let m01 = a.mul_add(b, c * d);
-    let m11 = b.mul_add(b, d * d);
-    let trace = m00 + m11;
-    let det = m00 * m11 - m01 * m01;
-    let mut disc = trace.mul_add(trace, -4.0 * det);
-    if disc < 0.0 && disc.abs() <= f64::EPSILON * 32.0 {
-        disc = 0.0;
-    }
-    if disc < 0.0 || !disc.is_finite() {
-        return Err(LinAlgError::NormDetRankPolicyViolation(
-            "pinv eigendecomposition discriminant became invalid",
-        ));
-    }
-
-    let sqrt_disc = disc.sqrt();
-    let lambda_1 = ((trace + sqrt_disc) * 0.5).max(0.0);
-    let lambda_2 = ((trace - sqrt_disc) * 0.5).max(0.0);
-    let sigma_1 = lambda_1.sqrt();
-    let sigma_2 = lambda_2.sqrt();
-
-    let mut v1 = if m01.abs() > f64::EPSILON {
-        [m01, lambda_1 - m00]
-    } else if m00 >= m11 {
-        [1.0, 0.0]
-    } else {
-        [0.0, 1.0]
-    };
-    let v1_norm = (v1[0].mul_add(v1[0], v1[1] * v1[1])).sqrt();
-    if !v1_norm.is_finite() || v1_norm <= f64::EPSILON {
-        return Err(LinAlgError::NormDetRankPolicyViolation(
-            "pinv eigenvector normalization failed",
-        ));
-    }
-    v1[0] /= v1_norm;
-    v1[1] /= v1_norm;
-    let v2 = [-v1[1], v1[0]];
-    let sigmas = [sigma_1, sigma_2];
-    let vectors = [v1, v2];
-
-    let sigma_max = sigma_1;
-    if sigma_max <= f64::EPSILON {
-        return Ok([[0.0, 0.0], [0.0, 0.0]]);
-    }
-    let cutoff = sigma_max * rcond;
-
-    let mut pinv = [[0.0_f64; 2]; 2];
-    for idx in 0..2 {
-        let sigma = sigmas[idx];
-        if sigma <= cutoff {
-            continue;
-        }
-
-        let v = vectors[idx];
-        let av = [a.mul_add(v[0], b * v[1]), c.mul_add(v[0], d * v[1])];
-        let u = [av[0] / sigma, av[1] / sigma];
-        let inv_sigma = 1.0 / sigma;
-
-        pinv[0][0] += inv_sigma * v[0] * u[0];
-        pinv[0][1] += inv_sigma * v[0] * u[1];
-        pinv[1][0] += inv_sigma * v[1] * u[0];
-        pinv[1][1] += inv_sigma * v[1] * u[1];
-    }
-
-    Ok(pinv)
+pub fn pinv_2x2_with_tolerance_aliases(
+    matrix: [[f64; 2]; 2],
+    rcond: Option<f64>,
+    rtol: Option<Option<f64>>,
+) -> Result<[[f64; 2]; 2], LinAlgError> {
+    let resolved_rcond = resolve_pinv_tolerance_aliases(rcond, rtol)?;
+    pinv_2x2(matrix, resolved_rcond)
 }
 
 pub fn vector_norm(values: &[f64], ord: Option<VectorNormOrder>) -> Result<f64, LinAlgError> {
@@ -5319,6 +5291,8 @@ mod tests {
         matrix_rank_nxn_tol,
         multi_dot,
         pinv_2x2,
+        pinv_2x2_with_tolerance_aliases,
+        pinv_mxn_with_tolerance_aliases,
         pinv_nxn,
         polar_nxn,
         qr_2x2,
@@ -5686,6 +5660,40 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn pinv_tolerance_aliases_match_numpy_conflict_and_cutoff_semantics() {
+        let matrix = [[1.0, 0.0], [0.0, 1e-12]];
+
+        let default = pinv_2x2_with_tolerance_aliases(matrix, None, None).expect("default");
+        let explicit_none =
+            pinv_2x2_with_tolerance_aliases(matrix, None, Some(None)).expect("rtol none");
+        assert!(approx_equal(default[0][0], 1.0, 1e-12));
+        assert!(approx_equal(default[1][1], 1e12, 1.0));
+        assert_eq!(default, explicit_none);
+
+        let cutoff =
+            pinv_2x2_with_tolerance_aliases(matrix, None, Some(Some(1e-9))).expect("rtol cutoff");
+        assert!(approx_equal(cutoff[0][0], 1.0, 1e-12));
+        assert!(approx_equal(cutoff[1][1], 0.0, 1e-12));
+
+        let negative = pinv_2x2(matrix, -1.0).expect("negative rcond");
+        assert_eq!(negative, default);
+
+        let nan_rcond = pinv_2x2(matrix, f64::NAN).expect("nan rcond");
+        assert!(approx_equal(nan_rcond[0][0], 0.0, 1e-12));
+        assert!(approx_equal(nan_rcond[1][1], 0.0, 1e-12));
+
+        let err = pinv_2x2_with_tolerance_aliases(matrix, Some(1e-9), Some(None))
+            .expect_err("both rcond and rtol");
+        assert_eq!(format!("{err}"), "`rtol` and `rcond` can't be both set.");
+
+        let mxn_default =
+            pinv_mxn_with_tolerance_aliases(&[1.0, 0.0, 0.0, 1e-12], 2, 2, None, None)
+                .expect("mxn default");
+        assert!(approx_equal(mxn_default[0], 1.0, 1e-12));
+        assert!(approx_equal(mxn_default[3], 1e12, 1.0));
     }
 
     #[test]
@@ -9422,6 +9430,92 @@ print(int(rank))
             .expect("oracle rank")
     }
 
+    #[derive(Debug, Clone, PartialEq)]
+    enum PinvOracleOutcome {
+        Values(Vec<f64>),
+        Error(String),
+    }
+
+    fn numpy_oracle_pinv_tolerance_aliases(
+        a: &[f64],
+        m: usize,
+        n: usize,
+        rcond: Option<f64>,
+        rtol: Option<Option<f64>>,
+    ) -> PinvOracleOutcome {
+        let matrix_arg = format!(
+            "[{}]",
+            a.iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let rcond_arg = rcond
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "__omitted__".to_string());
+        let (rtol_state, rtol_value) = match rtol {
+            None => ("omitted".to_string(), String::new()),
+            Some(None) => ("none".to_string(), String::new()),
+            Some(Some(value)) => ("value".to_string(), value.to_string()),
+        };
+        let script = r#"
+import json
+import sys
+import numpy as np
+
+data = json.loads(sys.argv[1])
+m = int(sys.argv[2])
+n = int(sys.argv[3])
+rcond_arg = sys.argv[4]
+rtol_state = sys.argv[5]
+rtol_value = sys.argv[6]
+matrix = np.array(data, dtype=float).reshape((m, n))
+kwargs = {}
+if rcond_arg != "__omitted__":
+    kwargs["rcond"] = float(rcond_arg)
+if rtol_state == "none":
+    kwargs["rtol"] = None
+elif rtol_state == "value":
+    kwargs["rtol"] = float(rtol_value)
+try:
+    result = np.linalg.pinv(matrix, **kwargs)
+    print("ok\t" + ",".join(str(value) for value in result.reshape(-1).tolist()))
+except Exception as exc:
+    print("err\t" + str(exc))
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(matrix_arg)
+            .arg(m.to_string())
+            .arg(n.to_string())
+            .arg(rcond_arg)
+            .arg(rtol_state)
+            .arg(rtol_value)
+            .output()
+            .expect("python oracle should launch");
+        assert!(output.status.success(), "NumPy pinv oracle must succeed");
+        let payload = String::from_utf8(output.stdout).expect("oracle stdout must be utf-8");
+        let trimmed = payload.trim();
+        let (kind, body) = trimmed
+            .split_once('\t')
+            .expect("oracle payload must include kind and body");
+        match kind {
+            "ok" => {
+                let values = if body.is_empty() {
+                    Vec::new()
+                } else {
+                    body.split(',')
+                        .map(|value| value.parse::<f64>().expect("oracle float"))
+                        .collect::<Vec<_>>()
+                };
+                PinvOracleOutcome::Values(values)
+            }
+            "err" => PinvOracleOutcome::Error(body.to_string()),
+            _ => panic!("unknown oracle payload kind: {kind}"),
+        }
+    }
+
     fn assert_oracle(label: &str, got: f64, expected: f64) {
         assert!(
             (got - expected).abs() < ORACLE_TOL,
@@ -9438,6 +9532,30 @@ print(int(rank))
                 "{label}[{i}]: got {g:.17e}, expected {e:.17e}, diff {:.2e}",
                 (g - e).abs()
             );
+        }
+    }
+
+    fn assert_pinv_oracle_outcome(
+        label: &str,
+        actual: &PinvOracleOutcome,
+        expected: &PinvOracleOutcome,
+    ) {
+        match (actual, expected) {
+            (PinvOracleOutcome::Values(actual), PinvOracleOutcome::Values(expected)) => {
+                assert_eq!(actual.len(), expected.len(), "{label}: length mismatch");
+                for (index, (&got, &want)) in actual.iter().zip(expected.iter()).enumerate() {
+                    let tol = ORACLE_TOL * want.abs().max(1.0);
+                    assert!(
+                        (got - want).abs() <= tol,
+                        "{label}[{index}]: got {got:.17e}, expected {want:.17e}, diff {:.2e}",
+                        (got - want).abs()
+                    );
+                }
+            }
+            (PinvOracleOutcome::Error(actual), PinvOracleOutcome::Error(expected)) => {
+                assert_eq!(actual, expected, "{label}: error mismatch");
+            }
+            _ => panic!("{label}: outcome kind mismatch actual={actual:?} expected={expected:?}"),
         }
     }
 
@@ -9607,6 +9725,56 @@ print(int(rank))
             let actual = matrix_rank_nxn_tol(&diag3, 3, tol).expect("rank");
             let expected = numpy_oracle_matrix_rank_tol(&diag3, 3, 3, tol);
             assert_eq!(actual, expected, "diag3 tol={tol:?}");
+        }
+    }
+
+    #[test]
+    fn pinv_tolerance_aliases_match_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let matrix = [1.0, 0.0, 0.0, 1e-12];
+        let cases = [
+            (None, None),
+            (None, Some(None)),
+            (None, Some(Some(1e-9))),
+            (Some(-1.0), None),
+            (Some(f64::NAN), None),
+            (Some(1e-9), Some(None)),
+        ];
+
+        for (rcond, rtol) in cases {
+            let expected = numpy_oracle_pinv_tolerance_aliases(&matrix, 2, 2, rcond, rtol);
+
+            let actual_2x2 = match pinv_2x2_with_tolerance_aliases(
+                [[matrix[0], matrix[1]], [matrix[2], matrix[3]]],
+                rcond,
+                rtol,
+            ) {
+                Ok(values) => PinvOracleOutcome::Values(vec![
+                    values[0][0],
+                    values[0][1],
+                    values[1][0],
+                    values[1][1],
+                ]),
+                Err(err) => PinvOracleOutcome::Error(format!("{err}")),
+            };
+            assert_pinv_oracle_outcome(
+                &format!("2x2 rcond={rcond:?} rtol={rtol:?}"),
+                &actual_2x2,
+                &expected,
+            );
+
+            let actual_mxn = match pinv_mxn_with_tolerance_aliases(&matrix, 2, 2, rcond, rtol) {
+                Ok(values) => PinvOracleOutcome::Values(values),
+                Err(err) => PinvOracleOutcome::Error(format!("{err}")),
+            };
+            assert_pinv_oracle_outcome(
+                &format!("mxn rcond={rcond:?} rtol={rtol:?}"),
+                &actual_mxn,
+                &expected,
+            );
         }
     }
 
