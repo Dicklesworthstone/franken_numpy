@@ -31,6 +31,8 @@ pub const MAX_DISPATCH_RETRIES: usize = 8;
 /// Maximum validation retries for memory-mapped file integrity checks. Higher than
 /// dispatch retries because filesystem caching can cause transient inconsistencies.
 pub const MAX_MEMMAP_VALIDATION_RETRIES: usize = 64;
+/// NumPy pads `.npy` headers to a 64-byte boundary for mmap-friendly payload alignment.
+pub const NPY_ARRAY_ALIGN: usize = 64;
 
 pub const IO_PACKET_REASON_CODES: [&str; 10] = [
     "io_magic_invalid",
@@ -441,7 +443,8 @@ fn encode_npy_header_bytes(header: &NpyHeader, version: (u8, u8)) -> Result<Vec<
             .ok_or(IOError::HeaderSchemaInvalid(
                 "header bytes must be within bounded budget",
             ))?;
-    let padding = (16 - ((prefix_len + base_header_len) % 16)) % 16;
+    let padding =
+        (NPY_ARRAY_ALIGN - ((prefix_len + base_header_len) % NPY_ARRAY_ALIGN)) % NPY_ARRAY_ALIGN;
     let header_len = base_header_len
         .checked_add(padding)
         .ok_or(IOError::HeaderSchemaInvalid(
@@ -3696,7 +3699,8 @@ pub fn save_structured(
     let length_field_size = 2usize;
     let prefix_len = NPY_MAGIC_PREFIX.len() + 2 + length_field_size;
     let base_header_len = dict_bytes.len() + 1; // +1 for trailing newline
-    let padding = (16 - ((prefix_len + base_header_len) % 16)) % 16;
+    let padding =
+        (NPY_ARRAY_ALIGN - ((prefix_len + base_header_len) % NPY_ARRAY_ALIGN)) % NPY_ARRAY_ALIGN;
     let header_len = base_header_len + padding;
 
     if header_len > MAX_HEADER_BYTES {
@@ -3952,16 +3956,16 @@ mod tests {
         GenFromTxtConfig, IO_PACKET_ID, IO_PACKET_REASON_CODES, IOError, IOLogRecord,
         IORuntimeMode, IOSupportedDType, LoadBytes, LoadDispatch, MAX_ARCHIVE_MEMBERS,
         MAX_DISPATCH_RETRIES, MAX_HEADER_BYTES, MAX_MEMMAP_VALIDATION_RETRIES, MemmapMode,
-        NPY_MAGIC_PREFIX, NPZ_EMPTY_PREFIX, NPZ_MAGIC_PREFIX, NpyHeader, NpzCompression,
-        SaveTxtConfig, StructuredIODescriptor, StructuredIOField, classify_load_dispatch,
-        crc32_ieee, encode_npy_header_bytes, enforce_pickle_policy, fromfile, fromfile_complex,
-        fromfile_strings, fromfile_structured, fromfile_text, fromfile_text_with_budget,
-        fromstring, genfromtxt, genfromtxt_full, load, load_auto, load_complex, load_npz,
-        load_strings, load_structured, loadtxt, loadtxt_unpack, loadtxt_usecols, memmap,
-        memmap_npy, open_memmap, parse_structured_descr, read_npy_bytes, read_npz_bytes, save,
-        save_complex, save_strings, save_structured, savetxt, savez, savez_compressed,
-        synthesize_npz_member_names, tobytes, tofile, tofile_complex, tofile_strings,
-        tofile_structured, tofile_text, tostring, validate_descriptor_roundtrip,
+        NPY_ARRAY_ALIGN, NPY_MAGIC_PREFIX, NPZ_EMPTY_PREFIX, NPZ_MAGIC_PREFIX, NpyHeader,
+        NpzCompression, SaveTxtConfig, StructuredIODescriptor, StructuredIOField,
+        classify_load_dispatch, crc32_ieee, encode_npy_header_bytes, enforce_pickle_policy,
+        fromfile, fromfile_complex, fromfile_strings, fromfile_structured, fromfile_text,
+        fromfile_text_with_budget, fromstring, genfromtxt, genfromtxt_full, load, load_auto,
+        load_complex, load_npz, load_strings, load_structured, loadtxt, loadtxt_unpack,
+        loadtxt_usecols, memmap, memmap_npy, open_memmap, parse_structured_descr, read_npy_bytes,
+        read_npz_bytes, save, save_complex, save_strings, save_structured, savetxt, savez,
+        savez_compressed, synthesize_npz_member_names, tobytes, tofile, tofile_complex,
+        tofile_strings, tofile_structured, tofile_text, tostring, validate_descriptor_roundtrip,
         validate_header_schema, validate_io_policy_metadata, validate_magic_version,
         validate_memmap_contract, validate_npz_archive_budget, validate_read_payload,
         validate_write_contract, write_npy_bytes, write_npy_bytes_with_version, write_npy_preamble,
@@ -6861,8 +6865,7 @@ mm.flush()
         }
         arr.flush().expect("flush 2D");
 
-        let reopen =
-            memmap_npy(&path, MemmapMode::ReadOnly).expect("reopen as readonly for check");
+        let reopen = memmap_npy(&path, MemmapMode::ReadOnly).expect("reopen as readonly for check");
         assert_eq!(reopen.shape, vec![2, 3]);
         assert_eq!(
             reopen.to_f64_values().unwrap(),
@@ -7260,7 +7263,11 @@ mm.flush()
             header_str.contains("False"),
             "fortran_order should be False"
         );
-        // Total preamble + header must be divisible by 16 (NumPy v1 alignment)
-        assert_eq!((10 + header_len) % 16, 0, "header not 16-byte aligned");
+        // Total preamble + header must be divisible by 64 (NumPy ARRAY_ALIGN)
+        assert_eq!(
+            (10 + header_len) % NPY_ARRAY_ALIGN,
+            0,
+            "header not 64-byte aligned"
+        );
     }
 }
