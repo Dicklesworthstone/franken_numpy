@@ -288,5 +288,173 @@
     "data_values": [2.0, 4.0, 6.0, 8.0, 10.0],
     "mask": [false, false, false, false, false],
     "data_dtype": "f64"
+  },
+  {
+    "id": "masked_compress_idempotent_all_unmasked",
+    "relation": "masked_compress_idempotent",
+    "seed": 11200,
+    "mode": "strict",
+    "env_fingerprint": "fnp-masked-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_metamorphic_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_metamorphic_compress_idempotent_contract",
+    "data_shape": [6],
+    "data_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "mask": [false, false, false, false, false, false],
+    "data_dtype": "f64"
+  },
+  {
+    "id": "masked_compress_idempotent_fully_masked",
+    "relation": "masked_compress_idempotent",
+    "seed": 11201,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-masked-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_metamorphic_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_metamorphic_compress_idempotent_contract",
+    "data_shape": [4],
+    "data_values": [7.0, 8.0, 9.0, 10.0],
+    "mask": [true, true, true, true],
+    "data_dtype": "f64"
+  },
+  {
+    "id": "masked_add_commutative_2d_disjoint_masks",
+    "relation": "masked_add_commutative",
+    "seed": 11202,
+    "mode": "strict",
+    "env_fingerprint": "fnp-masked-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_metamorphic_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_metamorphic_add_commutative_contract",
+    "a_shape": [2, 3],
+    "a_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "a_mask": [true, false, true, false, true, false],
+    "b_shape": [2, 3],
+    "b_values": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+    "b_mask": [false, true, false, true, false, true],
+    "data_dtype": "f64"
+  },
+  {
+    "id": "masked_add_commutative_all_masked_one_side",
+    "relation": "masked_add_commutative",
+    "seed": 11203,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-masked-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_metamorphic_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_metamorphic_add_commutative_contract",
+    "a_shape": [3],
+    "a_values": [1.0, 2.0, 3.0],
+    "a_mask": [true, true, true],
+    "b_shape": [3],
+    "b_values": [100.0, 200.0, 300.0],
+    "b_mask": [false, false, false],
+    "data_dtype": "f64"
+  },
+  {
+    "id": "masked_mul_one_identity_2d_checker",
+    "relation": "masked_mul_one_identity",
+    "seed": 11204,
+    "mode": "strict",
+    "env_fingerprint": "fnp-masked-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_metamorphic_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_metamorphic_mul_one_identity_contract",
+    "data_shape": [2, 2],
+    "data_values": [7.0, -3.0, 1.5, 0.0],
+    "mask": [false, true, true, false],
+    "data_dtype": "f64"
+  },
+  {
+    "id": "masked_mul_one_identity_nomask_preserves",
+    "relation": "masked_mul_one_identity",
+    "seed": 11205,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-masked-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_metamorphic_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_metamorphic_mul_one_identity_contract",
+    "data_shape": [5],
+    "data_values": [1e-10, 1e10, -1e10, 0.5, -0.5],
+    "mask": [false, false, false, false, false],
+    "data_dtype": "f64"
+  },
+  {
+    "id": "masked_count_complement_mostly_masked",
+    "relation": "masked_count_complement",
+    "seed": 11206,
+    "mode": "strict",
+    "env_fingerprint": "fnp-masked-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_metamorphic_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_metamorphic_count_complement_contract",
+    "data_shape": [10],
+    "data_values": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+    "mask": [true, true, true, true, true, true, true, true, false, false],
+    "data_dtype": "f64"
+  },
+  {
+    "id": "masked_count_complement_alternating_2d",
+    "relation": "masked_count_complement",
+    "seed": 11207,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-masked-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_metamorphic_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_metamorphic_count_complement_contract",
+    "data_shape": [3, 4],
+    "data_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+    "mask": [true, false, true, false, false, true, false, true, true, false, true, false],
+    "data_dtype": "f64"
+  },
+  {
+    "id": "masked_filled_unmasked_unchanged_no_mask",
+    "relation": "masked_filled_unmasked_unchanged",
+    "seed": 11208,
+    "mode": "strict",
+    "env_fingerprint": "fnp-masked-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_metamorphic_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_metamorphic_filled_unchanged_contract",
+    "data_shape": [4],
+    "data_values": [10.0, 20.0, 30.0, 40.0],
+    "mask": [false, false, false, false],
+    "fill_value": -9999.0,
+    "data_dtype": "f64"
+  },
+  {
+    "id": "masked_filled_unmasked_unchanged_2d_sparse_mask",
+    "relation": "masked_filled_unmasked_unchanged",
+    "seed": 11209,
+    "mode": "hardened",
+    "env_fingerprint": "fnp-masked-packet-f",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/masked_metamorphic_cases.json",
+      "crates/fnp-masked/src/lib.rs"
+    ],
+    "reason_code": "masked_metamorphic_filled_unchanged_contract",
+    "data_shape": [2, 4],
+    "data_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "mask": [false, false, false, true, false, false, false, true],
+    "fill_value": 0.0,
+    "data_dtype": "f64"
   }
 ]
