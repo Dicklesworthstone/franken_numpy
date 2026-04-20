@@ -17985,36 +17985,38 @@ impl UFuncArray {
             return Ok((path, desc));
         }
 
-        // Greedy algorithm: repeatedly contract the pair with smallest result
-        let mut remaining: Vec<usize> = (0..n).collect();
-        let mut path = Vec::new();
-        let mut sizes: Vec<usize> = operands.iter().map(|o| o.values.len()).collect();
+        let output_labels: Vec<char> = parts[1].chars().filter(|c| *c != '.').collect();
+        let output_str: String = output_labels.iter().collect();
 
-        while remaining.len() > 1 {
-            // Find the pair (i, j) with smallest product of sizes
-            let mut best_i = 0;
-            let mut best_j = 1;
-            let mut best_cost = sizes[remaining[0]] * sizes[remaining[1]];
-            for i in 0..remaining.len() {
-                for j in (i + 1)..remaining.len() {
-                    let cost = sizes[remaining[i]] * sizes[remaining[j]];
-                    if cost < best_cost {
-                        best_i = i;
-                        best_j = j;
-                        best_cost = cost;
-                    }
-                }
-            }
-            let idx_a = remaining[best_j]; // remove larger index first
-            let idx_b = remaining[best_i];
-            path.push(vec![idx_b, idx_a]);
-            // The result replaces the lower index in the remaining list
-            remaining.remove(best_j);
-            remaining.remove(best_i);
-            // Add a new "virtual" operand
-            let new_size = best_cost.max(1); // approximate
-            sizes.push(new_size);
-            remaining.push(sizes.len() - 1);
+        // Greedy algorithm: repeatedly contract the pair that removes the most
+        // intermediate work, matching NumPy's preference for inner contractions
+        // before Hadamard- or outer-style steps.
+        let mut path = Vec::new();
+        let mut current_subs: Vec<String> = input_subs.iter().map(|s| s.to_string()).collect();
+        let mut current_shapes: Vec<Vec<usize>> =
+            operands.iter().map(|o| o.shape.clone()).collect();
+
+        while current_shapes.len() > 1 {
+            let (best_lo, best_hi) =
+                Self::pick_greedy_pair_from_specs(&current_shapes, &current_subs, &output_labels);
+            path.push(vec![best_lo, best_hi]);
+
+            let (inter_str, inter_shape) = Self::build_einsum_intermediate(
+                &current_subs,
+                &current_shapes,
+                &output_labels,
+                best_lo,
+                best_hi,
+                current_shapes.len() == 2,
+                &output_str,
+            );
+
+            current_shapes.remove(best_hi);
+            current_subs.remove(best_hi);
+            current_shapes.remove(best_lo);
+            current_subs.remove(best_lo);
+            current_shapes.push(inter_shape);
+            current_subs.push(inter_str);
         }
 
         let input_sizes: Vec<usize> = operands.iter().map(|o| o.values.len()).collect();
@@ -18096,35 +18098,23 @@ impl UFuncArray {
             let (best_lo, best_hi) = if optimize == "optimal" && current_ops.len() <= 10 {
                 Self::pick_optimal_pair(&current_ops, &current_subs, &output_labels)
             } else {
-                Self::pick_greedy_pair(&current_ops)
+                Self::pick_greedy_pair(&current_ops, &current_subs, &output_labels)
             };
 
             let sub_a = current_subs[best_lo].clone();
             let sub_b = current_subs[best_hi].clone();
-
-            // Determine intermediate output: labels needed by remaining operands or final output
-            let mut needed: std::collections::HashSet<char> =
-                output_labels.iter().copied().collect();
-            for (idx, s) in current_subs.iter().enumerate() {
-                if idx != best_lo && idx != best_hi {
-                    for c in s.chars() {
-                        needed.insert(c);
-                    }
-                }
-            }
-            let mut inter_labels: Vec<char> = Vec::new();
-            for c in sub_a.chars().chain(sub_b.chars()) {
-                if needed.contains(&c) && !inter_labels.contains(&c) {
-                    inter_labels.push(c);
-                }
-            }
-
-            // If this is the last pair, use the final output labels
-            let inter_str: String = if current_ops.len() == 2 {
-                output_str.clone()
-            } else {
-                inter_labels.iter().collect()
-            };
+            let (inter_str, _inter_shape) = Self::build_einsum_intermediate(
+                &current_subs,
+                &current_ops
+                    .iter()
+                    .map(|op| op.shape.clone())
+                    .collect::<Vec<_>>(),
+                &output_labels,
+                best_lo,
+                best_hi,
+                current_ops.len() == 2,
+                &output_str,
+            );
 
             let pair_sub = format!("{sub_a},{sub_b}->{inter_str}");
             let result = Self::einsum(&pair_sub, &[&current_ops[best_lo], &current_ops[best_hi]])?;
@@ -18148,22 +18138,151 @@ impl UFuncArray {
         }
     }
 
-    /// Pick the pair with smallest element-count product (greedy).
-    fn pick_greedy_pair(ops: &[Self]) -> (usize, usize) {
-        let mut best_lo = 0;
-        let mut best_hi = 1;
-        let mut best_cost = ops[0].values.len() * ops[1].values.len();
-        for i in 0..ops.len() {
-            for j in (i + 1)..ops.len() {
-                let cost = ops[i].values.len() * ops[j].values.len();
-                if cost < best_cost {
-                    best_lo = i;
-                    best_hi = j;
-                    best_cost = cost;
+    fn build_einsum_intermediate(
+        subs: &[String],
+        shapes: &[Vec<usize>],
+        output_labels: &[char],
+        best_lo: usize,
+        best_hi: usize,
+        final_pair: bool,
+        output_str: &str,
+    ) -> (String, Vec<usize>) {
+        let mut needed: std::collections::HashSet<char> = output_labels.iter().copied().collect();
+        for (idx, s) in subs.iter().enumerate() {
+            if idx != best_lo && idx != best_hi {
+                for c in s.chars() {
+                    needed.insert(c);
                 }
             }
         }
+
+        let mut label_sizes = std::collections::HashMap::new();
+        for (shape, sub) in [
+            (shapes[best_lo].as_slice(), &subs[best_lo]),
+            (shapes[best_hi].as_slice(), &subs[best_hi]),
+        ] {
+            for (idx, c) in sub.chars().enumerate() {
+                if idx < shape.len() {
+                    label_sizes.entry(c).or_insert(shape[idx]);
+                }
+            }
+        }
+
+        let inter_labels: Vec<char> = if final_pair {
+            output_labels.to_vec()
+        } else {
+            let mut labels = Vec::new();
+            for c in subs[best_lo].chars().chain(subs[best_hi].chars()) {
+                if needed.contains(&c) && !labels.contains(&c) {
+                    labels.push(c);
+                }
+            }
+            labels
+        };
+        let inter_str = if final_pair {
+            output_str.to_string()
+        } else {
+            inter_labels.iter().collect()
+        };
+        let inter_shape = inter_labels
+            .iter()
+            .filter_map(|label| label_sizes.get(label).copied())
+            .collect::<Vec<_>>();
+
+        (inter_str, inter_shape)
+    }
+
+    fn greedy_pair_sort_key(
+        shapes: &[Vec<usize>],
+        subs: &[String],
+        output_labels: &[char],
+        i: usize,
+        j: usize,
+    ) -> (std::cmp::Reverse<usize>, usize, usize, usize) {
+        let input_sizes = shapes[i].iter().product::<usize>() + shapes[j].iter().product::<usize>();
+        let mut label_sizes = std::collections::HashMap::new();
+        for (shape, sub) in [
+            (shapes[i].as_slice(), &subs[i]),
+            (shapes[j].as_slice(), &subs[j]),
+        ] {
+            for (idx, c) in sub.chars().enumerate() {
+                if idx < shape.len() {
+                    label_sizes.entry(c).or_insert(shape[idx]);
+                }
+            }
+        }
+
+        let contract_labels = subs[i]
+            .chars()
+            .chain(subs[j].chars())
+            .collect::<std::collections::HashSet<_>>();
+        let mut remaining_labels: std::collections::HashSet<char> =
+            output_labels.iter().copied().collect();
+        for (idx, sub) in subs.iter().enumerate() {
+            if idx != i && idx != j {
+                for label in sub.chars() {
+                    remaining_labels.insert(label);
+                }
+            }
+        }
+        let new_result_labels = contract_labels
+            .iter()
+            .filter(|label| remaining_labels.contains(label))
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        let new_size = new_result_labels
+            .iter()
+            .map(|label| label_sizes.get(label).copied().unwrap_or(1))
+            .product::<usize>()
+            .max(1);
+        let removed_size = input_sizes.saturating_sub(new_size);
+        let idx_removed = contract_labels.difference(&new_result_labels).count();
+        let cost = contract_labels
+            .iter()
+            .map(|label| label_sizes.get(label).copied().unwrap_or(1))
+            .product::<usize>()
+            * if idx_removed > 0 { 2 } else { 1 };
+
+        (std::cmp::Reverse(removed_size), cost, i, j)
+    }
+
+    fn pick_greedy_pair_from_specs(
+        shapes: &[Vec<usize>],
+        subs: &[String],
+        output_labels: &[char],
+    ) -> (usize, usize) {
+        let mut best_shared: Option<(std::cmp::Reverse<usize>, usize, usize, usize)> = None;
+        let mut best_any: Option<(std::cmp::Reverse<usize>, usize, usize, usize)> = None;
+
+        for i in 0..shapes.len() {
+            for j in (i + 1)..shapes.len() {
+                let key = Self::greedy_pair_sort_key(shapes, subs, output_labels, i, j);
+                if best_any.as_ref().is_none_or(|best| key < *best) {
+                    best_any = Some(key);
+                }
+
+                let labels_i = subs[i].chars().collect::<std::collections::HashSet<_>>();
+                let labels_j = subs[j].chars().collect::<std::collections::HashSet<_>>();
+                if !labels_i.is_disjoint(&labels_j)
+                    && best_shared.as_ref().is_none_or(|best| key < *best)
+                {
+                    best_shared = Some(key);
+                }
+            }
+        }
+
+        let (_, _, best_lo, best_hi) =
+            best_shared
+                .or(best_any)
+                .unwrap_or((std::cmp::Reverse(0), usize::MAX, 0, 1));
         (best_lo, best_hi)
+    }
+
+    /// Pick the pair with NumPy-style greedy priority: maximize removed
+    /// intermediate size, then minimize flop cost.
+    fn pick_greedy_pair(ops: &[Self], subs: &[String], output_labels: &[char]) -> (usize, usize) {
+        let shapes = ops.iter().map(|op| op.shape.clone()).collect::<Vec<_>>();
+        Self::pick_greedy_pair_from_specs(&shapes, subs, output_labels)
     }
 
     /// Pick the optimal pair by trying all pairs and choosing the one that
@@ -31775,6 +31894,61 @@ print(",".join(str(float(value)) for value in dst.reshape(-1)))
             .collect()
     }
 
+    fn numpy_oracle_einsum_path(
+        subscripts: &str,
+        shapes: &[Vec<usize>],
+        optimize: &str,
+    ) -> Result<String, String> {
+        let shape_spec = shapes
+            .iter()
+            .map(|shape| {
+                shape
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        let script = r#"
+import sys
+import numpy as np
+
+subscripts = sys.argv[1]
+shape_spec = sys.argv[2]
+optimize = sys.argv[3]
+operands = []
+for encoded in shape_spec.split(";"):
+    shape = tuple(int(part) for part in encoded.split(",") if part)
+    operands.append(np.zeros(shape, dtype=float))
+path, _ = np.einsum_path(subscripts, *operands, optimize=optimize)
+steps = []
+for step in path[1:]:
+    if isinstance(step, tuple):
+        steps.append("(" + ",".join(str(value) for value in step) + ")")
+    else:
+        steps.append(str(step))
+print("ok:" + ";".join(steps))
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(subscripts)
+            .arg(shape_spec)
+            .arg(optimize)
+            .output()
+            .map_err(|err| format!("failed to launch NumPy einsum_path oracle: {err}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "NumPy einsum_path oracle failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        String::from_utf8(output.stdout)
+            .map_err(|err| format!("oracle stdout must be utf-8: {err}"))
+            .map(|stdout| stdout.trim().to_string())
+    }
+
     fn numpy_oracle_notmasked_edges(
         masked: &MaskedArray,
         axis: Option<isize>,
@@ -44333,6 +44507,21 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn einsum_path_greedy_prefers_larger_reduction_like_numpy() {
+        let a = UFuncArray::new(vec![32, 2], vec![1.0; 64], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![2, 32], vec![1.0; 64], DType::F64).unwrap();
+        let c = UFuncArray::new(vec![32, 8], vec![1.0; 256], DType::F64).unwrap();
+
+        let (path, _desc) = UFuncArray::einsum_path("ab,bc,cd->ad", &[&a, &b, &c]).unwrap();
+        assert_eq!(path, vec![vec![1, 2], vec![0, 1]]);
+
+        let brute = UFuncArray::einsum("ab,bc,cd->ad", &[&a, &b, &c]).unwrap();
+        let greedy = UFuncArray::einsum_optimized("ab,bc,cd->ad", &[&a, &b, &c], "greedy").unwrap();
+        assert_eq!(greedy.shape(), brute.shape());
+        assert_eq!(greedy.values(), brute.values());
+    }
+
+    #[test]
     fn einsum_path_mismatch() {
         let a = UFuncArray::new(vec![2], vec![0.0; 2], DType::F64).unwrap();
         assert!(UFuncArray::einsum_path("i,j->ij", &[&a]).is_err());
@@ -45175,6 +45364,31 @@ print(json.dumps(payload))
             dst.copyto(&src, mask.as_ref(), None).unwrap();
             assert_eq!(dst.values(), expected.as_slice());
         }
+    }
+
+    #[test]
+    fn einsum_path_greedy_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let shapes = vec![vec![32, 2], vec![2, 32], vec![32, 8]];
+        let expected = numpy_oracle_einsum_path("ab,bc,cd->ad", &shapes, "greedy");
+        assert!(
+            expected.is_ok(),
+            "{}",
+            expected
+                .as_deref()
+                .err()
+                .map_or("NumPy einsum_path oracle failed", |err| err)
+        );
+        assert_eq!(expected.unwrap_or_default(), "ok:(1,2);(0,1)");
+
+        let a = UFuncArray::new(vec![32, 2], vec![1.0; 64], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![2, 32], vec![1.0; 64], DType::F64).unwrap();
+        let c = UFuncArray::new(vec![32, 8], vec![1.0; 256], DType::F64).unwrap();
+        let (path, _desc) = UFuncArray::einsum_path("ab,bc,cd->ad", &[&a, &b, &c]).unwrap();
+        assert_eq!(path, vec![vec![1, 2], vec![0, 1]]);
     }
 
     #[test]
