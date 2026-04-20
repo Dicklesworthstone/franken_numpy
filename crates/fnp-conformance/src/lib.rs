@@ -25,7 +25,7 @@ use fnp_iter::{
 };
 use fnp_linalg::{
     LinAlgError, QrMode, batch_det, batch_inv, batch_solve, batch_trace, cholesky_2x2, cond_mxn,
-    cross_product, eigvals_2x2, lstsq_output_shapes, matrix_power_nxn, pinv_2x2, qr_2x2,
+    cross_product, eigvals_2x2, kron_nxn, lstsq_output_shapes, matrix_power_nxn, pinv_2x2, qr_2x2,
     qr_output_shapes, slogdet_2x2, solve_2x2, svd_2x2, svd_output_shapes, tensorsolve,
     validate_backend_bridge, validate_policy_metadata as validate_linalg_policy_metadata,
     validate_spectral_branch, validate_tolerance_policy,
@@ -19062,6 +19062,18 @@ fn execute_linalg_operation(
             let result = cross_product(&a, input.rhs)?;
             Ok(LinalgOperationOutcome::SolveVector(result))
         }
+        "kron" => {
+            // matrix[0] is flat `a` of shape `shape=[m,n]`;
+            // matrix[1] is flat `b` of shape `rhs_shape=[p,q]`.
+            let a = input.matrix.first().cloned().unwrap_or_default();
+            let b = input.matrix.get(1).cloned().unwrap_or_default();
+            let m = input.shape.first().copied().unwrap_or(0);
+            let n = input.shape.get(1).copied().unwrap_or(0);
+            let p = input.rhs_shape.first().copied().unwrap_or(0);
+            let q = input.rhs_shape.get(1).copied().unwrap_or(0);
+            let result = kron_nxn(&a, m, n, &b, p, q)?;
+            Ok(LinalgOperationOutcome::SolveVector(result))
+        }
         _ => Err(LinAlgError::PolicyUnknownMetadata(
             "unsupported linalg operation",
         )),
@@ -19091,7 +19103,7 @@ fn validate_linalg_differential_expectation(
         }
         (
             "batch_det" | "batch_trace" | "batch_inv" | "batch_solve" | "tensorsolve"
-            | "cross_product",
+            | "cross_product" | "kron",
             LinalgOperationOutcome::SolveVector(actual),
         ) => {
             if case.expected_solution.len() != actual.len() {

@@ -1369,5 +1369,87 @@
     "rhs": [2.5, 3.5, 4.5],
     "expected_solution": [0.0, 0.0, 0.0],
     "expected_tolerance": 1e-12
+  },
+  {
+    "id": "linalg_kron_2x2_swap_2x2",
+    "operation": "kron",
+    "seed": 8320,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.4.3",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [2, 2],
+    "rhs_shape": [2, 2],
+    "matrix": [[1.0, 2.0, 3.0, 4.0], [0.0, 1.0, 1.0, 0.0]],
+    "expected_solution": [0.0, 1.0, 0.0, 2.0, 1.0, 0.0, 2.0, 0.0, 0.0, 3.0, 0.0, 4.0, 3.0, 0.0, 4.0, 0.0],
+    "expected_tolerance": 1e-12
+  },
+  {
+    "id": "linalg_kron_2x3_identity_2x2",
+    "operation": "kron",
+    "seed": 8321,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.4.3",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [2, 3],
+    "rhs_shape": [2, 2],
+    "matrix": [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [1.0, 0.0, 0.0, 1.0]],
+    "expected_solution": [1.0, 0.0, 2.0, 0.0, 3.0, 0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 3.0, 4.0, 0.0, 5.0, 0.0, 6.0, 0.0, 0.0, 4.0, 0.0, 5.0, 0.0, 6.0],
+    "expected_tolerance": 1e-12
+  },
+  {
+    "id": "linalg_kron_scalar_scales_matrix",
+    "operation": "kron",
+    "seed": 8322,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.4.3",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [1, 1],
+    "rhs_shape": [2, 2],
+    "matrix": [[3.0], [1.0, 2.0, 3.0, 4.0]],
+    "expected_solution": [3.0, 6.0, 9.0, 12.0],
+    "expected_tolerance": 1e-12
+  },
+  {
+    "id": "linalg_kron_identity_identity_yields_block_identity",
+    "operation": "kron",
+    "seed": 8323,
+    "mode": "strict",
+    "env_fingerprint": "numpy-2.4.3",
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/linalg_differential_cases.json",
+      "crates/fnp-linalg/src/lib.rs"
+    ],
+    "reason_code": "linalg_differential_expected_success",
+    "expected_reason_code": "linalg_differential_expected_success",
+    "shape": [2, 2],
+    "rhs_shape": [3, 3],
+    "matrix": [
+      [1.0, 0.0, 0.0, 1.0],
+      [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    ],
+    "expected_solution": [
+      1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+      0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+      0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
+      0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+      0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+      0.0, 0.0, 0.0, 0.0, 0.0, 1.0
+    ],
+    "expected_tolerance": 1e-12
   }
 ]
