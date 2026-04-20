@@ -2618,12 +2618,16 @@ impl Generator {
     /// Mimics `rng.bytes(length)`. Returns `length` random bytes.
     #[must_use]
     pub fn bytes(&mut self, length: usize) -> Vec<u8> {
+        if length == 0 {
+            let _ = self.next_uint32();
+            return Vec::new();
+        }
         let mut result = Vec::with_capacity(length);
         let mut remaining = length;
         while remaining > 0 {
-            let word = self.next_u64();
+            let word = self.next_uint32();
             let bytes = word.to_le_bytes();
-            let take = remaining.min(8);
+            let take = remaining.min(4);
             result.extend_from_slice(&bytes[..take]);
             remaining -= take;
         }
@@ -4515,6 +4519,45 @@ print(",".join(str(float(value)) for value in out.tolist()))
             .collect()
     }
 
+    fn numpy_oracle_bytes_sequence(lengths: &[usize]) -> Vec<Vec<u8>> {
+        let lengths_arg = lengths
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let script = r#"
+import sys
+import numpy as np
+
+lengths = [int(part) for part in sys.argv[1].split(",") if part]
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+for length in lengths:
+    out = rng.bytes(length)
+    print(",".join(str(int(value)) for value in out))
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(lengths_arg)
+            .output()
+            .expect("python oracle should launch");
+        assert!(output.status.success(), "NumPy bytes oracle must succeed");
+        String::from_utf8(output.stdout)
+            .expect("oracle stdout must be utf-8")
+            .lines()
+            .map(|line| {
+                if line.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    line.split(',')
+                        .filter(|token| !token.is_empty())
+                        .map(|token| token.parse::<u8>().expect("oracle byte"))
+                        .collect()
+                }
+            })
+            .collect()
+    }
+
     fn numpy_oracle_seed_sequence_spawn_words(
         entropy: &[u32],
         first_batch: usize,
@@ -6316,10 +6359,25 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn bytes_zero_length_advances_stream_like_numpy() {
+        let mut rng = oracle_gen();
+        assert!(rng.bytes(0).is_empty());
+        assert_eq!(rng.bytes(3), vec![217, 231, 156]);
+    }
+
+    #[test]
     fn bytes_partial_word() {
         let mut rng = test_generator();
         let data = rng.bytes(3);
         assert_eq!(data.len(), 3);
+    }
+
+    #[test]
+    fn bytes_separate_partial_calls_do_not_reuse_discarded_tail_bytes() {
+        let mut rng = test_generator();
+        let first = rng.bytes(3);
+        let second = rng.bytes(3);
+        assert_ne!(first, second);
     }
 
     #[test]
@@ -7204,6 +7262,25 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn oracle_bytes_sequential_lengths() {
+        let mut g = oracle_gen();
+        let first = g.bytes(3);
+        let second = g.bytes(8);
+        let third = g.bytes(9);
+        assert_eq!(first, vec![111, 20, 208], "oracle bytes(3) mismatch");
+        assert_eq!(
+            second,
+            vec![217, 231, 156, 238, 131, 8, 106, 4],
+            "oracle bytes(8) mismatch"
+        );
+        assert_eq!(
+            third,
+            vec![95, 196, 102, 86, 189, 226, 40, 207, 97],
+            "oracle bytes(9) mismatch"
+        );
+    }
+
+    #[test]
     fn oracle_integers() {
         let mut g = oracle_gen();
         let vals = g.integers(0, 100, 10).expect("integers");
@@ -7629,6 +7706,22 @@ for child in rng.spawn(n_children):
             -1.0728008429700662,
         ];
         assert_f64_seq("vonmises_zero_kappa", &vals, &expected);
+    }
+
+    #[test]
+    fn bytes_match_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let lengths = [0usize, 3, 8, 9, 16];
+        let expected = numpy_oracle_bytes_sequence(&lengths);
+        let mut g = oracle_gen();
+        let actual = lengths
+            .iter()
+            .map(|&length| g.bytes(length))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
     }
 
     #[test]
