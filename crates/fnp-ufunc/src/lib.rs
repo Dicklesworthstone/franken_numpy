@@ -12134,15 +12134,87 @@ impl UFuncArray {
         Self::new(vec![len, 2], values, dtype)
     }
 
+    fn reflect_upper_triangle_to_lower(values: &[f64], n: usize) -> Vec<f64> {
+        let mut reflected = vec![0.0; n * n];
+        for row in 0..n {
+            for col in 0..=row {
+                reflected[row * n + col] = values[col * n + row];
+            }
+        }
+        reflected
+    }
+
+    fn transpose_lower_triangle_to_upper(values: &[f64], n: usize) -> Vec<f64> {
+        let mut transposed = vec![0.0; n * n];
+        for row in 0..n {
+            for col in 0..=row {
+                transposed[col * n + row] = values[row * n + col];
+            }
+        }
+        transposed
+    }
+
+    fn reflect_complex_upper_triangle_to_lower(values: &[f64], n: usize) -> Vec<f64> {
+        let mut reflected = vec![0.0; 2 * n * n];
+        for row in 0..n {
+            for col in 0..=row {
+                let src = 2 * (col * n + row);
+                let dst = 2 * (row * n + col);
+                reflected[dst] = values[src];
+                reflected[dst + 1] = if row == col {
+                    values[src + 1]
+                } else {
+                    -values[src + 1]
+                };
+            }
+        }
+        reflected
+    }
+
+    fn complex_lower_triangle_to_upper_hermitian(values: &[f64], n: usize) -> Vec<f64> {
+        let mut upper = vec![0.0; 2 * n * n];
+        for row in 0..n {
+            for col in 0..=row {
+                let src = 2 * (row * n + col);
+                let dst = 2 * (col * n + row);
+                upper[dst] = values[src];
+                upper[dst + 1] = if row == col {
+                    values[src + 1]
+                } else {
+                    -values[src + 1]
+                };
+            }
+        }
+        upper
+    }
+
     // ── Additional linalg bridge methods ─────────────────────────
 
     /// Cholesky decomposition (np.linalg.cholesky).
     /// Returns the lower-triangular factor L such that A = L L^T.
     pub fn cholesky(&self) -> Result<Self, UFuncError> {
+        self.cholesky_with_upper(false)
+    }
+
+    /// Cholesky decomposition (np.linalg.cholesky) with explicit triangle selection.
+    pub fn cholesky_with_upper(&self, upper: bool) -> Result<Self, UFuncError> {
         if self.uses_complex_interleaved_storage() {
             let (values, n, _) = self.as_complex_matrix_input("cholesky", true)?;
-            let result = fnp_linalg::complex_cholesky_nxn(&values, n)
+            if n == 0 {
+                return Self::complex_matrix_from_interleaved(0, 0, Vec::new(), self.dtype);
+            }
+            let selected = if upper {
+                Self::reflect_complex_upper_triangle_to_lower(&values, n)
+            } else {
+                values
+            };
+            let result = fnp_linalg::complex_cholesky_nxn(&selected, n)
                 .map_err(|e| UFuncError::Msg(format!("{e}")))?;
+            let result = if upper {
+                Self::complex_lower_triangle_to_upper_hermitian(&result, n)
+            } else {
+                result
+            };
             return Self::complex_matrix_from_interleaved(n, n, result, self.dtype);
         }
 
@@ -12152,8 +12224,26 @@ impl UFuncArray {
             ));
         }
         let n = self.shape[0];
-        let result = fnp_linalg::cholesky_nxn(&self.values, n)
-            .map_err(|e| UFuncError::Msg(format!("{e}")))?;
+        if n == 0 {
+            return Ok(Self {
+                shape: vec![0, 0],
+                values: Vec::new(),
+                dtype: DType::F64,
+                integer_sidecar: None,
+            });
+        }
+        let selected = if upper {
+            Self::reflect_upper_triangle_to_lower(&self.values, n)
+        } else {
+            self.values.clone()
+        };
+        let result =
+            fnp_linalg::cholesky_nxn(&selected, n).map_err(|e| UFuncError::Msg(format!("{e}")))?;
+        let result = if upper {
+            Self::transpose_lower_triangle_to_upper(&result, n)
+        } else {
+            result
+        };
         Ok(Self {
             shape: vec![n, n],
             values: result,
@@ -31873,6 +31963,143 @@ print(json.dumps(result.tolist()))
             .map_err(|err| format!("oracle json: {err}"))
     }
 
+    type OracleOutcome<T> = Result<Result<T, String>, String>;
+
+    fn numpy_oracle_cholesky(
+        matrix: &UFuncArray,
+        upper: bool,
+    ) -> OracleOutcome<(Vec<usize>, Vec<f64>)> {
+        let shape = matrix
+            .shape()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let values = matrix
+            .values()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let dtype = match matrix.dtype() {
+            DType::Complex64 | DType::Complex128 => "complex",
+            _ => "real",
+        };
+        let output = Command::new(oracle_python_bin())
+            .args([
+                "-c",
+                r#"
+import json
+import sys
+import numpy as np
+
+shape = tuple(int(part) for part in sys.argv[1].split(",") if part)
+raw = [float(part) for part in sys.argv[2].split(",") if part]
+dtype = sys.argv[3]
+upper = sys.argv[4] == "1"
+
+if dtype == "complex":
+    array_shape = shape[:-1]
+    values = [complex(raw[i], raw[i + 1]) for i in range(0, len(raw), 2)]
+    array = np.array(values, dtype=np.complex128).reshape(array_shape)
+else:
+    array = np.array(raw, dtype=np.float64).reshape(shape)
+
+try:
+    result = np.linalg.cholesky(array, upper=upper)
+except Exception as exc:
+    print(json.dumps({"kind": "error", "message": str(exc)}))
+    raise SystemExit(0)
+
+payload = {"kind": "ok", "shape": list(result.shape) + ([2] if np.iscomplexobj(result) else [])}
+flat = result.reshape(-1)
+if np.iscomplexobj(result):
+    payload["values"] = [[float(value.real), float(value.imag)] for value in flat]
+else:
+    payload["values"] = [float(value) for value in flat]
+print(json.dumps(payload))
+"#,
+                &shape,
+                &values,
+                dtype,
+                if upper { "1" } else { "0" },
+            ])
+            .output()
+            .map_err(|err| format!("failed to launch NumPy cholesky oracle: {err}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "NumPy cholesky oracle failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&output.stdout).map_err(|err| format!("oracle json: {err}"))?;
+        match parsed
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "oracle missing kind".to_string())?
+        {
+            "ok" => {
+                let shape = parsed
+                    .get("shape")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| "oracle missing shape".to_string())?
+                    .iter()
+                    .map(|dim| {
+                        dim.as_u64()
+                            .ok_or_else(|| "oracle shape must be integers".to_string())
+                            .and_then(|dim| {
+                                usize::try_from(dim)
+                                    .map_err(|_| "oracle shape out of range".to_string())
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let values = if dtype == "complex" {
+                    let mut flattened = Vec::new();
+                    for pair in parsed
+                        .get("values")
+                        .and_then(serde_json::Value::as_array)
+                        .ok_or_else(|| "oracle missing complex values".to_string())?
+                    {
+                        let pair = pair
+                            .as_array()
+                            .ok_or_else(|| "oracle complex value must be pair".to_string())?;
+                        flattened.push(
+                            pair.first()
+                                .and_then(serde_json::Value::as_f64)
+                                .ok_or_else(|| "oracle complex real missing".to_string())?,
+                        );
+                        flattened.push(
+                            pair.get(1)
+                                .and_then(serde_json::Value::as_f64)
+                                .ok_or_else(|| "oracle complex imag missing".to_string())?,
+                        );
+                    }
+                    flattened
+                } else {
+                    parsed
+                        .get("values")
+                        .and_then(serde_json::Value::as_array)
+                        .ok_or_else(|| "oracle missing values".to_string())?
+                        .iter()
+                        .map(|value| {
+                            value
+                                .as_f64()
+                                .ok_or_else(|| "oracle value must be float".to_string())
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                };
+                Ok(Ok((shape, values)))
+            }
+            "error" => Ok(Err(parsed
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "oracle missing error message".to_string())?
+                .to_string())),
+            other => Err(format!("unexpected oracle kind: {other}")),
+        }
+    }
+
     #[test]
     fn broadcasted_add_matches_expected_values() {
         let lhs = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
@@ -48480,6 +48707,91 @@ print(json.dumps(result.tolist()))
         let expected = [2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0, 0.0];
         for (actual, expected) in l.values().iter().zip(expected) {
             assert!((actual - expected).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn cholesky_upper_uses_selected_triangle_only() {
+        let a = UFuncArray::new(vec![2, 2], vec![4.0, 2.0, 99.0, 3.0], DType::F64).unwrap();
+        assert!(a.cholesky().is_err());
+
+        let upper = a.cholesky_with_upper(true).unwrap();
+        assert_eq!(upper.shape(), &[2, 2]);
+        let expected = [2.0, 1.0, 0.0, std::f64::consts::SQRT_2];
+        for (actual, expected) in upper.values().iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn cholesky_upper_complex_uses_selected_triangle_only() {
+        let a = UFuncArray::new(
+            vec![2, 2, 2],
+            vec![4.0, 0.0, 1.0, -2.0, 99.0, 7.0, 3.0, 0.0],
+            DType::Complex128,
+        )
+        .unwrap();
+        assert!(a.cholesky().is_err());
+
+        let upper = a.cholesky_with_upper(true).unwrap();
+        let expected = [2.0, 0.0, 0.5, -1.0, 0.0, 0.0, 1.3228756555322954, 0.0];
+        assert_eq!(upper.shape(), &[2, 2, 2]);
+        for (actual, expected) in upper.values().iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn cholesky_empty_matrix_is_allowed_for_both_triangles() {
+        let real = UFuncArray::new(vec![0, 0], Vec::new(), DType::F64).unwrap();
+        assert_eq!(real.cholesky().unwrap().shape(), &[0, 0]);
+        assert_eq!(real.cholesky_with_upper(true).unwrap().shape(), &[0, 0]);
+
+        let complex = UFuncArray::new(vec![0, 0, 2], Vec::new(), DType::Complex128).unwrap();
+        assert_eq!(complex.cholesky().unwrap().shape(), &[0, 0, 2]);
+        assert_eq!(
+            complex.cholesky_with_upper(true).unwrap().shape(),
+            &[0, 0, 2]
+        );
+    }
+
+    #[test]
+    fn cholesky_upper_matches_numpy() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let cases = [
+            (
+                UFuncArray::new(vec![2, 2], vec![4.0, 2.0, 99.0, 3.0], DType::F64).unwrap(),
+                true,
+            ),
+            (
+                UFuncArray::new(vec![2, 2], vec![4.0, 99.0, 2.0, 3.0], DType::F64).unwrap(),
+                false,
+            ),
+            (
+                UFuncArray::new(
+                    vec![2, 2, 2],
+                    vec![4.0, 0.0, 1.0, -2.0, 99.0, 7.0, 3.0, 0.0],
+                    DType::Complex128,
+                )
+                .unwrap(),
+                true,
+            ),
+            (
+                UFuncArray::new(vec![0, 0], Vec::new(), DType::F64).unwrap(),
+                true,
+            ),
+        ];
+
+        for (matrix, upper) in cases {
+            let expected = numpy_oracle_cholesky(&matrix, upper).expect("oracle should run");
+            let actual = matrix
+                .cholesky_with_upper(upper)
+                .map(|result| (result.shape().to_vec(), result.values().to_vec()))
+                .map_err(|err| err.to_string());
+            assert_eq!(actual, expected);
         }
     }
 
