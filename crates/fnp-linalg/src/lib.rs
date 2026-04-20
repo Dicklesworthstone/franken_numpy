@@ -1330,28 +1330,236 @@ fn svd_shift_2x2(f: f64, g: f64, h: f64) -> f64 {
     sigma_min_sq.sqrt()
 }
 
-/// Core SVD implementation using Golub-Kahan bidiagonalization + Golub-Reinsch QR.
-///
-/// Returns (U, sigmas, Vt) where U is m×m, sigmas has min(m,n) entries, Vt is n×n.
-fn svd_bidiag_full(a: &[f64], m: usize, n: usize) -> Result<SvdFullResult, LinAlgError> {
-    let k = m.min(n);
+fn try_store_orthonormal_column(
+    u: &mut [f64],
+    m: usize,
+    col: usize,
+    candidate: &mut [f64],
+    tol: f64,
+) -> bool {
+    for prev in 0..col {
+        let mut dot = 0.0;
+        for row in 0..m {
+            dot += candidate[row] * u[row * m + prev];
+        }
+        for row in 0..m {
+            candidate[row] -= dot * u[row * m + prev];
+        }
+    }
 
-    // Handle m < n by working with A^T and swapping U/V
+    let norm = candidate
+        .iter()
+        .map(|value| value * value)
+        .sum::<f64>()
+        .sqrt();
+    if !norm.is_finite() || norm <= tol {
+        return false;
+    }
+
+    for row in 0..m {
+        u[row * m + col] = candidate[row] / norm;
+    }
+    true
+}
+
+fn store_orthonormal_column(
+    u: &mut [f64],
+    m: usize,
+    col: usize,
+    seed: &[f64],
+    tol: f64,
+) -> Result<(), LinAlgError> {
+    let mut candidate = seed.to_vec();
+    if try_store_orthonormal_column(u, m, col, &mut candidate, tol) {
+        return Ok(());
+    }
+
+    for basis in 0..m {
+        candidate.fill(0.0);
+        candidate[basis] = 1.0;
+        if try_store_orthonormal_column(u, m, col, &mut candidate, tol) {
+            return Ok(());
+        }
+    }
+
+    Err(LinAlgError::SvdNonConvergence)
+}
+
+fn svd_via_jacobi_full(a: &[f64], m: usize, n: usize) -> Result<SvdFullResult, LinAlgError> {
+    let k = m.min(n);
+    let mut b = a.to_vec();
+    let mut v = vec![0.0; n * n];
+    for i in 0..n {
+        v[i * n + i] = 1.0;
+    }
+
+    let a_norm = a.iter().map(|value| value * value).sum::<f64>().sqrt();
+    let ortho_tol = f64::EPSILON * (m as f64) * a_norm.max(1.0) * a_norm.max(1.0) * 16.0;
+    let mut converged = false;
+    for _sweep in 0..SVD_QR_ITERATION_COEFF {
+        let mut changed = false;
+        for p in 0..n.saturating_sub(1) {
+            for q in (p + 1)..n {
+                let mut alpha = 0.0;
+                let mut beta = 0.0;
+                let mut gamma = 0.0;
+                for row in 0..m {
+                    let bp = b[row * n + p];
+                    let bq = b[row * n + q];
+                    alpha += bp * bp;
+                    beta += bq * bq;
+                    gamma += bp * bq;
+                }
+
+                if gamma.abs() <= ortho_tol.max(f64::EPSILON * (alpha * beta).sqrt()) {
+                    continue;
+                }
+
+                changed = true;
+                let zeta = (beta - alpha) / (2.0 * gamma);
+                let t = if zeta == 0.0 {
+                    1.0
+                } else {
+                    zeta.signum() / (zeta.abs() + (1.0 + zeta * zeta).sqrt())
+                };
+                let c = 1.0 / (1.0 + t * t).sqrt();
+                let s = c * t;
+
+                for row in 0..m {
+                    let bp = b[row * n + p];
+                    let bq = b[row * n + q];
+                    b[row * n + p] = c * bp - s * bq;
+                    b[row * n + q] = s * bp + c * bq;
+                }
+                for row in 0..n {
+                    let vp = v[row * n + p];
+                    let vq = v[row * n + q];
+                    v[row * n + p] = c * vp - s * vq;
+                    v[row * n + q] = s * vp + c * vq;
+                }
+            }
+        }
+
+        if !changed {
+            converged = true;
+            break;
+        }
+    }
+
+    if !converged {
+        for p in 0..n.saturating_sub(1) {
+            for q in (p + 1)..n {
+                let mut alpha = 0.0;
+                let mut beta = 0.0;
+                let mut gamma = 0.0;
+                for row in 0..m {
+                    let bp = b[row * n + p];
+                    let bq = b[row * n + q];
+                    alpha += bp * bp;
+                    beta += bq * bq;
+                    gamma += bp * bq;
+                }
+                if gamma.abs() > ortho_tol.max(f64::EPSILON * (alpha * beta).sqrt()) {
+                    return Err(LinAlgError::SvdNonConvergence);
+                }
+            }
+        }
+    }
+
+    let mut sigma_by_col = vec![0.0; n];
+    for col in 0..n {
+        let mut sigma_sq = 0.0;
+        for row in 0..m {
+            let value = b[row * n + col];
+            sigma_sq += value * value;
+        }
+        sigma_by_col[col] = sigma_sq.sqrt();
+    }
+
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&lhs, &rhs| {
+        sigma_by_col[rhs]
+            .partial_cmp(&sigma_by_col[lhs])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let sigma_max = order.first().map(|&idx| sigma_by_col[idx]).unwrap_or(0.0);
+    let tol = f64::EPSILON * (m.max(n) as f64) * sigma_max.max(1.0) * 8.0;
+
+    let mut sigmas = vec![0.0; k];
+    let mut vt = vec![0.0; n * n];
+    for (new_col, &old_col) in order.iter().enumerate() {
+        for row in 0..n {
+            vt[new_col * n + row] = v[row * n + old_col];
+        }
+        if new_col < k {
+            sigmas[new_col] = sigma_by_col[old_col];
+        }
+    }
+
+    let mut u = vec![0.0; m * m];
+    for col in 0..k {
+        let sigma = sigmas[col];
+        let mut seed = vec![0.0; m];
+        if sigma > tol {
+            for row in 0..m {
+                seed[row] = b[row * n + order[col]] / sigma;
+            }
+        }
+        store_orthonormal_column(&mut u, m, col, &seed, tol)?;
+    }
+
+    for col in k..m {
+        store_orthonormal_column(&mut u, m, col, &vec![0.0; m], tol)?;
+    }
+
+    Ok((u, sigmas, vt))
+}
+
+fn svd_bidiag_full_with_max_iters(
+    a: &[f64],
+    m: usize,
+    n: usize,
+    max_iter: usize,
+) -> Result<SvdFullResult, LinAlgError> {
     if m < n {
-        // A^T is n×m row-major
         let mut at = vec![0.0; n * m];
         for i in 0..m {
             for j in 0..n {
                 at[j * m + i] = a[i * n + j];
             }
         }
-        let (u_t, sigmas, vt_t) = svd_bidiag_full(&at, n, m)?;
-        // SVD(A^T) = U_t * S * Vt_t → SVD(A) = Vt_t^T * S * U_t^T
-        // So U = Vt_t^T (m×m), Vt = U_t^T (n×n)
+        let (u_t, sigmas, vt_t) = svd_bidiag_full_with_max_iters(&at, n, m, max_iter)?;
         let u = transpose_mat(&vt_t, m, m);
         let vt = transpose_mat(&u_t, n, n);
         return Ok((u, sigmas, vt));
     }
+
+    match svd_bidiag_qr_full(a, m, n, max_iter) {
+        Ok(result) => Ok(result),
+        Err(LinAlgError::SvdNonConvergence) => svd_via_jacobi_full(a, m, n),
+        Err(err) => Err(err),
+    }
+}
+
+/// Core SVD implementation using Golub-Kahan bidiagonalization + Golub-Reinsch QR.
+///
+/// Returns (U, sigmas, Vt) where U is m×m, sigmas has min(m,n) entries, Vt is n×n.
+fn svd_bidiag_full(a: &[f64], m: usize, n: usize) -> Result<SvdFullResult, LinAlgError> {
+    let k = m.min(n);
+    svd_bidiag_full_with_max_iters(a, m, n, SVD_QR_ITERATION_COEFF * k * k)
+}
+
+/// Core QR-phase SVD implementation for the bidiagonalized matrix.
+///
+/// Requires `m >= n`; transpose handling and fallback are done by the wrapper.
+fn svd_bidiag_qr_full(
+    a: &[f64],
+    m: usize,
+    n: usize,
+    max_iter: usize,
+) -> Result<SvdFullResult, LinAlgError> {
+    let k = m.min(n);
 
     // Now m >= n. Bidiagonalize A into U1 * B * V1^T
     // B is n×n upper bidiagonal: diagonal d[0..n], superdiagonal e[0..n-1]
@@ -1481,7 +1689,6 @@ fn svd_bidiag_full(a: &[f64], m: usize, n: usize) -> Result<SvdFullResult, LinAl
     // Works with (d, e) without forming B^T*B, avoiding condition-number squaring.
     // Left rotations accumulate into U (column operations), right into Vt (row operations).
     let eps_mach = f64::EPSILON;
-    let max_iter = SVD_QR_ITERATION_COEFF * n * n;
 
     let mut converged = false;
     for _iter in 0..max_iter {
@@ -5123,6 +5330,7 @@ mod tests {
         solve_triangular,
         sqrtm_nxn,
         svd_2x2,
+        svd_bidiag_full_with_max_iters,
         svd_mxn,
         svd_mxn_full,
         svd_nxn,
@@ -7921,7 +8129,7 @@ mod tests {
         assert_eq!(u.len(), 9);
         assert_eq!(s.len(), 2);
         assert_eq!(vt.len(), 4);
-        let mut recon = [0.0; 6];
+        let mut recon = [0.0_f64; 6];
         for i in 0..3 {
             for j in 0..2 {
                 let mut sum = 0.0;
@@ -7934,6 +8142,39 @@ mod tests {
         for i in 0..6 {
             assert!((recon[i] - a[i]).abs() < 1e-8, "SVD recon at {i}");
         }
+    }
+
+    #[test]
+    fn svd_fallback_reconstructs_when_qr_budget_is_zero() {
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let (u, s, vt) = svd_bidiag_full_with_max_iters(&a, 3, 2, 0).expect("fallback svd");
+        assert_eq!(u.len(), 9);
+        assert_eq!(s.len(), 2);
+        assert_eq!(vt.len(), 4);
+
+        let mut recon = [0.0; 6];
+        for i in 0..3 {
+            for j in 0..2 {
+                let mut sum = 0.0;
+                for kk in 0..2 {
+                    sum += u[i * 3 + kk] * s[kk] * vt[kk * 2 + j];
+                }
+                recon[i * 2 + j] = sum;
+            }
+        }
+        for i in 0..6 {
+            assert!((recon[i] - a[i]).abs() < 1e-8, "fallback recon at {i}");
+        }
+    }
+
+    #[test]
+    fn svd_fallback_handles_wide_matrix_when_qr_budget_is_zero() {
+        let a = [3.0, 0.0, 0.0, 0.0, 2.0, 0.0];
+        let (_u, s, vt) = svd_bidiag_full_with_max_iters(&a, 2, 3, 0).expect("wide fallback svd");
+        assert_eq!(s.len(), 2);
+        assert_eq!(vt.len(), 9);
+        assert!((s[0] - 3.0).abs() < 1e-8, "sigma_0={}", s[0]);
+        assert!((s[1] - 2.0).abs() < 1e-8, "sigma_1={}", s[1]);
     }
 
     #[test]
@@ -8027,6 +8268,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn svd_fallback_preserves_high_condition_number_singular_values() {
+        #[rustfmt::skip]
+        let a = [
+             379645.7743350327,  -225645.24435488618,  479553.25114605244,
+            -178966.65563490757,  106370.25818389589, -226063.73815110396,
+            -358826.2181453029,   213270.82822770457, -453254.4589148696,
+             184936.09609271045, -109917.40263701396,  233602.18131610617,
+        ];
+        let (_u, s, _vt) =
+            svd_bidiag_full_with_max_iters(&a, 4, 3, 0).expect("high-condition fallback svd");
+        assert!(
+            (s[0] - 1e6).abs() / 1e6 < 1e-8,
+            "fallback sigma_0 = {} (expected 1e6)",
+            s[0]
+        );
+        assert!(
+            (s[1] - 1.0).abs() < 1e-8,
+            "fallback sigma_1 = {} (expected 1.0)",
+            s[1]
+        );
+        assert!(
+            (s[2] - 1e-6).abs() / 1e-6 < 1e-2,
+            "fallback sigma_2 = {} (expected 1e-6)",
+            s[2]
+        );
     }
 
     // ── expm tests ──
