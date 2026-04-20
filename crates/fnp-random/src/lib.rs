@@ -4594,6 +4594,67 @@ except Exception as exc:
             .to_string()
     }
 
+    fn numpy_oracle_triangular_then_random(
+        left: f64,
+        mode: f64,
+        right: f64,
+        tri_size: usize,
+        random_size: usize,
+    ) -> (String, Vec<f64>) {
+        let script = r#"
+import sys
+import numpy as np
+
+left = float(sys.argv[1])
+mode = float(sys.argv[2])
+right = float(sys.argv[3])
+tri_size = int(sys.argv[4])
+random_size = int(sys.argv[5])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+try:
+    out = rng.triangular(left, mode, right, size=tri_size)
+    print("outcome:ok:" + ",".join(str(float(value)) for value in out.tolist()))
+except Exception as exc:
+    print(f"outcome:err:{type(exc).__name__}:{exc}")
+after = rng.random(random_size)
+print("after:" + ",".join(str(float(value)) for value in after.tolist()))
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(left.to_string())
+            .arg(mode.to_string())
+            .arg(right.to_string())
+            .arg(tri_size.to_string())
+            .arg(random_size.to_string())
+            .output()
+            .expect("python oracle should launch");
+        assert!(
+            output.status.success(),
+            "NumPy triangular oracle must succeed"
+        );
+        let stdout = String::from_utf8(output.stdout).expect("oracle stdout must be utf-8");
+        let mut lines = stdout.lines();
+        let outcome = lines
+            .next()
+            .and_then(|line| line.strip_prefix("outcome:"))
+            .expect("oracle outcome prefix must be present")
+            .to_string();
+        let after_line = lines
+            .next()
+            .and_then(|line| line.strip_prefix("after:"))
+            .expect("oracle random prefix must be present");
+        let after = if after_line.is_empty() {
+            Vec::new()
+        } else {
+            after_line
+                .split(',')
+                .map(|token| token.parse::<f64>().expect("oracle float"))
+                .collect()
+        };
+        (outcome, after)
+    }
+
     fn numpy_oracle_exponential_then_random(
         scale: f64,
         exp_size: usize,
@@ -6292,6 +6353,22 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn triangular_left_equals_right_rejected_without_advancing_state() {
+        let mut rng = oracle_gen();
+        let err = rng
+            .triangular(1.0, 1.0, 1.0, 5)
+            .expect_err("left == right must be rejected");
+        assert_eq!(err, RandomError::InvalidParameter);
+        let after = rng.random(3);
+        let expected_after = [0.9320816903198763, 0.3375056011176768, 0.21698197019501064];
+        assert_f64_seq(
+            "triangular_left_equals_right_after",
+            &after,
+            &expected_after,
+        );
+    }
+
+    #[test]
     fn laplace_basic() {
         let mut rng = test_generator();
         let samples = rng.laplace(0.0, 1.0, 1000).unwrap();
@@ -7845,6 +7922,22 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn oracle_triangular_left_equals_right_rejected() {
+        let mut g = oracle_gen();
+        let err = g
+            .triangular(1.0, 1.0, 1.0, 1)
+            .expect_err("left == right must be rejected");
+        assert_eq!(err, RandomError::InvalidParameter);
+        let after = g.random(3);
+        let expected_after = [0.9320816903198763, 0.3375056011176768, 0.21698197019501064];
+        assert_f64_seq(
+            "triangular_left_equals_right_oracle_after",
+            &after,
+            &expected_after,
+        );
+    }
+
+    #[test]
     fn oracle_standard_cauchy() {
         let mut g = oracle_gen();
         let vals = g.standard_cauchy(10);
@@ -8179,6 +8272,43 @@ for child in rng.spawn(n_children):
         assert_eq!(zero_expected, "ok:");
         let zero_actual = g.geometric(1.0, 0).expect("size=0 should succeed");
         assert!(zero_actual.is_empty());
+    }
+
+    #[test]
+    fn triangular_left_equals_right_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let (outcome, after) = numpy_oracle_triangular_then_random(1.0, 1.0, 1.0, 5, 3);
+        assert_eq!(outcome, "err:ValueError:left == right");
+
+        let mut g = oracle_gen();
+        assert_eq!(
+            g.triangular(1.0, 1.0, 1.0, 5),
+            Err(RandomError::InvalidParameter)
+        );
+        let actual_after = g.random(3);
+        assert_f64_seq(
+            "triangular_left_equals_right_live_numpy_after",
+            &actual_after,
+            &after,
+        );
+
+        let (size_zero_outcome, size_zero_after) =
+            numpy_oracle_triangular_then_random(1.0, 1.0, 1.0, 0, 3);
+        assert_eq!(size_zero_outcome, "err:ValueError:left == right");
+        let mut zero_g = oracle_gen();
+        assert_eq!(
+            zero_g.triangular(1.0, 1.0, 1.0, 0),
+            Err(RandomError::InvalidParameter)
+        );
+        let zero_after = zero_g.random(3);
+        assert_f64_seq(
+            "triangular_left_equals_right_size_zero_live_numpy_after",
+            &zero_after,
+            &size_zero_after,
+        );
     }
 
     #[test]
