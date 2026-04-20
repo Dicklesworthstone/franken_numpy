@@ -2390,6 +2390,50 @@ fn count_nonzero(
     Ok(output)
 }
 
+fn validate_trim_zeros_mode(trim: &str) -> PyResult<()> {
+    if trim.is_empty() || trim.chars().any(|ch| ch != 'f' && ch != 'b') {
+        return Err(PyValueError::new_err(format!(
+            "unexpected character(s) in `trim`: '{trim}'"
+        )));
+    }
+
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature = (filt, trim="fb"))]
+fn trim_zeros(py: Python<'_>, filt: Py<PyAny>, trim: &str) -> PyResult<Py<PyAny>> {
+    validate_trim_zeros_mode(trim)?;
+
+    let filt_bound = filt.bind(py);
+    let preserve_list = filt_bound.downcast::<PyList>().is_ok();
+    let preserve_tuple = filt_bound.downcast::<PyTuple>().is_ok();
+
+    let filt = extract_numeric_array(py, filt_bound, "trim_zeros(filt)")?;
+    if filt.shape().is_empty() {
+        return Ok(filt_bound.clone().unbind());
+    }
+    if filt.shape().len() > 1 {
+        return Err(PyValueError::new_err(
+            "trim_zeros: multidimensional inputs are not supported yet",
+        ));
+    }
+
+    let output = build_numpy_array_from_ufunc(py, &filt.trim_zeros_mode(trim))?;
+    if preserve_list {
+        return Ok(output.bind(py).call_method0("tolist")?.unbind());
+    }
+    if preserve_tuple {
+        let builtins = py.import("builtins")?;
+        return Ok(builtins
+            .getattr("tuple")?
+            .call1((output.bind(py).call_method0("tolist")?,))?
+            .unbind());
+    }
+
+    Ok(output)
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, ind=2))]
 fn tensorinv(py: Python<'_>, a: Py<PyAny>, ind: usize) -> PyResult<Py<PyAny>> {
@@ -3261,6 +3305,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tril_indices_from, m)?)?;
     m.add_function(wrap_pyfunction!(triu_indices, m)?)?;
     m.add_function(wrap_pyfunction!(triu_indices_from, m)?)?;
+    m.add_function(wrap_pyfunction!(trim_zeros, m)?)?;
     m.add_function(wrap_pyfunction!(put_along_axis, m)?)?;
     m.add_function(wrap_pyfunction!(take_along_axis, m)?)?;
     Ok(())
@@ -3515,6 +3560,7 @@ mod tests {
             assert!(module.getattr("tril_indices_from").is_ok());
             assert!(module.getattr("triu_indices").is_ok());
             assert!(module.getattr("triu_indices_from").is_ok());
+            assert!(module.getattr("trim_zeros").is_ok());
             assert!(module.getattr("put_along_axis").is_ok());
             assert!(module.getattr("take_along_axis").is_ok());
             assert!(module.getattr("Nditer").is_ok());
@@ -5114,6 +5160,65 @@ mod tests {
                 }),
             )?;
             assert_array_matches_numpy(actual_ind.bind(py), &expected_ind)
+        });
+    }
+
+    #[test]
+    fn trim_zeros_matches_numpy_front_and_back_modes() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let trim_zeros_fn = module.getattr("trim_zeros")?;
+            let numpy_trim_zeros = py.import("numpy")?.getattr("trim_zeros")?;
+
+            let list_input = PyList::new(py, [0_i32, 0, 1, 2, 0, 0])?;
+            let actual_default = trim_zeros_fn.call1((list_input.clone(),))?;
+            let expected_default = numpy_trim_zeros.call1((list_input.clone(),))?;
+            assert_eq!(
+                actual_default.get_type().name()?.extract::<String>()?,
+                expected_default.get_type().name()?.extract::<String>()?
+            );
+            assert_eq!(repr_string(&actual_default), repr_string(&expected_default));
+
+            let tuple_input = PyTuple::new(py, [0_i32, 0, 1, 2, 0, 0])?;
+            let actual_front = trim_zeros_fn.call1((tuple_input.clone(), "f"))?;
+            let expected_front = numpy_trim_zeros.call1((tuple_input.clone(), "f"))?;
+            assert_eq!(
+                actual_front.get_type().name()?.extract::<String>()?,
+                expected_front.get_type().name()?.extract::<String>()?
+            );
+            assert_eq!(repr_string(&actual_front), repr_string(&expected_front));
+
+            let array_input = numeric_array(py, vec![0_i32, 0, 1, 2, 0, 0], "int64");
+            let actual_back = trim_zeros_fn.call1((array_input.clone(), "b"))?;
+            let expected_back = numpy_trim_zeros.call1((array_input.clone(), "b"))?;
+            assert_array_matches_numpy(&actual_back, &expected_back)?;
+
+            let scalar_input = 0_i32.into_pyobject(py)?.unbind();
+            let actual_scalar = trim_zeros_fn.call1((scalar_input.clone_ref(py),))?;
+            let expected_scalar = numpy_trim_zeros.call1((scalar_input,))?;
+            assert_eq!(
+                actual_scalar.get_type().name()?.extract::<String>()?,
+                expected_scalar.get_type().name()?.extract::<String>()?
+            );
+            assert_eq!(repr_string(&actual_scalar), repr_string(&expected_scalar));
+
+            let actual_err = trim_zeros_fn.call1((list_input.clone(), "x")).unwrap_err();
+            let expected_err = numpy_trim_zeros.call1((list_input, "x")).unwrap_err();
+            assert_eq!(
+                actual_err.get_type(py).name()?.extract::<String>()?,
+                expected_err.get_type(py).name()?.extract::<String>()?
+            );
+            assert_eq!(
+                actual_err.value(py).str()?.extract::<String>()?,
+                expected_err.value(py).str()?.extract::<String>()?
+            );
+
+            Ok(())
         });
     }
 
