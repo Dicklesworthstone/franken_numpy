@@ -4798,6 +4798,20 @@ fn real_if_close(py: Python<'_>, a: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> 
 }
 
 #[pyfunction]
+#[pyo3(signature = (z, deg=false))]
+fn angle(py: Python<'_>, z: Py<PyAny>, deg: bool) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.angle so the angle of complex numbers matches
+    // numpy across scalar/array, real-input (treated as imag=0), 2-D
+    // input, and the deg=True path returning degrees instead of
+    // radians.
+    let numpy = py.import("numpy")?;
+    let angle_fn = numpy.getattr("angle")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("deg", deg)?;
+    Ok(angle_fn.call((z.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x,))]
 fn iscomplexobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.iscomplexobj. Returns True iff input has a
@@ -5919,6 +5933,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ascontiguousarray, m)?)?;
     m.add_function(wrap_pyfunction!(real_if_close, m)?)?;
     m.add_function(wrap_pyfunction!(iscomplexobj, m)?)?;
+    m.add_function(wrap_pyfunction!(angle, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6208,6 +6223,7 @@ mod tests {
             assert!(module.getattr("ascontiguousarray").is_ok());
             assert!(module.getattr("real_if_close").is_ok());
             assert!(module.getattr("iscomplexobj").is_ok());
+            assert!(module.getattr("angle").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -22233,6 +22249,109 @@ mod tests {
                 numpy_isc.call1((zero_imag.clone(),))?,
                 "complex array with zero imag",
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn angle_matches_numpy_across_complex_real_and_deg() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let angle_fn = module.getattr("angle")?;
+            let numpy = py.import("numpy")?;
+            let numpy_angle = numpy.getattr("angle")?;
+            let isclose = numpy.getattr("isclose")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+            let make_complex_array = |pairs: Vec<(f64, f64)>| -> PyResult<Bound<'_, PyAny>> {
+                let mut items: Vec<Py<PyAny>> = Vec::with_capacity(pairs.len());
+                for (r, i) in pairs {
+                    items.push(py_complex.call1((r, i))?.unbind());
+                }
+                let lst = PyList::new(py, items)?;
+                numpy.getattr("array")?.call1((lst,))
+            };
+
+            // Scalar 1+0j → 0.
+            let z_real = py_complex.call1((1.0_f64, 0.0_f64))?;
+            let ours_re = angle_fn.call1((z_real.clone(),))?;
+            let theirs_re = numpy_angle.call1((z_real.clone(),))?;
+            let ok_re: bool = isclose.call1((&ours_re, &theirs_re))?.extract()?;
+            assert!(ok_re, "angle(1+0j) mismatch");
+
+            // Scalar 0+1j → π/2.
+            let z_i = py_complex.call1((0.0_f64, 1.0_f64))?;
+            let ours_i = angle_fn.call1((z_i.clone(),))?;
+            let theirs_i = numpy_angle.call1((z_i.clone(),))?;
+            let ok_i: bool = isclose.call1((&ours_i, &theirs_i))?.extract()?;
+            assert!(ok_i, "angle(0+1j) mismatch");
+            let val: f64 = ours_i.extract()?;
+            let pi_half = std::f64::consts::FRAC_PI_2;
+            assert!((val - pi_half).abs() < 1e-12, "angle(0+1j) must equal π/2");
+
+            // Scalar -1+0j → π.
+            let z_neg = py_complex.call1((-1.0_f64, 0.0_f64))?;
+            let ours_n = angle_fn.call1((z_neg.clone(),))?;
+            let theirs_n = numpy_angle.call1((z_neg.clone(),))?;
+            let ok_n: bool = isclose.call1((&ours_n, &theirs_n))?.extract()?;
+            assert!(ok_n, "angle(-1+0j) mismatch");
+
+            // 1-D complex array.
+            let arr = make_complex_array(vec![
+                (1.0, 0.0),
+                (0.0, 1.0),
+                (-1.0, 0.0),
+                (0.0, -1.0),
+            ])?;
+            let ours_a = angle_fn.call1((arr.clone(),))?;
+            let theirs_a = numpy_angle.call1((arr.clone(),))?;
+            let ok_a: bool = allclose.call1((&ours_a, &theirs_a))?.extract()?;
+            assert!(ok_a, "angle 1-D complex array mismatch");
+
+            // deg=True returns degrees.
+            let ours_d = angle_fn.call(
+                (arr.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("deg", true)?;
+                    kw
+                }),
+            )?;
+            let theirs_d = numpy_angle.call(
+                (arr.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("deg", true)?;
+                    kw
+                }),
+            )?;
+            let ok_d: bool = allclose.call1((&ours_d, &theirs_d))?.extract()?;
+            assert!(ok_d, "angle deg=True mismatch");
+
+            // Real input (treated as complex with imag=0): positive
+            // values yield 0, negative yield π.
+            let real_arr = numpy.getattr("array")?.call1((vec![1.0_f64, -2.0, 3.0, -4.0],))?;
+            let ours_r = angle_fn.call1((real_arr.clone(),))?;
+            let theirs_r = numpy_angle.call1((real_arr.clone(),))?;
+            let ok_r: bool = allclose.call1((&ours_r, &theirs_r))?.extract()?;
+            assert!(ok_r, "angle real input mismatch");
+
+            // 2-D complex input element-wise.
+            let row1 = make_complex_array(vec![(1.0, 1.0), (1.0, -1.0)])?;
+            let row2 = make_complex_array(vec![(-1.0, 1.0), (-1.0, -1.0)])?;
+            let nested = PyList::new(py, [row1.unbind(), row2.unbind()])?;
+            let two_d = numpy.getattr("array")?.call1((nested,))?;
+            let ours_2d = angle_fn.call1((two_d.clone(),))?;
+            let theirs_2d = numpy_angle.call1((two_d.clone(),))?;
+            let ok_2d: bool = allclose.call1((&ours_2d, &theirs_2d))?.extract()?;
+            assert!(ok_2d, "angle 2-D complex mismatch");
 
             Ok(())
         });
