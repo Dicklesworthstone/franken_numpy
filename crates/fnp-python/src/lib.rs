@@ -4903,6 +4903,19 @@ fn polyder(py: Python<'_>, p: Py<PyAny>, m: i64) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, reps))]
+fn tile(py: Python<'_>, a: Py<PyAny>, reps: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.tile. `reps` may be a scalar or a tuple of
+    // ints; output dimensionality follows numpy's documented rules
+    // (max(arr.ndim, len(reps))).
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("tile")?
+        .call1((a.bind(py), reps.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x,))]
 fn iscomplexobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.iscomplexobj. Returns True iff input has a
@@ -6033,6 +6046,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(isreal, m)?)?;
     m.add_function(wrap_pyfunction!(expm1, m)?)?;
     m.add_function(wrap_pyfunction!(polyder, m)?)?;
+    m.add_function(wrap_pyfunction!(tile, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6331,6 +6345,7 @@ mod tests {
             assert!(module.getattr("isreal").is_ok());
             assert!(module.getattr("expm1").is_ok());
             assert!(module.getattr("polyder").is_ok());
+            assert!(module.getattr("tile").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -23134,6 +23149,82 @@ mod tests {
             let ours_dtype = ours_i.getattr("dtype")?.str()?.to_string();
             let theirs_dtype = theirs_i.getattr("dtype")?.str()?.to_string();
             assert_eq!(ours_dtype, theirs_dtype, "polyder int dtype must match numpy");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn tile_matches_numpy_across_reps_shapes_and_dtype() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let tile_fn = module.getattr("tile")?;
+            let numpy = py.import("numpy")?;
+            let numpy_tile = numpy.getattr("tile")?;
+
+            // 1-D scalar reps.
+            let one_d = numpy.getattr("array")?.call1((vec![1_i64, 2],))?;
+            assert_array_matches_numpy(
+                &tile_fn.call1((one_d.clone(), 3_i64))?,
+                &numpy_tile.call1((one_d.clone(), 3_i64))?,
+            )?;
+
+            // 1-D tuple reps preserves dimensionality.
+            let reps_tuple = PyTuple::new(py, [2_i64, 3])?;
+            assert_array_matches_numpy(
+                &tile_fn.call1((one_d.clone(), &reps_tuple))?,
+                &numpy_tile.call1((one_d.clone(), &reps_tuple))?,
+            )?;
+
+            // 2-D scalar reps.
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![1_i64, 2],
+                vec![3, 4],
+            ],))?;
+            assert_array_matches_numpy(
+                &tile_fn.call1((two_d.clone(), 2_i64))?,
+                &numpy_tile.call1((two_d.clone(), 2_i64))?,
+            )?;
+
+            // 2-D tuple reps stretches both axes.
+            let reps_2d = PyTuple::new(py, [2_i64, 3])?;
+            assert_array_matches_numpy(
+                &tile_fn.call1((two_d.clone(), &reps_2d))?,
+                &numpy_tile.call1((two_d.clone(), &reps_2d))?,
+            )?;
+
+            // reps=0 yields an empty array along the repeated axis.
+            let ours_zero = tile_fn.call1((one_d.clone(), 0_i64))?;
+            let theirs_zero = numpy_tile.call1((one_d.clone(), 0_i64))?;
+            assert_array_matches_numpy(&ours_zero, &theirs_zero)?;
+            let ours_size: usize = ours_zero.getattr("size")?.extract()?;
+            assert_eq!(ours_size, 0, "tile reps=0 must produce empty");
+
+            // dtype preservation across float/int.
+            let floats = numpy.getattr("array")?.call(
+                (vec![1.5_f64, 2.5],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("float64")?)?;
+                    kw
+                }),
+            )?;
+            let ours_f = tile_fn.call1((floats.clone(), 2_i64))?;
+            let theirs_f = numpy_tile.call1((floats.clone(), 2_i64))?;
+            let ours_dtype = ours_f.getattr("dtype")?.str()?.to_string();
+            let theirs_dtype = theirs_f.getattr("dtype")?.str()?.to_string();
+            assert_eq!(ours_dtype, theirs_dtype, "tile dtype must match numpy");
+
+            // Larger reps factor.
+            assert_array_matches_numpy(
+                &tile_fn.call1((one_d.clone(), 10_i64))?,
+                &numpy_tile.call1((one_d.clone(), 10_i64))?,
+            )?;
 
             Ok(())
         });
