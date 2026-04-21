@@ -4903,6 +4903,29 @@ fn polyder(py: Python<'_>, p: Py<PyAny>, m: i64) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (p, m=1, k=None))]
+fn polyint(
+    py: Python<'_>,
+    p: Py<PyAny>,
+    m: i64,
+    k: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.polyint. Returns the m-th antiderivative of the
+    // polynomial p (decreasing-power coefficients). `k` may be None (all
+    // zeros), a scalar (reused for every integration), or a rank-1 array
+    // of length 1 or >= m (per NumPy's documented broadcasting rule).
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(k) = k {
+        kwargs.set_item("k", k.bind(py))?;
+    }
+    Ok(numpy
+        .getattr("polyint")?
+        .call((p.bind(py), m), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, reps))]
 fn tile(py: Python<'_>, a: Py<PyAny>, reps: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.tile. `reps` may be a scalar or a tuple of
@@ -5070,6 +5093,37 @@ fn testing_assert_allclose(
         kwargs.set_item("err_msg", msg)?;
     }
     kwargs.set_item("verbose", verbose)?;
+    assert_fn.call(
+        (actual.bind(py), desired.bind(py)),
+        Some(&kwargs),
+    )?;
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature = (actual, desired, err_msg=None, verbose=true, strict=false))]
+fn testing_assert_array_equal(
+    py: Python<'_>,
+    actual: Py<PyAny>,
+    desired: Py<PyAny>,
+    err_msg: Option<String>,
+    verbose: bool,
+    strict: bool,
+) -> PyResult<()> {
+    // Passthrough to numpy.testing.assert_array_equal. Raises
+    // AssertionError if arrays are not element-wise equal. NaN
+    // positions match by default; strict=True additionally enforces
+    // dtype equality.
+    let numpy = py.import("numpy")?;
+    let assert_fn = numpy
+        .getattr("testing")?
+        .getattr("assert_array_equal")?;
+    let kwargs = PyDict::new(py);
+    if let Some(msg) = err_msg {
+        kwargs.set_item("err_msg", msg)?;
+    }
+    kwargs.set_item("verbose", verbose)?;
+    kwargs.set_item("strict", strict)?;
     assert_fn.call(
         (actual.bind(py), desired.bind(py)),
         Some(&kwargs),
@@ -6208,6 +6262,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(isreal, m)?)?;
     m.add_function(wrap_pyfunction!(expm1, m)?)?;
     m.add_function(wrap_pyfunction!(polyder, m)?)?;
+    m.add_function(wrap_pyfunction!(polyint, m)?)?;
     m.add_function(wrap_pyfunction!(tile, m)?)?;
     m.add_function(wrap_pyfunction!(true_divide, m)?)?;
     m.add_function(wrap_pyfunction!(allclose, m)?)?;
@@ -6218,6 +6273,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(isrealobj, m)?)?;
     m.add_function(wrap_pyfunction!(average, m)?)?;
     m.add_function(wrap_pyfunction!(testing_assert_allclose, m)?)?;
+    m.add_function(wrap_pyfunction!(testing_assert_array_equal, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6526,6 +6582,7 @@ mod tests {
             assert!(module.getattr("isrealobj").is_ok());
             assert!(module.getattr("average").is_ok());
             assert!(module.getattr("testing_assert_allclose").is_ok());
+            assert!(module.getattr("testing_assert_array_equal").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -23335,6 +23392,74 @@ mod tests {
     }
 
     #[test]
+    fn polyint_matches_numpy_across_orders_and_constants() {
+        // Pin fnp-python `polyint` parity against NumPy's reference for the
+        // four documented k-shapes (None, scalar, length-1 rank-1,
+        // matching-length rank-1) at several orders, plus m=0 and the
+        // empty-input edge cases.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let polyint_fn = module.getattr("polyint")?;
+            let numpy = py.import("numpy")?;
+            let numpy_polyint = numpy.getattr("polyint")?;
+
+            // Helper: call both ours and NumPy's polyint with matching args +
+            // a kwargs dict that already carries any k/etc., and assert the
+            // outputs agree via allclose-equivalent array comparison.
+            let assert_equiv = |args: (Vec<f64>, i64),
+                                kwargs: &Bound<'_, PyDict>|
+             -> PyResult<()> {
+                let ours = polyint_fn.call(args.clone(), Some(kwargs))?;
+                let theirs = numpy_polyint.call(args, Some(kwargs))?;
+                assert_array_matches_numpy(&ours, &theirs)
+            };
+
+            let base = vec![1.0_f64, 2.0, 3.0];
+
+            // m=1, default k=None (no kwargs).
+            assert_equiv((base.clone(), 1), &PyDict::new(py))?;
+
+            // m=1 with scalar k.
+            let kw_scalar = PyDict::new(py);
+            kw_scalar.set_item("k", 5.0_f64)?;
+            assert_equiv((base.clone(), 1), &kw_scalar)?;
+
+            // m=1 with length-1 list k.
+            let kw_len1 = PyDict::new(py);
+            kw_len1.set_item("k", PyList::new(py, [5.0_f64])?)?;
+            assert_equiv((base.clone(), 1), &kw_len1)?;
+
+            // m=2 with matching-length list k.
+            let kw_len2 = PyDict::new(py);
+            kw_len2.set_item("k", PyList::new(py, [7.0_f64, 11.0])?)?;
+            assert_equiv((base.clone(), 2), &kw_len2)?;
+
+            // m=3 with a k-list longer than m (extras ignored per numpy).
+            let kw_len3 = PyDict::new(py);
+            kw_len3.set_item("k", PyList::new(py, [1.0_f64, 2.0, 3.0, 4.0])?)?;
+            assert_equiv((base.clone(), 3), &kw_len3)?;
+
+            // m=0 returns input unchanged.
+            assert_equiv((base.clone(), 0), &PyDict::new(py))?;
+
+            // Empty input edge cases: np.polyint([]) == [0.]; with m>=1 the
+            // output is all zeros (or the supplied constants).
+            assert_equiv((Vec::<f64>::new(), 1), &PyDict::new(py))?;
+            assert_equiv((Vec::<f64>::new(), 2), &PyDict::new(py))?;
+            let kw_empty_k = PyDict::new(py);
+            kw_empty_k.set_item("k", PyList::new(py, [7.0_f64, 11.0])?)?;
+            assert_equiv((Vec::<f64>::new(), 2), &kw_empty_k)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn tile_matches_numpy_across_reps_shapes_and_dtype() {
         with_python(|py| {
             if !numpy_available(py) {
@@ -24302,6 +24427,103 @@ mod tests {
 
             // Broadcasting: scalar vs array equal-valued → passes.
             assert_fn.call1((1.0_f64, numpy.getattr("array")?.call1((vec![1.0_f64, 1.0, 1.0],))?))?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn testing_assert_array_equal_matches_numpy_pass_and_fail_paths() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let assert_fn = module.getattr("testing_assert_array_equal")?;
+            let numpy = py.import("numpy")?;
+
+            // Identical arrays → pass.
+            let a = numpy.getattr("array")?.call1((vec![1_i64, 2, 3, 4],))?;
+            let b = numpy.getattr("array")?.call1((vec![1_i64, 2, 3, 4],))?;
+            assert_fn.call1((a.clone(), b.clone()))?;
+
+            // Different content → AssertionError.
+            let c = numpy.getattr("array")?.call1((vec![1_i64, 2, 99, 4],))?;
+            let err = assert_fn.call1((a.clone(), c.clone())).err();
+            assert!(err.is_some(), "different content must raise");
+            let err_type = err
+                .as_ref()
+                .map(|e| e.get_type(py).name().unwrap().to_string())
+                .unwrap_or_default();
+            assert!(
+                err_type.contains("AssertionError"),
+                "expected AssertionError, got {}",
+                err_type,
+            );
+
+            // Different shape → AssertionError.
+            let d = numpy.getattr("array")?.call1((vec![1_i64, 2, 3],))?;
+            let err_shape = assert_fn.call1((a.clone(), d.clone())).err();
+            assert!(err_shape.is_some(), "different shape must raise");
+
+            // NaN at same positions → passes by default.
+            let nan_a = numpy.getattr("array")?.call1((vec![1.0_f64, f64::NAN, 3.0],))?;
+            let nan_b = numpy.getattr("array")?.call1((vec![1.0_f64, f64::NAN, 3.0],))?;
+            assert_fn.call1((nan_a.clone(), nan_b.clone()))?;
+
+            // strict=True with dtype mismatch → AssertionError.
+            let int_arr = numpy.getattr("array")?.call(
+                (vec![1_i64, 2, 3, 4],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("int64")?)?;
+                    kw
+                }),
+            )?;
+            let float_arr = numpy.getattr("array")?.call(
+                (vec![1.0_f64, 2.0, 3.0, 4.0],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("float64")?)?;
+                    kw
+                }),
+            )?;
+            // strict=False (default) → passes despite dtype difference.
+            assert_fn.call1((int_arr.clone(), float_arr.clone()))?;
+            // strict=True → raises due to dtype mismatch.
+            let err_strict = assert_fn.call(
+                (int_arr.clone(), float_arr.clone()),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("strict", true)?;
+                    kw
+                }),
+            ).err();
+            assert!(
+                err_strict.is_some(),
+                "strict=True with dtype mismatch must raise",
+            );
+
+            // Custom err_msg appears in raised text.
+            let err_msg_test = assert_fn.call(
+                (a.clone(), c.clone()),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("err_msg", "diff-marker")?;
+                    kw
+                }),
+            ).err();
+            let err_text = err_msg_test
+                .as_ref()
+                .map(|e| e.value(py).str().unwrap().to_string())
+                .unwrap_or_default();
+            assert!(
+                err_text.contains("diff-marker"),
+                "err_msg must appear in raised AssertionError; got: {}",
+                err_text,
+            );
 
             Ok(())
         });
