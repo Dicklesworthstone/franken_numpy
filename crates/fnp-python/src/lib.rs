@@ -4978,6 +4978,87 @@ fn polymul(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAny>> 
 }
 
 #[pyfunction]
+#[pyo3(signature = (c1, c2))]
+fn chebadd(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to numpy.polynomial.chebyshev.chebadd. Coefficients
+    // are expressed in the Chebyshev basis in ascending order (c[0] is
+    // T_0's coefficient). Shorter input is zero-right-padded so
+    // like-basis terms align before summing.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("chebyshev")?
+        .getattr("chebadd")?
+        .call1((c1.bind(py), c2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c1, c2))]
+fn chebsub(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to numpy.polynomial.chebyshev.chebsub. Returns c1 - c2
+    // in the Chebyshev basis with the same zero-right-pad alignment as
+    // chebadd.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("chebyshev")?
+        .getattr("chebsub")?
+        .call1((c1.bind(py), c2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c1, c2))]
+fn chebmul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to numpy.polynomial.chebyshev.chebmul. Multiplies two
+    // Chebyshev series; result has len(c1) + len(c2) - 1 coefficients.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("chebyshev")?
+        .getattr("chebmul")?
+        .call1((c1.bind(py), c2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, c, tensor=true))]
+fn chebval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult<Py<PyAny>> {
+    // Passthrough to numpy.polynomial.chebyshev.chebval. Evaluates a
+    // Chebyshev series at `x` using Clenshaw recurrence. When `c` has
+    // more than one dimension and tensor=True, evaluation broadcasts
+    // over `x` with the coefficient axis treated as a tensor index;
+    // tensor=False evaluates the corresponding x element against the
+    // corresponding coefficient row instead.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("tensor", tensor)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("chebyshev")?
+        .getattr("chebval")?
+        .call((x.bind(py), c.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c,))]
+fn chebroots(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to numpy.polynomial.chebyshev.chebroots. Returns the
+    // real and complex roots of the Chebyshev series via its companion
+    // matrix eigenvalues. Input must be 1-D; a length-1 (constant)
+    // series returns an empty array.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("chebyshev")?
+        .getattr("chebroots")?
+        .call1((c.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x, window_shape, axis=None, *, subok=false, writeable=false))]
 fn sliding_window_view(
     py: Python<'_>,
@@ -6386,6 +6467,11 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(polymul, m)?)?;
     m.add_function(wrap_pyfunction!(sliding_window_view, m)?)?;
     m.add_function(wrap_pyfunction!(as_strided, m)?)?;
+    m.add_function(wrap_pyfunction!(chebadd, m)?)?;
+    m.add_function(wrap_pyfunction!(chebsub, m)?)?;
+    m.add_function(wrap_pyfunction!(chebmul, m)?)?;
+    m.add_function(wrap_pyfunction!(chebval, m)?)?;
+    m.add_function(wrap_pyfunction!(chebroots, m)?)?;
     m.add_function(wrap_pyfunction!(tile, m)?)?;
     m.add_function(wrap_pyfunction!(true_divide, m)?)?;
     m.add_function(wrap_pyfunction!(allclose, m)?)?;
@@ -23755,6 +23841,89 @@ mod tests {
                 &ours.call((a.clone(),), Some(&kw_overlap))?,
                 &theirs.call((a.clone(),), Some(&kw_overlap))?,
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn chebyshev_wrappers_match_numpy() {
+        // Pin fnp-python chebyshev wrapper parity against
+        // numpy.polynomial.chebyshev for the five newly exposed helpers.
+        // chebadd / chebsub / chebmul are exercised across same-length,
+        // length-mismatched (both directions), and single-coefficient
+        // (constant) inputs; chebval is exercised at scalar x, vector x,
+        // and with tensor=False against a 2-D coefficient matrix;
+        // chebroots is exercised on a quadratic with known real roots,
+        // a cubic, and a length-1 (constant) series returning [].
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let numpy_cheb = numpy.getattr("polynomial")?.getattr("chebyshev")?;
+
+            let arith_ops: [&str; 3] = ["chebadd", "chebsub", "chebmul"];
+            let arith_cases: Vec<(Vec<f64>, Vec<f64>)> = vec![
+                (vec![1.0, 2.0, 3.0], vec![1.0, 2.0, 3.0]),
+                (vec![1.0, 2.0, 3.0], vec![1.0, 1.0]),
+                (vec![1.0, 2.0], vec![1.0, 2.0, 3.0, 4.0]),
+                (vec![5.0], vec![1.0, 2.0, 3.0]),
+                (vec![1.0, 2.0, 3.0], vec![5.0]),
+            ];
+            for op in arith_ops {
+                let ours = module.getattr(op)?;
+                let theirs = numpy_cheb.getattr(op)?;
+                for (idx, (c1, c2)) in arith_cases.iter().enumerate() {
+                    let ours_out = ours.call1((c1.clone(), c2.clone()))?;
+                    let theirs_out = theirs.call1((c1.clone(), c2.clone()))?;
+                    assert_array_matches_numpy(&ours_out, &theirs_out)
+                        .unwrap_or_else(|_| panic!("{op} case {idx}"));
+                }
+            }
+
+            // chebval at scalar x.
+            let cv = module.getattr("chebval")?;
+            let cv_ref = numpy_cheb.getattr("chebval")?;
+            let c = vec![1.0_f64, 0.5];
+            assert_array_matches_numpy(
+                &cv.call1((2.0_f64, c.clone()))?,
+                &cv_ref.call1((2.0_f64, c.clone()))?,
+            )?;
+            // chebval at vector x.
+            let xs = vec![0.0_f64, 0.5, 1.0];
+            let c2 = vec![1.0_f64, 0.0, 1.0];
+            assert_array_matches_numpy(
+                &cv.call1((xs.clone(), c2.clone()))?,
+                &cv_ref.call1((xs.clone(), c2.clone()))?,
+            )?;
+            // chebval with 2-D coefficient matrix and tensor=False.
+            let c_multi = numpy
+                .getattr("array")?
+                .call1((vec![vec![1.0, 2.0], vec![3.0, 4.0]],))?;
+            let xs2 = vec![0.5_f64, 1.0];
+            let kw_tensor_false = PyDict::new(py);
+            kw_tensor_false.set_item("tensor", false)?;
+            assert_array_matches_numpy(
+                &cv.call((xs2.clone(), c_multi.clone()), Some(&kw_tensor_false))?,
+                &cv_ref.call((xs2.clone(), c_multi.clone()), Some(&kw_tensor_false))?,
+            )?;
+
+            // chebroots: quadratic, cubic, length-1 constant.
+            let cr = module.getattr("chebroots")?;
+            let cr_ref = numpy_cheb.getattr("chebroots")?;
+            for coeffs in [
+                vec![-0.5_f64, 0.0, 1.0],
+                vec![0.0_f64, -0.25, 0.0, 1.0],
+                vec![1.0_f64],
+            ] {
+                let ours_r = cr.call1((coeffs.clone(),))?;
+                let theirs_r = cr_ref.call1((coeffs.clone(),))?;
+                assert_array_matches_numpy(&ours_r, &theirs_r)?;
+            }
 
             Ok(())
         });
