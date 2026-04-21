@@ -4955,6 +4955,17 @@ fn allclose(
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
+fn fix(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.fix. Round toward zero (truncate the
+    // fractional part); equivalent to ceil for negatives and floor
+    // for positives. Integer input passes through unchanged; NaN
+    // propagates.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("fix")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
 fn iscomplexobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.iscomplexobj. Returns True iff input has a
     // complex dtype, regardless of whether imaginary parts are
@@ -6087,6 +6098,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tile, m)?)?;
     m.add_function(wrap_pyfunction!(true_divide, m)?)?;
     m.add_function(wrap_pyfunction!(allclose, m)?)?;
+    m.add_function(wrap_pyfunction!(fix, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6388,6 +6400,7 @@ mod tests {
             assert!(module.getattr("tile").is_ok());
             assert!(module.getattr("true_divide").is_ok());
             assert!(module.getattr("allclose").is_ok());
+            assert!(module.getattr("fix").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -23507,6 +23520,89 @@ mod tests {
                 )?,
                 "tight atol+rtol",
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn fix_matches_numpy_across_signs_dtypes_and_special_values() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let fix_fn = module.getattr("fix")?;
+            let numpy = py.import("numpy")?;
+            let numpy_fix = numpy.getattr("fix")?;
+            let isclose = numpy.getattr("isclose")?;
+            let allclose = numpy.getattr("allclose")?;
+            let isnan_fn = numpy.getattr("isnan")?;
+
+            // Positive non-integer truncates toward zero.
+            let ours_p = fix_fn.call1((3.7_f64,))?;
+            let theirs_p = numpy_fix.call1((3.7_f64,))?;
+            let ok_p: bool = isclose.call1((&ours_p, &theirs_p))?.extract()?;
+            assert!(ok_p, "fix(3.7) mismatch");
+            let val_p: f64 = ours_p.extract()?;
+            assert!((val_p - 3.0).abs() < 1e-12, "fix(3.7) must equal 3.0");
+
+            // Negative non-integer truncates toward zero (not floor).
+            let ours_n = fix_fn.call1((-3.7_f64,))?;
+            let theirs_n = numpy_fix.call1((-3.7_f64,))?;
+            let ok_n: bool = isclose.call1((&ours_n, &theirs_n))?.extract()?;
+            assert!(ok_n, "fix(-3.7) mismatch");
+            let val_n: f64 = ours_n.extract()?;
+            assert!((val_n + 3.0).abs() < 1e-12, "fix(-3.7) must equal -3.0");
+
+            // Exact integers unchanged.
+            let exact_arr = numpy.getattr("array")?.call1((vec![-2.0_f64, -1.0, 0.0, 1.0, 2.0],))?;
+            let ours_e = fix_fn.call1((exact_arr.clone(),))?;
+            let theirs_e = numpy_fix.call1((exact_arr.clone(),))?;
+            let ok_e: bool = allclose.call1((&ours_e, &theirs_e))?.extract()?;
+            assert!(ok_e, "fix exact integers mismatch");
+
+            // Mixed-sign 1-D array.
+            let mixed = numpy.getattr("array")?.call1((vec![
+                -3.7_f64, -1.5, -0.5, 0.5, 1.5, 3.7,
+            ],))?;
+            let ours_m = fix_fn.call1((mixed.clone(),))?;
+            let theirs_m = numpy_fix.call1((mixed.clone(),))?;
+            let ok_m: bool = allclose.call1((&ours_m, &theirs_m))?.extract()?;
+            assert!(ok_m, "fix mixed-sign 1-D mismatch");
+
+            // Integer input (passes through unchanged).
+            let ints = numpy.getattr("array")?.call1((vec![-3_i64, -1, 0, 1, 3],))?;
+            let ours_i = fix_fn.call1((ints.clone(),))?;
+            let theirs_i = numpy_fix.call1((ints.clone(),))?;
+            let ok_i: bool = allclose.call1((&ours_i, &theirs_i))?.extract()?;
+            assert!(ok_i, "fix integer input mismatch");
+
+            // NaN propagation.
+            let with_nan = numpy.getattr("array")?.call1((vec![1.5_f64, f64::NAN, -2.5],))?;
+            let ours_nan = fix_fn.call1((with_nan.clone(),))?;
+            let theirs_nan = numpy_fix.call1((with_nan.clone(),))?;
+            let ours_nan_check: bool = isnan_fn
+                .call1((&ours_nan,))?
+                .get_item(1_i64)?
+                .extract()?;
+            let theirs_nan_check: bool = isnan_fn
+                .call1((&theirs_nan,))?
+                .get_item(1_i64)?
+                .extract()?;
+            assert!(ours_nan_check && theirs_nan_check, "fix must propagate NaN");
+
+            // 2-D array element-wise.
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![1.5_f64, -1.5],
+                vec![2.7, -2.7],
+            ],))?;
+            let ours_2d = fix_fn.call1((two_d.clone(),))?;
+            let theirs_2d = numpy_fix.call1((two_d.clone(),))?;
+            let ok_2d: bool = allclose.call1((&ours_2d, &theirs_2d))?.extract()?;
+            assert!(ok_2d, "fix 2-D mismatch");
 
             Ok(())
         });
