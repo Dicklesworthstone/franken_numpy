@@ -4646,6 +4646,19 @@ fn percentile(
 }
 
 #[pyfunction]
+#[pyo3(signature = (keys, axis=-1))]
+fn lexsort(py: Python<'_>, keys: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.lexsort so indirect stable sorting by a
+    // sequence of keys (last key = primary sort) matches numpy across
+    // tuple-of-1-D-keys input, 2-D keys array, and explicit axis.
+    let numpy = py.import("numpy")?;
+    let lexsort_fn = numpy.getattr("lexsort")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("axis", axis)?;
+    Ok(lexsort_fn.call((keys.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (p, x))]
 fn polyval(py: Python<'_>, p: Py<PyAny>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.polyval. Coefficients `p` are in decreasing
@@ -5703,6 +5716,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(nansum, m)?)?;
     m.add_function(wrap_pyfunction!(nanmax, m)?)?;
     m.add_function(wrap_pyfunction!(percentile, m)?)?;
+    m.add_function(wrap_pyfunction!(lexsort, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
     m.add_function(wrap_pyfunction!(compressed, m)?)?;
@@ -5982,6 +5996,7 @@ mod tests {
             assert!(module.getattr("nansum").is_ok());
             assert!(module.getattr("nanmax").is_ok());
             assert!(module.getattr("percentile").is_ok());
+            assert!(module.getattr("lexsort").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
             assert!(module.getattr("compressed").is_ok());
@@ -20939,6 +20954,90 @@ mod tests {
             let theirs_max = numpy_percentile.call1((one_d.clone(), 100.0_f64))?;
             let ok_max: bool = isclose.call1((&ours_max, &theirs_max))?.extract()?;
             assert!(ok_max, "percentile q=100 (max) mismatch");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn lexsort_matches_numpy_across_keys_axis_and_ties() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let lexsort_fn = module.getattr("lexsort")?;
+            let numpy = py.import("numpy")?;
+            let numpy_lexsort = numpy.getattr("lexsort")?;
+
+            // Tuple of two 1-D keys: secondary first, primary last.
+            let secondary = numpy.getattr("array")?.call1((vec![1_i64, 2, 1, 2, 1],))?;
+            let primary = numpy.getattr("array")?.call1((vec![3_i64, 1, 4, 1, 5],))?;
+            let keys_tuple = PyTuple::new(py, [secondary.clone(), primary.clone()])?;
+            let ours = lexsort_fn.call1((keys_tuple.clone(),))?;
+            let theirs = numpy_lexsort.call1((keys_tuple.clone(),))?;
+            assert_array_matches_numpy(&ours, &theirs)?;
+
+            // 2-D keys array: each row is a key (last row is primary).
+            let two_d_keys = numpy.getattr("array")?.call1((vec![
+                vec![5_i64, 4, 3, 2, 1],
+                vec![1_i64, 1, 1, 1, 1],
+            ],))?;
+            assert_array_matches_numpy(
+                &lexsort_fn.call1((two_d_keys.clone(),))?,
+                &numpy_lexsort.call1((two_d_keys.clone(),))?,
+            )?;
+
+            // Ties broken by the secondary key: when primary values
+            // tie at indices, the secondary key determines order.
+            let primary_with_ties = numpy.getattr("array")?.call1((vec![1_i64, 2, 2, 1, 3],))?;
+            let secondary_breaker =
+                numpy.getattr("array")?.call1((vec![5_i64, 4, 3, 6, 0],))?;
+            let tie_keys = PyTuple::new(
+                py,
+                [secondary_breaker.clone(), primary_with_ties.clone()],
+            )?;
+            let ours_ties = lexsort_fn.call1((tie_keys.clone(),))?;
+            let theirs_ties = numpy_lexsort.call1((tie_keys.clone(),))?;
+            assert_array_matches_numpy(&ours_ties, &theirs_ties)?;
+            // Verify the resulting permutation actually sorts the keys.
+            let primary_sorted = primary_with_ties
+                .get_item(theirs_ties.clone())?;
+            let expected_sorted = numpy.getattr("array")?.call1((vec![1_i64, 1, 2, 2, 3],))?;
+            assert_array_matches_numpy(&primary_sorted, &expected_sorted)?;
+
+            // Single-key input via length-1 tuple matches numpy.
+            let single_key = numpy.getattr("array")?.call1((vec![3_i64, 1, 4, 1, 5, 9, 2, 6],))?;
+            let single_tuple = PyTuple::new(py, [single_key.clone()])?;
+            assert_array_matches_numpy(
+                &lexsort_fn.call1((single_tuple.clone(),))?,
+                &numpy_lexsort.call1((single_tuple.clone(),))?,
+            )?;
+
+            // axis=0 on 2-D keys (each column treated as an entry along axis 0).
+            let axis_keys = numpy.getattr("array")?.call1((vec![
+                vec![3_i64, 1, 2],
+                vec![5_i64, 5, 5],
+            ],))?;
+            let kwargs_axis0 = PyDict::new(py);
+            kwargs_axis0.set_item("axis", 0_i64)?;
+            assert_array_matches_numpy(
+                &lexsort_fn.call((axis_keys.clone(),), Some(&kwargs_axis0))?,
+                &numpy_lexsort.call((axis_keys.clone(),), Some(&kwargs_axis0))?,
+            )?;
+
+            // String keys.
+            let string_secondary = numpy.getattr("array")?.call1((vec!["b", "a", "c", "b", "a"],))?;
+            let string_primary =
+                numpy.getattr("array")?.call1((vec!["one", "one", "two", "two", "three"],))?;
+            let string_keys =
+                PyTuple::new(py, [string_secondary.clone(), string_primary.clone()])?;
+            assert_array_matches_numpy(
+                &lexsort_fn.call1((string_keys.clone(),))?,
+                &numpy_lexsort.call1((string_keys.clone(),))?,
+            )?;
 
             Ok(())
         });
