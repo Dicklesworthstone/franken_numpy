@@ -4187,6 +4187,21 @@ fn tri(
 }
 
 #[pyfunction]
+#[pyo3(signature = (x, p=None))]
+fn cond(py: Python<'_>, x: Py<PyAny>, p: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.linalg.cond so the seven valid p values
+    // (None, 1, -1, 2, -2, 'fro', inf, -inf) and batched (..., M, N)
+    // broadcasting match numpy exactly across real and complex inputs.
+    let numpy = py.import("numpy")?;
+    let cond_fn = numpy.getattr("linalg")?.getattr("cond")?;
+    let kwargs = PyDict::new(py);
+    if let Some(value) = p {
+        kwargs.set_item("p", value.bind(py))?;
+    }
+    Ok(cond_fn.call((x.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x, ord=None, axis=None, keepdims=false))]
 fn norm(
     py: Python<'_>,
@@ -4678,6 +4693,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(putmask, m)?)?;
     m.add_function(wrap_pyfunction!(indices, m)?)?;
     m.add_function(wrap_pyfunction!(tri, m)?)?;
+    m.add_function(wrap_pyfunction!(cond, m)?)?;
     m.add_function(wrap_pyfunction!(norm, m)?)?;
     m.add_function(wrap_pyfunction!(fftshift, m)?)?;
     m.add_function(wrap_pyfunction!(ifftshift, m)?)?;
@@ -4912,6 +4928,7 @@ mod tests {
             assert!(module.getattr("maximum_fill_value").is_ok());
             assert!(module.getattr("pinv").is_ok());
             assert!(module.getattr("eigvals").is_ok());
+            assert!(module.getattr("cond").is_ok());
             assert!(module.getattr("norm").is_ok());
             assert!(module.getattr("fftshift").is_ok());
             assert!(module.getattr("ifftshift").is_ok());
@@ -13983,6 +14000,128 @@ mod tests {
                     ))?
                     .extract::<bool>()?,
                 "norm complex 1-D diverged"
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn cond_matches_numpy_across_p_values_and_complex() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let cond_fn = module.getattr("cond")?;
+            let numpy = py.import("numpy")?;
+            let numpy_cond = numpy.getattr("linalg")?.getattr("cond")?;
+            let isclose = numpy.getattr("isclose")?;
+
+            // Well-conditioned 2x2 — default p (2-norm).
+            let good = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 2.0])?,
+                    PyList::new(py, [3.0_f64, 4.0])?,
+                ],
+            )?,))?;
+            assert!(
+                isclose
+                    .call1((
+                        &cond_fn.call1((good.clone(),))?,
+                        &numpy_cond.call1((good.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "cond default p diverged"
+            );
+
+            // p=1 (max column sum / min column sum).
+            for p in [1_i64, -1_i64, 2_i64, -2_i64] {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("p", p)?;
+                let kwargs_n = PyDict::new(py);
+                kwargs_n.set_item("p", p)?;
+                assert!(
+                    isclose
+                        .call1((
+                            &cond_fn.call((good.clone(),), Some(&kwargs))?,
+                            &numpy_cond.call((good.clone(),), Some(&kwargs_n))?,
+                        ))?
+                        .extract::<bool>()?,
+                    "cond p={p} diverged"
+                );
+            }
+
+            // p='fro'.
+            let fro_kwargs = PyDict::new(py);
+            fro_kwargs.set_item("p", "fro")?;
+            let fro_kwargs_n = PyDict::new(py);
+            fro_kwargs_n.set_item("p", "fro")?;
+            assert!(
+                isclose
+                    .call1((
+                        &cond_fn.call((good.clone(),), Some(&fro_kwargs))?,
+                        &numpy_cond.call((good.clone(),), Some(&fro_kwargs_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "cond p='fro' diverged"
+            );
+
+            // p=inf and p=-inf.
+            let inf = numpy.getattr("inf")?;
+            let inf_kw = PyDict::new(py);
+            inf_kw.set_item("p", &inf)?;
+            let inf_kw_n = PyDict::new(py);
+            inf_kw_n.set_item("p", &inf)?;
+            assert!(
+                isclose
+                    .call1((
+                        &cond_fn.call((good.clone(),), Some(&inf_kw))?,
+                        &numpy_cond.call((good.clone(),), Some(&inf_kw_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "cond p=inf diverged"
+            );
+
+            // Complex 2x2 default.
+            let builtins = py.import("builtins")?;
+            let complex_a = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        PyList::new(
+                            py,
+                            [
+                                builtins.getattr("complex")?.call1((1.0_f64, 1.0_f64))?,
+                                builtins.getattr("complex")?.call1((2.0_f64, 0.0_f64))?,
+                            ],
+                        )?,
+                        PyList::new(
+                            py,
+                            [
+                                builtins.getattr("complex")?.call1((0.0_f64, -1.0_f64))?,
+                                builtins.getattr("complex")?.call1((1.0_f64, 2.0_f64))?,
+                            ],
+                        )?,
+                    ],
+                )?,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", "complex128")?;
+                    kwargs
+                }),
+            )?;
+            assert!(
+                isclose
+                    .call1((
+                        &cond_fn.call1((complex_a.clone(),))?,
+                        &numpy_cond.call1((complex_a.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "cond complex 2x2 diverged"
             );
 
             Ok(())
