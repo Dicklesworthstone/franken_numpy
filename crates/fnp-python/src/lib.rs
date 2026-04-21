@@ -4792,6 +4792,34 @@ fn nanvar(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, axis=None, out=None, keepdims=None))]
+fn nanargmax(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
+    keepdims: Option<bool>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.nanargmax so NaN-ignoring index selection
+    // matches numpy across axis=None/int, optional out, and explicit
+    // keepdims forwarding. Fully-NaN slices must raise the same
+    // ValueError surface as numpy instead of returning an index.
+    let numpy = py.import("numpy")?;
+    let nanargmax_fn = numpy.getattr("nanargmax")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis_val) = axis {
+        kwargs.set_item("axis", axis_val.bind(py))?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    if let Some(keepdims_val) = keepdims {
+        kwargs.set_item("keepdims", keepdims_val)?;
+    }
+    Ok(nanargmax_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, q, axis=None, out=None, overwrite_input=false, method=None, keepdims=false, weights=None))]
 #[allow(clippy::too_many_arguments)]
 fn percentile(
@@ -7425,6 +7453,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(nanmin, m)?)?;
     m.add_function(wrap_pyfunction!(nanstd, m)?)?;
     m.add_function(wrap_pyfunction!(nanvar, m)?)?;
+    m.add_function(wrap_pyfunction!(nanargmax, m)?)?;
     m.add_function(wrap_pyfunction!(percentile, m)?)?;
     m.add_function(wrap_pyfunction!(lexsort, m)?)?;
     m.add_function(wrap_pyfunction!(rfftn, m)?)?;
@@ -7805,6 +7834,7 @@ mod tests {
             assert!(module.getattr("nanmin").is_ok());
             assert!(module.getattr("nanstd").is_ok());
             assert!(module.getattr("nanvar").is_ok());
+            assert!(module.getattr("nanargmax").is_ok());
             assert!(module.getattr("percentile").is_ok());
             assert!(module.getattr("lexsort").is_ok());
             assert!(module.getattr("rfftn").is_ok());
@@ -23283,6 +23313,117 @@ mod tests {
             assert!(ok_zero, "nanvar identical-input mismatch");
             let ours_zero_ok: bool = isclose.call1((&ours_zero, 0.0_f64))?.extract()?;
             assert!(ours_zero_ok, "nanvar identical-input must return 0");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn nanargmax_matches_numpy_across_axes_keepdims_and_all_nan_errors() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let nanargmax_fn = module.getattr("nanargmax")?;
+            let numpy = py.import("numpy")?;
+            let numpy_nanargmax = numpy.getattr("nanargmax")?;
+
+            // 1-D with NaN ignored.
+            let with_nan =
+                numpy
+                    .getattr("array")?
+                    .call1((vec![1.0_f64, 2.0, f64::NAN, 4.0, 3.0],))?;
+            let ours = nanargmax_fn.call1((with_nan.clone(),))?;
+            let theirs = numpy_nanargmax.call1((with_nan.clone(),))?;
+            assert_eq!(
+                repr_string(&ours),
+                repr_string(&theirs),
+                "nanargmax 1-D with NaN mismatch",
+            );
+
+            // 2-D mixed NaN with axis reductions.
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![1.0_f64, f64::NAN, 3.0],
+                vec![4.0, 5.0, f64::NAN],
+                vec![f64::NAN, 8.0, 9.0],
+            ],))?;
+            for axis in [0_i64, 1] {
+                let ours_ax = nanargmax_fn.call(
+                    (two_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", axis)?;
+                        kw
+                    }),
+                )?;
+                let theirs_ax = numpy_nanargmax.call(
+                    (two_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", axis)?;
+                        kw
+                    }),
+                )?;
+                assert_array_matches_numpy(&ours_ax, &theirs_ax)?;
+            }
+
+            // keepdims=True preserves reduced axes.
+            let ours_kd = nanargmax_fn.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 1_i64)?;
+                    kw.set_item("keepdims", true)?;
+                    kw
+                }),
+            )?;
+            let theirs_kd = numpy_nanargmax.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 1_i64)?;
+                    kw.set_item("keepdims", true)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_kd, &theirs_kd)?;
+
+            // All-NaN slices must raise ValueError with numpy-matching text.
+            let all_nan = numpy
+                .getattr("array")?
+                .call1((vec![f64::NAN, f64::NAN, f64::NAN],))?;
+            let actual_err = nanargmax_fn.call1((all_nan.clone(),)).unwrap_err();
+            let expected_err = numpy_nanargmax.call1((all_nan.clone(),)).unwrap_err();
+            assert!(actual_err.is_instance_of::<PyValueError>(py));
+            assert!(expected_err.is_instance_of::<PyValueError>(py));
+            assert_eq!(actual_err.to_string(), expected_err.to_string());
+
+            // Integer input matches numpy.argmax semantics.
+            let ints = numpy
+                .getattr("array")?
+                .call1((vec![3_i64, 1, 4, 1, 5, 9, 2],))?;
+            let ours_i = nanargmax_fn.call1((ints.clone(),))?;
+            let theirs_i = numpy_nanargmax.call1((ints.clone(),))?;
+            assert_eq!(
+                repr_string(&ours_i),
+                repr_string(&theirs_i),
+                "nanargmax integer input mismatch",
+            );
+
+            // Ties choose the first maximal index just like numpy.
+            let tied = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 5.0, f64::NAN, 5.0, 4.0],))?;
+            let ours_tied = nanargmax_fn.call1((tied.clone(),))?;
+            let theirs_tied = numpy_nanargmax.call1((tied.clone(),))?;
+            assert_eq!(
+                repr_string(&ours_tied),
+                repr_string(&theirs_tied),
+                "nanargmax tie handling mismatch",
+            );
 
             Ok(())
         });
