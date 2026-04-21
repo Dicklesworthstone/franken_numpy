@@ -4659,6 +4659,38 @@ fn lexsort(py: Python<'_>, keys: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, s=None, axes=None, norm=None, out=None))]
+fn rfftn(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    s: Option<Py<PyAny>>,
+    axes: Option<Py<PyAny>>,
+    norm: Option<String>,
+    out: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.fft.rfftn for the N-D real FFT. Output is
+    // complex with the last transformed axis having length n//2+1.
+    // Covers optional shape `s`, axes selection (default: all axes),
+    // norm conventions ('backward'/'ortho'/'forward'), and `out=`.
+    let numpy = py.import("numpy")?;
+    let rfftn_fn = numpy.getattr("fft")?.getattr("rfftn")?;
+    let kwargs = PyDict::new(py);
+    if let Some(s_val) = s {
+        kwargs.set_item("s", s_val.bind(py))?;
+    }
+    if let Some(axes_val) = axes {
+        kwargs.set_item("axes", axes_val.bind(py))?;
+    }
+    if let Some(norm_val) = norm {
+        kwargs.set_item("norm", norm_val)?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    Ok(rfftn_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (p, x))]
 fn polyval(py: Python<'_>, p: Py<PyAny>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.polyval. Coefficients `p` are in decreasing
@@ -5717,6 +5749,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(nanmax, m)?)?;
     m.add_function(wrap_pyfunction!(percentile, m)?)?;
     m.add_function(wrap_pyfunction!(lexsort, m)?)?;
+    m.add_function(wrap_pyfunction!(rfftn, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
     m.add_function(wrap_pyfunction!(compressed, m)?)?;
@@ -5997,6 +6030,7 @@ mod tests {
             assert!(module.getattr("nanmax").is_ok());
             assert!(module.getattr("percentile").is_ok());
             assert!(module.getattr("lexsort").is_ok());
+            assert!(module.getattr("rfftn").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
             assert!(module.getattr("compressed").is_ok());
@@ -21038,6 +21072,132 @@ mod tests {
                 &lexsort_fn.call1((string_keys.clone(),))?,
                 &numpy_lexsort.call1((string_keys.clone(),))?,
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn rfftn_matches_numpy_across_nd_shape_axes_and_norm() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let rfftn_fn = module.getattr("rfftn")?;
+            let numpy = py.import("numpy")?;
+            let numpy_rfftn = numpy.getattr("fft")?.getattr("rfftn")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // 3-D real input, default all-axes transform.
+            let three_d = numpy.getattr("array")?.call(
+                (vec![
+                    vec![vec![1.0_f64, 2.0, 3.0, 4.0], vec![5.0, 6.0, 7.0, 8.0]],
+                    vec![vec![9.0, 10.0, 11.0, 12.0], vec![13.0, 14.0, 15.0, 16.0]],
+                ],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("float64")?)?;
+                    kw
+                }),
+            )?;
+            let ours = rfftn_fn.call1((three_d.clone(),))?;
+            let theirs = numpy_rfftn.call1((three_d.clone(),))?;
+            let ok: bool = allclose.call1((&ours, &theirs))?.extract()?;
+            assert!(ok, "rfftn 3-D default mismatch");
+
+            // Last transformed axis must be n//2+1 along axis -1.
+            // Input shape (2, 2, 4) → output (2, 2, 3).
+            let out_shape: (usize, usize, usize) = ours.getattr("shape")?.extract()?;
+            assert_eq!(out_shape, (2, 2, 3), "rfftn output shape must match n//2+1");
+
+            // Explicit s=(4, 4, 8) zero-pads each transform axis.
+            let s_tuple = PyTuple::new(py, [4_usize, 4, 8])?;
+            let ours_s = rfftn_fn.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("s", &s_tuple)?;
+                    kw
+                }),
+            )?;
+            let theirs_s = numpy_rfftn.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("s", &s_tuple)?;
+                    kw
+                }),
+            )?;
+            let ok_s: bool = allclose.call1((&ours_s, &theirs_s))?.extract()?;
+            assert!(ok_s, "rfftn s=(4,4,8) mismatch");
+
+            // Subset axes=(-1, -2) reverses the rfftn axis order.
+            let axes_subset = PyTuple::new(py, [-1_i64, -2])?;
+            let ours_axes = rfftn_fn.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axes", &axes_subset)?;
+                    kw
+                }),
+            )?;
+            let theirs_axes = numpy_rfftn.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axes", &axes_subset)?;
+                    kw
+                }),
+            )?;
+            let ok_axes: bool = allclose.call1((&ours_axes, &theirs_axes))?.extract()?;
+            assert!(ok_axes, "rfftn axes=(-1,-2) mismatch");
+
+            // norm='ortho' and norm='forward'.
+            for norm_tag in ["ortho", "forward"] {
+                let ours_n = rfftn_fn.call(
+                    (three_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("norm", norm_tag)?;
+                        kw
+                    }),
+                )?;
+                let theirs_n = numpy_rfftn.call(
+                    (three_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("norm", norm_tag)?;
+                        kw
+                    }),
+                )?;
+                let ok_n: bool = allclose.call1((&ours_n, &theirs_n))?.extract()?;
+                assert!(ok_n, "rfftn norm={} mismatch", norm_tag);
+            }
+
+            // Output dtype is complex.
+            let ours_dtype = ours.getattr("dtype")?.str()?.to_string();
+            let theirs_dtype = theirs.getattr("dtype")?.str()?.to_string();
+            assert_eq!(
+                ours_dtype, theirs_dtype,
+                "rfftn output dtype must match numpy (complex128)",
+            );
+
+            // Round-trip: irfftn(rfftn(x)) ≈ x for even-shape input.
+            let irfftn_fn = numpy.getattr("fft")?.getattr("irfftn")?;
+            let s_for_inv = PyTuple::new(py, [2_usize, 2, 4])?;
+            let round_trip = irfftn_fn.call(
+                (rfftn_fn.call1((three_d.clone(),))?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("s", &s_for_inv)?;
+                    kw
+                }),
+            )?;
+            let ok_rt: bool = allclose.call1((&round_trip, &three_d))?.extract()?;
+            assert!(ok_rt, "irfftn(rfftn(x)) must round-trip for even-shape x");
 
             Ok(())
         });
