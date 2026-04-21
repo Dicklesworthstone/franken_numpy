@@ -4798,6 +4798,20 @@ fn real_if_close(py: Python<'_>, a: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> 
 }
 
 #[pyfunction]
+#[pyo3(signature = (x,))]
+fn iscomplexobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.iscomplexobj. Returns True iff input has a
+    // complex dtype, regardless of whether imaginary parts are
+    // nonzero. Matches numpy's behavior across ndarray, scalar, and
+    // Python list inputs.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("iscomplexobj")?
+        .call1((x.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, q, axis=None, out=None, overwrite_input=false, method=None, keepdims=false, weights=None))]
 #[allow(clippy::too_many_arguments)]
 fn quantile(
@@ -5904,6 +5918,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fliplr, m)?)?;
     m.add_function(wrap_pyfunction!(ascontiguousarray, m)?)?;
     m.add_function(wrap_pyfunction!(real_if_close, m)?)?;
+    m.add_function(wrap_pyfunction!(iscomplexobj, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6192,6 +6207,7 @@ mod tests {
             assert!(module.getattr("fliplr").is_ok());
             assert!(module.getattr("ascontiguousarray").is_ok());
             assert!(module.getattr("real_if_close").is_ok());
+            assert!(module.getattr("iscomplexobj").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -22103,6 +22119,120 @@ mod tests {
                 ours_tdef_dtype, theirs_tdef_dtype,
                 "default-tol dtype-kind must match numpy",
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn iscomplexobj_matches_numpy_across_dtypes_and_collections() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let isc_fn = module.getattr("iscomplexobj")?;
+            let numpy = py.import("numpy")?;
+            let numpy_isc = numpy.getattr("iscomplexobj")?;
+
+            let check = |ours: Bound<'_, PyAny>, theirs: Bound<'_, PyAny>, ctx: &str| -> PyResult<()> {
+                let ours_b: bool = ours.extract()?;
+                let theirs_b: bool = theirs.extract()?;
+                assert_eq!(ours_b, theirs_b, "iscomplexobj mismatch: {}", ctx);
+                Ok(())
+            };
+
+            // Real float array → False.
+            let real_arr = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            check(
+                isc_fn.call1((real_arr.clone(),))?,
+                numpy_isc.call1((real_arr.clone(),))?,
+                "real float array",
+            )?;
+
+            // Integer array → False.
+            let int_arr = numpy.getattr("array")?.call1((vec![1_i64, 2, 3],))?;
+            check(
+                isc_fn.call1((int_arr.clone(),))?,
+                numpy_isc.call1((int_arr.clone(),))?,
+                "integer array",
+            )?;
+
+            // Complex array → True (built via complex literals).
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+            let make_complex_array = |pairs: Vec<(f64, f64)>| -> PyResult<Bound<'_, PyAny>> {
+                let mut items: Vec<Py<PyAny>> = Vec::with_capacity(pairs.len());
+                for (r, i) in pairs {
+                    items.push(py_complex.call1((r, i))?.unbind());
+                }
+                let lst = PyList::new(py, items)?;
+                numpy.getattr("array")?.call1((lst,))
+            };
+            let complex_arr = make_complex_array(vec![(1.0, 2.0), (3.0, 4.0)])?;
+            check(
+                isc_fn.call1((complex_arr.clone(),))?,
+                numpy_isc.call1((complex_arr.clone(),))?,
+                "complex array",
+            )?;
+
+            // Complex scalar → True (via Python complex).
+            let scalar_c = py_complex.call1((1.0_f64, 2.0_f64))?;
+            check(
+                isc_fn.call1((scalar_c.clone(),))?,
+                numpy_isc.call1((scalar_c.clone(),))?,
+                "complex scalar",
+            )?;
+
+            // Real scalar → False.
+            check(
+                isc_fn.call1((1.5_f64,))?,
+                numpy_isc.call1((1.5_f64,))?,
+                "real scalar",
+            )?;
+
+            // List of floats → False.
+            let lst_floats = PyList::new(py, [1.0_f64, 2.0, 3.0])?;
+            check(
+                isc_fn.call1((lst_floats.clone(),))?,
+                numpy_isc.call1((lst_floats.clone(),))?,
+                "list of floats",
+            )?;
+
+            // List of complex → True.
+            let complex_items: Vec<Py<PyAny>> = vec![
+                py_complex.call1((1.0_f64, 2.0_f64))?.unbind(),
+                py_complex.call1((3.0_f64, 4.0_f64))?.unbind(),
+            ];
+            let lst_complex = PyList::new(py, complex_items)?;
+            check(
+                isc_fn.call1((lst_complex.clone(),))?,
+                numpy_isc.call1((lst_complex.clone(),))?,
+                "list of complex",
+            )?;
+
+            // Nested 2-D complex array → True.
+            let two_d_complex_a = make_complex_array(vec![(1.0, 2.0), (3.0, 4.0)])?;
+            let two_d_complex_b = make_complex_array(vec![(5.0, 6.0), (7.0, 8.0)])?;
+            let nested_lst = PyList::new(
+                py,
+                [two_d_complex_a.unbind(), two_d_complex_b.unbind()],
+            )?;
+            let two_d_complex = numpy.getattr("array")?.call1((nested_lst,))?;
+            check(
+                isc_fn.call1((two_d_complex.clone(),))?,
+                numpy_isc.call1((two_d_complex.clone(),))?,
+                "2-D complex array",
+            )?;
+
+            // Complex array with all-zero imag → still complex dtype → True.
+            let zero_imag = make_complex_array(vec![(1.0, 0.0), (2.0, 0.0)])?;
+            check(
+                isc_fn.call1((zero_imag.clone(),))?,
+                numpy_isc.call1((zero_imag.clone(),))?,
+                "complex array with zero imag",
+            )?;
 
             Ok(())
         });
