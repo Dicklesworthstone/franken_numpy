@@ -4939,6 +4939,45 @@ fn tile(py: Python<'_>, a: Py<PyAny>, reps: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (a1, a2))]
+fn polyadd(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.polyadd. Coefficients in decreasing-power order;
+    // the shorter sequence is zero-padded on the left so like-degree
+    // terms align before summation. Returns a 1-D array whose length is
+    // max(len(a1), len(a2)).
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polyadd")?
+        .call1((a1.bind(py), a2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a1, a2))]
+fn polysub(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.polysub. Returns a1 - a2 with the same
+    // left-zero-pad alignment rule as polyadd.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polysub")?
+        .call1((a1.bind(py), a2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a1, a2))]
+fn polymul(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.polymul. Returns the product polynomial with
+    // degree len(a1) + len(a2) - 2 (length len(a1) + len(a2) - 1).
+    // Inputs must be 1-D; NumPy raises ValueError on higher ranks.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polymul")?
+        .call1((a1.bind(py), a2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x1, x2))]
 fn true_divide(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.true_divide so x1/x2 element-wise always
@@ -6263,6 +6302,9 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(expm1, m)?)?;
     m.add_function(wrap_pyfunction!(polyder, m)?)?;
     m.add_function(wrap_pyfunction!(polyint, m)?)?;
+    m.add_function(wrap_pyfunction!(polyadd, m)?)?;
+    m.add_function(wrap_pyfunction!(polysub, m)?)?;
+    m.add_function(wrap_pyfunction!(polymul, m)?)?;
     m.add_function(wrap_pyfunction!(tile, m)?)?;
     m.add_function(wrap_pyfunction!(true_divide, m)?)?;
     m.add_function(wrap_pyfunction!(allclose, m)?)?;
@@ -23454,6 +23496,64 @@ mod tests {
             let kw_empty_k = PyDict::new(py);
             kw_empty_k.set_item("k", PyList::new(py, [7.0_f64, 11.0])?)?;
             assert_equiv((Vec::<f64>::new(), 2), &kw_empty_k)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn polyadd_polysub_polymul_match_numpy() {
+        // Pin fnp-python polyadd/polysub/polymul parity by calling each
+        // wrapper alongside the numpy reference for same-length inputs,
+        // length-mismatched inputs (exercising the left-zero-pad
+        // alignment rule), empty-sequence inputs, and scalar polynomials.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            let ops: [&str; 3] = ["polyadd", "polysub", "polymul"];
+            let cases: Vec<(Vec<f64>, Vec<f64>)> = vec![
+                // Equal length.
+                (vec![1.0, 2.0, 3.0], vec![1.0, 2.0, 3.0]),
+                // Mismatched length (longer first).
+                (vec![1.0, 2.0, 3.0], vec![1.0, 1.0]),
+                // Mismatched length (longer second).
+                (vec![1.0, 2.0], vec![1.0, 2.0, 3.0, 4.0]),
+                // Empty left.
+                (Vec::<f64>::new(), vec![1.0, 2.0, 3.0]),
+                // Empty right.
+                (vec![1.0, 2.0, 3.0], Vec::<f64>::new()),
+                // Both scalar (length-1) polynomials.
+                (vec![3.0], vec![2.0]),
+                // Typical degree-2 × degree-1 product used in polymul docs.
+                (vec![1.0, 2.0, 3.0], vec![1.0, 1.0]),
+            ];
+
+            for op in ops {
+                let ours = module.getattr(op)?;
+                let theirs = numpy.getattr(op)?;
+                for (idx, (a, b)) in cases.iter().enumerate() {
+                    let ours_out = ours.call1((a.clone(), b.clone()))?;
+                    let theirs_out = theirs.call1((a.clone(), b.clone()))?;
+                    assert_array_matches_numpy(&ours_out, &theirs_out).unwrap_or_else(|_| {
+                        panic!("{op} mismatch on case {idx}: {a:?} vs {b:?}")
+                    });
+                }
+            }
+
+            // polymul enforces 1-D inputs; 2-D must raise ValueError
+            // matching NumPy's "Polynomial must be 1d only." message.
+            let pm = module.getattr("polymul")?;
+            let bad = numpy
+                .getattr("array")?
+                .call1((vec![vec![1.0, 2.0]],))?; // 2-D
+            let err = pm.call1((bad.clone(), vec![1.0, 2.0])).err();
+            assert!(err.is_some(), "polymul must reject 2-D inputs");
 
             Ok(())
         });
