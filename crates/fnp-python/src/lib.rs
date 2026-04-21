@@ -5785,6 +5785,34 @@ fn linspace(
 }
 
 #[pyfunction]
+#[pyo3(signature = (start, stop, num=50, endpoint=true, dtype=None, axis=0))]
+fn geomspace(
+    py: Python<'_>,
+    start: Py<PyAny>,
+    stop: Py<PyAny>,
+    num: isize,
+    endpoint: bool,
+    dtype: Option<Py<PyAny>>,
+    axis: isize,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.geomspace so logarithmic spacing, supported
+    // negative/complex endpoint handling, dtype coercion, and axis
+    // insertion on array endpoints all match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let geomspace_fn = numpy.getattr("geomspace")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("num", num)?;
+    kwargs.set_item("endpoint", endpoint)?;
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    kwargs.set_item("axis", axis)?;
+    Ok(geomspace_fn
+        .call((start.bind(py), stop.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (shape, fill_value, dtype=None, order="C", *, device=None, like=None))]
 fn full(
     py: Python<'_>,
@@ -8522,6 +8550,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(vander, m)?)?;
     m.add_function(wrap_pyfunction!(arange, m)?)?;
     m.add_function(wrap_pyfunction!(linspace, m)?)?;
+    m.add_function(wrap_pyfunction!(geomspace, m)?)?;
     m.add_function(wrap_pyfunction!(full, m)?)?;
     m.add_function(wrap_pyfunction!(full_like, m)?)?;
     m.add_function(wrap_pyfunction!(zeros_like, m)?)?;
@@ -8955,6 +8984,7 @@ mod tests {
             assert!(module.getattr("vander").is_ok());
             assert!(module.getattr("arange").is_ok());
             assert!(module.getattr("linspace").is_ok());
+            assert!(module.getattr("geomspace").is_ok());
             assert!(module.getattr("full").is_ok());
             assert!(module.getattr("full_like").is_ok());
             assert!(module.getattr("zeros_like").is_ok());
@@ -29108,6 +29138,72 @@ mod tests {
             assert_array_matches_numpy(
                 &linspace_fn.call((starts.clone(), stops.clone()), Some(&axis_kwargs))?,
                 &numpy_linspace.call((starts.clone(), stops.clone()), Some(&axis_kwargs))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn geomspace_matches_numpy_across_scalar_negative_complex_dtype_and_axis() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let geomspace_fn = module.getattr("geomspace")?;
+            let numpy = py.import("numpy")?;
+            let numpy_geomspace = numpy.getattr("geomspace")?;
+
+            // Positive scalar endpoints.
+            assert_array_matches_numpy(
+                &geomspace_fn.call1((1.0_f64, 1000.0_f64))?,
+                &numpy_geomspace.call1((1.0_f64, 1000.0_f64))?,
+            )?;
+
+            // Supported negative endpoints should match NumPy exactly.
+            assert_array_matches_numpy(
+                &geomspace_fn.call1((-1.0_f64, -1000.0_f64))?,
+                &numpy_geomspace.call1((-1.0_f64, -1000.0_f64))?,
+            )?;
+
+            // Supported complex endpoint surface parity.
+            let complex_start = py
+                .import("builtins")?
+                .getattr("complex")?
+                .call1((0_i64, 1_i64))?;
+            let complex_stop = py
+                .import("builtins")?
+                .getattr("complex")?
+                .call1((0_i64, 1000_i64))?;
+            assert_array_matches_numpy(
+                &geomspace_fn.call1((complex_start.clone(), complex_stop.clone()))?,
+                &numpy_geomspace.call1((complex_start.clone(), complex_stop.clone()))?,
+            )?;
+
+            // endpoint=False and explicit dtype override.
+            let dtype_kwargs = PyDict::new(py);
+            dtype_kwargs.set_item("num", 4_i64)?;
+            dtype_kwargs.set_item("endpoint", false)?;
+            dtype_kwargs.set_item("dtype", numpy.getattr("float32")?)?;
+            assert_array_matches_numpy(
+                &geomspace_fn.call((1_i64, 16_i64), Some(&dtype_kwargs))?,
+                &numpy_geomspace.call((1_i64, 16_i64), Some(&dtype_kwargs))?,
+            )?;
+
+            // Axis insertion on vectorized start/stop inputs.
+            let starts = numpy.getattr("array")?.call1((vec![1.0_f64, 10.0_f64],))?;
+            let stops = numpy
+                .getattr("array")?
+                .call1((vec![100.0_f64, 1000.0_f64],))?;
+            let axis_kwargs = PyDict::new(py);
+            axis_kwargs.set_item("num", 4_i64)?;
+            axis_kwargs.set_item("axis", -1_i64)?;
+            assert_array_matches_numpy(
+                &geomspace_fn.call((starts.clone(), stops.clone()), Some(&axis_kwargs))?,
+                &numpy_geomspace.call((starts.clone(), stops.clone()), Some(&axis_kwargs))?,
             )?;
 
             Ok(())
