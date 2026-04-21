@@ -3318,6 +3318,28 @@ fn insert(
 }
 
 #[pyfunction]
+#[pyo3(signature = (arr, obj, axis=None))]
+fn delete(
+    py: Python<'_>,
+    arr: Py<PyAny>,
+    obj: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Delegate to NumPy so scalar, slice, and vector deletions,
+    // flattened defaults, axis-aware removals, and bounds errors all
+    // stay exact.
+    let numpy = py.import("numpy")?;
+    let delete_fn = numpy.getattr("delete")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis) = axis {
+        kwargs.set_item("axis", axis.bind(py))?;
+    }
+    Ok(delete_fn
+        .call((arr.bind(py), obj.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn concatenate(
     py: Python<'_>,
@@ -7999,6 +8021,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(repeat, m)?)?;
     m.add_function(wrap_pyfunction!(append, m)?)?;
     m.add_function(wrap_pyfunction!(insert, m)?)?;
+    m.add_function(wrap_pyfunction!(delete, m)?)?;
     m.add_function(wrap_pyfunction!(concatenate, m)?)?;
     m.add_function(wrap_pyfunction!(stack, m)?)?;
     m.add_function(wrap_pyfunction!(row_stack, m)?)?;
@@ -8485,6 +8508,7 @@ mod tests {
             assert!(module.getattr("repeat").is_ok());
             assert!(module.getattr("append").is_ok());
             assert!(module.getattr("insert").is_ok());
+            assert!(module.getattr("delete").is_ok());
             assert!(module.getattr("concatenate").is_ok());
             assert!(module.getattr("stack").is_ok());
             assert!(module.getattr("row_stack").is_ok());
@@ -13852,6 +13876,75 @@ mod tests {
             let expected_err = numpy_insert
                 .call1((one_d.clone(), 10_i64, 7_i64))
                 .unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn delete_matches_numpy_across_scalar_slice_multi_axis_and_errors() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let delete_fn = module.getattr("delete")?;
+            let numpy = py.import("numpy")?;
+            let numpy_delete = numpy.getattr("delete")?;
+
+            let one_d = numeric_array(py, vec![1_i64, 2, 3, 4], "int64");
+
+            // Scalar index deletion on 1-D input.
+            assert_array_matches_numpy(
+                &delete_fn.call1((one_d.clone(), 1_i64))?,
+                &numpy_delete.call1((one_d.clone(), 1_i64))?,
+            )?;
+
+            // Slice deletion on 1-D input.
+            let slice = py
+                .import("builtins")?
+                .getattr("slice")?
+                .call1((1_i64, 3_i64))?;
+            assert_array_matches_numpy(
+                &delete_fn.call1((one_d.clone(), slice.clone()))?,
+                &numpy_delete.call1((one_d.clone(), slice.clone()))?,
+            )?;
+
+            // Multiple index deletion on 1-D input.
+            let multi_indices = PyList::new(py, [0_i64, 2_i64])?;
+            assert_array_matches_numpy(
+                &delete_fn.call1((one_d.clone(), multi_indices.clone()))?,
+                &numpy_delete.call1((one_d.clone(), multi_indices.clone()))?,
+            )?;
+
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![1_i64, 2],
+                vec![3_i64, 4],
+                vec![5_i64, 6],
+            ],))?;
+
+            // Default axis=None flattens before deletion.
+            assert_array_matches_numpy(
+                &delete_fn.call1((two_d.clone(), 2_i64))?,
+                &numpy_delete.call1((two_d.clone(), 2_i64))?,
+            )?;
+
+            // Axis-aware deletions across rows and columns.
+            assert_array_matches_numpy(
+                &delete_fn.call1((two_d.clone(), 1_i64, 0_i64))?,
+                &numpy_delete.call1((two_d.clone(), 1_i64, 0_i64))?,
+            )?;
+            assert_array_matches_numpy(
+                &delete_fn.call1((two_d.clone(), 0_i64, 1_i64))?,
+                &numpy_delete.call1((two_d.clone(), 0_i64, 1_i64))?,
+            )?;
+
+            // Out-of-range index surfaces NumPy's exact error.
+            let actual_err = delete_fn.call1((one_d.clone(), 10_i64)).unwrap_err();
+            let expected_err = numpy_delete.call1((one_d.clone(), 10_i64)).unwrap_err();
             assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
 
             Ok(())
