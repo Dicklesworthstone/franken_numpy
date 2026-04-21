@@ -3379,6 +3379,20 @@ fn eigvals(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (a,))]
+fn slogdet(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.linalg.slogdet so the (sign, logabsdet) SlogdetResult
+    // namedtuple identity and batched (..., M, M) broadcasting semantics
+    // match numpy exactly across real and complex inputs.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("linalg")?
+        .getattr("slogdet")?
+        .call1((a.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, b))]
 fn solve(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.linalg.solve so square real/complex, batched
@@ -4385,6 +4399,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(minimum_fill_value, m)?)?;
     m.add_function(wrap_pyfunction!(pinv, m)?)?;
     m.add_function(wrap_pyfunction!(eigvals, m)?)?;
+    m.add_function(wrap_pyfunction!(slogdet, m)?)?;
     m.add_function(wrap_pyfunction!(solve, m)?)?;
     m.add_function(wrap_pyfunction!(eigvalsh, m)?)?;
     m.add_function(wrap_pyfunction!(det, m)?)?;
@@ -4669,6 +4684,7 @@ mod tests {
             assert!(module.getattr("eigvals").is_ok());
             assert!(module.getattr("rfft").is_ok());
             assert!(module.getattr("irfft").is_ok());
+            assert!(module.getattr("slogdet").is_ok());
             assert!(module.getattr("solve").is_ok());
             assert!(module.getattr("eigvalsh").is_ok());
             assert!(module.getattr("det").is_ok());
@@ -6298,6 +6314,174 @@ mod tests {
             assert_eq!(
                 repr_string(true_actual.bind(py)),
                 repr_string(&true_expected)
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn slogdet_matches_numpy_namedtuple_across_real_complex_and_batched() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let slogdet_fn = module.getattr("slogdet")?;
+            let numpy = py.import("numpy")?;
+            let numpy_slogdet = numpy.getattr("linalg")?.getattr("slogdet")?;
+            let isclose = numpy.getattr("isclose")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Positive-determinant real 2x2.
+            let a_pos = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [3.0_f64, 1.0])?,
+                    PyList::new(py, [1.0_f64, 2.0])?,
+                ],
+            )?,))?;
+            let actual = slogdet_fn.call1((a_pos.clone(),))?;
+            let expected = numpy_slogdet.call1((a_pos.clone(),))?;
+            let actual_sign = actual.getattr("sign")?;
+            let expected_sign = expected.getattr("sign")?;
+            let actual_logabsdet = actual.getattr("logabsdet")?;
+            let expected_logabsdet = expected.getattr("logabsdet")?;
+            assert!(
+                isclose
+                    .call1((&actual_sign, &expected_sign))?
+                    .extract::<bool>()?,
+                "slogdet sign (pos) diverged"
+            );
+            assert!(
+                isclose
+                    .call1((&actual_logabsdet, &expected_logabsdet))?
+                    .extract::<bool>()?,
+                "slogdet logabsdet (pos) diverged"
+            );
+
+            // Negative-determinant real 2x2 (sign = -1).
+            let a_neg = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [0.0_f64, 1.0])?,
+                    PyList::new(py, [1.0_f64, 0.0])?,
+                ],
+            )?,))?;
+            let actual_n = slogdet_fn.call1((a_neg.clone(),))?;
+            let expected_n = numpy_slogdet.call1((a_neg.clone(),))?;
+            assert!(
+                isclose
+                    .call1((&actual_n.getattr("sign")?, &expected_n.getattr("sign")?))?
+                    .extract::<bool>()?,
+                "slogdet sign (neg) diverged"
+            );
+
+            // Singular real 2x2 — sign=0, logabsdet=-inf.
+            let a_sing = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 2.0])?,
+                    PyList::new(py, [2.0_f64, 4.0])?,
+                ],
+            )?,))?;
+            let actual_s = slogdet_fn.call1((a_sing.clone(),))?;
+            let expected_s = numpy_slogdet.call1((a_sing.clone(),))?;
+            let a_sign_s = actual_s.getattr("sign")?.extract::<f64>()?;
+            let e_sign_s = expected_s.getattr("sign")?.extract::<f64>()?;
+            assert_eq!(a_sign_s, e_sign_s, "slogdet singular sign diverged");
+
+            // Batched stack of three 2x2 matrices.
+            let batched = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(
+                        py,
+                        [
+                            PyList::new(py, [2.0_f64, 0.0])?,
+                            PyList::new(py, [0.0_f64, 3.0])?,
+                        ],
+                    )?,
+                    PyList::new(
+                        py,
+                        [
+                            PyList::new(py, [1.0_f64, 0.0])?,
+                            PyList::new(py, [0.0_f64, -1.0])?,
+                        ],
+                    )?,
+                    PyList::new(
+                        py,
+                        [
+                            PyList::new(py, [4.0_f64, 1.0])?,
+                            PyList::new(py, [2.0_f64, 3.0])?,
+                        ],
+                    )?,
+                ],
+            )?,))?;
+            let actual_b = slogdet_fn.call1((batched.clone(),))?;
+            let expected_b = numpy_slogdet.call1((batched.clone(),))?;
+            assert!(
+                allclose
+                    .call1((&actual_b.getattr("sign")?, &expected_b.getattr("sign")?))?
+                    .extract::<bool>()?,
+                "slogdet batched sign diverged"
+            );
+            assert!(
+                allclose
+                    .call1((
+                        &actual_b.getattr("logabsdet")?,
+                        &expected_b.getattr("logabsdet")?,
+                    ))?
+                    .extract::<bool>()?,
+                "slogdet batched logabsdet diverged"
+            );
+
+            // Complex 2x2.
+            let builtins = py.import("builtins")?;
+            let complex_a = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        PyList::new(
+                            py,
+                            [
+                                builtins.getattr("complex")?.call1((1.0_f64, 1.0_f64))?,
+                                builtins.getattr("complex")?.call1((2.0_f64, 0.0_f64))?,
+                            ],
+                        )?,
+                        PyList::new(
+                            py,
+                            [
+                                builtins.getattr("complex")?.call1((0.0_f64, -1.0_f64))?,
+                                builtins.getattr("complex")?.call1((1.0_f64, 2.0_f64))?,
+                            ],
+                        )?,
+                    ],
+                )?,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", "complex128")?;
+                    kwargs
+                }),
+            )?;
+            let actual_c = slogdet_fn.call1((complex_a.clone(),))?;
+            let expected_c = numpy_slogdet.call1((complex_a.clone(),))?;
+            assert!(
+                isclose
+                    .call1((&actual_c.getattr("sign")?, &expected_c.getattr("sign")?))?
+                    .extract::<bool>()?,
+                "slogdet complex sign diverged"
+            );
+            assert!(
+                isclose
+                    .call1((
+                        &actual_c.getattr("logabsdet")?,
+                        &expected_c.getattr("logabsdet")?,
+                    ))?
+                    .extract::<bool>()?,
+                "slogdet complex logabsdet diverged"
             );
 
             Ok(())
