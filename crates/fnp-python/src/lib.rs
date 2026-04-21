@@ -5215,6 +5215,201 @@ fn chebtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
         .unbind())
 }
 
+// numpy.polynomial.hermite wrappers. Same API shape as the chebyshev
+// helpers above; each is a direct passthrough that preserves NumPy's
+// dtype, ValueError, and tuple-return contracts.
+
+#[pyfunction]
+#[pyo3(signature = (c1, c2))]
+fn hermadd(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite")?
+        .getattr("hermadd")?
+        .call1((c1.bind(py), c2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c1, c2))]
+fn hermsub(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite")?
+        .getattr("hermsub")?
+        .call1((c1.bind(py), c2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c1, c2))]
+fn hermmul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite")?
+        .getattr("hermmul")?
+        .call1((c1.bind(py), c2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, c, tensor=true))]
+fn hermval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("tensor", tensor)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite")?
+        .getattr("hermval")?
+        .call((x.bind(py), c.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c,))]
+fn hermroots(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite")?
+        .getattr("hermroots")?
+        .call1((c.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (roots,))]
+fn hermfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite")?
+        .getattr("hermfromroots")?
+        .call1((roots.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c, pow, maxpower=16))]
+fn hermpow(
+    py: Python<'_>,
+    c: Py<PyAny>,
+    pow: Py<PyAny>,
+    maxpower: i64,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("maxpower", maxpower)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite")?
+        .getattr("hermpow")?
+        .call((c.bind(py), pow.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c1, c2))]
+fn hermdiv(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite")?
+        .getattr("hermdiv")?
+        .call1((c1.bind(py), c2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (off, scl))]
+fn hermline(py: Python<'_>, off: Py<PyAny>, scl: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite")?
+        .getattr("hermline")?
+        .call1((off.bind(py), scl.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c,))]
+fn hermmulx(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite")?
+        .getattr("hermmulx")?
+        .call1((c.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c, tol=0.0))]
+fn hermtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("tol", tol)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite")?
+        .getattr("hermtrim")?
+        .call((c.bind(py),), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c, m=1, scl=1.0, axis=0))]
+fn hermder(
+    py: Python<'_>,
+    c: Py<PyAny>,
+    m: i64,
+    scl: f64,
+    axis: i64,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("scl", scl)?;
+    kwargs.set_item("axis", axis)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite")?
+        .getattr("hermder")?
+        .call((c.bind(py), m), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c, m=1, k=None, lbnd=0.0, scl=1.0, axis=0))]
+fn hermint(
+    py: Python<'_>,
+    c: Py<PyAny>,
+    m: i64,
+    k: Option<Py<PyAny>>,
+    lbnd: f64,
+    scl: f64,
+    axis: i64,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(k_val) = k {
+        kwargs.set_item("k", k_val.bind(py))?;
+    }
+    kwargs.set_item("lbnd", lbnd)?;
+    kwargs.set_item("scl", scl)?;
+    kwargs.set_item("axis", axis)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite")?
+        .getattr("hermint")?
+        .call((c.bind(py), m), Some(&kwargs))?
+        .unbind())
+}
+
 #[pyfunction]
 #[pyo3(signature = (x, window_shape, axis=None, *, subok=false, writeable=false))]
 fn sliding_window_view(
@@ -5501,6 +5696,26 @@ fn svdvals(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
         .call1((x.bind(py),))?
         .unbind())
 }
+
+#[pyfunction]
+#[pyo3(signature = (a, axis=None))]
+fn size_count(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.size. Returns total elements (axis=None) or
+    // count along axis. Exposed as size_count to avoid clashing with
+    // std::mem::size_of.
+    let numpy = py.import("numpy")?;
+    let size_fn = numpy.getattr("size")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis_val) = axis {
+        kwargs.set_item("axis", axis_val.bind(py))?;
+    }
+    Ok(size_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
@@ -6652,6 +6867,19 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chebline, m)?)?;
     m.add_function(wrap_pyfunction!(chebmulx, m)?)?;
     m.add_function(wrap_pyfunction!(chebtrim, m)?)?;
+    m.add_function(wrap_pyfunction!(hermadd, m)?)?;
+    m.add_function(wrap_pyfunction!(hermsub, m)?)?;
+    m.add_function(wrap_pyfunction!(hermmul, m)?)?;
+    m.add_function(wrap_pyfunction!(hermval, m)?)?;
+    m.add_function(wrap_pyfunction!(hermroots, m)?)?;
+    m.add_function(wrap_pyfunction!(hermfromroots, m)?)?;
+    m.add_function(wrap_pyfunction!(hermpow, m)?)?;
+    m.add_function(wrap_pyfunction!(hermdiv, m)?)?;
+    m.add_function(wrap_pyfunction!(hermline, m)?)?;
+    m.add_function(wrap_pyfunction!(hermmulx, m)?)?;
+    m.add_function(wrap_pyfunction!(hermtrim, m)?)?;
+    m.add_function(wrap_pyfunction!(hermder, m)?)?;
+    m.add_function(wrap_pyfunction!(hermint, m)?)?;
     m.add_function(wrap_pyfunction!(tile, m)?)?;
     m.add_function(wrap_pyfunction!(true_divide, m)?)?;
     m.add_function(wrap_pyfunction!(allclose, m)?)?;
@@ -6665,6 +6893,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(testing_assert_array_equal, m)?)?;
     m.add_function(wrap_pyfunction!(matrix_transpose, m)?)?;
     m.add_function(wrap_pyfunction!(svdvals, m)?)?;
+    m.add_function(wrap_pyfunction!(size_count, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6976,6 +7205,7 @@ mod tests {
             assert!(module.getattr("testing_assert_array_equal").is_ok());
             assert!(module.getattr("matrix_transpose").is_ok());
             assert!(module.getattr("svdvals").is_ok());
+            assert!(module.getattr("size_count").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
