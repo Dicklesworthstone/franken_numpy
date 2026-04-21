@@ -4136,6 +4136,19 @@ fn squeeze(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py
 }
 
 #[pyfunction]
+#[pyo3(signature = (m, k=1, axes=(0, 1)))]
+fn rot90(py: Python<'_>, m: Py<PyAny>, k: i64, axes: (i64, i64)) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.rot90 so repeated quarter-turns, custom plane
+    // selection, reversed axis order, and numpy's validation errors all
+    // stay exact.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("rot90")?
+        .call1((m.bind(py), k, axes))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (tup, *, dtype=None, casting="same_kind"))]
 fn vstack(
     py: Python<'_>,
@@ -7718,6 +7731,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(transpose, m)?)?;
     m.add_function(wrap_pyfunction!(swapaxes, m)?)?;
     m.add_function(wrap_pyfunction!(squeeze, m)?)?;
+    m.add_function(wrap_pyfunction!(rot90, m)?)?;
     m.add_function(wrap_pyfunction!(split, m)?)?;
     m.add_function(wrap_pyfunction!(array_split, m)?)?;
     m.add_function(wrap_pyfunction!(hsplit, m)?)?;
@@ -8128,6 +8142,7 @@ mod tests {
             assert!(module.getattr("transpose").is_ok());
             assert!(module.getattr("swapaxes").is_ok());
             assert!(module.getattr("squeeze").is_ok());
+            assert!(module.getattr("rot90").is_ok());
             assert!(module.getattr("expand_dims").is_ok());
             assert!(module.getattr("structured_to_unstructured").is_ok());
             assert!(module.getattr("trim_zeros").is_ok());
@@ -26282,6 +26297,73 @@ mod tests {
                 )
                 .unwrap_err();
             assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn rot90_matches_numpy_across_k_axes_and_error_surface() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let rot90_fn = module.getattr("rot90")?;
+            let numpy = py.import("numpy")?;
+            let numpy_rot90 = numpy.getattr("rot90")?;
+
+            // Default k=1 on a non-square 2-D input.
+            let rectangular = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2, 3], vec![4, 5, 6]],))?;
+            assert_array_matches_numpy(
+                &rot90_fn.call1((rectangular.clone(),))?,
+                &numpy_rot90.call1((rectangular.clone(),))?,
+            )?;
+
+            // Repeated turns, including negative k.
+            assert_array_matches_numpy(
+                &rot90_fn.call1((rectangular.clone(), 2_i64))?,
+                &numpy_rot90.call1((rectangular.clone(), 2_i64))?,
+            )?;
+            assert_array_matches_numpy(
+                &rot90_fn.call1((rectangular.clone(), -1_i64))?,
+                &numpy_rot90.call1((rectangular.clone(), -1_i64))?,
+            )?;
+
+            // 3-D rotation over a custom axis pair.
+            let three_d = numpy.getattr("array")?.call1((vec![
+                vec![vec![1_i64, 2], vec![3, 4], vec![5, 6]],
+                vec![vec![7_i64, 8], vec![9, 10], vec![11, 12]],
+            ],))?;
+            assert_array_matches_numpy(
+                &rot90_fn.call1((three_d.clone(), 1_i64, (0_i64, 2_i64)))?,
+                &numpy_rot90.call1((three_d.clone(), 1_i64, (0_i64, 2_i64)))?,
+            )?;
+
+            // Reversing the axes flips the rotation direction.
+            assert_array_matches_numpy(
+                &rot90_fn.call1((three_d.clone(), 1_i64, (1_i64, 0_i64)))?,
+                &numpy_rot90.call1((three_d.clone(), 1_i64, (1_i64, 0_i64)))?,
+            )?;
+
+            // Repeated axes must raise the same error surface.
+            let actual_repeated_err = rot90_fn
+                .call1((three_d.clone(), 1_i64, (1_i64, 1_i64)))
+                .unwrap_err();
+            let expected_repeated_err = numpy_rot90
+                .call1((three_d.clone(), 1_i64, (1_i64, 1_i64)))
+                .unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_repeated_err, expected_repeated_err)?;
+
+            // Rotating a 1-D input with default axes is invalid.
+            let one_d = numpy.getattr("array")?.call1((vec![1_i64, 2, 3],))?;
+            let actual_dim_err = rot90_fn.call1((one_d.clone(),)).unwrap_err();
+            let expected_dim_err = numpy_rot90.call1((one_d.clone(),)).unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_dim_err, expected_dim_err)?;
 
             Ok(())
         });
