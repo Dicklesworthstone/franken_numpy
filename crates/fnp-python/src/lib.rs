@@ -4781,6 +4781,19 @@ fn intersect1d(
 }
 
 #[pyfunction]
+#[pyo3(signature = (ar1, ar2))]
+fn union1d(py: Python<'_>, ar1: Py<PyAny>, ar2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.union1d so sorted-unique output and flattening
+    // semantics match numpy exactly across numeric, string, and NaN
+    // containing inputs.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("union1d")?
+        .call1((ar1.bind(py), ar2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, dtype=None))]
 fn ascontiguousarray(
     py: Python<'_>,
@@ -7214,6 +7227,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(flipud, m)?)?;
     m.add_function(wrap_pyfunction!(fliplr, m)?)?;
     m.add_function(wrap_pyfunction!(intersect1d, m)?)?;
+    m.add_function(wrap_pyfunction!(union1d, m)?)?;
     m.add_function(wrap_pyfunction!(ascontiguousarray, m)?)?;
     m.add_function(wrap_pyfunction!(real_if_close, m)?)?;
     m.add_function(wrap_pyfunction!(iscomplexobj, m)?)?;
@@ -7587,6 +7601,7 @@ mod tests {
             assert!(module.getattr("flipud").is_ok());
             assert!(module.getattr("fliplr").is_ok());
             assert!(module.getattr("intersect1d").is_ok());
+            assert!(module.getattr("union1d").is_ok());
             assert!(module.getattr("ascontiguousarray").is_ok());
             assert!(module.getattr("real_if_close").is_ok());
             assert!(module.getattr("iscomplexobj").is_ok());
@@ -23428,6 +23443,79 @@ mod tests {
             assert_array_matches_numpy(
                 &intersect1d_fn.call1((two_d_left.clone(), two_d_right.clone()))?,
                 &numpy_intersect1d.call1((two_d_left.clone(), two_d_right.clone()))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn union1d_matches_numpy_across_disjoint_overlap_empty_string_and_flattened_inputs() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let union1d_fn = module.getattr("union1d")?;
+            let numpy = py.import("numpy")?;
+            let numpy_union1d = numpy.getattr("union1d")?;
+
+            // Two disjoint integer arrays become a sorted unique union.
+            let disjoint_left = numpy.getattr("array")?.call1((vec![5_i64, 1, 3],))?;
+            let disjoint_right = numpy.getattr("array")?.call1((vec![2_i64, 4, 6],))?;
+            assert_array_matches_numpy(
+                &union1d_fn.call1((disjoint_left.clone(), disjoint_right.clone()))?,
+                &numpy_union1d.call1((disjoint_left.clone(), disjoint_right.clone()))?,
+            )?;
+
+            // Overlapping arrays are deduplicated.
+            let overlap_left = numpy.getattr("array")?.call1((vec![1_i64, 2, 2, 4],))?;
+            let overlap_right = numpy.getattr("array")?.call1((vec![2_i64, 3, 4, 4],))?;
+            assert_array_matches_numpy(
+                &union1d_fn.call1((overlap_left.clone(), overlap_right.clone()))?,
+                &numpy_union1d.call1((overlap_left.clone(), overlap_right.clone()))?,
+            )?;
+
+            // Empty left operand returns sorted-unique(right).
+            let empty = numpy.getattr("array")?.call1((Vec::<i64>::new(),))?;
+            let right = numpy.getattr("array")?.call1((vec![3_i64, 1, 3, 2],))?;
+            assert_array_matches_numpy(
+                &union1d_fn.call1((empty.clone(), right.clone()))?,
+                &numpy_union1d.call1((empty.clone(), right.clone()))?,
+            )?;
+
+            // String arrays follow the same sorted-unique semantics.
+            let strings_left = numpy.getattr("array")?.call1((vec!["b", "a", "c"],))?;
+            let strings_right = numpy.getattr("array")?.call1((vec!["d", "a", "b"],))?;
+            assert_array_matches_numpy(
+                &union1d_fn.call1((strings_left.clone(), strings_right.clone()))?,
+                &numpy_union1d.call1((strings_left.clone(), strings_right.clone()))?,
+            )?;
+
+            // 2-D inputs are flattened before union.
+            let two_d_left = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2], vec![2, 3]],))?;
+            let two_d_right = numpy
+                .getattr("array")?
+                .call1((vec![vec![3_i64, 4], vec![4, 5]],))?;
+            assert_array_matches_numpy(
+                &union1d_fn.call1((two_d_left.clone(), two_d_right.clone()))?,
+                &numpy_union1d.call1((two_d_left.clone(), two_d_right.clone()))?,
+            )?;
+
+            // Float arrays with NaN preserve numpy's ordering and dtype.
+            let float_left = numpy
+                .getattr("array")?
+                .call1((vec![1.5_f64, f64::NAN, 2.5, 1.5],))?;
+            let float_right = numpy
+                .getattr("array")?
+                .call1((vec![2.5_f64, 3.5, f64::NAN],))?;
+            assert_array_matches_numpy(
+                &union1d_fn.call1((float_left.clone(), float_right.clone()))?,
+                &numpy_union1d.call1((float_left.clone(), float_right.clone()))?,
             )?;
 
             Ok(())
