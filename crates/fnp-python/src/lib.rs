@@ -4856,6 +4856,20 @@ fn cbrt(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (element,))]
+fn isscalar(py: Python<'_>, element: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.isscalar. True for native Python scalars
+    // (int, float, complex, str, bytes) and numpy generic scalar
+    // objects; False for ndarray (including 0-d) and Python
+    // collections (list, dict, tuple).
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("isscalar")?
+        .call1((element.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x,))]
 fn iscomplexobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.iscomplexobj. Returns True iff input has a
@@ -5982,6 +5996,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(iscomplex, m)?)?;
     m.add_function(wrap_pyfunction!(square, m)?)?;
     m.add_function(wrap_pyfunction!(cbrt, m)?)?;
+    m.add_function(wrap_pyfunction!(isscalar, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6276,6 +6291,7 @@ mod tests {
             assert!(module.getattr("iscomplex").is_ok());
             assert!(module.getattr("square").is_ok());
             assert!(module.getattr("cbrt").is_ok());
+            assert!(module.getattr("isscalar").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -22706,6 +22722,117 @@ mod tests {
             let cubed = ours_a.call_method1("__pow__", (3_i64,))?;
             let ok_rt: bool = allclose.call1((&cubed, &arr))?.extract()?;
             assert!(ok_rt, "cbrt(x)**3 must round-trip to x");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn isscalar_matches_numpy_across_python_and_numpy_objects() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let isc_fn = module.getattr("isscalar")?;
+            let numpy = py.import("numpy")?;
+            let numpy_isc = numpy.getattr("isscalar")?;
+
+            let check = |ours: Bound<'_, PyAny>, theirs: Bound<'_, PyAny>, ctx: &str| -> PyResult<()> {
+                let ours_b: bool = ours.extract()?;
+                let theirs_b: bool = theirs.extract()?;
+                assert_eq!(ours_b, theirs_b, "isscalar mismatch: {}", ctx);
+                Ok(())
+            };
+
+            // Python int → True.
+            check(
+                isc_fn.call1((42_i64,))?,
+                numpy_isc.call1((42_i64,))?,
+                "python int",
+            )?;
+
+            // Python float → True.
+            check(
+                isc_fn.call1((1.5_f64,))?,
+                numpy_isc.call1((1.5_f64,))?,
+                "python float",
+            )?;
+
+            // Python complex → True.
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+            let cplx = py_complex.call1((1.0_f64, 2.0_f64))?;
+            check(
+                isc_fn.call1((cplx.clone(),))?,
+                numpy_isc.call1((cplx.clone(),))?,
+                "python complex",
+            )?;
+
+            // Python str → True.
+            check(
+                isc_fn.call1(("hello",))?,
+                numpy_isc.call1(("hello",))?,
+                "python str",
+            )?;
+
+            // Python list → False.
+            let lst = PyList::new(py, [1_i64, 2, 3])?;
+            check(
+                isc_fn.call1((lst.clone(),))?,
+                numpy_isc.call1((lst.clone(),))?,
+                "python list",
+            )?;
+
+            // Python dict → False.
+            let dct = PyDict::new(py);
+            dct.set_item("a", 1_i64)?;
+            check(
+                isc_fn.call1((dct.clone(),))?,
+                numpy_isc.call1((dct.clone(),))?,
+                "python dict",
+            )?;
+
+            // Python tuple → False.
+            let tup = PyTuple::new(py, [1_i64, 2, 3])?;
+            check(
+                isc_fn.call1((tup.clone(),))?,
+                numpy_isc.call1((tup.clone(),))?,
+                "python tuple",
+            )?;
+
+            // 1-D ndarray → False.
+            let arr_1d = numpy.getattr("array")?.call1((vec![1_i64, 2, 3],))?;
+            check(
+                isc_fn.call1((arr_1d.clone(),))?,
+                numpy_isc.call1((arr_1d.clone(),))?,
+                "1-D ndarray",
+            )?;
+
+            // 0-d ndarray → False (numpy quirk).
+            let arr_0d = numpy.getattr("array")?.call1((42_i64,))?;
+            check(
+                isc_fn.call1((arr_0d.clone(),))?,
+                numpy_isc.call1((arr_0d.clone(),))?,
+                "0-d ndarray",
+            )?;
+
+            // numpy scalar (np.int64(5)) → True.
+            let np_scalar = numpy.getattr("int64")?.call1((5_i64,))?;
+            check(
+                isc_fn.call1((np_scalar.clone(),))?,
+                numpy_isc.call1((np_scalar.clone(),))?,
+                "numpy int64 scalar",
+            )?;
+
+            // numpy float64 scalar → True.
+            let np_f = numpy.getattr("float64")?.call1((2.5_f64,))?;
+            check(
+                isc_fn.call1((np_f.clone(),))?,
+                numpy_isc.call1((np_f.clone(),))?,
+                "numpy float64 scalar",
+            )?;
 
             Ok(())
         });
