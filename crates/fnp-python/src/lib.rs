@@ -4300,6 +4300,20 @@ fn rfftfreq(py: Python<'_>, n: usize, d: f64, device: Option<Py<PyAny>>) -> PyRe
     build_numpy_array_from_ufunc(py, &result)
 }
 
+#[pyfunction]
+#[pyo3(signature = (n, d=1.0, device=None))]
+fn fftfreq(py: Python<'_>, n: usize, d: f64, device: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    // Mirror the rfftfreq wrapper's device-kwarg guard and zero-division
+    // checks, then delegate to the Rust UFuncArray::fftfreq fast path so
+    // n/d semantics match numpy exactly for even and odd n.
+    validate_cpu_device_kwarg(py, device)?;
+    if n == 0 || d == 0.0 {
+        return Err(PyZeroDivisionError::new_err("float division by zero"));
+    }
+    let result = UFuncArray::fftfreq(n, d);
+    build_numpy_array_from_ufunc(py, &result)
+}
+
 fn rfft_norm_scale(norm: Option<&str>, n: usize) -> PyResult<f64> {
     match norm {
         None | Some("backward") => Ok(1.0),
@@ -4736,6 +4750,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rfft, m)?)?;
     m.add_function(wrap_pyfunction!(irfft, m)?)?;
     m.add_function(wrap_pyfunction!(rfftfreq, m)?)?;
+    m.add_function(wrap_pyfunction!(fftfreq, m)?)?;
     m.add_function(wrap_pyfunction!(diag, m)?)?;
     m.add_function(wrap_pyfunction!(diagflat, m)?)?;
     m.add_function(wrap_pyfunction!(diagonal, m)?)?;
@@ -5030,6 +5045,7 @@ mod tests {
             assert!(module.getattr("indices").is_ok());
             assert!(module.getattr("tri").is_ok());
             assert!(module.getattr("rfftfreq").is_ok());
+            assert!(module.getattr("fftfreq").is_ok());
             assert!(module.getattr("diag").is_ok());
             assert!(module.getattr("diagflat").is_ok());
             assert!(module.getattr("diagonal").is_ok());
@@ -14364,13 +14380,101 @@ mod tests {
             copy_kwargs.set_item("copy", false)?;
             let copy_kwargs_n = PyDict::new(py);
             copy_kwargs_n.set_item("copy", false)?;
-            let actual_nocopy = masked_where_fn.call(
-                (cond.clone(), data.clone()),
-                Some(&copy_kwargs),
-            )?;
+            let actual_nocopy =
+                masked_where_fn.call((cond.clone(), data.clone()), Some(&copy_kwargs))?;
             let expected_nocopy =
                 numpy_masked_where.call((cond.clone(), data.clone()), Some(&copy_kwargs_n))?;
             assert_eq!(repr_string(&actual_nocopy), repr_string(&expected_nocopy));
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn fftfreq_matches_numpy_across_n_d_and_device_variants() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let fftfreq_fn = module.getattr("fftfreq")?;
+            let numpy = py.import("numpy")?;
+            let numpy_fftfreq = numpy.getattr("fft")?.getattr("fftfreq")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Even n with default d=1.0.
+            let even = fftfreq_fn.call1((8_usize,))?;
+            let expected_even = numpy_fftfreq.call1((8_i64,))?;
+            assert!(
+                allclose.call1((&even, &expected_even))?.extract::<bool>()?,
+                "fftfreq(8) diverged"
+            );
+
+            // Odd n.
+            let odd = fftfreq_fn.call1((7_usize,))?;
+            let expected_odd = numpy_fftfreq.call1((7_i64,))?;
+            assert!(
+                allclose.call1((&odd, &expected_odd))?.extract::<bool>()?,
+                "fftfreq(7) diverged"
+            );
+
+            // Non-unit d — rescales all frequencies by 1/d.
+            let d_kwargs = PyDict::new(py);
+            d_kwargs.set_item("d", 0.1_f64)?;
+            let d_kwargs_n = PyDict::new(py);
+            d_kwargs_n.set_item("d", 0.1_f64)?;
+            let actual_d = fftfreq_fn.call((16_usize,), Some(&d_kwargs))?;
+            let expected_d = numpy_fftfreq.call((16_i64,), Some(&d_kwargs_n))?;
+            assert!(
+                allclose
+                    .call1((&actual_d, &expected_d))?
+                    .extract::<bool>()?,
+                "fftfreq(16, d=0.1) diverged"
+            );
+
+            // Large d (small frequencies).
+            let big_d_kwargs = PyDict::new(py);
+            big_d_kwargs.set_item("d", 1000.0_f64)?;
+            let big_d_kwargs_n = PyDict::new(py);
+            big_d_kwargs_n.set_item("d", 1000.0_f64)?;
+            let actual_big = fftfreq_fn.call((4_usize,), Some(&big_d_kwargs))?;
+            let expected_big = numpy_fftfreq.call((4_i64,), Some(&big_d_kwargs_n))?;
+            assert!(
+                allclose
+                    .call1((&actual_big, &expected_big))?
+                    .extract::<bool>()?,
+                "fftfreq(4, d=1000) diverged"
+            );
+
+            // n=1 edge case.
+            let single = fftfreq_fn.call1((1_usize,))?;
+            let expected_single = numpy_fftfreq.call1((1_i64,))?;
+            assert!(
+                allclose
+                    .call1((&single, &expected_single))?
+                    .extract::<bool>()?,
+                "fftfreq(1) diverged"
+            );
+
+            // Zero n rejected.
+            let err = fftfreq_fn.call1((0_usize,)).unwrap_err();
+            assert!(
+                err.is_instance_of::<pyo3::exceptions::PyZeroDivisionError>(py),
+                "fftfreq(0) must raise ZeroDivisionError"
+            );
+
+            // Zero d rejected.
+            let zero_d = PyDict::new(py);
+            zero_d.set_item("d", 0.0_f64)?;
+            let err_d = fftfreq_fn
+                .call((4_usize,), Some(&zero_d))
+                .unwrap_err();
+            assert!(
+                err_d.is_instance_of::<pyo3::exceptions::PyZeroDivisionError>(py),
+                "fftfreq(..., d=0) must raise ZeroDivisionError"
+            );
 
             Ok(())
         });
