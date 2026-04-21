@@ -5755,6 +5755,41 @@ fn full(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, fill_value, dtype=None, order="K", subok=true, shape=None, *, device=None))]
+#[allow(clippy::too_many_arguments)]
+fn full_like(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    fill_value: Py<PyAny>,
+    dtype: Option<Py<PyAny>>,
+    order: &str,
+    subok: bool,
+    shape: Option<Py<PyAny>>,
+    device: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.full_like so dtype/layout inheritance, shape
+    // overrides, subclass handling, object fills, and zero-sized input
+    // behavior all match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let full_like_fn = numpy.getattr("full_like")?;
+    let kwargs = PyDict::new(py);
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    kwargs.set_item("order", order)?;
+    kwargs.set_item("subok", subok)?;
+    if let Some(shape_val) = shape {
+        kwargs.set_item("shape", shape_val.bind(py))?;
+    }
+    if let Some(device_val) = device {
+        kwargs.set_item("device", device_val.bind(py))?;
+    }
+    Ok(full_like_fn
+        .call((a.bind(py), fill_value.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, dtype=None, order=None, *, copy=None, device=None, like=None))]
 fn asarray(
     py: Python<'_>,
@@ -8329,6 +8364,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(isin, m)?)?;
     m.add_function(wrap_pyfunction!(vander, m)?)?;
     m.add_function(wrap_pyfunction!(full, m)?)?;
+    m.add_function(wrap_pyfunction!(full_like, m)?)?;
     m.add_function(wrap_pyfunction!(asarray, m)?)?;
     m.add_function(wrap_pyfunction!(asanyarray, m)?)?;
     m.add_function(wrap_pyfunction!(ascontiguousarray, m)?)?;
@@ -8756,6 +8792,7 @@ mod tests {
             assert!(module.getattr("isin").is_ok());
             assert!(module.getattr("vander").is_ok());
             assert!(module.getattr("full").is_ok());
+            assert!(module.getattr("full_like").is_ok());
             assert!(module.getattr("asarray").is_ok());
             assert!(module.getattr("asanyarray").is_ok());
             assert!(module.getattr("ascontiguousarray").is_ok());
@@ -28641,6 +28678,148 @@ mod tests {
             let ours_scalar_fill = full_fn.call1(((2_i64, 2_i64), scalar_fill.clone()))?;
             let theirs_scalar_fill = numpy_full.call1(((2_i64, 2_i64), scalar_fill.clone()))?;
             assert_array_matches_numpy(&ours_scalar_fill, &theirs_scalar_fill)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn full_like_matches_numpy_across_layout_dtype_shape_subok_object_and_zero() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let full_like_fn = module.getattr("full_like")?;
+            let numpy = py.import("numpy")?;
+            let numpy_full_like = numpy.getattr("full_like")?;
+
+            // Default dtype/order should follow the input array.
+            let fortran_source = numpy
+                .getattr("asfortranarray")?
+                .call1((vec![vec![1_i64, 2, 3], vec![4_i64, 5, 6]],))?;
+            let ours_default = full_like_fn.call1((fortran_source.clone(), 9_i64))?;
+            let theirs_default = numpy_full_like.call1((fortran_source.clone(), 9_i64))?;
+            assert_array_matches_numpy(&ours_default, &theirs_default)?;
+            assert_eq!(
+                ours_default.getattr("dtype")?.str()?.extract::<String>()?,
+                theirs_default
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?
+            );
+            let ours_f: bool = ours_default
+                .getattr("flags")?
+                .get_item("F_CONTIGUOUS")?
+                .extract()?;
+            let theirs_f: bool = theirs_default
+                .getattr("flags")?
+                .get_item("F_CONTIGUOUS")?
+                .extract()?;
+            assert_eq!(ours_f, theirs_f, "default order inheritance mismatch");
+
+            // Explicit dtype override must match NumPy's coercion.
+            let ours_dtype = full_like_fn.call(
+                (fortran_source.clone(), 1.5_f64),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", numpy.getattr("float64")?)?;
+                    kwargs
+                }),
+            )?;
+            let theirs_dtype = numpy_full_like.call(
+                (fortran_source.clone(), 1.5_f64),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", numpy.getattr("float64")?)?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_dtype, &theirs_dtype)?;
+
+            // shape= overrides output shape while preserving fill semantics.
+            let ours_shape = full_like_fn.call(
+                (fortran_source.clone(), -2_i64),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("shape", (3_i64,))?;
+                    kwargs
+                }),
+            )?;
+            let theirs_shape = numpy_full_like.call(
+                (fortran_source.clone(), -2_i64),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("shape", (3_i64,))?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_shape, &theirs_shape)?;
+
+            // Object fill values should preserve object dtype and contents.
+            let object_source = object_array(py, vec!["east", "west"]);
+            let object_fill = PyDict::new(py);
+            object_fill.set_item("route", "north")?;
+            let ours_object = full_like_fn.call(
+                (object_source.clone(), object_fill.clone()),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", numpy.getattr("object_")?)?;
+                    kwargs
+                }),
+            )?;
+            let theirs_object = numpy_full_like.call(
+                (object_source.clone(), object_fill.clone()),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", numpy.getattr("object_")?)?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_object, &theirs_object)?;
+
+            // subok controls whether ndarray subclasses are preserved.
+            let matrix_type = numpy.getattr("matrix")?;
+            let matrix_input = matrix_type.call1((vec![vec![1_i64, 2], vec![3, 4]],))?;
+            let ours_subok = full_like_fn.call1((matrix_input.clone(), 5_i64))?;
+            let theirs_subok = numpy_full_like.call1((matrix_input.clone(), 5_i64))?;
+            assert_eq!(
+                ours_subok.get_type().name()?.extract::<String>()?,
+                theirs_subok.get_type().name()?.extract::<String>()?,
+                "subok=True subclass preservation mismatch",
+            );
+            assert_array_matches_numpy(&ours_subok, &theirs_subok)?;
+
+            let ours_no_subok = full_like_fn.call(
+                (matrix_input.clone(), 6_i64),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("subok", false)?;
+                    kwargs
+                }),
+            )?;
+            let theirs_no_subok = numpy_full_like.call(
+                (matrix_input.clone(), 6_i64),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("subok", false)?;
+                    kwargs
+                }),
+            )?;
+            assert_eq!(
+                ours_no_subok.get_type().name()?.extract::<String>()?,
+                theirs_no_subok.get_type().name()?.extract::<String>()?,
+                "subok=False base-array surface mismatch",
+            );
+            assert_array_matches_numpy(&ours_no_subok, &theirs_no_subok)?;
+
+            // Zero-sized inputs should still preserve dtype/layout parity.
+            let zero_source = numpy.getattr("empty")?.call1(((0_i64, 3_i64),))?;
+            let ours_zero = full_like_fn.call1((zero_source.clone(), 4_i64))?;
+            let theirs_zero = numpy_full_like.call1((zero_source.clone(), 4_i64))?;
+            assert_array_matches_numpy(&ours_zero, &theirs_zero)?;
 
             Ok(())
         });
