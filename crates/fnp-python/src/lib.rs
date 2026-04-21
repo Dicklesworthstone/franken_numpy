@@ -5821,6 +5821,37 @@ fn zeros_like(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, dtype=None, order="K", subok=true, shape=None, *, device=None))]
+fn ones_like(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    dtype: Option<Py<PyAny>>,
+    order: &str,
+    subok: bool,
+    shape: Option<Py<PyAny>>,
+    device: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.ones_like so dtype/layout inheritance, shape
+    // overrides, subclass handling, object one-fills, and zero-sized
+    // input behavior all match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let ones_like_fn = numpy.getattr("ones_like")?;
+    let kwargs = PyDict::new(py);
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    kwargs.set_item("order", order)?;
+    kwargs.set_item("subok", subok)?;
+    if let Some(shape_val) = shape {
+        kwargs.set_item("shape", shape_val.bind(py))?;
+    }
+    if let Some(device_val) = device {
+        kwargs.set_item("device", device_val.bind(py))?;
+    }
+    Ok(ones_like_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, dtype=None, order=None, *, copy=None, device=None, like=None))]
 fn asarray(
     py: Python<'_>,
@@ -8397,6 +8428,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(full, m)?)?;
     m.add_function(wrap_pyfunction!(full_like, m)?)?;
     m.add_function(wrap_pyfunction!(zeros_like, m)?)?;
+    m.add_function(wrap_pyfunction!(ones_like, m)?)?;
     m.add_function(wrap_pyfunction!(asarray, m)?)?;
     m.add_function(wrap_pyfunction!(asanyarray, m)?)?;
     m.add_function(wrap_pyfunction!(ascontiguousarray, m)?)?;
@@ -8826,6 +8858,7 @@ mod tests {
             assert!(module.getattr("full").is_ok());
             assert!(module.getattr("full_like").is_ok());
             assert!(module.getattr("zeros_like").is_ok());
+            assert!(module.getattr("ones_like").is_ok());
             assert!(module.getattr("asarray").is_ok());
             assert!(module.getattr("asanyarray").is_ok());
             assert!(module.getattr("ascontiguousarray").is_ok());
@@ -28956,6 +28989,110 @@ mod tests {
             let zero_source = numpy.getattr("empty")?.call1(((0_i64, 3_i64),))?;
             let ours_zero = zeros_like_fn.call1((zero_source.clone(),))?;
             let theirs_zero = numpy_zeros_like.call1((zero_source.clone(),))?;
+            assert_array_matches_numpy(&ours_zero, &theirs_zero)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ones_like_matches_numpy_across_layout_dtype_shape_object_scalar_and_zero() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let ones_like_fn = module.getattr("ones_like")?;
+            let numpy = py.import("numpy")?;
+            let numpy_ones_like = numpy.getattr("ones_like")?;
+
+            // Default dtype/order should follow the input array.
+            let fortran_source = numpy
+                .getattr("asfortranarray")?
+                .call1((vec![vec![1_i64, 2, 3], vec![4_i64, 5, 6]],))?;
+            let ours_default = ones_like_fn.call1((fortran_source.clone(),))?;
+            let theirs_default = numpy_ones_like.call1((fortran_source.clone(),))?;
+            assert_array_matches_numpy(&ours_default, &theirs_default)?;
+            let ours_f: bool = ours_default
+                .getattr("flags")?
+                .get_item("F_CONTIGUOUS")?
+                .extract()?;
+            let theirs_f: bool = theirs_default
+                .getattr("flags")?
+                .get_item("F_CONTIGUOUS")?
+                .extract()?;
+            assert_eq!(ours_f, theirs_f, "default order inheritance mismatch");
+
+            // Explicit dtype override must match NumPy's coercion.
+            let ours_dtype = ones_like_fn.call(
+                (fortran_source.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", numpy.getattr("float64")?)?;
+                    kwargs
+                }),
+            )?;
+            let theirs_dtype = numpy_ones_like.call(
+                (fortran_source.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", numpy.getattr("float64")?)?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_dtype, &theirs_dtype)?;
+
+            // shape= overrides output shape while preserving one-fill semantics.
+            let ours_shape = ones_like_fn.call(
+                (fortran_source.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("shape", (3_i64,))?;
+                    kwargs
+                }),
+            )?;
+            let theirs_shape = numpy_ones_like.call(
+                (fortran_source.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("shape", (3_i64,))?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_shape, &theirs_shape)?;
+
+            // Object dtype one-fill should match NumPy's Python object payloads.
+            let object_source = object_array(py, vec!["east", "west"]);
+            let ours_object = ones_like_fn.call(
+                (object_source.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", numpy.getattr("object_")?)?;
+                    kwargs
+                }),
+            )?;
+            let theirs_object = numpy_ones_like.call(
+                (object_source.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", numpy.getattr("object_")?)?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_object, &theirs_object)?;
+
+            // Scalar input parity should match NumPy's 0-d output exactly.
+            assert_array_matches_numpy(
+                &ones_like_fn.call1((7_i64,))?,
+                &numpy_ones_like.call1((7_i64,))?,
+            )?;
+
+            // Zero-sized inputs should still preserve dtype/layout parity.
+            let zero_source = numpy.getattr("empty")?.call1(((0_i64, 3_i64),))?;
+            let ours_zero = ones_like_fn.call1((zero_source.clone(),))?;
+            let theirs_zero = numpy_ones_like.call1((zero_source.clone(),))?;
             assert_array_matches_numpy(&ours_zero, &theirs_zero)?;
 
             Ok(())
