@@ -724,6 +724,47 @@ fn extract_axis_spec(
     )))
 }
 
+fn extract_tensorsolve_axes(
+    py: Python<'_>,
+    axes: Option<Py<PyAny>>,
+    ndim: usize,
+) -> PyResult<Option<Vec<usize>>> {
+    let Some(axes) = axes else {
+        return Ok(None);
+    };
+
+    let axes = axes.bind(py);
+    if axes.is_none() {
+        return Ok(None);
+    }
+
+    let iter = axes.try_iter()?;
+    let permutation = PyList::new(py, 0..ndim)?;
+    for axis in iter {
+        let axis = axis?;
+        permutation.call_method1("remove", (axis.clone(),))?;
+        permutation.call_method1("insert", (ndim, axis))?;
+    }
+
+    let mut normalized = Vec::with_capacity(ndim);
+    for axis in permutation.iter() {
+        if axis.downcast::<PyBool>().is_ok() {
+            return Err(PyTypeError::new_err("an integer is required"));
+        }
+        match axis.extract::<usize>() {
+            Ok(value) => normalized.push(value),
+            Err(_) => {
+                let type_name = axis.get_type().name()?;
+                return Err(PyTypeError::new_err(format!(
+                    "'{type_name}' object cannot be interpreted as an integer"
+                )));
+            }
+        }
+    }
+
+    Ok(Some(normalized))
+}
+
 fn require_numpy_ndarray(py: Python<'_>, value: &Bound<'_, PyAny>, context: &str) -> PyResult<()> {
     let builtins = py.import("builtins")?;
     let numpy = py.import("numpy")?;
@@ -3094,10 +3135,20 @@ fn trim_zeros(py: Python<'_>, filt: Py<PyAny>, trim: &str) -> PyResult<Py<PyAny>
 }
 
 #[pyfunction]
-fn tensorsolve(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (a, b, axes=None))]
+fn tensorsolve(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    b: Py<PyAny>,
+    axes: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
     let a = extract_numeric_array(py, a.bind(py), "tensorsolve(a)")?;
     let b = extract_numeric_array(py, b.bind(py), "tensorsolve(b)")?;
-    let result = a.tensorsolve(&b).map_err(map_ufunc_error)?;
+    let result = match extract_tensorsolve_axes(py, axes, a.shape().len())? {
+        Some(axes) => a.tensorsolve_with_axes(&b, &axes),
+        None => a.tensorsolve(&b),
+    }
+    .map_err(map_ufunc_error)?;
     build_numpy_array_from_ufunc(py, &result)
 }
 
@@ -4127,6 +4178,22 @@ mod tests {
         kwargs: Option<&pyo3::Bound<'_, PyDict>>,
     ) -> PyResult<String> {
         match ufunc.call_method("reduce", (array,), kwargs) {
+            Ok(value) => Ok(format!("ok:{}", repr_string(&value))),
+            Err(err) => {
+                let name = err.get_type(py).name()?;
+                let message = err.value(py).str()?.extract::<String>()?;
+                Ok(format!("err:{name}:{message}"))
+            }
+        }
+    }
+
+    fn call_outcome(
+        py: Python<'_>,
+        callable: &pyo3::Bound<'_, pyo3::types::PyAny>,
+        args: &pyo3::Bound<'_, PyTuple>,
+        kwargs: Option<&pyo3::Bound<'_, PyDict>>,
+    ) -> PyResult<String> {
+        match callable.call(args, kwargs) {
             Ok(value) => Ok(format!("ok:{}", repr_string(&value))),
             Err(err) => {
                 let name = err.get_type(py).name()?;
@@ -5892,12 +5959,129 @@ mod tests {
                 "float64",
             );
 
-            let actual = tensorsolve(py, a.clone().unbind(), b.clone().unbind())?;
+            let actual = tensorsolve(py, a.clone().unbind(), b.clone().unbind(), None)?;
             let expected = numpy
                 .getattr("linalg")?
                 .call_method1("tensorsolve", (a, b))?;
 
             assert_array_matches_numpy(actual.bind(py), &expected)
+        });
+    }
+
+    #[test]
+    fn tensorsolve_matches_numpy_axes_kwarg() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let linalg = numpy.getattr("linalg")?;
+
+            let a = numpy
+                .getattr("eye")?
+                .call1((24,))?
+                .call_method1("reshape", ((3, 4, 2, 3, 4, 2),))?;
+            let b = numeric_array(
+                py,
+                vec![
+                    vec![
+                        vec![0.0, 1.0],
+                        vec![2.0, 3.0],
+                        vec![4.0, 5.0],
+                        vec![6.0, 7.0],
+                    ],
+                    vec![
+                        vec![8.0, 9.0],
+                        vec![10.0, 11.0],
+                        vec![12.0, 13.0],
+                        vec![14.0, 15.0],
+                    ],
+                    vec![
+                        vec![16.0, 17.0],
+                        vec![18.0, 19.0],
+                        vec![20.0, 21.0],
+                        vec![22.0, 23.0],
+                    ],
+                ],
+                "float64",
+            );
+
+            for axes in [
+                PyTuple::new(py, [0_isize, 2_isize, 1_isize])?
+                    .into_any()
+                    .unbind(),
+                PyList::new(py, [0_isize])?.into_any().unbind(),
+                PyTuple::empty(py).into_any().unbind(),
+            ] {
+                let actual = tensorsolve(
+                    py,
+                    a.clone().unbind(),
+                    b.clone().unbind(),
+                    Some(axes.clone_ref(py)),
+                )?;
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("axes", axes.bind(py))?;
+                let expected =
+                    linalg.call_method("tensorsolve", (a.clone(), b.clone()), Some(&kwargs))?;
+                assert_array_matches_numpy(actual.bind(py), &expected)?;
+            }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn tensorsolve_axes_error_surface_matches_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let linalg = numpy.getattr("linalg")?;
+            let tensorsolve_fn = module.getattr("tensorsolve")?;
+            let numpy_tensorsolve = linalg.getattr("tensorsolve")?;
+
+            let a = numpy
+                .getattr("eye")?
+                .call1((24,))?
+                .call_method1("reshape", ((3, 4, 2, 3, 4, 2),))?;
+            let b = numpy
+                .getattr("arange")?
+                .call1((24.0,))?
+                .call_method1("reshape", ((3, 4, 2),))?;
+
+            for axes in [
+                0_i32.into_pyobject(py)?.unbind().into_any(),
+                PyTuple::new(py, [-1_isize])?.into_any().unbind(),
+                PyTuple::new(py, [1.0_f64])?.into_any().unbind(),
+            ] {
+                let actual_kwargs = PyDict::new(py);
+                actual_kwargs.set_item("axes", axes.bind(py))?;
+                let expected_kwargs = PyDict::new(py);
+                expected_kwargs.set_item("axes", axes.bind(py))?;
+
+                let actual = call_outcome(
+                    py,
+                    &tensorsolve_fn,
+                    &PyTuple::new(py, [a.clone(), b.clone()])?,
+                    Some(&actual_kwargs),
+                )?;
+                let expected = call_outcome(
+                    py,
+                    &numpy_tensorsolve,
+                    &PyTuple::new(py, [a.clone(), b.clone()])?,
+                    Some(&expected_kwargs),
+                )?;
+                assert_eq!(actual, expected);
+            }
+
+            Ok(())
         });
     }
 

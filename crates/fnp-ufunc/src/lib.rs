@@ -11960,6 +11960,25 @@ impl UFuncArray {
         })
     }
 
+    /// Solve a tensor equation after reordering selected axes to the right first.
+    ///
+    /// Mirrors `np.linalg.tensorsolve(a, b, axes=...)` for already-normalized axis
+    /// indices. Duplicate entries follow NumPy's "remove then append" behavior.
+    pub fn tensorsolve_with_axes(&self, b: &Self, axes: &[usize]) -> Result<Self, UFuncError> {
+        let ndim = self.shape.len();
+        let mut permutation: Vec<usize> = (0..ndim).collect();
+        for &axis in axes {
+            let Some(position) = permutation.iter().position(|&current| current == axis) else {
+                return Err(UFuncError::Msg(
+                    "tensorsolve: axis out of range for operand".to_string(),
+                ));
+            };
+            let moved = permutation.remove(position);
+            permutation.push(moved);
+        }
+        self.transpose(Some(&permutation))?.tensorsolve(b)
+    }
+
     /// Compute the tensor inverse (np.linalg.tensorinv).
     pub fn tensorinv(&self, ind: usize) -> Result<Self, UFuncError> {
         let (values, out_shape) = fnp_linalg::tensorinv(&self.values, &self.shape, ind)
@@ -54170,6 +54189,23 @@ print(json.dumps(payload))
         let result = a.tensorsolve(&b).unwrap();
         assert_eq!(result.shape(), &[2, 2, 2]);
         assert_eq!(result.values(), b.values());
+    }
+
+    #[test]
+    fn test_linalg_tensorsolve_with_axes_reorders_solution_axes() {
+        let mut values = vec![0.0; 24 * 24];
+        for i in 0..24 {
+            values[i * 24 + i] = 1.0;
+        }
+        let a = UFuncArray::new(vec![3, 4, 2, 3, 4, 2], values, DType::F64).unwrap();
+        let b =
+            UFuncArray::new(vec![3, 4, 2], (0..24).map(f64::from).collect(), DType::F64).unwrap();
+
+        let result = a.tensorsolve_with_axes(&b, &[0, 2, 1]).unwrap();
+        let expected = b.transpose(Some(&[0, 2, 1])).unwrap();
+
+        assert_eq!(result.shape(), expected.shape());
+        assert_eq!(result.values(), expected.values());
     }
 
     // ── Real-world workflow integration tests ──────────────────
