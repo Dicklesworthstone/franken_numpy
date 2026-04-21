@@ -4311,6 +4311,21 @@ fn masked_greater_equal(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, UPLO="L"))]
+#[allow(non_snake_case)]
+fn eigh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.linalg.eigh so the EighResult namedtuple
+    // (eigenvalues, eigenvectors), UPLO selector, complex-Hermitian
+    // eigenvalue realness guarantee, and batched (..., M, M) broadcasting
+    // semantics all match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let eigh_fn = numpy.getattr("linalg")?.getattr("eigh")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("UPLO", UPLO)?;
+    Ok(eigh_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, b, axes=None))]
 fn tensordot(
     py: Python<'_>,
@@ -5073,6 +5088,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(vdot, m)?)?;
     m.add_function(wrap_pyfunction!(masked_inside, m)?)?;
     m.add_function(wrap_pyfunction!(masked_greater_equal, m)?)?;
+    m.add_function(wrap_pyfunction!(eigh, m)?)?;
     m.add_function(wrap_pyfunction!(tensordot, m)?)?;
     m.add_function(wrap_pyfunction!(cross, m)?)?;
     m.add_function(wrap_pyfunction!(multi_dot, m)?)?;
@@ -5327,6 +5343,7 @@ mod tests {
             assert!(module.getattr("vdot").is_ok());
             assert!(module.getattr("masked_inside").is_ok());
             assert!(module.getattr("masked_greater_equal").is_ok());
+            assert!(module.getattr("eigh").is_ok());
             assert!(module.getattr("tensordot").is_ok());
             assert!(module.getattr("cross").is_ok());
             assert!(module.getattr("multi_dot").is_ok());
