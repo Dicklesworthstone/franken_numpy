@@ -10,11 +10,11 @@ use fnp_ufunc::{
     logaddexp2 as ufunc_logaddexp2, modf as ufunc_modf, nextafter as ufunc_nextafter,
     reduce_frompyfunc_values, signbit as ufunc_signbit, spacing as ufunc_spacing, where_nonzero,
 };
-use pyo3::Bound;
 use pyo3::exceptions::{PyTypeError, PyValueError, PyZeroDivisionError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBool, PyDict, PyList, PyModule, PyTuple};
 use pyo3::wrap_pyfunction;
+use pyo3::{Bound, IntoPyObject};
 
 #[pyclass(name = "NditerStep", get_all, unsendable)]
 #[derive(Clone)]
@@ -4115,6 +4115,38 @@ fn gradient(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, n=1, axis=-1, *varargs, **kwargs))]
+fn diff(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    n: i64,
+    axis: i64,
+    varargs: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.diff so repeated differencing, axis handling,
+    // and the `<no value>` omission semantics for prepend/append
+    // match numpy exactly, including explicit `None`.
+    let numpy = py.import("numpy")?;
+    let diff_fn = numpy.getattr("diff")?;
+    let mut positional: Vec<Py<PyAny>> = Vec::with_capacity(varargs.len() + 3);
+    positional.push(a);
+    positional.push(n.into_pyobject(py)?.into_any().unbind());
+    positional.push(axis.into_pyobject(py)?.into_any().unbind());
+    for arg in varargs.iter() {
+        positional.push(arg.unbind());
+    }
+    let args = PyTuple::new(py, positional.iter().map(|item| item.bind(py)))?;
+    let call_kwargs = PyDict::new(py);
+    if let Some(kwargs) = kwargs {
+        for (key, value) in kwargs.iter() {
+            call_kwargs.set_item(key, value)?;
+        }
+    }
+    Ok(diff_fn.call(args, Some(&call_kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, bins=None, range=None, weights=None))]
 fn histogram_bin_edges(
     py: Python<'_>,
@@ -7780,6 +7812,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(searchsorted, m)?)?;
     m.add_function(wrap_pyfunction!(histogram, m)?)?;
     m.add_function(wrap_pyfunction!(gradient, m)?)?;
+    m.add_function(wrap_pyfunction!(diff, m)?)?;
     m.add_function(wrap_pyfunction!(histogram_bin_edges, m)?)?;
     m.add_function(wrap_pyfunction!(transpose, m)?)?;
     m.add_function(wrap_pyfunction!(swapaxes, m)?)?;
@@ -8192,6 +8225,7 @@ mod tests {
             assert!(module.getattr("count_nonzero").is_ok());
             assert!(module.getattr("histogram").is_ok());
             assert!(module.getattr("gradient").is_ok());
+            assert!(module.getattr("diff").is_ok());
             assert!(module.getattr("histogram_bin_edges").is_ok());
             assert!(module.getattr("transpose").is_ok());
             assert!(module.getattr("swapaxes").is_ok());
@@ -9473,6 +9507,73 @@ mod tests {
             assert_array_matches_numpy(
                 &gradient_fn.call1((integers.clone(),))?,
                 &numpy_gradient.call1((integers.clone(),))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn diff_matches_numpy_across_n_axis_prepend_append_and_dtype_behavior() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let diff_fn = module.getattr("diff")?;
+            let numpy = py.import("numpy")?;
+            let numpy_diff = numpy.getattr("diff")?;
+
+            let one_d = numpy
+                .getattr("array")?
+                .call1((vec![1_i64, 4, 9, 16, 25],))?;
+            assert_array_matches_numpy(
+                &diff_fn.call1((one_d.clone(),))?,
+                &numpy_diff.call1((one_d.clone(),))?,
+            )?;
+
+            assert_array_matches_numpy(
+                &diff_fn.call1((one_d.clone(), 2_i64))?,
+                &numpy_diff.call1((one_d.clone(), 2_i64))?,
+            )?;
+
+            let two_d = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2, 4, 7], vec![3, 5, 8, 13]],))?;
+            assert_array_matches_numpy(
+                &diff_fn.call1((two_d.clone(), 1_i64, 0_i64))?,
+                &numpy_diff.call1((two_d.clone(), 1_i64, 0_i64))?,
+            )?;
+            assert_array_matches_numpy(
+                &diff_fn.call1((two_d.clone(), 1_i64, 1_i64))?,
+                &numpy_diff.call1((two_d.clone(), 1_i64, 1_i64))?,
+            )?;
+
+            let prepend_scalar_kwargs = PyDict::new(py);
+            prepend_scalar_kwargs.set_item("prepend", 0_i64)?;
+            let prepend_scalar_kwargs_n = PyDict::new(py);
+            prepend_scalar_kwargs_n.set_item("prepend", 0_i64)?;
+            assert_array_matches_numpy(
+                &diff_fn.call((one_d.clone(),), Some(&prepend_scalar_kwargs))?,
+                &numpy_diff.call((one_d.clone(),), Some(&prepend_scalar_kwargs_n))?,
+            )?;
+
+            let append_array = numpy.getattr("array")?.call1((vec![40_i64],))?;
+            let append_array_kwargs = PyDict::new(py);
+            append_array_kwargs.set_item("append", append_array.clone())?;
+            let append_array_kwargs_n = PyDict::new(py);
+            append_array_kwargs_n.set_item("append", append_array.clone())?;
+            assert_array_matches_numpy(
+                &diff_fn.call((one_d.clone(),), Some(&append_array_kwargs))?,
+                &numpy_diff.call((one_d.clone(),), Some(&append_array_kwargs_n))?,
+            )?;
+
+            let booleans = numeric_array(py, vec![true, true, false, true], "bool");
+            assert_array_matches_numpy(
+                &diff_fn.call1((booleans.clone(),))?,
+                &numpy_diff.call1((booleans.clone(),))?,
             )?;
 
             Ok(())
