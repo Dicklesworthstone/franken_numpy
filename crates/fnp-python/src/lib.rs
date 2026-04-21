@@ -4311,6 +4311,35 @@ fn masked_greater_equal(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, b, axisa=-1, axisb=-1, axisc=-1, axis=None))]
+fn cross(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    b: Py<PyAny>,
+    axisa: i64,
+    axisb: i64,
+    axisc: i64,
+    axis: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.cross so the cross-product result for 2-D and 3-D
+    // input vectors, axisa/axisb/axisc per-input axis selectors, the
+    // overriding `axis` shorthand, and broadcasting semantics all match
+    // numpy exactly across real and complex inputs.
+    let numpy = py.import("numpy")?;
+    let cross_fn = numpy.getattr("cross")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("axisa", axisa)?;
+    kwargs.set_item("axisb", axisb)?;
+    kwargs.set_item("axisc", axisc)?;
+    if let Some(value) = axis {
+        kwargs.set_item("axis", value.bind(py))?;
+    }
+    Ok(cross_fn
+        .call((a.bind(py), b.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (arrays, *, out=None))]
 fn multi_dot(
     py: Python<'_>,
@@ -5025,6 +5054,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(vdot, m)?)?;
     m.add_function(wrap_pyfunction!(masked_inside, m)?)?;
     m.add_function(wrap_pyfunction!(masked_greater_equal, m)?)?;
+    m.add_function(wrap_pyfunction!(cross, m)?)?;
     m.add_function(wrap_pyfunction!(multi_dot, m)?)?;
     m.add_function(wrap_pyfunction!(masked_values, m)?)?;
     m.add_function(wrap_pyfunction!(masked_less_equal, m)?)?;
@@ -5277,6 +5307,7 @@ mod tests {
             assert!(module.getattr("vdot").is_ok());
             assert!(module.getattr("masked_inside").is_ok());
             assert!(module.getattr("masked_greater_equal").is_ok());
+            assert!(module.getattr("cross").is_ok());
             assert!(module.getattr("multi_dot").is_ok());
             assert!(module.getattr("masked_values").is_ok());
             assert!(module.getattr("masked_less_equal").is_ok());
@@ -16328,6 +16359,165 @@ mod tests {
                     .call1((&returned, &expected_out))?
                     .extract::<bool>()?,
                 "multi_dot out= diverged"
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn cross_matches_numpy_across_dimensions_axes_and_complex() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let cross_fn = module.getattr("cross")?;
+            let numpy = py.import("numpy")?;
+            let numpy_cross = numpy.getattr("cross")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // 3-D × 3-D — basic cross product.
+            let a3 = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            let b3 = numpy.getattr("array")?.call1((vec![4.0_f64, 5.0, 6.0],))?;
+            assert!(
+                allclose
+                    .call1((
+                        &cross_fn.call1((a3.clone(), b3.clone()))?,
+                        &numpy_cross.call1((a3.clone(), b3.clone()))?,
+                    ))?
+                    .extract::<bool>()?,
+                "cross 3D x 3D diverged"
+            );
+
+            // 2-D × 2-D — returns scalar (NumPy 2.0 raises DeprecationWarning
+            // but still produces a value); skip the deprecation by using 3-D.
+            // Standard basis: e1 x e2 == e3.
+            let e1 = numpy.getattr("array")?.call1((vec![1.0_f64, 0.0, 0.0],))?;
+            let e2 = numpy.getattr("array")?.call1((vec![0.0_f64, 1.0, 0.0],))?;
+            assert!(
+                allclose
+                    .call1((
+                        &cross_fn.call1((e1.clone(), e2.clone()))?,
+                        &numpy_cross.call1((e1.clone(), e2.clone()))?,
+                    ))?
+                    .extract::<bool>()?,
+                "cross e1 x e2 diverged"
+            );
+
+            // Anticommutativity: a x b == -(b x a).
+            let ab = cross_fn.call1((a3.clone(), b3.clone()))?;
+            let ba = cross_fn.call1((b3.clone(), a3.clone()))?;
+            let neg_ba = numpy.getattr("negative")?.call1((&ba,))?;
+            assert!(
+                allclose.call1((&ab, &neg_ba))?.extract::<bool>()?,
+                "cross anticommutativity diverged"
+            );
+
+            // Stacked input — broadcast along leading axis.
+            let stacked_a = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 0.0, 0.0])?,
+                    PyList::new(py, [0.0_f64, 1.0, 0.0])?,
+                ],
+            )?,))?;
+            let stacked_b = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [0.0_f64, 1.0, 0.0])?,
+                    PyList::new(py, [0.0_f64, 0.0, 1.0])?,
+                ],
+            )?,))?;
+            assert!(
+                allclose
+                    .call1((
+                        &cross_fn.call1((stacked_a.clone(), stacked_b.clone()))?,
+                        &numpy_cross.call1((stacked_a.clone(), stacked_b.clone()))?,
+                    ))?
+                    .extract::<bool>()?,
+                "cross stacked diverged"
+            );
+
+            // Explicit axis= shorthand on stacked-with-vector-along-rows input.
+            let row_vecs_a = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 0.0])?,
+                    PyList::new(py, [2.0_f64, 0.0])?,
+                    PyList::new(py, [3.0_f64, 0.0])?,
+                ],
+            )?,))?;
+            let row_vecs_b = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [0.0_f64, 1.0])?,
+                    PyList::new(py, [0.0_f64, 2.0])?,
+                    PyList::new(py, [0.0_f64, 3.0])?,
+                ],
+            )?,))?;
+            let axis_kwargs = PyDict::new(py);
+            axis_kwargs.set_item("axis", 0_i64)?;
+            let axis_kwargs_n = PyDict::new(py);
+            axis_kwargs_n.set_item("axis", 0_i64)?;
+            assert!(
+                allclose
+                    .call1((
+                        &cross_fn.call(
+                            (row_vecs_a.clone(), row_vecs_b.clone()),
+                            Some(&axis_kwargs),
+                        )?,
+                        &numpy_cross.call(
+                            (row_vecs_a.clone(), row_vecs_b.clone()),
+                            Some(&axis_kwargs_n),
+                        )?,
+                    ))?
+                    .extract::<bool>()?,
+                "cross axis=0 diverged"
+            );
+
+            // Complex 3-D vector cross.
+            let builtins = py.import("builtins")?;
+            let complex_a = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        builtins.getattr("complex")?.call1((1.0_f64, 1.0_f64))?,
+                        builtins.getattr("complex")?.call1((0.0_f64, 1.0_f64))?,
+                        builtins.getattr("complex")?.call1((2.0_f64, 0.0_f64))?,
+                    ],
+                )?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "complex128")?;
+                    kw
+                }),
+            )?;
+            let complex_b = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        builtins.getattr("complex")?.call1((1.0_f64, 0.0_f64))?,
+                        builtins.getattr("complex")?.call1((2.0_f64, 1.0_f64))?,
+                        builtins.getattr("complex")?.call1((0.0_f64, 1.0_f64))?,
+                    ],
+                )?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "complex128")?;
+                    kw
+                }),
+            )?;
+            assert!(
+                allclose
+                    .call1((
+                        &cross_fn.call1((complex_a.clone(), complex_b.clone()))?,
+                        &numpy_cross.call1((complex_a.clone(), complex_b.clone()))?,
+                    ))?
+                    .extract::<bool>()?,
+                "cross complex diverged"
             );
 
             Ok(())
