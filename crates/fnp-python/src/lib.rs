@@ -4604,6 +4604,48 @@ fn nanmax(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, q, axis=None, out=None, overwrite_input=false, method=None, keepdims=false, weights=None))]
+#[allow(clippy::too_many_arguments)]
+fn percentile(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    q: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
+    overwrite_input: bool,
+    method: Option<String>,
+    keepdims: bool,
+    weights: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.percentile so percentile reduction matches
+    // numpy across scalar/vector q, axis=None/int/tuple, optional
+    // `out=` destination, overwrite_input flag, method selector
+    // ('linear'/'lower'/'higher'/'nearest'/'midpoint'/...), keepdims,
+    // and optional weights kwarg. Integer inputs are promoted to
+    // float and the result dtype matches numpy exactly.
+    let numpy = py.import("numpy")?;
+    let percentile_fn = numpy.getattr("percentile")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis_val) = axis {
+        kwargs.set_item("axis", axis_val.bind(py))?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    kwargs.set_item("overwrite_input", overwrite_input)?;
+    if let Some(method_val) = method {
+        kwargs.set_item("method", method_val)?;
+    }
+    kwargs.set_item("keepdims", keepdims)?;
+    if let Some(weights_val) = weights {
+        kwargs.set_item("weights", weights_val.bind(py))?;
+    }
+    Ok(percentile_fn
+        .call((a.bind(py), q.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (p, x))]
 fn polyval(py: Python<'_>, p: Py<PyAny>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.polyval. Coefficients `p` are in decreasing
@@ -5660,6 +5702,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(nanmean, m)?)?;
     m.add_function(wrap_pyfunction!(nansum, m)?)?;
     m.add_function(wrap_pyfunction!(nanmax, m)?)?;
+    m.add_function(wrap_pyfunction!(percentile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
     m.add_function(wrap_pyfunction!(compressed, m)?)?;
@@ -5938,6 +5981,7 @@ mod tests {
             assert!(module.getattr("nanmean").is_ok());
             assert!(module.getattr("nansum").is_ok());
             assert!(module.getattr("nanmax").is_ok());
+            assert!(module.getattr("percentile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
             assert!(module.getattr("compressed").is_ok());
@@ -20762,6 +20806,139 @@ mod tests {
                 ours_shape, theirs_shape,
                 "nanmax keepdims shape must match numpy",
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn percentile_matches_numpy_across_q_axis_method_and_dtype() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let percentile_fn = module.getattr("percentile")?;
+            let numpy = py.import("numpy")?;
+            let numpy_percentile = numpy.getattr("percentile")?;
+            let isclose = numpy.getattr("isclose")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Scalar q on 1-D: q=50 (median).
+            let one_d = numpy.getattr("array")?.call1((vec![3.0_f64, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0],))?;
+            let ours = percentile_fn.call1((one_d.clone(), 50.0_f64))?;
+            let theirs = numpy_percentile.call1((one_d.clone(), 50.0_f64))?;
+            let ok: bool = isclose.call1((&ours, &theirs))?.extract()?;
+            assert!(ok, "percentile q=50 1-D mismatch");
+
+            // Vector q (quartiles).
+            let qs = numpy.getattr("array")?.call1((vec![25.0_f64, 50.0, 75.0],))?;
+            let ours_qs = percentile_fn.call1((one_d.clone(), qs.clone()))?;
+            let theirs_qs = numpy_percentile.call1((one_d.clone(), qs.clone()))?;
+            let ok_qs: bool = allclose.call1((&ours_qs, &theirs_qs))?.extract()?;
+            assert!(ok_qs, "percentile vector q mismatch");
+
+            // 2-D axis=0 and axis=1.
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![1.0_f64, 5.0, 3.0, 7.0],
+                vec![4.0, 2.0, 6.0, 8.0],
+                vec![7.0, 8.0, 9.0, 1.0],
+            ],))?;
+            for axis in [0_i64, 1] {
+                let ours_ax = percentile_fn.call(
+                    (two_d.clone(), 50.0_f64),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", axis)?;
+                        kw
+                    }),
+                )?;
+                let theirs_ax = numpy_percentile.call(
+                    (two_d.clone(), 50.0_f64),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", axis)?;
+                        kw
+                    }),
+                )?;
+                let ok_ax: bool = allclose.call1((&ours_ax, &theirs_ax))?.extract()?;
+                assert!(ok_ax, "percentile 2-D axis={} mismatch", axis);
+            }
+
+            // Each documented method (legacy aliases) at q=50.
+            for method in ["linear", "lower", "higher", "nearest", "midpoint"] {
+                let ours_m = percentile_fn.call(
+                    (one_d.clone(), 50.0_f64),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("method", method)?;
+                        kw
+                    }),
+                )?;
+                let theirs_m = numpy_percentile.call(
+                    (one_d.clone(), 50.0_f64),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("method", method)?;
+                        kw
+                    }),
+                )?;
+                let ok_m: bool = isclose.call1((&ours_m, &theirs_m))?.extract()?;
+                assert!(ok_m, "percentile method={} mismatch", method);
+            }
+
+            // keepdims=True preserves length-1 reduction axis.
+            let ours_kd = percentile_fn.call(
+                (two_d.clone(), 50.0_f64),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 1_i64)?;
+                    kw.set_item("keepdims", true)?;
+                    kw
+                }),
+            )?;
+            let theirs_kd = numpy_percentile.call(
+                (two_d.clone(), 50.0_f64),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 1_i64)?;
+                    kw.set_item("keepdims", true)?;
+                    kw
+                }),
+            )?;
+            let ok_kd: bool = allclose.call1((&ours_kd, &theirs_kd))?.extract()?;
+            assert!(ok_kd, "percentile keepdims=True mismatch");
+            let ours_shape = ours_kd.getattr("shape")?.str()?.to_string();
+            let theirs_shape = theirs_kd.getattr("shape")?.str()?.to_string();
+            assert_eq!(
+                ours_shape, theirs_shape,
+                "percentile keepdims shape must match numpy",
+            );
+
+            // Integer input: dtype promotes to float.
+            let ints = numpy.getattr("array")?.call1((vec![1_i64, 2, 3, 4, 5, 6, 7, 8, 9, 10],))?;
+            let ours_i = percentile_fn.call1((ints.clone(), 50.0_f64))?;
+            let theirs_i = numpy_percentile.call1((ints.clone(), 50.0_f64))?;
+            let ok_i: bool = isclose.call1((&ours_i, &theirs_i))?.extract()?;
+            assert!(ok_i, "percentile integer input mismatch");
+            let ours_dtype = ours_i.getattr("dtype")?.str()?.to_string();
+            let theirs_dtype = theirs_i.getattr("dtype")?.str()?.to_string();
+            assert_eq!(
+                ours_dtype, theirs_dtype,
+                "percentile integer input must produce numpy's dtype",
+            );
+
+            // q=0 minimum, q=100 maximum.
+            let ours_min = percentile_fn.call1((one_d.clone(), 0.0_f64))?;
+            let theirs_min = numpy_percentile.call1((one_d.clone(), 0.0_f64))?;
+            let ok_min: bool = isclose.call1((&ours_min, &theirs_min))?.extract()?;
+            assert!(ok_min, "percentile q=0 (min) mismatch");
+            let ours_max = percentile_fn.call1((one_d.clone(), 100.0_f64))?;
+            let theirs_max = numpy_percentile.call1((one_d.clone(), 100.0_f64))?;
+            let ok_max: bool = isclose.call1((&ours_max, &theirs_max))?.extract()?;
+            assert!(ok_max, "percentile q=100 (max) mismatch");
 
             Ok(())
         });
