@@ -3119,16 +3119,20 @@ fn count_nonzero(
 ) -> PyResult<Py<PyAny>> {
     let a = extract_numeric_array(py, a.bind(py), "count_nonzero(a)")?;
     let axes = extract_axis_spec(py, axis, "count_nonzero")?;
-    let result = match axes {
+    let axis_was_none = axes.is_none();
+    let result = match axes.as_ref() {
         None => a.count_nonzero(None, keepdims),
         Some(axes) if axes.len() == 1 => a.count_nonzero(Some(axes[0]), keepdims),
-        Some(axes) => a.count_nonzero_axes(&axes, keepdims),
+        Some(axes) => a.count_nonzero_axes(axes, keepdims),
     }
     .map_err(map_ufunc_error)?;
 
     let output = build_numpy_array_from_ufunc(py, &result)?;
     if result.shape().is_empty() {
-        return Ok(output.bind(py).call_method0("item")?.unbind());
+        if axis_was_none {
+            return Ok(output.bind(py).call_method0("item")?.unbind());
+        }
+        return Ok(output.bind(py).get_item(())?.unbind());
     }
 
     Ok(output)
@@ -3193,10 +3197,12 @@ fn trim_zeros(py: Python<'_>, filt: Py<PyAny>, trim: &str) -> PyResult<Py<PyAny>
     // Delegate to NumPy so list/tuple/scalar preservation and error messages
     // match trim_zeros exactly.
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("trim_zeros")?
-        .call1((filt.bind(py), trim))?
-        .unbind())
+    let trim_zeros_fn = numpy.getattr("trim_zeros")?;
+    if trim == "fb" {
+        Ok(trim_zeros_fn.call1((filt.bind(py),))?.unbind())
+    } else {
+        Ok(trim_zeros_fn.call1((filt.bind(py), trim))?.unbind())
+    }
 }
 
 #[pyfunction]
@@ -4181,6 +4187,31 @@ fn tri(
 }
 
 #[pyfunction]
+#[pyo3(signature = (x, ord=None, axis=None, keepdims=false))]
+fn norm(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    ord: Option<Py<PyAny>>,
+    axis: Option<Py<PyAny>>,
+    keepdims: bool,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.linalg.norm so ord (None/fro/nuc/int/inf/-inf/real),
+    // axis (None/int/tuple), keepdims, and 1-D vector vs 2-D matrix vs
+    // batched (..., M, N) broadcasting semantics all match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let norm_fn = numpy.getattr("linalg")?.getattr("norm")?;
+    let kwargs = PyDict::new(py);
+    if let Some(value) = ord {
+        kwargs.set_item("ord", value.bind(py))?;
+    }
+    if let Some(value) = axis {
+        kwargs.set_item("axis", value.bind(py))?;
+    }
+    kwargs.set_item("keepdims", keepdims)?;
+    Ok(norm_fn.call((x.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x, axes=None))]
 fn fftshift(py: Python<'_>, x: Py<PyAny>, axes: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.fft.fftshift so single-axis, multi-axis (tuple/list),
@@ -4647,6 +4678,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(putmask, m)?)?;
     m.add_function(wrap_pyfunction!(indices, m)?)?;
     m.add_function(wrap_pyfunction!(tri, m)?)?;
+    m.add_function(wrap_pyfunction!(norm, m)?)?;
     m.add_function(wrap_pyfunction!(fftshift, m)?)?;
     m.add_function(wrap_pyfunction!(ifftshift, m)?)?;
     m.add_function(wrap_pyfunction!(rfft, m)?)?;
@@ -4880,6 +4912,7 @@ mod tests {
             assert!(module.getattr("maximum_fill_value").is_ok());
             assert!(module.getattr("pinv").is_ok());
             assert!(module.getattr("eigvals").is_ok());
+            assert!(module.getattr("norm").is_ok());
             assert!(module.getattr("fftshift").is_ok());
             assert!(module.getattr("ifftshift").is_ok());
             assert!(module.getattr("rfft").is_ok());
@@ -8100,13 +8133,11 @@ mod tests {
             assert_array_matches_numpy(&actual_back, &expected_back)?;
 
             let scalar_input = 0_i32.into_pyobject(py)?.unbind();
-            let actual_scalar = trim_zeros_fn.call1((scalar_input.clone_ref(py),))?;
-            let expected_scalar = numpy_trim_zeros.call1((scalar_input,))?;
+            let scalar_args = PyTuple::new(py, [scalar_input.clone_ref(py).into_bound(py)])?;
             assert_eq!(
-                actual_scalar.get_type().name()?.extract::<String>()?,
-                expected_scalar.get_type().name()?.extract::<String>()?
+                call_outcome(py, &trim_zeros_fn, &scalar_args, None)?,
+                call_outcome(py, &numpy_trim_zeros, &scalar_args, None)?,
             );
-            assert_eq!(repr_string(&actual_scalar), repr_string(&expected_scalar));
 
             let actual_err = trim_zeros_fn.call1((list_input.clone(), "x")).unwrap_err();
             let expected_err = numpy_trim_zeros.call1((list_input, "x")).unwrap_err();
@@ -9030,13 +9061,11 @@ mod tests {
             let numpy = py.import("numpy")?;
             let recfunctions = py.import("numpy.lib.recfunctions")?;
 
-            let subarray_dtype = numpy
-                .getattr("dtype")?
-                .call1((py.eval(
-                    pyo3::ffi::c_str!("[('xy', '<i4', (2,)), ('z', '<i4')]"),
-                    None,
-                    None,
-                )?,))?;
+            let subarray_dtype = numpy.getattr("dtype")?.call1((py.eval(
+                pyo3::ffi::c_str!("[('xy', '<i4', (2,)), ('z', '<i4')]"),
+                None,
+                None,
+            )?,))?;
             let array_kwargs = PyDict::new(py);
             array_kwargs.set_item("dtype", subarray_dtype)?;
             let structured = numpy.getattr("array")?.call(
@@ -13802,6 +13831,158 @@ mod tests {
                     ))?
                     .extract::<bool>()?,
                 "fftshift float diverged"
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn norm_matches_numpy_across_ord_axis_keepdims_and_batched() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let norm_fn = module.getattr("norm")?;
+            let numpy = py.import("numpy")?;
+            let numpy_norm = numpy.getattr("linalg")?.getattr("norm")?;
+            let isclose = numpy.getattr("isclose")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // 1-D default (L2).
+            let vec = numpy
+                .getattr("array")?
+                .call1((vec![3.0_f64, 4.0],))?;
+            assert!(
+                isclose
+                    .call1((&norm_fn.call1((vec.clone(),))?, &numpy_norm.call1((vec.clone(),))?))?
+                    .extract::<bool>()?,
+                "norm 1-D L2 diverged"
+            );
+
+            // 1-D with ord=1 (sum of absolute values).
+            let kwargs_l1 = PyDict::new(py);
+            kwargs_l1.set_item("ord", 1_i64)?;
+            let kwargs_l1_n = PyDict::new(py);
+            kwargs_l1_n.set_item("ord", 1_i64)?;
+            assert!(
+                isclose
+                    .call1((
+                        &norm_fn.call((vec.clone(),), Some(&kwargs_l1))?,
+                        &numpy_norm.call((vec.clone(),), Some(&kwargs_l1_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "norm 1-D L1 diverged"
+            );
+
+            // 1-D with ord=np.inf (max absolute value).
+            let inf = numpy.getattr("inf")?;
+            let kwargs_inf = PyDict::new(py);
+            kwargs_inf.set_item("ord", &inf)?;
+            let kwargs_inf_n = PyDict::new(py);
+            kwargs_inf_n.set_item("ord", &inf)?;
+            assert!(
+                isclose
+                    .call1((
+                        &norm_fn.call((vec.clone(),), Some(&kwargs_inf))?,
+                        &numpy_norm.call((vec.clone(),), Some(&kwargs_inf_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "norm 1-D inf diverged"
+            );
+
+            // 2-D Frobenius (default).
+            let mat = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 2.0, 3.0])?,
+                    PyList::new(py, [4.0_f64, 5.0, 6.0])?,
+                ],
+            )?,))?;
+            assert!(
+                isclose
+                    .call1((
+                        &norm_fn.call1((mat.clone(),))?,
+                        &numpy_norm.call1((mat.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "norm 2-D Frobenius diverged"
+            );
+
+            // 2-D with ord='fro' explicit.
+            let kwargs_fro = PyDict::new(py);
+            kwargs_fro.set_item("ord", "fro")?;
+            let kwargs_fro_n = PyDict::new(py);
+            kwargs_fro_n.set_item("ord", "fro")?;
+            assert!(
+                isclose
+                    .call1((
+                        &norm_fn.call((mat.clone(),), Some(&kwargs_fro))?,
+                        &numpy_norm.call((mat.clone(),), Some(&kwargs_fro_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "norm 2-D fro string diverged"
+            );
+
+            // 2-D with axis=0 (column-wise norms).
+            let kwargs_ax0 = PyDict::new(py);
+            kwargs_ax0.set_item("axis", 0_i64)?;
+            let kwargs_ax0_n = PyDict::new(py);
+            kwargs_ax0_n.set_item("axis", 0_i64)?;
+            assert!(
+                allclose
+                    .call1((
+                        &norm_fn.call((mat.clone(),), Some(&kwargs_ax0))?,
+                        &numpy_norm.call((mat.clone(),), Some(&kwargs_ax0_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "norm 2-D axis=0 diverged"
+            );
+
+            // 2-D with axis=1 and keepdims=True.
+            let kwargs_kd = PyDict::new(py);
+            kwargs_kd.set_item("axis", 1_i64)?;
+            kwargs_kd.set_item("keepdims", true)?;
+            let kwargs_kd_n = PyDict::new(py);
+            kwargs_kd_n.set_item("axis", 1_i64)?;
+            kwargs_kd_n.set_item("keepdims", true)?;
+            assert!(
+                allclose
+                    .call1((
+                        &norm_fn.call((mat.clone(),), Some(&kwargs_kd))?,
+                        &numpy_norm.call((mat.clone(),), Some(&kwargs_kd_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "norm 2-D axis=1 keepdims diverged"
+            );
+
+            // Complex 1-D.
+            let builtins = py.import("builtins")?;
+            let complex_vec = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        builtins.getattr("complex")?.call1((3.0_f64, 4.0_f64))?,
+                        builtins.getattr("complex")?.call1((0.0_f64, 1.0_f64))?,
+                    ],
+                )?,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", "complex128")?;
+                    kwargs
+                }),
+            )?;
+            assert!(
+                isclose
+                    .call1((
+                        &norm_fn.call1((complex_vec.clone(),))?,
+                        &numpy_norm.call1((complex_vec.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "norm complex 1-D diverged"
             );
 
             Ok(())
