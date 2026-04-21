@@ -4077,6 +4077,19 @@ fn transpose(py: Python<'_>, a: Py<PyAny>, axes: Option<Py<PyAny>>) -> PyResult<
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, axis1, axis2))]
+fn swapaxes(py: Python<'_>, a: Py<PyAny>, axis1: i64, axis2: i64) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.swapaxes so non-adjacent axis swaps, negative
+    // axis normalization, scalar/1-D identity behavior, and out-of-
+    // range errors match numpy exactly.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("swapaxes")?
+        .call1((a.bind(py), axis1, axis2))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, axis=None))]
 fn squeeze(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.squeeze so singleton-axis removal, explicit
@@ -7562,6 +7575,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(searchsorted, m)?)?;
     m.add_function(wrap_pyfunction!(histogram_bin_edges, m)?)?;
     m.add_function(wrap_pyfunction!(transpose, m)?)?;
+    m.add_function(wrap_pyfunction!(swapaxes, m)?)?;
     m.add_function(wrap_pyfunction!(squeeze, m)?)?;
     m.add_function(wrap_pyfunction!(split, m)?)?;
     m.add_function(wrap_pyfunction!(array_split, m)?)?;
@@ -7967,6 +7981,7 @@ mod tests {
             assert!(module.getattr("count_nonzero").is_ok());
             assert!(module.getattr("histogram_bin_edges").is_ok());
             assert!(module.getattr("transpose").is_ok());
+            assert!(module.getattr("swapaxes").is_ok());
             assert!(module.getattr("squeeze").is_ok());
             assert!(module.getattr("expand_dims").is_ok());
             assert!(module.getattr("structured_to_unstructured").is_ok());
@@ -25396,6 +25411,83 @@ mod tests {
                         kw
                     }),
                 )
+                .unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn swapaxes_matches_numpy_across_dims_negative_axes_and_error_surface() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let swapaxes_fn = module.getattr("swapaxes")?;
+            let numpy = py.import("numpy")?;
+            let numpy_swapaxes = numpy.getattr("swapaxes")?;
+
+            // 2-D swap matches transpose.
+            let two_d = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2, 3], vec![4, 5, 6]],))?;
+            assert_array_matches_numpy(
+                &swapaxes_fn.call1((two_d.clone(), 0_i64, 1_i64))?,
+                &numpy_swapaxes.call1((two_d.clone(), 0_i64, 1_i64))?,
+            )?;
+
+            // 3-D non-adjacent axis swap.
+            let three_d = numpy.getattr("array")?.call1((vec![
+                vec![vec![1_i64, 2], vec![3, 4], vec![5, 6]],
+                vec![vec![7_i64, 8], vec![9, 10], vec![11, 12]],
+            ],))?;
+            assert_array_matches_numpy(
+                &swapaxes_fn.call1((three_d.clone(), 0_i64, 2_i64))?,
+                &numpy_swapaxes.call1((three_d.clone(), 0_i64, 2_i64))?,
+            )?;
+
+            // Negative axes normalize like numpy.
+            assert_array_matches_numpy(
+                &swapaxes_fn.call1((three_d.clone(), -1_i64, -3_i64))?,
+                &numpy_swapaxes.call1((three_d.clone(), -1_i64, -3_i64))?,
+            )?;
+
+            // Scalar input raises the same axis error surface.
+            let scalar = numpy.getattr("array")?.call1((7_i64,))?;
+            let actual_scalar_err = swapaxes_fn
+                .call1((scalar.clone(), 0_i64, 0_i64))
+                .unwrap_err();
+            let expected_scalar_err = numpy_swapaxes
+                .call1((scalar.clone(), 0_i64, 0_i64))
+                .unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_scalar_err, expected_scalar_err)?;
+
+            // 1-D with axis 0 is an identity operation.
+            let one_d = numpy.getattr("array")?.call1((vec![1_i64, 2, 3],))?;
+            assert_array_matches_numpy(
+                &swapaxes_fn.call1((one_d.clone(), 0_i64, 0_i64))?,
+                &numpy_swapaxes.call1((one_d.clone(), 0_i64, 0_i64))?,
+            )?;
+
+            // Object dtype parity.
+            let objects = numpy
+                .getattr("array")?
+                .call1((vec![vec!["a", "bb"], vec!["ccc", "dddd"]],))?;
+            assert_array_matches_numpy(
+                &swapaxes_fn.call1((objects.clone(), 0_i64, 1_i64))?,
+                &numpy_swapaxes.call1((objects.clone(), 0_i64, 1_i64))?,
+            )?;
+
+            // Out-of-range axis must raise the same error surface.
+            let actual_err = swapaxes_fn
+                .call1((three_d.clone(), 0_i64, 3_i64))
+                .unwrap_err();
+            let expected_err = numpy_swapaxes
+                .call1((three_d.clone(), 0_i64, 3_i64))
                 .unwrap_err();
             assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
 
