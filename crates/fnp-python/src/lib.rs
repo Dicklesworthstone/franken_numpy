@@ -24829,4 +24829,109 @@ mod tests {
             Ok(())
         });
     }
+
+    #[test]
+    fn matrix_transpose_matches_numpy_across_dims_and_dtype() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let mt_fn = module.getattr("matrix_transpose")?;
+            let numpy = py.import("numpy")?;
+            let numpy_mt = numpy.getattr("linalg")?.getattr("matrix_transpose")?;
+
+            // 2-D matrix transpose.
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![1_i64, 2, 3],
+                vec![4, 5, 6],
+            ],))?;
+            assert_array_matches_numpy(
+                &mt_fn.call1((two_d.clone(),))?,
+                &numpy_mt.call1((two_d.clone(),))?,
+            )?;
+
+            // 3-D batched transpose preserves leading axis.
+            let three_d = numpy.getattr("array")?.call1((vec![
+                vec![vec![1_i64, 2, 3], vec![4, 5, 6]],
+                vec![vec![7, 8, 9], vec![10, 11, 12]],
+            ],))?;
+            assert_array_matches_numpy(
+                &mt_fn.call1((three_d.clone(),))?,
+                &numpy_mt.call1((three_d.clone(),))?,
+            )?;
+            // Verify resulting shape: (2, 3, 2) for input (2, 2, 3).
+            let result_shape: (usize, usize, usize) =
+                mt_fn.call1((three_d.clone(),))?.getattr("shape")?.extract()?;
+            assert_eq!(
+                result_shape,
+                (2, 3, 2),
+                "matrix_transpose must transpose only last two axes",
+            );
+
+            // 4-D batched.
+            let four_d = numpy.getattr("array")?.call1((vec![
+                vec![vec![vec![1_i64, 2], vec![3, 4]], vec![vec![5, 6], vec![7, 8]]],
+                vec![vec![vec![9, 10], vec![11, 12]], vec![vec![13, 14], vec![15, 16]]],
+            ],))?;
+            assert_array_matches_numpy(
+                &mt_fn.call1((four_d.clone(),))?,
+                &numpy_mt.call1((four_d.clone(),))?,
+            )?;
+
+            // Float dtype preservation.
+            let floats = numpy.getattr("array")?.call(
+                (vec![vec![1.5_f64, 2.5], vec![3.5, 4.5]],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("float64")?)?;
+                    kw
+                }),
+            )?;
+            let ours_f = mt_fn.call1((floats.clone(),))?;
+            let theirs_f = numpy_mt.call1((floats.clone(),))?;
+            assert_array_matches_numpy(&ours_f, &theirs_f)?;
+            let ours_dtype = ours_f.getattr("dtype")?.str()?.to_string();
+            let theirs_dtype = theirs_f.getattr("dtype")?.str()?.to_string();
+            assert_eq!(ours_dtype, theirs_dtype, "matrix_transpose dtype mismatch");
+
+            // Complex matrix: must be transpose, NOT conjugate-transpose.
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+            let row1: Vec<Py<PyAny>> = vec![
+                py_complex.call1((1.0_f64, 1.0_f64))?.unbind(),
+                py_complex.call1((2.0_f64, 2.0_f64))?.unbind(),
+            ];
+            let row2: Vec<Py<PyAny>> = vec![
+                py_complex.call1((3.0_f64, 3.0_f64))?.unbind(),
+                py_complex.call1((4.0_f64, 4.0_f64))?.unbind(),
+            ];
+            let r1_lst = PyList::new(py, row1)?;
+            let r2_lst = PyList::new(py, row2)?;
+            let cplx_2d = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [r1_lst.unbind(), r2_lst.unbind()],
+            )?,))?;
+            let ours_c = mt_fn.call1((cplx_2d.clone(),))?;
+            let theirs_c = numpy_mt.call1((cplx_2d.clone(),))?;
+            assert_array_matches_numpy(&ours_c, &theirs_c)?;
+            // Verify [0,1] became [1,0]: imag stays positive (no conjugation).
+            let entry: Bound<'_, PyAny> = ours_c.get_item(0_i64)?.get_item(1_i64)?;
+            let imag_val: f64 = entry.getattr("imag")?.extract()?;
+            assert!(imag_val > 0.0, "matrix_transpose must NOT conjugate complex");
+
+            // 1-D input must raise an error matching numpy.
+            let one_d = numpy.getattr("array")?.call1((vec![1_i64, 2, 3],))?;
+            let ours_err = mt_fn.call1((one_d.clone(),)).err();
+            let theirs_err = numpy_mt.call1((one_d.clone(),)).err();
+            assert_eq!(
+                ours_err.is_some(),
+                theirs_err.is_some(),
+                "matrix_transpose 1-D must raise iff numpy does",
+            );
+
+            Ok(())
+        });
+    }
 }
