@@ -5410,6 +5410,200 @@ fn hermint(
         .unbind())
 }
 
+// numpy.polynomial.laguerre wrappers. API shape mirrors chebyshev and
+// hermite; each is a direct passthrough.
+
+#[pyfunction]
+#[pyo3(signature = (c1, c2))]
+fn lagadd(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("laguerre")?
+        .getattr("lagadd")?
+        .call1((c1.bind(py), c2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c1, c2))]
+fn lagsub(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("laguerre")?
+        .getattr("lagsub")?
+        .call1((c1.bind(py), c2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c1, c2))]
+fn lagmul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("laguerre")?
+        .getattr("lagmul")?
+        .call1((c1.bind(py), c2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, c, tensor=true))]
+fn lagval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("tensor", tensor)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("laguerre")?
+        .getattr("lagval")?
+        .call((x.bind(py), c.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c,))]
+fn lagroots(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("laguerre")?
+        .getattr("lagroots")?
+        .call1((c.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (roots,))]
+fn lagfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("laguerre")?
+        .getattr("lagfromroots")?
+        .call1((roots.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c, pow, maxpower=16))]
+fn lagpow(
+    py: Python<'_>,
+    c: Py<PyAny>,
+    pow: Py<PyAny>,
+    maxpower: i64,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("maxpower", maxpower)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("laguerre")?
+        .getattr("lagpow")?
+        .call((c.bind(py), pow.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c1, c2))]
+fn lagdiv(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("laguerre")?
+        .getattr("lagdiv")?
+        .call1((c1.bind(py), c2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (off, scl))]
+fn lagline(py: Python<'_>, off: Py<PyAny>, scl: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("laguerre")?
+        .getattr("lagline")?
+        .call1((off.bind(py), scl.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c,))]
+fn lagmulx(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("laguerre")?
+        .getattr("lagmulx")?
+        .call1((c.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c, tol=0.0))]
+fn lagtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("tol", tol)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("laguerre")?
+        .getattr("lagtrim")?
+        .call((c.bind(py),), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c, m=1, scl=1.0, axis=0))]
+fn lagder(
+    py: Python<'_>,
+    c: Py<PyAny>,
+    m: i64,
+    scl: f64,
+    axis: i64,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("scl", scl)?;
+    kwargs.set_item("axis", axis)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("laguerre")?
+        .getattr("lagder")?
+        .call((c.bind(py), m), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c, m=1, k=None, lbnd=0.0, scl=1.0, axis=0))]
+fn lagint(
+    py: Python<'_>,
+    c: Py<PyAny>,
+    m: i64,
+    k: Option<Py<PyAny>>,
+    lbnd: f64,
+    scl: f64,
+    axis: i64,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(k_val) = k {
+        kwargs.set_item("k", k_val.bind(py))?;
+    }
+    kwargs.set_item("lbnd", lbnd)?;
+    kwargs.set_item("scl", scl)?;
+    kwargs.set_item("axis", axis)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("laguerre")?
+        .getattr("lagint")?
+        .call((c.bind(py), m), Some(&kwargs))?
+        .unbind())
+}
+
 #[pyfunction]
 #[pyo3(signature = (x, window_shape, axis=None, *, subok=false, writeable=false))]
 fn sliding_window_view(
@@ -5696,6 +5890,32 @@ fn svdvals(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
         .call1((x.bind(py),))?
         .unbind())
 }
+
+#[pyfunction]
+#[pyo3(signature = (a, axis=None, weights=None, returned=false))]
+fn ma_average(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    weights: Option<Py<PyAny>>,
+    returned: bool,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.ma.average. Mask-aware weighted/unweighted
+    // mean; matches numpy across axis, optional weights, and the
+    // returned=True path that yields (avg, sum_of_weights).
+    let numpy = py.import("numpy")?;
+    let avg_fn = numpy.getattr("ma")?.getattr("average")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis_val) = axis {
+        kwargs.set_item("axis", axis_val.bind(py))?;
+    }
+    if let Some(weights_val) = weights {
+        kwargs.set_item("weights", weights_val.bind(py))?;
+    }
+    kwargs.set_item("returned", returned)?;
+    Ok(avg_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
 
 #[pyfunction]
 #[pyo3(signature = (a, axis=None))]
@@ -6880,6 +7100,19 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hermtrim, m)?)?;
     m.add_function(wrap_pyfunction!(hermder, m)?)?;
     m.add_function(wrap_pyfunction!(hermint, m)?)?;
+    m.add_function(wrap_pyfunction!(lagadd, m)?)?;
+    m.add_function(wrap_pyfunction!(lagsub, m)?)?;
+    m.add_function(wrap_pyfunction!(lagmul, m)?)?;
+    m.add_function(wrap_pyfunction!(lagval, m)?)?;
+    m.add_function(wrap_pyfunction!(lagroots, m)?)?;
+    m.add_function(wrap_pyfunction!(lagfromroots, m)?)?;
+    m.add_function(wrap_pyfunction!(lagpow, m)?)?;
+    m.add_function(wrap_pyfunction!(lagdiv, m)?)?;
+    m.add_function(wrap_pyfunction!(lagline, m)?)?;
+    m.add_function(wrap_pyfunction!(lagmulx, m)?)?;
+    m.add_function(wrap_pyfunction!(lagtrim, m)?)?;
+    m.add_function(wrap_pyfunction!(lagder, m)?)?;
+    m.add_function(wrap_pyfunction!(lagint, m)?)?;
     m.add_function(wrap_pyfunction!(tile, m)?)?;
     m.add_function(wrap_pyfunction!(true_divide, m)?)?;
     m.add_function(wrap_pyfunction!(allclose, m)?)?;
@@ -6893,6 +7126,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(testing_assert_array_equal, m)?)?;
     m.add_function(wrap_pyfunction!(matrix_transpose, m)?)?;
     m.add_function(wrap_pyfunction!(svdvals, m)?)?;
+    m.add_function(wrap_pyfunction!(ma_average, m)?)?;
     m.add_function(wrap_pyfunction!(size_count, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
@@ -7205,6 +7439,7 @@ mod tests {
             assert!(module.getattr("testing_assert_array_equal").is_ok());
             assert!(module.getattr("matrix_transpose").is_ok());
             assert!(module.getattr("svdvals").is_ok());
+            assert!(module.getattr("ma_average").is_ok());
             assert!(module.getattr("size_count").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
@@ -24723,6 +24958,189 @@ mod tests {
             let our_int = module.getattr("hermint")?;
             let np_der = nherm.getattr("hermder")?;
             let np_int = nherm.getattr("hermint")?;
+            let base4 = vec![1.0_f64, 2.0, 3.0, 4.0];
+            for m in 0_i64..=2 {
+                let kw = PyDict::new(py);
+                kw.set_item("m", m)?;
+                assert_array_matches_numpy(
+                    &our_der.call((base4.clone(),), Some(&kw))?,
+                    &np_der.call((base4.clone(),), Some(&kw))?,
+                )?;
+            }
+            let kw_int_all = PyDict::new(py);
+            kw_int_all.set_item("m", 2_i64)?;
+            kw_int_all.set_item("k", PyList::new(py, [3.0_f64, 7.0])?)?;
+            kw_int_all.set_item("lbnd", 1.0_f64)?;
+            kw_int_all.set_item("scl", 2.0_f64)?;
+            assert_array_matches_numpy(
+                &our_int.call((base4.clone(),), Some(&kw_int_all))?,
+                &np_int.call((base4.clone(),), Some(&kw_int_all))?,
+            )?;
+            let our_rt = our_der.call1((our_int.call1((base4.clone(),))?,))?;
+            let np_rt = np_der.call1((np_int.call1((base4.clone(),))?,))?;
+            assert_array_matches_numpy(&our_rt, &np_rt)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn laguerre_wrappers_match_numpy() {
+        // Pin parity for every newly exposed numpy.polynomial.laguerre
+        // helper in a single sweep. Mirrors the hermite parity coverage
+        // one-for-one: arithmetic triad across four shape cases, lagval
+        // scalar / vector / tensor=False, lagroots quadratic / cubic /
+        // constant, lagfromroots across 0..3 roots, lagpow with
+        // maxpower ValueError boundary, lagdiv's tuple return, lagline
+        // pairs, lagmulx vs lagmul([0, 1]) identity, lagtrim tolerance
+        // sweeps, lagder / lagint kwargs + roundtrip parity.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let nlag = numpy.getattr("polynomial")?.getattr("laguerre")?;
+
+            let arith_cases: Vec<(Vec<f64>, Vec<f64>)> = vec![
+                (vec![1.0, 2.0, 3.0], vec![1.0, 2.0, 3.0]),
+                (vec![1.0, 2.0, 3.0], vec![1.0, 1.0]),
+                (vec![1.0, 2.0], vec![1.0, 2.0, 3.0, 4.0]),
+                (vec![5.0], vec![1.0, 2.0, 3.0]),
+            ];
+            for op in ["lagadd", "lagsub", "lagmul"] {
+                let ours = module.getattr(op)?;
+                let theirs = nlag.getattr(op)?;
+                for (idx, (c1, c2)) in arith_cases.iter().enumerate() {
+                    let o = ours.call1((c1.clone(), c2.clone()))?;
+                    let t = theirs.call1((c1.clone(), c2.clone()))?;
+                    assert_array_matches_numpy(&o, &t)
+                        .unwrap_or_else(|_| panic!("{op} case {idx}"));
+                }
+            }
+
+            let lv = module.getattr("lagval")?;
+            let lv_ref = nlag.getattr("lagval")?;
+            let c = vec![1.0_f64, 0.5];
+            assert_array_matches_numpy(
+                &lv.call1((2.0_f64, c.clone()))?,
+                &lv_ref.call1((2.0_f64, c.clone()))?,
+            )?;
+            let xs = vec![0.0_f64, 0.5, 1.0];
+            let c2 = vec![1.0_f64, 0.0, 1.0];
+            assert_array_matches_numpy(
+                &lv.call1((xs.clone(), c2.clone()))?,
+                &lv_ref.call1((xs.clone(), c2.clone()))?,
+            )?;
+            let c_multi = numpy
+                .getattr("array")?
+                .call1((vec![vec![1.0, 2.0], vec![3.0, 4.0]],))?;
+            let xs2 = vec![0.5_f64, 1.0];
+            let kw_tf = PyDict::new(py);
+            kw_tf.set_item("tensor", false)?;
+            assert_array_matches_numpy(
+                &lv.call((xs2.clone(), c_multi.clone()), Some(&kw_tf))?,
+                &lv_ref.call((xs2.clone(), c_multi.clone()), Some(&kw_tf))?,
+            )?;
+
+            let lr = module.getattr("lagroots")?;
+            let lr_ref = nlag.getattr("lagroots")?;
+            for coeffs in [
+                vec![-0.5_f64, 0.0, 1.0],
+                vec![0.0_f64, -0.25, 0.0, 1.0],
+                vec![1.0_f64],
+            ] {
+                assert_array_matches_numpy(
+                    &lr.call1((coeffs.clone(),))?,
+                    &lr_ref.call1((coeffs.clone(),))?,
+                )?;
+            }
+
+            let lfr = module.getattr("lagfromroots")?;
+            let lfr_ref = nlag.getattr("lagfromroots")?;
+            for roots in [
+                Vec::<f64>::new(),
+                vec![0.5_f64],
+                vec![1.0_f64, -1.0],
+                vec![-2.0_f64, 0.0, 2.0],
+            ] {
+                assert_array_matches_numpy(
+                    &lfr.call1((roots.clone(),))?,
+                    &lfr_ref.call1((roots.clone(),))?,
+                )?;
+            }
+
+            let lp = module.getattr("lagpow")?;
+            let lp_ref = nlag.getattr("lagpow")?;
+            let base = vec![1.0_f64, 1.0];
+            for pow in [0_i64, 1, 2, 3] {
+                assert_array_matches_numpy(
+                    &lp.call1((base.clone(), pow))?,
+                    &lp_ref.call1((base.clone(), pow))?,
+                )?;
+            }
+            let kw_mp = PyDict::new(py);
+            kw_mp.set_item("maxpower", 4_i64)?;
+            let our_err = lp.call((base.clone(), 5_i64), Some(&kw_mp)).err();
+            let np_err = lp_ref.call((base.clone(), 5_i64), Some(&kw_mp)).err();
+            assert_eq!(our_err.is_some(), np_err.is_some());
+
+            let ld = module.getattr("lagdiv")?;
+            let ld_ref = nlag.getattr("lagdiv")?;
+            let ours_tup: Bound<'_, pyo3::types::PyAny> =
+                ld.call1((vec![1.0_f64, 2.0, 3.0], vec![1.0_f64, 1.0]))?;
+            let theirs_tup: Bound<'_, pyo3::types::PyAny> =
+                ld_ref.call1((vec![1.0_f64, 2.0, 3.0], vec![1.0_f64, 1.0]))?;
+            for idx in 0_i64..2 {
+                assert_array_matches_numpy(
+                    &ours_tup.get_item(idx)?,
+                    &theirs_tup.get_item(idx)?,
+                )?;
+            }
+
+            let ll = module.getattr("lagline")?;
+            let ll_ref = nlag.getattr("lagline")?;
+            for (off, scl) in [(3.0_f64, 2.0), (0.0, 1.0), (-1.5, 0.5)] {
+                assert_array_matches_numpy(
+                    &ll.call1((off, scl))?,
+                    &ll_ref.call1((off, scl))?,
+                )?;
+            }
+
+            let lmx = module.getattr("lagmulx")?;
+            let lmx_ref = nlag.getattr("lagmulx")?;
+            let cs = vec![1.0_f64, 2.0, 3.0];
+            assert_array_matches_numpy(
+                &lmx.call1((cs.clone(),))?,
+                &lmx_ref.call1((cs.clone(),))?,
+            )?;
+            let our_mul = module.getattr("lagmul")?;
+            assert_array_matches_numpy(
+                &lmx.call1((cs.clone(),))?,
+                &our_mul.call1((cs.clone(), vec![0.0_f64, 1.0]))?,
+            )?;
+
+            let lt = module.getattr("lagtrim")?;
+            let lt_ref = nlag.getattr("lagtrim")?;
+            let trail = vec![1.0_f64, 0.0, 2.0, 0.0, 0.0];
+            assert_array_matches_numpy(
+                &lt.call1((trail.clone(),))?,
+                &lt_ref.call1((trail.clone(),))?,
+            )?;
+            let kw_tol = PyDict::new(py);
+            kw_tol.set_item("tol", 0.05_f64)?;
+            let near = vec![1.0_f64, 0.0, 2.0, 0.01, 0.0];
+            assert_array_matches_numpy(
+                &lt.call((near.clone(),), Some(&kw_tol))?,
+                &lt_ref.call((near.clone(),), Some(&kw_tol))?,
+            )?;
+
+            let our_der = module.getattr("lagder")?;
+            let our_int = module.getattr("lagint")?;
+            let np_der = nlag.getattr("lagder")?;
+            let np_int = nlag.getattr("lagint")?;
             let base4 = vec![1.0_f64, 2.0, 3.0, 4.0];
             for m in 0_i64..=2 {
                 let kw = PyDict::new(py);
