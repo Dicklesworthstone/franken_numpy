@@ -4342,11 +4342,7 @@ fn fft(
 
 #[pyfunction]
 #[pyo3(signature = (a, fill_value=None))]
-fn filled(
-    py: Python<'_>,
-    a: Py<PyAny>,
-    fill_value: Option<Py<PyAny>>,
-) -> PyResult<Py<PyAny>> {
+fn filled(py: Python<'_>, a: Py<PyAny>, fill_value: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.ma.filled so masked-element replacement using either
     // the explicit fill_value or the array's intrinsic fill_value attribute
     // matches numpy exactly. Returns an ndarray (not a MaskedArray).
@@ -4357,6 +4353,20 @@ fn filled(
         kwargs.set_item("fill_value", value.bind(py))?;
     }
     Ok(filled_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
+fn compressed(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.ma.compressed so masked-element filtering,
+    // flatten-to-1-D semantics, and dtype preservation all match numpy
+    // exactly for masked arrays, plain ndarrays, and scalar inputs.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("ma")?
+        .getattr("compressed")?
+        .call1((x.bind(py),))?
+        .unbind())
 }
 
 #[pyfunction]
@@ -5169,6 +5179,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(masked_greater_equal, m)?)?;
     m.add_function(wrap_pyfunction!(fft, m)?)?;
     m.add_function(wrap_pyfunction!(filled, m)?)?;
+    m.add_function(wrap_pyfunction!(compressed, m)?)?;
     m.add_function(wrap_pyfunction!(ifft, m)?)?;
     m.add_function(wrap_pyfunction!(eigh, m)?)?;
     m.add_function(wrap_pyfunction!(tensordot, m)?)?;
@@ -5427,6 +5438,7 @@ mod tests {
             assert!(module.getattr("masked_greater_equal").is_ok());
             assert!(module.getattr("fft").is_ok());
             assert!(module.getattr("filled").is_ok());
+            assert!(module.getattr("compressed").is_ok());
             assert!(module.getattr("ifft").is_ok());
             assert!(module.getattr("eigh").is_ok());
             assert!(module.getattr("tensordot").is_ok());
@@ -17266,9 +17278,7 @@ mod tests {
             );
 
             // Plain ndarray (no mask) — filled returns the array as-is.
-            let plain = numpy
-                .getattr("array")?
-                .call1((vec![1.0_f64, 2.0, 3.0],))?;
+            let plain = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
             assert!(
                 array_equal
                     .call1((
@@ -17370,6 +17380,105 @@ mod tests {
                 repr_string(&filled_fn.call((masked.clone(),), Some(&kw_nan))?),
                 repr_string(&numpy_filled.call((masked.clone(),), Some(&kw_nan_n))?)
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn compressed_matches_numpy_flattening_masks_scalars_and_dtypes() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let compressed_fn = module.getattr("compressed")?;
+            let numpy = py.import("numpy")?;
+            let numpy_compressed = numpy.getattr("ma")?.getattr("compressed")?;
+
+            // Plain ndarray input is flattened to 1-D.
+            let plain = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1_i64, 2_i64])?,
+                    PyList::new(py, [3_i64, 4_i64])?,
+                ],
+            )?,))?;
+            assert_array_matches_numpy(
+                &compressed_fn.call1((plain.clone(),))?,
+                &numpy_compressed.call1((plain.clone(),))?,
+            )?;
+
+            // Masked float array drops masked elements and preserves float dtype.
+            let masked_float = numpy.getattr("ma")?.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        PyList::new(py, [1.5_f64, 2.5_f64])?,
+                        PyList::new(py, [3.5_f64, 4.5_f64])?,
+                    ],
+                )?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item(
+                        "mask",
+                        PyList::new(
+                            py,
+                            [
+                                PyList::new(py, [false, true])?,
+                                PyList::new(py, [true, false])?,
+                            ],
+                        )?,
+                    )?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(
+                &compressed_fn.call1((masked_float.clone(),))?,
+                &numpy_compressed.call1((masked_float.clone(),))?,
+            )?;
+
+            // Boolean masked array preserves bool dtype.
+            let masked_bool = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![true, false, true, false],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("mask", vec![false, true, false, true])?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(
+                &compressed_fn.call1((masked_bool.clone(),))?,
+                &numpy_compressed.call1((masked_bool.clone(),))?,
+            )?;
+
+            // Scalar masked array becomes length-1; fully masked scalar becomes empty.
+            let scalar = numpy.getattr("ma")?.getattr("array")?.call(
+                (7_i64,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("mask", false)?;
+                    kw
+                }),
+            )?;
+            let masked_scalar = numpy.getattr("ma")?.getattr("array")?.call(
+                (7_i64,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("mask", true)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(
+                &compressed_fn.call1((scalar.clone(),))?,
+                &numpy_compressed.call1((scalar.clone(),))?,
+            )?;
+            assert_array_matches_numpy(
+                &compressed_fn.call1((masked_scalar.clone(),))?,
+                &numpy_compressed.call1((masked_scalar.clone(),))?,
+            )?;
 
             Ok(())
         });
