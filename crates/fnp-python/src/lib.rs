@@ -5004,6 +5004,19 @@ fn asfortranarray(
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
+fn isrealobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.isrealobj. Returns True iff input has a
+    // real (non-complex) dtype, regardless of whether values would
+    // round-trip through complex. Logical complement of iscomplexobj.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("isrealobj")?
+        .call1((x.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
 fn iscomplexobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.iscomplexobj. Returns True iff input has a
     // complex dtype, regardless of whether imaginary parts are
@@ -6140,6 +6153,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tril, m)?)?;
     m.add_function(wrap_pyfunction!(i0, m)?)?;
     m.add_function(wrap_pyfunction!(asfortranarray, m)?)?;
+    m.add_function(wrap_pyfunction!(isrealobj, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6445,6 +6459,7 @@ mod tests {
             assert!(module.getattr("tril").is_ok());
             assert!(module.getattr("i0").is_ok());
             assert!(module.getattr("asfortranarray").is_ok());
+            assert!(module.getattr("isrealobj").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -23869,6 +23884,137 @@ mod tests {
             let ours_l = asf_fn.call1((lst.clone(),))?;
             let theirs_l = numpy_asf.call1((lst.clone(),))?;
             assert_array_matches_numpy(&ours_l, &theirs_l)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn isrealobj_matches_numpy_and_complements_iscomplexobj() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let isr_fn = module.getattr("isrealobj")?;
+            let numpy = py.import("numpy")?;
+            let numpy_isr = numpy.getattr("isrealobj")?;
+
+            let check = |ours: Bound<'_, PyAny>, theirs: Bound<'_, PyAny>, ctx: &str| -> PyResult<()> {
+                let ours_b: bool = ours.extract()?;
+                let theirs_b: bool = theirs.extract()?;
+                assert_eq!(ours_b, theirs_b, "isrealobj mismatch: {}", ctx);
+                Ok(())
+            };
+
+            // Float array → True.
+            let real_arr = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            check(
+                isr_fn.call1((real_arr.clone(),))?,
+                numpy_isr.call1((real_arr.clone(),))?,
+                "real float array",
+            )?;
+
+            // Integer array → True.
+            let int_arr = numpy.getattr("array")?.call1((vec![1_i64, 2, 3],))?;
+            check(
+                isr_fn.call1((int_arr.clone(),))?,
+                numpy_isr.call1((int_arr.clone(),))?,
+                "integer array",
+            )?;
+
+            // Bool array → True.
+            let bool_arr = numpy.getattr("array")?.call(
+                (vec![true, false, true],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("bool_")?)?;
+                    kw
+                }),
+            )?;
+            check(
+                isr_fn.call1((bool_arr.clone(),))?,
+                numpy_isr.call1((bool_arr.clone(),))?,
+                "bool array",
+            )?;
+
+            // Complex array → False.
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+            let cplx_items: Vec<Py<PyAny>> = vec![
+                py_complex.call1((1.0_f64, 2.0_f64))?.unbind(),
+                py_complex.call1((3.0_f64, 4.0_f64))?.unbind(),
+            ];
+            let cplx_lst = PyList::new(py, cplx_items)?;
+            let cplx_arr = numpy.getattr("array")?.call1((cplx_lst,))?;
+            check(
+                isr_fn.call1((cplx_arr.clone(),))?,
+                numpy_isr.call1((cplx_arr.clone(),))?,
+                "complex array",
+            )?;
+
+            // Complex with all-zero imag → still complex dtype → False.
+            let zero_imag_items: Vec<Py<PyAny>> = vec![
+                py_complex.call1((1.0_f64, 0.0_f64))?.unbind(),
+                py_complex.call1((2.0_f64, 0.0_f64))?.unbind(),
+            ];
+            let zero_imag_lst = PyList::new(py, zero_imag_items)?;
+            let zero_imag = numpy.getattr("array")?.call1((zero_imag_lst,))?;
+            check(
+                isr_fn.call1((zero_imag.clone(),))?,
+                numpy_isr.call1((zero_imag.clone(),))?,
+                "complex with zero imag",
+            )?;
+
+            // List of floats → True.
+            let lst_floats = PyList::new(py, [1.0_f64, 2.0, 3.0])?;
+            check(
+                isr_fn.call1((lst_floats.clone(),))?,
+                numpy_isr.call1((lst_floats.clone(),))?,
+                "list of floats",
+            )?;
+
+            // List of complex literals → False.
+            let lst_complex_items: Vec<Py<PyAny>> = vec![
+                py_complex.call1((1.0_f64, 1.0_f64))?.unbind(),
+                py_complex.call1((2.0_f64, 0.0_f64))?.unbind(),
+            ];
+            let lst_complex = PyList::new(py, lst_complex_items)?;
+            check(
+                isr_fn.call1((lst_complex.clone(),))?,
+                numpy_isr.call1((lst_complex.clone(),))?,
+                "list of complex",
+            )?;
+
+            // 2-D real → True.
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![1.0_f64, 2.0],
+                vec![3.0, 4.0],
+            ],))?;
+            check(
+                isr_fn.call1((two_d.clone(),))?,
+                numpy_isr.call1((two_d.clone(),))?,
+                "2-D real",
+            )?;
+
+            // Complement-of-iscomplexobj cross-check.
+            let isc_fn = module.getattr("iscomplexobj")?;
+            let cases = [
+                real_arr.clone().into_any(),
+                int_arr.clone().into_any(),
+                cplx_arr.clone().into_any(),
+                zero_imag.clone().into_any(),
+            ];
+            for (i, case) in cases.iter().enumerate() {
+                let isr_val: bool = isr_fn.call1((case,))?.extract()?;
+                let isc_val: bool = isc_fn.call1((case,))?.extract()?;
+                assert_eq!(
+                    isr_val, !isc_val,
+                    "isrealobj must equal !iscomplexobj on case {}",
+                    i,
+                );
+            }
 
             Ok(())
         });
