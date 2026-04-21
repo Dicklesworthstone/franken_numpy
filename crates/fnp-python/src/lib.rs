@@ -3150,17 +3150,70 @@ fn masked_invalid(py: Python<'_>, a: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny
         .unbind())
 }
 
+fn minimum_fill_value_for_supported_dtype(py: Python<'_>, dtype: DType) -> PyResult<Py<PyAny>> {
+    Ok(match dtype {
+        DType::Bool => 1_i64.into_pyobject(py)?.into_any().unbind(),
+        DType::I8 => i8::MAX.into_pyobject(py)?.into_any().unbind(),
+        DType::I16 => i16::MAX.into_pyobject(py)?.into_any().unbind(),
+        DType::I32 => i32::MAX.into_pyobject(py)?.into_any().unbind(),
+        DType::I64 => i64::MAX.into_pyobject(py)?.into_any().unbind(),
+        DType::U8 => u8::MAX.into_pyobject(py)?.into_any().unbind(),
+        DType::U16 => u16::MAX.into_pyobject(py)?.into_any().unbind(),
+        DType::U32 => u32::MAX.into_pyobject(py)?.into_any().unbind(),
+        DType::U64 => u64::MAX.into_pyobject(py)?.into_any().unbind(),
+        DType::F16 | DType::F32 | DType::F64 => {
+            f64::INFINITY.into_pyobject(py)?.into_any().unbind()
+        }
+        DType::Complex64 | DType::Complex128 => py
+            .import("builtins")?
+            .getattr("complex")?
+            .call1((f64::INFINITY, f64::INFINITY))?
+            .unbind(),
+        DType::DateTime64 | DType::TimeDelta64 => i64::MAX.into_pyobject(py)?.into_any().unbind(),
+        DType::Str | DType::Structured => py.None(),
+    })
+}
+
 #[pyfunction]
 #[pyo3(signature = (obj,))]
 fn minimum_fill_value(py: Python<'_>, obj: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Mirror np.ma.minimum_fill_value: return the reduction-identity sentinel
-    // for the dtype of the input array / masked array / dtype.
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("ma")?
-        .getattr("minimum_fill_value")?
-        .call1((obj.bind(py),))?
-        .unbind())
+    let builtins = py.import("builtins")?;
+    let bound = obj.bind(py);
+    let dtype = if builtins
+        .call_method1("isinstance", (bound, numpy.getattr("dtype")?))?
+        .extract::<bool>()?
+    {
+        bound.clone()
+    } else {
+        numpy.call_method1("asarray", (bound,))?.getattr("dtype")?
+    };
+
+    if !dtype.getattr("names")?.is_none() {
+        return Ok(numpy
+            .getattr("ma")?
+            .getattr("minimum_fill_value")?
+            .call1((bound,))?
+            .unbind());
+    }
+
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if matches!(kind.as_str(), "O" | "S" | "U" | "V") {
+        return Ok(py.None());
+    }
+
+    let parsed_dtype = match kind.as_str() {
+        "M" => DType::DateTime64,
+        "m" => DType::TimeDelta64,
+        _ => {
+            let name = dtype.getattr("name")?.extract::<String>()?;
+            DType::parse(&name).ok_or_else(|| {
+                PyTypeError::new_err(format!("minimum_fill_value: unsupported dtype {name}"))
+            })?
+        }
+    };
+
+    minimum_fill_value_for_supported_dtype(py, parsed_dtype)
 }
 
 #[pyfunction]
@@ -6419,6 +6472,139 @@ mod tests {
             assert_eq!(repr_string(&actual_dtype), repr_string(&expected_dtype));
 
             Ok(())
+        });
+    }
+
+    #[test]
+    fn minimum_fill_value_matches_numpy_supported_and_fallback_cases() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let minimum_fill_value_fn = module.getattr("minimum_fill_value")?;
+            let numpy = py.import("numpy")?;
+            let numpy_minimum_fill_value = numpy.getattr("ma")?.getattr("minimum_fill_value")?;
+
+            let int_input = numeric_array(py, vec![1_i8, 2, 3], "int8");
+            let actual_int = minimum_fill_value_fn.call1((int_input.clone(),))?;
+            let expected_int = numpy_minimum_fill_value.call1((int_input.clone(),))?;
+            assert_eq!(repr_string(&actual_int), repr_string(&expected_int));
+
+            let float_input = numeric_array(py, vec![1.0_f64, 2.0], "float64");
+            let actual_float = minimum_fill_value_fn.call1((float_input.clone(),))?;
+            let expected_float = numpy_minimum_fill_value.call1((float_input.clone(),))?;
+            assert_eq!(repr_string(&actual_float), repr_string(&expected_float));
+
+            let builtins = py.import("builtins")?;
+            let complex_input = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    builtins.getattr("complex")?.call1((1.0_f64, 2.0_f64))?,
+                    builtins.getattr("complex")?.call1((3.0_f64, 4.0_f64))?,
+                ],
+            )?,))?;
+            let actual_complex = minimum_fill_value_fn.call1((complex_input.clone(),))?;
+            let expected_complex = numpy_minimum_fill_value.call1((complex_input.clone(),))?;
+            assert_eq!(repr_string(&actual_complex), repr_string(&expected_complex));
+
+            let datetime_input = numpy.call_method(
+                "array",
+                (PyList::new(
+                    py,
+                    [
+                        numpy.getattr("datetime64")?.call1(("NaT",))?,
+                        numpy.getattr("datetime64")?.call1(("2020-01-01",))?,
+                    ],
+                )?,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", "datetime64[D]")?;
+                    kwargs
+                }),
+            )?;
+            let actual_datetime = minimum_fill_value_fn.call1((datetime_input.clone(),))?;
+            let expected_datetime = numpy_minimum_fill_value.call1((datetime_input.clone(),))?;
+            assert_eq!(
+                repr_string(&actual_datetime),
+                repr_string(&expected_datetime)
+            );
+
+            let object_input = numpy.call_method(
+                "array",
+                (PyList::new(py, [py.None()])?,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", numpy.getattr("object_")?)?;
+                    kwargs
+                }),
+            )?;
+            let actual_object = minimum_fill_value_fn.call1((object_input.clone(),))?;
+            let expected_object = numpy_minimum_fill_value.call1((object_input.clone(),))?;
+            assert_eq!(repr_string(&actual_object), repr_string(&expected_object));
+
+            let structured_input = numpy.call_method(
+                "array",
+                (PyList::new(py, [(1_i32, 2_i16)])?,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", PyList::new(py, [("x", "i4"), ("y", "i2")])?)?;
+                    kwargs
+                }),
+            )?;
+            let actual_structured = minimum_fill_value_fn.call1((structured_input.clone(),))?;
+            let expected_structured =
+                numpy_minimum_fill_value.call1((structured_input.clone(),))?;
+            assert_eq!(
+                repr_string(&actual_structured),
+                repr_string(&expected_structured)
+            );
+
+            let dtype_input = numpy.getattr("dtype")?.call1(("int32",))?;
+            let actual_dtype = minimum_fill_value_fn.call1((dtype_input.clone(),))?;
+            let expected_dtype = numpy_minimum_fill_value.call1((dtype_input,))?;
+            assert_eq!(repr_string(&actual_dtype), repr_string(&expected_dtype));
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn minimum_fill_value_supported_dtypes_do_not_delegate_to_numpy_ma() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let minimum_fill_value_fn = module.getattr("minimum_fill_value")?;
+            let numpy = py.import("numpy")?;
+            let ma = numpy.getattr("ma")?;
+            let original = ma.getattr("minimum_fill_value")?;
+            let bomb = py.eval(
+                pyo3::ffi::c_str!(
+                    "lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError('should not delegate'))"
+                ),
+                None,
+                None,
+            )?;
+
+            ma.setattr("minimum_fill_value", bomb)?;
+            let result = (|| -> PyResult<()> {
+                let int_input = numeric_array(py, vec![1_i8, 2, 3], "int8");
+                let actual_int = minimum_fill_value_fn.call1((int_input,))?;
+                assert_eq!(repr_string(&actual_int), "127");
+
+                let dtype_input = numpy.getattr("dtype")?.call1(("int32",))?;
+                let actual_dtype = minimum_fill_value_fn.call1((dtype_input,))?;
+                assert_eq!(repr_string(&actual_dtype), "2147483647");
+                Ok(())
+            })();
+            ma.setattr("minimum_fill_value", original)?;
+            result
         });
     }
 
