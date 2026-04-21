@@ -3302,6 +3302,36 @@ fn concatenate(
     Ok(concatenate_fn.call(args, Some(&call_kwargs))?.unbind())
 }
 
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn stack(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // Delegate to NumPy so sequence handling, default axis insertion,
+    // explicit out buffers, dtype/casting interactions, and shape
+    // mismatch errors all match exactly.
+    let numpy = py.import("numpy")?;
+    let stack_fn = numpy.getattr("stack")?;
+    if args.is_empty() || args.len() > 2 {
+        return Ok(stack_fn.call(args, kwargs)?.unbind());
+    }
+
+    let call_kwargs = PyDict::new(py);
+    if let Some(kwargs) = kwargs {
+        for (key, value) in kwargs.iter() {
+            call_kwargs.set_item(key, value)?;
+        }
+    }
+
+    if !call_kwargs.contains("axis")? && args.len() == 1 {
+        call_kwargs.set_item("axis", 0_i64)?;
+    }
+
+    Ok(stack_fn.call(args, Some(&call_kwargs))?.unbind())
+}
+
 #[allow(dead_code)]
 fn validate_trim_zeros_mode(trim: &str) -> PyResult<()> {
     if trim.is_empty() || trim.chars().any(|ch| ch != 'f' && ch != 'b') {
@@ -4394,6 +4424,14 @@ fn vstack(
         );
     }
     stack_helper_default(py, tup, StackHelperKind::Vertical)
+}
+
+#[pyfunction]
+fn row_stack(py: Python<'_>, tup: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Delegate to NumPy so 1-D row promotion, 2-D preservation, object
+    // handling, and incompatible-width validation stay exact.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("row_stack")?.call1((tup.bind(py),))?.unbind())
 }
 
 #[pyfunction]
@@ -7915,6 +7953,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(clip, m)?)?;
     m.add_function(wrap_pyfunction!(repeat, m)?)?;
     m.add_function(wrap_pyfunction!(concatenate, m)?)?;
+    m.add_function(wrap_pyfunction!(stack, m)?)?;
+    m.add_function(wrap_pyfunction!(row_stack, m)?)?;
     m.add_function(wrap_pyfunction!(structured_to_unstructured, m)?)?;
     m.add_function(wrap_pyfunction!(trim_zeros, m)?)?;
     m.add_function(wrap_pyfunction!(masked_invalid, m)?)?;
@@ -8397,6 +8437,8 @@ mod tests {
             assert!(module.getattr("clip").is_ok());
             assert!(module.getattr("repeat").is_ok());
             assert!(module.getattr("concatenate").is_ok());
+            assert!(module.getattr("stack").is_ok());
+            assert!(module.getattr("row_stack").is_ok());
             assert!(module.getattr("structured_to_unstructured").is_ok());
             assert!(module.getattr("trim_zeros").is_ok());
             assert!(module.getattr("masked_invalid").is_ok());
@@ -13438,6 +13480,184 @@ mod tests {
                     }),
                 )
                 .unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn stack_matches_numpy_across_default_negative_axis_out_dtype_casting_and_errors() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let stack_fn = module.getattr("stack")?;
+            let numpy = py.import("numpy")?;
+            let numpy_stack = numpy.getattr("stack")?;
+
+            let first = numeric_array(py, vec![1_i64, 2], "int64");
+            let second = numeric_array(py, vec![3_i64, 4], "int64");
+            let arrays_1d = PyList::new(py, [first.clone(), second.clone()])?;
+
+            // Default axis=0 insertion.
+            assert_array_matches_numpy(
+                &stack_fn.call1((arrays_1d.clone(),))?,
+                &numpy_stack.call1((arrays_1d.clone(),))?,
+            )?;
+
+            // Negative axis insertion.
+            let axis_neg_kwargs = PyDict::new(py);
+            axis_neg_kwargs.set_item("axis", -1_i64)?;
+            assert_array_matches_numpy(
+                &stack_fn.call((arrays_1d.clone(),), Some(&axis_neg_kwargs))?,
+                &numpy_stack.call((arrays_1d.clone(),), Some(&axis_neg_kwargs))?,
+            )?;
+
+            // 2-D inputs stacked along an inner axis.
+            let top = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2, 3], vec![4_i64, 5, 6]],))?;
+            let bottom = numpy
+                .getattr("array")?
+                .call1((vec![vec![7_i64, 8, 9], vec![10_i64, 11, 12]],))?;
+            let arrays_2d = PyList::new(py, [top.clone(), bottom.clone()])?;
+            let axis_inner_kwargs = PyDict::new(py);
+            axis_inner_kwargs.set_item("axis", 1_i64)?;
+            assert_array_matches_numpy(
+                &stack_fn.call((arrays_2d.clone(),), Some(&axis_inner_kwargs))?,
+                &numpy_stack.call((arrays_2d.clone(),), Some(&axis_inner_kwargs))?,
+            )?;
+
+            // Explicit out buffer parity.
+            let out_actual = numpy.getattr("empty")?.call1(((2_usize, 2, 3),))?;
+            let out_expected = numpy.getattr("empty")?.call1(((2_usize, 2, 3),))?;
+            let out_result_actual = stack_fn.call(
+                (arrays_2d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 0_i64)?;
+                    kw.set_item("out", out_actual.clone())?;
+                    kw
+                }),
+            )?;
+            let out_result_expected = numpy_stack.call(
+                (arrays_2d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 0_i64)?;
+                    kw.set_item("out", out_expected.clone())?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&out_result_actual, &out_result_expected)?;
+            assert_array_matches_numpy(&out_actual, &out_expected)?;
+
+            // dtype/casting keyword behavior.
+            let float_first = numpy.getattr("array")?.call1((vec![1.25_f64, 2.75_f64],))?;
+            let cast_arrays = PyList::new(py, [float_first.clone(), second.clone()])?;
+            let cast_actual = stack_fn.call(
+                (cast_arrays.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 0_i64)?;
+                    kw.set_item("dtype", numpy.getattr("int64")?)?;
+                    kw.set_item("casting", "unsafe")?;
+                    kw
+                }),
+            )?;
+            let cast_expected = numpy_stack.call(
+                (cast_arrays.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 0_i64)?;
+                    kw.set_item("dtype", numpy.getattr("int64")?)?;
+                    kw.set_item("casting", "unsafe")?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&cast_actual, &cast_expected)?;
+            assert_eq!(
+                cast_actual.getattr("dtype")?.str()?.extract::<String>()?,
+                cast_expected.getattr("dtype")?.str()?.extract::<String>()?
+            );
+
+            // Mismatched-shape error parity.
+            let bad = numpy.getattr("array")?.call1((vec![1_i64, 2, 3],))?;
+            let bad_arrays = PyList::new(py, [first.clone(), bad.clone()])?;
+            let actual_err = stack_fn.call1((bad_arrays.clone(),)).unwrap_err();
+            let expected_err = numpy_stack.call1((bad_arrays.clone(),)).unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn row_stack_matches_numpy_across_rank_promotion_object_and_width_errors() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let row_stack_fn = module.getattr("row_stack")?;
+            let numpy = py.import("numpy")?;
+            let numpy_row_stack = numpy.getattr("row_stack")?;
+
+            // 1-D inputs are promoted to rows.
+            let first = numeric_array(py, vec![1_i64, 2, 3], "int64");
+            let second = numeric_array(py, vec![4_i64, 5, 6], "int64");
+            let rows_1d = PyTuple::new(py, [first.clone(), second.clone()])?;
+            assert_array_matches_numpy(
+                &row_stack_fn.call1((rows_1d.clone(),))?,
+                &numpy_row_stack.call1((rows_1d.clone(),))?,
+            )?;
+
+            // 2-D inputs are preserved and stacked along axis 0.
+            let top = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2, 3], vec![4_i64, 5, 6]],))?;
+            let bottom = numpy
+                .getattr("array")?
+                .call1((vec![vec![7_i64, 8, 9], vec![10_i64, 11, 12]],))?;
+            let rows_2d = PyTuple::new(py, [top.clone(), bottom.clone()])?;
+            let actual_2d = row_stack_fn.call1((rows_2d.clone(),))?;
+            let expected_2d = numpy_row_stack.call1((rows_2d.clone(),))?;
+            assert_array_matches_numpy(&actual_2d, &expected_2d)?;
+            assert_eq!(
+                actual_2d.getattr("shape")?.extract::<Vec<usize>>()?,
+                vec![4, 3]
+            );
+
+            // Mixed 1-D and 2-D inputs preserve rectangular output parity.
+            let mixed_rows = PyTuple::new(py, [first.clone(), top.clone()])?;
+            let actual_mixed = row_stack_fn.call1((mixed_rows.clone(),))?;
+            let expected_mixed = numpy_row_stack.call1((mixed_rows.clone(),))?;
+            assert_array_matches_numpy(&actual_mixed, &expected_mixed)?;
+            assert_eq!(
+                actual_mixed.getattr("shape")?.extract::<Vec<usize>>()?,
+                vec![3, 3]
+            );
+
+            // Object dtype behavior matches NumPy.
+            let object_left = object_array(py, vec!["north", "south"]);
+            let object_right = object_array(py, vec!["east", "west"]);
+            let object_rows = PyTuple::new(py, [object_left.clone(), object_right.clone()])?;
+            assert_array_matches_numpy(
+                &row_stack_fn.call1((object_rows.clone(),))?,
+                &numpy_row_stack.call1((object_rows.clone(),))?,
+            )?;
+
+            // Incompatible widths surface NumPy's exact error type/message.
+            let bad_row = numeric_array(py, vec![7_i64, 8], "int64");
+            let bad_rows = PyTuple::new(py, [first.clone(), bad_row.clone()])?;
+            let actual_err = row_stack_fn.call1((bad_rows.clone(),)).unwrap_err();
+            let expected_err = numpy_row_stack.call1((bad_rows.clone(),)).unwrap_err();
             assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
 
             Ok(())
