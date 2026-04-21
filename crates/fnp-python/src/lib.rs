@@ -5059,6 +5059,63 @@ fn chebroots(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (c, m=1, scl=1.0, axis=0))]
+fn chebder(
+    py: Python<'_>,
+    c: Py<PyAny>,
+    m: i64,
+    scl: f64,
+    axis: i64,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to numpy.polynomial.chebyshev.chebder. Takes the m-th
+    // derivative of a Chebyshev series along `axis`, multiplying by
+    // `scl` at each iteration (use for a linear change-of-variable).
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("scl", scl)?;
+    kwargs.set_item("axis", axis)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("chebyshev")?
+        .getattr("chebder")?
+        .call((c.bind(py), m), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c, m=1, k=None, lbnd=0.0, scl=1.0, axis=0))]
+fn chebint(
+    py: Python<'_>,
+    c: Py<PyAny>,
+    m: i64,
+    k: Option<Py<PyAny>>,
+    lbnd: f64,
+    scl: f64,
+    axis: i64,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to numpy.polynomial.chebyshev.chebint. Integrates a
+    // Chebyshev series m times along `axis`. `k` is the list of
+    // integration constants (None → all zeros, broadcast from scalar
+    // or length-1 when m>1). `lbnd` is the lower integration bound
+    // used to pin each antiderivative's constant; `scl` rescales each
+    // integration.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(k_val) = k {
+        kwargs.set_item("k", k_val.bind(py))?;
+    }
+    kwargs.set_item("lbnd", lbnd)?;
+    kwargs.set_item("scl", scl)?;
+    kwargs.set_item("axis", axis)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("chebyshev")?
+        .getattr("chebint")?
+        .call((c.bind(py), m), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x, window_shape, axis=None, *, subok=false, writeable=false))]
 fn sliding_window_view(
     py: Python<'_>,
@@ -6472,6 +6529,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chebmul, m)?)?;
     m.add_function(wrap_pyfunction!(chebval, m)?)?;
     m.add_function(wrap_pyfunction!(chebroots, m)?)?;
+    m.add_function(wrap_pyfunction!(chebder, m)?)?;
+    m.add_function(wrap_pyfunction!(chebint, m)?)?;
     m.add_function(wrap_pyfunction!(tile, m)?)?;
     m.add_function(wrap_pyfunction!(true_divide, m)?)?;
     m.add_function(wrap_pyfunction!(allclose, m)?)?;
@@ -23924,6 +23983,117 @@ mod tests {
                 let theirs_r = cr_ref.call1((coeffs.clone(),))?;
                 assert_array_matches_numpy(&ours_r, &theirs_r)?;
             }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn chebder_chebint_match_numpy() {
+        // Pin chebder / chebint parity against
+        // numpy.polynomial.chebyshev for the documented kwarg surface:
+        // chebder is exercised at m=0/1/2 and with scl != 1; chebint is
+        // exercised at m=1/2, with k absent / scalar-broadcast /
+        // matching-length, with non-zero lbnd, with scl != 1, and with
+        // every kwarg specified simultaneously. Round-trip
+        // chebder(chebint(c)) is also compared to the pure-numpy round
+        // trip to make sure the kwarg plumbing survives both directions.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let ncheb = numpy.getattr("polynomial")?.getattr("chebyshev")?;
+            let our_der = module.getattr("chebder")?;
+            let our_int = module.getattr("chebint")?;
+            let np_der = ncheb.getattr("chebder")?;
+            let np_int = ncheb.getattr("chebint")?;
+
+            let base = vec![1.0_f64, 2.0, 3.0, 4.0];
+
+            // chebder default, m=2, and with scl=2.
+            for m in 0_i64..=2 {
+                let kw = PyDict::new(py);
+                kw.set_item("m", m)?;
+                assert_array_matches_numpy(
+                    &our_der.call((base.clone(),), Some(&kw))?,
+                    &np_der.call((base.clone(),), Some(&kw))?,
+                )?;
+            }
+            let kw_scl = PyDict::new(py);
+            kw_scl.set_item("scl", 2.0_f64)?;
+            assert_array_matches_numpy(
+                &our_der.call((base.clone(),), Some(&kw_scl))?,
+                &np_der.call((base.clone(),), Some(&kw_scl))?,
+            )?;
+
+            // chebint default (m=1, k=None).
+            assert_array_matches_numpy(
+                &our_int.call1((base.clone(),))?,
+                &np_int.call1((base.clone(),))?,
+            )?;
+
+            // chebint m=2 with default k.
+            let kw_m2 = PyDict::new(py);
+            kw_m2.set_item("m", 2_i64)?;
+            assert_array_matches_numpy(
+                &our_int.call((base.clone(),), Some(&kw_m2))?,
+                &np_int.call((base.clone(),), Some(&kw_m2))?,
+            )?;
+
+            // chebint with k scalar-broadcast via length-1 list.
+            let kw_k = PyDict::new(py);
+            kw_k.set_item("k", PyList::new(py, [5.0_f64])?)?;
+            assert_array_matches_numpy(
+                &our_int.call((base.clone(),), Some(&kw_k))?,
+                &np_int.call((base.clone(),), Some(&kw_k))?,
+            )?;
+
+            // chebint m=2 with matching-length k.
+            let kw_k_match = PyDict::new(py);
+            kw_k_match.set_item("m", 2_i64)?;
+            kw_k_match.set_item("k", PyList::new(py, [5.0_f64, 10.0])?)?;
+            assert_array_matches_numpy(
+                &our_int.call((base.clone(),), Some(&kw_k_match))?,
+                &np_int.call((base.clone(),), Some(&kw_k_match))?,
+            )?;
+
+            // chebint with non-zero lbnd.
+            let kw_lbnd = PyDict::new(py);
+            kw_lbnd.set_item("lbnd", 1.0_f64)?;
+            assert_array_matches_numpy(
+                &our_int.call((base.clone(),), Some(&kw_lbnd))?,
+                &np_int.call((base.clone(),), Some(&kw_lbnd))?,
+            )?;
+
+            // chebint with scl != 1.
+            let kw_int_scl = PyDict::new(py);
+            kw_int_scl.set_item("scl", 2.0_f64)?;
+            assert_array_matches_numpy(
+                &our_int.call((base.clone(),), Some(&kw_int_scl))?,
+                &np_int.call((base.clone(),), Some(&kw_int_scl))?,
+            )?;
+
+            // chebint with every kwarg specified.
+            let kw_all = PyDict::new(py);
+            kw_all.set_item("m", 2_i64)?;
+            kw_all.set_item("k", PyList::new(py, [3.0_f64, 7.0])?)?;
+            kw_all.set_item("lbnd", 1.0_f64)?;
+            kw_all.set_item("scl", 2.0_f64)?;
+            assert_array_matches_numpy(
+                &our_int.call((base.clone(),), Some(&kw_all))?,
+                &np_int.call((base.clone(),), Some(&kw_all))?,
+            )?;
+
+            // Round trip: chebder(chebint(c)) should recover c (modulo
+            // floating noise) both through ours and numpy, and the two
+            // paths should agree with each other.
+            let our_roundtrip = our_der.call1((our_int.call1((base.clone(),))?,))?;
+            let np_roundtrip = np_der.call1((np_int.call1((base.clone(),))?,))?;
+            assert_array_matches_numpy(&our_roundtrip, &np_roundtrip)?;
 
             Ok(())
         });
