@@ -3295,6 +3295,29 @@ fn append(
 }
 
 #[pyfunction]
+#[pyo3(signature = (arr, obj, values, axis=None))]
+fn insert(
+    py: Python<'_>,
+    arr: Py<PyAny>,
+    obj: Py<PyAny>,
+    values: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Delegate to NumPy so scalar and vector insertion positions,
+    // flattened defaults, axis-aware broadcasting, and index errors
+    // all stay exact.
+    let numpy = py.import("numpy")?;
+    let insert_fn = numpy.getattr("insert")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis) = axis {
+        kwargs.set_item("axis", axis.bind(py))?;
+    }
+    Ok(insert_fn
+        .call((arr.bind(py), obj.bind(py), values.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn concatenate(
     py: Python<'_>,
@@ -7975,6 +7998,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(clip, m)?)?;
     m.add_function(wrap_pyfunction!(repeat, m)?)?;
     m.add_function(wrap_pyfunction!(append, m)?)?;
+    m.add_function(wrap_pyfunction!(insert, m)?)?;
     m.add_function(wrap_pyfunction!(concatenate, m)?)?;
     m.add_function(wrap_pyfunction!(stack, m)?)?;
     m.add_function(wrap_pyfunction!(row_stack, m)?)?;
@@ -8460,6 +8484,7 @@ mod tests {
             assert!(module.getattr("clip").is_ok());
             assert!(module.getattr("repeat").is_ok());
             assert!(module.getattr("append").is_ok());
+            assert!(module.getattr("insert").is_ok());
             assert!(module.getattr("concatenate").is_ok());
             assert!(module.getattr("stack").is_ok());
             assert!(module.getattr("row_stack").is_ok());
@@ -13758,6 +13783,74 @@ mod tests {
                 .unwrap_err();
             let expected_err = numpy_append
                 .call1((two_d.clone(), bad_axis_values.clone(), 0_i64))
+                .unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn insert_matches_numpy_across_indices_axes_broadcast_and_errors() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let insert_fn = module.getattr("insert")?;
+            let numpy = py.import("numpy")?;
+            let numpy_insert = numpy.getattr("insert")?;
+
+            let one_d = numeric_array(py, vec![1_i64, 2, 3], "int64");
+
+            // Scalar insertion index on 1-D input.
+            assert_array_matches_numpy(
+                &insert_fn.call1((one_d.clone(), 1_i64, -5_i64))?,
+                &numpy_insert.call1((one_d.clone(), 1_i64, -5_i64))?,
+            )?;
+
+            // Multiple insertion indices on 1-D input.
+            let multi_indices = PyList::new(py, [1_i64, 3_i64])?;
+            let multi_values = numeric_array(py, vec![20_i64, 30], "int64");
+            assert_array_matches_numpy(
+                &insert_fn.call1((one_d.clone(), multi_indices.clone(), multi_values.clone()))?,
+                &numpy_insert.call1((
+                    one_d.clone(),
+                    multi_indices.clone(),
+                    multi_values.clone(),
+                ))?,
+            )?;
+
+            let two_d = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2], vec![3_i64, 4]],))?;
+
+            // Default axis=None flattens before insertion.
+            let flat_values = numeric_array(py, vec![50_i64, 60], "int64");
+            assert_array_matches_numpy(
+                &insert_fn.call1((two_d.clone(), 2_i64, flat_values.clone()))?,
+                &numpy_insert.call1((two_d.clone(), 2_i64, flat_values.clone()))?,
+            )?;
+
+            // Axis=0 inserts a row into the 2-D input.
+            let row_values = numeric_array(py, vec![5_i64, 6], "int64");
+            assert_array_matches_numpy(
+                &insert_fn.call1((two_d.clone(), 1_i64, row_values.clone(), 0_i64))?,
+                &numpy_insert.call1((two_d.clone(), 1_i64, row_values.clone(), 0_i64))?,
+            )?;
+
+            // Axis=1 broadcasts a scalar insertion value across rows.
+            assert_array_matches_numpy(
+                &insert_fn.call1((two_d.clone(), 1_i64, 99_i64, 1_i64))?,
+                &numpy_insert.call1((two_d.clone(), 1_i64, 99_i64, 1_i64))?,
+            )?;
+
+            // Out-of-range insertion index surfaces NumPy's exact error.
+            let actual_err = insert_fn.call1((one_d.clone(), 10_i64, 7_i64)).unwrap_err();
+            let expected_err = numpy_insert
+                .call1((one_d.clone(), 10_i64, 7_i64))
                 .unwrap_err();
             assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
 
