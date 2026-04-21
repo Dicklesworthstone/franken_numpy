@@ -4423,6 +4423,29 @@ fn getmaskarray(py: Python<'_>, arr: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (m, copy=false, shrink=true, dtype=None))]
+fn make_mask(
+    py: Python<'_>,
+    m: Py<PyAny>,
+    copy: bool,
+    shrink: bool,
+    dtype: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.ma.make_mask so nomask handling, integer-to-bool
+    // casting, copy/shrink behavior, and optional structured mask dtype
+    // construction all match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let make_mask_fn = numpy.getattr("ma")?.getattr("make_mask")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("copy", copy)?;
+    kwargs.set_item("shrink", shrink)?;
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    Ok(make_mask_fn.call((m.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x,))]
 fn compressed(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.ma.compressed so masked-element filtering,
@@ -4560,6 +4583,39 @@ fn fftn(
         kwargs.set_item("out", out_val.bind(py))?;
     }
     Ok(fftn_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, s=None, axes=None, norm=None, out=None))]
+fn ifftn(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    s: Option<Py<PyAny>>,
+    axes: Option<Py<PyAny>>,
+    norm: Option<String>,
+    out: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.fft.ifftn so the N-D inverse FFT matches numpy
+    // exactly across optional shape tuple `s`, arbitrary axes selection
+    // (default: all axes), norm conventions
+    // ('backward'/'ortho'/'forward'), and optional `out=` destination.
+    // Output is complex.
+    let numpy = py.import("numpy")?;
+    let ifftn_fn = numpy.getattr("fft")?.getattr("ifftn")?;
+    let kwargs = PyDict::new(py);
+    if let Some(s_val) = s {
+        kwargs.set_item("s", s_val.bind(py))?;
+    }
+    if let Some(axes_val) = axes {
+        kwargs.set_item("axes", axes_val.bind(py))?;
+    }
+    if let Some(norm_val) = norm {
+        kwargs.set_item("norm", norm_val)?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    Ok(ifftn_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
 
 #[pyfunction]
@@ -5346,11 +5402,13 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(is_masked, m)?)?;
     m.add_function(wrap_pyfunction!(mask_or, m)?)?;
     m.add_function(wrap_pyfunction!(getmaskarray, m)?)?;
+    m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(compressed, m)?)?;
     m.add_function(wrap_pyfunction!(ifft, m)?)?;
     m.add_function(wrap_pyfunction!(fft2, m)?)?;
     m.add_function(wrap_pyfunction!(ifft2, m)?)?;
     m.add_function(wrap_pyfunction!(fftn, m)?)?;
+    m.add_function(wrap_pyfunction!(ifftn, m)?)?;
     m.add_function(wrap_pyfunction!(eigh, m)?)?;
     m.add_function(wrap_pyfunction!(tensordot, m)?)?;
     m.add_function(wrap_pyfunction!(cross, m)?)?;
@@ -5612,11 +5670,13 @@ mod tests {
             assert!(module.getattr("is_masked").is_ok());
             assert!(module.getattr("mask_or").is_ok());
             assert!(module.getattr("getmaskarray").is_ok());
+            assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("compressed").is_ok());
             assert!(module.getattr("ifft").is_ok());
             assert!(module.getattr("fft2").is_ok());
             assert!(module.getattr("ifft2").is_ok());
             assert!(module.getattr("fftn").is_ok());
+            assert!(module.getattr("ifftn").is_ok());
             assert!(module.getattr("eigh").is_ok());
             assert!(module.getattr("tensordot").is_ok());
             assert!(module.getattr("cross").is_ok());
@@ -18134,6 +18194,187 @@ mod tests {
     }
 
     #[test]
+    fn make_mask_matches_numpy_nomask_cast_copy_shrink_and_structured_dtype() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let make_mask_fn = module.getattr("make_mask")?;
+            let numpy = py.import("numpy")?;
+            let numpy_make_mask = numpy.getattr("ma")?.getattr("make_mask")?;
+            let nomask = numpy.getattr("ma")?.getattr("nomask")?;
+            let shares_memory = numpy.getattr("shares_memory")?;
+
+            // nomask input preserves numpy.ma.nomask identity.
+            let ours_nomask = make_mask_fn.call1((nomask.clone(),))?;
+            let theirs_nomask = numpy_make_mask.call1((nomask.clone(),))?;
+            assert!(ours_nomask.is(&nomask));
+            assert!(theirs_nomask.is(&nomask));
+
+            // Python bool list produces a concrete bool ndarray.
+            let bool_list = PyList::new(py, [true, false, true])?;
+            assert_array_matches_numpy(
+                &make_mask_fn.call1((bool_list.clone(),))?,
+                &numpy_make_mask.call1((bool_list.clone(),))?,
+            )?;
+
+            // Integer array is cast elementwise to bool.
+            let int_mask = numpy
+                .getattr("array")?
+                .call1((vec![0_i64, 2_i64, -1_i64],))?;
+            assert_array_matches_numpy(
+                &make_mask_fn.call1((int_mask.clone(),))?,
+                &numpy_make_mask.call1((int_mask.clone(),))?,
+            )?;
+
+            // Existing bool ndarray with copy=False should be returned as-is.
+            let bool_mask = numpy.getattr("array")?.call(
+                (vec![true, false, true],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("bool_")?)?;
+                    kw
+                }),
+            )?;
+            let ours_view = make_mask_fn.call(
+                (bool_mask.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("copy", false)?;
+                    kw
+                }),
+            )?;
+            let theirs_view = numpy_make_mask.call(
+                (bool_mask.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("copy", false)?;
+                    kw
+                }),
+            )?;
+            assert!(ours_view.is(&bool_mask));
+            assert!(theirs_view.is(&bool_mask));
+
+            // copy=True should allocate fresh storage instead of aliasing.
+            let bool_mask_copy = numpy.getattr("array")?.call(
+                (vec![true, false, true],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("bool_")?)?;
+                    kw
+                }),
+            )?;
+            let ours_copy = make_mask_fn.call(
+                (bool_mask_copy.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("copy", true)?;
+                    kw
+                }),
+            )?;
+            let theirs_copy = numpy_make_mask.call(
+                (bool_mask_copy.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("copy", true)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_copy, &theirs_copy)?;
+            assert!(!ours_copy.is(&bool_mask_copy));
+            assert!(!theirs_copy.is(&bool_mask_copy));
+            assert!(
+                !shares_memory
+                    .call1((&ours_copy, &bool_mask_copy))?
+                    .extract::<bool>()?
+            );
+            assert!(
+                !shares_memory
+                    .call1((&theirs_copy, &bool_mask_copy))?
+                    .extract::<bool>()?
+            );
+
+            // shrink=True collapses all-False masks to nomask; shrink=False keeps array.
+            let all_false = PyList::new(py, [false, false])?;
+            let ours_shrunk = make_mask_fn.call(
+                (all_false.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("shrink", true)?;
+                    kw
+                }),
+            )?;
+            let theirs_shrunk = numpy_make_mask.call(
+                (all_false.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("shrink", true)?;
+                    kw
+                }),
+            )?;
+            assert!(ours_shrunk.is(&nomask));
+            assert!(theirs_shrunk.is(&nomask));
+
+            let ours_kept = make_mask_fn.call(
+                (all_false.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("shrink", false)?;
+                    kw
+                }),
+            )?;
+            let theirs_kept = numpy_make_mask.call(
+                (all_false.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("shrink", false)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_kept, &theirs_kept)?;
+            assert!(!ours_kept.is(&nomask));
+
+            // Structured dtype construction should preserve field layout and bool conversion.
+            let structured_src_dtype = numpy
+                .getattr("dtype")?
+                .call1((vec![("x", "i4"), ("y", "i4")],))?;
+            let structured_mask_dtype = numpy
+                .getattr("dtype")?
+                .call1((vec![("x", "?"), ("y", "?")],))?;
+            let structured_src = numpy.getattr("array")?.call(
+                (vec![(1_i64, 0_i64), (0_i64, 3_i64)],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", structured_src_dtype.clone())?;
+                    kw
+                }),
+            )?;
+            let ours_structured = make_mask_fn.call(
+                (structured_src.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", structured_mask_dtype.clone())?;
+                    kw
+                }),
+            )?;
+            let theirs_structured = numpy_make_mask.call(
+                (structured_src.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", structured_mask_dtype.clone())?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_structured, &theirs_structured)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn ifft2_matches_numpy_across_shape_axes_and_norm() {
         with_python(|py| {
             if !numpy_available(py) {
@@ -18709,6 +18950,138 @@ mod tests {
             let round_trip = ifftn_fn.call1((fftn_fn.call1((three_d.clone(),))?,))?;
             let ok_rt: bool = allclose.call1((&round_trip, &three_d))?.extract()?;
             assert!(ok_rt, "ifftn(fftn(x)) must round-trip to x");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ifftn_matches_numpy_across_nd_shape_axes_and_norm() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let ifftn_fn = module.getattr("ifftn")?;
+            let numpy = py.import("numpy")?;
+            let numpy_ifftn = numpy.getattr("fft")?.getattr("ifftn")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // 3-D complex spectrum (fftn of a real input): invert all axes.
+            let real_in = numpy.getattr("array")?.call(
+                (vec![
+                    vec![vec![1.0_f64, 2.0, 3.0], vec![4.0, 5.0, 6.0]],
+                    vec![vec![7.0, 8.0, 9.0], vec![10.0, 11.0, 12.0]],
+                    vec![vec![13.0, 14.0, 15.0], vec![16.0, 17.0, 18.0]],
+                ],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("float64")?)?;
+                    kw
+                }),
+            )?;
+            let fftn_fn = numpy.getattr("fft")?.getattr("fftn")?;
+            let spectrum = fftn_fn.call1((real_in.clone(),))?;
+
+            // Default: s=None, axes=None → all axes.
+            let ours = ifftn_fn.call1((spectrum.clone(),))?;
+            let theirs = numpy_ifftn.call1((spectrum.clone(),))?;
+            let ok: bool = allclose.call1((&ours, &theirs))?.extract()?;
+            assert!(ok, "ifftn default mismatch");
+
+            // Explicit s=(4,4,4) zero-pads each axis.
+            let s_tuple = PyTuple::new(py, [4_usize, 4, 4])?;
+            let ours_s = ifftn_fn.call(
+                (spectrum.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("s", &s_tuple)?;
+                    kw
+                }),
+            )?;
+            let theirs_s = numpy_ifftn.call(
+                (spectrum.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("s", &s_tuple)?;
+                    kw
+                }),
+            )?;
+            let ok_s: bool = allclose.call1((&ours_s, &theirs_s))?.extract()?;
+            assert!(ok_s, "ifftn s=(4,4,4) mismatch");
+
+            // Subset axes=(-2, -1) like ifft2 over last two axes.
+            let axes_subset = PyTuple::new(py, [-2_i64, -1])?;
+            let ours_axes = ifftn_fn.call(
+                (spectrum.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axes", &axes_subset)?;
+                    kw
+                }),
+            )?;
+            let theirs_axes = numpy_ifftn.call(
+                (spectrum.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axes", &axes_subset)?;
+                    kw
+                }),
+            )?;
+            let ok_axes: bool = allclose.call1((&ours_axes, &theirs_axes))?.extract()?;
+            assert!(ok_axes, "ifftn axes=(-2,-1) mismatch");
+
+            // norm='ortho' and norm='forward'.
+            for norm_tag in ["ortho", "forward"] {
+                let ours_n = ifftn_fn.call(
+                    (spectrum.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("norm", norm_tag)?;
+                        kw
+                    }),
+                )?;
+                let theirs_n = numpy_ifftn.call(
+                    (spectrum.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("norm", norm_tag)?;
+                        kw
+                    }),
+                )?;
+                let ok_n: bool = allclose.call1((&ours_n, &theirs_n))?.extract()?;
+                assert!(ok_n, "ifftn norm={} mismatch", norm_tag);
+            }
+
+            // 1-D degradation: ifftn on a 1-D complex array matches ifft.
+            let one_d = fftn_fn.call1((numpy.getattr("array")?.call(
+                (vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("float64")?)?;
+                    kw
+                }),
+            )?,))?;
+            let ours_1d = ifftn_fn.call1((one_d.clone(),))?;
+            let theirs_1d = numpy_ifftn.call1((one_d.clone(),))?;
+            let ok_1d: bool = allclose.call1((&ours_1d, &theirs_1d))?.extract()?;
+            assert!(ok_1d, "ifftn 1-D mismatch");
+
+            // Round-trip identity: fftn(ifftn(spectrum)) ≈ spectrum.
+            let round_trip = fftn_fn.call1((ifftn_fn.call1((spectrum.clone(),))?,))?;
+            let ok_rt: bool = allclose.call1((&round_trip, &spectrum))?.extract()?;
+            assert!(ok_rt, "fftn(ifftn(x)) must round-trip to x");
+
+            // Full end-to-end: real -> fftn -> ifftn should recover real_in (real part).
+            let recovered = ifftn_fn.call1((fftn_fn.call1((real_in.clone(),))?,))?;
+            let real_out = recovered.getattr("real")?;
+            let ok_e2e: bool = allclose.call1((&real_out, &real_in))?.extract()?;
+            assert!(
+                ok_e2e,
+                "real -> fftn -> ifftn real-part round-trip mismatch"
+            );
 
             Ok(())
         });
