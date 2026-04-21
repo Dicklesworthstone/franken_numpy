@@ -4406,6 +4406,16 @@ fn histogram_bin_edges(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, order="C"))]
+fn ravel(py: Python<'_>, a: Py<PyAny>, order: &str) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.ravel so order-sensitive flattening, scalar
+    // behavior, object dtype handling, and result shape/dtype match
+    // numpy exactly.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("ravel")?.call1((a.bind(py), order))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, axes=None))]
 fn transpose(py: Python<'_>, a: Py<PyAny>, axes: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.transpose so default axis reversal, explicit
@@ -8093,6 +8103,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(diff, m)?)?;
     m.add_function(wrap_pyfunction!(roll, m)?)?;
     m.add_function(wrap_pyfunction!(histogram_bin_edges, m)?)?;
+    m.add_function(wrap_pyfunction!(ravel, m)?)?;
     m.add_function(wrap_pyfunction!(transpose, m)?)?;
     m.add_function(wrap_pyfunction!(swapaxes, m)?)?;
     m.add_function(wrap_pyfunction!(moveaxis, m)?)?;
@@ -8507,6 +8518,7 @@ mod tests {
             assert!(module.getattr("diff").is_ok());
             assert!(module.getattr("roll").is_ok());
             assert!(module.getattr("histogram_bin_edges").is_ok());
+            assert!(module.getattr("ravel").is_ok());
             assert!(module.getattr("transpose").is_ok());
             assert!(module.getattr("swapaxes").is_ok());
             assert!(module.getattr("moveaxis").is_ok());
@@ -27484,6 +27496,82 @@ mod tests {
                 }),
             )?;
             assert_index_tuple_matches_numpy(&actual_empty, &expected_empty)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ravel_matches_numpy_across_order_ndim_scalar_and_object() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let ravel_fn = module.getattr("ravel")?;
+            let numpy = py.import("numpy")?;
+            let numpy_ravel = numpy.getattr("ravel")?;
+
+            let two_d = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2], vec![3_i64, 4]],))?;
+
+            // Default C-order flattening on 2-D input.
+            assert_array_matches_numpy(
+                &ravel_fn.call1((two_d.clone(),))?,
+                &numpy_ravel.call1((two_d.clone(),))?,
+            )?;
+
+            // Fortran-order flattening traverses columns first.
+            assert_array_matches_numpy(
+                &ravel_fn.call1((two_d.clone(), "F"))?,
+                &numpy_ravel.call1((two_d.clone(), "F"))?,
+            )?;
+
+            // 3-D inputs preserve NumPy's order-sensitive flattening.
+            let three_d = numpy
+                .getattr("arange")?
+                .call1((8_i64,))?
+                .call_method1("reshape", ((2_i64, 2_i64, 2_i64),))?;
+            assert_array_matches_numpy(
+                &ravel_fn.call1((three_d.clone(), "F"))?,
+                &numpy_ravel.call1((three_d.clone(), "F"))?,
+            )?;
+
+            // Scalar/0-D input becomes a length-1 result with matching
+            // shape and dtype.
+            let scalar = numpy.getattr("array")?.call1((7_i64,))?;
+            let ours_scalar = ravel_fn.call1((scalar.clone(),))?;
+            let theirs_scalar = numpy_ravel.call1((scalar.clone(),))?;
+            assert_array_matches_numpy(&ours_scalar, &theirs_scalar)?;
+            assert_eq!(
+                ours_scalar.getattr("shape")?.str()?.to_string(),
+                theirs_scalar.getattr("shape")?.str()?.to_string(),
+                "ravel scalar shape must match numpy",
+            );
+            assert_eq!(
+                ours_scalar.getattr("dtype")?.str()?.to_string(),
+                theirs_scalar.getattr("dtype")?.str()?.to_string(),
+                "ravel scalar dtype must match numpy",
+            );
+
+            // Object arrays preserve dtype and value parity.
+            let object_arr = object_array(py, vec!["north", "south"]);
+            let ours_object = ravel_fn.call1((object_arr.clone(),))?;
+            let theirs_object = numpy_ravel.call1((object_arr.clone(),))?;
+            assert_array_matches_numpy(&ours_object, &theirs_object)?;
+            assert_eq!(
+                ours_object.getattr("shape")?.str()?.to_string(),
+                theirs_object.getattr("shape")?.str()?.to_string(),
+                "ravel object-array shape must match numpy",
+            );
+            assert_eq!(
+                ours_object.getattr("dtype")?.str()?.to_string(),
+                theirs_object.getattr("dtype")?.str()?.to_string(),
+                "ravel object-array dtype must match numpy",
+            );
 
             Ok(())
         });
