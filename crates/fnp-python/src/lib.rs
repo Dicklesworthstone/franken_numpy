@@ -4481,6 +4481,20 @@ fn allequal(
 }
 
 #[pyfunction]
+#[pyo3(signature = (p, x))]
+fn polyval(py: Python<'_>, p: Py<PyAny>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.polyval. Coefficients `p` are in decreasing
+    // powers (p[0]*x^n + ... + p[n]). `x` may be scalar or array-like;
+    // output matches numpy's dtype-promotion rules (including complex
+    // coefficients broadcasting up).
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polyval")?
+        .call1((p.bind(py), x.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (arr,))]
 fn getmaskarray(py: Python<'_>, arr: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.ma.getmaskarray. Unlike getmask, this always
@@ -5495,6 +5509,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ma_count, m)?)?;
     m.add_function(wrap_pyfunction!(median, m)?)?;
     m.add_function(wrap_pyfunction!(allequal, m)?)?;
+    m.add_function(wrap_pyfunction!(polyval, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
     m.add_function(wrap_pyfunction!(compressed, m)?)?;
@@ -5767,6 +5782,7 @@ mod tests {
             assert!(module.getattr("ma_count").is_ok());
             assert!(module.getattr("median").is_ok());
             assert!(module.getattr("allequal").is_ok());
+            assert!(module.getattr("polyval").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
             assert!(module.getattr("compressed").is_ok());
@@ -19764,6 +19780,91 @@ mod tests {
                 numpy_allequal.call1((two_a.clone(), two_b.clone()))?,
                 "2-D equal",
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn polyval_matches_numpy_across_scalar_array_and_dtype() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let polyval_fn = module.getattr("polyval")?;
+            let numpy = py.import("numpy")?;
+            let numpy_polyval = numpy.getattr("polyval")?;
+            let isclose = numpy.getattr("isclose")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Constant polynomial p=[c] at scalar x.
+            let const_p = vec![5.0_f64];
+            let ours_c = polyval_fn.call1((const_p.clone(), 3.0_f64))?;
+            let theirs_c = numpy_polyval.call1((const_p.clone(), 3.0_f64))?;
+            let ok_c: bool = isclose.call1((&ours_c, &theirs_c))?.extract()?;
+            assert!(ok_c, "polyval constant polynomial scalar-x mismatch");
+
+            // Linear polynomial p=[a,b] at scalar x: a*x + b.
+            let linear = vec![2.0_f64, 3.0];
+            let ours_l = polyval_fn.call1((linear.clone(), 4.0_f64))?;
+            let theirs_l = numpy_polyval.call1((linear.clone(), 4.0_f64))?;
+            let ok_l: bool = isclose.call1((&ours_l, &theirs_l))?.extract()?;
+            assert!(ok_l, "polyval linear scalar-x mismatch");
+
+            // Quadratic at an array of x values.
+            let quad = vec![1.0_f64, -2.0, 1.0]; // (x-1)^2
+            let xs = numpy.getattr("array")?.call1((vec![-1.0_f64, 0.0, 1.0, 2.0, 3.0],))?;
+            let ours_q = polyval_fn.call1((quad.clone(), xs.clone()))?;
+            let theirs_q = numpy_polyval.call1((quad.clone(), xs.clone()))?;
+            let ok_q: bool = allclose.call1((&ours_q, &theirs_q))?.extract()?;
+            assert!(ok_q, "polyval quadratic array-x mismatch");
+
+            // Cubic: p(x) = x^3 - 6x^2 + 11x - 6 = (x-1)(x-2)(x-3).
+            let cubic = vec![1.0_f64, -6.0, 11.0, -6.0];
+            let roots = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            let at_roots = polyval_fn.call1((cubic.clone(), roots.clone()))?;
+            let zeros = numpy.getattr("zeros")?.call1((3_usize,))?;
+            let ok_roots: bool = allclose.call1((&at_roots, &zeros))?.extract()?;
+            assert!(ok_roots, "polyval at roots should be ~0");
+
+            // Complex coefficients promote output to complex.
+            let complex_p = numpy.getattr("array")?.call(
+                (vec![1.0_f64, 0.0, 1.0],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("complex128")?)?;
+                    kw
+                }),
+            )?;
+            let complex_xs = numpy.getattr("array")?.call(
+                (vec![0.0_f64, 1.0, 2.0],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("complex128")?)?;
+                    kw
+                }),
+            )?;
+            let ours_cp = polyval_fn.call1((complex_p.clone(), complex_xs.clone()))?;
+            let theirs_cp = numpy_polyval.call1((complex_p.clone(), complex_xs.clone()))?;
+            let ok_cp: bool = allclose.call1((&ours_cp, &theirs_cp))?.extract()?;
+            assert!(ok_cp, "polyval complex coefficients mismatch");
+
+            // Integer coefficients at integer scalar x (dtype parity).
+            let int_p = vec![1_i64, 2, 3];
+            let ours_ip = polyval_fn.call1((int_p.clone(), 2_i64))?;
+            let theirs_ip = numpy_polyval.call1((int_p.clone(), 2_i64))?;
+            let ok_ip: bool = isclose.call1((&ours_ip, &theirs_ip))?.extract()?;
+            assert!(ok_ip, "polyval integer coeffs mismatch");
+
+            // Empty-coefficient edge: numpy returns 0.0.
+            let empty_p = Vec::<f64>::new();
+            let ours_e = polyval_fn.call1((empty_p.clone(), 5.0_f64))?;
+            let theirs_e = numpy_polyval.call1((empty_p.clone(), 5.0_f64))?;
+            let ok_e: bool = isclose.call1((&ours_e, &theirs_e))?.extract()?;
+            assert!(ok_e, "polyval empty coeffs mismatch");
 
             Ok(())
         });
