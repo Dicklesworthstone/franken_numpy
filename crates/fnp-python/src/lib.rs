@@ -4408,6 +4408,31 @@ fn mask_or(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, axis=None, keepdims=None))]
+fn ma_count(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    keepdims: Option<bool>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.ma.count so counting of non-masked elements
+    // matches numpy exactly across axis=None/int/tuple, keepdims, and
+    // both MaskedArray and plain ndarray inputs. `keepdims` is only
+    // forwarded when an explicit value is supplied so numpy's
+    // `_NoValue` sentinel behavior is preserved for the default path.
+    let numpy = py.import("numpy")?;
+    let count_fn = numpy.getattr("ma")?.getattr("count")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis_val) = axis {
+        kwargs.set_item("axis", axis_val.bind(py))?;
+    }
+    if let Some(keepdims_val) = keepdims {
+        kwargs.set_item("keepdims", keepdims_val)?;
+    }
+    Ok(count_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (arr,))]
 fn getmaskarray(py: Python<'_>, arr: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.ma.getmaskarray. Unlike getmask, this always
@@ -5402,6 +5427,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(is_masked, m)?)?;
     m.add_function(wrap_pyfunction!(mask_or, m)?)?;
     m.add_function(wrap_pyfunction!(getmaskarray, m)?)?;
+    m.add_function(wrap_pyfunction!(ma_count, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(compressed, m)?)?;
     m.add_function(wrap_pyfunction!(ifft, m)?)?;
@@ -5670,6 +5696,7 @@ mod tests {
             assert!(module.getattr("is_masked").is_ok());
             assert!(module.getattr("mask_or").is_ok());
             assert!(module.getattr("getmaskarray").is_ok());
+            assert!(module.getattr("ma_count").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("compressed").is_ok());
             assert!(module.getattr("ifft").is_ok());
@@ -19082,6 +19109,188 @@ mod tests {
                 ok_e2e,
                 "real -> fftn -> ifftn real-part round-trip mismatch"
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ma_count_matches_numpy_across_axis_and_keepdims() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let count_fn = module.getattr("ma_count")?;
+            let numpy = py.import("numpy")?;
+            let numpy_count = numpy.getattr("ma")?.getattr("count")?;
+
+            // 1-D MaskedArray with partial mask: axis=None default.
+            let partial = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![1.0_f64, 2.0, 3.0, 4.0, 5.0],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("mask", vec![false, true, false, true, false])?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(
+                &count_fn.call1((partial.clone(),))?,
+                &numpy_count.call1((partial.clone(),))?,
+            )?;
+
+            // 2-D MaskedArray with axis=0, axis=1, axis=None.
+            let two_d = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![
+                    vec![1.0_f64, 2.0, 3.0],
+                    vec![4.0, 5.0, 6.0],
+                    vec![7.0, 8.0, 9.0],
+                ],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item(
+                        "mask",
+                        vec![
+                            vec![false, true, false],
+                            vec![true, false, false],
+                            vec![false, false, true],
+                        ],
+                    )?;
+                    kw
+                }),
+            )?;
+            for axis in [0_i64, 1] {
+                let ours = count_fn.call(
+                    (two_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", axis)?;
+                        kw
+                    }),
+                )?;
+                let theirs = numpy_count.call(
+                    (two_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", axis)?;
+                        kw
+                    }),
+                )?;
+                assert_array_matches_numpy(&ours, &theirs)?;
+            }
+            assert_array_matches_numpy(
+                &count_fn.call1((two_d.clone(),))?,
+                &numpy_count.call1((two_d.clone(),))?,
+            )?;
+
+            // keepdims=True with axis=1 preserves a length-1 trailing axis.
+            let ours_kd = count_fn.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 1_i64)?;
+                    kw.set_item("keepdims", true)?;
+                    kw
+                }),
+            )?;
+            let theirs_kd = numpy_count.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 1_i64)?;
+                    kw.set_item("keepdims", true)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_kd, &theirs_kd)?;
+
+            // Fully-masked 1-D → count is 0.
+            let all_masked = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![10_i64, 20, 30],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("mask", true)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(
+                &count_fn.call1((all_masked.clone(),))?,
+                &numpy_count.call1((all_masked.clone(),))?,
+            )?;
+
+            // Plain ndarray → all elements counted.
+            let plain = numpy.getattr("array")?.call1((vec![vec![1_i64, 2], vec![3, 4]],))?;
+            assert_array_matches_numpy(
+                &count_fn.call1((plain.clone(),))?,
+                &numpy_count.call1((plain.clone(),))?,
+            )?;
+            assert_array_matches_numpy(
+                &count_fn.call(
+                    (plain.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", 0_i64)?;
+                        kw
+                    }),
+                )?,
+                &numpy_count.call(
+                    (plain.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", 0_i64)?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // MaskedArray with nomask: counts all elements.
+            let no_mask = numpy
+                .getattr("ma")?
+                .getattr("array")?
+                .call1((vec![1_i64, 2, 3, 4],))?;
+            assert_array_matches_numpy(
+                &count_fn.call1((no_mask.clone(),))?,
+                &numpy_count.call1((no_mask.clone(),))?,
+            )?;
+
+            // Tuple axis: axis=(0, 1) on a 3-D array.
+            let three_d = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![
+                    vec![vec![1_i64, 2], vec![3, 4]],
+                    vec![vec![5, 6], vec![7, 8]],
+                ],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item(
+                        "mask",
+                        vec![
+                            vec![vec![false, true], vec![false, false]],
+                            vec![vec![true, false], vec![false, true]],
+                        ],
+                    )?;
+                    kw
+                }),
+            )?;
+            let axis_tuple = PyTuple::new(py, [0_i64, 1])?;
+            let ours_tuple = count_fn.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", &axis_tuple)?;
+                    kw
+                }),
+            )?;
+            let theirs_tuple = numpy_count.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", &axis_tuple)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_tuple, &theirs_tuple)?;
 
             Ok(())
         });
