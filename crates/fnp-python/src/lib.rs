@@ -3295,6 +3295,16 @@ fn append(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, new_shape))]
+fn resize(py: Python<'_>, a: Py<PyAny>, new_shape: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Delegate to NumPy so truncation, repetition, scalar promotion, and
+    // dtype-preserving shape expansion all stay exact.
+    let numpy = py.import("numpy")?;
+    let resize_fn = numpy.getattr("resize")?;
+    Ok(resize_fn.call1((a.bind(py), new_shape.bind(py)))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (arr, obj, values, axis=None))]
 fn insert(
     py: Python<'_>,
@@ -8019,6 +8029,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(broadcast_arrays, m)?)?;
     m.add_function(wrap_pyfunction!(clip, m)?)?;
     m.add_function(wrap_pyfunction!(repeat, m)?)?;
+    m.add_function(wrap_pyfunction!(resize, m)?)?;
     m.add_function(wrap_pyfunction!(append, m)?)?;
     m.add_function(wrap_pyfunction!(insert, m)?)?;
     m.add_function(wrap_pyfunction!(delete, m)?)?;
@@ -8506,6 +8517,7 @@ mod tests {
             assert!(module.getattr("broadcast_arrays").is_ok());
             assert!(module.getattr("clip").is_ok());
             assert!(module.getattr("repeat").is_ok());
+            assert!(module.getattr("resize").is_ok());
             assert!(module.getattr("append").is_ok());
             assert!(module.getattr("insert").is_ok());
             assert!(module.getattr("delete").is_ok());
@@ -13732,6 +13744,73 @@ mod tests {
             let actual_err = row_stack_fn.call1((bad_rows.clone(),)).unwrap_err();
             let expected_err = numpy_row_stack.call1((bad_rows.clone(),)).unwrap_err();
             assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn resize_matches_numpy_across_growth_shrink_scalar_zero_and_dtype() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let resize_fn = module.getattr("resize")?;
+            let numpy = py.import("numpy")?;
+            let numpy_resize = numpy.getattr("resize")?;
+
+            let one_d = numeric_array(py, vec![1_i64, 2, 3], "int64");
+
+            // Growth repeats values to fill the target shape.
+            assert_array_matches_numpy(
+                &resize_fn.call1((one_d.clone(), (5_i64,)))?,
+                &numpy_resize.call1((one_d.clone(), (5_i64,)))?,
+            )?;
+
+            // Shrinking drops the tail exactly as NumPy does.
+            let shrink_source = numeric_array(py, vec![1_i64, 2, 3, 4], "int64");
+            assert_array_matches_numpy(
+                &resize_fn.call1((shrink_source.clone(), (2_i64,)))?,
+                &numpy_resize.call1((shrink_source.clone(), (2_i64,)))?,
+            )?;
+
+            // Scalar inputs expand by repeating the scalar value.
+            assert_array_matches_numpy(
+                &resize_fn.call1((7_i64, (4_i64,)))?,
+                &numpy_resize.call1((7_i64, (4_i64,)))?,
+            )?;
+
+            // Multi-dimensional outputs repeat the flattened source data.
+            let two_d = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2, 3], vec![4_i64, 5, 6]],))?;
+            assert_array_matches_numpy(
+                &resize_fn.call1((two_d.clone(), (3_i64, 4_i64)))?,
+                &numpy_resize.call1((two_d.clone(), (3_i64, 4_i64)))?,
+            )?;
+
+            // Zero-sized output shapes preserve NumPy's empty-array parity.
+            assert_array_matches_numpy(
+                &resize_fn.call1((one_d.clone(), (0_i64,)))?,
+                &numpy_resize.call1((one_d.clone(), (0_i64,)))?,
+            )?;
+
+            // Dtype preservation matters when repetition occurs.
+            let int16_source = numpy.getattr("array")?.call(
+                (vec![1_i64, 2_i64],),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", "int16")?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(
+                &resize_fn.call1((int16_source.clone(), (5_i64,)))?,
+                &numpy_resize.call1((int16_source.clone(), (5_i64,)))?,
+            )?;
 
             Ok(())
         });
