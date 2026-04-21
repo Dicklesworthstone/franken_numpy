@@ -4467,6 +4467,38 @@ fn ifft(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, s=None, axes=None, norm=None, out=None))]
+fn ifft2(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    s: Option<Py<PyAny>>,
+    axes: Option<Py<PyAny>>,
+    norm: Option<String>,
+    out: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.fft.ifft2 so the 2-D inverse FFT matches numpy
+    // exactly across optional shape `s`, axes tuple (default (-2, -1)),
+    // norm conventions ('backward'/'ortho'/'forward'), and optional
+    // `out=` destination. Output is complex.
+    let numpy = py.import("numpy")?;
+    let ifft2_fn = numpy.getattr("fft")?.getattr("ifft2")?;
+    let kwargs = PyDict::new(py);
+    if let Some(s_val) = s {
+        kwargs.set_item("s", s_val.bind(py))?;
+    }
+    if let Some(axes_val) = axes {
+        kwargs.set_item("axes", axes_val.bind(py))?;
+    }
+    if let Some(norm_val) = norm {
+        kwargs.set_item("norm", norm_val)?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    Ok(ifft2_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, UPLO="L"))]
 #[allow(non_snake_case)]
 fn eigh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
@@ -5252,6 +5284,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(getmaskarray, m)?)?;
     m.add_function(wrap_pyfunction!(compressed, m)?)?;
     m.add_function(wrap_pyfunction!(ifft, m)?)?;
+    m.add_function(wrap_pyfunction!(ifft2, m)?)?;
     m.add_function(wrap_pyfunction!(eigh, m)?)?;
     m.add_function(wrap_pyfunction!(tensordot, m)?)?;
     m.add_function(wrap_pyfunction!(cross, m)?)?;
@@ -5515,6 +5548,7 @@ mod tests {
             assert!(module.getattr("getmaskarray").is_ok());
             assert!(module.getattr("compressed").is_ok());
             assert!(module.getattr("ifft").is_ok());
+            assert!(module.getattr("ifft2").is_ok());
             assert!(module.getattr("eigh").is_ok());
             assert!(module.getattr("tensordot").is_ok());
             assert!(module.getattr("cross").is_ok());
@@ -18029,6 +18063,154 @@ mod tests {
                 theirs_dtype.str()?.to_string(),
                 "dtype must match numpy's getmaskarray output",
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ifft2_matches_numpy_across_shape_axes_and_norm() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let ifft2_fn = module.getattr("ifft2")?;
+            let numpy = py.import("numpy")?;
+            let numpy_ifft2 = numpy.getattr("fft")?.getattr("ifft2")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Build a deterministic 4x4 complex spectrum to invert.
+            let spectrum = numpy
+                .getattr("fft")?
+                .getattr("fft2")?
+                .call1((numpy.getattr("array")?.call(
+                    (vec![
+                        vec![1.0_f64, 2.0, 3.0, 4.0],
+                        vec![5.0, 6.0, 7.0, 8.0],
+                        vec![9.0, 10.0, 11.0, 12.0],
+                        vec![13.0, 14.0, 15.0, 16.0],
+                    ],),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("dtype", numpy.getattr("complex128")?)?;
+                        kw
+                    }),
+                )?,))?;
+
+            // Default: s=None, axes=(-2, -1), norm=None.
+            let ours = ifft2_fn.call1((spectrum.clone(),))?;
+            let theirs = numpy_ifft2.call1((spectrum.clone(),))?;
+            let ok: bool = allclose.call1((&ours, &theirs))?.extract()?;
+            assert!(ok, "ifft2 default mismatch");
+
+            // Explicit shape s that oversamples (zero-pads to 6x6).
+            let s_tuple = PyTuple::new(py, [6_usize, 6_usize])?;
+            let ours_s = ifft2_fn.call(
+                (spectrum.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("s", &s_tuple)?;
+                    kw
+                }),
+            )?;
+            let theirs_s = numpy_ifft2.call(
+                (spectrum.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("s", &s_tuple)?;
+                    kw
+                }),
+            )?;
+            let ok_s: bool = allclose.call1((&ours_s, &theirs_s))?.extract()?;
+            assert!(ok_s, "ifft2 explicit s=(6,6) mismatch");
+
+            // Explicit axes=(0, 1): same last-two default for 2-D but exercised as kwarg.
+            let axes_tuple = PyTuple::new(py, [0_i64, 1_i64])?;
+            let ours_axes = ifft2_fn.call(
+                (spectrum.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axes", &axes_tuple)?;
+                    kw
+                }),
+            )?;
+            let theirs_axes = numpy_ifft2.call(
+                (spectrum.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axes", &axes_tuple)?;
+                    kw
+                }),
+            )?;
+            let ok_axes: bool = allclose.call1((&ours_axes, &theirs_axes))?.extract()?;
+            assert!(ok_axes, "ifft2 axes=(0,1) mismatch");
+
+            // norm='ortho' scales by 1/sqrt(N).
+            let ours_ortho = ifft2_fn.call(
+                (spectrum.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("norm", "ortho")?;
+                    kw
+                }),
+            )?;
+            let theirs_ortho = numpy_ifft2.call(
+                (spectrum.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("norm", "ortho")?;
+                    kw
+                }),
+            )?;
+            let ok_ortho: bool = allclose.call1((&ours_ortho, &theirs_ortho))?.extract()?;
+            assert!(ok_ortho, "ifft2 norm=ortho mismatch");
+
+            // norm='forward' leaves the inverse unnormalized.
+            let ours_fwd = ifft2_fn.call(
+                (spectrum.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("norm", "forward")?;
+                    kw
+                }),
+            )?;
+            let theirs_fwd = numpy_ifft2.call(
+                (spectrum.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("norm", "forward")?;
+                    kw
+                }),
+            )?;
+            let ok_fwd: bool = allclose.call1((&ours_fwd, &theirs_fwd))?.extract()?;
+            assert!(ok_fwd, "ifft2 norm=forward mismatch");
+
+            // 3-D input, axes=(-2, -1) default — process each leading slice.
+            let three_d = numpy.getattr("array")?.call(
+                (vec![
+                    vec![vec![1.0_f64, 2.0], vec![3.0, 4.0]],
+                    vec![vec![5.0, 6.0], vec![7.0, 8.0]],
+                ],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("complex128")?)?;
+                    kw
+                }),
+            )?;
+            let ours_3d = ifft2_fn.call1((three_d.clone(),))?;
+            let theirs_3d = numpy_ifft2.call1((three_d.clone(),))?;
+            let ok_3d: bool = allclose.call1((&ours_3d, &theirs_3d))?.extract()?;
+            assert!(ok_3d, "ifft2 3-D default axes mismatch");
+
+            // Round-trip identity: fft2(ifft2(x)) ≈ x (within tolerance).
+            let fft2_fn = numpy.getattr("fft")?.getattr("fft2")?;
+            let inverted = ifft2_fn.call1((spectrum.clone(),))?;
+            let round_trip = fft2_fn.call1((inverted,))?;
+            let ok_rt: bool = allclose.call1((&round_trip, &spectrum))?.extract()?;
+            assert!(ok_rt, "fft2(ifft2(x)) must round-trip to x");
 
             Ok(())
         });
