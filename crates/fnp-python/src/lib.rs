@@ -3221,6 +3221,31 @@ fn masked_invalid(py: Python<'_>, a: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny
         .unbind())
 }
 
+#[pyfunction]
+#[pyo3(signature = (a, mask=None, copy=true, fill_value=None))]
+fn fix_invalid(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    mask: Option<Py<PyAny>>,
+    copy: bool,
+    fill_value: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.ma.fix_invalid so invalid-value masking, mask=
+    // union semantics, copy=False aliasing, and fill_value forwarding
+    // match numpy exactly for scalar and n-D inputs.
+    let numpy = py.import("numpy")?;
+    let fix_invalid_fn = numpy.getattr("ma")?.getattr("fix_invalid")?;
+    let kwargs = PyDict::new(py);
+    if let Some(mask_val) = mask {
+        kwargs.set_item("mask", mask_val.bind(py))?;
+    }
+    kwargs.set_item("copy", copy)?;
+    if let Some(fill_value_val) = fill_value {
+        kwargs.set_item("fill_value", fill_value_val.bind(py))?;
+    }
+    Ok(fix_invalid_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
 fn minimum_fill_value_for_supported_dtype(py: Python<'_>, dtype: DType) -> PyResult<Py<PyAny>> {
     Ok(match dtype {
         DType::Bool => 1_i64.into_pyobject(py)?.into_any().unbind(),
@@ -7263,6 +7288,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(structured_to_unstructured, m)?)?;
     m.add_function(wrap_pyfunction!(trim_zeros, m)?)?;
     m.add_function(wrap_pyfunction!(masked_invalid, m)?)?;
+    m.add_function(wrap_pyfunction!(fix_invalid, m)?)?;
     m.add_function(wrap_pyfunction!(minimum_fill_value, m)?)?;
     m.add_function(wrap_pyfunction!(maximum_fill_value, m)?)?;
     m.add_function(wrap_pyfunction!(pinv, m)?)?;
@@ -7699,6 +7725,7 @@ mod tests {
             assert!(module.getattr("structured_to_unstructured").is_ok());
             assert!(module.getattr("trim_zeros").is_ok());
             assert!(module.getattr("masked_invalid").is_ok());
+            assert!(module.getattr("fix_invalid").is_ok());
             assert!(module.getattr("minimum_fill_value").is_ok());
             assert!(module.getattr("maximum_fill_value").is_ok());
             assert!(module.getattr("pinv").is_ok());
@@ -11272,6 +11299,110 @@ mod tests {
                 actual_object_err.value(py).str()?.extract::<String>()?,
                 expected_object_err.value(py).str()?.extract::<String>()?
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn fix_invalid_matches_numpy_across_mask_copy_fill_and_shapes() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let fix_invalid_fn = module.getattr("fix_invalid")?;
+            let numpy = py.import("numpy")?;
+            let numpy_fix_invalid = numpy.getattr("ma")?.getattr("fix_invalid")?;
+
+            // NaN and Inf are masked in the default path.
+            let float_input =
+                numeric_array(py, vec![1.0_f64, f64::NAN, f64::INFINITY, -2.0], "float64");
+            let actual_float = fix_invalid_fn.call1((float_input.clone(),))?;
+            let expected_float = numpy_fix_invalid.call1((float_input.clone(),))?;
+            assert_eq!(repr_string(&actual_float), repr_string(&expected_float));
+
+            // Explicit mask= is unioned with invalid-value masking for n-D input.
+            let two_d = numpy
+                .getattr("array")?
+                .call1((vec![vec![1.0_f64, f64::NAN], vec![f64::INFINITY, 4.0]],))?;
+            let explicit_mask = vec![vec![false, true], vec![false, false]];
+            let actual_masked = fix_invalid_fn.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("mask", explicit_mask.clone())?;
+                    kwargs
+                }),
+            )?;
+            let expected_masked = numpy_fix_invalid.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("mask", explicit_mask.clone())?;
+                    kwargs
+                }),
+            )?;
+            assert_eq!(repr_string(&actual_masked), repr_string(&expected_masked));
+
+            // fill_value is forwarded to the resulting MaskedArray.
+            let actual_fill = fix_invalid_fn.call(
+                (float_input.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("fill_value", -99.0_f64)?;
+                    kwargs
+                }),
+            )?;
+            let expected_fill = numpy_fix_invalid.call(
+                (float_input.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("fill_value", -99.0_f64)?;
+                    kwargs
+                }),
+            )?;
+            assert_eq!(repr_string(&actual_fill), repr_string(&expected_fill));
+            assert_eq!(
+                repr_string(&actual_fill.getattr("fill_value")?),
+                repr_string(&expected_fill.getattr("fill_value")?),
+            );
+
+            // copy=False aliases the original storage exactly when numpy does.
+            let shared_input = numeric_array(py, vec![1.0_f64, f64::NAN, 3.0], "float64");
+            let actual_copy_false = fix_invalid_fn.call(
+                (shared_input.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("copy", false)?;
+                    kwargs
+                }),
+            )?;
+            let expected_copy_false = numpy_fix_invalid.call(
+                (shared_input.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("copy", false)?;
+                    kwargs
+                }),
+            )?;
+            let actual_shares = numpy
+                .getattr("shares_memory")?
+                .call1((actual_copy_false.getattr("data")?, shared_input.clone()))?
+                .extract::<bool>()?;
+            let expected_shares = numpy
+                .getattr("shares_memory")?
+                .call1((expected_copy_false.getattr("data")?, shared_input.clone()))?
+                .extract::<bool>()?;
+            assert_eq!(actual_shares, expected_shares);
+
+            // Scalar numpy scalars return the same masked-scalar result.
+            let scalar_input = numpy.getattr("float64")?.call1((f64::INFINITY,))?;
+            let actual_scalar = fix_invalid_fn.call1((scalar_input.clone(),))?;
+            let expected_scalar = numpy_fix_invalid.call1((scalar_input.clone(),))?;
+            assert_eq!(repr_string(&actual_scalar), repr_string(&expected_scalar));
 
             Ok(())
         });
