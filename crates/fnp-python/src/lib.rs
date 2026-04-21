@@ -4965,6 +4965,16 @@ fn fix(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (m, k=0))]
+fn tril(py: Python<'_>, m: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.tril so lower-triangular extraction matches
+    // numpy across square/rectangular matrices, k offset (positive,
+    // zero, negative), and N-D batch inputs.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("tril")?.call1((m.bind(py), k))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x,))]
 fn iscomplexobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.iscomplexobj. Returns True iff input has a
@@ -6099,6 +6109,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(true_divide, m)?)?;
     m.add_function(wrap_pyfunction!(allclose, m)?)?;
     m.add_function(wrap_pyfunction!(fix, m)?)?;
+    m.add_function(wrap_pyfunction!(tril, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6401,6 +6412,7 @@ mod tests {
             assert!(module.getattr("true_divide").is_ok());
             assert!(module.getattr("allclose").is_ok());
             assert!(module.getattr("fix").is_ok());
+            assert!(module.getattr("tril").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -23603,6 +23615,83 @@ mod tests {
             let theirs_2d = numpy_fix.call1((two_d.clone(),))?;
             let ok_2d: bool = allclose.call1((&ours_2d, &theirs_2d))?.extract()?;
             assert!(ok_2d, "fix 2-D mismatch");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn tril_matches_numpy_across_offsets_shapes_and_dtype() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let tril_fn = module.getattr("tril")?;
+            let numpy = py.import("numpy")?;
+            let numpy_tril = numpy.getattr("tril")?;
+
+            // Square matrix k=0 (main diagonal).
+            let square = numpy.getattr("array")?.call1((vec![
+                vec![1_i64, 2, 3],
+                vec![4, 5, 6],
+                vec![7, 8, 9],
+            ],))?;
+            assert_array_matches_numpy(
+                &tril_fn.call1((square.clone(),))?,
+                &numpy_tril.call1((square.clone(),))?,
+            )?;
+
+            // k=1 includes one super-diagonal.
+            assert_array_matches_numpy(
+                &tril_fn.call1((square.clone(), 1_i64))?,
+                &numpy_tril.call1((square.clone(), 1_i64))?,
+            )?;
+
+            // k=-1 excludes the main diagonal.
+            assert_array_matches_numpy(
+                &tril_fn.call1((square.clone(), -1_i64))?,
+                &numpy_tril.call1((square.clone(), -1_i64))?,
+            )?;
+
+            // Rectangular (3, 5).
+            let rect = numpy.getattr("array")?.call1((vec![
+                vec![1_i64, 2, 3, 4, 5],
+                vec![6, 7, 8, 9, 10],
+                vec![11, 12, 13, 14, 15],
+            ],))?;
+            assert_array_matches_numpy(
+                &tril_fn.call1((rect.clone(),))?,
+                &numpy_tril.call1((rect.clone(),))?,
+            )?;
+
+            // 3-D batch (preserves leading axes).
+            let three_d = numpy.getattr("array")?.call1((vec![
+                vec![vec![1_i64, 2], vec![3, 4]],
+                vec![vec![5, 6], vec![7, 8]],
+            ],))?;
+            assert_array_matches_numpy(
+                &tril_fn.call1((three_d.clone(),))?,
+                &numpy_tril.call1((three_d.clone(),))?,
+            )?;
+
+            // Float dtype preservation.
+            let floats = numpy.getattr("array")?.call(
+                (vec![vec![1.5_f64, 2.5], vec![3.5, 4.5]],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("float64")?)?;
+                    kw
+                }),
+            )?;
+            let ours_f = tril_fn.call1((floats.clone(),))?;
+            let theirs_f = numpy_tril.call1((floats.clone(),))?;
+            assert_array_matches_numpy(&ours_f, &theirs_f)?;
+            let ours_dtype = ours_f.getattr("dtype")?.str()?.to_string();
+            let theirs_dtype = theirs_f.getattr("dtype")?.str()?.to_string();
+            assert_eq!(ours_dtype, theirs_dtype, "tril dtype must match numpy");
 
             Ok(())
         });
