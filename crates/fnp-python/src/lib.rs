@@ -4461,6 +4461,26 @@ fn median(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, b, fill_value=true))]
+fn allequal(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    b: Py<PyAny>,
+    fill_value: bool,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.ma.allequal so whole-array equality checks
+    // (honoring fill_value for masked positions; False for NaN) match
+    // numpy for plain ndarrays and MaskedArrays alike. Returns a bool.
+    let numpy = py.import("numpy")?;
+    let allequal_fn = numpy.getattr("ma")?.getattr("allequal")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("fill_value", fill_value)?;
+    Ok(allequal_fn
+        .call((a.bind(py), b.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (arr,))]
 fn getmaskarray(py: Python<'_>, arr: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.ma.getmaskarray. Unlike getmask, this always
@@ -5474,6 +5494,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(getmaskarray, m)?)?;
     m.add_function(wrap_pyfunction!(ma_count, m)?)?;
     m.add_function(wrap_pyfunction!(median, m)?)?;
+    m.add_function(wrap_pyfunction!(allequal, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
     m.add_function(wrap_pyfunction!(compressed, m)?)?;
@@ -5745,6 +5766,7 @@ mod tests {
             assert!(module.getattr("getmaskarray").is_ok());
             assert!(module.getattr("ma_count").is_ok());
             assert!(module.getattr("median").is_ok());
+            assert!(module.getattr("allequal").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
             assert!(module.getattr("compressed").is_ok());
@@ -19603,6 +19625,145 @@ mod tests {
                 }),
             )?;
             assert_array_matches_numpy(&ours_tuple, &theirs_tuple)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn allequal_matches_numpy_across_masked_and_fill_value_paths() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let allequal_fn = module.getattr("allequal")?;
+            let numpy = py.import("numpy")?;
+            let numpy_allequal = numpy.getattr("ma")?.getattr("allequal")?;
+
+            let check = |ours: Bound<'_, PyAny>, theirs: Bound<'_, PyAny>, ctx: &str| -> PyResult<()> {
+                let ours_b: bool = ours.extract()?;
+                let theirs_b: bool = theirs.extract()?;
+                assert_eq!(ours_b, theirs_b, "allequal mismatch: {}", ctx);
+                Ok(())
+            };
+
+            // Two equal plain ndarrays → True.
+            let a1 = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            let b1 = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            check(
+                allequal_fn.call1((a1.clone(), b1.clone()))?,
+                numpy_allequal.call1((a1.clone(), b1.clone()))?,
+                "equal plain arrays",
+            )?;
+
+            // Two unequal plain ndarrays → False.
+            let a2 = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            let b2 = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 4.0],))?;
+            check(
+                allequal_fn.call1((a2.clone(), b2.clone()))?,
+                numpy_allequal.call1((a2.clone(), b2.clone()))?,
+                "unequal plain arrays",
+            )?;
+
+            // Two MaskedArrays equal at non-masked positions with same masks → True
+            // when fill_value=True (default), True also when fill_value=False because
+            // all unmasked entries match.
+            let ma = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![1.0_f64, 2.0, 3.0, 4.0],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("mask", vec![false, true, false, true])?;
+                    kw
+                }),
+            )?;
+            let mb = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![1.0_f64, 99.0, 3.0, 7.0],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("mask", vec![false, true, false, true])?;
+                    kw
+                }),
+            )?;
+            check(
+                allequal_fn.call1((ma.clone(), mb.clone()))?,
+                numpy_allequal.call1((ma.clone(), mb.clone()))?,
+                "masked arrays equal at unmasked positions (default fill_value)",
+            )?;
+            check(
+                allequal_fn.call(
+                    (ma.clone(), mb.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("fill_value", false)?;
+                        kw
+                    }),
+                )?,
+                numpy_allequal.call(
+                    (ma.clone(), mb.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("fill_value", false)?;
+                        kw
+                    }),
+                )?,
+                "masked arrays with fill_value=False",
+            )?;
+
+            // Asymmetric masks: differ where one is masked and the other is not.
+            let ma2 = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![1.0_f64, 2.0, 3.0],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("mask", vec![false, true, false])?;
+                    kw
+                }),
+            )?;
+            let plain_rhs = numpy.getattr("array")?.call1((vec![1.0_f64, 99.0, 3.0],))?;
+            check(
+                allequal_fn.call1((ma2.clone(), plain_rhs.clone()))?,
+                numpy_allequal.call1((ma2.clone(), plain_rhs.clone()))?,
+                "masked vs plain default fill_value (True treats masked as equal)",
+            )?;
+            check(
+                allequal_fn.call(
+                    (ma2.clone(), plain_rhs.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("fill_value", false)?;
+                        kw
+                    }),
+                )?,
+                numpy_allequal.call(
+                    (ma2.clone(), plain_rhs.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("fill_value", false)?;
+                        kw
+                    }),
+                )?,
+                "masked vs plain fill_value=False (masked position counts as unequal)",
+            )?;
+
+            // NaN anywhere: numpy.ma.allequal returns False regardless of fill_value.
+            let nan_a = numpy.getattr("array")?.call1((vec![1.0_f64, f64::NAN, 3.0],))?;
+            let nan_b = numpy.getattr("array")?.call1((vec![1.0_f64, f64::NAN, 3.0],))?;
+            check(
+                allequal_fn.call1((nan_a.clone(), nan_b.clone()))?,
+                numpy_allequal.call1((nan_a.clone(), nan_b.clone()))?,
+                "NaN in both must return False",
+            )?;
+
+            // 2-D equal arrays → True.
+            let two_a = numpy.getattr("array")?.call1((vec![vec![1_i64, 2], vec![3, 4]],))?;
+            let two_b = numpy.getattr("array")?.call1((vec![vec![1_i64, 2], vec![3, 4]],))?;
+            check(
+                allequal_fn.call1((two_a.clone(), two_b.clone()))?,
+                numpy_allequal.call1((two_a.clone(), two_b.clone()))?,
+                "2-D equal",
+            )?;
 
             Ok(())
         });
