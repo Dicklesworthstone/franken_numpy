@@ -6087,6 +6087,34 @@ fn svdvals(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, axis=None, out=None, overwrite_input=false, keepdims=false))]
+fn nanmedian(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
+    overwrite_input: bool,
+    keepdims: bool,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.nanmedian. NaN-ignoring median along axis;
+    // fully-NaN slices emit a RuntimeWarning and return NaN (numpy
+    // behavior preserved).
+    let numpy = py.import("numpy")?;
+    let nanmedian_fn = numpy.getattr("nanmedian")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis_val) = axis {
+        kwargs.set_item("axis", axis_val.bind(py))?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    kwargs.set_item("overwrite_input", overwrite_input)?;
+    kwargs.set_item("keepdims", keepdims)?;
+    Ok(nanmedian_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+
+#[pyfunction]
 #[pyo3(signature = (a, axis=None, weights=None, returned=false))]
 fn ma_average(
     py: Python<'_>,
@@ -7334,6 +7362,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(testing_assert_array_equal, m)?)?;
     m.add_function(wrap_pyfunction!(matrix_transpose, m)?)?;
     m.add_function(wrap_pyfunction!(svdvals, m)?)?;
+    m.add_function(wrap_pyfunction!(nanmedian, m)?)?;
     m.add_function(wrap_pyfunction!(ma_average, m)?)?;
     m.add_function(wrap_pyfunction!(size_count, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
@@ -7647,6 +7676,7 @@ mod tests {
             assert!(module.getattr("testing_assert_array_equal").is_ok());
             assert!(module.getattr("matrix_transpose").is_ok());
             assert!(module.getattr("svdvals").is_ok());
+            assert!(module.getattr("nanmedian").is_ok());
             assert!(module.getattr("ma_average").is_ok());
             assert!(module.getattr("size_count").is_ok());
             assert!(module.getattr("quantile").is_ok());
