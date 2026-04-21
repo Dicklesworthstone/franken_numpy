@@ -5686,6 +5686,41 @@ fn vander(py: Python<'_>, x: Py<PyAny>, N: Option<usize>, increasing: bool) -> P
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, dtype=None, order=None, *, copy=None, device=None, like=None))]
+fn asarray(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    dtype: Option<Py<PyAny>>,
+    order: Option<Py<PyAny>>,
+    copy: Option<Py<PyAny>>,
+    device: Option<Py<PyAny>>,
+    like: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.asarray so list/scalar normalization,
+    // dtype coercion, memory-order requests, copy= semantics, and
+    // object-dtype preservation stay exactly aligned with numpy.
+    let numpy = py.import("numpy")?;
+    let asarray_fn = numpy.getattr("asarray")?;
+    let kwargs = PyDict::new(py);
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    if let Some(order_val) = order {
+        kwargs.set_item("order", order_val.bind(py))?;
+    }
+    if let Some(copy_val) = copy {
+        kwargs.set_item("copy", copy_val.bind(py))?;
+    }
+    if let Some(device_val) = device {
+        kwargs.set_item("device", device_val.bind(py))?;
+    }
+    if let Some(like_val) = like {
+        kwargs.set_item("like", like_val.bind(py))?;
+    }
+    Ok(asarray_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, dtype=None))]
 fn ascontiguousarray(
     py: Python<'_>,
@@ -8187,6 +8222,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(setdiff1d, m)?)?;
     m.add_function(wrap_pyfunction!(isin, m)?)?;
     m.add_function(wrap_pyfunction!(vander, m)?)?;
+    m.add_function(wrap_pyfunction!(asarray, m)?)?;
     m.add_function(wrap_pyfunction!(ascontiguousarray, m)?)?;
     m.add_function(wrap_pyfunction!(real_if_close, m)?)?;
     m.add_function(wrap_pyfunction!(iscomplexobj, m)?)?;
@@ -8610,6 +8646,7 @@ mod tests {
             assert!(module.getattr("setdiff1d").is_ok());
             assert!(module.getattr("isin").is_ok());
             assert!(module.getattr("vander").is_ok());
+            assert!(module.getattr("asarray").is_ok());
             assert!(module.getattr("ascontiguousarray").is_ok());
             assert!(module.getattr("real_if_close").is_ok());
             assert!(module.getattr("iscomplexobj").is_ok());
@@ -28185,6 +28222,118 @@ mod tests {
             let actual_dim_err = rot90_fn.call1((one_d.clone(),)).unwrap_err();
             let expected_dim_err = numpy_rot90.call1((one_d.clone(),)).unwrap_err();
             assert_pyerr_matches_numpy(py, actual_dim_err, expected_dim_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn asarray_matches_numpy_across_list_dtype_order_scalar_object_and_copy_false() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let asarray_fn = module.getattr("asarray")?;
+            let numpy = py.import("numpy")?;
+            let numpy_asarray = numpy.getattr("asarray")?;
+
+            // Plain Python lists normalize into ndarrays with NumPy's defaults.
+            let python_list = PyList::new(py, [1_i64, 2, 3, 4])?;
+            assert_array_matches_numpy(
+                &asarray_fn.call1((python_list.clone(),))?,
+                &numpy_asarray.call1((python_list.clone(),))?,
+            )?;
+
+            // Explicit dtype coercion must match NumPy's output dtype and values.
+            let ints = vec![vec![1_i64, 2], vec![3_i64, 4]];
+            let ours_dtype = asarray_fn.call(
+                (ints.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", numpy.getattr("float64")?)?;
+                    kwargs
+                }),
+            )?;
+            let theirs_dtype = numpy_asarray.call(
+                (ints.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", numpy.getattr("float64")?)?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_dtype, &theirs_dtype)?;
+
+            // order='F' should preserve NumPy's Fortran-layout request.
+            let ours_fortran = asarray_fn.call(
+                (ints.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("order", "F")?;
+                    kwargs
+                }),
+            )?;
+            let theirs_fortran = numpy_asarray.call(
+                (ints.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("order", "F")?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_fortran, &theirs_fortran)?;
+            let ours_f: bool = ours_fortran
+                .getattr("flags")?
+                .get_item("F_CONTIGUOUS")?
+                .extract()?;
+            let theirs_f: bool = theirs_fortran
+                .getattr("flags")?
+                .get_item("F_CONTIGUOUS")?
+                .extract()?;
+            assert_eq!(ours_f, theirs_f, "Fortran-contiguous flag mismatch");
+
+            // Scalar inputs stay scalar arrays with the same dtype/shape.
+            assert_array_matches_numpy(
+                &asarray_fn.call1((7_i64,))?,
+                &numpy_asarray.call1((7_i64,))?,
+            )?;
+
+            // Object arrays keep object dtype and values intact.
+            let object_source = object_array(py, vec!["north", "south"]);
+            let ours_object = asarray_fn.call1((object_source.clone(),))?;
+            let theirs_object = numpy_asarray.call1((object_source.clone(),))?;
+            assert_array_matches_numpy(&ours_object, &theirs_object)?;
+
+            // copy=False aliases the original storage exactly when NumPy does.
+            let shared_input = numeric_array(py, vec![1_i64, 2, 3, 4], "int64");
+            let ours_copy_false = asarray_fn.call(
+                (shared_input.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("copy", false)?;
+                    kwargs
+                }),
+            )?;
+            let theirs_copy_false = numpy_asarray.call(
+                (shared_input.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("copy", false)?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_copy_false, &theirs_copy_false)?;
+            let shares_memory = numpy.getattr("shares_memory")?;
+            let ours_shares = shares_memory
+                .call1((ours_copy_false.clone(), shared_input.clone()))?
+                .extract::<bool>()?;
+            let theirs_shares = shares_memory
+                .call1((theirs_copy_false.clone(), shared_input.clone()))?
+                .extract::<bool>()?;
+            assert_eq!(ours_shares, theirs_shares, "copy=False aliasing mismatch");
 
             Ok(())
         });
