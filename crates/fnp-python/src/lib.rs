@@ -4794,6 +4794,32 @@ fn union1d(py: Python<'_>, ar1: Py<PyAny>, ar2: Py<PyAny>) -> PyResult<Py<PyAny>
 }
 
 #[pyfunction]
+#[pyo3(signature = (element, test_elements, assume_unique=false, invert=false, kind=None))]
+fn isin(
+    py: Python<'_>,
+    element: Py<PyAny>,
+    test_elements: Py<PyAny>,
+    assume_unique: bool,
+    invert: bool,
+    kind: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.isin so numpy owns shape preservation,
+    // invert/assume_unique behavior, and the optional backend
+    // selection via kind=None/"sort"/"table".
+    let numpy = py.import("numpy")?;
+    let isin_fn = numpy.getattr("isin")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("assume_unique", assume_unique)?;
+    kwargs.set_item("invert", invert)?;
+    if let Some(kind_val) = kind {
+        kwargs.set_item("kind", kind_val.bind(py))?;
+    }
+    Ok(isin_fn
+        .call((element.bind(py), test_elements.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, dtype=None))]
 fn ascontiguousarray(
     py: Python<'_>,
@@ -7228,6 +7254,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fliplr, m)?)?;
     m.add_function(wrap_pyfunction!(intersect1d, m)?)?;
     m.add_function(wrap_pyfunction!(union1d, m)?)?;
+    m.add_function(wrap_pyfunction!(isin, m)?)?;
     m.add_function(wrap_pyfunction!(ascontiguousarray, m)?)?;
     m.add_function(wrap_pyfunction!(real_if_close, m)?)?;
     m.add_function(wrap_pyfunction!(iscomplexobj, m)?)?;
@@ -7602,6 +7629,7 @@ mod tests {
             assert!(module.getattr("fliplr").is_ok());
             assert!(module.getattr("intersect1d").is_ok());
             assert!(module.getattr("union1d").is_ok());
+            assert!(module.getattr("isin").is_ok());
             assert!(module.getattr("ascontiguousarray").is_ok());
             assert!(module.getattr("real_if_close").is_ok());
             assert!(module.getattr("iscomplexobj").is_ok());
@@ -23516,6 +23544,124 @@ mod tests {
             assert_array_matches_numpy(
                 &union1d_fn.call1((float_left.clone(), float_right.clone()))?,
                 &numpy_union1d.call1((float_left.clone(), float_right.clone()))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn isin_matches_numpy_across_shapes_invert_kind_and_empty_tests() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let isin_fn = module.getattr("isin")?;
+            let numpy = py.import("numpy")?;
+            let numpy_isin = numpy.getattr("isin")?;
+
+            // 1-D integer membership.
+            let one_d = numpy.getattr("array")?.call1((vec![1_i64, 2, 3, 4],))?;
+            let test = numpy.getattr("array")?.call1((vec![2_i64, 4],))?;
+            assert_array_matches_numpy(
+                &isin_fn.call1((one_d.clone(), test.clone()))?,
+                &numpy_isin.call1((one_d.clone(), test.clone()))?,
+            )?;
+
+            // 2-D input preserves the original shape.
+            let two_d = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2], vec![3, 4]],))?;
+            let two_d_test = numpy.getattr("array")?.call1((vec![2_i64, 3],))?;
+            assert_array_matches_numpy(
+                &isin_fn.call1((two_d.clone(), two_d_test.clone()))?,
+                &numpy_isin.call1((two_d.clone(), two_d_test.clone()))?,
+            )?;
+
+            // invert=True negates the membership mask.
+            assert_array_matches_numpy(
+                &isin_fn.call(
+                    (one_d.clone(), test.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("invert", true)?;
+                        kw
+                    }),
+                )?,
+                &numpy_isin.call(
+                    (one_d.clone(), test.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("invert", true)?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // assume_unique=True fast path with already-unique inputs.
+            let unique = numpy.getattr("array")?.call1((vec![1_i64, 5, 9, 11],))?;
+            let unique_test = numpy.getattr("array")?.call1((vec![0_i64, 5, 11],))?;
+            assert_array_matches_numpy(
+                &isin_fn.call(
+                    (unique.clone(), unique_test.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("assume_unique", true)?;
+                        kw
+                    }),
+                )?,
+                &numpy_isin.call(
+                    (unique.clone(), unique_test.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("assume_unique", true)?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // Explicit backend choices stay parity-aligned.
+            let backend_input = numpy.getattr("array")?.call1((vec![1_i64, 2, 4, 8],))?;
+            let backend_test = numpy.getattr("array")?.call1((vec![0_i64, 2, 8],))?;
+            for kind_name in ["sort", "table"] {
+                assert_array_matches_numpy(
+                    &isin_fn.call(
+                        (backend_input.clone(), backend_test.clone()),
+                        Some(&{
+                            let kw = PyDict::new(py);
+                            kw.set_item("kind", kind_name)?;
+                            kw
+                        }),
+                    )?,
+                    &numpy_isin.call(
+                        (backend_input.clone(), backend_test.clone()),
+                        Some(&{
+                            let kw = PyDict::new(py);
+                            kw.set_item("kind", kind_name)?;
+                            kw
+                        }),
+                    )?,
+                )?;
+            }
+
+            // String arrays compare elementwise like numpy.
+            let strings = numpy
+                .getattr("array")?
+                .call1((vec!["pear", "apple", "banana", "pear"],))?;
+            let string_test = numpy.getattr("array")?.call1((vec!["apple", "kiwi"],))?;
+            assert_array_matches_numpy(
+                &isin_fn.call1((strings.clone(), string_test.clone()))?,
+                &numpy_isin.call1((strings.clone(), string_test.clone()))?,
+            )?;
+
+            // Empty test_elements yields an all-false mask.
+            let empty = numpy.getattr("array")?.call1((Vec::<i64>::new(),))?;
+            assert_array_matches_numpy(
+                &isin_fn.call1((one_d.clone(), empty.clone()))?,
+                &numpy_isin.call1((one_d.clone(), empty.clone()))?,
             )?;
 
             Ok(())
