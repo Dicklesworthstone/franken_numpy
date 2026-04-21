@@ -5723,6 +5723,38 @@ fn vander(py: Python<'_>, x: Py<PyAny>, N: Option<usize>, increasing: bool) -> P
 }
 
 #[pyfunction]
+#[pyo3(signature = (shape, fill_value, dtype=None, order="C", *, device=None, like=None))]
+fn full(
+    py: Python<'_>,
+    shape: Py<PyAny>,
+    fill_value: Py<PyAny>,
+    dtype: Option<Py<PyAny>>,
+    order: &str,
+    device: Option<Py<PyAny>>,
+    like: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.full so scalar/tuple shapes, dtype coercion,
+    // object fills, zero-sized dimensions, memory-order requests, and
+    // scalar-array fill behavior all match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let full_fn = numpy.getattr("full")?;
+    let kwargs = PyDict::new(py);
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    kwargs.set_item("order", order)?;
+    if let Some(device_val) = device {
+        kwargs.set_item("device", device_val.bind(py))?;
+    }
+    if let Some(like_val) = like {
+        kwargs.set_item("like", like_val.bind(py))?;
+    }
+    Ok(full_fn
+        .call((shape.bind(py), fill_value.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, dtype=None, order=None, *, copy=None, device=None, like=None))]
 fn asarray(
     py: Python<'_>,
@@ -8296,6 +8328,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(setdiff1d, m)?)?;
     m.add_function(wrap_pyfunction!(isin, m)?)?;
     m.add_function(wrap_pyfunction!(vander, m)?)?;
+    m.add_function(wrap_pyfunction!(full, m)?)?;
     m.add_function(wrap_pyfunction!(asarray, m)?)?;
     m.add_function(wrap_pyfunction!(asanyarray, m)?)?;
     m.add_function(wrap_pyfunction!(ascontiguousarray, m)?)?;
@@ -8722,6 +8755,7 @@ mod tests {
             assert!(module.getattr("setdiff1d").is_ok());
             assert!(module.getattr("isin").is_ok());
             assert!(module.getattr("vander").is_ok());
+            assert!(module.getattr("full").is_ok());
             assert!(module.getattr("asarray").is_ok());
             assert!(module.getattr("asanyarray").is_ok());
             assert!(module.getattr("ascontiguousarray").is_ok());
@@ -28500,6 +28534,113 @@ mod tests {
             let actual_dim_err = rot90_fn.call1((one_d.clone(),)).unwrap_err();
             let expected_dim_err = numpy_rot90.call1((one_d.clone(),)).unwrap_err();
             assert_pyerr_matches_numpy(py, actual_dim_err, expected_dim_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn full_matches_numpy_across_shapes_dtype_object_order_zero_and_scalar_fill() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let full_fn = module.getattr("full")?;
+            let numpy = py.import("numpy")?;
+            let numpy_full = numpy.getattr("full")?;
+
+            // Scalar shape input fills a 1-D array.
+            assert_array_matches_numpy(
+                &full_fn.call1((4_i64, 7_i64))?,
+                &numpy_full.call1((4_i64, 7_i64))?,
+            )?;
+
+            // Tuple shape plus explicit dtype coercion.
+            let ours_dtype = full_fn.call(
+                ((2_i64, 3_i64), 1.25_f64),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", numpy.getattr("int64")?)?;
+                    kwargs
+                }),
+            )?;
+            let theirs_dtype = numpy_full.call(
+                ((2_i64, 3_i64), 1.25_f64),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", numpy.getattr("int64")?)?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_dtype, &theirs_dtype)?;
+            assert_eq!(
+                ours_dtype.getattr("dtype")?.str()?.extract::<String>()?,
+                theirs_dtype.getattr("dtype")?.str()?.extract::<String>()?
+            );
+
+            // Object fill values should preserve object dtype and contents.
+            let object_fill = PyDict::new(py);
+            object_fill.set_item("direction", "north")?;
+            let ours_object = full_fn.call(
+                ((2_i64,), object_fill.clone()),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", numpy.getattr("object_")?)?;
+                    kwargs
+                }),
+            )?;
+            let theirs_object = numpy_full.call(
+                ((2_i64,), object_fill.clone()),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", numpy.getattr("object_")?)?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_object, &theirs_object)?;
+
+            // order='F' should preserve NumPy's Fortran-layout request.
+            let ours_fortran = full_fn.call(
+                ((2_i64, 3_i64), 9_i64),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("order", "F")?;
+                    kwargs
+                }),
+            )?;
+            let theirs_fortran = numpy_full.call(
+                ((2_i64, 3_i64), 9_i64),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("order", "F")?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_fortran, &theirs_fortran)?;
+            let ours_f: bool = ours_fortran
+                .getattr("flags")?
+                .get_item("F_CONTIGUOUS")?
+                .extract()?;
+            let theirs_f: bool = theirs_fortran
+                .getattr("flags")?
+                .get_item("F_CONTIGUOUS")?
+                .extract()?;
+            assert_eq!(ours_f, theirs_f, "Fortran-contiguous flag mismatch");
+
+            // Zero-sized dimensions should still preserve dtype and shape parity.
+            assert_array_matches_numpy(
+                &full_fn.call1(((0_i64, 3_i64), 5_i64))?,
+                &numpy_full.call1(((0_i64, 3_i64), 5_i64))?,
+            )?;
+
+            // Scalar-array fills broadcast exactly like NumPy.
+            let scalar_fill = numpy.getattr("array")?.call1((11_i64,))?;
+            let ours_scalar_fill = full_fn.call1(((2_i64, 2_i64), scalar_fill.clone()))?;
+            let theirs_scalar_fill = numpy_full.call1(((2_i64, 2_i64), scalar_fill.clone()))?;
+            assert_array_matches_numpy(&ours_scalar_fill, &theirs_scalar_fill)?;
 
             Ok(())
         });
