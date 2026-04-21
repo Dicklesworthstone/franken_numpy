@@ -4930,6 +4930,30 @@ fn true_divide(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAn
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, b, rtol=1e-5, atol=1e-8, equal_nan=false))]
+fn allclose(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    b: Py<PyAny>,
+    rtol: f64,
+    atol: f64,
+    equal_nan: bool,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.allclose so element-wise within-tolerance
+    // comparison matches numpy across rtol/atol scaling, equal_nan,
+    // broadcasting, and shape compatibility.
+    let numpy = py.import("numpy")?;
+    let allclose_fn = numpy.getattr("allclose")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("rtol", rtol)?;
+    kwargs.set_item("atol", atol)?;
+    kwargs.set_item("equal_nan", equal_nan)?;
+    Ok(allclose_fn
+        .call((a.bind(py), b.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x,))]
 fn iscomplexobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.iscomplexobj. Returns True iff input has a
@@ -6062,6 +6086,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(polyder, m)?)?;
     m.add_function(wrap_pyfunction!(tile, m)?)?;
     m.add_function(wrap_pyfunction!(true_divide, m)?)?;
+    m.add_function(wrap_pyfunction!(allclose, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6362,6 +6387,7 @@ mod tests {
             assert!(module.getattr("polyder").is_ok());
             assert!(module.getattr("tile").is_ok());
             assert!(module.getattr("true_divide").is_ok());
+            assert!(module.getattr("allclose").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -23352,6 +23378,135 @@ mod tests {
                 via_op.get_item(0_i64)?,
             ))?.extract()?;
             assert!(ok_op, "true_divide must equal __truediv__ result");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn allclose_matches_numpy_across_tolerance_and_nan_paths() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let allclose_fn = module.getattr("allclose")?;
+            let numpy = py.import("numpy")?;
+            let numpy_allclose = numpy.getattr("allclose")?;
+
+            let check = |ours: Bound<'_, PyAny>, theirs: Bound<'_, PyAny>, ctx: &str| -> PyResult<()> {
+                let ours_b: bool = ours.extract()?;
+                let theirs_b: bool = theirs.extract()?;
+                assert_eq!(ours_b, theirs_b, "allclose mismatch: {}", ctx);
+                Ok(())
+            };
+
+            // Identical arrays → True.
+            let arr_a = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            let arr_b = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            check(
+                allclose_fn.call1((arr_a.clone(), arr_b.clone()))?,
+                numpy_allclose.call1((arr_a.clone(), arr_b.clone()))?,
+                "identical arrays",
+            )?;
+
+            // Slightly perturbed within default tol → True.
+            let arr_c = numpy.getattr("array")?.call1((vec![1.0_f64 + 1e-10, 2.0, 3.0],))?;
+            check(
+                allclose_fn.call1((arr_a.clone(), arr_c.clone()))?,
+                numpy_allclose.call1((arr_a.clone(), arr_c.clone()))?,
+                "within default tol",
+            )?;
+
+            // Beyond tol → False.
+            let arr_d = numpy.getattr("array")?.call1((vec![1.0_f64 + 1.0, 2.0, 3.0],))?;
+            check(
+                allclose_fn.call1((arr_a.clone(), arr_d.clone()))?,
+                numpy_allclose.call1((arr_a.clone(), arr_d.clone()))?,
+                "beyond tol",
+            )?;
+
+            // NaN with equal_nan=True → True; equal_nan=False → False.
+            let nan_a = numpy.getattr("array")?.call1((vec![1.0_f64, f64::NAN, 3.0],))?;
+            let nan_b = numpy.getattr("array")?.call1((vec![1.0_f64, f64::NAN, 3.0],))?;
+            check(
+                allclose_fn.call(
+                    (nan_a.clone(), nan_b.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("equal_nan", true)?;
+                        kw
+                    }),
+                )?,
+                numpy_allclose.call(
+                    (nan_a.clone(), nan_b.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("equal_nan", true)?;
+                        kw
+                    }),
+                )?,
+                "NaN equal_nan=True",
+            )?;
+            check(
+                allclose_fn.call1((nan_a.clone(), nan_b.clone()))?,
+                numpy_allclose.call1((nan_a.clone(), nan_b.clone()))?,
+                "NaN equal_nan=False default",
+            )?;
+
+            // Broadcasting (scalar vs array).
+            check(
+                allclose_fn.call1((1.0_f64, arr_a.clone()))?,
+                numpy_allclose.call1((1.0_f64, arr_a.clone()))?,
+                "scalar/array broadcast",
+            )?;
+
+            // Custom rtol scaling.
+            let arr_e = numpy.getattr("array")?.call1((vec![1.0_f64 + 1e-3, 2.0, 3.0],))?;
+            check(
+                allclose_fn.call(
+                    (arr_a.clone(), arr_e.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("rtol", 1e-2_f64)?;
+                        kw
+                    }),
+                )?,
+                numpy_allclose.call(
+                    (arr_a.clone(), arr_e.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("rtol", 1e-2_f64)?;
+                        kw
+                    }),
+                )?,
+                "custom rtol=1e-2",
+            )?;
+
+            // Custom atol scaling tightening tolerance.
+            check(
+                allclose_fn.call(
+                    (arr_a.clone(), arr_e.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("atol", 1e-15_f64)?;
+                        kw.set_item("rtol", 1e-15_f64)?;
+                        kw
+                    }),
+                )?,
+                numpy_allclose.call(
+                    (arr_a.clone(), arr_e.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("atol", 1e-15_f64)?;
+                        kw.set_item("rtol", 1e-15_f64)?;
+                        kw
+                    }),
+                )?,
+                "tight atol+rtol",
+            )?;
 
             Ok(())
         });
