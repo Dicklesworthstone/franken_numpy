@@ -4062,6 +4062,21 @@ fn histogram_bin_edges(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, axes=None))]
+fn transpose(py: Python<'_>, a: Py<PyAny>, axes: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.transpose so default axis reversal, explicit
+    // axis tuples, scalar/1-D identity behavior, and error surfaces
+    // match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let transpose_fn = numpy.getattr("transpose")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axes_val) = axes {
+        kwargs.set_item("axes", axes_val.bind(py))?;
+    }
+    Ok(transpose_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (tup, *, dtype=None, casting="same_kind"))]
 fn vstack(
     py: Python<'_>,
@@ -7531,6 +7546,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(choose, m)?)?;
     m.add_function(wrap_pyfunction!(searchsorted, m)?)?;
     m.add_function(wrap_pyfunction!(histogram_bin_edges, m)?)?;
+    m.add_function(wrap_pyfunction!(transpose, m)?)?;
     m.add_function(wrap_pyfunction!(split, m)?)?;
     m.add_function(wrap_pyfunction!(array_split, m)?)?;
     m.add_function(wrap_pyfunction!(hsplit, m)?)?;
@@ -7934,6 +7950,7 @@ mod tests {
             assert!(module.getattr("argwhere").is_ok());
             assert!(module.getattr("count_nonzero").is_ok());
             assert!(module.getattr("histogram_bin_edges").is_ok());
+            assert!(module.getattr("transpose").is_ok());
             assert!(module.getattr("expand_dims").is_ok());
             assert!(module.getattr("structured_to_unstructured").is_ok());
             assert!(module.getattr("trim_zeros").is_ok());
@@ -25245,6 +25262,120 @@ mod tests {
                     Some(&{
                         let kw = PyDict::new(py);
                         kw.set_item("bins", "auto")?;
+                        kw
+                    }),
+                )
+                .unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn transpose_matches_numpy_across_axes_scalar_object_and_error_surface() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let transpose_fn = module.getattr("transpose")?;
+            let numpy = py.import("numpy")?;
+            let numpy_transpose = numpy.getattr("transpose")?;
+
+            // 2-D default transpose.
+            let two_d = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2, 3], vec![4, 5, 6]],))?;
+            assert_array_matches_numpy(
+                &transpose_fn.call1((two_d.clone(),))?,
+                &numpy_transpose.call1((two_d.clone(),))?,
+            )?;
+
+            // Explicit axes on 3-D input.
+            let three_d = numpy.getattr("array")?.call1((vec![
+                vec![vec![1_i64, 2], vec![3, 4], vec![5, 6]],
+                vec![vec![7_i64, 8], vec![9, 10], vec![11, 12]],
+            ],))?;
+            assert_array_matches_numpy(
+                &transpose_fn.call(
+                    (three_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axes", (1_i64, 2_i64, 0_i64))?;
+                        kw
+                    }),
+                )?,
+                &numpy_transpose.call(
+                    (three_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axes", (1_i64, 2_i64, 0_i64))?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // Negative axes normalize like numpy.
+            assert_array_matches_numpy(
+                &transpose_fn.call(
+                    (three_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axes", (-1_i64, -3_i64, -2_i64))?;
+                        kw
+                    }),
+                )?,
+                &numpy_transpose.call(
+                    (three_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axes", (-1_i64, -3_i64, -2_i64))?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // Scalar and 1-D inputs are shape-preserving no-ops.
+            let scalar = numpy.getattr("array")?.call1((7_i64,))?;
+            assert_array_matches_numpy(
+                &transpose_fn.call1((scalar.clone(),))?,
+                &numpy_transpose.call1((scalar.clone(),))?,
+            )?;
+            let one_d = numpy.getattr("array")?.call1((vec![1_i64, 2, 3],))?;
+            assert_array_matches_numpy(
+                &transpose_fn.call1((one_d.clone(),))?,
+                &numpy_transpose.call1((one_d.clone(),))?,
+            )?;
+
+            // Object dtype parity.
+            let objects = numpy
+                .getattr("array")?
+                .call1((vec![vec!["a", "bb"], vec!["ccc", "dddd"]],))?;
+            assert_array_matches_numpy(
+                &transpose_fn.call1((objects.clone(),))?,
+                &numpy_transpose.call1((objects.clone(),))?,
+            )?;
+
+            // Invalid repeated axis must raise the same error surface.
+            let actual_err = transpose_fn
+                .call(
+                    (three_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axes", (0_i64, 0_i64, 1_i64))?;
+                        kw
+                    }),
+                )
+                .unwrap_err();
+            let expected_err = numpy_transpose
+                .call(
+                    (three_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axes", (0_i64, 0_i64, 1_i64))?;
                         kw
                     }),
                 )
