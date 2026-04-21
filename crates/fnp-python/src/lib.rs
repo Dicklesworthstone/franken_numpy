@@ -4794,6 +4794,26 @@ fn union1d(py: Python<'_>, ar1: Py<PyAny>, ar2: Py<PyAny>) -> PyResult<Py<PyAny>
 }
 
 #[pyfunction]
+#[pyo3(signature = (ar1, ar2, assume_unique=false))]
+fn setdiff1d(
+    py: Python<'_>,
+    ar1: Py<PyAny>,
+    ar2: Py<PyAny>,
+    assume_unique: bool,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.setdiff1d so sorted-unique output, flattened
+    // input handling, and the assume_unique fast path all match numpy
+    // exactly.
+    let numpy = py.import("numpy")?;
+    let setdiff1d_fn = numpy.getattr("setdiff1d")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("assume_unique", assume_unique)?;
+    Ok(setdiff1d_fn
+        .call((ar1.bind(py), ar2.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (element, test_elements, assume_unique=false, invert=false, kind=None))]
 fn isin(
     py: Python<'_>,
@@ -7254,6 +7274,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fliplr, m)?)?;
     m.add_function(wrap_pyfunction!(intersect1d, m)?)?;
     m.add_function(wrap_pyfunction!(union1d, m)?)?;
+    m.add_function(wrap_pyfunction!(setdiff1d, m)?)?;
     m.add_function(wrap_pyfunction!(isin, m)?)?;
     m.add_function(wrap_pyfunction!(ascontiguousarray, m)?)?;
     m.add_function(wrap_pyfunction!(real_if_close, m)?)?;
@@ -7629,6 +7650,7 @@ mod tests {
             assert!(module.getattr("fliplr").is_ok());
             assert!(module.getattr("intersect1d").is_ok());
             assert!(module.getattr("union1d").is_ok());
+            assert!(module.getattr("setdiff1d").is_ok());
             assert!(module.getattr("isin").is_ok());
             assert!(module.getattr("ascontiguousarray").is_ok());
             assert!(module.getattr("real_if_close").is_ok());
@@ -23662,6 +23684,98 @@ mod tests {
             assert_array_matches_numpy(
                 &isin_fn.call1((one_d.clone(), empty.clone()))?,
                 &numpy_isin.call1((one_d.clone(), empty.clone()))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn setdiff1d_matches_numpy_across_overlap_empty_string_and_flattened_inputs() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let setdiff1d_fn = module.getattr("setdiff1d")?;
+            let numpy = py.import("numpy")?;
+            let numpy_setdiff1d = numpy.getattr("setdiff1d")?;
+
+            // Disjoint inputs yield sorted-unique(ar1).
+            let disjoint_left = numpy.getattr("array")?.call1((vec![5_i64, 1, 3],))?;
+            let disjoint_right = numpy.getattr("array")?.call1((vec![10_i64, 8],))?;
+            assert_array_matches_numpy(
+                &setdiff1d_fn.call1((disjoint_left.clone(), disjoint_right.clone()))?,
+                &numpy_setdiff1d.call1((disjoint_left.clone(), disjoint_right.clone()))?,
+            )?;
+
+            // Overlap removes any value present in ar2.
+            let overlap_left = numpy.getattr("array")?.call1((vec![1_i64, 2, 2, 4, 5],))?;
+            let overlap_right = numpy.getattr("array")?.call1((vec![2_i64, 4, 7],))?;
+            assert_array_matches_numpy(
+                &setdiff1d_fn.call1((overlap_left.clone(), overlap_right.clone()))?,
+                &numpy_setdiff1d.call1((overlap_left.clone(), overlap_right.clone()))?,
+            )?;
+
+            // assume_unique=True fast path with pre-sorted unique input.
+            let unique_left = numpy.getattr("array")?.call1((vec![1_i64, 3, 5, 7],))?;
+            let unique_right = numpy.getattr("array")?.call1((vec![3_i64, 8],))?;
+            assert_array_matches_numpy(
+                &setdiff1d_fn.call(
+                    (unique_left.clone(), unique_right.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("assume_unique", true)?;
+                        kw
+                    }),
+                )?,
+                &numpy_setdiff1d.call(
+                    (unique_left.clone(), unique_right.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("assume_unique", true)?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // Empty ar1 yields an empty result.
+            let empty = numpy.getattr("array")?.call1((Vec::<i64>::new(),))?;
+            let nonempty = numpy.getattr("array")?.call1((vec![1_i64, 2, 3],))?;
+            assert_array_matches_numpy(
+                &setdiff1d_fn.call1((empty.clone(), nonempty.clone()))?,
+                &numpy_setdiff1d.call1((empty.clone(), nonempty.clone()))?,
+            )?;
+
+            // Empty ar2 returns sorted-unique(ar1).
+            let dup_left = numpy.getattr("array")?.call1((vec![4_i64, 1, 4, 2],))?;
+            assert_array_matches_numpy(
+                &setdiff1d_fn.call1((dup_left.clone(), empty.clone()))?,
+                &numpy_setdiff1d.call1((dup_left.clone(), empty.clone()))?,
+            )?;
+
+            // String arrays use the same sorted-unique semantics.
+            let strings_left = numpy
+                .getattr("array")?
+                .call1((vec!["pear", "apple", "pear"],))?;
+            let strings_right = numpy.getattr("array")?.call1((vec!["apple", "kiwi"],))?;
+            assert_array_matches_numpy(
+                &setdiff1d_fn.call1((strings_left.clone(), strings_right.clone()))?,
+                &numpy_setdiff1d.call1((strings_left.clone(), strings_right.clone()))?,
+            )?;
+
+            // Non-1-D input is flattened before differencing.
+            let two_d_left = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2], vec![2, 3]],))?;
+            let two_d_right = numpy
+                .getattr("array")?
+                .call1((vec![vec![2_i64, 4], vec![5, 6]],))?;
+            assert_array_matches_numpy(
+                &setdiff1d_fn.call1((two_d_left.clone(), two_d_right.clone()))?,
+                &numpy_setdiff1d.call1((two_d_left.clone(), two_d_right.clone()))?,
             )?;
 
             Ok(())
