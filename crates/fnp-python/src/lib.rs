@@ -4237,6 +4237,28 @@ fn masked_equal(py: Python<'_>, x: Py<PyAny>, value: Py<PyAny>, copy: bool) -> P
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, b, out=None))]
+fn outer(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    b: Py<PyAny>,
+    out: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.outer so input flattening, output shape (M, N),
+    // dtype promotion, and the optional `out` destination semantics match
+    // numpy exactly across real/complex/integer/boolean inputs.
+    let numpy = py.import("numpy")?;
+    let outer_fn = numpy.getattr("outer")?;
+    let kwargs = PyDict::new(py);
+    if let Some(value) = out {
+        kwargs.set_item("out", value.bind(py))?;
+    }
+    Ok(outer_fn
+        .call((a.bind(py), b.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x, value, copy=true))]
 fn masked_less(py: Python<'_>, x: Py<PyAny>, value: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny>> {
     // Passthrough to np.ma.masked_less so the strict less-than masking
@@ -4795,6 +4817,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tri, m)?)?;
     m.add_function(wrap_pyfunction!(masked_where, m)?)?;
     m.add_function(wrap_pyfunction!(masked_equal, m)?)?;
+    m.add_function(wrap_pyfunction!(outer, m)?)?;
     m.add_function(wrap_pyfunction!(masked_less, m)?)?;
     m.add_function(wrap_pyfunction!(masked_greater, m)?)?;
     m.add_function(wrap_pyfunction!(cond, m)?)?;
@@ -5035,6 +5058,7 @@ mod tests {
             assert!(module.getattr("eigvals").is_ok());
             assert!(module.getattr("masked_where").is_ok());
             assert!(module.getattr("masked_equal").is_ok());
+            assert!(module.getattr("outer").is_ok());
             assert!(module.getattr("masked_less").is_ok());
             assert!(module.getattr("masked_greater").is_ok());
             assert!(module.getattr("cond").is_ok());
@@ -14789,6 +14813,151 @@ mod tests {
             assert_eq!(
                 repr_string(&actual_nocopy),
                 repr_string(&expected_nocopy)
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn outer_matches_numpy_across_shapes_dtypes_and_out_kwarg() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let outer_fn = module.getattr("outer")?;
+            let numpy = py.import("numpy")?;
+            let numpy_outer = numpy.getattr("outer")?;
+            let allclose = numpy.getattr("allclose")?;
+            let array_equal = numpy.getattr("array_equal")?;
+
+            // Float 1-D × float 1-D — basic case.
+            let a = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            let b = numpy.getattr("array")?.call1((vec![4.0_f64, 5.0],))?;
+            assert!(
+                allclose
+                    .call1((
+                        &outer_fn.call1((a.clone(), b.clone()))?,
+                        &numpy_outer.call1((a.clone(), b.clone()))?,
+                    ))?
+                    .extract::<bool>()?,
+                "outer 1-D float diverged"
+            );
+
+            // Integer 1-D × integer 1-D — exact match required.
+            let ia = numpy.getattr("array")?.call(
+                (vec![1_i64, 2, 3, 4],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "int64")?;
+                    kw
+                }),
+            )?;
+            let ib = numpy.getattr("array")?.call(
+                (vec![10_i64, 20],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "int64")?;
+                    kw
+                }),
+            )?;
+            assert!(
+                array_equal
+                    .call1((
+                        &outer_fn.call1((ia.clone(), ib.clone()))?,
+                        &numpy_outer.call1((ia.clone(), ib.clone()))?,
+                    ))?
+                    .extract::<bool>()?,
+                "outer 1-D int diverged"
+            );
+
+            // Higher-dimensional inputs are flattened by numpy.outer.
+            let a2d = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 2.0])?,
+                    PyList::new(py, [3.0_f64, 4.0])?,
+                ],
+            )?,))?;
+            let b2d = numpy.getattr("array")?.call1((vec![5.0_f64, 6.0],))?;
+            assert!(
+                allclose
+                    .call1((
+                        &outer_fn.call1((a2d.clone(), b2d.clone()))?,
+                        &numpy_outer.call1((a2d.clone(), b2d.clone()))?,
+                    ))?
+                    .extract::<bool>()?,
+                "outer 2-D flattened diverged"
+            );
+
+            // Mixed dtype promotion (int + float -> float).
+            let mixed_a = numpy.getattr("array")?.call1((vec![1_i64, 2, 3],))?;
+            let mixed_b = numpy.getattr("array")?.call1((vec![0.5_f64, 1.5],))?;
+            assert!(
+                allclose
+                    .call1((
+                        &outer_fn.call1((mixed_a.clone(), mixed_b.clone()))?,
+                        &numpy_outer.call1((mixed_a.clone(), mixed_b.clone()))?,
+                    ))?
+                    .extract::<bool>()?,
+                "outer mixed dtype diverged"
+            );
+
+            // Complex 1-D × complex 1-D.
+            let builtins = py.import("builtins")?;
+            let complex_a = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        builtins.getattr("complex")?.call1((1.0_f64, 1.0_f64))?,
+                        builtins.getattr("complex")?.call1((2.0_f64, 0.0_f64))?,
+                    ],
+                )?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "complex128")?;
+                    kw
+                }),
+            )?;
+            let complex_b = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        builtins.getattr("complex")?.call1((0.0_f64, 1.0_f64))?,
+                        builtins.getattr("complex")?.call1((-1.0_f64, 0.0_f64))?,
+                    ],
+                )?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "complex128")?;
+                    kw
+                }),
+            )?;
+            assert!(
+                allclose
+                    .call1((
+                        &outer_fn.call1((complex_a.clone(), complex_b.clone()))?,
+                        &numpy_outer.call1((complex_a.clone(), complex_b.clone()))?,
+                    ))?
+                    .extract::<bool>()?,
+                "outer complex diverged"
+            );
+
+            // out= kwarg writes into a pre-allocated array of correct shape.
+            let out_buf = numpy.getattr("zeros")?.call1((PyTuple::new(py, [3_i64, 2_i64])?,))?;
+            let out_kwargs = PyDict::new(py);
+            out_kwargs.set_item("out", out_buf.clone())?;
+            let returned = outer_fn.call((a.clone(), b.clone()), Some(&out_kwargs))?;
+            // numpy returns the same out buffer
+            let expected_out = numpy_outer.call1((a.clone(), b.clone()))?;
+            assert!(
+                allclose
+                    .call1((&returned, &expected_out))?
+                    .extract::<bool>()?,
+                "outer out= diverged"
             );
 
             Ok(())
