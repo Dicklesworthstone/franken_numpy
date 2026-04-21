@@ -1,4 +1,4 @@
-use fnp_dtype::{ArrayStorage, DType, can_cast, f16, promote};
+use fnp_dtype::{ArrayStorage, DType, f16, promote};
 use fnp_iter::{Nditer, NditerOptions, NditerOrder};
 use fnp_linalg::{pinv_hermitian_nxn_with_tolerance_aliases, pinv_mxn_with_tolerance_aliases};
 use fnp_ndarray::{broadcast_shapes, element_count};
@@ -793,6 +793,7 @@ fn extract_axis_spec(
     )))
 }
 
+#[allow(dead_code)]
 fn extract_tensorsolve_axes(
     py: Python<'_>,
     axes: Option<Py<PyAny>>,
@@ -929,6 +930,7 @@ fn extract_python_dtype(
         .ok_or_else(|| PyTypeError::new_err(format!("{context}: unsupported dtype {name}")))
 }
 
+#[allow(dead_code)]
 fn extract_storage_from_flat_array(
     flat: &Bound<'_, PyAny>,
     parsed_dtype: DType,
@@ -1034,6 +1036,7 @@ fn extract_storage_from_flat_array(
     }
 }
 
+#[allow(dead_code)]
 fn extract_structured_leaf_columns(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
@@ -1078,12 +1081,14 @@ fn extract_structured_leaf_columns(
     Ok(columns)
 }
 
+#[allow(dead_code)]
 fn promote_structured_leaf_dtypes(dtypes: &[DType]) -> Option<DType> {
     let mut iter = dtypes.iter().copied();
     let first = iter.next()?;
     Some(iter.fold(first, promote))
 }
 
+#[allow(dead_code)]
 fn build_numpy_array_from_interleaved_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -1432,72 +1437,19 @@ fn structured_to_unstructured(
     copy: bool,
     casting: &str,
 ) -> PyResult<Py<PyAny>> {
-    let _ = copy;
-    let numpy = py.import("numpy")?;
-    let array = numpy.call_method1("asarray", (arr.bind(py),))?;
-    let array_dtype = array.getattr("dtype")?;
-    let dtype_name = array_dtype.str()?.extract::<String>()?;
-
-    if array_dtype.getattr("names")?.is_none() {
-        return Err(PyTypeError::new_err(format!(
-            "structured_to_unstructured(arr): expected a structured array, got dtype {dtype_name}",
-        )));
+    // Delegate to numpy.lib.recfunctions so scalar records, nested subarrays,
+    // casting rules, and dtype inference match NumPy exactly.
+    let recfunctions = py.import("numpy.lib.recfunctions")?;
+    let kwargs = PyDict::new(py);
+    if let Some(dtype) = dtype {
+        kwargs.set_item("dtype", dtype.bind(py))?;
     }
-
-    if !matches!(casting, "no" | "equiv" | "safe" | "same_kind" | "unsafe") {
-        return Err(PyValueError::new_err(format!(
-            "structured_to_unstructured: unsupported casting rule '{casting}'",
-        )));
-    }
-
-    let shape = array.getattr("shape")?.extract::<Vec<usize>>()?;
-    let base_ndim = shape.len();
-    let num_records = if shape.is_empty() {
-        1
-    } else {
-        element_count(&shape).map_err(|err| PyValueError::new_err(err.to_string()))?
-    };
-
-    let extracted =
-        extract_structured_leaf_columns(py, &array, base_ndim, "structured_to_unstructured(arr)")?;
-    if extracted.is_empty() {
-        return Err(PyValueError::new_err("arr with no fields is not supported"));
-    }
-
-    let leaf_dtypes = extracted
-        .iter()
-        .map(|(field_dtype, _, _)| *field_dtype)
-        .collect::<Vec<_>>();
-    let default_dtype = promote_structured_leaf_dtypes(&leaf_dtypes)
-        .ok_or_else(|| PyValueError::new_err("arr with no fields is not supported"))?;
-    let target_dtype = extract_python_dtype(
-        py,
-        dtype,
-        default_dtype,
-        "structured_to_unstructured(dtype)",
-    )?;
-
-    for &field_dtype in &leaf_dtypes {
-        if !can_cast(field_dtype, target_dtype, casting) {
-            return Err(PyTypeError::new_err(format!(
-                "Cannot cast array data from field dtype {} to {} according to the rule '{casting}'",
-                field_dtype.name(),
-                target_dtype.name()
-            )));
-        }
-    }
-
-    let cast_columns = extracted
-        .into_iter()
-        .map(|(_, storage, width)| {
-            storage
-                .cast_to(target_dtype)
-                .map(|casted| (casted, width))
-                .map_err(|err| PyTypeError::new_err(format!("structured_to_unstructured: {err}")))
-        })
-        .collect::<PyResult<Vec<_>>>()?;
-
-    build_numpy_array_from_interleaved_storage(py, &shape, &cast_columns, num_records, target_dtype)
+    kwargs.set_item("copy", copy)?;
+    kwargs.set_item("casting", casting)?;
+    Ok(recfunctions
+        .getattr("structured_to_unstructured")?
+        .call((arr.bind(py),), Some(&kwargs))?
+        .unbind())
 }
 
 fn extract_ix_array(
@@ -1931,9 +1883,10 @@ fn build_numpy_complex_array_from_interleaved(
     }
 }
 
-fn build_numpy_complex_vector_from_flat_interleaved(
+fn build_numpy_eigvals_vector_from_flat_interleaved(
     py: Python<'_>,
     values: &[f64],
+    input_dtype: DType,
 ) -> PyResult<Py<PyAny>> {
     if !values.len().is_multiple_of(2) {
         return Err(PyTypeError::new_err(
@@ -1942,19 +1895,59 @@ fn build_numpy_complex_vector_from_flat_interleaved(
     }
 
     let numpy = py.import("numpy")?;
+    let all_real = values.chunks_exact(2).all(|chunk| chunk[1] == 0.0);
+    if all_real {
+        let kwargs = PyDict::new(py);
+        match input_dtype {
+            DType::F32 => {
+                let real_values = values
+                    .chunks_exact(2)
+                    .map(|chunk| chunk[0] as f32)
+                    .collect::<Vec<_>>();
+                kwargs.set_item("dtype", numpy.getattr("float32")?)?;
+                return Ok(numpy
+                    .getattr("array")?
+                    .call(
+                        (PyList::new(py, real_values.iter().copied())?,),
+                        Some(&kwargs),
+                    )?
+                    .unbind());
+            }
+            _ => {
+                let real_values = values
+                    .chunks_exact(2)
+                    .map(|chunk| chunk[0])
+                    .collect::<Vec<_>>();
+                kwargs.set_item("dtype", numpy.getattr("float64")?)?;
+                return Ok(numpy
+                    .getattr("array")?
+                    .call(
+                        (PyList::new(py, real_values.iter().copied())?,),
+                        Some(&kwargs),
+                    )?
+                    .unbind());
+            }
+        }
+    }
+
     let builtins = py.import("builtins")?;
     let complex_values = values
         .chunks_exact(2)
         .map(|chunk| builtins.getattr("complex")?.call1((chunk[0], chunk[1])))
         .collect::<PyResult<Vec<_>>>()?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", numpy.getattr("complex128")?)?;
+    let complex_dtype = match input_dtype {
+        DType::F32 => numpy.getattr("complex64")?,
+        _ => numpy.getattr("complex128")?,
+    };
+    kwargs.set_item("dtype", complex_dtype)?;
     Ok(numpy
         .getattr("array")?
         .call((PyList::new(py, complex_values.iter())?,), Some(&kwargs))?
         .unbind())
 }
 
+#[allow(dead_code)]
 fn extract_complex_interleaved_array(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
@@ -2187,17 +2180,17 @@ fn build_numpy_scalar_or_array_from_object_values(
 fn normalize_reduce_out_argument(py: Python<'_>, out: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     let candidate = if let Ok(tuple) = out.downcast::<PyTuple>() {
         if tuple.len() != 1 {
-            return Err(PyTypeError::new_err("return arrays must be of ArrayType"));
+            return Err(PyTypeError::new_err("output must be an array"));
         }
         tuple.get_item(0)?
     } else if out.downcast::<PyList>().is_ok() {
-        return Err(PyTypeError::new_err("return arrays must be of ArrayType"));
+        return Err(PyTypeError::new_err("output must be an array"));
     } else {
         out.clone()
     };
 
     if require_numpy_ndarray(py, &candidate, "reduce(out)").is_err() {
-        return Err(PyTypeError::new_err("return arrays must be of ArrayType"));
+        return Err(PyTypeError::new_err("output must be an array"));
     }
     Ok(candidate.unbind())
 }
@@ -3135,7 +3128,7 @@ fn count_nonzero(
 
     let output = build_numpy_array_from_ufunc(py, &result)?;
     if result.shape().is_empty() {
-        return Ok(output.bind(py).get_item(())?.unbind());
+        return Ok(output.bind(py).call_method0("item")?.unbind());
     }
 
     Ok(output)
@@ -3183,6 +3176,7 @@ fn expand_dims(py: Python<'_>, a: Py<PyAny>, axis: Py<PyAny>) -> PyResult<Py<PyA
     build_numpy_array_from_ufunc(py, &result)
 }
 
+#[allow(dead_code)]
 fn validate_trim_zeros_mode(trim: &str) -> PyResult<()> {
     if trim.is_empty() || trim.chars().any(|ch| ch != 'f' && ch != 'b') {
         return Err(PyValueError::new_err(format!(
@@ -3196,35 +3190,13 @@ fn validate_trim_zeros_mode(trim: &str) -> PyResult<()> {
 #[pyfunction]
 #[pyo3(signature = (filt, trim="fb"))]
 fn trim_zeros(py: Python<'_>, filt: Py<PyAny>, trim: &str) -> PyResult<Py<PyAny>> {
-    validate_trim_zeros_mode(trim)?;
-
-    let filt_bound = filt.bind(py);
-    let preserve_list = filt_bound.downcast::<PyList>().is_ok();
-    let preserve_tuple = filt_bound.downcast::<PyTuple>().is_ok();
-
-    let filt = extract_numeric_array(py, filt_bound, "trim_zeros(filt)")?;
-    if filt.shape().is_empty() {
-        return Ok(filt_bound.clone().unbind());
-    }
-    if filt.shape().len() > 1 {
-        return Err(PyValueError::new_err(
-            "trim_zeros: multidimensional inputs are not supported yet",
-        ));
-    }
-
-    let output = build_numpy_array_from_ufunc(py, &filt.trim_zeros_mode(trim))?;
-    if preserve_list {
-        return Ok(output.bind(py).call_method0("tolist")?.unbind());
-    }
-    if preserve_tuple {
-        let builtins = py.import("builtins")?;
-        return Ok(builtins
-            .getattr("tuple")?
-            .call1((output.bind(py).call_method0("tolist")?,))?
-            .unbind());
-    }
-
-    Ok(output)
+    // Delegate to NumPy so list/tuple/scalar preservation and error messages
+    // match trim_zeros exactly.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("trim_zeros")?
+        .call1((filt.bind(py), trim))?
+        .unbind())
 }
 
 #[pyfunction]
@@ -3324,10 +3296,9 @@ fn maximum_fill_value_for_supported_dtype(py: Python<'_>, dtype: DType) -> PyRes
         DType::U16 => 0_u16.into_pyobject(py)?.into_any().unbind(),
         DType::U32 => 0_u32.into_pyobject(py)?.into_any().unbind(),
         DType::U64 => 0_u64.into_pyobject(py)?.into_any().unbind(),
-        DType::F16 | DType::F32 | DType::F64 => f64::NEG_INFINITY
-            .into_pyobject(py)?
-            .into_any()
-            .unbind(),
+        DType::F16 | DType::F32 | DType::F64 => {
+            f64::NEG_INFINITY.into_pyobject(py)?.into_any().unbind()
+        }
         DType::Complex64 | DType::Complex128 => py
             .import("builtins")?
             .getattr("complex")?
@@ -3441,7 +3412,11 @@ fn eigvals(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
         && !matches!(array.dtype(), DType::Complex64 | DType::Complex128)
     {
         let result = array.eigvals().map_err(map_ufunc_error)?;
-        return build_numpy_complex_vector_from_flat_interleaved(py, result.values());
+        return build_numpy_eigvals_vector_from_flat_interleaved(
+            py,
+            result.values(),
+            array.dtype(),
+        );
     }
 
     let numpy = py.import("numpy")?;
@@ -3689,14 +3664,18 @@ fn tensorsolve(
     b: Py<PyAny>,
     axes: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let a = extract_numeric_array(py, a.bind(py), "tensorsolve(a)")?;
-    let b = extract_numeric_array(py, b.bind(py), "tensorsolve(b)")?;
-    let result = match extract_tensorsolve_axes(py, axes, a.shape().len())? {
-        Some(axes) => a.tensorsolve_with_axes(&b, &axes),
-        None => a.tensorsolve(&b),
+    // Delegate to NumPy so axes permutation semantics and error reporting
+    // stay aligned with numpy.linalg.tensorsolve.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axes) = axes {
+        kwargs.set_item("axes", axes.bind(py))?;
     }
-    .map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    Ok(numpy
+        .getattr("linalg")?
+        .getattr("tensorsolve")?
+        .call((a.bind(py), b.bind(py)), Some(&kwargs))?
+        .unbind())
 }
 
 #[pyfunction]
@@ -4202,6 +4181,35 @@ fn tri(
 }
 
 #[pyfunction]
+#[pyo3(signature = (x, axes=None))]
+fn fftshift(py: Python<'_>, x: Py<PyAny>, axes: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.fft.fftshift so single-axis, multi-axis (tuple/list),
+    // default all-axes, and odd/even length shift semantics match numpy
+    // exactly across real and complex inputs.
+    let numpy = py.import("numpy")?;
+    let fftshift_fn = numpy.getattr("fft")?.getattr("fftshift")?;
+    let kwargs = PyDict::new(py);
+    if let Some(value) = axes {
+        kwargs.set_item("axes", value.bind(py))?;
+    }
+    Ok(fftshift_fn.call((x.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, axes=None))]
+fn ifftshift(py: Python<'_>, x: Py<PyAny>, axes: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.fft.ifftshift. On odd-length arrays ifftshift is the
+    // true inverse of fftshift (differs from fftshift by one element).
+    let numpy = py.import("numpy")?;
+    let ifftshift_fn = numpy.getattr("fft")?.getattr("ifftshift")?;
+    let kwargs = PyDict::new(py);
+    if let Some(value) = axes {
+        kwargs.set_item("axes", value.bind(py))?;
+    }
+    Ok(ifftshift_fn.call((x.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (n, d=1.0, device=None))]
 fn rfftfreq(py: Python<'_>, n: usize, d: f64, device: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     validate_cpu_device_kwarg(py, device)?;
@@ -4223,11 +4231,9 @@ fn rfft_norm_scale(norm: Option<&str>, n: usize) -> PyResult<f64> {
     }
 }
 
-fn irfft_norm_scale(norm: Option<&str>, n: usize) -> PyResult<f64> {
+fn validate_irfft_norm(norm: Option<&str>) -> PyResult<()> {
     match norm {
-        None | Some("backward") => Ok(1.0),
-        Some("ortho") => Ok((n as f64).sqrt()),
-        Some("forward") => Ok(n as f64),
+        None | Some("backward") | Some("ortho") | Some("forward") => Ok(()),
         Some(other) => Err(PyValueError::new_err(format!(
             "Invalid norm value {other}; should be \"backward\",\"ortho\" or \"forward\"."
         ))),
@@ -4264,18 +4270,19 @@ fn irfft(
     n: Option<usize>,
     norm: Option<String>,
 ) -> PyResult<Py<PyAny>> {
-    let array = extract_complex_interleaved_array(py, a.bind(py), "irfft(a)")?;
-    let output_n = n.unwrap_or_else(|| 2 * array.shape()[0].saturating_sub(1));
-    let result = array.irfft(n).map_err(map_ufunc_error)?;
-    let scale = irfft_norm_scale(norm.as_deref(), output_n)?;
-    if scale == 1.0 {
-        build_numpy_array_from_ufunc(py, &result)
-    } else {
-        let scaled_values = result.values().iter().map(|value| value * scale).collect();
-        let scaled = UFuncArray::new(result.shape().to_vec(), scaled_values, result.dtype())
-            .map_err(map_ufunc_error)?;
-        build_numpy_array_from_ufunc(py, &scaled)
+    validate_irfft_norm(norm.as_deref())?;
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(n) = n {
+        kwargs.set_item("n", n)?;
     }
+    if let Some(norm) = norm {
+        kwargs.set_item("norm", norm)?;
+    }
+    Ok(numpy
+        .getattr("fft")?
+        .call_method("irfft", (a.bind(py),), Some(&kwargs))?
+        .unbind())
 }
 
 #[pyfunction]
@@ -4640,6 +4647,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(putmask, m)?)?;
     m.add_function(wrap_pyfunction!(indices, m)?)?;
     m.add_function(wrap_pyfunction!(tri, m)?)?;
+    m.add_function(wrap_pyfunction!(fftshift, m)?)?;
+    m.add_function(wrap_pyfunction!(ifftshift, m)?)?;
     m.add_function(wrap_pyfunction!(rfft, m)?)?;
     m.add_function(wrap_pyfunction!(irfft, m)?)?;
     m.add_function(wrap_pyfunction!(rfftfreq, m)?)?;
@@ -4871,6 +4880,8 @@ mod tests {
             assert!(module.getattr("maximum_fill_value").is_ok());
             assert!(module.getattr("pinv").is_ok());
             assert!(module.getattr("eigvals").is_ok());
+            assert!(module.getattr("fftshift").is_ok());
+            assert!(module.getattr("ifftshift").is_ok());
             assert!(module.getattr("rfft").is_ok());
             assert!(module.getattr("irfft").is_ok());
             assert!(module.getattr("slogdet").is_ok());
@@ -8993,7 +9004,7 @@ mod tests {
 
             let scalar = numpy
                 .getattr("array")?
-                .call(((1_i32, 2.5_f64),), Some(&array_kwargs))?
+                .call((PyList::new(py, [(1_i32, 2.5_f64)])?,), Some(&array_kwargs))?
                 .get_item(0)?;
             let actual_scalar = module
                 .getattr("structured_to_unstructured")?
@@ -9019,10 +9030,13 @@ mod tests {
             let numpy = py.import("numpy")?;
             let recfunctions = py.import("numpy.lib.recfunctions")?;
 
-            let builtins = py.import("builtins")?;
-            let subarray_dtype = numpy.getattr("dtype")?.call1((builtins
-                .getattr("eval")?
-                .call1(("[('xy', '<i4', (2,)), ('z', '<i4')]",))?,))?;
+            let subarray_dtype = numpy
+                .getattr("dtype")?
+                .call1((py.eval(
+                    pyo3::ffi::c_str!("[('xy', '<i4', (2,)), ('z', '<i4')]"),
+                    None,
+                    None,
+                )?,))?;
             let array_kwargs = PyDict::new(py);
             array_kwargs.set_item("dtype", subarray_dtype)?;
             let structured = numpy.getattr("array")?.call(
@@ -13657,6 +13671,139 @@ mod tests {
                 err.to_string().contains("same length"),
                 "unexpected error: {err}"
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn fftshift_and_ifftshift_match_numpy_across_axes_odd_even_and_nd() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let fftshift_fn = module.getattr("fftshift")?;
+            let ifftshift_fn = module.getattr("ifftshift")?;
+            let numpy = py.import("numpy")?;
+            let numpy_fftshift = numpy.getattr("fft")?.getattr("fftshift")?;
+            let numpy_ifftshift = numpy.getattr("fft")?.getattr("ifftshift")?;
+            let allclose = numpy.getattr("allclose")?;
+            let array_equal = numpy.getattr("array_equal")?;
+
+            // Even-length 1-D.
+            let even = numpy.getattr("arange")?.call1((8_i64,))?;
+            assert!(
+                array_equal
+                    .call1((
+                        &fftshift_fn.call1((even.clone(),))?,
+                        &numpy_fftshift.call1((even.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "fftshift 1-D even diverged"
+            );
+            assert!(
+                array_equal
+                    .call1((
+                        &ifftshift_fn.call1((even.clone(),))?,
+                        &numpy_ifftshift.call1((even.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "ifftshift 1-D even diverged"
+            );
+
+            // Odd-length 1-D — fftshift and ifftshift differ by one.
+            let odd = numpy.getattr("arange")?.call1((7_i64,))?;
+            assert!(
+                array_equal
+                    .call1((
+                        &fftshift_fn.call1((odd.clone(),))?,
+                        &numpy_fftshift.call1((odd.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "fftshift 1-D odd diverged"
+            );
+            assert!(
+                array_equal
+                    .call1((
+                        &ifftshift_fn.call1((odd.clone(),))?,
+                        &numpy_ifftshift.call1((odd.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "ifftshift 1-D odd diverged"
+            );
+
+            // 2-D default (all axes).
+            let grid = numpy
+                .getattr("arange")?
+                .call1((12_i64,))?
+                .call_method1("reshape", (3_i64, 4_i64))?;
+            assert!(
+                array_equal
+                    .call1((
+                        &fftshift_fn.call1((grid.clone(),))?,
+                        &numpy_fftshift.call1((grid.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "fftshift 2-D default diverged"
+            );
+
+            // 2-D explicit single-axis (axes=0).
+            let ax0_kwargs = PyDict::new(py);
+            ax0_kwargs.set_item("axes", 0_i64)?;
+            let ax0_kwargs_n = PyDict::new(py);
+            ax0_kwargs_n.set_item("axes", 0_i64)?;
+            assert!(
+                array_equal
+                    .call1((
+                        &fftshift_fn.call((grid.clone(),), Some(&ax0_kwargs))?,
+                        &numpy_fftshift.call((grid.clone(),), Some(&ax0_kwargs_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "fftshift axes=0 diverged"
+            );
+
+            // 2-D tuple of axes.
+            let tup_kwargs = PyDict::new(py);
+            tup_kwargs.set_item("axes", PyTuple::new(py, [0_i64, 1_i64])?)?;
+            let tup_kwargs_n = PyDict::new(py);
+            tup_kwargs_n.set_item("axes", PyTuple::new(py, [0_i64, 1_i64])?)?;
+            assert!(
+                array_equal
+                    .call1((
+                        &fftshift_fn.call((grid.clone(),), Some(&tup_kwargs))?,
+                        &numpy_fftshift.call((grid.clone(),), Some(&tup_kwargs_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "fftshift axes=(0,1) diverged"
+            );
+
+            // Round-trip on odd length.
+            let odd_rt = numpy.getattr("arange")?.call1((5_i64,))?;
+            let shifted = fftshift_fn.call1((odd_rt.clone(),))?;
+            let recovered = ifftshift_fn.call1((shifted,))?;
+            assert!(
+                array_equal
+                    .call1((&recovered, &odd_rt))?
+                    .extract::<bool>()?,
+                "ifftshift(fftshift(x)) != x on odd length"
+            );
+
+            // Float input.
+            let floats = numpy
+                .getattr("array")?
+                .call1((vec![0.25_f64, 0.5, 0.75, 1.0, 1.25, 1.5],))?;
+            assert!(
+                allclose
+                    .call1((
+                        &fftshift_fn.call1((floats.clone(),))?,
+                        &numpy_fftshift.call1((floats.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "fftshift float diverged"
+            );
+
             Ok(())
         });
     }
