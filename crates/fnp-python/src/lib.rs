@@ -4637,6 +4637,36 @@ fn nanmax(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, axis=None, out=None, keepdims=None))]
+fn nanmin(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
+    keepdims: Option<bool>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.nanmin so NaN-ignoring minimum matches numpy
+    // across axis=None/int/tuple, optional `out=` destination, and
+    // keepdims. Fully-NaN slices yield NaN with a RuntimeWarning;
+    // integer input has no NaN possibility and matches np.min.
+    // `keepdims` is forwarded only when explicitly supplied so numpy's
+    // `_NoValue` default is preserved.
+    let numpy = py.import("numpy")?;
+    let nanmin_fn = numpy.getattr("nanmin")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis_val) = axis {
+        kwargs.set_item("axis", axis_val.bind(py))?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    if let Some(keepdims_val) = keepdims {
+        kwargs.set_item("keepdims", keepdims_val)?;
+    }
+    Ok(nanmin_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, q, axis=None, out=None, overwrite_input=false, method=None, keepdims=false, weights=None))]
 #[allow(clippy::too_many_arguments)]
 fn percentile(
@@ -7266,6 +7296,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(nanmean, m)?)?;
     m.add_function(wrap_pyfunction!(nansum, m)?)?;
     m.add_function(wrap_pyfunction!(nanmax, m)?)?;
+    m.add_function(wrap_pyfunction!(nanmin, m)?)?;
     m.add_function(wrap_pyfunction!(percentile, m)?)?;
     m.add_function(wrap_pyfunction!(lexsort, m)?)?;
     m.add_function(wrap_pyfunction!(rfftn, m)?)?;
@@ -7642,6 +7673,7 @@ mod tests {
             assert!(module.getattr("nanmean").is_ok());
             assert!(module.getattr("nansum").is_ok());
             assert!(module.getattr("nanmax").is_ok());
+            assert!(module.getattr("nanmin").is_ok());
             assert!(module.getattr("percentile").is_ok());
             assert!(module.getattr("lexsort").is_ok());
             assert!(module.getattr("rfftn").is_ok());
@@ -22617,6 +22649,136 @@ mod tests {
             assert_eq!(
                 ours_shape, theirs_shape,
                 "nanmax keepdims shape must match numpy",
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn nanmin_matches_numpy_across_axis_keepdims_and_all_nan() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let nanmin_fn = module.getattr("nanmin")?;
+            let numpy = py.import("numpy")?;
+            let numpy_nanmin = numpy.getattr("nanmin")?;
+            let isclose = numpy.getattr("isclose")?;
+            let allclose = numpy.getattr("allclose")?;
+            let isnan_fn = numpy.getattr("isnan")?;
+            let warnings = py.import("warnings")?;
+
+            // 1-D no NaN matches min.
+            let clean = numpy
+                .getattr("array")?
+                .call1((vec![3.0_f64, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0],))?;
+            let ours_c = nanmin_fn.call1((clean.clone(),))?;
+            let theirs_c = numpy_nanmin.call1((clean.clone(),))?;
+            let ok_c: bool = isclose.call1((&ours_c, &theirs_c))?.extract()?;
+            assert!(ok_c, "nanmin no-NaN 1-D mismatch");
+
+            // 1-D with NaN ignored.
+            let with_nan =
+                numpy
+                    .getattr("array")?
+                    .call1((vec![4.0_f64, 2.0, f64::NAN, 1.0, 3.0],))?;
+            let ours_n = nanmin_fn.call1((with_nan.clone(),))?;
+            let theirs_n = numpy_nanmin.call1((with_nan.clone(),))?;
+            let ok_n: bool = isclose.call1((&ours_n, &theirs_n))?.extract()?;
+            assert!(ok_n, "nanmin 1-D with NaN mismatch");
+
+            // 2-D mixed NaN, axis=0 and axis=1.
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![1.0_f64, f64::NAN, 3.0],
+                vec![4.0, 2.0, f64::NAN],
+                vec![f64::NAN, 8.0, 9.0],
+            ],))?;
+            for axis in [0_i64, 1] {
+                let ours = nanmin_fn.call(
+                    (two_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", axis)?;
+                        kw
+                    }),
+                )?;
+                let theirs = numpy_nanmin.call(
+                    (two_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", axis)?;
+                        kw
+                    }),
+                )?;
+                let ok_ax: bool = allclose.call1((&ours, &theirs))?.extract()?;
+                assert!(ok_ax, "nanmin 2-D axis={} mismatch", axis);
+            }
+
+            // Fully-NaN slice -> NaN (warnings silenced on both sides).
+            let all_nan = numpy
+                .getattr("array")?
+                .call1((vec![f64::NAN, f64::NAN, f64::NAN],))?;
+            let catch_warnings = warnings.getattr("catch_warnings")?;
+            let suppressed_ours = {
+                let ctx = catch_warnings.call0()?;
+                ctx.call_method0("__enter__")?;
+                warnings.call_method1("simplefilter", ("ignore",))?;
+                let result = nanmin_fn.call1((all_nan.clone(),))?;
+                ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+                result
+            };
+            let suppressed_theirs = {
+                let ctx = catch_warnings.call0()?;
+                ctx.call_method0("__enter__")?;
+                warnings.call_method1("simplefilter", ("ignore",))?;
+                let result = numpy_nanmin.call1((all_nan.clone(),))?;
+                ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+                result
+            };
+            let ours_is_nan: bool = isnan_fn.call1((&suppressed_ours,))?.extract()?;
+            let theirs_is_nan: bool = isnan_fn.call1((&suppressed_theirs,))?.extract()?;
+            assert!(ours_is_nan && theirs_is_nan, "fully-NaN nanmin must be NaN");
+
+            // Integer input matches plain min.
+            let ints = numpy
+                .getattr("array")?
+                .call1((vec![3_i64, 1, 4, 1, 5, 9, 2, 6],))?;
+            let ours_i = nanmin_fn.call1((ints.clone(),))?;
+            let theirs_i = numpy_nanmin.call1((ints.clone(),))?;
+            let ours_i_val: i64 = ours_i.extract()?;
+            let theirs_i_val: i64 = theirs_i.extract()?;
+            assert_eq!(ours_i_val, theirs_i_val, "nanmin integer mismatch");
+
+            // keepdims=True preserves length-1 reduction axis.
+            let ours_kd = nanmin_fn.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 1_i64)?;
+                    kw.set_item("keepdims", true)?;
+                    kw
+                }),
+            )?;
+            let theirs_kd = numpy_nanmin.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 1_i64)?;
+                    kw.set_item("keepdims", true)?;
+                    kw
+                }),
+            )?;
+            let ok_kd: bool = allclose.call1((&ours_kd, &theirs_kd))?.extract()?;
+            assert!(ok_kd, "nanmin keepdims=True mismatch");
+            let ours_shape = ours_kd.getattr("shape")?.str()?.to_string();
+            let theirs_shape = theirs_kd.getattr("shape")?.str()?.to_string();
+            assert_eq!(
+                ours_shape, theirs_shape,
+                "nanmin keepdims shape must match numpy",
             );
 
             Ok(())
