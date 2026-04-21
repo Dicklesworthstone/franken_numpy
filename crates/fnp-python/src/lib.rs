@@ -5092,6 +5092,23 @@ fn isin(
 }
 
 #[pyfunction]
+#[pyo3(signature = (x, N=None, increasing=false))]
+#[allow(non_snake_case)]
+fn vander(py: Python<'_>, x: Py<PyAny>, N: Option<usize>, increasing: bool) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.vander so width selection, increasing-order
+    // columns, dtype preservation, and 1-D input validation all match
+    // numpy exactly.
+    let numpy = py.import("numpy")?;
+    let vander_fn = numpy.getattr("vander")?;
+    let kwargs = PyDict::new(py);
+    if let Some(width) = N {
+        kwargs.set_item("N", width)?;
+    }
+    kwargs.set_item("increasing", increasing)?;
+    Ok(vander_fn.call((x.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, dtype=None))]
 fn ascontiguousarray(
     py: Python<'_>,
@@ -7535,6 +7552,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(union1d, m)?)?;
     m.add_function(wrap_pyfunction!(setdiff1d, m)?)?;
     m.add_function(wrap_pyfunction!(isin, m)?)?;
+    m.add_function(wrap_pyfunction!(vander, m)?)?;
     m.add_function(wrap_pyfunction!(ascontiguousarray, m)?)?;
     m.add_function(wrap_pyfunction!(real_if_close, m)?)?;
     m.add_function(wrap_pyfunction!(iscomplexobj, m)?)?;
@@ -7918,6 +7936,7 @@ mod tests {
             assert!(module.getattr("union1d").is_ok());
             assert!(module.getattr("setdiff1d").is_ok());
             assert!(module.getattr("isin").is_ok());
+            assert!(module.getattr("vander").is_ok());
             assert!(module.getattr("ascontiguousarray").is_ok());
             assert!(module.getattr("real_if_close").is_ok());
             assert!(module.getattr("iscomplexobj").is_ok());
@@ -24895,6 +24914,128 @@ mod tests {
                 &setdiff1d_fn.call1((two_d_left.clone(), two_d_right.clone()))?,
                 &numpy_setdiff1d.call1((two_d_left.clone(), two_d_right.clone()))?,
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn vander_matches_numpy_across_width_order_dtype_empty_and_error_surface() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let vander_fn = module.getattr("vander")?;
+            let numpy = py.import("numpy")?;
+            let numpy_vander = numpy.getattr("vander")?;
+
+            // Default width is len(x) and integer input preserves dtype.
+            let ints = numpy.getattr("array")?.call1((vec![1_i64, 2, 3],))?;
+            assert_array_matches_numpy(
+                &vander_fn.call1((ints.clone(),))?,
+                &numpy_vander.call1((ints.clone(),))?,
+            )?;
+
+            // Explicit N larger than len(x) pads the leading columns.
+            assert_array_matches_numpy(
+                &vander_fn.call(
+                    (ints.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("N", 5_usize)?;
+                        kw
+                    }),
+                )?,
+                &numpy_vander.call(
+                    (ints.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("N", 5_usize)?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // Explicit N smaller than len(x) truncates to the requested width.
+            assert_array_matches_numpy(
+                &vander_fn.call(
+                    (ints.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("N", 2_usize)?;
+                        kw
+                    }),
+                )?,
+                &numpy_vander.call(
+                    (ints.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("N", 2_usize)?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // increasing=True reverses the power order.
+            assert_array_matches_numpy(
+                &vander_fn.call(
+                    (ints.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("increasing", true)?;
+                        kw
+                    }),
+                )?,
+                &numpy_vander.call(
+                    (ints.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("increasing", true)?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // Float input preserves dtype and values.
+            let floats = numpy.getattr("array")?.call1((vec![0.5_f64, 1.5, 2.5],))?;
+            assert_array_matches_numpy(
+                &vander_fn.call1((floats.clone(),))?,
+                &numpy_vander.call1((floats.clone(),))?,
+            )?;
+
+            // Empty input with explicit width returns an empty 2-D result.
+            let empty = numpy.getattr("array")?.call1((Vec::<i64>::new(),))?;
+            assert_array_matches_numpy(
+                &vander_fn.call(
+                    (empty.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("N", 3_usize)?;
+                        kw
+                    }),
+                )?,
+                &numpy_vander.call(
+                    (empty.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("N", 3_usize)?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // Non-1-D input must raise the same ValueError surface.
+            let two_d = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2], vec![3, 4]],))?;
+            let actual_err = vander_fn.call1((two_d.clone(),)).unwrap_err();
+            let expected_err = numpy_vander.call1((two_d.clone(),)).unwrap_err();
+            assert!(actual_err.is_instance_of::<PyValueError>(py));
+            assert!(expected_err.is_instance_of::<PyValueError>(py));
+            assert_eq!(actual_err.to_string(), expected_err.to_string());
 
             Ok(())
         });
