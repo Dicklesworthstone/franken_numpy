@@ -4272,6 +4272,25 @@ fn masked_inside(
 }
 
 #[pyfunction]
+#[pyo3(signature = (x, value, copy=true))]
+fn masked_greater_equal(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    value: Py<PyAny>,
+    copy: bool,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.ma.masked_greater_equal: mask values >= threshold.
+    // copy flag and MaskedArray return type forwarded.
+    let numpy = py.import("numpy")?;
+    let masked_ge_fn = numpy.getattr("ma")?.getattr("masked_greater_equal")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("copy", copy)?;
+    Ok(masked_ge_fn
+        .call((x.bind(py), value.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x, v1, v2, copy=true))]
 fn masked_outside(
     py: Python<'_>,
@@ -4290,6 +4309,21 @@ fn masked_outside(
     Ok(masked_outside_fn
         .call((x.bind(py), v1.bind(py), v2.bind(py)), Some(&kwargs))?
         .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (arr, axis=None))]
+fn count_masked(py: Python<'_>, arr: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.ma.count_masked so default scalar-vs-array return
+    // typing, axis reductions, and invalid-axis error text all match numpy
+    // exactly for masked and unmasked inputs.
+    let numpy = py.import("numpy")?;
+    let count_masked_fn = numpy.getattr("ma")?.getattr("count_masked")?;
+    Ok(match axis {
+        Some(axis) => count_masked_fn.call1((arr.bind(py), axis.bind(py)))?,
+        None => count_masked_fn.call1((arr.bind(py),))?,
+    }
+    .unbind())
 }
 
 #[pyfunction]
@@ -4901,7 +4935,9 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(masked_equal, m)?)?;
     m.add_function(wrap_pyfunction!(vdot, m)?)?;
     m.add_function(wrap_pyfunction!(masked_inside, m)?)?;
+    m.add_function(wrap_pyfunction!(masked_greater_equal, m)?)?;
     m.add_function(wrap_pyfunction!(masked_outside, m)?)?;
+    m.add_function(wrap_pyfunction!(count_masked, m)?)?;
     m.add_function(wrap_pyfunction!(kron, m)?)?;
     m.add_function(wrap_pyfunction!(inner, m)?)?;
     m.add_function(wrap_pyfunction!(outer, m)?)?;
@@ -5147,6 +5183,8 @@ mod tests {
             assert!(module.getattr("masked_equal").is_ok());
             assert!(module.getattr("vdot").is_ok());
             assert!(module.getattr("masked_inside").is_ok());
+            assert!(module.getattr("masked_greater_equal").is_ok());
+            assert!(module.getattr("count_masked").is_ok());
             assert!(module.getattr("masked_outside").is_ok());
             assert!(module.getattr("kron").is_ok());
             assert!(module.getattr("inner").is_ok());
@@ -15334,10 +15372,7 @@ mod tests {
             let ia = numpy.getattr("array")?.call(
                 (PyList::new(
                     py,
-                    [
-                        PyList::new(py, [1_i64, 0])?,
-                        PyList::new(py, [0_i64, 1])?,
-                    ],
+                    [PyList::new(py, [1_i64, 0])?, PyList::new(py, [0_i64, 1])?],
                 )?,),
                 Some(&{
                     let kw = PyDict::new(py);
@@ -15348,10 +15383,7 @@ mod tests {
             let ib = numpy.getattr("array")?.call(
                 (PyList::new(
                     py,
-                    [
-                        PyList::new(py, [1_i64, 2])?,
-                        PyList::new(py, [3_i64, 4])?,
-                    ],
+                    [PyList::new(py, [1_i64, 2])?, PyList::new(py, [3_i64, 4])?],
                 )?,),
                 Some(&{
                     let kw = PyDict::new(py);
@@ -15473,14 +15505,12 @@ mod tests {
 
             // Bounds outside data range — nothing masked.
             let actual_out = masked_inside_fn.call1((data.clone(), 100.0_f64, 200.0_f64))?;
-            let expected_out =
-                numpy_masked_inside.call1((data.clone(), 100.0_f64, 200.0_f64))?;
+            let expected_out = numpy_masked_inside.call1((data.clone(), 100.0_f64, 200.0_f64))?;
             assert_eq!(repr_string(&actual_out), repr_string(&expected_out));
 
             // Bounds covering everything — full mask.
             let actual_all = masked_inside_fn.call1((data.clone(), -10.0_f64, 10.0_f64))?;
-            let expected_all =
-                numpy_masked_inside.call1((data.clone(), -10.0_f64, 10.0_f64))?;
+            let expected_all = numpy_masked_inside.call1((data.clone(), -10.0_f64, 10.0_f64))?;
             assert_eq!(repr_string(&actual_all), repr_string(&expected_all));
 
             // Integer data.
@@ -15493,8 +15523,7 @@ mod tests {
                 }),
             )?;
             let actual_i = masked_inside_fn.call1((int_data.clone(), 5_i64, 15_i64))?;
-            let expected_i =
-                numpy_masked_inside.call1((int_data.clone(), 5_i64, 15_i64))?;
+            let expected_i = numpy_masked_inside.call1((int_data.clone(), 5_i64, 15_i64))?;
             assert_eq!(repr_string(&actual_i), repr_string(&expected_i));
 
             // 2-D data.
@@ -15506,8 +15535,7 @@ mod tests {
                 ],
             )?,))?;
             let actual_2d = masked_inside_fn.call1((data_2d.clone(), -1.0_f64, 1.0_f64))?;
-            let expected_2d =
-                numpy_masked_inside.call1((data_2d.clone(), -1.0_f64, 1.0_f64))?;
+            let expected_2d = numpy_masked_inside.call1((data_2d.clone(), -1.0_f64, 1.0_f64))?;
             assert_eq!(repr_string(&actual_2d), repr_string(&expected_2d));
 
             // copy=False forwarded.
@@ -15515,18 +15543,11 @@ mod tests {
             copy_kwargs.set_item("copy", false)?;
             let copy_kwargs_n = PyDict::new(py);
             copy_kwargs_n.set_item("copy", false)?;
-            let actual_nocopy = masked_inside_fn.call(
-                (data.clone(), 1.0_f64, 3.0_f64),
-                Some(&copy_kwargs),
-            )?;
-            let expected_nocopy = numpy_masked_inside.call(
-                (data.clone(), 1.0_f64, 3.0_f64),
-                Some(&copy_kwargs_n),
-            )?;
-            assert_eq!(
-                repr_string(&actual_nocopy),
-                repr_string(&expected_nocopy)
-            );
+            let actual_nocopy =
+                masked_inside_fn.call((data.clone(), 1.0_f64, 3.0_f64), Some(&copy_kwargs))?;
+            let expected_nocopy =
+                numpy_masked_inside.call((data.clone(), 1.0_f64, 3.0_f64), Some(&copy_kwargs_n))?;
+            assert_eq!(repr_string(&actual_nocopy), repr_string(&expected_nocopy));
 
             Ok(())
         });
@@ -15560,14 +15581,12 @@ mod tests {
 
             // Bounds covering all data — nothing masked.
             let actual_none = masked_outside_fn.call1((data.clone(), -10.0_f64, 10.0_f64))?;
-            let expected_none =
-                numpy_masked_outside.call1((data.clone(), -10.0_f64, 10.0_f64))?;
+            let expected_none = numpy_masked_outside.call1((data.clone(), -10.0_f64, 10.0_f64))?;
             assert_eq!(repr_string(&actual_none), repr_string(&expected_none));
 
             // Bounds outside data range — everything masked.
             let actual_all = masked_outside_fn.call1((data.clone(), 100.0_f64, 200.0_f64))?;
-            let expected_all =
-                numpy_masked_outside.call1((data.clone(), 100.0_f64, 200.0_f64))?;
+            let expected_all = numpy_masked_outside.call1((data.clone(), 100.0_f64, 200.0_f64))?;
             assert_eq!(repr_string(&actual_all), repr_string(&expected_all));
 
             // Integer dtype.
@@ -15580,8 +15599,7 @@ mod tests {
                 }),
             )?;
             let actual_i = masked_outside_fn.call1((int_data.clone(), 5_i64, 15_i64))?;
-            let expected_i =
-                numpy_masked_outside.call1((int_data.clone(), 5_i64, 15_i64))?;
+            let expected_i = numpy_masked_outside.call1((int_data.clone(), 5_i64, 15_i64))?;
             assert_eq!(repr_string(&actual_i), repr_string(&expected_i));
 
             // 2-D data with bracket interval.
@@ -15593,8 +15611,7 @@ mod tests {
                 ],
             )?,))?;
             let actual_2d = masked_outside_fn.call1((data_2d.clone(), -1.0_f64, 1.0_f64))?;
-            let expected_2d =
-                numpy_masked_outside.call1((data_2d.clone(), -1.0_f64, 1.0_f64))?;
+            let expected_2d = numpy_masked_outside.call1((data_2d.clone(), -1.0_f64, 1.0_f64))?;
             assert_eq!(repr_string(&actual_2d), repr_string(&expected_2d));
 
             // copy=False forwarded.
@@ -15602,17 +15619,177 @@ mod tests {
             copy_kwargs.set_item("copy", false)?;
             let copy_kwargs_n = PyDict::new(py);
             copy_kwargs_n.set_item("copy", false)?;
-            let actual_nocopy = masked_outside_fn.call(
-                (data.clone(), 1.0_f64, 3.0_f64),
-                Some(&copy_kwargs),
+            let actual_nocopy =
+                masked_outside_fn.call((data.clone(), 1.0_f64, 3.0_f64), Some(&copy_kwargs))?;
+            let expected_nocopy = numpy_masked_outside
+                .call((data.clone(), 1.0_f64, 3.0_f64), Some(&copy_kwargs_n))?;
+            assert_eq!(repr_string(&actual_nocopy), repr_string(&expected_nocopy));
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn masked_greater_equal_matches_numpy_across_dtypes_and_thresholds() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let masked_ge_fn = module.getattr("masked_greater_equal")?;
+            let numpy = py.import("numpy")?;
+            let numpy_masked_ge = numpy.getattr("ma")?.getattr("masked_greater_equal")?;
+
+            // Integer data with integer threshold (>= masks).
+            let int_data = numpy.getattr("array")?.call(
+                (vec![1_i64, 2, 3, 4, 5],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "int64")?;
+                    kw
+                }),
             )?;
-            let expected_nocopy = numpy_masked_outside.call(
-                (data.clone(), 1.0_f64, 3.0_f64),
-                Some(&copy_kwargs_n),
+            let actual_i = masked_ge_fn.call1((int_data.clone(), 3_i64))?;
+            let expected_i = numpy_masked_ge.call1((int_data.clone(), 3_i64))?;
+            assert_eq!(repr_string(&actual_i), repr_string(&expected_i));
+
+            // Float data with float threshold.
+            let float_data = numpy
+                .getattr("array")?
+                .call1((vec![-1.5_f64, 0.0, 1.5, 2.5, 3.5],))?;
+            let actual_f = masked_ge_fn.call1((float_data.clone(), 1.0_f64))?;
+            let expected_f = numpy_masked_ge.call1((float_data.clone(), 1.0_f64))?;
+            assert_eq!(repr_string(&actual_f), repr_string(&expected_f));
+
+            // Threshold above all values — nothing masked.
+            let actual_none = masked_ge_fn.call1((int_data.clone(), 100_i64))?;
+            let expected_none = numpy_masked_ge.call1((int_data.clone(), 100_i64))?;
+            assert_eq!(repr_string(&actual_none), repr_string(&expected_none));
+
+            // Threshold below all values — everything masked.
+            let actual_all = masked_ge_fn.call1((int_data.clone(), 0_i64))?;
+            let expected_all = numpy_masked_ge.call1((int_data.clone(), 0_i64))?;
+            assert_eq!(repr_string(&actual_all), repr_string(&expected_all));
+
+            // Boundary: threshold equal to a present value (>= includes it).
+            let actual_eq = masked_ge_fn.call1((int_data.clone(), 3_i64))?;
+            let expected_eq = numpy_masked_ge.call1((int_data.clone(), 3_i64))?;
+            assert_eq!(repr_string(&actual_eq), repr_string(&expected_eq));
+
+            // 2-D input.
+            let data_2d = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 5.0, 2.0])?,
+                    PyList::new(py, [4.0_f64, 0.5, 6.0])?,
+                ],
+            )?,))?;
+            let actual_2d = masked_ge_fn.call1((data_2d.clone(), 3.0_f64))?;
+            let expected_2d = numpy_masked_ge.call1((data_2d.clone(), 3.0_f64))?;
+            assert_eq!(repr_string(&actual_2d), repr_string(&expected_2d));
+
+            // copy=False forwarded.
+            let copy_kwargs = PyDict::new(py);
+            copy_kwargs.set_item("copy", false)?;
+            let copy_kwargs_n = PyDict::new(py);
+            copy_kwargs_n.set_item("copy", false)?;
+            let actual_nocopy = masked_ge_fn.call((int_data.clone(), 3_i64), Some(&copy_kwargs))?;
+            let expected_nocopy =
+                numpy_masked_ge.call((int_data.clone(), 3_i64), Some(&copy_kwargs_n))?;
+            assert_eq!(repr_string(&actual_nocopy), repr_string(&expected_nocopy));
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn count_masked_matches_numpy_scalars_axes_and_error_surface() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let count_masked_fn = module.getattr("count_masked")?;
+            let numpy = py.import("numpy")?;
+            let ma = numpy.getattr("ma")?;
+            let numpy_count_masked = ma.getattr("count_masked")?;
+            let ma_array = ma.getattr("array")?;
+
+            // Default path returns a NumPy scalar count.
+            let masked_1d = ma_array.call(
+                (vec![1_i64, 2, 3, 4],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("mask", vec![false, true, false, true])?;
+                    kw
+                }),
             )?;
+            let actual_default = count_masked_fn.call1((masked_1d.clone(),))?;
+            let expected_default = numpy_count_masked.call1((masked_1d.clone(),))?;
+            assert_eq!(repr_string(&actual_default), repr_string(&expected_default));
+
+            // Axis reductions return ndarrays with NumPy's integer count dtype.
+            let masked_2d = ma_array.call(
+                (PyList::new(
+                    py,
+                    [
+                        PyList::new(py, [1_i64, 2, 3])?,
+                        PyList::new(py, [4_i64, 5, 6])?,
+                    ],
+                )?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item(
+                        "mask",
+                        PyList::new(
+                            py,
+                            [
+                                PyList::new(py, [false, true, false])?,
+                                PyList::new(py, [true, false, true])?,
+                            ],
+                        )?,
+                    )?;
+                    kw
+                }),
+            )?;
+            let actual_axis0 = count_masked_fn.call1((masked_2d.clone(), 0_i64))?;
+            let expected_axis0 = numpy_count_masked.call1((masked_2d.clone(), 0_i64))?;
+            assert_eq!(repr_string(&actual_axis0), repr_string(&expected_axis0));
+
+            let actual_axis1 = count_masked_fn.call1((masked_2d.clone(), 1_i64))?;
+            let expected_axis1 = numpy_count_masked.call1((masked_2d.clone(), 1_i64))?;
+            assert_eq!(repr_string(&actual_axis1), repr_string(&expected_axis1));
+
+            // Tuple axes collapse to a scalar when all dimensions reduce.
+            let axes = PyTuple::new(py, [0_i64, 1_i64])?;
+            let actual_tuple = count_masked_fn.call1((masked_2d.clone(), axes))?;
+            let expected_tuple = numpy_count_masked.call1((masked_2d.clone(), (0_i64, 1_i64)))?;
+            assert_eq!(repr_string(&actual_tuple), repr_string(&expected_tuple));
+
+            // Plain ndarrays without a mask should report zero masked entries.
+            let plain = numpy.getattr("array")?.call1((vec![10_i64, 20, 30],))?;
+            let actual_plain = count_masked_fn.call1((plain.clone(),))?;
+            let expected_plain = numpy_count_masked.call1((plain.clone(),))?;
+            assert_eq!(repr_string(&actual_plain), repr_string(&expected_plain));
+
+            // Invalid axis errors should surface unchanged.
+            let actual_err = count_masked_fn
+                .call1((masked_2d.clone(), 2_i64))
+                .unwrap_err();
+            let expected_err = numpy_count_masked
+                .call1((masked_2d.clone(), 2_i64))
+                .unwrap_err();
             assert_eq!(
-                repr_string(&actual_nocopy),
-                repr_string(&expected_nocopy)
+                actual_err.get_type(py).name()?.extract::<String>()?,
+                expected_err.get_type(py).name()?.extract::<String>()?
+            );
+            assert_eq!(
+                actual_err.value(py).str()?.extract::<String>()?,
+                expected_err.value(py).str()?.extract::<String>()?
             );
 
             Ok(())
