@@ -3379,6 +3379,62 @@ fn eigvals(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (a,))]
+fn det(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Real 2-D square inputs route to fnp_linalg::det_nxn for zero-overhead
+    // parity; everything else (complex, batched (..., M, M), non-2-D) is
+    // passed through to np.linalg.det so numpy's broadcasting / complex
+    // semantics are preserved exactly.
+    let bound = a.bind(py);
+    let numpy = py.import("numpy")?;
+    if let Ok(array) = extract_numeric_array(py, bound, "det(a)") {
+        let shape = array.shape();
+        if shape.len() == 2
+            && shape[0] == shape[1]
+            && !matches!(array.dtype(), DType::Complex64 | DType::Complex128)
+        {
+            let value = fnp_linalg::det_nxn(array.values(), shape[0]).map_err(map_ufunc_error)?;
+            return Ok(numpy
+                .getattr("float64")?
+                .call1((value,))?
+                .unbind());
+        }
+    }
+    Ok(numpy
+        .getattr("linalg")?
+        .getattr("det")?
+        .call1((bound,))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a,))]
+fn inv(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Real 2-D square inputs route to fnp_linalg::inv_nxn; complex /
+    // batched / non-2-D passthrough to np.linalg.inv.
+    let bound = a.bind(py);
+    let numpy = py.import("numpy")?;
+    if let Ok(array) = extract_numeric_array(py, bound, "inv(a)") {
+        let shape = array.shape();
+        if shape.len() == 2
+            && shape[0] == shape[1]
+            && !matches!(array.dtype(), DType::Complex64 | DType::Complex128)
+        {
+            let values =
+                fnp_linalg::inv_nxn(array.values(), shape[0]).map_err(map_ufunc_error)?;
+            let result = UFuncArray::new(vec![shape[0], shape[0]], values, DType::F64)
+                .map_err(map_ufunc_error)?;
+            return build_numpy_array_from_ufunc(py, &result);
+        }
+    }
+    Ok(numpy
+        .getattr("linalg")?
+        .getattr("inv")?
+        .call1((bound,))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, b, rcond=None))]
 fn lstsq(
     py: Python<'_>,
@@ -4302,6 +4358,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(minimum_fill_value, m)?)?;
     m.add_function(wrap_pyfunction!(pinv, m)?)?;
     m.add_function(wrap_pyfunction!(eigvals, m)?)?;
+    m.add_function(wrap_pyfunction!(det, m)?)?;
+    m.add_function(wrap_pyfunction!(inv, m)?)?;
     m.add_function(wrap_pyfunction!(lstsq, m)?)?;
     m.add_function(wrap_pyfunction!(tensorsolve, m)?)?;
     m.add_function(wrap_pyfunction!(tensorinv, m)?)?;
@@ -4582,6 +4640,8 @@ mod tests {
             assert!(module.getattr("eigvals").is_ok());
             assert!(module.getattr("rfft").is_ok());
             assert!(module.getattr("irfft").is_ok());
+            assert!(module.getattr("det").is_ok());
+            assert!(module.getattr("inv").is_ok());
             assert!(module.getattr("lstsq").is_ok());
             assert!(module.getattr("tensorsolve").is_ok());
             assert!(module.getattr("tensorinv").is_ok());
@@ -6207,6 +6267,186 @@ mod tests {
             assert_eq!(
                 repr_string(true_actual.bind(py)),
                 repr_string(&true_expected)
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn det_and_inv_match_numpy_across_real_complex_and_batched_inputs() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let det_fn = module.getattr("det")?;
+            let inv_fn = module.getattr("inv")?;
+            let numpy = py.import("numpy")?;
+            let numpy_det = numpy.getattr("linalg")?.getattr("det")?;
+            let numpy_inv = numpy.getattr("linalg")?.getattr("inv")?;
+            let allclose = numpy.getattr("allclose")?;
+            let isclose = numpy.getattr("isclose")?;
+
+            // Real 2-D 2x2 invertible — fast path.
+            let square = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [4.0_f64, 7.0])?,
+                    PyList::new(py, [2.0_f64, 6.0])?,
+                ],
+            )?,))?;
+            let actual_det = det_fn.call1((square.clone(),))?;
+            let expected_det = numpy_det.call1((square.clone(),))?;
+            assert!(
+                isclose
+                    .call1((&actual_det, &expected_det))?
+                    .extract::<bool>()?,
+                "det 2x2 diverged"
+            );
+            let actual_inv = inv_fn.call1((square.clone(),))?;
+            let expected_inv = numpy_inv.call1((square.clone(),))?;
+            assert!(
+                allclose
+                    .call1((&actual_inv, &expected_inv))?
+                    .extract::<bool>()?,
+                "inv 2x2 diverged"
+            );
+
+            // Real 2-D 3x3 invertible.
+            let three = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 2.0, 0.0])?,
+                    PyList::new(py, [0.0_f64, 1.0, 3.0])?,
+                    PyList::new(py, [4.0_f64, 0.0, 1.0])?,
+                ],
+            )?,))?;
+            let actual_det3 = det_fn.call1((three.clone(),))?;
+            let expected_det3 = numpy_det.call1((three.clone(),))?;
+            assert!(
+                isclose
+                    .call1((&actual_det3, &expected_det3))?
+                    .extract::<bool>()?,
+                "det 3x3 diverged"
+            );
+            let actual_inv3 = inv_fn.call1((three.clone(),))?;
+            let expected_inv3 = numpy_inv.call1((three.clone(),))?;
+            assert!(
+                allclose
+                    .call1((&actual_inv3, &expected_inv3))?
+                    .extract::<bool>()?,
+                "inv 3x3 diverged"
+            );
+
+            // Identity matrix — det(I) = 1, inv(I) = I.
+            let eye = numpy.getattr("eye")?.call1((4_i64,))?;
+            let actual_det_i = det_fn.call1((eye.clone(),))?;
+            let expected_det_i = numpy_det.call1((eye.clone(),))?;
+            assert!(
+                isclose
+                    .call1((&actual_det_i, &expected_det_i))?
+                    .extract::<bool>()?,
+                "det(eye) diverged"
+            );
+            let actual_inv_i = inv_fn.call1((eye.clone(),))?;
+            let expected_inv_i = numpy_inv.call1((eye.clone(),))?;
+            assert!(
+                allclose
+                    .call1((&actual_inv_i, &expected_inv_i))?
+                    .extract::<bool>()?,
+                "inv(eye) diverged"
+            );
+
+            // Batched 2x2 stack of 3 — passthrough path.
+            let batched = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(
+                        py,
+                        [
+                            PyList::new(py, [1.0_f64, 0.0])?,
+                            PyList::new(py, [0.0_f64, 1.0])?,
+                        ],
+                    )?,
+                    PyList::new(
+                        py,
+                        [
+                            PyList::new(py, [2.0_f64, 0.0])?,
+                            PyList::new(py, [0.0_f64, 2.0])?,
+                        ],
+                    )?,
+                    PyList::new(
+                        py,
+                        [
+                            PyList::new(py, [1.0_f64, 1.0])?,
+                            PyList::new(py, [0.0_f64, 1.0])?,
+                        ],
+                    )?,
+                ],
+            )?,))?;
+            let actual_det_batch = det_fn.call1((batched.clone(),))?;
+            let expected_det_batch = numpy_det.call1((batched.clone(),))?;
+            assert!(
+                allclose
+                    .call1((&actual_det_batch, &expected_det_batch))?
+                    .extract::<bool>()?,
+                "det batched diverged"
+            );
+            let actual_inv_batch = inv_fn.call1((batched.clone(),))?;
+            let expected_inv_batch = numpy_inv.call1((batched.clone(),))?;
+            assert!(
+                allclose
+                    .call1((&actual_inv_batch, &expected_inv_batch))?
+                    .extract::<bool>()?,
+                "inv batched diverged"
+            );
+
+            // Complex 2x2 — passthrough path.
+            let builtins = py.import("builtins")?;
+            let complex_2x2 = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        PyList::new(
+                            py,
+                            [
+                                builtins.getattr("complex")?.call1((1.0_f64, 2.0_f64))?,
+                                builtins.getattr("complex")?.call1((0.0_f64, 1.0_f64))?,
+                            ],
+                        )?,
+                        PyList::new(
+                            py,
+                            [
+                                builtins.getattr("complex")?.call1((3.0_f64, 0.0_f64))?,
+                                builtins.getattr("complex")?.call1((1.0_f64, -1.0_f64))?,
+                            ],
+                        )?,
+                    ],
+                )?,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", "complex128")?;
+                    kwargs
+                }),
+            )?;
+            let actual_det_c = det_fn.call1((complex_2x2.clone(),))?;
+            let expected_det_c = numpy_det.call1((complex_2x2.clone(),))?;
+            assert!(
+                isclose
+                    .call1((&actual_det_c, &expected_det_c))?
+                    .extract::<bool>()?,
+                "det complex diverged"
+            );
+            let actual_inv_c = inv_fn.call1((complex_2x2.clone(),))?;
+            let expected_inv_c = numpy_inv.call1((complex_2x2.clone(),))?;
+            assert!(
+                allclose
+                    .call1((&actual_inv_c, &expected_inv_c))?
+                    .extract::<bool>()?,
+                "inv complex diverged"
             );
 
             Ok(())
