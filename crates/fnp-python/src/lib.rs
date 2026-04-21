@@ -3379,6 +3379,19 @@ fn eigvals(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, UPLO="L"))]
+#[allow(non_snake_case)]
+fn eigvalsh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.linalg.eigvalsh so the UPLO selector, complex-Hermitian
+    // handling, and batched (..., M, M) broadcasting semantics match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let eigvalsh_fn = numpy.getattr("linalg")?.getattr("eigvalsh")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("UPLO", UPLO)?;
+    Ok(eigvalsh_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a,))]
 fn det(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Real 2-D square inputs route to fnp_linalg::det_nxn for zero-overhead
@@ -4358,6 +4371,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(minimum_fill_value, m)?)?;
     m.add_function(wrap_pyfunction!(pinv, m)?)?;
     m.add_function(wrap_pyfunction!(eigvals, m)?)?;
+    m.add_function(wrap_pyfunction!(eigvalsh, m)?)?;
     m.add_function(wrap_pyfunction!(det, m)?)?;
     m.add_function(wrap_pyfunction!(inv, m)?)?;
     m.add_function(wrap_pyfunction!(lstsq, m)?)?;
@@ -4640,6 +4654,7 @@ mod tests {
             assert!(module.getattr("eigvals").is_ok());
             assert!(module.getattr("rfft").is_ok());
             assert!(module.getattr("irfft").is_ok());
+            assert!(module.getattr("eigvalsh").is_ok());
             assert!(module.getattr("det").is_ok());
             assert!(module.getattr("inv").is_ok());
             assert!(module.getattr("lstsq").is_ok());
@@ -6267,6 +6282,136 @@ mod tests {
             assert_eq!(
                 repr_string(true_actual.bind(py)),
                 repr_string(&true_expected)
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn eigvalsh_matches_numpy_across_uplo_batched_and_complex() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let eigvalsh_fn = module.getattr("eigvalsh")?;
+            let numpy = py.import("numpy")?;
+            let numpy_eigvalsh = numpy.getattr("linalg")?.getattr("eigvalsh")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Real symmetric 2x2 — default UPLO='L'.
+            let spd = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [2.0_f64, 1.0])?,
+                    PyList::new(py, [1.0_f64, 2.0])?,
+                ],
+            )?,))?;
+            let actual = eigvalsh_fn.call1((spd.clone(),))?;
+            let expected = numpy_eigvalsh.call1((spd.clone(),))?;
+            assert!(
+                allclose.call1((&actual, &expected))?.extract::<bool>()?,
+                "eigvalsh 2x2 default UPLO diverged"
+            );
+
+            // Explicit UPLO='U' on a 3x3 symmetric — both triangles match by construction.
+            let sym3 = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [4.0_f64, 1.0, 0.0])?,
+                    PyList::new(py, [1.0_f64, 3.0, 2.0])?,
+                    PyList::new(py, [0.0_f64, 2.0, 5.0])?,
+                ],
+            )?,))?;
+            let kwargs_u = PyDict::new(py);
+            kwargs_u.set_item("UPLO", "U")?;
+            let actual_u = eigvalsh_fn.call((sym3.clone(),), Some(&kwargs_u))?;
+            let kwargs_u_n = PyDict::new(py);
+            kwargs_u_n.set_item("UPLO", "U")?;
+            let expected_u = numpy_eigvalsh.call((sym3.clone(),), Some(&kwargs_u_n))?;
+            assert!(
+                allclose
+                    .call1((&actual_u, &expected_u))?
+                    .extract::<bool>()?,
+                "eigvalsh UPLO='U' diverged"
+            );
+
+            // Identity → eigenvalues all 1.
+            let eye = numpy.getattr("eye")?.call1((4_i64,))?;
+            let actual_eye = eigvalsh_fn.call1((eye.clone(),))?;
+            let expected_eye = numpy_eigvalsh.call1((eye.clone(),))?;
+            assert!(
+                allclose
+                    .call1((&actual_eye, &expected_eye))?
+                    .extract::<bool>()?,
+                "eigvalsh(eye) diverged"
+            );
+
+            // Batched stack of two 2x2 symmetric matrices.
+            let batched = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(
+                        py,
+                        [
+                            PyList::new(py, [2.0_f64, 0.0])?,
+                            PyList::new(py, [0.0_f64, 3.0])?,
+                        ],
+                    )?,
+                    PyList::new(
+                        py,
+                        [
+                            PyList::new(py, [5.0_f64, 1.0])?,
+                            PyList::new(py, [1.0_f64, 4.0])?,
+                        ],
+                    )?,
+                ],
+            )?,))?;
+            let actual_batch = eigvalsh_fn.call1((batched.clone(),))?;
+            let expected_batch = numpy_eigvalsh.call1((batched.clone(),))?;
+            assert!(
+                allclose
+                    .call1((&actual_batch, &expected_batch))?
+                    .extract::<bool>()?,
+                "eigvalsh batched diverged"
+            );
+
+            // Complex Hermitian 2x2 — passthrough must forward numpy's real-eigenvalue guarantee.
+            let builtins = py.import("builtins")?;
+            let hermitian = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        PyList::new(
+                            py,
+                            [
+                                builtins.getattr("complex")?.call1((2.0_f64, 0.0_f64))?,
+                                builtins.getattr("complex")?.call1((1.0_f64, -1.0_f64))?,
+                            ],
+                        )?,
+                        PyList::new(
+                            py,
+                            [
+                                builtins.getattr("complex")?.call1((1.0_f64, 1.0_f64))?,
+                                builtins.getattr("complex")?.call1((3.0_f64, 0.0_f64))?,
+                            ],
+                        )?,
+                    ],
+                )?,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", "complex128")?;
+                    kwargs
+                }),
+            )?;
+            let actual_h = eigvalsh_fn.call1((hermitian.clone(),))?;
+            let expected_h = numpy_eigvalsh.call1((hermitian.clone(),))?;
+            assert!(
+                allclose.call1((&actual_h, &expected_h))?.extract::<bool>()?,
+                "eigvalsh Hermitian diverged"
             );
 
             Ok(())
