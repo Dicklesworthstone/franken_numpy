@@ -16021,17 +16021,114 @@ mod tests {
             copy_kwargs.set_item("copy", false)?;
             let copy_kwargs_n = PyDict::new(py);
             copy_kwargs_n.set_item("copy", false)?;
-            let actual_nocopy = masked_le_fn.call(
-                (int_data.clone(), 3_i64),
-                Some(&copy_kwargs),
+            let actual_nocopy = masked_le_fn.call((int_data.clone(), 3_i64), Some(&copy_kwargs))?;
+            let expected_nocopy =
+                numpy_masked_le.call((int_data.clone(), 3_i64), Some(&copy_kwargs_n))?;
+            assert_eq!(repr_string(&actual_nocopy), repr_string(&expected_nocopy));
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn masked_values_matches_numpy_across_tolerances_and_dtypes() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let masked_values_fn = module.getattr("masked_values")?;
+            let numpy = py.import("numpy")?;
+            let numpy_masked_values = numpy.getattr("ma")?.getattr("masked_values")?;
+
+            // Float data with float sentinel — defaults rtol=1e-5, atol=1e-8.
+            let float_data = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 1.5, 2.0, 1.5000001, 3.0],))?;
+            let actual = masked_values_fn.call1((float_data.clone(), 1.5_f64))?;
+            let expected = numpy_masked_values.call1((float_data.clone(), 1.5_f64))?;
+            assert_eq!(repr_string(&actual), repr_string(&expected));
+
+            // Loose rtol — should mask the slightly-off value 1.5000001.
+            let loose_kwargs = PyDict::new(py);
+            loose_kwargs.set_item("rtol", 1e-3_f64)?;
+            loose_kwargs.set_item("atol", 1e-3_f64)?;
+            let loose_kwargs_n = PyDict::new(py);
+            loose_kwargs_n.set_item("rtol", 1e-3_f64)?;
+            loose_kwargs_n.set_item("atol", 1e-3_f64)?;
+            let actual_loose = masked_values_fn.call(
+                (float_data.clone(), 1.5_f64),
+                Some(&loose_kwargs),
             )?;
-            let expected_nocopy = numpy_masked_le.call(
-                (int_data.clone(), 3_i64),
-                Some(&copy_kwargs_n),
+            let expected_loose = numpy_masked_values.call(
+                (float_data.clone(), 1.5_f64),
+                Some(&loose_kwargs_n),
+            )?;
+            assert_eq!(repr_string(&actual_loose), repr_string(&expected_loose));
+
+            // Tight tolerances — only exact matches.
+            let tight_kwargs = PyDict::new(py);
+            tight_kwargs.set_item("rtol", 0.0_f64)?;
+            tight_kwargs.set_item("atol", 0.0_f64)?;
+            let tight_kwargs_n = PyDict::new(py);
+            tight_kwargs_n.set_item("rtol", 0.0_f64)?;
+            tight_kwargs_n.set_item("atol", 0.0_f64)?;
+            let actual_tight = masked_values_fn.call(
+                (float_data.clone(), 1.5_f64),
+                Some(&tight_kwargs),
+            )?;
+            let expected_tight = numpy_masked_values.call(
+                (float_data.clone(), 1.5_f64),
+                Some(&tight_kwargs_n),
+            )?;
+            assert_eq!(repr_string(&actual_tight), repr_string(&expected_tight));
+
+            // Integer data — falls back to exact equality.
+            let int_data = numpy.getattr("array")?.call(
+                (vec![1_i64, 2, 3, 2, 5],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "int64")?;
+                    kw
+                }),
+            )?;
+            let actual_i = masked_values_fn.call1((int_data.clone(), 2_i64))?;
+            let expected_i = numpy_masked_values.call1((int_data.clone(), 2_i64))?;
+            assert_eq!(repr_string(&actual_i), repr_string(&expected_i));
+
+            // 2-D float input.
+            let data_2d = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 2.0, 3.0])?,
+                    PyList::new(py, [2.0_f64, 4.0, 5.0])?,
+                ],
+            )?,))?;
+            let actual_2d = masked_values_fn.call1((data_2d.clone(), 2.0_f64))?;
+            let expected_2d = numpy_masked_values.call1((data_2d.clone(), 2.0_f64))?;
+            assert_eq!(repr_string(&actual_2d), repr_string(&expected_2d));
+
+            // shrink=False forwarded.
+            let no_match_data = numpy
+                .getattr("array")?
+                .call1((vec![10.0_f64, 20.0, 30.0],))?;
+            let shrink_kwargs = PyDict::new(py);
+            shrink_kwargs.set_item("shrink", false)?;
+            let shrink_kwargs_n = PyDict::new(py);
+            shrink_kwargs_n.set_item("shrink", false)?;
+            let actual_shrink = masked_values_fn.call(
+                (no_match_data.clone(), 99.0_f64),
+                Some(&shrink_kwargs),
+            )?;
+            let expected_shrink = numpy_masked_values.call(
+                (no_match_data.clone(), 99.0_f64),
+                Some(&shrink_kwargs_n),
             )?;
             assert_eq!(
-                repr_string(&actual_nocopy),
-                repr_string(&expected_nocopy)
+                repr_string(&actual_shrink),
+                repr_string(&expected_shrink)
             );
 
             Ok(())
