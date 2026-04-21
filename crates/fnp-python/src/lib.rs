@@ -5016,6 +5016,34 @@ fn isrealobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, axis=None, weights=None, returned=false, keepdims=false))]
+fn average(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    weights: Option<Py<PyAny>>,
+    returned: bool,
+    keepdims: bool,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.average so weighted/unweighted mean matches
+    // numpy across axis=None/int/tuple, optional weights with
+    // broadcasting, returned=True (returns (avg, sum_of_weights)
+    // tuple), and keepdims shape preservation.
+    let numpy = py.import("numpy")?;
+    let avg_fn = numpy.getattr("average")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis_val) = axis {
+        kwargs.set_item("axis", axis_val.bind(py))?;
+    }
+    if let Some(weights_val) = weights {
+        kwargs.set_item("weights", weights_val.bind(py))?;
+    }
+    kwargs.set_item("returned", returned)?;
+    kwargs.set_item("keepdims", keepdims)?;
+    Ok(avg_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x,))]
 fn iscomplexobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.iscomplexobj. Returns True iff input has a
@@ -6154,6 +6182,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(i0, m)?)?;
     m.add_function(wrap_pyfunction!(asfortranarray, m)?)?;
     m.add_function(wrap_pyfunction!(isrealobj, m)?)?;
+    m.add_function(wrap_pyfunction!(average, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6460,6 +6489,7 @@ mod tests {
             assert!(module.getattr("i0").is_ok());
             assert!(module.getattr("asfortranarray").is_ok());
             assert!(module.getattr("isrealobj").is_ok());
+            assert!(module.getattr("average").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -24015,6 +24045,146 @@ mod tests {
                     i,
                 );
             }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn average_matches_numpy_across_axis_weights_and_returned() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let avg_fn = module.getattr("average")?;
+            let numpy = py.import("numpy")?;
+            let numpy_avg = numpy.getattr("average")?;
+            let isclose = numpy.getattr("isclose")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Unweighted 1-D matches mean.
+            let arr = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0, 4.0, 5.0],))?;
+            let ours = avg_fn.call1((arr.clone(),))?;
+            let theirs = numpy_avg.call1((arr.clone(),))?;
+            let ok: bool = isclose.call1((&ours, &theirs))?.extract()?;
+            assert!(ok, "average unweighted 1-D mismatch");
+
+            // Weighted 1-D.
+            let weights = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0, 4.0, 5.0],))?;
+            let ours_w = avg_fn.call(
+                (arr.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("weights", weights.clone())?;
+                    kw
+                }),
+            )?;
+            let theirs_w = numpy_avg.call(
+                (arr.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("weights", weights.clone())?;
+                    kw
+                }),
+            )?;
+            let ok_w: bool = isclose.call1((&ours_w, &theirs_w))?.extract()?;
+            assert!(ok_w, "average weighted 1-D mismatch");
+
+            // 2-D axis=0 and axis=1.
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![1.0_f64, 2.0, 3.0],
+                vec![4.0, 5.0, 6.0],
+                vec![7.0, 8.0, 9.0],
+            ],))?;
+            for axis in [0_i64, 1] {
+                let ours_ax = avg_fn.call(
+                    (two_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", axis)?;
+                        kw
+                    }),
+                )?;
+                let theirs_ax = numpy_avg.call(
+                    (two_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", axis)?;
+                        kw
+                    }),
+                )?;
+                let ok_ax: bool = allclose.call1((&ours_ax, &theirs_ax))?.extract()?;
+                assert!(ok_ax, "average 2-D axis={} mismatch", axis);
+            }
+
+            // returned=True yields (avg, sum_of_weights) tuple.
+            let ours_r = avg_fn.call(
+                (arr.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("returned", true)?;
+                    kw.set_item("weights", weights.clone())?;
+                    kw
+                }),
+            )?;
+            let theirs_r = numpy_avg.call(
+                (arr.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("returned", true)?;
+                    kw.set_item("weights", weights.clone())?;
+                    kw
+                }),
+            )?;
+            // Both should be 2-tuples; compare each element.
+            let ours_avg_part = ours_r.get_item(0_i64)?;
+            let theirs_avg_part = theirs_r.get_item(0_i64)?;
+            let ok_avg: bool = isclose.call1((&ours_avg_part, &theirs_avg_part))?.extract()?;
+            assert!(ok_avg, "average returned=True avg part mismatch");
+            let ours_sum_part = ours_r.get_item(1_i64)?;
+            let theirs_sum_part = theirs_r.get_item(1_i64)?;
+            let ok_sum: bool = isclose.call1((&ours_sum_part, &theirs_sum_part))?.extract()?;
+            assert!(ok_sum, "average returned=True sum_of_weights mismatch");
+
+            // Equal weights produces same as mean.
+            let equal_w = numpy.getattr("ones")?.call1((5_usize,))?;
+            let ours_eq = avg_fn.call(
+                (arr.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("weights", equal_w.clone())?;
+                    kw
+                }),
+            )?;
+            let mean_val = numpy.getattr("mean")?.call1((arr.clone(),))?;
+            let ok_eq: bool = isclose.call1((&ours_eq, &mean_val))?.extract()?;
+            assert!(ok_eq, "average with equal weights must equal mean");
+
+            // 2-D weights broadcasting on axis=1.
+            let row_weights = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            let ours_2d_w = avg_fn.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 1_i64)?;
+                    kw.set_item("weights", row_weights.clone())?;
+                    kw
+                }),
+            )?;
+            let theirs_2d_w = numpy_avg.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 1_i64)?;
+                    kw.set_item("weights", row_weights.clone())?;
+                    kw
+                }),
+            )?;
+            let ok_2d_w: bool = allclose.call1((&ours_2d_w, &theirs_2d_w))?.extract()?;
+            assert!(ok_2d_w, "average 2-D axis=1 with weights mismatch");
 
             Ok(())
         });
