@@ -4497,6 +4497,39 @@ fn cov(
 }
 
 #[pyfunction]
+#[pyo3(signature = (x, y=None, rowvar=true, bias=None, ddof=None, dtype=None))]
+fn corrcoef(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    y: Option<Py<PyAny>>,
+    rowvar: bool,
+    bias: Option<Py<PyAny>>,
+    ddof: Option<Py<PyAny>>,
+    dtype: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.corrcoef so row/column variable orientation, paired x/y
+    // inputs, deprecated bias/ddof keyword handling, and explicit output dtype
+    // match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let corrcoef_fn = numpy.getattr("corrcoef")?;
+    let kwargs = PyDict::new(py);
+    if let Some(y_val) = y {
+        kwargs.set_item("y", y_val.bind(py))?;
+    }
+    kwargs.set_item("rowvar", rowvar)?;
+    if let Some(bias_val) = bias {
+        kwargs.set_item("bias", bias_val.bind(py))?;
+    }
+    if let Some(ddof_val) = ddof {
+        kwargs.set_item("ddof", ddof_val.bind(py))?;
+    }
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    Ok(corrcoef_fn.call((x.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, b, fill_value=true))]
 fn allequal(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, fill_value: bool) -> PyResult<Py<PyAny>> {
     // Passthrough to np.ma.allequal so whole-array equality checks
@@ -4688,6 +4721,22 @@ fn rfftn(
         kwargs.set_item("out", out_val.bind(py))?;
     }
     Ok(rfftn_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (m, axis=None))]
+fn flip(py: Python<'_>, m: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.flip so axis-wise reversal matches numpy
+    // across axis=None (reverse all dimensions), int axis, axis tuple,
+    // and any input dimensionality. dtype is preserved; result is a
+    // view of the input when possible.
+    let numpy = py.import("numpy")?;
+    let flip_fn = numpy.getattr("flip")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis_val) = axis {
+        kwargs.set_item("axis", axis_val.bind(py))?;
+    }
+    Ok(flip_fn.call((m.bind(py),), Some(&kwargs))?.unbind())
 }
 
 #[pyfunction]
@@ -5742,6 +5791,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ma_count, m)?)?;
     m.add_function(wrap_pyfunction!(median, m)?)?;
     m.add_function(wrap_pyfunction!(cov, m)?)?;
+    m.add_function(wrap_pyfunction!(corrcoef, m)?)?;
     m.add_function(wrap_pyfunction!(allequal, m)?)?;
     m.add_function(wrap_pyfunction!(polyval, m)?)?;
     m.add_function(wrap_pyfunction!(nanmean, m)?)?;
@@ -5750,6 +5800,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(percentile, m)?)?;
     m.add_function(wrap_pyfunction!(lexsort, m)?)?;
     m.add_function(wrap_pyfunction!(rfftn, m)?)?;
+    m.add_function(wrap_pyfunction!(flip, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
     m.add_function(wrap_pyfunction!(compressed, m)?)?;
@@ -6023,6 +6074,7 @@ mod tests {
             assert!(module.getattr("ma_count").is_ok());
             assert!(module.getattr("median").is_ok());
             assert!(module.getattr("cov").is_ok());
+            assert!(module.getattr("corrcoef").is_ok());
             assert!(module.getattr("allequal").is_ok());
             assert!(module.getattr("polyval").is_ok());
             assert!(module.getattr("nanmean").is_ok());
@@ -6031,6 +6083,7 @@ mod tests {
             assert!(module.getattr("percentile").is_ok());
             assert!(module.getattr("lexsort").is_ok());
             assert!(module.getattr("rfftn").is_ok());
+            assert!(module.getattr("flip").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
             assert!(module.getattr("compressed").is_ok());
@@ -20215,6 +20268,119 @@ mod tests {
     }
 
     #[test]
+    fn corrcoef_matches_numpy_across_orientation_dtype_and_nan_paths() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let corrcoef_fn = module.getattr("corrcoef")?;
+            let numpy = py.import("numpy")?;
+            let numpy_corrcoef = numpy.getattr("corrcoef")?;
+            let diag = numpy.getattr("diag")?;
+            let allclose = numpy.getattr("allclose")?;
+            let ones = numpy.getattr("ones")?;
+
+            let matrix = numpy.getattr("array")?.call1((vec![
+                vec![0.0_f64, 2.0, 4.0, 6.0],
+                vec![1.0, 3.0, 6.0, 10.0],
+                vec![5.0, 7.0, 11.0, 13.0],
+            ],))?;
+
+            // Default single-array path with rowvar=True.
+            let ours_default = corrcoef_fn.call1((matrix.clone(),))?;
+            let theirs_default = numpy_corrcoef.call1((matrix.clone(),))?;
+            assert_array_matches_numpy(&ours_default, &theirs_default)?;
+
+            // rowvar=False treats columns as variables.
+            let ours_rowvar_false = corrcoef_fn.call(
+                (matrix.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("rowvar", false)?;
+                    kw
+                }),
+            )?;
+            let theirs_rowvar_false = numpy_corrcoef.call(
+                (matrix.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("rowvar", false)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_rowvar_false, &theirs_rowvar_false)?;
+
+            // Separate x and y arrays.
+            let x = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 2.0, 4.0, 8.0, 16.0],))?;
+            let y = numpy
+                .getattr("array")?
+                .call1((vec![2.0_f64, 1.0, 3.0, 5.0, 9.0],))?;
+            let ours_pair = corrcoef_fn.call(
+                (x.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("y", y.clone())?;
+                    kw
+                }),
+            )?;
+            let theirs_pair = numpy_corrcoef.call(
+                (x.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("y", y.clone())?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_pair, &theirs_pair)?;
+
+            // Explicit dtype controls the output dtype.
+            let dtype_float32 = numpy.getattr("float32")?;
+            let ours_dtype = corrcoef_fn.call(
+                (matrix.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", dtype_float32.clone())?;
+                    kw
+                }),
+            )?;
+            let theirs_dtype = numpy_corrcoef.call(
+                (matrix.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", dtype_float32.clone())?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_dtype, &theirs_dtype)?;
+
+            // NaNs propagate to the same positions as numpy.
+            let with_nan = numpy.getattr("array")?.call1((vec![
+                vec![1.0_f64, f64::NAN, 3.0, 5.0],
+                vec![2.0, 4.0, 6.0, 8.0],
+            ],))?;
+            let ours_nan = corrcoef_fn.call1((with_nan.clone(),))?;
+            let theirs_nan = numpy_corrcoef.call1((with_nan.clone(),))?;
+            assert_array_matches_numpy(&ours_nan, &theirs_nan)?;
+
+            // Self-correlation diagonal remains ~1 for finite, non-constant inputs.
+            let diag_default = diag.call1((&ours_default,))?;
+            let expected_ones = ones.call1((vec![3_i64],))?;
+            let diag_all_ones: bool = allclose.call1((&diag_default, &expected_ones))?.extract()?;
+            assert!(
+                diag_all_ones,
+                "corrcoef diagonal should be ~1 for self-correlation"
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn allequal_matches_numpy_across_masked_and_fill_value_paths() {
         with_python(|py| {
             if !numpy_available(py) {
@@ -20876,14 +21042,18 @@ mod tests {
             let allclose = numpy.getattr("allclose")?;
 
             // Scalar q on 1-D: q=50 (median).
-            let one_d = numpy.getattr("array")?.call1((vec![3.0_f64, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0],))?;
+            let one_d = numpy
+                .getattr("array")?
+                .call1((vec![3.0_f64, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0],))?;
             let ours = percentile_fn.call1((one_d.clone(), 50.0_f64))?;
             let theirs = numpy_percentile.call1((one_d.clone(), 50.0_f64))?;
             let ok: bool = isclose.call1((&ours, &theirs))?.extract()?;
             assert!(ok, "percentile q=50 1-D mismatch");
 
             // Vector q (quartiles).
-            let qs = numpy.getattr("array")?.call1((vec![25.0_f64, 50.0, 75.0],))?;
+            let qs = numpy
+                .getattr("array")?
+                .call1((vec![25.0_f64, 50.0, 75.0],))?;
             let ours_qs = percentile_fn.call1((one_d.clone(), qs.clone()))?;
             let theirs_qs = numpy_percentile.call1((one_d.clone(), qs.clone()))?;
             let ok_qs: bool = allclose.call1((&ours_qs, &theirs_qs))?.extract()?;
@@ -20967,7 +21137,9 @@ mod tests {
             );
 
             // Integer input: dtype promotes to float.
-            let ints = numpy.getattr("array")?.call1((vec![1_i64, 2, 3, 4, 5, 6, 7, 8, 9, 10],))?;
+            let ints = numpy
+                .getattr("array")?
+                .call1((vec![1_i64, 2, 3, 4, 5, 6, 7, 8, 9, 10],))?;
             let ours_i = percentile_fn.call1((ints.clone(), 50.0_f64))?;
             let theirs_i = numpy_percentile.call1((ints.clone(), 50.0_f64))?;
             let ok_i: bool = isclose.call1((&ours_i, &theirs_i))?.extract()?;
@@ -21015,10 +21187,9 @@ mod tests {
             assert_array_matches_numpy(&ours, &theirs)?;
 
             // 2-D keys array: each row is a key (last row is primary).
-            let two_d_keys = numpy.getattr("array")?.call1((vec![
-                vec![5_i64, 4, 3, 2, 1],
-                vec![1_i64, 1, 1, 1, 1],
-            ],))?;
+            let two_d_keys = numpy
+                .getattr("array")?
+                .call1((vec![vec![5_i64, 4, 3, 2, 1], vec![1_i64, 1, 1, 1, 1]],))?;
             assert_array_matches_numpy(
                 &lexsort_fn.call1((two_d_keys.clone(),))?,
                 &numpy_lexsort.call1((two_d_keys.clone(),))?,
@@ -21027,23 +21198,21 @@ mod tests {
             // Ties broken by the secondary key: when primary values
             // tie at indices, the secondary key determines order.
             let primary_with_ties = numpy.getattr("array")?.call1((vec![1_i64, 2, 2, 1, 3],))?;
-            let secondary_breaker =
-                numpy.getattr("array")?.call1((vec![5_i64, 4, 3, 6, 0],))?;
-            let tie_keys = PyTuple::new(
-                py,
-                [secondary_breaker.clone(), primary_with_ties.clone()],
-            )?;
+            let secondary_breaker = numpy.getattr("array")?.call1((vec![5_i64, 4, 3, 6, 0],))?;
+            let tie_keys =
+                PyTuple::new(py, [secondary_breaker.clone(), primary_with_ties.clone()])?;
             let ours_ties = lexsort_fn.call1((tie_keys.clone(),))?;
             let theirs_ties = numpy_lexsort.call1((tie_keys.clone(),))?;
             assert_array_matches_numpy(&ours_ties, &theirs_ties)?;
             // Verify the resulting permutation actually sorts the keys.
-            let primary_sorted = primary_with_ties
-                .get_item(theirs_ties.clone())?;
+            let primary_sorted = primary_with_ties.get_item(theirs_ties.clone())?;
             let expected_sorted = numpy.getattr("array")?.call1((vec![1_i64, 1, 2, 2, 3],))?;
             assert_array_matches_numpy(&primary_sorted, &expected_sorted)?;
 
             // Single-key input via length-1 tuple matches numpy.
-            let single_key = numpy.getattr("array")?.call1((vec![3_i64, 1, 4, 1, 5, 9, 2, 6],))?;
+            let single_key = numpy
+                .getattr("array")?
+                .call1((vec![3_i64, 1, 4, 1, 5, 9, 2, 6],))?;
             let single_tuple = PyTuple::new(py, [single_key.clone()])?;
             assert_array_matches_numpy(
                 &lexsort_fn.call1((single_tuple.clone(),))?,
@@ -21051,10 +21220,9 @@ mod tests {
             )?;
 
             // axis=0 on 2-D keys (each column treated as an entry along axis 0).
-            let axis_keys = numpy.getattr("array")?.call1((vec![
-                vec![3_i64, 1, 2],
-                vec![5_i64, 5, 5],
-            ],))?;
+            let axis_keys = numpy
+                .getattr("array")?
+                .call1((vec![vec![3_i64, 1, 2], vec![5_i64, 5, 5]],))?;
             let kwargs_axis0 = PyDict::new(py);
             kwargs_axis0.set_item("axis", 0_i64)?;
             assert_array_matches_numpy(
@@ -21063,11 +21231,13 @@ mod tests {
             )?;
 
             // String keys.
-            let string_secondary = numpy.getattr("array")?.call1((vec!["b", "a", "c", "b", "a"],))?;
-            let string_primary =
-                numpy.getattr("array")?.call1((vec!["one", "one", "two", "two", "three"],))?;
-            let string_keys =
-                PyTuple::new(py, [string_secondary.clone(), string_primary.clone()])?;
+            let string_secondary = numpy
+                .getattr("array")?
+                .call1((vec!["b", "a", "c", "b", "a"],))?;
+            let string_primary = numpy
+                .getattr("array")?
+                .call1((vec!["one", "one", "two", "two", "three"],))?;
+            let string_keys = PyTuple::new(py, [string_secondary.clone(), string_primary.clone()])?;
             assert_array_matches_numpy(
                 &lexsort_fn.call1((string_keys.clone(),))?,
                 &numpy_lexsort.call1((string_keys.clone(),))?,
@@ -21198,6 +21368,127 @@ mod tests {
             )?;
             let ok_rt: bool = allclose.call1((&round_trip, &three_d))?.extract()?;
             assert!(ok_rt, "irfftn(rfftn(x)) must round-trip for even-shape x");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn flip_matches_numpy_across_axis_dims_and_dtype() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let flip_fn = module.getattr("flip")?;
+            let numpy = py.import("numpy")?;
+            let numpy_flip = numpy.getattr("flip")?;
+
+            // 1-D reverse.
+            let one_d = numpy.getattr("array")?.call1((vec![1_i64, 2, 3, 4, 5],))?;
+            assert_array_matches_numpy(
+                &flip_fn.call1((one_d.clone(),))?,
+                &numpy_flip.call1((one_d.clone(),))?,
+            )?;
+
+            // 2-D axis=0 (row reversal) and axis=1 (column reversal).
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![1_i64, 2, 3],
+                vec![4, 5, 6],
+                vec![7, 8, 9],
+            ],))?;
+            for axis in [0_i64, 1] {
+                assert_array_matches_numpy(
+                    &flip_fn.call(
+                        (two_d.clone(),),
+                        Some(&{
+                            let kw = PyDict::new(py);
+                            kw.set_item("axis", axis)?;
+                            kw
+                        }),
+                    )?,
+                    &numpy_flip.call(
+                        (two_d.clone(),),
+                        Some(&{
+                            let kw = PyDict::new(py);
+                            kw.set_item("axis", axis)?;
+                            kw
+                        }),
+                    )?,
+                )?;
+            }
+
+            // axis=None reverses all dimensions.
+            assert_array_matches_numpy(
+                &flip_fn.call1((two_d.clone(),))?,
+                &numpy_flip.call1((two_d.clone(),))?,
+            )?;
+
+            // axis tuple selects a subset of axes.
+            let axis_tuple = PyTuple::new(py, [0_i64, 1])?;
+            assert_array_matches_numpy(
+                &flip_fn.call(
+                    (two_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", &axis_tuple)?;
+                        kw
+                    }),
+                )?,
+                &numpy_flip.call(
+                    (two_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", &axis_tuple)?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // 3-D mixed-axis flip.
+            let three_d = numpy.getattr("array")?.call1((vec![
+                vec![vec![1_i64, 2], vec![3, 4]],
+                vec![vec![5, 6], vec![7, 8]],
+                vec![vec![9, 10], vec![11, 12]],
+            ],))?;
+            for axis in [0_i64, 1, 2, -1] {
+                assert_array_matches_numpy(
+                    &flip_fn.call(
+                        (three_d.clone(),),
+                        Some(&{
+                            let kw = PyDict::new(py);
+                            kw.set_item("axis", axis)?;
+                            kw
+                        }),
+                    )?,
+                    &numpy_flip.call(
+                        (three_d.clone(),),
+                        Some(&{
+                            let kw = PyDict::new(py);
+                            kw.set_item("axis", axis)?;
+                            kw
+                        }),
+                    )?,
+                )?;
+            }
+
+            // Float dtype preserved.
+            let floats = numpy.getattr("array")?.call(
+                (vec![1.5_f64, 2.5, 3.5, 4.5],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("float64")?)?;
+                    kw
+                }),
+            )?;
+            let ours_f = flip_fn.call1((floats.clone(),))?;
+            let theirs_f = numpy_flip.call1((floats.clone(),))?;
+            assert_array_matches_numpy(&ours_f, &theirs_f)?;
+            let ours_dtype = ours_f.getattr("dtype")?.str()?.to_string();
+            let theirs_dtype = theirs_f.getattr("dtype")?.str()?.to_string();
+            assert_eq!(ours_dtype, theirs_dtype, "flip dtype must match numpy");
 
             Ok(())
         });
