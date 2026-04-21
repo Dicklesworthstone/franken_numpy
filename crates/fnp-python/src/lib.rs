@@ -3379,6 +3379,32 @@ fn eigvals(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, tol=None, hermitian=false, *, rtol=None))]
+fn matrix_rank(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    tol: Option<Py<PyAny>>,
+    hermitian: bool,
+    rtol: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.linalg.matrix_rank so the SVD-based rank calculation,
+    // tol/rtol precedence (rtol is keyword-only, mutually-exclusive with tol),
+    // hermitian fast path, and batched (..., M, N) broadcasting match numpy
+    // exactly across 1-D vectors, 2-D matrices, and stacked arrays.
+    let numpy = py.import("numpy")?;
+    let matrix_rank_fn = numpy.getattr("linalg")?.getattr("matrix_rank")?;
+    let kwargs = PyDict::new(py);
+    if let Some(value) = tol {
+        kwargs.set_item("tol", value.bind(py))?;
+    }
+    kwargs.set_item("hermitian", hermitian)?;
+    if let Some(value) = rtol {
+        kwargs.set_item("rtol", value.bind(py))?;
+    }
+    Ok(matrix_rank_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a,))]
 fn slogdet(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.linalg.slogdet so the (sign, logabsdet) SlogdetResult
@@ -3389,6 +3415,93 @@ fn slogdet(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
         .getattr("linalg")?
         .getattr("slogdet")?
         .call1((a.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, full_matrices=true, compute_uv=true, hermitian=false))]
+fn svd(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    full_matrices: bool,
+    compute_uv: bool,
+    hermitian: bool,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.linalg.svd so the SVDResult namedtuple identity,
+    // compute_uv=False scalar-array path, hermitian fast path, and stacked
+    // (..., M, N) semantics match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let svd_fn = numpy.getattr("linalg")?.getattr("svd")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("full_matrices", full_matrices)?;
+    kwargs.set_item("compute_uv", compute_uv)?;
+    kwargs.set_item("hermitian", hermitian)?;
+    Ok(svd_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, mode="reduced"))]
+fn qr(py: Python<'_>, a: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.linalg.qr so QRResult / ndarray / tuple return types,
+    // deprecated compatibility modes, and stacked (..., M, N) semantics stay
+    // byte-for-byte aligned with numpy.
+    let numpy = py.import("numpy")?;
+    let qr_fn = numpy.getattr("linalg")?.getattr("qr")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("mode", mode)?;
+    Ok(qr_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn cholesky(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    match args.len()? {
+        0 => {
+            return Err(PyTypeError::new_err(
+                "cholesky() missing 1 required positional argument: 'a'",
+            ));
+        }
+        1 => {}
+        count => {
+            return Err(PyTypeError::new_err(format!(
+                "cholesky() takes 1 positional argument but {count} were given"
+            )));
+        }
+    }
+
+    // Passthrough to np.linalg.cholesky so the keyword-only upper selector,
+    // lower/upper triangle semantics, complex Hermitian handling, and batched
+    // (..., M, M) behavior match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let cholesky_fn = numpy.getattr("linalg")?.getattr("cholesky")?;
+    let call_kwargs = PyDict::new(py);
+    let mut saw_upper = false;
+    if let Some(kwargs) = kwargs {
+        for (key, value) in kwargs.iter() {
+            let name = key.extract::<String>()?;
+            match name.as_str() {
+                "upper" => {
+                    call_kwargs.set_item("upper", value)?;
+                    saw_upper = true;
+                }
+                _ => {
+                    return Err(PyTypeError::new_err(format!(
+                        "cholesky() got an unexpected keyword argument '{name}'"
+                    )));
+                }
+            }
+        }
+    }
+    if !saw_upper {
+        call_kwargs.set_item("upper", false)?;
+    }
+
+    Ok(cholesky_fn
+        .call((args.get_item(0)?,), Some(&call_kwargs))?
         .unbind())
 }
 
@@ -3435,10 +3548,7 @@ fn det(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
             && !matches!(array.dtype(), DType::Complex64 | DType::Complex128)
         {
             let value = fnp_linalg::det_nxn(array.values(), shape[0]).map_err(map_ufunc_error)?;
-            return Ok(numpy
-                .getattr("float64")?
-                .call1((value,))?
-                .unbind());
+            return Ok(numpy.getattr("float64")?.call1((value,))?.unbind());
         }
     }
     Ok(numpy
@@ -3461,8 +3571,7 @@ fn inv(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
             && shape[0] == shape[1]
             && !matches!(array.dtype(), DType::Complex64 | DType::Complex128)
         {
-            let values =
-                fnp_linalg::inv_nxn(array.values(), shape[0]).map_err(map_ufunc_error)?;
+            let values = fnp_linalg::inv_nxn(array.values(), shape[0]).map_err(map_ufunc_error)?;
             let result = UFuncArray::new(vec![shape[0], shape[0]], values, DType::F64)
                 .map_err(map_ufunc_error)?;
             return build_numpy_array_from_ufunc(py, &result);
@@ -4400,6 +4509,10 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pinv, m)?)?;
     m.add_function(wrap_pyfunction!(eigvals, m)?)?;
     m.add_function(wrap_pyfunction!(slogdet, m)?)?;
+    m.add_function(wrap_pyfunction!(matrix_rank, m)?)?;
+    m.add_function(wrap_pyfunction!(svd, m)?)?;
+    m.add_function(wrap_pyfunction!(qr, m)?)?;
+    m.add_function(wrap_pyfunction!(cholesky, m)?)?;
     m.add_function(wrap_pyfunction!(solve, m)?)?;
     m.add_function(wrap_pyfunction!(eigvalsh, m)?)?;
     m.add_function(wrap_pyfunction!(det, m)?)?;
@@ -4685,6 +4798,10 @@ mod tests {
             assert!(module.getattr("rfft").is_ok());
             assert!(module.getattr("irfft").is_ok());
             assert!(module.getattr("slogdet").is_ok());
+            assert!(module.getattr("matrix_rank").is_ok());
+            assert!(module.getattr("svd").is_ok());
+            assert!(module.getattr("qr").is_ok());
+            assert!(module.getattr("cholesky").is_ok());
             assert!(module.getattr("solve").is_ok());
             assert!(module.getattr("eigvalsh").is_ok());
             assert!(module.getattr("det").is_ok());
@@ -6489,6 +6606,599 @@ mod tests {
     }
 
     #[test]
+    fn svd_matches_numpy_namedtuple_array_and_error_paths() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let svd_fn = module.getattr("svd")?;
+            let numpy = py.import("numpy")?;
+            let numpy_svd = numpy.getattr("linalg")?.getattr("svd")?;
+            let builtins = py.import("builtins")?;
+
+            let matrix = numeric_array(
+                py,
+                vec![vec![1.0_f64, 2.0, 3.0], vec![4.0_f64, 5.0, 6.0]],
+                "float64",
+            );
+            let actual_default = svd_fn.call1((matrix.clone(),))?;
+            let expected_default = numpy_svd.call1((matrix.clone(),))?;
+            assert_array_matches_numpy(
+                &actual_default.getattr("U")?,
+                &expected_default.getattr("U")?,
+            )?;
+            assert_array_matches_numpy(
+                &actual_default.getattr("S")?,
+                &expected_default.getattr("S")?,
+            )?;
+            assert_array_matches_numpy(
+                &actual_default.getattr("Vh")?,
+                &expected_default.getattr("Vh")?,
+            )?;
+
+            let reduced_kwargs = PyDict::new(py);
+            reduced_kwargs.set_item("full_matrices", false)?;
+            let actual_reduced = svd_fn.call((matrix.clone(),), Some(&reduced_kwargs))?;
+            let expected_reduced = numpy_svd.call((matrix.clone(),), Some(&reduced_kwargs))?;
+            assert_array_matches_numpy(
+                &actual_reduced.getattr("U")?,
+                &expected_reduced.getattr("U")?,
+            )?;
+            assert_array_matches_numpy(
+                &actual_reduced.getattr("S")?,
+                &expected_reduced.getattr("S")?,
+            )?;
+            assert_array_matches_numpy(
+                &actual_reduced.getattr("Vh")?,
+                &expected_reduced.getattr("Vh")?,
+            )?;
+
+            let values_only_kwargs = PyDict::new(py);
+            values_only_kwargs.set_item("compute_uv", false)?;
+            let actual_values = svd_fn.call((matrix.clone(),), Some(&values_only_kwargs))?;
+            let expected_values = numpy_svd.call((matrix.clone(),), Some(&values_only_kwargs))?;
+            assert_array_matches_numpy(&actual_values, &expected_values)?;
+
+            let hermitian_matrix = numeric_array(
+                py,
+                vec![
+                    vec![5.0_f64, 2.0, 1.0],
+                    vec![2.0_f64, 4.0, 0.0],
+                    vec![1.0_f64, 0.0, 3.0],
+                ],
+                "float64",
+            );
+            let hermitian_kwargs = PyDict::new(py);
+            hermitian_kwargs.set_item("hermitian", true)?;
+            let actual_hermitian =
+                svd_fn.call((hermitian_matrix.clone(),), Some(&hermitian_kwargs))?;
+            let expected_hermitian =
+                numpy_svd.call((hermitian_matrix.clone(),), Some(&hermitian_kwargs))?;
+            assert_array_matches_numpy(
+                &actual_hermitian.getattr("U")?,
+                &expected_hermitian.getattr("U")?,
+            )?;
+            assert_array_matches_numpy(
+                &actual_hermitian.getattr("S")?,
+                &expected_hermitian.getattr("S")?,
+            )?;
+            assert_array_matches_numpy(
+                &actual_hermitian.getattr("Vh")?,
+                &expected_hermitian.getattr("Vh")?,
+            )?;
+
+            let complex_batch = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        PyList::new(
+                            py,
+                            [
+                                PyList::new(
+                                    py,
+                                    [
+                                        builtins.getattr("complex")?.call1((1.0_f64, 1.0_f64))?,
+                                        builtins.getattr("complex")?.call1((2.0_f64, -1.0_f64))?,
+                                    ],
+                                )?,
+                                PyList::new(
+                                    py,
+                                    [
+                                        builtins.getattr("complex")?.call1((0.0_f64, 2.0_f64))?,
+                                        builtins.getattr("complex")?.call1((3.0_f64, 0.5_f64))?,
+                                    ],
+                                )?,
+                            ],
+                        )?,
+                        PyList::new(
+                            py,
+                            [
+                                PyList::new(
+                                    py,
+                                    [
+                                        builtins.getattr("complex")?.call1((2.0_f64, 0.0_f64))?,
+                                        builtins.getattr("complex")?.call1((1.0_f64, 1.0_f64))?,
+                                    ],
+                                )?,
+                                PyList::new(
+                                    py,
+                                    [
+                                        builtins.getattr("complex")?.call1((4.0_f64, -1.0_f64))?,
+                                        builtins.getattr("complex")?.call1((0.5_f64, 2.0_f64))?,
+                                    ],
+                                )?,
+                            ],
+                        )?,
+                    ],
+                )?,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", "complex128")?;
+                    kwargs
+                }),
+            )?;
+            let actual_batch = svd_fn.call1((complex_batch.clone(),))?;
+            let expected_batch = numpy_svd.call1((complex_batch.clone(),))?;
+            assert_array_matches_numpy(&actual_batch.getattr("U")?, &expected_batch.getattr("U")?)?;
+            assert_array_matches_numpy(&actual_batch.getattr("S")?, &expected_batch.getattr("S")?)?;
+            assert_array_matches_numpy(
+                &actual_batch.getattr("Vh")?,
+                &expected_batch.getattr("Vh")?,
+            )?;
+
+            let vector = numeric_array(py, vec![1.0_f64, 2.0, 3.0], "float64");
+            let actual_error =
+                call_outcome(py, &svd_fn, &PyTuple::new(py, [vector.clone()])?, None)?;
+            let expected_error = call_outcome(py, &numpy_svd, &PyTuple::new(py, [vector])?, None)?;
+            assert_eq!(actual_error, expected_error);
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn qr_matches_numpy_modes_and_error_surface() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let qr_fn = module.getattr("qr")?;
+            let numpy = py.import("numpy")?;
+            let numpy_qr = numpy.getattr("linalg")?.getattr("qr")?;
+            let builtins = py.import("builtins")?;
+
+            let tall = numeric_array(
+                py,
+                vec![vec![1.0_f64, 2.0], vec![3.0_f64, 4.0], vec![5.0_f64, 6.0]],
+                "float64",
+            );
+            let actual_reduced = qr_fn.call1((tall.clone(),))?;
+            let expected_reduced = numpy_qr.call1((tall.clone(),))?;
+            assert_array_matches_numpy(
+                &actual_reduced.getattr("Q")?,
+                &expected_reduced.getattr("Q")?,
+            )?;
+            assert_array_matches_numpy(
+                &actual_reduced.getattr("R")?,
+                &expected_reduced.getattr("R")?,
+            )?;
+
+            let complete_kwargs = PyDict::new(py);
+            complete_kwargs.set_item("mode", "complete")?;
+            let actual_complete = qr_fn.call((tall.clone(),), Some(&complete_kwargs))?;
+            let expected_complete = numpy_qr.call((tall.clone(),), Some(&complete_kwargs))?;
+            assert_array_matches_numpy(
+                &actual_complete.getattr("Q")?,
+                &expected_complete.getattr("Q")?,
+            )?;
+            assert_array_matches_numpy(
+                &actual_complete.getattr("R")?,
+                &expected_complete.getattr("R")?,
+            )?;
+
+            let r_kwargs = PyDict::new(py);
+            r_kwargs.set_item("mode", "r")?;
+            let actual_r = qr_fn.call((tall.clone(),), Some(&r_kwargs))?;
+            let expected_r = numpy_qr.call((tall.clone(),), Some(&r_kwargs))?;
+            assert_array_matches_numpy(&actual_r, &expected_r)?;
+
+            let raw_kwargs = PyDict::new(py);
+            raw_kwargs.set_item("mode", "raw")?;
+            let actual_raw = qr_fn.call((tall.clone(),), Some(&raw_kwargs))?;
+            let expected_raw = numpy_qr.call((tall.clone(),), Some(&raw_kwargs))?;
+            assert_index_tuple_matches_numpy(&actual_raw, &expected_raw)?;
+
+            let full_outcome = call_outcome(
+                py,
+                &qr_fn,
+                &PyTuple::new(py, [tall.clone()])?,
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("mode", "full")?;
+                    kwargs
+                }),
+            )?;
+            let expected_full_outcome = call_outcome(
+                py,
+                &numpy_qr,
+                &PyTuple::new(py, [tall.clone()])?,
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("mode", "full")?;
+                    kwargs
+                }),
+            )?;
+            assert_eq!(full_outcome, expected_full_outcome);
+
+            let economic_outcome = call_outcome(
+                py,
+                &qr_fn,
+                &PyTuple::new(py, [tall.clone()])?,
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("mode", "economic")?;
+                    kwargs
+                }),
+            )?;
+            let expected_economic_outcome = call_outcome(
+                py,
+                &numpy_qr,
+                &PyTuple::new(py, [tall.clone()])?,
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("mode", "economic")?;
+                    kwargs
+                }),
+            )?;
+            assert_eq!(economic_outcome, expected_economic_outcome);
+
+            let alias_outcome = call_outcome(
+                py,
+                &qr_fn,
+                &PyTuple::new(py, [tall.clone()])?,
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("mode", "f")?;
+                    kwargs
+                }),
+            )?;
+            let expected_alias_outcome = call_outcome(
+                py,
+                &numpy_qr,
+                &PyTuple::new(py, [tall.clone()])?,
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("mode", "f")?;
+                    kwargs
+                }),
+            )?;
+            assert_eq!(alias_outcome, expected_alias_outcome);
+
+            let complex_batch = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        PyList::new(
+                            py,
+                            [
+                                PyList::new(
+                                    py,
+                                    [
+                                        builtins.getattr("complex")?.call1((1.0_f64, 1.0_f64))?,
+                                        builtins.getattr("complex")?.call1((2.0_f64, 0.0_f64))?,
+                                    ],
+                                )?,
+                                PyList::new(
+                                    py,
+                                    [
+                                        builtins.getattr("complex")?.call1((3.0_f64, -1.0_f64))?,
+                                        builtins.getattr("complex")?.call1((4.0_f64, 2.0_f64))?,
+                                    ],
+                                )?,
+                            ],
+                        )?,
+                        PyList::new(
+                            py,
+                            [
+                                PyList::new(
+                                    py,
+                                    [
+                                        builtins.getattr("complex")?.call1((0.5_f64, 0.0_f64))?,
+                                        builtins.getattr("complex")?.call1((1.5_f64, -0.5_f64))?,
+                                    ],
+                                )?,
+                                PyList::new(
+                                    py,
+                                    [
+                                        builtins.getattr("complex")?.call1((2.0_f64, 1.0_f64))?,
+                                        builtins.getattr("complex")?.call1((1.0_f64, 0.0_f64))?,
+                                    ],
+                                )?,
+                            ],
+                        )?,
+                    ],
+                )?,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", "complex128")?;
+                    kwargs
+                }),
+            )?;
+            let actual_batch = qr_fn.call1((complex_batch.clone(),))?;
+            let expected_batch = numpy_qr.call1((complex_batch.clone(),))?;
+            assert_array_matches_numpy(&actual_batch.getattr("Q")?, &expected_batch.getattr("Q")?)?;
+            assert_array_matches_numpy(&actual_batch.getattr("R")?, &expected_batch.getattr("R")?)?;
+
+            let bad_mode = call_outcome(
+                py,
+                &qr_fn,
+                &PyTuple::new(py, [tall.clone()])?,
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("mode", "hostile_mode")?;
+                    kwargs
+                }),
+            )?;
+            let expected_bad_mode = call_outcome(
+                py,
+                &numpy_qr,
+                &PyTuple::new(py, [tall])?,
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("mode", "hostile_mode")?;
+                    kwargs
+                }),
+            )?;
+            assert_eq!(bad_mode, expected_bad_mode);
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn cholesky_matches_numpy_lower_upper_complex_and_error_surface() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let cholesky_fn = module.getattr("cholesky")?;
+            let numpy = py.import("numpy")?;
+            let numpy_cholesky = numpy.getattr("linalg")?.getattr("cholesky")?;
+            let builtins = py.import("builtins")?;
+
+            let spd = numeric_array(
+                py,
+                vec![
+                    vec![4.0_f64, 1.0, 2.0],
+                    vec![1.0_f64, 3.0, 0.0],
+                    vec![2.0_f64, 0.0, 5.0],
+                ],
+                "float64",
+            );
+            let actual_lower = cholesky_fn.call1((spd.clone(),))?;
+            let expected_lower = numpy_cholesky.call1((spd.clone(),))?;
+            assert_array_matches_numpy(&actual_lower, &expected_lower)?;
+
+            let upper_kwargs = PyDict::new(py);
+            upper_kwargs.set_item("upper", true)?;
+            let actual_upper = cholesky_fn.call((spd.clone(),), Some(&upper_kwargs))?;
+            let expected_upper = numpy_cholesky.call((spd.clone(),), Some(&upper_kwargs))?;
+            assert_array_matches_numpy(&actual_upper, &expected_upper)?;
+
+            let batched = numeric_array(
+                py,
+                vec![
+                    vec![vec![4.0_f64, 1.0], vec![1.0_f64, 3.0]],
+                    vec![vec![9.0_f64, 0.0], vec![0.0_f64, 16.0]],
+                ],
+                "float64",
+            );
+            let actual_batch = cholesky_fn.call1((batched.clone(),))?;
+            let expected_batch = numpy_cholesky.call1((batched.clone(),))?;
+            assert_array_matches_numpy(&actual_batch, &expected_batch)?;
+
+            let complex_spd = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        PyList::new(
+                            py,
+                            [
+                                builtins.getattr("complex")?.call1((5.0_f64, 0.0_f64))?,
+                                builtins.getattr("complex")?.call1((1.0_f64, -2.0_f64))?,
+                            ],
+                        )?,
+                        PyList::new(
+                            py,
+                            [
+                                builtins.getattr("complex")?.call1((1.0_f64, 2.0_f64))?,
+                                builtins.getattr("complex")?.call1((6.0_f64, 0.0_f64))?,
+                            ],
+                        )?,
+                    ],
+                )?,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", "complex128")?;
+                    kwargs
+                }),
+            )?;
+            let actual_complex = cholesky_fn.call1((complex_spd.clone(),))?;
+            let expected_complex = numpy_cholesky.call1((complex_spd.clone(),))?;
+            assert_array_matches_numpy(&actual_complex, &expected_complex)?;
+
+            let actual_positional_err = cholesky_fn.call1((spd.clone(), true)).unwrap_err();
+            let expected_positional_err = numpy_cholesky.call1((spd.clone(), true)).unwrap_err();
+            assert_eq!(
+                actual_positional_err
+                    .get_type(py)
+                    .name()?
+                    .extract::<String>()?,
+                expected_positional_err
+                    .get_type(py)
+                    .name()?
+                    .extract::<String>()?
+            );
+            assert_eq!(
+                actual_positional_err.value(py).str()?.extract::<String>()?,
+                expected_positional_err
+                    .value(py)
+                    .str()?
+                    .extract::<String>()?
+            );
+
+            let non_pd = numeric_array(py, vec![vec![1.0_f64, 2.0], vec![2.0_f64, 1.0]], "float64");
+            let actual_error =
+                call_outcome(py, &cholesky_fn, &PyTuple::new(py, [non_pd.clone()])?, None)?;
+            let expected_error =
+                call_outcome(py, &numpy_cholesky, &PyTuple::new(py, [non_pd])?, None)?;
+            assert_eq!(actual_error, expected_error);
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn matrix_rank_matches_numpy_across_tol_rtol_hermitian_and_batched() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let matrix_rank_fn = module.getattr("matrix_rank")?;
+            let numpy = py.import("numpy")?;
+            let numpy_matrix_rank = numpy.getattr("linalg")?.getattr("matrix_rank")?;
+            let array_equal = numpy.getattr("array_equal")?;
+
+            let assert_scalar_eq =
+                |actual: &Bound<'_, PyAny>, expected: &Bound<'_, PyAny>| -> PyResult<()> {
+                    let a_val = actual.extract::<i64>()?;
+                    let e_val = expected.extract::<i64>()?;
+                    assert_eq!(a_val, e_val, "matrix_rank scalar diverged");
+                    Ok(())
+                };
+
+            // Full-rank 3x3.
+            let full_rank = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 0.0, 0.0])?,
+                    PyList::new(py, [0.0_f64, 1.0, 0.0])?,
+                    PyList::new(py, [0.0_f64, 0.0, 1.0])?,
+                ],
+            )?,))?;
+            assert_scalar_eq(
+                &matrix_rank_fn.call1((full_rank.clone(),))?,
+                &numpy_matrix_rank.call1((full_rank.clone(),))?,
+            )?;
+
+            // Rank-deficient 3x3 (two linearly dependent rows).
+            let defic = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 2.0, 3.0])?,
+                    PyList::new(py, [2.0_f64, 4.0, 6.0])?,
+                    PyList::new(py, [0.0_f64, 1.0, 2.0])?,
+                ],
+            )?,))?;
+            assert_scalar_eq(
+                &matrix_rank_fn.call1((defic.clone(),))?,
+                &numpy_matrix_rank.call1((defic.clone(),))?,
+            )?;
+
+            // 1-D vector — nonzero yields rank 1.
+            let vec_nonzero = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            assert_scalar_eq(
+                &matrix_rank_fn.call1((vec_nonzero.clone(),))?,
+                &numpy_matrix_rank.call1((vec_nonzero.clone(),))?,
+            )?;
+
+            // Explicit tol overrides auto-threshold.
+            let tol_kwargs = PyDict::new(py);
+            tol_kwargs.set_item("tol", 0.5_f64)?;
+            let actual_tol = matrix_rank_fn.call((defic.clone(),), Some(&tol_kwargs))?;
+            let tol_kwargs_n = PyDict::new(py);
+            tol_kwargs_n.set_item("tol", 0.5_f64)?;
+            let expected_tol = numpy_matrix_rank.call((defic.clone(),), Some(&tol_kwargs_n))?;
+            assert_scalar_eq(&actual_tol, &expected_tol)?;
+
+            // rtol keyword-only on the same matrix.
+            let rtol_kwargs = PyDict::new(py);
+            rtol_kwargs.set_item("rtol", 1e-3_f64)?;
+            let actual_rtol = matrix_rank_fn.call((defic.clone(),), Some(&rtol_kwargs))?;
+            let rtol_kwargs_n = PyDict::new(py);
+            rtol_kwargs_n.set_item("rtol", 1e-3_f64)?;
+            let expected_rtol = numpy_matrix_rank.call((defic.clone(),), Some(&rtol_kwargs_n))?;
+            assert_scalar_eq(&actual_rtol, &expected_rtol)?;
+
+            // hermitian=True on a symmetric SPD 2x2.
+            let spd = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [2.0_f64, 1.0])?,
+                    PyList::new(py, [1.0_f64, 2.0])?,
+                ],
+            )?,))?;
+            let herm_kwargs = PyDict::new(py);
+            herm_kwargs.set_item("hermitian", true)?;
+            let actual_h = matrix_rank_fn.call((spd.clone(),), Some(&herm_kwargs))?;
+            let herm_kwargs_n = PyDict::new(py);
+            herm_kwargs_n.set_item("hermitian", true)?;
+            let expected_h = numpy_matrix_rank.call((spd.clone(),), Some(&herm_kwargs_n))?;
+            assert_scalar_eq(&actual_h, &expected_h)?;
+
+            // Batched stack of three 2x2 matrices (full-rank, rank-1, zero).
+            let batched = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(
+                        py,
+                        [
+                            PyList::new(py, [1.0_f64, 0.0])?,
+                            PyList::new(py, [0.0_f64, 1.0])?,
+                        ],
+                    )?,
+                    PyList::new(
+                        py,
+                        [
+                            PyList::new(py, [1.0_f64, 2.0])?,
+                            PyList::new(py, [2.0_f64, 4.0])?,
+                        ],
+                    )?,
+                    PyList::new(
+                        py,
+                        [
+                            PyList::new(py, [0.0_f64, 0.0])?,
+                            PyList::new(py, [0.0_f64, 0.0])?,
+                        ],
+                    )?,
+                ],
+            )?,))?;
+            let actual_b = matrix_rank_fn.call1((batched.clone(),))?;
+            let expected_b = numpy_matrix_rank.call1((batched.clone(),))?;
+            assert!(
+                array_equal
+                    .call1((&actual_b, &expected_b))?
+                    .extract::<bool>()?,
+                "matrix_rank batched diverged"
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn solve_matches_numpy_across_square_batched_multi_rhs_and_complex() {
         with_python(|py| {
             if !numpy_available(py) {
@@ -6546,7 +7256,9 @@ mod tests {
 
             // Identity — solve(I, b) == b.
             let eye = numpy.getattr("eye")?.call1((4_i64,))?;
-            let b4 = numpy.getattr("array")?.call1((vec![1.0_f64, -2.0, 3.5, 0.0],))?;
+            let b4 = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, -2.0, 3.5, 0.0],))?;
             let actual_eye = solve_fn.call1((eye.clone(), b4.clone()))?;
             let expected_eye = numpy_solve.call1((eye.clone(), b4.clone()))?;
             assert!(
@@ -6637,7 +7349,9 @@ mod tests {
             let actual_c = solve_fn.call1((complex_a.clone(), complex_b.clone()))?;
             let expected_c = numpy_solve.call1((complex_a.clone(), complex_b.clone()))?;
             assert!(
-                allclose.call1((&actual_c, &expected_c))?.extract::<bool>()?,
+                allclose
+                    .call1((&actual_c, &expected_c))?
+                    .extract::<bool>()?,
                 "solve complex diverged"
             );
 
@@ -6767,7 +7481,9 @@ mod tests {
             let actual_h = eigvalsh_fn.call1((hermitian.clone(),))?;
             let expected_h = numpy_eigvalsh.call1((hermitian.clone(),))?;
             assert!(
-                allclose.call1((&actual_h, &expected_h))?.extract::<bool>()?,
+                allclose
+                    .call1((&actual_h, &expected_h))?
+                    .extract::<bool>()?,
                 "eigvalsh Hermitian diverged"
             );
 
