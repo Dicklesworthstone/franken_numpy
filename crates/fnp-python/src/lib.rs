@@ -4784,6 +4784,20 @@ fn ascontiguousarray(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, tol=100.0))]
+fn real_if_close(py: Python<'_>, a: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.real_if_close. If input is complex with all
+    // imaginary parts within tol*epsilon of zero, returns the real
+    // part; otherwise returns the input unchanged. Plain real input
+    // passes through.
+    let numpy = py.import("numpy")?;
+    let rif_fn = numpy.getattr("real_if_close")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("tol", tol)?;
+    Ok(rif_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, q, axis=None, out=None, overwrite_input=false, method=None, keepdims=false, weights=None))]
 #[allow(clippy::too_many_arguments)]
 fn quantile(
@@ -5889,6 +5903,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(flipud, m)?)?;
     m.add_function(wrap_pyfunction!(fliplr, m)?)?;
     m.add_function(wrap_pyfunction!(ascontiguousarray, m)?)?;
+    m.add_function(wrap_pyfunction!(real_if_close, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6176,6 +6191,7 @@ mod tests {
             assert!(module.getattr("flipud").is_ok());
             assert!(module.getattr("fliplr").is_ok());
             assert!(module.getattr("ascontiguousarray").is_ok());
+            assert!(module.getattr("real_if_close").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -21968,6 +21984,125 @@ mod tests {
             let ours_o = asc_fn.call1((one_d.clone(),))?;
             let theirs_o = numpy_asc.call1((one_d.clone(),))?;
             assert_array_matches_numpy(&ours_o, &theirs_o)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn real_if_close_matches_numpy_across_real_complex_and_tol() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let rif_fn = module.getattr("real_if_close")?;
+            let numpy = py.import("numpy")?;
+            let numpy_rif = numpy.getattr("real_if_close")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Pure real input passes through.
+            let real_arr = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            let ours = rif_fn.call1((real_arr.clone(),))?;
+            let theirs = numpy_rif.call1((real_arr.clone(),))?;
+            let ok: bool = allclose.call1((&ours, &theirs))?.extract()?;
+            assert!(ok, "real_if_close pure real mismatch");
+            let ours_dtype = ours.getattr("dtype")?.str()?.to_string();
+            let theirs_dtype = theirs.getattr("dtype")?.str()?.to_string();
+            assert_eq!(ours_dtype, theirs_dtype, "dtype must match for real input");
+
+            // Helper to build a complex array from (real, imag) pairs by
+            // constructing Python complex objects via the builtin and
+            // passing the list to numpy.array.
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+            let make_complex_array = |pairs: Vec<(f64, f64)>| -> PyResult<Bound<'_, PyAny>> {
+                let mut items: Vec<Py<PyAny>> = Vec::with_capacity(pairs.len());
+                for (r, i) in pairs {
+                    items.push(py_complex.call1((r, i))?.unbind());
+                }
+                let lst = PyList::new(py, items)?;
+                numpy.getattr("array")?.call1((lst,))
+            };
+
+            // Complex with tiny imag → returns real array.
+            let tiny_imag = make_complex_array(vec![
+                (1.0, 1e-15),
+                (2.0, 1e-15),
+                (3.0, 1e-15),
+            ])?;
+            let ours_t = rif_fn.call1((tiny_imag.clone(),))?;
+            let theirs_t = numpy_rif.call1((tiny_imag.clone(),))?;
+            let ok_t: bool = allclose.call1((&ours_t, &theirs_t))?.extract()?;
+            assert!(ok_t, "real_if_close tiny imag mismatch");
+            let ours_t_dtype = ours_t.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+            let theirs_t_dtype = theirs_t.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+            assert_eq!(
+                ours_t_dtype, theirs_t_dtype,
+                "tiny-imag dtype kind must match (numpy yields 'f' for floats)",
+            );
+
+            // Complex with significant imag → unchanged.
+            let big_imag = make_complex_array(vec![(1.0, 2.0), (3.0, 4.0)])?;
+            let ours_b = rif_fn.call1((big_imag.clone(),))?;
+            let theirs_b = numpy_rif.call1((big_imag.clone(),))?;
+            let ok_b: bool = allclose.call1((&ours_b, &theirs_b))?.extract()?;
+            assert!(ok_b, "real_if_close big imag mismatch");
+            let ours_b_dtype = ours_b.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+            let theirs_b_dtype = theirs_b.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+            assert_eq!(
+                ours_b_dtype, theirs_b_dtype,
+                "big-imag dtype kind must match (must remain complex)",
+            );
+            assert_eq!(ours_b_dtype, "c", "big-imag output must remain complex");
+
+            // Custom tol scaling: small enough tol forces complex retention.
+            let at_threshold = make_complex_array(vec![
+                (1.0, 1e-10),
+                (2.0, 1e-10),
+            ])?;
+            let ours_tol_low = rif_fn.call(
+                (at_threshold.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("tol", 1.0_f64)?;
+                    kw
+                }),
+            )?;
+            let theirs_tol_low = numpy_rif.call(
+                (at_threshold.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("tol", 1.0_f64)?;
+                    kw
+                }),
+            )?;
+            let ours_tl_dtype = ours_tol_low.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+            let theirs_tl_dtype = theirs_tol_low
+                .getattr("dtype")?
+                .getattr("kind")?
+                .extract::<String>()?;
+            assert_eq!(
+                ours_tl_dtype, theirs_tl_dtype,
+                "custom-tol dtype-kind must match numpy",
+            );
+
+            // Default tol=100 with the same input → returns real.
+            let ours_tol_def = rif_fn.call1((at_threshold.clone(),))?;
+            let theirs_tol_def = numpy_rif.call1((at_threshold.clone(),))?;
+            let ours_tdef_dtype = ours_tol_def
+                .getattr("dtype")?
+                .getattr("kind")?
+                .extract::<String>()?;
+            let theirs_tdef_dtype = theirs_tol_def
+                .getattr("dtype")?
+                .getattr("kind")?
+                .extract::<String>()?;
+            assert_eq!(
+                ours_tdef_dtype, theirs_tdef_dtype,
+                "default-tol dtype-kind must match numpy",
+            );
 
             Ok(())
         });
