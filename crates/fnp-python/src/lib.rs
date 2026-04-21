@@ -5723,6 +5723,33 @@ fn vander(py: Python<'_>, x: Py<PyAny>, N: Option<usize>, increasing: bool) -> P
 }
 
 #[pyfunction]
+#[pyo3(signature = (*args, dtype=None, device=None, like=None))]
+fn arange(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    dtype: Option<Py<PyAny>>,
+    device: Option<Py<PyAny>>,
+    like: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.arange so positional arity, negative-step
+    // traversal, dtype coercion, float-step rounding behavior, and
+    // empty-range handling all match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let arange_fn = numpy.getattr("arange")?;
+    let kwargs = PyDict::new(py);
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    if let Some(device_val) = device {
+        kwargs.set_item("device", device_val.bind(py))?;
+    }
+    if let Some(like_val) = like {
+        kwargs.set_item("like", like_val.bind(py))?;
+    }
+    Ok(arange_fn.call(args, Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (shape, fill_value, dtype=None, order="C", *, device=None, like=None))]
 fn full(
     py: Python<'_>,
@@ -8458,6 +8485,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(setdiff1d, m)?)?;
     m.add_function(wrap_pyfunction!(isin, m)?)?;
     m.add_function(wrap_pyfunction!(vander, m)?)?;
+    m.add_function(wrap_pyfunction!(arange, m)?)?;
     m.add_function(wrap_pyfunction!(full, m)?)?;
     m.add_function(wrap_pyfunction!(full_like, m)?)?;
     m.add_function(wrap_pyfunction!(zeros_like, m)?)?;
@@ -8889,6 +8917,7 @@ mod tests {
             assert!(module.getattr("setdiff1d").is_ok());
             assert!(module.getattr("isin").is_ok());
             assert!(module.getattr("vander").is_ok());
+            assert!(module.getattr("arange").is_ok());
             assert!(module.getattr("full").is_ok());
             assert!(module.getattr("full_like").is_ok());
             assert!(module.getattr("zeros_like").is_ok());
@@ -28921,6 +28950,60 @@ mod tests {
             let ours_zero = full_like_fn.call1((zero_source.clone(), 4_i64))?;
             let theirs_zero = numpy_full_like.call1((zero_source.clone(), 4_i64))?;
             assert_array_matches_numpy(&ours_zero, &theirs_zero)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn arange_matches_numpy_across_stop_start_step_dtype_and_empty_ranges() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let arange_fn = module.getattr("arange")?;
+            let numpy = py.import("numpy")?;
+            let numpy_arange = numpy.getattr("arange")?;
+
+            // Single-argument stop form.
+            assert_array_matches_numpy(
+                &arange_fn.call1((5_i64,))?,
+                &numpy_arange.call1((5_i64,))?,
+            )?;
+
+            // Explicit start/stop/step traversal.
+            assert_array_matches_numpy(
+                &arange_fn.call1((1_i64, 8_i64, 2_i64))?,
+                &numpy_arange.call1((1_i64, 8_i64, 2_i64))?,
+            )?;
+
+            // Negative-step parity.
+            assert_array_matches_numpy(
+                &arange_fn.call1((5_i64, -1_i64, -2_i64))?,
+                &numpy_arange.call1((5_i64, -1_i64, -2_i64))?,
+            )?;
+
+            // Explicit dtype coercion should match NumPy exactly.
+            let dtype_kwargs = PyDict::new(py);
+            dtype_kwargs.set_item("dtype", numpy.getattr("float64")?)?;
+            let ours_dtype = arange_fn.call((4_i64,), Some(&dtype_kwargs))?;
+            let theirs_dtype = numpy_arange.call((4_i64,), Some(&dtype_kwargs))?;
+            assert_array_matches_numpy(&ours_dtype, &theirs_dtype)?;
+
+            // Float-step behavior, including endpoint rounding surface.
+            assert_array_matches_numpy(
+                &arange_fn.call1((0.5_f64, 2.5_f64, 0.5_f64))?,
+                &numpy_arange.call1((0.5_f64, 2.5_f64, 0.5_f64))?,
+            )?;
+
+            // Empty-range parity should preserve dtype/shape exactly.
+            assert_array_matches_numpy(
+                &arange_fn.call1((3_i64, 3_i64))?,
+                &numpy_arange.call1((3_i64, 3_i64))?,
+            )?;
 
             Ok(())
         });
