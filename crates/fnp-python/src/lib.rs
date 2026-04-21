@@ -4461,6 +4461,42 @@ fn median(
 }
 
 #[pyfunction]
+#[pyo3(signature = (m, y=None, rowvar=true, bias=false, ddof=None, fweights=None, aweights=None))]
+#[allow(clippy::too_many_arguments)]
+fn cov(
+    py: Python<'_>,
+    m: Py<PyAny>,
+    y: Option<Py<PyAny>>,
+    rowvar: bool,
+    bias: bool,
+    ddof: Option<Py<PyAny>>,
+    fweights: Option<Py<PyAny>>,
+    aweights: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.cov so row/column variable orientation, paired m/y
+    // inputs, ddof/bias interaction, frequency/analytic weights, and 1-D
+    // scalar return semantics match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let cov_fn = numpy.getattr("cov")?;
+    let kwargs = PyDict::new(py);
+    if let Some(y_val) = y {
+        kwargs.set_item("y", y_val.bind(py))?;
+    }
+    kwargs.set_item("rowvar", rowvar)?;
+    kwargs.set_item("bias", bias)?;
+    if let Some(ddof_val) = ddof {
+        kwargs.set_item("ddof", ddof_val.bind(py))?;
+    }
+    if let Some(fweights_val) = fweights {
+        kwargs.set_item("fweights", fweights_val.bind(py))?;
+    }
+    if let Some(aweights_val) = aweights {
+        kwargs.set_item("aweights", aweights_val.bind(py))?;
+    }
+    Ok(cov_fn.call((m.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, b, fill_value=true))]
 fn allequal(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, fill_value: bool) -> PyResult<Py<PyAny>> {
     // Passthrough to np.ma.allequal so whole-array equality checks
@@ -4535,6 +4571,36 @@ fn nansum(
     }
     kwargs.set_item("keepdims", keepdims)?;
     Ok(nansum_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, axis=None, out=None, keepdims=None))]
+fn nanmax(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
+    keepdims: Option<bool>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.nanmax so NaN-ignoring maximum matches numpy
+    // across axis=None/int/tuple, optional `out=` destination, and
+    // keepdims. Fully-NaN slices yield NaN with a RuntimeWarning;
+    // integer input has no NaN possibility and matches np.max.
+    // `keepdims` is forwarded only when explicitly supplied so numpy's
+    // `_NoValue` default is preserved.
+    let numpy = py.import("numpy")?;
+    let nanmax_fn = numpy.getattr("nanmax")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis_val) = axis {
+        kwargs.set_item("axis", axis_val.bind(py))?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    if let Some(keepdims_val) = keepdims {
+        kwargs.set_item("keepdims", keepdims_val)?;
+    }
+    Ok(nanmax_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
 
 #[pyfunction]
@@ -5588,10 +5654,12 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(getmaskarray, m)?)?;
     m.add_function(wrap_pyfunction!(ma_count, m)?)?;
     m.add_function(wrap_pyfunction!(median, m)?)?;
+    m.add_function(wrap_pyfunction!(cov, m)?)?;
     m.add_function(wrap_pyfunction!(allequal, m)?)?;
     m.add_function(wrap_pyfunction!(polyval, m)?)?;
     m.add_function(wrap_pyfunction!(nanmean, m)?)?;
     m.add_function(wrap_pyfunction!(nansum, m)?)?;
+    m.add_function(wrap_pyfunction!(nanmax, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
     m.add_function(wrap_pyfunction!(compressed, m)?)?;
@@ -5864,10 +5932,12 @@ mod tests {
             assert!(module.getattr("getmaskarray").is_ok());
             assert!(module.getattr("ma_count").is_ok());
             assert!(module.getattr("median").is_ok());
+            assert!(module.getattr("cov").is_ok());
             assert!(module.getattr("allequal").is_ok());
             assert!(module.getattr("polyval").is_ok());
             assert!(module.getattr("nanmean").is_ok());
             assert!(module.getattr("nansum").is_ok());
+            assert!(module.getattr("nanmax").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
             assert!(module.getattr("compressed").is_ok());
@@ -19883,6 +19953,175 @@ mod tests {
     }
 
     #[test]
+    fn cov_matches_numpy_across_orientation_weights_and_scalar_return() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let cov_fn = module.getattr("cov")?;
+            let numpy = py.import("numpy")?;
+            let numpy_cov = numpy.getattr("cov")?;
+            let isclose = numpy.getattr("isclose")?;
+
+            let column_major = numpy.getattr("array")?.call1((vec![
+                vec![0.0_f64, 2.0, 4.0, 6.0],
+                vec![1.0, 3.0, 5.0, 7.0],
+                vec![2.0, 4.0, 6.0, 8.0],
+            ],))?;
+
+            // Default single-array path with rowvar=True.
+            let ours_default = cov_fn.call1((column_major.clone(),))?;
+            let theirs_default = numpy_cov.call1((column_major.clone(),))?;
+            assert_array_matches_numpy(&ours_default, &theirs_default)?;
+
+            // rowvar=False treats columns as variables.
+            let ours_rowvar_false = cov_fn.call(
+                (column_major.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("rowvar", false)?;
+                    kw
+                }),
+            )?;
+            let theirs_rowvar_false = numpy_cov.call(
+                (column_major.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("rowvar", false)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_rowvar_false, &theirs_rowvar_false)?;
+
+            // Separate m and y arrays.
+            let m = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 2.0, 4.0, 8.0, 16.0],))?;
+            let y = numpy
+                .getattr("array")?
+                .call1((vec![2.0_f64, 1.0, 3.0, 5.0, 9.0],))?;
+            let ours_pair = cov_fn.call(
+                (m.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("y", y.clone())?;
+                    kw
+                }),
+            )?;
+            let theirs_pair = numpy_cov.call(
+                (m.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("y", y.clone())?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_pair, &theirs_pair)?;
+
+            // Explicit ddof=0.
+            let ours_ddof0 = cov_fn.call(
+                (column_major.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("ddof", 0_i64)?;
+                    kw
+                }),
+            )?;
+            let theirs_ddof0 = numpy_cov.call(
+                (column_major.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("ddof", 0_i64)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_ddof0, &theirs_ddof0)?;
+
+            // bias=True.
+            let ours_bias = cov_fn.call(
+                (column_major.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("bias", true)?;
+                    kw
+                }),
+            )?;
+            let theirs_bias = numpy_cov.call(
+                (column_major.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("bias", true)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_bias, &theirs_bias)?;
+
+            // Integer frequency weights.
+            let ours_fweights = cov_fn.call(
+                (m.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("fweights", vec![1_i64, 2, 1, 3, 1])?;
+                    kw
+                }),
+            )?;
+            let theirs_fweights = numpy_cov.call(
+                (m.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("fweights", vec![1_i64, 2, 1, 3, 1])?;
+                    kw
+                }),
+            )?;
+            let ok_fweights: bool = isclose
+                .call1((&ours_fweights, &theirs_fweights))?
+                .extract()?;
+            assert!(ok_fweights, "cov fweights mismatch");
+
+            // Floating analytic weights.
+            let ours_aweights = cov_fn.call(
+                (m.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("aweights", vec![0.5_f64, 1.0, 1.5, 2.0, 3.0])?;
+                    kw
+                }),
+            )?;
+            let theirs_aweights = numpy_cov.call(
+                (m.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("aweights", vec![0.5_f64, 1.0, 1.5, 2.0, 3.0])?;
+                    kw
+                }),
+            )?;
+            let ok_aweights: bool = isclose
+                .call1((&ours_aweights, &theirs_aweights))?
+                .extract()?;
+            assert!(ok_aweights, "cov aweights mismatch");
+
+            // 1-D input returns a scalar rather than a 1x1 array.
+            let vector = numpy
+                .getattr("array")?
+                .call1((vec![10.0_f64, 20.0, 40.0, 80.0],))?;
+            let ours_scalar = cov_fn.call1((vector.clone(),))?;
+            let theirs_scalar = numpy_cov.call1((vector.clone(),))?;
+            let ok_scalar: bool = isclose.call1((&ours_scalar, &theirs_scalar))?.extract()?;
+            assert!(ok_scalar, "cov 1-D scalar return mismatch");
+            assert_eq!(
+                repr_string(&ours_scalar.get_type()),
+                repr_string(&theirs_scalar.get_type()),
+                "cov 1-D return type must match numpy",
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn allequal_matches_numpy_across_masked_and_fill_value_paths() {
         with_python(|py| {
             if !numpy_available(py) {
@@ -20135,14 +20374,18 @@ mod tests {
             let warnings = py.import("warnings")?;
 
             // 1-D no NaN: matches np.mean.
-            let clean = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0, 4.0, 5.0],))?;
+            let clean = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 2.0, 3.0, 4.0, 5.0],))?;
             let ours_c = nanmean_fn.call1((clean.clone(),))?;
             let theirs_c = numpy_nanmean.call1((clean.clone(),))?;
             let ok_c: bool = isclose.call1((&ours_c, &theirs_c))?.extract()?;
             assert!(ok_c, "nanmean no-NaN 1-D mismatch");
 
             // 1-D with NaN: ignores NaN.
-            let with_nan = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, f64::NAN, 4.0],))?;
+            let with_nan = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 2.0, f64::NAN, 4.0],))?;
             let ours_n = nanmean_fn.call1((with_nan.clone(),))?;
             let theirs_n = numpy_nanmean.call1((with_nan.clone(),))?;
             let ok_n: bool = isclose.call1((&ours_n, &theirs_n))?.extract()?;
@@ -20282,14 +20525,18 @@ mod tests {
             let allclose = numpy.getattr("allclose")?;
 
             // 1-D with NaN: treat as 0.
-            let with_nan = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, f64::NAN, 4.0],))?;
+            let with_nan = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 2.0, f64::NAN, 4.0],))?;
             let ours = nansum_fn.call1((with_nan.clone(),))?;
             let theirs = numpy_nansum.call1((with_nan.clone(),))?;
             let ok: bool = isclose.call1((&ours, &theirs))?.extract()?;
             assert!(ok, "nansum 1-D with NaN mismatch");
 
             // Fully-NaN slice → 0 (distinctly not NaN).
-            let all_nan = numpy.getattr("array")?.call1((vec![f64::NAN, f64::NAN, f64::NAN],))?;
+            let all_nan = numpy
+                .getattr("array")?
+                .call1((vec![f64::NAN, f64::NAN, f64::NAN],))?;
             let ours_all = nansum_fn.call1((all_nan.clone(),))?;
             let theirs_all = numpy_nansum.call1((all_nan.clone(),))?;
             let ok_all: bool = isclose.call1((&ours_all, &theirs_all))?.extract()?;
@@ -20384,6 +20631,136 @@ mod tests {
             assert_eq!(
                 ours_shape, theirs_shape,
                 "nansum keepdims shape must match numpy",
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn nanmax_matches_numpy_across_axis_keepdims_and_all_nan() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let nanmax_fn = module.getattr("nanmax")?;
+            let numpy = py.import("numpy")?;
+            let numpy_nanmax = numpy.getattr("nanmax")?;
+            let isclose = numpy.getattr("isclose")?;
+            let allclose = numpy.getattr("allclose")?;
+            let isnan_fn = numpy.getattr("isnan")?;
+            let warnings = py.import("warnings")?;
+
+            // 1-D no NaN matches max.
+            let clean = numpy
+                .getattr("array")?
+                .call1((vec![3.0_f64, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0],))?;
+            let ours_c = nanmax_fn.call1((clean.clone(),))?;
+            let theirs_c = numpy_nanmax.call1((clean.clone(),))?;
+            let ok_c: bool = isclose.call1((&ours_c, &theirs_c))?.extract()?;
+            assert!(ok_c, "nanmax no-NaN 1-D mismatch");
+
+            // 1-D with NaN ignored.
+            let with_nan =
+                numpy
+                    .getattr("array")?
+                    .call1((vec![1.0_f64, 2.0, f64::NAN, 4.0, 3.0],))?;
+            let ours_n = nanmax_fn.call1((with_nan.clone(),))?;
+            let theirs_n = numpy_nanmax.call1((with_nan.clone(),))?;
+            let ok_n: bool = isclose.call1((&ours_n, &theirs_n))?.extract()?;
+            assert!(ok_n, "nanmax 1-D with NaN mismatch");
+
+            // 2-D mixed NaN, axis=0 and axis=1.
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![1.0_f64, f64::NAN, 3.0],
+                vec![4.0, 5.0, f64::NAN],
+                vec![f64::NAN, 8.0, 9.0],
+            ],))?;
+            for axis in [0_i64, 1] {
+                let ours = nanmax_fn.call(
+                    (two_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", axis)?;
+                        kw
+                    }),
+                )?;
+                let theirs = numpy_nanmax.call(
+                    (two_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", axis)?;
+                        kw
+                    }),
+                )?;
+                let ok_ax: bool = allclose.call1((&ours, &theirs))?.extract()?;
+                assert!(ok_ax, "nanmax 2-D axis={} mismatch", axis);
+            }
+
+            // Fully-NaN slice → NaN (warnings silenced on both sides).
+            let all_nan = numpy
+                .getattr("array")?
+                .call1((vec![f64::NAN, f64::NAN, f64::NAN],))?;
+            let catch_warnings = warnings.getattr("catch_warnings")?;
+            let suppressed_ours = {
+                let ctx = catch_warnings.call0()?;
+                ctx.call_method0("__enter__")?;
+                warnings.call_method1("simplefilter", ("ignore",))?;
+                let result = nanmax_fn.call1((all_nan.clone(),))?;
+                ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+                result
+            };
+            let suppressed_theirs = {
+                let ctx = catch_warnings.call0()?;
+                ctx.call_method0("__enter__")?;
+                warnings.call_method1("simplefilter", ("ignore",))?;
+                let result = numpy_nanmax.call1((all_nan.clone(),))?;
+                ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+                result
+            };
+            let ours_is_nan: bool = isnan_fn.call1((&suppressed_ours,))?.extract()?;
+            let theirs_is_nan: bool = isnan_fn.call1((&suppressed_theirs,))?.extract()?;
+            assert!(ours_is_nan && theirs_is_nan, "fully-NaN nanmax must be NaN");
+
+            // Integer input matches plain max.
+            let ints = numpy
+                .getattr("array")?
+                .call1((vec![3_i64, 1, 4, 1, 5, 9, 2, 6],))?;
+            let ours_i = nanmax_fn.call1((ints.clone(),))?;
+            let theirs_i = numpy_nanmax.call1((ints.clone(),))?;
+            let ours_i_val: i64 = ours_i.extract()?;
+            let theirs_i_val: i64 = theirs_i.extract()?;
+            assert_eq!(ours_i_val, theirs_i_val, "nanmax integer mismatch");
+
+            // keepdims=True preserves length-1 reduction axis.
+            let ours_kd = nanmax_fn.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 1_i64)?;
+                    kw.set_item("keepdims", true)?;
+                    kw
+                }),
+            )?;
+            let theirs_kd = numpy_nanmax.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 1_i64)?;
+                    kw.set_item("keepdims", true)?;
+                    kw
+                }),
+            )?;
+            let ok_kd: bool = allclose.call1((&ours_kd, &theirs_kd))?.extract()?;
+            assert!(ok_kd, "nanmax keepdims=True mismatch");
+            let ours_shape = ours_kd.getattr("shape")?.str()?.to_string();
+            let theirs_shape = theirs_kd.getattr("shape")?.str()?.to_string();
+            assert_eq!(
+                ours_shape, theirs_shape,
+                "nanmax keepdims shape must match numpy",
             );
 
             Ok(())
