@@ -4740,6 +4740,19 @@ fn flip(py: Python<'_>, m: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<Py
 }
 
 #[pyfunction]
+#[pyo3(signature = (m,))]
+fn flipud(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.flipud so up/down (axis=0) reversal matches
+    // numpy across 1-D arrays, 2-D row reversal, and N-D arrays
+    // leaving non-leading axes intact. Preserves dtype.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("flipud")?
+        .call1((m.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, q, axis=None, out=None, overwrite_input=false, method=None, keepdims=false, weights=None))]
 #[allow(clippy::too_many_arguments)]
 fn quantile(
@@ -5842,6 +5855,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lexsort, m)?)?;
     m.add_function(wrap_pyfunction!(rfftn, m)?)?;
     m.add_function(wrap_pyfunction!(flip, m)?)?;
+    m.add_function(wrap_pyfunction!(flipud, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6126,6 +6140,7 @@ mod tests {
             assert!(module.getattr("lexsort").is_ok());
             assert!(module.getattr("rfftn").is_ok());
             assert!(module.getattr("flip").is_ok());
+            assert!(module.getattr("flipud").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -21673,6 +21688,90 @@ mod tests {
             let q_via_pct = percentile_fn_module.call1((one_d.clone(), 50.0_f64))?;
             let ok_cross: bool = isclose.call1((&q_via_quant, &q_via_pct))?.extract()?;
             assert!(ok_cross, "quantile(0.5) must equal percentile(50)");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn flipud_matches_numpy_across_1d_2d_3d_and_dtype() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let flipud_fn = module.getattr("flipud")?;
+            let numpy = py.import("numpy")?;
+            let numpy_flipud = numpy.getattr("flipud")?;
+
+            // 1-D reverse (matches axis=0 flip).
+            let one_d = numpy.getattr("array")?.call1((vec![1_i64, 2, 3, 4, 5],))?;
+            assert_array_matches_numpy(
+                &flipud_fn.call1((one_d.clone(),))?,
+                &numpy_flipud.call1((one_d.clone(),))?,
+            )?;
+
+            // 2-D row reversal.
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![1_i64, 2, 3],
+                vec![4, 5, 6],
+                vec![7, 8, 9],
+            ],))?;
+            assert_array_matches_numpy(
+                &flipud_fn.call1((two_d.clone(),))?,
+                &numpy_flipud.call1((two_d.clone(),))?,
+            )?;
+
+            // 3-D leaves non-leading axes intact.
+            let three_d = numpy.getattr("array")?.call1((vec![
+                vec![vec![1_i64, 2], vec![3, 4]],
+                vec![vec![5, 6], vec![7, 8]],
+                vec![vec![9, 10], vec![11, 12]],
+            ],))?;
+            assert_array_matches_numpy(
+                &flipud_fn.call1((three_d.clone(),))?,
+                &numpy_flipud.call1((three_d.clone(),))?,
+            )?;
+
+            // Float dtype preservation.
+            let floats = numpy.getattr("array")?.call(
+                (vec![1.5_f64, 2.5, 3.5, 4.5],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("float64")?)?;
+                    kw
+                }),
+            )?;
+            let ours_f = flipud_fn.call1((floats.clone(),))?;
+            let theirs_f = numpy_flipud.call1((floats.clone(),))?;
+            assert_array_matches_numpy(&ours_f, &theirs_f)?;
+            let ours_dtype = ours_f.getattr("dtype")?.str()?.to_string();
+            let theirs_dtype = theirs_f.getattr("dtype")?.str()?.to_string();
+            assert_eq!(ours_dtype, theirs_dtype, "flipud dtype must match numpy");
+
+            // 0-D input must raise the same error in both implementations.
+            let scalar_zero_d = numpy.getattr("array")?.call1((42_i64,))?;
+            let ours_err = flipud_fn.call1((scalar_zero_d.clone(),)).err();
+            let theirs_err = numpy_flipud.call1((scalar_zero_d.clone(),)).err();
+            assert_eq!(
+                ours_err.is_some(),
+                theirs_err.is_some(),
+                "flipud 0-D must raise iff numpy does",
+            );
+
+            // Cross-check: flipud(x) ≡ flip(x, axis=0).
+            let flip_fn = module.getattr("flip")?;
+            let via_flip = flip_fn.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 0_i64)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&flipud_fn.call1((two_d.clone(),))?, &via_flip)?;
 
             Ok(())
         });
