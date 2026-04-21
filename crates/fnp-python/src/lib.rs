@@ -26161,6 +26161,126 @@ mod tests {
     }
 
     #[test]
+    fn nanmedian_matches_numpy_across_axis_keepdims_and_all_nan() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let nanmedian_fn = module.getattr("nanmedian")?;
+            let numpy = py.import("numpy")?;
+            let numpy_nanmedian = numpy.getattr("nanmedian")?;
+            let isclose = numpy.getattr("isclose")?;
+            let warnings = py.import("warnings")?;
+
+            // 1-D with no NaN matches the regular median result.
+            let clean = numpy
+                .getattr("array")?
+                .call1((vec![3.0_f64, 1.0, 4.0, 1.0, 5.0],))?;
+            let ours_clean = nanmedian_fn.call1((clean.clone(),))?;
+            let theirs_clean = numpy_nanmedian.call1((clean.clone(),))?;
+            let ok_clean: bool = isclose.call1((&ours_clean, &theirs_clean))?.extract()?;
+            assert!(ok_clean, "nanmedian clean 1-D mismatch");
+
+            // 1-D with NaN ignores NaN values.
+            let with_nan = numpy
+                .getattr("array")?
+                .call1((vec![3.0_f64, f64::NAN, 1.0, 5.0],))?;
+            let ours_nan = nanmedian_fn.call1((with_nan.clone(),))?;
+            let theirs_nan = numpy_nanmedian.call1((with_nan.clone(),))?;
+            let ok_nan: bool = isclose
+                .call(
+                    (&ours_nan, &theirs_nan),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("equal_nan", true)?;
+                        kw
+                    }),
+                )?
+                .extract()?;
+            assert!(ok_nan, "nanmedian NaN-filtering 1-D mismatch");
+
+            // 2-D mixed NaN with axis reductions.
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![1.0_f64, f64::NAN, 3.0],
+                vec![4.0, 2.0, f64::NAN],
+                vec![7.0, 8.0, 9.0],
+            ],))?;
+            for axis in [0_i64, 1] {
+                let ours = nanmedian_fn.call(
+                    (two_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", axis)?;
+                        kw
+                    }),
+                )?;
+                let theirs = numpy_nanmedian.call(
+                    (two_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", axis)?;
+                        kw
+                    }),
+                )?;
+                assert_array_matches_numpy(&ours, &theirs)?;
+            }
+
+            // keepdims=True preserves reduced axes.
+            let ours_kd = nanmedian_fn.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 0_i64)?;
+                    kw.set_item("keepdims", true)?;
+                    kw
+                }),
+            )?;
+            let theirs_kd = numpy_nanmedian.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 0_i64)?;
+                    kw.set_item("keepdims", true)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_kd, &theirs_kd)?;
+
+            // Integer input is accepted unchanged by NaN-specific logic.
+            let ints = numpy.getattr("array")?.call1((vec![9_i64, 1, 5, 3],))?;
+            let ours_int = nanmedian_fn.call1((ints.clone(),))?;
+            let theirs_int = numpy_nanmedian.call1((ints.clone(),))?;
+            let ok_int: bool = isclose.call1((&ours_int, &theirs_int))?.extract()?;
+            assert!(ok_int, "nanmedian integer input mismatch");
+
+            // Fully-NaN input returns NaN; silence RuntimeWarning on both
+            // calls so parity is value-focused.
+            let all_nan = numpy
+                .getattr("array")?
+                .call1((vec![f64::NAN, f64::NAN, f64::NAN],))?;
+            let _ = warnings.call_method1("simplefilter", ("ignore",))?;
+            let ours_all_nan = nanmedian_fn.call1((all_nan.clone(),))?;
+            let theirs_all_nan = numpy_nanmedian.call1((all_nan.clone(),))?;
+            let ok_all_nan: bool = isclose
+                .call(
+                    (&ours_all_nan, &theirs_all_nan),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("equal_nan", true)?;
+                        kw
+                    }),
+                )?
+                .extract()?;
+            assert!(ok_all_nan, "nanmedian all-NaN mismatch");
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn allclose_matches_numpy_across_tolerance_and_nan_paths() {
         with_python(|py| {
             if !numpy_available(py) {
