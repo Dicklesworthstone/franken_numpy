@@ -3143,9 +3143,10 @@ fn masked_invalid(py: Python<'_>, a: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny
     let invalid = numpy.getattr("logical_not")?.call1((finite,))?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("copy", copy)?;
+    kwargs.set_item("mask", invalid)?;
     Ok(ma
-        .getattr("masked_where")?
-        .call((invalid, a.bind(py)), Some(&kwargs))?
+        .getattr("array")?
+        .call((a.bind(py),), Some(&kwargs))?
         .unbind())
 }
 
@@ -6298,9 +6299,10 @@ mod tests {
                 .extract::<bool>()?;
             assert_eq!(actual_shares, expected_shares);
 
-            let object_values = PyList::empty(py);
-            object_values.append(1_i64)?;
-            object_values.append(py.None())?;
+            let object_values = PyList::new(
+                py,
+                [1_i64.into_pyobject(py)?.into_any().unbind(), py.None()],
+            )?;
             let object_input = numpy.call_method(
                 "array",
                 (object_values,),
