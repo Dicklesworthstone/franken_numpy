@@ -4364,11 +4364,7 @@ fn cross(
 
 #[pyfunction]
 #[pyo3(signature = (arrays, *, out=None))]
-fn multi_dot(
-    py: Python<'_>,
-    arrays: Py<PyAny>,
-    out: Option<Py<PyAny>>,
-) -> PyResult<Py<PyAny>> {
+fn multi_dot(py: Python<'_>, arrays: Py<PyAny>, out: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.linalg.multi_dot so the optimal-parenthesization
     // chain-multiplication, dtype promotion, optional `out=` destination,
     // and 1-D vector handling at the chain endpoints all match numpy
@@ -16138,14 +16134,10 @@ mod tests {
             let loose_kwargs_n = PyDict::new(py);
             loose_kwargs_n.set_item("rtol", 1e-3_f64)?;
             loose_kwargs_n.set_item("atol", 1e-3_f64)?;
-            let actual_loose = masked_values_fn.call(
-                (float_data.clone(), 1.5_f64),
-                Some(&loose_kwargs),
-            )?;
-            let expected_loose = numpy_masked_values.call(
-                (float_data.clone(), 1.5_f64),
-                Some(&loose_kwargs_n),
-            )?;
+            let actual_loose =
+                masked_values_fn.call((float_data.clone(), 1.5_f64), Some(&loose_kwargs))?;
+            let expected_loose =
+                numpy_masked_values.call((float_data.clone(), 1.5_f64), Some(&loose_kwargs_n))?;
             assert_eq!(repr_string(&actual_loose), repr_string(&expected_loose));
 
             // Tight tolerances — only exact matches.
@@ -16155,14 +16147,10 @@ mod tests {
             let tight_kwargs_n = PyDict::new(py);
             tight_kwargs_n.set_item("rtol", 0.0_f64)?;
             tight_kwargs_n.set_item("atol", 0.0_f64)?;
-            let actual_tight = masked_values_fn.call(
-                (float_data.clone(), 1.5_f64),
-                Some(&tight_kwargs),
-            )?;
-            let expected_tight = numpy_masked_values.call(
-                (float_data.clone(), 1.5_f64),
-                Some(&tight_kwargs_n),
-            )?;
+            let actual_tight =
+                masked_values_fn.call((float_data.clone(), 1.5_f64), Some(&tight_kwargs))?;
+            let expected_tight =
+                numpy_masked_values.call((float_data.clone(), 1.5_f64), Some(&tight_kwargs_n))?;
             assert_eq!(repr_string(&actual_tight), repr_string(&expected_tight));
 
             // Integer data — falls back to exact equality.
@@ -16198,18 +16186,11 @@ mod tests {
             shrink_kwargs.set_item("shrink", false)?;
             let shrink_kwargs_n = PyDict::new(py);
             shrink_kwargs_n.set_item("shrink", false)?;
-            let actual_shrink = masked_values_fn.call(
-                (no_match_data.clone(), 99.0_f64),
-                Some(&shrink_kwargs),
-            )?;
-            let expected_shrink = numpy_masked_values.call(
-                (no_match_data.clone(), 99.0_f64),
-                Some(&shrink_kwargs_n),
-            )?;
-            assert_eq!(
-                repr_string(&actual_shrink),
-                repr_string(&expected_shrink)
-            );
+            let actual_shrink =
+                masked_values_fn.call((no_match_data.clone(), 99.0_f64), Some(&shrink_kwargs))?;
+            let expected_shrink = numpy_masked_values
+                .call((no_match_data.clone(), 99.0_f64), Some(&shrink_kwargs_n))?;
+            assert_eq!(repr_string(&actual_shrink), repr_string(&expected_shrink));
 
             Ok(())
         });
@@ -16490,10 +16471,8 @@ mod tests {
             assert!(
                 allclose
                     .call1((
-                        &cross_fn.call(
-                            (row_vecs_a.clone(), row_vecs_b.clone()),
-                            Some(&axis_kwargs),
-                        )?,
+                        &cross_fn
+                            .call((row_vecs_a.clone(), row_vecs_b.clone()), Some(&axis_kwargs),)?,
                         &numpy_cross.call(
                             (row_vecs_a.clone(), row_vecs_b.clone()),
                             Some(&axis_kwargs_n),
@@ -16630,18 +16609,12 @@ mod tests {
             let axes_kw = PyDict::new(py);
             axes_kw.set_item(
                 "axes",
-                PyTuple::new(
-                    py,
-                    [PyList::new(py, [1_i64])?, PyList::new(py, [0_i64])?],
-                )?,
+                PyTuple::new(py, [PyList::new(py, [1_i64])?, PyList::new(py, [0_i64])?])?,
             )?;
             let axes_kw_n = PyDict::new(py);
             axes_kw_n.set_item(
                 "axes",
-                PyTuple::new(
-                    py,
-                    [PyList::new(py, [1_i64])?, PyList::new(py, [0_i64])?],
-                )?,
+                PyTuple::new(py, [PyList::new(py, [1_i64])?, PyList::new(py, [0_i64])?])?,
             )?;
             assert!(
                 allclose
@@ -16691,10 +16664,8 @@ mod tests {
                 allclose
                     .call1((
                         &tensordot_fn.call((complex_a.clone(), complex_b.clone()), Some(&kwc))?,
-                        &numpy_tensordot.call(
-                            (complex_a.clone(), complex_b.clone()),
-                            Some(&kwcn),
-                        )?,
+                        &numpy_tensordot
+                            .call((complex_a.clone(), complex_b.clone()), Some(&kwcn),)?,
                     ))?
                     .extract::<bool>()?,
                 "tensordot complex axes=1 diverged"
