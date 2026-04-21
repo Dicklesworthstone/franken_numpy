@@ -4985,6 +4985,24 @@ fn i0(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, dtype=None))]
+fn asfortranarray(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    dtype: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.asfortranarray. Returns the input as a
+    // Fortran-ordered (column-major) ndarray; copies when needed.
+    let numpy = py.import("numpy")?;
+    let asf_fn = numpy.getattr("asfortranarray")?;
+    let kwargs = PyDict::new(py);
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    Ok(asf_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x,))]
 fn iscomplexobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.iscomplexobj. Returns True iff input has a
@@ -6121,6 +6139,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fix, m)?)?;
     m.add_function(wrap_pyfunction!(tril, m)?)?;
     m.add_function(wrap_pyfunction!(i0, m)?)?;
+    m.add_function(wrap_pyfunction!(asfortranarray, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6425,6 +6444,7 @@ mod tests {
             assert!(module.getattr("fix").is_ok());
             assert!(module.getattr("tril").is_ok());
             assert!(module.getattr("i0").is_ok());
+            assert!(module.getattr("asfortranarray").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -23779,6 +23799,76 @@ mod tests {
             let ours_pos = i0_fn.call1((1.5_f64,))?;
             let ok_sym: bool = isclose.call1((&ours_neg, &ours_pos))?.extract()?;
             assert!(ok_sym, "i0(-x) must equal i0(x) by symmetry");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn asfortranarray_matches_numpy_across_layouts_and_dtype() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let asf_fn = module.getattr("asfortranarray")?;
+            let numpy = py.import("numpy")?;
+            let numpy_asf = numpy.getattr("asfortranarray")?;
+
+            // C-order 2-D input → F-order copy.
+            let c_order = numpy.getattr("array")?.call1((vec![
+                vec![1_i64, 2, 3],
+                vec![4, 5, 6],
+            ],))?;
+            let ours = asf_fn.call1((c_order.clone(),))?;
+            let theirs = numpy_asf.call1((c_order.clone(),))?;
+            assert_array_matches_numpy(&ours, &theirs)?;
+            let ours_f: bool = ours.getattr("flags")?.get_item("F_CONTIGUOUS")?.extract()?;
+            let theirs_f: bool = theirs.getattr("flags")?.get_item("F_CONTIGUOUS")?.extract()?;
+            assert_eq!(ours_f, theirs_f, "F_CONTIGUOUS flag must match");
+            assert!(ours_f, "asfortranarray must produce F-contiguous output");
+
+            // Already F-order input passes through equivalently.
+            let f_order = numpy_asf.call1((c_order.clone(),))?;
+            let ours_re = asf_fn.call1((f_order.clone(),))?;
+            let theirs_re = numpy_asf.call1((f_order.clone(),))?;
+            assert_array_matches_numpy(&ours_re, &theirs_re)?;
+
+            // Explicit dtype change promotes output dtype.
+            let ours_d = asf_fn.call(
+                (c_order.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("float64")?)?;
+                    kw
+                }),
+            )?;
+            let theirs_d = numpy_asf.call(
+                (c_order.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("float64")?)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_d, &theirs_d)?;
+            let ours_dtype = ours_d.getattr("dtype")?.str()?.to_string();
+            let theirs_dtype = theirs_d.getattr("dtype")?.str()?.to_string();
+            assert_eq!(ours_dtype, theirs_dtype, "explicit dtype must match numpy");
+
+            // 1-D input is both C and F contiguous (trivially F-contiguous).
+            let one_d = numpy.getattr("array")?.call1((vec![1_i64, 2, 3, 4, 5],))?;
+            let ours_o = asf_fn.call1((one_d.clone(),))?;
+            let theirs_o = numpy_asf.call1((one_d.clone(),))?;
+            assert_array_matches_numpy(&ours_o, &theirs_o)?;
+
+            // Python list → F-ordered ndarray.
+            let lst = PyList::new(py, [1_i64, 2, 3, 4])?;
+            let ours_l = asf_fn.call1((lst.clone(),))?;
+            let theirs_l = numpy_asf.call1((lst.clone(),))?;
+            assert_array_matches_numpy(&ours_l, &theirs_l)?;
 
             Ok(())
         });
