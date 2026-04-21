@@ -1,5 +1,6 @@
 use fnp_dtype::{ArrayStorage, DType, can_cast, f16, promote};
 use fnp_iter::{Nditer, NditerOptions, NditerOrder};
+use fnp_linalg::{pinv_hermitian_nxn_with_tolerance_aliases, pinv_mxn_with_tolerance_aliases};
 use fnp_ndarray::{broadcast_shapes, element_count};
 use fnp_ufunc::{
     FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
@@ -156,6 +157,74 @@ struct ParsedGridAxis {
 
 fn map_ufunc_error(err: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(err.to_string())
+}
+
+#[derive(Clone, Copy)]
+enum OptionalFloatKwarg {
+    Omitted,
+    None,
+    Value(f64),
+}
+
+impl OptionalFloatKwarg {
+    fn parse(py: Python<'_>, value: Option<Py<PyAny>>, name: &str) -> PyResult<Self> {
+        match value {
+            None => Ok(Self::Omitted),
+            Some(value) if value.bind(py).is_none() => Ok(Self::None),
+            Some(value) => Ok(Self::Value(value.bind(py).extract::<f64>().map_err(
+                |_| PyTypeError::new_err(format!("pinv: {name} must be a real number or None")),
+            )?)),
+        }
+    }
+
+    fn as_rcond(self) -> Option<f64> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::Omitted | Self::None => None,
+        }
+    }
+
+    fn as_rtol(self) -> Option<Option<f64>> {
+        match self {
+            Self::Omitted => None,
+            Self::None => Some(None),
+            Self::Value(value) => Some(Some(value)),
+        }
+    }
+
+    fn set_on_kwargs(self, kwargs: &Bound<'_, PyDict>, name: &str) -> PyResult<()> {
+        match self {
+            Self::Omitted => Ok(()),
+            Self::None => kwargs.set_item(name, kwargs.py().None()),
+            Self::Value(value) => kwargs.set_item(name, value),
+        }
+    }
+}
+
+fn parse_pinv_rtol_kwarg(
+    py: Python<'_>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<OptionalFloatKwarg> {
+    let Some(kwargs) = kwargs else {
+        return Ok(OptionalFloatKwarg::Omitted);
+    };
+
+    let mut rtol = OptionalFloatKwarg::Omitted;
+    for (key, value) in kwargs.iter() {
+        let name = key.extract::<String>()?;
+        match name.as_str() {
+            "rtol" => {
+                rtol = OptionalFloatKwarg::parse(py, Some(value.unbind()), "rtol")?;
+            }
+            _ => {
+                return Err(PyTypeError::new_err(format!(
+                    "pinv() got an unexpected keyword argument '{name}'"
+                )));
+            }
+        }
+    }
+
+    Ok(rtol)
 }
 
 fn extract_numeric_array(
@@ -3217,6 +3286,55 @@ fn minimum_fill_value(py: Python<'_>, obj: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, rcond=None, hermitian=false, **kwargs))]
+fn pinv(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    rcond: Option<Py<PyAny>>,
+    hermitian: bool,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let rcond = OptionalFloatKwarg::parse(py, rcond, "rcond")?;
+    let rtol = parse_pinv_rtol_kwarg(py, kwargs)?;
+    let array = extract_numeric_array(py, a.bind(py), "pinv(a)")?;
+    let shape = array.shape();
+
+    if shape.len() == 2
+        && !matches!(array.dtype(), DType::Complex64 | DType::Complex128)
+        && (!hermitian || shape[0] == shape[1])
+    {
+        let values = if hermitian {
+            pinv_hermitian_nxn_with_tolerance_aliases(
+                array.values(),
+                shape[0],
+                rcond.as_rcond(),
+                rtol.as_rtol(),
+            )
+        } else {
+            pinv_mxn_with_tolerance_aliases(
+                array.values(),
+                shape[0],
+                shape[1],
+                rcond.as_rcond(),
+                rtol.as_rtol(),
+            )
+        }
+        .map_err(map_ufunc_error)?;
+        let result = UFuncArray::new(vec![shape[1], shape[0]], values, DType::F64)
+            .map_err(map_ufunc_error)?;
+        return build_numpy_array_from_ufunc(py, &result);
+    }
+
+    let numpy = py.import("numpy")?;
+    let pinv_fn = numpy.getattr("linalg")?.getattr("pinv")?;
+    let kwargs = PyDict::new(py);
+    rcond.set_on_kwargs(&kwargs, "rcond")?;
+    kwargs.set_item("hermitian", hermitian)?;
+    rtol.set_on_kwargs(&kwargs, "rtol")?;
+    Ok(pinv_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, b, axes=None))]
 fn tensorsolve(
     py: Python<'_>,
@@ -4115,6 +4233,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(trim_zeros, m)?)?;
     m.add_function(wrap_pyfunction!(masked_invalid, m)?)?;
     m.add_function(wrap_pyfunction!(minimum_fill_value, m)?)?;
+    m.add_function(wrap_pyfunction!(pinv, m)?)?;
     m.add_function(wrap_pyfunction!(tensorsolve, m)?)?;
     m.add_function(wrap_pyfunction!(tensorinv, m)?)?;
     m.add_function(wrap_pyfunction!(solve_triangular, m)?)?;
@@ -4389,6 +4508,7 @@ mod tests {
             assert!(module.getattr("trim_zeros").is_ok());
             assert!(module.getattr("masked_invalid").is_ok());
             assert!(module.getattr("minimum_fill_value").is_ok());
+            assert!(module.getattr("pinv").is_ok());
             assert!(module.getattr("rfft").is_ok());
             assert!(module.getattr("irfft").is_ok());
             assert!(module.getattr("tensorsolve").is_ok());
@@ -6604,6 +6724,276 @@ mod tests {
                 Ok(())
             })();
             ma.setattr("minimum_fill_value", original)?;
+            result
+        });
+    }
+
+    #[test]
+    fn pinv_matches_numpy_across_shapes_rcond_and_hermitian() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let pinv_fn = module.getattr("pinv")?;
+            let numpy = py.import("numpy")?;
+            let numpy_pinv = numpy.getattr("linalg")?.getattr("pinv")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Square invertible 2x2.
+            let square = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 2.0])?,
+                    PyList::new(py, [3.0_f64, 4.0])?,
+                ],
+            )?,))?;
+            let actual = pinv_fn.call1((square.clone(),))?;
+            let expected = numpy_pinv.call1((square.clone(),))?;
+            assert!(
+                allclose.call1((&actual, &expected))?.extract::<bool>()?,
+                "square pinv diverged from numpy"
+            );
+
+            // Rectangular 3x2 (tall).
+            let tall = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 0.0])?,
+                    PyList::new(py, [0.0_f64, 1.0])?,
+                    PyList::new(py, [1.0_f64, 1.0])?,
+                ],
+            )?,))?;
+            let actual_tall = pinv_fn.call1((tall.clone(),))?;
+            let expected_tall = numpy_pinv.call1((tall.clone(),))?;
+            assert!(
+                allclose
+                    .call1((&actual_tall, &expected_tall))?
+                    .extract::<bool>()?,
+                "tall pinv diverged from numpy"
+            );
+
+            // Rank-deficient square — pinv must stay finite and match numpy.
+            let singular = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 2.0])?,
+                    PyList::new(py, [2.0_f64, 4.0])?,
+                ],
+            )?,))?;
+            let actual_singular = pinv_fn.call1((singular.clone(),))?;
+            let expected_singular = numpy_pinv.call1((singular.clone(),))?;
+            assert!(
+                allclose
+                    .call1((&actual_singular, &expected_singular))?
+                    .extract::<bool>()?,
+                "singular pinv diverged from numpy"
+            );
+
+            // Explicit rcond override (scalar).
+            let rcond_kwargs_1 = PyDict::new(py);
+            rcond_kwargs_1.set_item("rcond", 1e-10_f64)?;
+            let rcond_kwargs_2 = PyDict::new(py);
+            rcond_kwargs_2.set_item("rcond", 1e-10_f64)?;
+            let actual_rcond = pinv_fn.call((square.clone(),), Some(&rcond_kwargs_1))?;
+            let expected_rcond = numpy_pinv.call((square.clone(),), Some(&rcond_kwargs_2))?;
+            assert!(
+                allclose
+                    .call1((&actual_rcond, &expected_rcond))?
+                    .extract::<bool>()?,
+                "rcond-override pinv diverged from numpy"
+            );
+
+            // hermitian=True on a symmetric positive-definite 2x2.
+            let spd = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [2.0_f64, 1.0])?,
+                    PyList::new(py, [1.0_f64, 2.0])?,
+                ],
+            )?,))?;
+            let herm_kwargs_1 = PyDict::new(py);
+            herm_kwargs_1.set_item("hermitian", true)?;
+            let herm_kwargs_2 = PyDict::new(py);
+            herm_kwargs_2.set_item("hermitian", true)?;
+            let actual_herm = pinv_fn.call((spd.clone(),), Some(&herm_kwargs_1))?;
+            let expected_herm = numpy_pinv.call((spd.clone(),), Some(&herm_kwargs_2))?;
+            assert!(
+                allclose
+                    .call1((&actual_herm, &expected_herm))?
+                    .extract::<bool>()?,
+                "hermitian pinv diverged from numpy"
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn pinv_matches_numpy_rtol_keyword_only_and_error_surface() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let pinv_fn = module.getattr("pinv")?;
+            let numpy = py.import("numpy")?;
+            let numpy_pinv = numpy.getattr("linalg")?.getattr("pinv")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            let assert_allclose = |actual: &pyo3::Bound<'_, PyAny>,
+                                   expected: &pyo3::Bound<'_, PyAny>|
+             -> PyResult<()> {
+                let close = allclose.call1((actual, expected))?.extract::<bool>()?;
+                assert!(close, "pinv result diverged from numpy");
+                Ok(())
+            };
+
+            let matrix = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 2.0])?,
+                    PyList::new(py, [3.0_f64, 4.0])?,
+                ],
+            )?,))?;
+
+            let actual_rtol = pinv_fn.call(
+                (matrix.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("rtol", 1e-12_f64)?;
+                    kwargs
+                }),
+            )?;
+            let expected_rtol = numpy_pinv.call(
+                (matrix.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("rtol", 1e-12_f64)?;
+                    kwargs
+                }),
+            )?;
+            assert_allclose(&actual_rtol, &expected_rtol)?;
+
+            let actual_positional_err = pinv_fn
+                .call1((matrix.clone(), py.None(), false, 1e-12_f64))
+                .unwrap_err();
+            let expected_positional_err = numpy_pinv
+                .call1((matrix.clone(), py.None(), false, 1e-12_f64))
+                .unwrap_err();
+            assert_eq!(
+                actual_positional_err
+                    .get_type(py)
+                    .name()?
+                    .extract::<String>()?,
+                expected_positional_err
+                    .get_type(py)
+                    .name()?
+                    .extract::<String>()?
+            );
+            assert_eq!(
+                actual_positional_err.value(py).str()?.extract::<String>()?,
+                expected_positional_err
+                    .value(py)
+                    .str()?
+                    .extract::<String>()?
+            );
+
+            let actual_conflict = call_outcome(
+                py,
+                &pinv_fn,
+                &PyTuple::new(py, [matrix.clone()])?,
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("rcond", 1e-12_f64)?;
+                    kwargs.set_item("rtol", py.None())?;
+                    kwargs
+                }),
+            )?;
+            let expected_conflict = call_outcome(
+                py,
+                &numpy_pinv,
+                &PyTuple::new(py, [matrix.clone()])?,
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("rcond", 1e-12_f64)?;
+                    kwargs.set_item("rtol", py.None())?;
+                    kwargs
+                }),
+            )?;
+            assert_eq!(actual_conflict, expected_conflict);
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn pinv_supported_real_inputs_do_not_delegate_to_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let pinv_fn = module.getattr("pinv")?;
+            let numpy = py.import("numpy")?;
+            let linalg = numpy.getattr("linalg")?;
+            let allclose = numpy.getattr("allclose")?;
+            let original = linalg.getattr("pinv")?;
+            let bomb = py.eval(
+                pyo3::ffi::c_str!(
+                    "lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError('should not delegate'))"
+                ),
+                None,
+                None,
+            )?;
+
+            linalg.setattr("pinv", bomb)?;
+            let result = (|| -> PyResult<()> {
+                let matrix = numeric_array(py, vec![1.0_f64, 2.0, 3.0, 4.0], "float64")
+                    .call_method1("reshape", ((2, 2),))?;
+                let actual = pinv_fn.call1((matrix,))?;
+                let expected = numeric_array(py, vec![-2.0_f64, 1.0, 1.5, -0.5], "float64")
+                    .call_method1("reshape", ((2, 2),))?;
+                if !allclose.call1((&actual, &expected))?.extract::<bool>()? {
+                    return Err(PyValueError::new_err(
+                        "pinv: local real 2-D path diverged from expected inverse",
+                    ));
+                }
+
+                let hermitian_matrix = numeric_array(py, vec![2.0_f64, 1.0, 1.0, 2.0], "float64")
+                    .call_method1("reshape", ((2, 2),))?;
+                let actual_hermitian = pinv_fn.call(
+                    (hermitian_matrix,),
+                    Some(&{
+                        let kwargs = PyDict::new(py);
+                        kwargs.set_item("hermitian", true)?;
+                        kwargs
+                    }),
+                )?;
+                let expected_hermitian = numeric_array(
+                    py,
+                    vec![2.0_f64 / 3.0, -1.0 / 3.0, -1.0 / 3.0, 2.0 / 3.0],
+                    "float64",
+                )
+                .call_method1("reshape", ((2, 2),))?;
+                if !allclose
+                    .call1((&actual_hermitian, &expected_hermitian))?
+                    .extract::<bool>()?
+                {
+                    return Err(PyValueError::new_err(
+                        "pinv: local hermitian path diverged from expected inverse",
+                    ));
+                }
+
+                Ok(())
+            })();
+            linalg.setattr("pinv", original)?;
             result
         });
     }

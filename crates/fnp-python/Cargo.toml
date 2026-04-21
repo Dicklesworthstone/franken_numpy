@@ -18,3 +18,4 @@ fnp-dtype = { path = "../fnp-dtype" }
 fnp-iter = { path = "../fnp-iter" }
 fnp-ndarray = { path = "../fnp-ndarray" }
 fnp-ufunc = { path = "../fnp-ufunc" }
+fnp-linalg = { path = "../fnp-linalg" }

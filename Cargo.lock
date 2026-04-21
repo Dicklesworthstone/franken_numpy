@@ -458,6 +458,7 @@ version = "0.1.0"
 dependencies = [
  "fnp-dtype",
  "fnp-iter",
+ "fnp-linalg",
  "fnp-ndarray",
  "fnp-ufunc",
  "pyo3",
