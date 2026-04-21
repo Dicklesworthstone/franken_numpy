@@ -4311,6 +4311,28 @@ fn masked_greater_equal(
 }
 
 #[pyfunction]
+#[pyo3(signature = (arrays, *, out=None))]
+fn multi_dot(
+    py: Python<'_>,
+    arrays: Py<PyAny>,
+    out: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.linalg.multi_dot so the optimal-parenthesization
+    // chain-multiplication, dtype promotion, optional `out=` destination,
+    // and 1-D vector handling at the chain endpoints all match numpy
+    // exactly across real and complex inputs.
+    let numpy = py.import("numpy")?;
+    let multi_dot_fn = numpy.getattr("linalg")?.getattr("multi_dot")?;
+    let kwargs = PyDict::new(py);
+    if let Some(value) = out {
+        kwargs.set_item("out", value.bind(py))?;
+    }
+    Ok(multi_dot_fn
+        .call((arrays.bind(py),), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x, value, rtol=1e-5, atol=1e-8, copy=true, shrink=true))]
 fn masked_values(
     py: Python<'_>,
@@ -5003,6 +5025,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(vdot, m)?)?;
     m.add_function(wrap_pyfunction!(masked_inside, m)?)?;
     m.add_function(wrap_pyfunction!(masked_greater_equal, m)?)?;
+    m.add_function(wrap_pyfunction!(multi_dot, m)?)?;
     m.add_function(wrap_pyfunction!(masked_values, m)?)?;
     m.add_function(wrap_pyfunction!(masked_less_equal, m)?)?;
     m.add_function(wrap_pyfunction!(masked_outside, m)?)?;
@@ -5254,6 +5277,7 @@ mod tests {
             assert!(module.getattr("vdot").is_ok());
             assert!(module.getattr("masked_inside").is_ok());
             assert!(module.getattr("masked_greater_equal").is_ok());
+            assert!(module.getattr("multi_dot").is_ok());
             assert!(module.getattr("masked_values").is_ok());
             assert!(module.getattr("masked_less_equal").is_ok());
             assert!(module.getattr("count_masked").is_ok());
@@ -16129,6 +16153,181 @@ mod tests {
             assert_eq!(
                 repr_string(&actual_shrink),
                 repr_string(&expected_shrink)
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn multi_dot_matches_numpy_across_chain_lengths_shapes_and_complex() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let multi_dot_fn = module.getattr("multi_dot")?;
+            let numpy = py.import("numpy")?;
+            let numpy_multi_dot = numpy.getattr("linalg")?.getattr("multi_dot")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // 2-matrix chain (smallest valid input).
+            let a = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 2.0])?,
+                    PyList::new(py, [3.0_f64, 4.0])?,
+                ],
+            )?,))?;
+            let b = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [5.0_f64, 6.0])?,
+                    PyList::new(py, [7.0_f64, 8.0])?,
+                ],
+            )?,))?;
+            let chain2 = PyList::new(py, [a.clone(), b.clone()])?;
+            assert!(
+                allclose
+                    .call1((
+                        &multi_dot_fn.call1((chain2.clone(),))?,
+                        &numpy_multi_dot.call1((chain2.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "multi_dot 2-chain diverged"
+            );
+
+            // 3-matrix chain — exercises the optimization path.
+            let c = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [9.0_f64, 10.0])?,
+                    PyList::new(py, [11.0_f64, 12.0])?,
+                ],
+            )?,))?;
+            let chain3 = PyList::new(py, [a.clone(), b.clone(), c.clone()])?;
+            assert!(
+                allclose
+                    .call1((
+                        &multi_dot_fn.call1((chain3.clone(),))?,
+                        &numpy_multi_dot.call1((chain3.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "multi_dot 3-chain diverged"
+            );
+
+            // 4-matrix chain with rectangular shapes — non-trivial parenthesization.
+            let m1 = numpy
+                .getattr("arange")?
+                .call1((24_i64,))?
+                .call_method1("reshape", (3_i64, 8_i64))?
+                .call_method1("astype", ("float64",))?;
+            let m2 = numpy
+                .getattr("arange")?
+                .call1((16_i64,))?
+                .call_method1("reshape", (8_i64, 2_i64))?
+                .call_method1("astype", ("float64",))?;
+            let m3 = numpy
+                .getattr("arange")?
+                .call1((10_i64,))?
+                .call_method1("reshape", (2_i64, 5_i64))?
+                .call_method1("astype", ("float64",))?;
+            let m4 = numpy
+                .getattr("arange")?
+                .call1((20_i64,))?
+                .call_method1("reshape", (5_i64, 4_i64))?
+                .call_method1("astype", ("float64",))?;
+            let chain4 = PyList::new(py, [m1.clone(), m2.clone(), m3.clone(), m4.clone()])?;
+            assert!(
+                allclose
+                    .call1((
+                        &multi_dot_fn.call1((chain4.clone(),))?,
+                        &numpy_multi_dot.call1((chain4.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "multi_dot 4-chain rectangular diverged"
+            );
+
+            // 1-D vector at chain start (treated as row vector).
+            let vec_start = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0],))?;
+            let chain_v = PyList::new(py, [vec_start.clone(), a.clone(), b.clone()])?;
+            assert!(
+                allclose
+                    .call1((
+                        &multi_dot_fn.call1((chain_v.clone(),))?,
+                        &numpy_multi_dot.call1((chain_v.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "multi_dot 1-D start diverged"
+            );
+
+            // 1-D vector at chain end (treated as column vector).
+            let vec_end = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0],))?;
+            let chain_e = PyList::new(py, [a.clone(), b.clone(), vec_end.clone()])?;
+            assert!(
+                allclose
+                    .call1((
+                        &multi_dot_fn.call1((chain_e.clone(),))?,
+                        &numpy_multi_dot.call1((chain_e.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "multi_dot 1-D end diverged"
+            );
+
+            // Complex 2-chain.
+            let builtins = py.import("builtins")?;
+            let complex_a = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        PyList::new(
+                            py,
+                            [
+                                builtins.getattr("complex")?.call1((1.0_f64, 1.0_f64))?,
+                                builtins.getattr("complex")?.call1((2.0_f64, 0.0_f64))?,
+                            ],
+                        )?,
+                        PyList::new(
+                            py,
+                            [
+                                builtins.getattr("complex")?.call1((0.0_f64, 1.0_f64))?,
+                                builtins.getattr("complex")?.call1((1.0_f64, -1.0_f64))?,
+                            ],
+                        )?,
+                    ],
+                )?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "complex128")?;
+                    kw
+                }),
+            )?;
+            let chain_c = PyList::new(py, [complex_a.clone(), complex_a.clone()])?;
+            assert!(
+                allclose
+                    .call1((
+                        &multi_dot_fn.call1((chain_c.clone(),))?,
+                        &numpy_multi_dot.call1((chain_c.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "multi_dot complex diverged"
+            );
+
+            // out= kwarg writes into pre-allocated buffer.
+            let out_buf = numpy
+                .getattr("zeros")?
+                .call1((PyTuple::new(py, [2_i64, 2_i64])?,))?;
+            let out_kwargs = PyDict::new(py);
+            out_kwargs.set_item("out", out_buf.clone())?;
+            let returned = multi_dot_fn.call((chain2.clone(),), Some(&out_kwargs))?;
+            let expected_out = numpy_multi_dot.call1((chain2.clone(),))?;
+            assert!(
+                allclose
+                    .call1((&returned, &expected_out))?
+                    .extract::<bool>()?,
+                "multi_dot out= diverged"
             );
 
             Ok(())
