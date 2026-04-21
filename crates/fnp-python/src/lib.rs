@@ -3151,6 +3151,19 @@ fn masked_invalid(py: Python<'_>, a: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny
 }
 
 #[pyfunction]
+#[pyo3(signature = (obj,))]
+fn minimum_fill_value(py: Python<'_>, obj: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Mirror np.ma.minimum_fill_value: return the reduction-identity sentinel
+    // for the dtype of the input array / masked array / dtype.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("ma")?
+        .getattr("minimum_fill_value")?
+        .call1((obj.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, b, axes=None))]
 fn tensorsolve(
     py: Python<'_>,
@@ -4048,6 +4061,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(structured_to_unstructured, m)?)?;
     m.add_function(wrap_pyfunction!(trim_zeros, m)?)?;
     m.add_function(wrap_pyfunction!(masked_invalid, m)?)?;
+    m.add_function(wrap_pyfunction!(minimum_fill_value, m)?)?;
     m.add_function(wrap_pyfunction!(tensorsolve, m)?)?;
     m.add_function(wrap_pyfunction!(tensorinv, m)?)?;
     m.add_function(wrap_pyfunction!(solve_triangular, m)?)?;
@@ -4321,6 +4335,7 @@ mod tests {
             assert!(module.getattr("structured_to_unstructured").is_ok());
             assert!(module.getattr("trim_zeros").is_ok());
             assert!(module.getattr("masked_invalid").is_ok());
+            assert!(module.getattr("minimum_fill_value").is_ok());
             assert!(module.getattr("rfft").is_ok());
             assert!(module.getattr("irfft").is_ok());
             assert!(module.getattr("tensorsolve").is_ok());
@@ -6329,6 +6344,79 @@ mod tests {
                 actual_object_err.value(py).str()?.extract::<String>()?,
                 expected_object_err.value(py).str()?.extract::<String>()?
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn minimum_fill_value_matches_numpy_across_dtypes() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let minimum_fill_value_fn = module.getattr("minimum_fill_value")?;
+            let numpy = py.import("numpy")?;
+            let numpy_minimum_fill_value = numpy.getattr("ma")?.getattr("minimum_fill_value")?;
+
+            // Array inputs across numeric, boolean, complex, and datetime dtypes.
+            let float_arr = numeric_array(py, vec![1.0_f64, 2.0_f64], "float64");
+            let actual_float = minimum_fill_value_fn.call1((float_arr.clone(),))?;
+            let expected_float = numpy_minimum_fill_value.call1((float_arr.clone(),))?;
+            assert_eq!(repr_string(&actual_float), repr_string(&expected_float));
+
+            let int_arr = numeric_array(py, vec![1_i32, -2_i32], "int32");
+            let actual_int = minimum_fill_value_fn.call1((int_arr.clone(),))?;
+            let expected_int = numpy_minimum_fill_value.call1((int_arr.clone(),))?;
+            assert_eq!(repr_string(&actual_int), repr_string(&expected_int));
+
+            let uint_arr = numeric_array(py, vec![0_u64, 1_u64, 2_u64], "uint64");
+            let actual_uint = minimum_fill_value_fn.call1((uint_arr.clone(),))?;
+            let expected_uint = numpy_minimum_fill_value.call1((uint_arr.clone(),))?;
+            assert_eq!(repr_string(&actual_uint), repr_string(&expected_uint));
+
+            let bool_arr = numeric_array(py, vec![true, false], "bool");
+            let actual_bool = minimum_fill_value_fn.call1((bool_arr.clone(),))?;
+            let expected_bool = numpy_minimum_fill_value.call1((bool_arr.clone(),))?;
+            assert_eq!(repr_string(&actual_bool), repr_string(&expected_bool));
+
+            let builtins = py.import("builtins")?;
+            let complex_arr = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [builtins.getattr("complex")?.call1((1.0_f64, 2.0_f64))?],
+                )?,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", "complex128")?;
+                    kwargs
+                }),
+            )?;
+            let actual_complex = minimum_fill_value_fn.call1((complex_arr.clone(),))?;
+            let expected_complex = numpy_minimum_fill_value.call1((complex_arr.clone(),))?;
+            assert_eq!(repr_string(&actual_complex), repr_string(&expected_complex));
+
+            // Masked array input — dtype comes from the wrapped ndarray.
+            let masked_input = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![1.0_f64, 2.0_f64],),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("mask", vec![false, true])?;
+                    kwargs
+                }),
+            )?;
+            let actual_masked = minimum_fill_value_fn.call1((masked_input.clone(),))?;
+            let expected_masked = numpy_minimum_fill_value.call1((masked_input.clone(),))?;
+            assert_eq!(repr_string(&actual_masked), repr_string(&expected_masked));
+
+            // Numpy dtype object directly (np.ma.minimum_fill_value also accepts a dtype).
+            let dtype_obj = numpy.getattr("dtype")?.call1(("float32",))?;
+            let actual_dtype = minimum_fill_value_fn.call1((dtype_obj.clone(),))?;
+            let expected_dtype = numpy_minimum_fill_value.call1((dtype_obj.clone(),))?;
+            assert_eq!(repr_string(&actual_dtype), repr_string(&expected_dtype));
 
             Ok(())
         });
