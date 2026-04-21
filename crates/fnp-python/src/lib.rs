@@ -4753,6 +4753,18 @@ fn flipud(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (m,))]
+fn fliplr(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.fliplr so left/right (axis=1) reversal matches
+    // numpy. Requires at least 2-D input; raises ValueError for 1-D.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("fliplr")?
+        .call1((m.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, q, axis=None, out=None, overwrite_input=false, method=None, keepdims=false, weights=None))]
 #[allow(clippy::too_many_arguments)]
 fn quantile(
@@ -5856,6 +5868,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rfftn, m)?)?;
     m.add_function(wrap_pyfunction!(flip, m)?)?;
     m.add_function(wrap_pyfunction!(flipud, m)?)?;
+    m.add_function(wrap_pyfunction!(fliplr, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6141,6 +6154,7 @@ mod tests {
             assert!(module.getattr("rfftn").is_ok());
             assert!(module.getattr("flip").is_ok());
             assert!(module.getattr("flipud").is_ok());
+            assert!(module.getattr("fliplr").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -21772,6 +21786,83 @@ mod tests {
                 }),
             )?;
             assert_array_matches_numpy(&flipud_fn.call1((two_d.clone(),))?, &via_flip)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn fliplr_matches_numpy_across_2d_3d_dtype_and_error() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let fliplr_fn = module.getattr("fliplr")?;
+            let numpy = py.import("numpy")?;
+            let numpy_fliplr = numpy.getattr("fliplr")?;
+
+            // 2-D column reversal.
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![1_i64, 2, 3],
+                vec![4, 5, 6],
+                vec![7, 8, 9],
+            ],))?;
+            assert_array_matches_numpy(
+                &fliplr_fn.call1((two_d.clone(),))?,
+                &numpy_fliplr.call1((two_d.clone(),))?,
+            )?;
+
+            // 3-D leaves leading axis intact.
+            let three_d = numpy.getattr("array")?.call1((vec![
+                vec![vec![1_i64, 2], vec![3, 4]],
+                vec![vec![5, 6], vec![7, 8]],
+                vec![vec![9, 10], vec![11, 12]],
+            ],))?;
+            assert_array_matches_numpy(
+                &fliplr_fn.call1((three_d.clone(),))?,
+                &numpy_fliplr.call1((three_d.clone(),))?,
+            )?;
+
+            // Float dtype preservation.
+            let floats = numpy.getattr("array")?.call(
+                (vec![vec![1.5_f64, 2.5], vec![3.5, 4.5]],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("float64")?)?;
+                    kw
+                }),
+            )?;
+            let ours_f = fliplr_fn.call1((floats.clone(),))?;
+            let theirs_f = numpy_fliplr.call1((floats.clone(),))?;
+            assert_array_matches_numpy(&ours_f, &theirs_f)?;
+            let ours_dtype = ours_f.getattr("dtype")?.str()?.to_string();
+            let theirs_dtype = theirs_f.getattr("dtype")?.str()?.to_string();
+            assert_eq!(ours_dtype, theirs_dtype, "fliplr dtype must match numpy");
+
+            // 1-D input must raise the same error in both implementations.
+            let one_d = numpy.getattr("array")?.call1((vec![1_i64, 2, 3],))?;
+            let ours_err = fliplr_fn.call1((one_d.clone(),)).err();
+            let theirs_err = numpy_fliplr.call1((one_d.clone(),)).err();
+            assert_eq!(
+                ours_err.is_some(),
+                theirs_err.is_some(),
+                "fliplr 1-D must raise iff numpy does",
+            );
+
+            // Cross-check: fliplr(x) ≡ flip(x, axis=1).
+            let flip_fn = module.getattr("flip")?;
+            let via_flip = flip_fn.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 1_i64)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&fliplr_fn.call1((two_d.clone(),))?, &via_flip)?;
 
             Ok(())
         });
