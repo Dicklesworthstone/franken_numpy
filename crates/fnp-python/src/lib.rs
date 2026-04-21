@@ -3135,6 +3135,21 @@ fn trim_zeros(py: Python<'_>, filt: Py<PyAny>, trim: &str) -> PyResult<Py<PyAny>
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, copy=true))]
+fn masked_invalid(py: Python<'_>, a: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let ma = numpy.getattr("ma")?;
+    let finite = numpy.getattr("isfinite")?.call1((a.bind(py),))?;
+    let invalid = numpy.getattr("logical_not")?.call1((finite,))?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("copy", copy)?;
+    Ok(ma
+        .getattr("masked_where")?
+        .call((invalid, a.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, b, axes=None))]
 fn tensorsolve(
     py: Python<'_>,
@@ -4031,6 +4046,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(expand_dims, m)?)?;
     m.add_function(wrap_pyfunction!(structured_to_unstructured, m)?)?;
     m.add_function(wrap_pyfunction!(trim_zeros, m)?)?;
+    m.add_function(wrap_pyfunction!(masked_invalid, m)?)?;
     m.add_function(wrap_pyfunction!(tensorsolve, m)?)?;
     m.add_function(wrap_pyfunction!(tensorinv, m)?)?;
     m.add_function(wrap_pyfunction!(solve_triangular, m)?)?;
@@ -4303,6 +4319,7 @@ mod tests {
             assert!(module.getattr("expand_dims").is_ok());
             assert!(module.getattr("structured_to_unstructured").is_ok());
             assert!(module.getattr("trim_zeros").is_ok());
+            assert!(module.getattr("masked_invalid").is_ok());
             assert!(module.getattr("rfft").is_ok());
             assert!(module.getattr("irfft").is_ok());
             assert!(module.getattr("tensorsolve").is_ok());
@@ -6176,6 +6193,139 @@ mod tests {
             assert_eq!(
                 actual_err.value(py).str()?.extract::<String>()?,
                 expected_err.value(py).str()?.extract::<String>()?
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn masked_invalid_matches_numpy_basic_cases_and_copy_semantics() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let masked_invalid_fn = module.getattr("masked_invalid")?;
+            let numpy = py.import("numpy")?;
+            let numpy_masked_invalid = numpy.getattr("ma")?.getattr("masked_invalid")?;
+
+            let float_input = numeric_array(py, vec![1.0_f64, f64::NAN, f64::INFINITY], "float64");
+            let actual_float = masked_invalid_fn.call1((float_input.clone(),))?;
+            let expected_float = numpy_masked_invalid.call1((float_input.clone(),))?;
+            assert_eq!(repr_string(&actual_float), repr_string(&expected_float));
+
+            let bool_input = numeric_array(py, vec![true, false, true], "bool");
+            let actual_bool = masked_invalid_fn.call1((bool_input.clone(),))?;
+            let expected_bool = numpy_masked_invalid.call1((bool_input.clone(),))?;
+            assert_eq!(repr_string(&actual_bool), repr_string(&expected_bool));
+
+            let builtins = py.import("builtins")?;
+            let complex_input = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    builtins.getattr("complex")?.call1((1.0_f64, 2.0_f64))?,
+                    builtins.getattr("complex")?.call1((f64::NAN, 0.0_f64))?,
+                    builtins
+                        .getattr("complex")?
+                        .call1((1.0_f64, f64::INFINITY))?,
+                ],
+            )?,))?;
+            let actual_complex = masked_invalid_fn.call1((complex_input.clone(),))?;
+            let expected_complex = numpy_masked_invalid.call1((complex_input.clone(),))?;
+            assert_eq!(repr_string(&actual_complex), repr_string(&expected_complex));
+
+            let datetime_input = numpy.call_method(
+                "array",
+                (PyList::new(
+                    py,
+                    [
+                        numpy.getattr("datetime64")?.call1(("NaT",))?,
+                        numpy.getattr("datetime64")?.call1(("2020-01-01",))?,
+                    ],
+                )?,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", "datetime64[D]")?;
+                    kwargs
+                }),
+            )?;
+            let actual_datetime = masked_invalid_fn.call1((datetime_input.clone(),))?;
+            let expected_datetime = numpy_masked_invalid.call1((datetime_input.clone(),))?;
+            assert_eq!(
+                repr_string(&actual_datetime),
+                repr_string(&expected_datetime)
+            );
+
+            let masked_input = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![1.0_f64, f64::NAN],),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("mask", vec![false, true])?;
+                    kwargs
+                }),
+            )?;
+            let actual_masked = masked_invalid_fn.call1((masked_input.clone(),))?;
+            let expected_masked = numpy_masked_invalid.call1((masked_input.clone(),))?;
+            assert_eq!(repr_string(&actual_masked), repr_string(&expected_masked));
+
+            let shared_input = numeric_array(py, vec![1.0_f64, f64::NAN], "float64");
+            let actual_copy_false = masked_invalid_fn.call(
+                (shared_input.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("copy", false)?;
+                    kwargs
+                }),
+            )?;
+            let expected_copy_false = numpy_masked_invalid.call(
+                (shared_input.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("copy", false)?;
+                    kwargs
+                }),
+            )?;
+            let actual_shares = numpy
+                .getattr("shares_memory")?
+                .call1((actual_copy_false.getattr("data")?, shared_input.clone()))?
+                .extract::<bool>()?;
+            let expected_shares = numpy
+                .getattr("shares_memory")?
+                .call1((expected_copy_false.getattr("data")?, shared_input.clone()))?
+                .extract::<bool>()?;
+            assert_eq!(actual_shares, expected_shares);
+
+            let object_values = PyList::empty(py);
+            object_values.append(1_i64)?;
+            object_values.append(py.None())?;
+            let object_input = numpy.call_method(
+                "array",
+                (object_values,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", numpy.getattr("object_")?)?;
+                    kwargs
+                }),
+            )?;
+            let actual_object_err = masked_invalid_fn
+                .call1((object_input.clone(),))
+                .unwrap_err();
+            let expected_object_err = numpy_masked_invalid
+                .call1((object_input.clone(),))
+                .unwrap_err();
+            assert_eq!(
+                actual_object_err.get_type(py).name()?.extract::<String>()?,
+                expected_object_err
+                    .get_type(py)
+                    .name()?
+                    .extract::<String>()?
+            );
+            assert_eq!(
+                actual_object_err.value(py).str()?.extract::<String>()?,
+                expected_object_err.value(py).str()?.extract::<String>()?
             );
 
             Ok(())
