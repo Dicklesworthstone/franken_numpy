@@ -26441,6 +26441,11 @@ impl MaskedArray {
         ma_minimum_fill_value(&self.data)
     }
 
+    #[must_use]
+    pub fn maximum_fill_value(&self) -> Option<UFuncArray> {
+        ma_maximum_fill_value(&self.data)
+    }
+
     /// Return data with masked elements replaced by `fill_value`.
     pub fn filled(&self, fill_value: f64) -> Result<UFuncArray, UFuncError> {
         match &self.mask {
@@ -27986,6 +27991,76 @@ pub fn ma_minimum_fill_value_for_dtype(dtype: DType) -> Option<UFuncArray> {
 #[must_use]
 pub fn ma_minimum_fill_value(a: &UFuncArray) -> Option<UFuncArray> {
     ma_minimum_fill_value_for_dtype(a.dtype())
+}
+
+/// Return the NumPy-style maximum fill value sentinel for a dtype.
+///
+/// This is the scalar used by `np.ma.maximum_fill_value`, i.e. the identity
+/// that keeps masked entries from affecting a maximum reduction. It mirrors
+/// `ma_minimum_fill_value_for_dtype` with the opposite polarity: bool→False,
+/// signed ints→MIN, unsigned ints→0, floats→-inf, complex→(-inf, -inf),
+/// datetime/timedelta→i64::MIN+1 (one past NaT, matching NumPy).
+#[must_use]
+pub fn ma_maximum_fill_value_for_dtype(dtype: DType) -> Option<UFuncArray> {
+    match dtype {
+        DType::Bool => {
+            UFuncArray::from_storage_with_dtype(vec![], ArrayStorage::Bool(vec![false]), dtype).ok()
+        }
+        DType::I8 => {
+            UFuncArray::from_storage_with_dtype(vec![], ArrayStorage::I8(vec![i8::MIN]), dtype).ok()
+        }
+        DType::I16 => {
+            UFuncArray::from_storage_with_dtype(vec![], ArrayStorage::I16(vec![i16::MIN]), dtype)
+                .ok()
+        }
+        DType::I32 => {
+            UFuncArray::from_storage_with_dtype(vec![], ArrayStorage::I32(vec![i32::MIN]), dtype)
+                .ok()
+        }
+        DType::I64 => {
+            UFuncArray::from_storage_with_dtype(vec![], ArrayStorage::I64(vec![i64::MIN]), dtype)
+                .ok()
+        }
+        DType::U8 => {
+            UFuncArray::from_storage_with_dtype(vec![], ArrayStorage::U8(vec![0]), dtype).ok()
+        }
+        DType::U16 => {
+            UFuncArray::from_storage_with_dtype(vec![], ArrayStorage::U16(vec![0]), dtype).ok()
+        }
+        DType::U32 => {
+            UFuncArray::from_storage_with_dtype(vec![], ArrayStorage::U32(vec![0]), dtype).ok()
+        }
+        DType::U64 => {
+            UFuncArray::from_storage_with_dtype(vec![], ArrayStorage::U64(vec![0]), dtype).ok()
+        }
+        DType::F16 | DType::F32 | DType::F64 => Some(UFuncArray {
+            shape: vec![],
+            values: vec![f64::NEG_INFINITY],
+            dtype,
+            integer_sidecar: None,
+        }),
+        DType::Complex64 | DType::Complex128 => Some(UFuncArray {
+            shape: vec![2],
+            values: vec![f64::NEG_INFINITY, f64::NEG_INFINITY],
+            dtype,
+            integer_sidecar: None,
+        }),
+        DType::DateTime64 | DType::TimeDelta64 => UFuncArray::from_storage_with_dtype(
+            vec![],
+            // NumPy uses -i64::MAX (one past NaT = i64::MIN) so reductions never
+            // collide with the NaT sentinel.
+            ArrayStorage::I64(vec![-i64::MAX]),
+            dtype,
+        )
+        .ok(),
+        DType::Str | DType::Structured => None,
+    }
+}
+
+/// Return the NumPy-style maximum fill value sentinel for an array's dtype.
+#[must_use]
+pub fn ma_maximum_fill_value(a: &UFuncArray) -> Option<UFuncArray> {
+    ma_maximum_fill_value_for_dtype(a.dtype())
 }
 
 /// Check whether an array qualifies as a boolean mask (np.ma.is_mask).
@@ -32099,7 +32174,8 @@ mod tests {
         lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, lcm_arrays, ldexp, leg2poly,
         legadd, legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub, legval,
         logaddexp, logaddexp2, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or,
-        ma_minimum_fill_value, ma_minimum_fill_value_for_dtype, mediate_ufunc_runtime_policy, modf,
+        ma_maximum_fill_value, ma_maximum_fill_value_for_dtype, ma_minimum_fill_value,
+        ma_minimum_fill_value_for_dtype, mediate_ufunc_runtime_policy, modf,
         nextafter, normalize_fixed_signature_keywords, normalize_signature_keywords, pad_empty,
         pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
         plan_binary_dispatch, plan_binary_dispatch_with_registry,
@@ -32136,6 +32212,10 @@ mod tests {
     }
 
     fn normalize_minimum_fill_value(result: Option<UFuncArray>) -> String {
+        normalize_fill_value(result)
+    }
+
+    fn normalize_fill_value(result: Option<UFuncArray>) -> String {
         match result {
             None => "none".to_string(),
             Some(arr) => match arr.dtype() {
@@ -32154,7 +32234,18 @@ mod tests {
                     Some(super::IntegerSidecar::U64(values)) => format!("uint:{}", values[0]),
                     _ => format!("uint:{}", arr.values()[0] as u64),
                 },
-                DType::F16 | DType::F32 | DType::F64 => "float:inf".to_string(),
+                DType::F16 | DType::F32 | DType::F64 => {
+                    let v = arr.values()[0];
+                    if v.is_infinite() {
+                        if v > 0.0 {
+                            "float:inf".to_string()
+                        } else {
+                            "float:-inf".to_string()
+                        }
+                    } else {
+                        format!("float:{v}")
+                    }
+                }
                 DType::Complex64 | DType::Complex128 => {
                     format!("complex:{},{}", arr.values()[0], arr.values()[1])
                 }
@@ -32164,14 +32255,25 @@ mod tests {
     }
 
     fn numpy_oracle_minimum_fill_value(dtype: &str) -> String {
+        numpy_oracle_fill_value(dtype, "minimum")
+    }
+
+    fn numpy_oracle_maximum_fill_value(dtype: &str) -> String {
+        numpy_oracle_fill_value(dtype, "maximum")
+    }
+
+    fn numpy_oracle_fill_value(dtype: &str, kind: &str) -> String {
         let script = r#"
-import json
 import sys
 import numpy as np
 
 dtype_name = sys.argv[1]
+kind = sys.argv[2]
 arr = np.ma.array([0], dtype=np.dtype(dtype_name))
-value = np.ma.minimum_fill_value(arr)
+if kind == "minimum":
+    value = np.ma.minimum_fill_value(arr)
+else:
+    value = np.ma.maximum_fill_value(arr)
 dt = arr.dtype
 
 if value is None:
@@ -32191,11 +32293,12 @@ else:
             .arg("-c")
             .arg(script)
             .arg(dtype)
+            .arg(kind)
             .output()
             .expect("python oracle should launch");
         assert!(
             output.status.success(),
-            "NumPy minimum_fill_value oracle must succeed"
+            "NumPy {kind}_fill_value oracle must succeed"
         );
         String::from_utf8(output.stdout)
             .expect("oracle stdout must be utf-8")
@@ -47191,6 +47294,115 @@ print(json.dumps(payload))
                 normalize_minimum_fill_value(ma_minimum_fill_value_for_dtype(dtype)),
                 numpy_oracle_minimum_fill_value(numpy_name),
                 "minimum_fill_value mismatch for {:?}",
+                dtype
+            );
+        }
+    }
+
+    #[test]
+    fn masked_maximum_fill_value_supported_dtypes() {
+        assert_eq!(
+            normalize_fill_value(ma_maximum_fill_value_for_dtype(DType::Bool)),
+            "bool:false"
+        );
+        assert_eq!(
+            normalize_fill_value(ma_maximum_fill_value_for_dtype(DType::I8)),
+            format!("int:{}", i8::MIN)
+        );
+        assert_eq!(
+            normalize_fill_value(ma_maximum_fill_value_for_dtype(DType::I16)),
+            format!("int:{}", i16::MIN)
+        );
+        assert_eq!(
+            normalize_fill_value(ma_maximum_fill_value_for_dtype(DType::I32)),
+            format!("int:{}", i32::MIN)
+        );
+        assert_eq!(
+            normalize_fill_value(ma_maximum_fill_value_for_dtype(DType::I64)),
+            format!("int:{}", i64::MIN)
+        );
+        assert_eq!(
+            normalize_fill_value(ma_maximum_fill_value_for_dtype(DType::U8)),
+            "uint:0"
+        );
+        assert_eq!(
+            normalize_fill_value(ma_maximum_fill_value_for_dtype(DType::U64)),
+            "uint:0"
+        );
+        assert_eq!(
+            normalize_fill_value(ma_maximum_fill_value_for_dtype(DType::F64)),
+            "float:-inf"
+        );
+        assert_eq!(
+            normalize_fill_value(ma_maximum_fill_value_for_dtype(DType::Complex128)),
+            "complex:-inf,-inf"
+        );
+        // NumPy uses -i64::MAX (not i64::MIN) so reductions avoid the NaT sentinel.
+        assert_eq!(
+            normalize_fill_value(ma_maximum_fill_value_for_dtype(DType::DateTime64)),
+            format!("int:{}", -i64::MAX)
+        );
+        assert_eq!(
+            normalize_fill_value(ma_maximum_fill_value_for_dtype(DType::TimeDelta64)),
+            format!("int:{}", -i64::MAX)
+        );
+        assert!(ma_maximum_fill_value_for_dtype(DType::Str).is_none());
+        assert!(ma_maximum_fill_value_for_dtype(DType::Structured).is_none());
+    }
+
+    #[test]
+    fn masked_array_maximum_fill_value_uses_underlying_dtype() {
+        let int_data =
+            UFuncArray::from_storage_with_dtype(vec![1], ArrayStorage::I64(vec![7]), DType::I64)
+                .expect("i64 array");
+        let int_masked = MaskedArray::new(int_data.clone(), None, None).expect("masked int");
+        assert_eq!(
+            normalize_fill_value(int_masked.maximum_fill_value()),
+            format!("int:{}", i64::MIN)
+        );
+        assert_eq!(
+            normalize_fill_value(ma_maximum_fill_value(&int_data)),
+            format!("int:{}", i64::MIN)
+        );
+
+        let complex_data = UFuncArray {
+            shape: vec![2],
+            values: vec![1.0, -2.0],
+            dtype: DType::Complex128,
+            integer_sidecar: None,
+        };
+        let complex_masked = MaskedArray::new(complex_data, None, None).expect("masked complex");
+        assert_eq!(
+            normalize_fill_value(complex_masked.maximum_fill_value()),
+            "complex:-inf,-inf"
+        );
+    }
+
+    #[test]
+    fn masked_maximum_fill_value_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let cases = [
+            (DType::Bool, "bool"),
+            (DType::I8, "int8"),
+            (DType::I64, "int64"),
+            (DType::U8, "uint8"),
+            (DType::U64, "uint64"),
+            (DType::F32, "float32"),
+            (DType::F64, "float64"),
+            (DType::Complex128, "complex128"),
+            (DType::DateTime64, "datetime64[ns]"),
+            (DType::TimeDelta64, "timedelta64[ns]"),
+            (DType::Str, "U1"),
+        ];
+
+        for (dtype, numpy_name) in cases {
+            assert_eq!(
+                normalize_fill_value(ma_maximum_fill_value_for_dtype(dtype)),
+                numpy_oracle_maximum_fill_value(numpy_name),
+                "maximum_fill_value mismatch for {:?}",
                 dtype
             );
         }
