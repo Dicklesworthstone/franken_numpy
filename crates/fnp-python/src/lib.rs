@@ -4237,6 +4237,26 @@ fn masked_equal(py: Python<'_>, x: Py<PyAny>, value: Py<PyAny>, copy: bool) -> P
 }
 
 #[pyfunction]
+#[pyo3(signature = (x, value, copy=true))]
+fn masked_not_equal(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    value: Py<PyAny>,
+    copy: bool,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.ma.masked_not_equal so inverse-equality masking,
+    // copy flag forwarding, and the MaskedArray result type all match
+    // numpy exactly across integer, float, boolean, and n-D inputs.
+    let numpy = py.import("numpy")?;
+    let masked_not_equal_fn = numpy.getattr("ma")?.getattr("masked_not_equal")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("copy", copy)?;
+    Ok(masked_not_equal_fn
+        .call((x.bind(py), value.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, b))]
 fn vdot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.vdot so the conjugate-of-first-arg semantics
@@ -4286,6 +4306,33 @@ fn masked_greater_equal(
     let kwargs = PyDict::new(py);
     kwargs.set_item("copy", copy)?;
     Ok(masked_ge_fn
+        .call((x.bind(py), value.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, value, rtol=1e-5, atol=1e-8, copy=true, shrink=true))]
+fn masked_values(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    value: Py<PyAny>,
+    rtol: f64,
+    atol: f64,
+    copy: bool,
+    shrink: bool,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.ma.masked_values: floating-point approximate-equality
+    // masking using rtol/atol thresholds (mirrors np.isclose semantics for the
+    // mask predicate). For integer / non-floating dtypes numpy falls back to
+    // exact equality. Forwards copy and shrink kwargs.
+    let numpy = py.import("numpy")?;
+    let masked_values_fn = numpy.getattr("ma")?.getattr("masked_values")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("rtol", rtol)?;
+    kwargs.set_item("atol", atol)?;
+    kwargs.set_item("copy", copy)?;
+    kwargs.set_item("shrink", shrink)?;
+    Ok(masked_values_fn
         .call((x.bind(py), value.bind(py)), Some(&kwargs))?
         .unbind())
 }
@@ -4952,9 +4999,11 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tri, m)?)?;
     m.add_function(wrap_pyfunction!(masked_where, m)?)?;
     m.add_function(wrap_pyfunction!(masked_equal, m)?)?;
+    m.add_function(wrap_pyfunction!(masked_not_equal, m)?)?;
     m.add_function(wrap_pyfunction!(vdot, m)?)?;
     m.add_function(wrap_pyfunction!(masked_inside, m)?)?;
     m.add_function(wrap_pyfunction!(masked_greater_equal, m)?)?;
+    m.add_function(wrap_pyfunction!(masked_values, m)?)?;
     m.add_function(wrap_pyfunction!(masked_less_equal, m)?)?;
     m.add_function(wrap_pyfunction!(masked_outside, m)?)?;
     m.add_function(wrap_pyfunction!(count_masked, m)?)?;
@@ -5201,9 +5250,11 @@ mod tests {
             assert!(module.getattr("eigvals").is_ok());
             assert!(module.getattr("masked_where").is_ok());
             assert!(module.getattr("masked_equal").is_ok());
+            assert!(module.getattr("masked_not_equal").is_ok());
             assert!(module.getattr("vdot").is_ok());
             assert!(module.getattr("masked_inside").is_ok());
             assert!(module.getattr("masked_greater_equal").is_ok());
+            assert!(module.getattr("masked_values").is_ok());
             assert!(module.getattr("masked_less_equal").is_ok());
             assert!(module.getattr("count_masked").is_ok());
             assert!(module.getattr("masked_outside").is_ok());
