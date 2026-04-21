@@ -17224,4 +17224,154 @@ mod tests {
             Ok(())
         });
     }
+
+    #[test]
+    fn filled_matches_numpy_across_explicit_and_intrinsic_fill_values() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let filled_fn = module.getattr("filled")?;
+            let numpy = py.import("numpy")?;
+            let numpy_filled = numpy.getattr("ma")?.getattr("filled")?;
+            let array_equal = numpy.getattr("array_equal")?;
+
+            // Masked array with explicit fill_value at construction.
+            let masked = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![1.0_f64, 2.0, 3.0, 4.0],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("mask", vec![false, true, false, true])?;
+                    kw.set_item("fill_value", -99.0_f64)?;
+                    kw
+                }),
+            )?;
+            // Default fill_value=None — uses array's intrinsic fill.
+            assert_eq!(
+                repr_string(&filled_fn.call1((masked.clone(),))?),
+                repr_string(&numpy_filled.call1((masked.clone(),))?)
+            );
+
+            // Explicit fill_value override.
+            let kw_fill = PyDict::new(py);
+            kw_fill.set_item("fill_value", 0.0_f64)?;
+            let kw_fill_n = PyDict::new(py);
+            kw_fill_n.set_item("fill_value", 0.0_f64)?;
+            assert_eq!(
+                repr_string(&filled_fn.call((masked.clone(),), Some(&kw_fill))?),
+                repr_string(&numpy_filled.call((masked.clone(),), Some(&kw_fill_n))?)
+            );
+
+            // Plain ndarray (no mask) — filled returns the array as-is.
+            let plain = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 2.0, 3.0],))?;
+            assert!(
+                array_equal
+                    .call1((
+                        &filled_fn.call1((plain.clone(),))?,
+                        &numpy_filled.call1((plain.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "filled plain ndarray diverged"
+            );
+
+            // Fully-masked array with explicit replacement.
+            let all_masked = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![1_i64, 2, 3, 4],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("mask", vec![true, true, true, true])?;
+                    kw
+                }),
+            )?;
+            let kw_int = PyDict::new(py);
+            kw_int.set_item("fill_value", 7_i64)?;
+            let kw_int_n = PyDict::new(py);
+            kw_int_n.set_item("fill_value", 7_i64)?;
+            assert!(
+                array_equal
+                    .call1((
+                        &filled_fn.call((all_masked.clone(),), Some(&kw_int))?,
+                        &numpy_filled.call((all_masked.clone(),), Some(&kw_int_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "filled fully-masked diverged"
+            );
+
+            // No-mask masked array — filled returns the data unchanged.
+            let no_mask = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![10.0_f64, 20.0, 30.0],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("mask", false)?;
+                    kw
+                }),
+            )?;
+            assert!(
+                array_equal
+                    .call1((
+                        &filled_fn.call1((no_mask.clone(),))?,
+                        &numpy_filled.call1((no_mask.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "filled nomask diverged"
+            );
+
+            // 2-D masked input.
+            let masked_2d = numpy.getattr("ma")?.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        PyList::new(py, [1.0_f64, 2.0, 3.0])?,
+                        PyList::new(py, [4.0_f64, 5.0, 6.0])?,
+                    ],
+                )?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item(
+                        "mask",
+                        PyList::new(
+                            py,
+                            [
+                                PyList::new(py, [false, true, false])?,
+                                PyList::new(py, [true, false, true])?,
+                            ],
+                        )?,
+                    )?;
+                    kw
+                }),
+            )?;
+            let kw_n2d = PyDict::new(py);
+            kw_n2d.set_item("fill_value", -1.0_f64)?;
+            let kw_n2d_n = PyDict::new(py);
+            kw_n2d_n.set_item("fill_value", -1.0_f64)?;
+            assert!(
+                array_equal
+                    .call1((
+                        &filled_fn.call((masked_2d.clone(),), Some(&kw_n2d))?,
+                        &numpy_filled.call((masked_2d.clone(),), Some(&kw_n2d_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "filled 2-D diverged"
+            );
+
+            // NaN fill_value preserves IEEE-754 NaN.
+            let kw_nan = PyDict::new(py);
+            kw_nan.set_item("fill_value", f64::NAN)?;
+            let kw_nan_n = PyDict::new(py);
+            kw_nan_n.set_item("fill_value", f64::NAN)?;
+            // numpy returns NaN at masked positions; check via repr (NaN ==
+            // NaN is False so allclose would also need equal_nan=True).
+            assert_eq!(
+                repr_string(&filled_fn.call((masked.clone(),), Some(&kw_nan))?),
+                repr_string(&numpy_filled.call((masked.clone(),), Some(&kw_nan_n))?)
+            );
+
+            Ok(())
+        });
+    }
 }
