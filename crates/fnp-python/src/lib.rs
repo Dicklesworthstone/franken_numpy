@@ -3025,6 +3025,15 @@ fn where_py(
 }
 
 #[pyfunction]
+fn nonzero(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.nonzero so tuple length, index ordering,
+    // scalar/0-D errors, empty-array behavior, and object-truthiness
+    // handling all match numpy exactly.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("nonzero")?.call1((a.bind(py),))?.unbind())
+}
+
+#[pyfunction]
 fn flatnonzero(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let a = extract_numeric_array(py, a.bind(py), "flatnonzero(a)")?;
     let result = a.flatnonzero();
@@ -8044,6 +8053,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(trapezoid, m)?)?;
     m.add_function(wrap_pyfunction!(trapz, m)?)?;
     m.add_function(wrap_pyfunction!(where_py, m)?)?;
+    m.add_function(wrap_pyfunction!(nonzero, m)?)?;
     m.add_function(wrap_pyfunction!(flatnonzero, m)?)?;
     m.add_function(wrap_pyfunction!(argwhere, m)?)?;
     m.add_function(wrap_pyfunction!(count_nonzero, m)?)?;
@@ -8524,6 +8534,7 @@ mod tests {
             assert!(module.getattr("trapezoid").is_ok());
             assert!(module.getattr("trapz").is_ok());
             assert!(module.getattr("where").is_ok());
+            assert!(module.getattr("nonzero").is_ok());
             assert!(module.getattr("flatnonzero").is_ok());
             assert!(module.getattr("argwhere").is_ok());
             assert!(module.getattr("count_nonzero").is_ok());
@@ -10076,6 +10087,82 @@ mod tests {
                     repr_string(&expected_item.call_method0("tolist")?)
                 );
             }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn nonzero_matches_numpy_bool_2d_scalar_empty_and_object_inputs() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let nonzero_fn = module.getattr("nonzero")?;
+            let numpy = py.import("numpy")?;
+            let numpy_nonzero = numpy.getattr("nonzero")?;
+
+            // 1-D boolean mask returns the matching flat indices.
+            let bool_mask = numpy
+                .getattr("array")?
+                .call1((vec![true, false, true, false],))?;
+            assert_index_tuple_matches_numpy(
+                &nonzero_fn.call1((bool_mask.clone(),))?,
+                &numpy_nonzero.call1((bool_mask.clone(),))?,
+            )?;
+
+            // 2-D mixed-zero input returns one index array per axis.
+            let two_d = numpy
+                .getattr("array")?
+                .call1((vec![vec![0_i64, 1, 0], vec![2_i64, 0, 3]],))?;
+            let ours_two_d = nonzero_fn.call1((two_d.clone(),))?;
+            let theirs_two_d = numpy_nonzero.call1((two_d.clone(),))?;
+            assert_index_tuple_matches_numpy(&ours_two_d, &theirs_two_d)?;
+            assert_eq!(
+                ours_two_d.downcast::<PyTuple>()?.len()?,
+                two_d.getattr("ndim")?.extract::<usize>()?,
+                "nonzero tuple length must match ndim",
+            );
+
+            // 0-D inputs must raise NumPy's exact error surface.
+            let scalar = numpy.getattr("array")?.call1((7_i64,))?;
+            let actual_err = nonzero_fn.call1((scalar.clone(),)).unwrap_err();
+            let expected_err = numpy_nonzero.call1((scalar.clone(),)).unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
+
+            // Empty arrays preserve tuple length and empty index arrays.
+            let empty = numpy.getattr("array")?.call1((Vec::<i64>::new(),))?;
+            let ours_empty = nonzero_fn.call1((empty.clone(),))?;
+            let theirs_empty = numpy_nonzero.call1((empty.clone(),))?;
+            assert_index_tuple_matches_numpy(&ours_empty, &theirs_empty)?;
+
+            // Object truthiness follows NumPy exactly.
+            let builtins = py.import("builtins")?;
+            let object_arr = numpy.getattr("array")?.call(
+                (vec![
+                    vec![py.None(), "x".into_pyobject(py)?.unbind().into()],
+                    vec![
+                        "".into_pyobject(py)?.unbind().into(),
+                        builtins.getattr("object")?.call0()?.unbind(),
+                    ],
+                ],),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", "object")?;
+                    kwargs
+                }),
+            )?;
+            let ours_object = nonzero_fn.call1((object_arr.clone(),))?;
+            let theirs_object = numpy_nonzero.call1((object_arr.clone(),))?;
+            assert_index_tuple_matches_numpy(&ours_object, &theirs_object)?;
+            assert_eq!(
+                ours_object.downcast::<PyTuple>()?.len()?,
+                object_arr.getattr("ndim")?.extract::<usize>()?,
+                "nonzero object tuple length must match ndim",
+            );
+
             Ok(())
         });
     }
