@@ -4341,6 +4341,25 @@ fn fft(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, fill_value=None))]
+fn filled(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    fill_value: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.ma.filled so masked-element replacement using either
+    // the explicit fill_value or the array's intrinsic fill_value attribute
+    // matches numpy exactly. Returns an ndarray (not a MaskedArray).
+    let numpy = py.import("numpy")?;
+    let filled_fn = numpy.getattr("ma")?.getattr("filled")?;
+    let kwargs = PyDict::new(py);
+    if let Some(value) = fill_value {
+        kwargs.set_item("fill_value", value.bind(py))?;
+    }
+    Ok(filled_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, n=None, axis=-1, norm=None, out=None))]
 fn ifft(
     py: Python<'_>,
@@ -5149,6 +5168,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(masked_inside, m)?)?;
     m.add_function(wrap_pyfunction!(masked_greater_equal, m)?)?;
     m.add_function(wrap_pyfunction!(fft, m)?)?;
+    m.add_function(wrap_pyfunction!(filled, m)?)?;
     m.add_function(wrap_pyfunction!(ifft, m)?)?;
     m.add_function(wrap_pyfunction!(eigh, m)?)?;
     m.add_function(wrap_pyfunction!(tensordot, m)?)?;
@@ -5406,6 +5426,7 @@ mod tests {
             assert!(module.getattr("masked_inside").is_ok());
             assert!(module.getattr("masked_greater_equal").is_ok());
             assert!(module.getattr("fft").is_ok());
+            assert!(module.getattr("filled").is_ok());
             assert!(module.getattr("ifft").is_ok());
             assert!(module.getattr("eigh").is_ok());
             assert!(module.getattr("tensordot").is_ok());
@@ -16774,23 +16795,22 @@ mod tests {
             // Compare eigenvalues exactly via allclose; compare eigenvector
             // matrices via abs() then allclose since the sign of an
             // eigenvector column is non-deterministic across LAPACK builds.
-            let assert_eigh_close = |actual: &Bound<'_, PyAny>,
-                                     expected: &Bound<'_, PyAny>|
-             -> PyResult<()> {
-                let a_vals = actual.getattr("eigenvalues")?;
-                let e_vals = expected.getattr("eigenvalues")?;
-                assert!(
-                    allclose.call1((&a_vals, &e_vals))?.extract::<bool>()?,
-                    "eigh eigenvalues diverged"
-                );
-                let a_vecs = abs_fn.call1((actual.getattr("eigenvectors")?,))?;
-                let e_vecs = abs_fn.call1((expected.getattr("eigenvectors")?,))?;
-                assert!(
-                    allclose.call1((&a_vecs, &e_vecs))?.extract::<bool>()?,
-                    "eigh |eigenvectors| diverged"
-                );
-                Ok(())
-            };
+            let assert_eigh_close =
+                |actual: &Bound<'_, PyAny>, expected: &Bound<'_, PyAny>| -> PyResult<()> {
+                    let a_vals = actual.getattr("eigenvalues")?;
+                    let e_vals = expected.getattr("eigenvalues")?;
+                    assert!(
+                        allclose.call1((&a_vals, &e_vals))?.extract::<bool>()?,
+                        "eigh eigenvalues diverged"
+                    );
+                    let a_vecs = abs_fn.call1((actual.getattr("eigenvectors")?,))?;
+                    let e_vecs = abs_fn.call1((expected.getattr("eigenvectors")?,))?;
+                    assert!(
+                        allclose.call1((&a_vecs, &e_vecs))?.extract::<bool>()?,
+                        "eigh |eigenvectors| diverged"
+                    );
+                    Ok(())
+                };
 
             // Real symmetric 2x2.
             let spd = numpy.getattr("array")?.call1((PyList::new(
@@ -17014,7 +17034,15 @@ mod tests {
             );
 
             // out= writes into a pre-allocated complex buffer.
-            let out_buf = numpy.getattr("zeros")?.call(
+            let actual_out_buf = numpy.getattr("zeros")?.call(
+                (PyTuple::new(py, [8_i64])?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "complex128")?;
+                    kw
+                }),
+            )?;
+            let expected_out_buf = numpy.getattr("zeros")?.call(
                 (PyTuple::new(py, [8_i64])?,),
                 Some(&{
                     let kw = PyDict::new(py);
@@ -17023,9 +17051,9 @@ mod tests {
                 }),
             )?;
             let out_kw = PyDict::new(py);
-            out_kw.set_item("out", out_buf.clone())?;
+            out_kw.set_item("out", actual_out_buf.clone())?;
             let out_kw_n = PyDict::new(py);
-            out_kw_n.set_item("out", out_buf.clone())?;
+            out_kw_n.set_item("out", expected_out_buf.clone())?;
             let returned = fft_fn.call((real_data.clone(),), Some(&out_kw))?;
             let expected_out = numpy_fft.call((real_data.clone(),), Some(&out_kw_n))?;
             assert!(
@@ -17040,7 +17068,9 @@ mod tests {
             bad_kw.set_item("norm", "bad")?;
             let bad_kw_n = PyDict::new(py);
             bad_kw_n.set_item("norm", "bad")?;
-            let actual_err = fft_fn.call((real_data.clone(),), Some(&bad_kw)).unwrap_err();
+            let actual_err = fft_fn
+                .call((real_data.clone(),), Some(&bad_kw))
+                .unwrap_err();
             let expected_err = numpy_fft
                 .call((real_data.clone(),), Some(&bad_kw_n))
                 .unwrap_err();
