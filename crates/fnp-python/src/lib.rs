@@ -5581,6 +5581,18 @@ fn array_equal(
 
 #[pyfunction]
 #[pyo3(signature = (a1, a2))]
+fn array_equiv(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.array_equiv so broadcastable-shape equivalence
+    // semantics match numpy exactly.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("array_equiv")?
+        .call1((a1.bind(py), a2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a1, a2))]
 fn polyadd(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.polyadd. Coefficients in decreasing-power order;
     // the shorter sequence is zero-padded on the left so like-degree
@@ -7944,6 +7956,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(legint, m)?)?;
     m.add_function(wrap_pyfunction!(tile, m)?)?;
     m.add_function(wrap_pyfunction!(array_equal, m)?)?;
+    m.add_function(wrap_pyfunction!(array_equiv, m)?)?;
     m.add_function(wrap_pyfunction!(true_divide, m)?)?;
     m.add_function(wrap_pyfunction!(allclose, m)?)?;
     m.add_function(wrap_pyfunction!(fix, m)?)?;
@@ -8295,6 +8308,7 @@ mod tests {
             assert!(module.getattr("polyder").is_ok());
             assert!(module.getattr("tile").is_ok());
             assert!(module.getattr("array_equal").is_ok());
+            assert!(module.getattr("array_equiv").is_ok());
             assert!(module.getattr("true_divide").is_ok());
             assert!(module.getattr("allclose").is_ok());
             assert!(module.getattr("fix").is_ok());
@@ -29034,6 +29048,98 @@ mod tests {
                 .call1((broadcast_left.clone(), broadcast_right.clone()))?
                 .extract()?;
             assert_eq!(ours_broadcast, theirs_broadcast);
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn array_equiv_matches_numpy_across_broadcast_scalar_object_and_mismatch() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let array_equiv_fn = module.getattr("array_equiv")?;
+            let numpy = py.import("numpy")?;
+            let numpy_array_equiv = numpy.getattr("array_equiv")?;
+
+            // Exact match.
+            let left = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2], vec![3, 4]],))?;
+            let right = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2], vec![3, 4]],))?;
+            let ours_exact: bool = array_equiv_fn
+                .call1((left.clone(), right.clone()))?
+                .extract()?;
+            let theirs_exact: bool = numpy_array_equiv
+                .call1((left.clone(), right.clone()))?
+                .extract()?;
+            assert_eq!(ours_exact, theirs_exact);
+
+            // Broadcastable equal arrays.
+            let row = numpy.getattr("array")?.call1((vec![1_i64, 2],))?;
+            let tiled = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2], vec![1, 2]],))?;
+            let ours_broadcast_true: bool = array_equiv_fn
+                .call1((row.clone(), tiled.clone()))?
+                .extract()?;
+            let theirs_broadcast_true: bool = numpy_array_equiv
+                .call1((row.clone(), tiled.clone()))?
+                .extract()?;
+            assert_eq!(ours_broadcast_true, theirs_broadcast_true);
+
+            // Broadcastable unequal arrays.
+            let mismatched_tiled = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2], vec![1, 3]],))?;
+            let ours_broadcast_false: bool = array_equiv_fn
+                .call1((row.clone(), mismatched_tiled.clone()))?
+                .extract()?;
+            let theirs_broadcast_false: bool = numpy_array_equiv
+                .call1((row.clone(), mismatched_tiled.clone()))?
+                .extract()?;
+            assert_eq!(ours_broadcast_false, theirs_broadcast_false);
+
+            // Scalar versus vector parity.
+            let scalar = 7_i64.into_pyobject(py)?.into_any().unbind();
+            let repeated = numpy.getattr("array")?.call1((vec![7_i64, 7, 7],))?;
+            let ours_scalar: bool = array_equiv_fn
+                .call1((scalar.clone_ref(py), repeated.clone()))?
+                .extract()?;
+            let theirs_scalar: bool = numpy_array_equiv
+                .call1((scalar.clone_ref(py), repeated.clone()))?
+                .extract()?;
+            assert_eq!(ours_scalar, theirs_scalar);
+
+            // Object dtype parity.
+            let object_left = numpy.getattr("array")?.call1((vec!["ab", "cd"],))?;
+            let object_right = numpy.getattr("array")?.call1((vec![vec!["ab", "cd"]],))?;
+            let ours_object: bool = array_equiv_fn
+                .call1((object_left.clone(), object_right.clone()))?
+                .extract()?;
+            let theirs_object: bool = numpy_array_equiv
+                .call1((object_left.clone(), object_right.clone()))?
+                .extract()?;
+            assert_eq!(ours_object, theirs_object);
+
+            // Non-broadcastable shape mismatch returns False.
+            let nonbroadcast = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2], vec![3, 4]],))?;
+            let vector = numpy.getattr("array")?.call1((vec![1_i64, 2, 3],))?;
+            let ours_mismatch: bool = array_equiv_fn
+                .call1((nonbroadcast.clone(), vector.clone()))?
+                .extract()?;
+            let theirs_mismatch: bool = numpy_array_equiv
+                .call1((nonbroadcast.clone(), vector.clone()))?
+                .extract()?;
+            assert_eq!(ours_mismatch, theirs_mismatch);
 
             Ok(())
         });
