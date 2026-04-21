@@ -24575,6 +24575,181 @@ mod tests {
     }
 
     #[test]
+    fn hermite_wrappers_match_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let nherm = numpy.getattr("polynomial")?.getattr("hermite")?;
+
+            let arith_cases: Vec<(Vec<f64>, Vec<f64>)> = vec![
+                (vec![1.0, 2.0, 3.0], vec![1.0, 2.0, 3.0]),
+                (vec![1.0, 2.0, 3.0], vec![1.0, 1.0]),
+                (vec![1.0, 2.0], vec![1.0, 2.0, 3.0, 4.0]),
+                (vec![5.0], vec![1.0, 2.0, 3.0]),
+            ];
+            for op in ["hermadd", "hermsub", "hermmul"] {
+                let ours = module.getattr(op)?;
+                let theirs = nherm.getattr(op)?;
+                for (idx, (c1, c2)) in arith_cases.iter().enumerate() {
+                    let o = ours.call1((c1.clone(), c2.clone()))?;
+                    let t = theirs.call1((c1.clone(), c2.clone()))?;
+                    assert_array_matches_numpy(&o, &t)
+                        .unwrap_or_else(|_| panic!("{op} case {idx}"));
+                }
+            }
+
+            let hv = module.getattr("hermval")?;
+            let hv_ref = nherm.getattr("hermval")?;
+            let c = vec![1.0_f64, 0.5];
+            assert_array_matches_numpy(
+                &hv.call1((2.0_f64, c.clone()))?,
+                &hv_ref.call1((2.0_f64, c.clone()))?,
+            )?;
+            let xs = vec![0.0_f64, 0.5, 1.0];
+            let c2 = vec![1.0_f64, 0.0, 1.0];
+            assert_array_matches_numpy(
+                &hv.call1((xs.clone(), c2.clone()))?,
+                &hv_ref.call1((xs.clone(), c2.clone()))?,
+            )?;
+            let c_multi = numpy
+                .getattr("array")?
+                .call1((vec![vec![1.0, 2.0], vec![3.0, 4.0]],))?;
+            let xs2 = vec![0.5_f64, 1.0];
+            let kw_tf = PyDict::new(py);
+            kw_tf.set_item("tensor", false)?;
+            assert_array_matches_numpy(
+                &hv.call((xs2.clone(), c_multi.clone()), Some(&kw_tf))?,
+                &hv_ref.call((xs2.clone(), c_multi.clone()), Some(&kw_tf))?,
+            )?;
+
+            let hr = module.getattr("hermroots")?;
+            let hr_ref = nherm.getattr("hermroots")?;
+            for coeffs in [
+                vec![-0.5_f64, 0.0, 1.0],
+                vec![0.0_f64, -0.25, 0.0, 1.0],
+                vec![1.0_f64],
+            ] {
+                assert_array_matches_numpy(
+                    &hr.call1((coeffs.clone(),))?,
+                    &hr_ref.call1((coeffs.clone(),))?,
+                )?;
+            }
+
+            let hfr = module.getattr("hermfromroots")?;
+            let hfr_ref = nherm.getattr("hermfromroots")?;
+            for roots in [
+                Vec::<f64>::new(),
+                vec![0.5_f64],
+                vec![1.0_f64, -1.0],
+                vec![-2.0_f64, 0.0, 2.0],
+            ] {
+                assert_array_matches_numpy(
+                    &hfr.call1((roots.clone(),))?,
+                    &hfr_ref.call1((roots.clone(),))?,
+                )?;
+            }
+
+            let hp = module.getattr("hermpow")?;
+            let hp_ref = nherm.getattr("hermpow")?;
+            let base = vec![1.0_f64, 1.0];
+            for pow in [0_i64, 1, 2, 3] {
+                assert_array_matches_numpy(
+                    &hp.call1((base.clone(), pow))?,
+                    &hp_ref.call1((base.clone(), pow))?,
+                )?;
+            }
+            let kw_mp = PyDict::new(py);
+            kw_mp.set_item("maxpower", 4_i64)?;
+            let our_err = hp.call((base.clone(), 5_i64), Some(&kw_mp)).err();
+            let np_err = hp_ref.call((base.clone(), 5_i64), Some(&kw_mp)).err();
+            assert_eq!(our_err.is_some(), np_err.is_some());
+
+            let hd = module.getattr("hermdiv")?;
+            let hd_ref = nherm.getattr("hermdiv")?;
+            let ours_tup: Bound<'_, pyo3::types::PyAny> =
+                hd.call1((vec![1.0_f64, 2.0, 3.0], vec![1.0_f64, 1.0]))?;
+            let theirs_tup: Bound<'_, pyo3::types::PyAny> =
+                hd_ref.call1((vec![1.0_f64, 2.0, 3.0], vec![1.0_f64, 1.0]))?;
+            for idx in 0_i64..2 {
+                assert_array_matches_numpy(
+                    &ours_tup.get_item(idx)?,
+                    &theirs_tup.get_item(idx)?,
+                )?;
+            }
+
+            let hl = module.getattr("hermline")?;
+            let hl_ref = nherm.getattr("hermline")?;
+            for (off, scl) in [(3.0_f64, 2.0), (0.0, 1.0), (-1.5, 0.5)] {
+                assert_array_matches_numpy(
+                    &hl.call1((off, scl))?,
+                    &hl_ref.call1((off, scl))?,
+                )?;
+            }
+
+            let hmx = module.getattr("hermmulx")?;
+            let hmx_ref = nherm.getattr("hermmulx")?;
+            let cs = vec![1.0_f64, 2.0, 3.0];
+            assert_array_matches_numpy(
+                &hmx.call1((cs.clone(),))?,
+                &hmx_ref.call1((cs.clone(),))?,
+            )?;
+            let our_mul = module.getattr("hermmul")?;
+            assert_array_matches_numpy(
+                &hmx.call1((cs.clone(),))?,
+                &our_mul.call1((cs.clone(), vec![0.0_f64, 1.0]))?,
+            )?;
+
+            let ht = module.getattr("hermtrim")?;
+            let ht_ref = nherm.getattr("hermtrim")?;
+            let trail = vec![1.0_f64, 0.0, 2.0, 0.0, 0.0];
+            assert_array_matches_numpy(
+                &ht.call1((trail.clone(),))?,
+                &ht_ref.call1((trail.clone(),))?,
+            )?;
+            let kw_tol = PyDict::new(py);
+            kw_tol.set_item("tol", 0.05_f64)?;
+            let near = vec![1.0_f64, 0.0, 2.0, 0.01, 0.0];
+            assert_array_matches_numpy(
+                &ht.call((near.clone(),), Some(&kw_tol))?,
+                &ht_ref.call((near.clone(),), Some(&kw_tol))?,
+            )?;
+
+            let our_der = module.getattr("hermder")?;
+            let our_int = module.getattr("hermint")?;
+            let np_der = nherm.getattr("hermder")?;
+            let np_int = nherm.getattr("hermint")?;
+            let base4 = vec![1.0_f64, 2.0, 3.0, 4.0];
+            for m in 0_i64..=2 {
+                let kw = PyDict::new(py);
+                kw.set_item("m", m)?;
+                assert_array_matches_numpy(
+                    &our_der.call((base4.clone(),), Some(&kw))?,
+                    &np_der.call((base4.clone(),), Some(&kw))?,
+                )?;
+            }
+            let kw_int_all = PyDict::new(py);
+            kw_int_all.set_item("m", 2_i64)?;
+            kw_int_all.set_item("k", PyList::new(py, [3.0_f64, 7.0])?)?;
+            kw_int_all.set_item("lbnd", 1.0_f64)?;
+            kw_int_all.set_item("scl", 2.0_f64)?;
+            assert_array_matches_numpy(
+                &our_int.call((base4.clone(),), Some(&kw_int_all))?,
+                &np_int.call((base4.clone(),), Some(&kw_int_all))?,
+            )?;
+            let our_rt = our_der.call1((our_int.call1((base4.clone(),))?,))?;
+            let np_rt = np_der.call1((np_int.call1((base4.clone(),))?,))?;
+            assert_array_matches_numpy(&our_rt, &np_rt)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn tile_matches_numpy_across_reps_shapes_and_dtype() {
         with_python(|py| {
             if !numpy_available(py) {
