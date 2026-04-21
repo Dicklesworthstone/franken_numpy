@@ -4978,6 +4978,71 @@ fn polymul(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAny>> 
 }
 
 #[pyfunction]
+#[pyo3(signature = (x, window_shape, axis=None, *, subok=false, writeable=false))]
+fn sliding_window_view(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    window_shape: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    subok: bool,
+    writeable: bool,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to numpy.lib.stride_tricks.sliding_window_view. Returns
+    // a read-only strided view with a leading window axis per element of
+    // `window_shape`; `axis` restricts which axes are windowed (None →
+    // every axis, which is the NumPy default). `subok` preserves ndarray
+    // subclasses like MaskedArray in the output.
+    let numpy = py.import("numpy")?;
+    let stride_tricks = numpy.getattr("lib")?.getattr("stride_tricks")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis_val) = axis {
+        kwargs.set_item("axis", axis_val.bind(py))?;
+    }
+    kwargs.set_item("subok", subok)?;
+    kwargs.set_item("writeable", writeable)?;
+    Ok(stride_tricks
+        .getattr("sliding_window_view")?
+        .call(
+            (x.bind(py), window_shape.bind(py)),
+            Some(&kwargs),
+        )?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, shape=None, strides=None, subok=false, writeable=true))]
+fn as_strided(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    shape: Option<Py<PyAny>>,
+    strides: Option<Py<PyAny>>,
+    subok: bool,
+    writeable: bool,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to numpy.lib.stride_tricks.as_strided. This is the
+    // low-level primitive that `sliding_window_view` is built on: it
+    // returns a new view whose shape and byte-level strides are set to
+    // the caller-supplied values with no bounds checking, so it is
+    // inherently unsafe. Exposed for callers that know what they're
+    // doing and want to construct custom overlapping views.
+    let numpy = py.import("numpy")?;
+    let stride_tricks = numpy.getattr("lib")?.getattr("stride_tricks")?;
+    let kwargs = PyDict::new(py);
+    if let Some(shape_val) = shape {
+        kwargs.set_item("shape", shape_val.bind(py))?;
+    }
+    if let Some(strides_val) = strides {
+        kwargs.set_item("strides", strides_val.bind(py))?;
+    }
+    kwargs.set_item("subok", subok)?;
+    kwargs.set_item("writeable", writeable)?;
+    Ok(stride_tricks
+        .getattr("as_strided")?
+        .call((x.bind(py),), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x1, x2))]
 fn true_divide(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.true_divide so x1/x2 element-wise always
@@ -5168,6 +5233,20 @@ fn testing_assert_array_equal(
         Some(&kwargs),
     )?;
     Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
+fn matrix_transpose(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.linalg.matrix_transpose. Transposes the last
+    // two axes of x; preserves all leading batch dimensions and dtype.
+    // Complex inputs get a transpose, NOT a conjugate-transpose.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("linalg")?
+        .getattr("matrix_transpose")?
+        .call1((x.bind(py),))?
+        .unbind())
 }
 
 #[pyfunction]
@@ -6305,6 +6384,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(polyadd, m)?)?;
     m.add_function(wrap_pyfunction!(polysub, m)?)?;
     m.add_function(wrap_pyfunction!(polymul, m)?)?;
+    m.add_function(wrap_pyfunction!(sliding_window_view, m)?)?;
+    m.add_function(wrap_pyfunction!(as_strided, m)?)?;
     m.add_function(wrap_pyfunction!(tile, m)?)?;
     m.add_function(wrap_pyfunction!(true_divide, m)?)?;
     m.add_function(wrap_pyfunction!(allclose, m)?)?;
@@ -6316,6 +6397,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(average, m)?)?;
     m.add_function(wrap_pyfunction!(testing_assert_allclose, m)?)?;
     m.add_function(wrap_pyfunction!(testing_assert_array_equal, m)?)?;
+    m.add_function(wrap_pyfunction!(matrix_transpose, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6625,6 +6707,7 @@ mod tests {
             assert!(module.getattr("average").is_ok());
             assert!(module.getattr("testing_assert_allclose").is_ok());
             assert!(module.getattr("testing_assert_array_equal").is_ok());
+            assert!(module.getattr("matrix_transpose").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -23554,6 +23637,124 @@ mod tests {
                 .call1((vec![vec![1.0, 2.0]],))?; // 2-D
             let err = pm.call1((bad.clone(), vec![1.0, 2.0])).err();
             assert!(err.is_some(), "polymul must reject 2-D inputs");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn sliding_window_view_matches_numpy() {
+        // Pin sliding_window_view parity against numpy.lib.stride_tricks
+        // for the typical callsites: 1-D with scalar window, 1-D with a
+        // length-1 tuple window, 2-D with a 2-D tuple window (every axis
+        // rolled), 2-D with axis-restricted rolling, and the oversized
+        // window ValueError path. Shape and content are both compared.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let ours = module.getattr("sliding_window_view")?;
+            let numpy = py.import("numpy")?;
+            let theirs = numpy
+                .getattr("lib")?
+                .getattr("stride_tricks")?
+                .getattr("sliding_window_view")?;
+            let arange = numpy.getattr("arange")?;
+
+            // 1-D scalar window.
+            let a1 = arange.call1((6_i64,))?;
+            assert_array_matches_numpy(
+                &ours.call1((a1.clone(), 3_i64))?,
+                &theirs.call1((a1.clone(), 3_i64))?,
+            )?;
+
+            // 1-D tuple window (same result as scalar).
+            let win_tuple = PyTuple::new(py, [3_i64])?;
+            assert_array_matches_numpy(
+                &ours.call1((a1.clone(), win_tuple.clone()))?,
+                &theirs.call1((a1.clone(), win_tuple.clone()))?,
+            )?;
+
+            // 2-D (3x4) windowed on all axes by (2, 3).
+            let a2 = arange.call1((12_i64,))?.call_method1("reshape", (3_i64, 4_i64))?;
+            let win2d = PyTuple::new(py, [2_i64, 3_i64])?;
+            assert_array_matches_numpy(
+                &ours.call1((a2.clone(), win2d.clone()))?,
+                &theirs.call1((a2.clone(), win2d.clone()))?,
+            )?;
+
+            // 2-D window along axis=1 only.
+            let kw_axis = PyDict::new(py);
+            kw_axis.set_item("axis", 1_i64)?;
+            assert_array_matches_numpy(
+                &ours.call((a2.clone(), 3_i64), Some(&kw_axis))?,
+                &theirs.call((a2.clone(), 3_i64), Some(&kw_axis))?,
+            )?;
+
+            // Oversized window → ValueError parity.
+            let err = ours.call1((a1.clone(), 9_i64)).err();
+            assert!(err.is_some(), "oversized window must raise");
+
+            // writeable=False default makes the view read-only.
+            let result = ours.call1((a1.clone(), 3_i64))?;
+            let writable: bool =
+                result.getattr("flags")?.getattr("writeable")?.extract()?;
+            assert!(!writable, "sliding_window_view default must be read-only");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn as_strided_matches_numpy() {
+        // Pin as_strided parity for the common callsite: a 1-D array
+        // viewed with a different length using its own itemsize stride,
+        // and a shape+strides tuple that produces an overlapping view.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let ours = module.getattr("as_strided")?;
+            let numpy = py.import("numpy")?;
+            let theirs = numpy
+                .getattr("lib")?
+                .getattr("stride_tricks")?
+                .getattr("as_strided")?;
+
+            let a = numpy.getattr("arange")?.call1((6_i64,))?;
+            let item_stride: isize = a
+                .getattr("strides")?
+                .get_item(0)?
+                .extract()?;
+
+            // shape=(4,) with default strides → same as a[:4] layout.
+            let shape4 = PyTuple::new(py, [4_i64])?;
+            let strides1 = PyTuple::new(py, [item_stride])?;
+            let kw_default = PyDict::new(py);
+            kw_default.set_item("shape", shape4.clone())?;
+            kw_default.set_item("strides", strides1.clone())?;
+            assert_array_matches_numpy(
+                &ours.call((a.clone(),), Some(&kw_default))?,
+                &theirs.call((a.clone(),), Some(&kw_default))?,
+            )?;
+
+            // Overlapping stride: shape=(4, 3) with stride=item for both
+            // axes yields a sliding-window-style view.
+            let shape43 = PyTuple::new(py, [4_i64, 3_i64])?;
+            let stride_pair = PyTuple::new(py, [item_stride, item_stride])?;
+            let kw_overlap = PyDict::new(py);
+            kw_overlap.set_item("shape", shape43)?;
+            kw_overlap.set_item("strides", stride_pair)?;
+            assert_array_matches_numpy(
+                &ours.call((a.clone(),), Some(&kw_overlap))?,
+                &theirs.call((a.clone(),), Some(&kw_overlap))?,
+            )?;
 
             Ok(())
         });
