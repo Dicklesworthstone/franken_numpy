@@ -3459,7 +3459,7 @@ fn cholesky(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    match args.len()? {
+    match args.len() {
         0 => {
             return Err(PyTypeError::new_err(
                 "cholesky() missing 1 required positional argument: 'a'",
