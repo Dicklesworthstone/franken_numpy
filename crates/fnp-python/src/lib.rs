@@ -5116,6 +5116,106 @@ fn chebint(
 }
 
 #[pyfunction]
+#[pyo3(signature = (roots,))]
+fn chebfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to numpy.polynomial.chebyshev.chebfromroots. Inverse
+    // of chebroots: builds the Chebyshev-basis coefficient array of a
+    // monic polynomial having the supplied roots. Empty input returns
+    // [1.0] (the constant 1).
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("chebyshev")?
+        .getattr("chebfromroots")?
+        .call1((roots.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c, pow, maxpower=16))]
+fn chebpow(
+    py: Python<'_>,
+    c: Py<PyAny>,
+    pow: Py<PyAny>,
+    maxpower: i64,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to numpy.polynomial.chebyshev.chebpow. Raises a
+    // Chebyshev series to a non-negative integer power, bounded by
+    // `maxpower` to prevent runaway allocation (NumPy raises
+    // ValueError if pow > maxpower).
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("maxpower", maxpower)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("chebyshev")?
+        .getattr("chebpow")?
+        .call((c.bind(py), pow.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c1, c2))]
+fn chebdiv(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to numpy.polynomial.chebyshev.chebdiv. Returns the
+    // (quotient, remainder) tuple from dividing the Chebyshev series
+    // c1 by c2.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("chebyshev")?
+        .getattr("chebdiv")?
+        .call1((c1.bind(py), c2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (off, scl))]
+fn chebline(py: Python<'_>, off: Py<PyAny>, scl: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to numpy.polynomial.chebyshev.chebline. Constructs
+    // the Chebyshev series coefficients of a line off + scl*x.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("chebyshev")?
+        .getattr("chebline")?
+        .call1((off.bind(py), scl.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c,))]
+fn chebmulx(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to numpy.polynomial.chebyshev.chebmulx. Multiplies a
+    // Chebyshev series by x (equivalent to chebmul(c, [0, 1])) but
+    // uses the closed-form recurrence for efficiency.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("chebyshev")?
+        .getattr("chebmulx")?
+        .call1((c.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c, tol=0.0))]
+fn chebtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
+    // Passthrough to numpy.polynomial.chebyshev.chebtrim. Drops
+    // trailing coefficients whose absolute value is <= tol. Inherited
+    // from polytrim's semantics; tol must be non-negative.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("tol", tol)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("chebyshev")?
+        .getattr("chebtrim")?
+        .call((c.bind(py),), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x, window_shape, axis=None, *, subok=false, writeable=false))]
 fn sliding_window_view(
     py: Python<'_>,
@@ -6531,6 +6631,12 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chebroots, m)?)?;
     m.add_function(wrap_pyfunction!(chebder, m)?)?;
     m.add_function(wrap_pyfunction!(chebint, m)?)?;
+    m.add_function(wrap_pyfunction!(chebfromroots, m)?)?;
+    m.add_function(wrap_pyfunction!(chebpow, m)?)?;
+    m.add_function(wrap_pyfunction!(chebdiv, m)?)?;
+    m.add_function(wrap_pyfunction!(chebline, m)?)?;
+    m.add_function(wrap_pyfunction!(chebmulx, m)?)?;
+    m.add_function(wrap_pyfunction!(chebtrim, m)?)?;
     m.add_function(wrap_pyfunction!(tile, m)?)?;
     m.add_function(wrap_pyfunction!(true_divide, m)?)?;
     m.add_function(wrap_pyfunction!(allclose, m)?)?;
@@ -24094,6 +24200,128 @@ mod tests {
             let our_roundtrip = our_der.call1((our_int.call1((base.clone(),))?,))?;
             let np_roundtrip = np_der.call1((np_int.call1((base.clone(),))?,))?;
             assert_array_matches_numpy(&our_roundtrip, &np_roundtrip)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn chebyshev_constructors_and_algebra_match_numpy() {
+        // Pin parity for the six smaller Chebyshev helpers newly wired
+        // through fnp-python. chebfromroots + chebroots round-trip a
+        // quadratic; chebpow is exercised at several powers including
+        // the maxpower boundary; chebdiv's (quotient, remainder) tuple
+        // is element-wise compared; chebline's 2-coefficient output is
+        // compared for several (off, scl) pairs; chebmulx is equated
+        // with chebmul(c, [0, 1]); chebtrim is tested with tol=0 and a
+        // positive tolerance that trims near-zero tail coefficients.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let ncheb = numpy.getattr("polynomial")?.getattr("chebyshev")?;
+
+            // chebfromroots parity for 0 / 1 / 2 / 3 roots.
+            let our_fr = module.getattr("chebfromroots")?;
+            let np_fr = ncheb.getattr("chebfromroots")?;
+            for roots in [
+                Vec::<f64>::new(),
+                vec![0.5_f64],
+                vec![1.0_f64, -1.0],
+                vec![-2.0_f64, 0.0, 2.0],
+            ] {
+                assert_array_matches_numpy(
+                    &our_fr.call1((roots.clone(),))?,
+                    &np_fr.call1((roots.clone(),))?,
+                )?;
+            }
+
+            // chebpow: pow=0 returns [1.0]; pow=1 is identity; pow=2, 3
+            // are compared; pow > maxpower raises matching ValueError.
+            let our_pow = module.getattr("chebpow")?;
+            let np_pow = ncheb.getattr("chebpow")?;
+            let base = vec![1.0_f64, 1.0];
+            for pow in [0_i64, 1, 2, 3] {
+                assert_array_matches_numpy(
+                    &our_pow.call1((base.clone(), pow))?,
+                    &np_pow.call1((base.clone(), pow))?,
+                )?;
+            }
+            let kw_maxp = PyDict::new(py);
+            kw_maxp.set_item("maxpower", 4_i64)?;
+            let our_err = our_pow
+                .call((base.clone(), 5_i64), Some(&kw_maxp))
+                .err();
+            let np_err = np_pow
+                .call((base.clone(), 5_i64), Some(&kw_maxp))
+                .err();
+            assert_eq!(
+                our_err.is_some(),
+                np_err.is_some(),
+                "chebpow maxpower-violation parity",
+            );
+
+            // chebdiv: element-wise compare both parts of the
+            // (quotient, remainder) tuple.
+            let our_div = module.getattr("chebdiv")?;
+            let np_div = ncheb.getattr("chebdiv")?;
+            let dividend = vec![1.0_f64, 2.0, 3.0];
+            let divisor = vec![1.0_f64, 1.0];
+            let ours_tuple: Bound<'_, pyo3::types::PyAny> =
+                our_div.call1((dividend.clone(), divisor.clone()))?;
+            let theirs_tuple: Bound<'_, pyo3::types::PyAny> =
+                np_div.call1((dividend, divisor))?;
+            for idx in 0_i64..2 {
+                assert_array_matches_numpy(
+                    &ours_tuple.get_item(idx)?,
+                    &theirs_tuple.get_item(idx)?,
+                )?;
+            }
+
+            // chebline parity for several (off, scl) pairs.
+            let our_line = module.getattr("chebline")?;
+            let np_line = ncheb.getattr("chebline")?;
+            for (off, scl) in [(3.0_f64, 2.0), (0.0, 1.0), (-1.5, 0.5)] {
+                assert_array_matches_numpy(
+                    &our_line.call1((off, scl))?,
+                    &np_line.call1((off, scl))?,
+                )?;
+            }
+
+            // chebmulx should equal chebmul(c, [0, 1]).
+            let our_mulx = module.getattr("chebmulx")?;
+            let np_mulx = ncheb.getattr("chebmulx")?;
+            let c = vec![1.0_f64, 2.0, 3.0];
+            assert_array_matches_numpy(
+                &our_mulx.call1((c.clone(),))?,
+                &np_mulx.call1((c.clone(),))?,
+            )?;
+            // Cross-check: chebmulx(c) matches our chebmul(c, [0, 1]).
+            let our_mul = module.getattr("chebmul")?;
+            assert_array_matches_numpy(
+                &our_mulx.call1((c.clone(),))?,
+                &our_mul.call1((c.clone(), vec![0.0_f64, 1.0]))?,
+            )?;
+
+            // chebtrim default tolerance and positive tolerance.
+            let our_trim = module.getattr("chebtrim")?;
+            let np_trim = ncheb.getattr("chebtrim")?;
+            let trail = vec![1.0_f64, 0.0, 2.0, 0.0, 0.0];
+            assert_array_matches_numpy(
+                &our_trim.call1((trail.clone(),))?,
+                &np_trim.call1((trail.clone(),))?,
+            )?;
+            let kw_tol = PyDict::new(py);
+            kw_tol.set_item("tol", 0.05_f64)?;
+            let near_zero = vec![1.0_f64, 0.0, 2.0, 0.01, 0.0];
+            assert_array_matches_numpy(
+                &our_trim.call((near_zero.clone(),), Some(&kw_tol))?,
+                &np_trim.call((near_zero.clone(),), Some(&kw_tol))?,
+            )?;
 
             Ok(())
         });
