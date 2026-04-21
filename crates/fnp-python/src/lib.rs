@@ -4976,6 +4976,16 @@ fn tril(py: Python<'_>, m: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
+fn i0(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.i0 (modified Bessel function of the first
+    // kind, order 0). Integer input promotes to float; result dtype
+    // follows numpy's promotion rules.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("i0")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
 fn iscomplexobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.iscomplexobj. Returns True iff input has a
     // complex dtype, regardless of whether imaginary parts are
@@ -6110,6 +6120,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(allclose, m)?)?;
     m.add_function(wrap_pyfunction!(fix, m)?)?;
     m.add_function(wrap_pyfunction!(tril, m)?)?;
+    m.add_function(wrap_pyfunction!(i0, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6413,6 +6424,7 @@ mod tests {
             assert!(module.getattr("allclose").is_ok());
             assert!(module.getattr("fix").is_ok());
             assert!(module.getattr("tril").is_ok());
+            assert!(module.getattr("i0").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -23692,6 +23704,81 @@ mod tests {
             let ours_dtype = ours_f.getattr("dtype")?.str()?.to_string();
             let theirs_dtype = theirs_f.getattr("dtype")?.str()?.to_string();
             assert_eq!(ours_dtype, theirs_dtype, "tril dtype must match numpy");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn i0_matches_numpy_across_scalars_arrays_and_dtype() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let i0_fn = module.getattr("i0")?;
+            let numpy = py.import("numpy")?;
+            let numpy_i0 = numpy.getattr("i0")?;
+            let isclose = numpy.getattr("isclose")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // i0(0) = 1.0.
+            let ours_z = i0_fn.call1((0.0_f64,))?;
+            let theirs_z = numpy_i0.call1((0.0_f64,))?;
+            let ok_z: bool = isclose.call1((&ours_z, &theirs_z))?.extract()?;
+            assert!(ok_z, "i0(0) mismatch");
+            let val_z: f64 = ours_z.extract()?;
+            assert!((val_z - 1.0).abs() < 1e-12, "i0(0) must equal 1.0");
+
+            // i0(1) ≈ 1.2660658.
+            let ours_1 = i0_fn.call1((1.0_f64,))?;
+            let theirs_1 = numpy_i0.call1((1.0_f64,))?;
+            let ok_1: bool = isclose.call1((&ours_1, &theirs_1))?.extract()?;
+            assert!(ok_1, "i0(1) mismatch");
+            let val_1: f64 = ours_1.extract()?;
+            assert!((val_1 - 1.2660658777520084).abs() < 1e-10, "i0(1) reference value");
+
+            // 1-D array of small values.
+            let small = numpy.getattr("array")?.call1((vec![0.0_f64, 0.5, 1.0, 1.5, 2.0],))?;
+            let ours_s = i0_fn.call1((small.clone(),))?;
+            let theirs_s = numpy_i0.call1((small.clone(),))?;
+            let ok_s: bool = allclose.call1((&ours_s, &theirs_s))?.extract()?;
+            assert!(ok_s, "i0 1-D small mismatch");
+
+            // Large values use asymptotic series; verify no overflow.
+            let large = numpy.getattr("array")?.call1((vec![10.0_f64, 20.0, 50.0],))?;
+            let ours_l = i0_fn.call1((large.clone(),))?;
+            let theirs_l = numpy_i0.call1((large.clone(),))?;
+            let ok_l: bool = allclose.call1((&ours_l, &theirs_l))?.extract()?;
+            assert!(ok_l, "i0 1-D large mismatch");
+
+            // Integer input promotes to float.
+            let ints = numpy.getattr("array")?.call1((vec![0_i64, 1, 2, 3],))?;
+            let ours_i = i0_fn.call1((ints.clone(),))?;
+            let theirs_i = numpy_i0.call1((ints.clone(),))?;
+            let ok_i: bool = allclose.call1((&ours_i, &theirs_i))?.extract()?;
+            assert!(ok_i, "i0 integer input mismatch");
+            let ours_dtype = ours_i.getattr("dtype")?.str()?.to_string();
+            let theirs_dtype = theirs_i.getattr("dtype")?.str()?.to_string();
+            assert_eq!(ours_dtype, theirs_dtype, "i0 integer input dtype must match numpy");
+
+            // 2-D array element-wise.
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![0.0_f64, 1.0],
+                vec![2.0, 3.0],
+            ],))?;
+            let ours_2d = i0_fn.call1((two_d.clone(),))?;
+            let theirs_2d = numpy_i0.call1((two_d.clone(),))?;
+            let ok_2d: bool = allclose.call1((&ours_2d, &theirs_2d))?.extract()?;
+            assert!(ok_2d, "i0 2-D mismatch");
+
+            // Negative input: i0 is symmetric (i0(-x) = i0(x)).
+            let ours_neg = i0_fn.call1((-1.5_f64,))?;
+            let ours_pos = i0_fn.call1((1.5_f64,))?;
+            let ok_sym: bool = isclose.call1((&ours_neg, &ours_pos))?.extract()?;
+            assert!(ok_sym, "i0(-x) must equal i0(x) by symmetry");
 
             Ok(())
         });
