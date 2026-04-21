@@ -3379,6 +3379,20 @@ fn eigvals(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, b))]
+fn solve(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.linalg.solve so square real/complex, batched
+    // (..., M, M) / (..., M, K), and stacked broadcasting semantics all
+    // match numpy exactly.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("linalg")?
+        .getattr("solve")?
+        .call1((a.bind(py), b.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, UPLO="L"))]
 #[allow(non_snake_case)]
 fn eigvalsh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
@@ -4371,6 +4385,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(minimum_fill_value, m)?)?;
     m.add_function(wrap_pyfunction!(pinv, m)?)?;
     m.add_function(wrap_pyfunction!(eigvals, m)?)?;
+    m.add_function(wrap_pyfunction!(solve, m)?)?;
     m.add_function(wrap_pyfunction!(eigvalsh, m)?)?;
     m.add_function(wrap_pyfunction!(det, m)?)?;
     m.add_function(wrap_pyfunction!(inv, m)?)?;
@@ -4654,6 +4669,7 @@ mod tests {
             assert!(module.getattr("eigvals").is_ok());
             assert!(module.getattr("rfft").is_ok());
             assert!(module.getattr("irfft").is_ok());
+            assert!(module.getattr("solve").is_ok());
             assert!(module.getattr("eigvalsh").is_ok());
             assert!(module.getattr("det").is_ok());
             assert!(module.getattr("inv").is_ok());
@@ -6282,6 +6298,163 @@ mod tests {
             assert_eq!(
                 repr_string(true_actual.bind(py)),
                 repr_string(&true_expected)
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn solve_matches_numpy_across_square_batched_multi_rhs_and_complex() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let solve_fn = module.getattr("solve")?;
+            let numpy = py.import("numpy")?;
+            let numpy_solve = numpy.getattr("linalg")?.getattr("solve")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Square 2x2 with 1-D b.
+            let square = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [3.0_f64, 1.0])?,
+                    PyList::new(py, [1.0_f64, 2.0])?,
+                ],
+            )?,))?;
+            let b1 = numpy.getattr("array")?.call1((vec![9.0_f64, 8.0],))?;
+            let actual = solve_fn.call1((square.clone(), b1.clone()))?;
+            let expected = numpy_solve.call1((square.clone(), b1.clone()))?;
+            assert!(
+                allclose.call1((&actual, &expected))?.extract::<bool>()?,
+                "solve 2x2 1-D diverged"
+            );
+
+            // 3x3 with 2-D b (multiple RHS).
+            let three = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 2.0, 0.0])?,
+                    PyList::new(py, [0.0_f64, 1.0, 3.0])?,
+                    PyList::new(py, [4.0_f64, 0.0, 1.0])?,
+                ],
+            )?,))?;
+            let multi_b = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 10.0])?,
+                    PyList::new(py, [2.0_f64, 20.0])?,
+                    PyList::new(py, [3.0_f64, 30.0])?,
+                ],
+            )?,))?;
+            let actual_multi = solve_fn.call1((three.clone(), multi_b.clone()))?;
+            let expected_multi = numpy_solve.call1((three.clone(), multi_b.clone()))?;
+            assert!(
+                allclose
+                    .call1((&actual_multi, &expected_multi))?
+                    .extract::<bool>()?,
+                "solve 3x3 multi-RHS diverged"
+            );
+
+            // Identity — solve(I, b) == b.
+            let eye = numpy.getattr("eye")?.call1((4_i64,))?;
+            let b4 = numpy.getattr("array")?.call1((vec![1.0_f64, -2.0, 3.5, 0.0],))?;
+            let actual_eye = solve_fn.call1((eye.clone(), b4.clone()))?;
+            let expected_eye = numpy_solve.call1((eye.clone(), b4.clone()))?;
+            assert!(
+                allclose
+                    .call1((&actual_eye, &expected_eye))?
+                    .extract::<bool>()?,
+                "solve(eye, b) diverged"
+            );
+
+            // Batched stack of two 2x2 solves with 2-D b per slice.
+            let batched_a = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(
+                        py,
+                        [
+                            PyList::new(py, [2.0_f64, 0.0])?,
+                            PyList::new(py, [0.0_f64, 2.0])?,
+                        ],
+                    )?,
+                    PyList::new(
+                        py,
+                        [
+                            PyList::new(py, [1.0_f64, 1.0])?,
+                            PyList::new(py, [0.0_f64, 1.0])?,
+                        ],
+                    )?,
+                ],
+            )?,))?;
+            let batched_b = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [2.0_f64, 4.0])?,
+                    PyList::new(py, [1.0_f64, 3.0])?,
+                ],
+            )?,))?;
+            let actual_batch = solve_fn.call1((batched_a.clone(), batched_b.clone()))?;
+            let expected_batch = numpy_solve.call1((batched_a.clone(), batched_b.clone()))?;
+            assert!(
+                allclose
+                    .call1((&actual_batch, &expected_batch))?
+                    .extract::<bool>()?,
+                "solve batched diverged"
+            );
+
+            // Complex 2x2 solve.
+            let builtins = py.import("builtins")?;
+            let complex_a = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        PyList::new(
+                            py,
+                            [
+                                builtins.getattr("complex")?.call1((1.0_f64, 1.0_f64))?,
+                                builtins.getattr("complex")?.call1((2.0_f64, 0.0_f64))?,
+                            ],
+                        )?,
+                        PyList::new(
+                            py,
+                            [
+                                builtins.getattr("complex")?.call1((0.0_f64, -1.0_f64))?,
+                                builtins.getattr("complex")?.call1((1.0_f64, 2.0_f64))?,
+                            ],
+                        )?,
+                    ],
+                )?,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", "complex128")?;
+                    kwargs
+                }),
+            )?;
+            let complex_b = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        builtins.getattr("complex")?.call1((3.0_f64, 0.0_f64))?,
+                        builtins.getattr("complex")?.call1((1.0_f64, 1.0_f64))?,
+                    ],
+                )?,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", "complex128")?;
+                    kwargs
+                }),
+            )?;
+            let actual_c = solve_fn.call1((complex_a.clone(), complex_b.clone()))?;
+            let expected_c = numpy_solve.call1((complex_a.clone(), complex_b.clone()))?;
+            assert!(
+                allclose.call1((&actual_c, &expected_c))?.extract::<bool>()?,
+                "solve complex diverged"
             );
 
             Ok(())
