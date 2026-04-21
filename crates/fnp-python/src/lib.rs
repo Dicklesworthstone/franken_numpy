@@ -3460,6 +3460,20 @@ fn matrix_rank(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, n))]
+fn matrix_power(py: Python<'_>, a: Py<PyAny>, n: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.linalg.matrix_power so dtype preservation for
+    // nonnegative powers, inverse promotion for negative powers, and stacked
+    // (..., M, M) semantics match numpy exactly.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("linalg")?
+        .getattr("matrix_power")?
+        .call1((a.bind(py), n.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a,))]
 fn slogdet(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.linalg.slogdet so the (sign, logabsdet) SlogdetResult
@@ -4187,6 +4201,26 @@ fn tri(
 }
 
 #[pyfunction]
+#[pyo3(signature = (condition, a, copy=true))]
+fn masked_where(
+    py: Python<'_>,
+    condition: Py<PyAny>,
+    a: Py<PyAny>,
+    copy: bool,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.ma.masked_where so truthy condition broadcasting,
+    // copy semantics, and the MaskedArray result type (with compatible
+    // fill_value / dtype inference) match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let masked_where_fn = numpy.getattr("ma")?.getattr("masked_where")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("copy", copy)?;
+    Ok(masked_where_fn
+        .call((condition.bind(py), a.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x, p=None))]
 fn cond(py: Python<'_>, x: Py<PyAny>, p: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.linalg.cond so the seven valid p values
@@ -4638,6 +4672,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(eigvals, m)?)?;
     m.add_function(wrap_pyfunction!(slogdet, m)?)?;
     m.add_function(wrap_pyfunction!(matrix_rank, m)?)?;
+    m.add_function(wrap_pyfunction!(matrix_power, m)?)?;
     m.add_function(wrap_pyfunction!(svd, m)?)?;
     m.add_function(wrap_pyfunction!(qr, m)?)?;
     m.add_function(wrap_pyfunction!(cholesky, m)?)?;
@@ -4693,6 +4728,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(putmask, m)?)?;
     m.add_function(wrap_pyfunction!(indices, m)?)?;
     m.add_function(wrap_pyfunction!(tri, m)?)?;
+    m.add_function(wrap_pyfunction!(masked_where, m)?)?;
     m.add_function(wrap_pyfunction!(cond, m)?)?;
     m.add_function(wrap_pyfunction!(norm, m)?)?;
     m.add_function(wrap_pyfunction!(fftshift, m)?)?;
@@ -4928,6 +4964,7 @@ mod tests {
             assert!(module.getattr("maximum_fill_value").is_ok());
             assert!(module.getattr("pinv").is_ok());
             assert!(module.getattr("eigvals").is_ok());
+            assert!(module.getattr("masked_where").is_ok());
             assert!(module.getattr("cond").is_ok());
             assert!(module.getattr("norm").is_ok());
             assert!(module.getattr("fftshift").is_ok());
@@ -4936,6 +4973,7 @@ mod tests {
             assert!(module.getattr("irfft").is_ok());
             assert!(module.getattr("slogdet").is_ok());
             assert!(module.getattr("matrix_rank").is_ok());
+            assert!(module.getattr("matrix_power").is_ok());
             assert!(module.getattr("svd").is_ok());
             assert!(module.getattr("qr").is_ok());
             assert!(module.getattr("cholesky").is_ok());
@@ -7329,6 +7367,117 @@ mod tests {
                     .call1((&actual_b, &expected_b))?
                     .extract::<bool>()?,
                 "matrix_rank batched diverged"
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn matrix_power_matches_numpy_across_dtypes_negative_and_stacked_inputs() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let matrix_power_fn = module.getattr("matrix_power")?;
+            let numpy = py.import("numpy")?;
+            let numpy_matrix_power = numpy.getattr("linalg")?.getattr("matrix_power")?;
+
+            let int_matrix =
+                numeric_array(py, vec![vec![1_i64, 2_i64], vec![3_i64, 5_i64]], "int64");
+            let actual_int = matrix_power_fn.call1((int_matrix.clone(), 3_i64))?;
+            let expected_int = numpy_matrix_power.call1((int_matrix.clone(), 3_i64))?;
+            assert_array_matches_numpy(&actual_int, &expected_int)?;
+
+            let bool_matrix = numeric_array(py, vec![vec![true, false], vec![false, true]], "bool");
+            let actual_zero = matrix_power_fn.call1((bool_matrix.clone(), 0_i64))?;
+            let expected_zero = numpy_matrix_power.call1((bool_matrix.clone(), 0_i64))?;
+            assert_array_matches_numpy(&actual_zero, &expected_zero)?;
+
+            let float32_matrix = numeric_array(
+                py,
+                vec![vec![1.0_f32, 2.0_f32], vec![3.0_f32, 5.0_f32]],
+                "float32",
+            );
+            let actual_neg = matrix_power_fn.call1((float32_matrix.clone(), -1_i64))?;
+            let expected_neg = numpy_matrix_power.call1((float32_matrix.clone(), -1_i64))?;
+            assert_array_matches_numpy(&actual_neg, &expected_neg)?;
+
+            let stacked = numpy
+                .getattr("arange")?
+                .call1((8.0_f64,))?
+                .call_method1("reshape", ((2, 2, 2),))?;
+            let actual_stacked = matrix_power_fn.call1((stacked.clone(), 2_i64))?;
+            let expected_stacked = numpy_matrix_power.call1((stacked.clone(), 2_i64))?;
+            assert_array_matches_numpy(&actual_stacked, &expected_stacked)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn matrix_power_error_surface_matches_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let matrix_power_fn = module.getattr("matrix_power")?;
+            let numpy = py.import("numpy")?;
+            let numpy_matrix_power = numpy.getattr("linalg")?.getattr("matrix_power")?;
+
+            let nonsquare = numeric_array(
+                py,
+                vec![
+                    vec![1.0_f64, 2.0_f64, 3.0_f64],
+                    vec![4.0_f64, 5.0_f64, 6.0_f64],
+                ],
+                "float64",
+            );
+            let actual_nonsquare = matrix_power_fn
+                .call1((nonsquare.clone(), 2_i64))
+                .unwrap_err();
+            let expected_nonsquare = numpy_matrix_power
+                .call1((nonsquare.clone(), 2_i64))
+                .unwrap_err();
+            assert_eq!(
+                actual_nonsquare.get_type(py).name()?.extract::<String>()?,
+                expected_nonsquare
+                    .get_type(py)
+                    .name()?
+                    .extract::<String>()?
+            );
+            assert_eq!(
+                actual_nonsquare.value(py).str()?.extract::<String>()?,
+                expected_nonsquare.value(py).str()?.extract::<String>()?
+            );
+
+            let square = numeric_array(
+                py,
+                vec![vec![1.0_f64, 2.0_f64], vec![3.0_f64, 4.0_f64]],
+                "float64",
+            );
+            let actual_float_exp = matrix_power_fn
+                .call1((square.clone(), 1.5_f64))
+                .unwrap_err();
+            let expected_float_exp = numpy_matrix_power
+                .call1((square.clone(), 1.5_f64))
+                .unwrap_err();
+            assert_eq!(
+                actual_float_exp.get_type(py).name()?.extract::<String>()?,
+                expected_float_exp
+                    .get_type(py)
+                    .name()?
+                    .extract::<String>()?
+            );
+            assert_eq!(
+                actual_float_exp.value(py).str()?.extract::<String>()?,
+                expected_float_exp.value(py).str()?.extract::<String>()?
             );
 
             Ok(())
@@ -13870,12 +14019,13 @@ mod tests {
             let allclose = numpy.getattr("allclose")?;
 
             // 1-D default (L2).
-            let vec = numpy
-                .getattr("array")?
-                .call1((vec![3.0_f64, 4.0],))?;
+            let vec = numpy.getattr("array")?.call1((vec![3.0_f64, 4.0],))?;
             assert!(
                 isclose
-                    .call1((&norm_fn.call1((vec.clone(),))?, &numpy_norm.call1((vec.clone(),))?))?
+                    .call1((
+                        &norm_fn.call1((vec.clone(),))?,
+                        &numpy_norm.call1((vec.clone(),))?
+                    ))?
                     .extract::<bool>()?,
                 "norm 1-D L2 diverged"
             );
@@ -14123,6 +14273,104 @@ mod tests {
                     .extract::<bool>()?,
                 "cond complex 2x2 diverged"
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn masked_where_matches_numpy_across_conditions_and_copy_semantics() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let masked_where_fn = module.getattr("masked_where")?;
+            let numpy = py.import("numpy")?;
+            let numpy_masked_where = numpy.getattr("ma")?.getattr("masked_where")?;
+
+            // Boolean array condition, float64 data.
+            let data = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 2.0, 3.0, 4.0, 5.0],))?;
+            let cond = numpy
+                .getattr("array")?
+                .call1((vec![false, true, false, true, false],))?;
+            let actual = masked_where_fn.call1((cond.clone(), data.clone()))?;
+            let expected = numpy_masked_where.call1((cond.clone(), data.clone()))?;
+            assert_eq!(repr_string(&actual), repr_string(&expected));
+
+            // Truthy condition derived from comparison.
+            let greater_cond = data.call_method1("__gt__", (2.5_f64,))?;
+            let actual_gt = masked_where_fn.call1((greater_cond.clone(), data.clone()))?;
+            let expected_gt = numpy_masked_where.call1((greater_cond.clone(), data.clone()))?;
+            assert_eq!(repr_string(&actual_gt), repr_string(&expected_gt));
+
+            // All-False condition — no elements masked.
+            let all_false = numpy
+                .getattr("array")?
+                .call1((vec![false, false, false, false, false],))?;
+            let actual_af = masked_where_fn.call1((all_false.clone(), data.clone()))?;
+            let expected_af = numpy_masked_where.call1((all_false.clone(), data.clone()))?;
+            assert_eq!(repr_string(&actual_af), repr_string(&expected_af));
+
+            // All-True condition — every element masked.
+            let all_true = numpy
+                .getattr("array")?
+                .call1((vec![true, true, true, true, true],))?;
+            let actual_at = masked_where_fn.call1((all_true.clone(), data.clone()))?;
+            let expected_at = numpy_masked_where.call1((all_true.clone(), data.clone()))?;
+            assert_eq!(repr_string(&actual_at), repr_string(&expected_at));
+
+            // 2-D data + 2-D condition.
+            let data_2d = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 2.0, 3.0])?,
+                    PyList::new(py, [4.0_f64, 5.0, 6.0])?,
+                ],
+            )?,))?;
+            let cond_2d = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [false, true, false])?,
+                    PyList::new(py, [true, false, true])?,
+                ],
+            )?,))?;
+            let actual_2d = masked_where_fn.call1((cond_2d.clone(), data_2d.clone()))?;
+            let expected_2d = numpy_masked_where.call1((cond_2d.clone(), data_2d.clone()))?;
+            assert_eq!(repr_string(&actual_2d), repr_string(&expected_2d));
+
+            // Integer dtype data.
+            let int_data = numpy.getattr("array")?.call(
+                (vec![10_i64, 20, 30, 40],),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", "int64")?;
+                    kwargs
+                }),
+            )?;
+            let int_cond = numpy
+                .getattr("array")?
+                .call1((vec![true, false, true, false],))?;
+            let actual_i = masked_where_fn.call1((int_cond.clone(), int_data.clone()))?;
+            let expected_i = numpy_masked_where.call1((int_cond.clone(), int_data.clone()))?;
+            assert_eq!(repr_string(&actual_i), repr_string(&expected_i));
+
+            // copy=False flag forwarded.
+            let copy_kwargs = PyDict::new(py);
+            copy_kwargs.set_item("copy", false)?;
+            let copy_kwargs_n = PyDict::new(py);
+            copy_kwargs_n.set_item("copy", false)?;
+            let actual_nocopy = masked_where_fn.call(
+                (cond.clone(), data.clone()),
+                Some(&copy_kwargs),
+            )?;
+            let expected_nocopy =
+                numpy_masked_where.call((cond.clone(), data.clone()), Some(&copy_kwargs_n))?;
+            assert_eq!(repr_string(&actual_nocopy), repr_string(&expected_nocopy));
 
             Ok(())
         });
