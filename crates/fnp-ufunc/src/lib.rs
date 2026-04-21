@@ -16725,20 +16725,63 @@ impl UFuncArray {
     /// Mimics `np.polyint(p)`. Coefficients in descending degree order.
     /// Integration constant is 0.
     pub fn polyint(&self) -> Result<Self, UFuncError> {
+        self.polyint_order(1, &[])
+    }
+
+    /// `np.polyint(p, m, k)` with explicit order and integration constants.
+    ///
+    /// `m` is the number of successive integrations to apply (must be
+    /// non-negative; `m == 0` returns a clone of `self`). `k` is the list of
+    /// integration constants, "those corresponding to highest-order terms
+    /// come first" per NumPy. Length rules match NumPy:
+    ///
+    /// - empty `k` → all constants default to 0
+    /// - `k.len() == 1` → the single value is reused for every integration
+    /// - `k.len() >= m` → the first `m` values are consumed in order
+    /// - otherwise → ValueError parity
+    pub fn polyint_order(&self, m: i64, k: &[f64]) -> Result<Self, UFuncError> {
         if self.shape.len() != 1 {
             return Err(UFuncError::Msg(
                 "polyint: coefficients must be 1-D".to_string(),
             ));
         }
-        let n = self.values.len();
-        let mut values = Vec::with_capacity(n + 1);
-        for (i, &c) in self.values.iter().enumerate() {
-            let power = n - i; // current degree
-            values.push(c / power as f64);
+        if m < 0 {
+            return Err(UFuncError::Msg(
+                "Order of integral must be positive (see polyder)".to_string(),
+            ));
         }
-        values.push(0.0); // integration constant
+        let m_u = usize::try_from(m)
+            .map_err(|_| UFuncError::Msg("polyint: invalid integration order".to_string()))?;
+        if m_u == 0 {
+            return Ok(self.clone());
+        }
+        if !k.is_empty() && k.len() != 1 && k.len() < m_u {
+            return Err(UFuncError::Msg(
+                "k must be a scalar or a rank-1 array of length 1 or >m.".to_string(),
+            ));
+        }
+
+        let mut values = self.values.clone();
+        for step in 0..m_u {
+            let n = values.len();
+            let mut next = Vec::with_capacity(n + 1);
+            for (i, &c) in values.iter().enumerate() {
+                let power = n - i;
+                next.push(c / power as f64);
+            }
+            let constant = if k.is_empty() {
+                0.0
+            } else if k.len() == 1 {
+                k[0]
+            } else {
+                k[step]
+            };
+            next.push(constant);
+            values = next;
+        }
+
         Ok(Self {
-            shape: vec![n + 1],
+            shape: vec![values.len()],
             values,
             dtype: DType::F64,
             integer_sidecar: None,
@@ -41222,6 +41265,77 @@ print(json.dumps(payload))
         assert!((ip.values()[0] - 3.0).abs() < 1e-12);
         assert!((ip.values()[1] - 2.0).abs() < 1e-12);
         assert_eq!(ip.values()[2], 0.0); // integration constant
+    }
+
+    #[test]
+    fn polyint_order_matches_numpy() {
+        // Oracles captured from np.polyint for the polynomial [1, 2, 3]
+        // (i.e. x^2 + 2x + 3 in descending-degree order).
+        let p = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+
+        // m=0 clones
+        let m0 = p.polyint_order(0, &[]).unwrap();
+        assert_eq!(m0.values(), &[1.0, 2.0, 3.0]);
+
+        // m=1 default constant 0
+        let m1 = p.polyint_order(1, &[]).unwrap();
+        let expected_m1 = [1.0 / 3.0, 1.0, 3.0, 0.0];
+        for (got, exp) in m1.values().iter().zip(expected_m1.iter()) {
+            assert!((got - exp).abs() < 1e-12);
+        }
+
+        // m=1 explicit scalar constant
+        let m1_k = p.polyint_order(1, &[5.0]).unwrap();
+        assert!((m1_k.values()[3] - 5.0).abs() < 1e-12);
+
+        // m=2 with matching-length k
+        let m2 = p.polyint_order(2, &[7.0, 11.0]).unwrap();
+        let expected_m2 = [1.0 / 12.0, 1.0 / 3.0, 1.5, 7.0, 11.0];
+        for (got, exp) in m2.values().iter().zip(expected_m2.iter()) {
+            assert!((got - exp).abs() < 1e-12);
+        }
+
+        // m=3 with k broadcast from a single value (reused for each step).
+        // Integration carries previously-introduced constants forward, so
+        // the k=5 from step 1 becomes 5/2 at step 3 after two further
+        // integrations (5 → 5 at step 2 → 5/2 at step 3), while the k=5
+        // from step 2 survives as 5 at step 3 (one integration of a bare
+        // constant) and the final step-3 constant is literally 5.
+        let m3_broadcast = p.polyint_order(3, &[5.0]).unwrap();
+        let tail: Vec<f64> = m3_broadcast.values()[3..].to_vec();
+        for (got, exp) in tail.iter().zip([2.5_f64, 5.0, 5.0].iter()) {
+            assert!((got - exp).abs() < 1e-12, "tail mismatch: {tail:?}");
+        }
+
+        // m=3 with k longer than m (extra entries ignored)
+        let m2_long_k = p.polyint_order(2, &[1.0, 2.0, 3.0]).unwrap();
+        assert!((m2_long_k.values()[3] - 1.0).abs() < 1e-12);
+        assert!((m2_long_k.values()[4] - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn polyint_order_handles_empty_input() {
+        // np.polyint([]) == [0.]; np.polyint([], 2, k=[7, 11]) == [7., 11.]
+        let empty = UFuncArray::new(vec![0], Vec::<f64>::new(), DType::F64).unwrap();
+        let m1 = empty.polyint_order(1, &[]).unwrap();
+        assert_eq!(m1.shape(), &[1]);
+        assert_eq!(m1.values(), &[0.0]);
+
+        let m2 = empty.polyint_order(2, &[7.0, 11.0]).unwrap();
+        assert_eq!(m2.values(), &[7.0, 11.0]);
+
+        let m0 = empty.polyint_order(0, &[]).unwrap();
+        assert_eq!(m0.shape(), &[0]);
+    }
+
+    #[test]
+    fn polyint_order_rejects_invalid_arguments() {
+        let p = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        let err = p.polyint_order(-1, &[]).unwrap_err();
+        assert!(err.to_string().contains("positive"));
+        // k shorter than m (and not length 1) is a ValueError parity case
+        let err = p.polyint_order(3, &[1.0, 2.0]).unwrap_err();
+        assert!(err.to_string().contains("scalar or a rank-1 array"));
     }
 
     #[test]
