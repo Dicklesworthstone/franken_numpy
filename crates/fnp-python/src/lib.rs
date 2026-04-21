@@ -5734,6 +5734,41 @@ fn asarray(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, dtype=None, order=None, *, copy=None, device=None, like=None))]
+fn asanyarray(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    dtype: Option<Py<PyAny>>,
+    order: Option<Py<PyAny>>,
+    copy: Option<Py<PyAny>>,
+    device: Option<Py<PyAny>>,
+    like: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.asanyarray so ndarray passthrough, matrix/subclass
+    // preservation, dtype coercion, and order handling all stay aligned
+    // with numpy.
+    let numpy = py.import("numpy")?;
+    let asanyarray_fn = numpy.getattr("asanyarray")?;
+    let kwargs = PyDict::new(py);
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    if let Some(order_val) = order {
+        kwargs.set_item("order", order_val.bind(py))?;
+    }
+    if let Some(copy_val) = copy {
+        kwargs.set_item("copy", copy_val.bind(py))?;
+    }
+    if let Some(device_val) = device {
+        kwargs.set_item("device", device_val.bind(py))?;
+    }
+    if let Some(like_val) = like {
+        kwargs.set_item("like", like_val.bind(py))?;
+    }
+    Ok(asanyarray_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, dtype=None))]
 fn ascontiguousarray(
     py: Python<'_>,
@@ -8237,6 +8272,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(isin, m)?)?;
     m.add_function(wrap_pyfunction!(vander, m)?)?;
     m.add_function(wrap_pyfunction!(asarray, m)?)?;
+    m.add_function(wrap_pyfunction!(asanyarray, m)?)?;
     m.add_function(wrap_pyfunction!(ascontiguousarray, m)?)?;
     m.add_function(wrap_pyfunction!(real_if_close, m)?)?;
     m.add_function(wrap_pyfunction!(iscomplexobj, m)?)?;
@@ -8662,6 +8698,7 @@ mod tests {
             assert!(module.getattr("isin").is_ok());
             assert!(module.getattr("vander").is_ok());
             assert!(module.getattr("asarray").is_ok());
+            assert!(module.getattr("asanyarray").is_ok());
             assert!(module.getattr("ascontiguousarray").is_ok());
             assert!(module.getattr("real_if_close").is_ok());
             assert!(module.getattr("iscomplexobj").is_ok());
@@ -28421,6 +28458,106 @@ mod tests {
                 .call1((theirs_copy_false.clone(), shared_input.clone()))?
                 .extract::<bool>()?;
             assert_eq!(ours_shares, theirs_shares, "copy=False aliasing mismatch");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn asanyarray_matches_numpy_ndarray_matrix_dtype_order_scalar_and_object() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let asanyarray_fn = module.getattr("asanyarray")?;
+            let numpy = py.import("numpy")?;
+            let numpy_asanyarray = numpy.getattr("asanyarray")?;
+
+            // Existing ndarray input should pass through exactly when NumPy does.
+            let shared_input = numeric_array(py, vec![1_i64, 2, 3, 4], "int64");
+            let ours_passthrough = asanyarray_fn.call1((shared_input.clone(),))?;
+            let theirs_passthrough = numpy_asanyarray.call1((shared_input.clone(),))?;
+            assert_array_matches_numpy(&ours_passthrough, &theirs_passthrough)?;
+            assert_eq!(
+                ours_passthrough.is(&shared_input),
+                theirs_passthrough.is(&shared_input),
+                "ndarray passthrough identity mismatch",
+            );
+
+            // Matrix/subclass preservation should match NumPy exactly.
+            let matrix_type = numpy.getattr("matrix")?;
+            let matrix_input = matrix_type.call1((vec![vec![1_i64, 2], vec![3, 4]],))?;
+            let ours_matrix = asanyarray_fn.call1((matrix_input.clone(),))?;
+            let theirs_matrix = numpy_asanyarray.call1((matrix_input.clone(),))?;
+            assert_eq!(
+                ours_matrix.get_type().name()?.extract::<String>()?,
+                theirs_matrix.get_type().name()?.extract::<String>()?,
+                "matrix subclass preservation mismatch",
+            );
+            assert_array_matches_numpy(&ours_matrix, &theirs_matrix)?;
+
+            // Explicit dtype coercion must match NumPy's output dtype and values.
+            let ints = vec![vec![1_i64, 2], vec![3_i64, 4]];
+            let ours_dtype = asanyarray_fn.call(
+                (ints.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", numpy.getattr("float64")?)?;
+                    kwargs
+                }),
+            )?;
+            let theirs_dtype = numpy_asanyarray.call(
+                (ints.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", numpy.getattr("float64")?)?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_dtype, &theirs_dtype)?;
+
+            // order='F' should preserve NumPy's Fortran-layout request.
+            let ours_fortran = asanyarray_fn.call(
+                (ints.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("order", "F")?;
+                    kwargs
+                }),
+            )?;
+            let theirs_fortran = numpy_asanyarray.call(
+                (ints.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("order", "F")?;
+                    kwargs
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_fortran, &theirs_fortran)?;
+            let ours_f: bool = ours_fortran
+                .getattr("flags")?
+                .get_item("F_CONTIGUOUS")?
+                .extract()?;
+            let theirs_f: bool = theirs_fortran
+                .getattr("flags")?
+                .get_item("F_CONTIGUOUS")?
+                .extract()?;
+            assert_eq!(ours_f, theirs_f, "Fortran-contiguous flag mismatch");
+
+            // Scalar inputs stay scalar arrays with the same dtype/shape.
+            assert_array_matches_numpy(
+                &asanyarray_fn.call1((7_i64,))?,
+                &numpy_asanyarray.call1((7_i64,))?,
+            )?;
+
+            // Object arrays keep object dtype and values intact.
+            let object_source = object_array(py, vec!["north", "south"]);
+            let ours_object = asanyarray_fn.call1((object_source.clone(),))?;
+            let theirs_object = numpy_asanyarray.call1((object_source.clone(),))?;
+            assert_array_matches_numpy(&ours_object, &theirs_object)?;
 
             Ok(())
         });
