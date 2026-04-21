@@ -4846,6 +4846,17 @@ fn square(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
+fn cbrt(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.cbrt (real cube root, defined for negative
+    // inputs unlike sqrt). Integer input promotes to float; complex
+    // input is not supported by numpy's cbrt and surfaces the same
+    // TypeError to callers.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("cbrt")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
 fn iscomplexobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.iscomplexobj. Returns True iff input has a
     // complex dtype, regardless of whether imaginary parts are
@@ -5970,6 +5981,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(bartlett, m)?)?;
     m.add_function(wrap_pyfunction!(iscomplex, m)?)?;
     m.add_function(wrap_pyfunction!(square, m)?)?;
+    m.add_function(wrap_pyfunction!(cbrt, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6263,6 +6275,7 @@ mod tests {
             assert!(module.getattr("bartlett").is_ok());
             assert!(module.getattr("iscomplex").is_ok());
             assert!(module.getattr("square").is_ok());
+            assert!(module.getattr("cbrt").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -22624,6 +22637,75 @@ mod tests {
                 .call_method1("__mul__", (arr.clone(),))?;
             let ok_mul: bool = allclose.call1((&ours_a, &via_mul))?.extract()?;
             assert!(ok_mul, "square(x) must equal x*x");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn cbrt_matches_numpy_across_signs_dtypes_and_shapes() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let cbrt_fn = module.getattr("cbrt")?;
+            let numpy = py.import("numpy")?;
+            let numpy_cbrt = numpy.getattr("cbrt")?;
+            let isclose = numpy.getattr("isclose")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Positive scalar.
+            let ours_p = cbrt_fn.call1((8.0_f64,))?;
+            let theirs_p = numpy_cbrt.call1((8.0_f64,))?;
+            let ok_p: bool = isclose.call1((&ours_p, &theirs_p))?.extract()?;
+            assert!(ok_p, "cbrt(8.0) mismatch");
+            let val_p: f64 = ours_p.extract()?;
+            assert!((val_p - 2.0).abs() < 1e-12, "cbrt(8.0) must equal 2.0");
+
+            // Negative scalar (cbrt is real-valued for reals).
+            let ours_n = cbrt_fn.call1((-27.0_f64,))?;
+            let theirs_n = numpy_cbrt.call1((-27.0_f64,))?;
+            let ok_n: bool = isclose.call1((&ours_n, &theirs_n))?.extract()?;
+            assert!(ok_n, "cbrt(-27.0) mismatch");
+            let val_n: f64 = ours_n.extract()?;
+            assert!((val_n + 3.0).abs() < 1e-12, "cbrt(-27.0) must equal -3.0");
+
+            // 1-D mixed-sign array.
+            let arr = numpy.getattr("array")?.call1((vec![
+                -8.0_f64, -1.0, 0.0, 1.0, 8.0, 27.0, 64.0,
+            ],))?;
+            let ours_a = cbrt_fn.call1((arr.clone(),))?;
+            let theirs_a = numpy_cbrt.call1((arr.clone(),))?;
+            let ok_a: bool = allclose.call1((&ours_a, &theirs_a))?.extract()?;
+            assert!(ok_a, "cbrt 1-D mixed-sign mismatch");
+
+            // Integer input promoted to float.
+            let ints = numpy.getattr("array")?.call1((vec![1_i64, 8, 27, 64, 125],))?;
+            let ours_i = cbrt_fn.call1((ints.clone(),))?;
+            let theirs_i = numpy_cbrt.call1((ints.clone(),))?;
+            let ok_i: bool = allclose.call1((&ours_i, &theirs_i))?.extract()?;
+            assert!(ok_i, "cbrt integer input mismatch");
+            let ours_dtype = ours_i.getattr("dtype")?.str()?.to_string();
+            let theirs_dtype = theirs_i.getattr("dtype")?.str()?.to_string();
+            assert_eq!(ours_dtype, theirs_dtype, "cbrt int dtype must match numpy");
+
+            // 2-D input.
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![1.0_f64, 8.0, 27.0],
+                vec![64.0, 125.0, 216.0],
+            ],))?;
+            let ours_2d = cbrt_fn.call1((two_d.clone(),))?;
+            let theirs_2d = numpy_cbrt.call1((two_d.clone(),))?;
+            let ok_2d: bool = allclose.call1((&ours_2d, &theirs_2d))?.extract()?;
+            assert!(ok_2d, "cbrt 2-D mismatch");
+
+            // Round-trip: cbrt(x)**3 ≈ x for floats (preserves sign).
+            let cubed = ours_a.call_method1("__pow__", (3_i64,))?;
+            let ok_rt: bool = allclose.call1((&cubed, &arr))?.extract()?;
+            assert!(ok_rt, "cbrt(x)**3 must round-trip to x");
 
             Ok(())
         });
