@@ -4416,6 +4416,19 @@ fn ravel(py: Python<'_>, a: Py<PyAny>, order: &str) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, newshape, order="C"))]
+fn reshape(py: Python<'_>, a: Py<PyAny>, newshape: Py<PyAny>, order: &str) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.reshape so inferred dimensions, order-sensitive
+    // layout, scalar behavior, object dtype handling, and error
+    // surfaces all match numpy exactly.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("reshape")?
+        .call1((a.bind(py), newshape.bind(py), order))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, axes=None))]
 fn transpose(py: Python<'_>, a: Py<PyAny>, axes: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.transpose so default axis reversal, explicit
@@ -8104,6 +8117,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(roll, m)?)?;
     m.add_function(wrap_pyfunction!(histogram_bin_edges, m)?)?;
     m.add_function(wrap_pyfunction!(ravel, m)?)?;
+    m.add_function(wrap_pyfunction!(reshape, m)?)?;
     m.add_function(wrap_pyfunction!(transpose, m)?)?;
     m.add_function(wrap_pyfunction!(swapaxes, m)?)?;
     m.add_function(wrap_pyfunction!(moveaxis, m)?)?;
@@ -8519,6 +8533,7 @@ mod tests {
             assert!(module.getattr("roll").is_ok());
             assert!(module.getattr("histogram_bin_edges").is_ok());
             assert!(module.getattr("ravel").is_ok());
+            assert!(module.getattr("reshape").is_ok());
             assert!(module.getattr("transpose").is_ok());
             assert!(module.getattr("swapaxes").is_ok());
             assert!(module.getattr("moveaxis").is_ok());
@@ -27572,6 +27587,85 @@ mod tests {
                 theirs_object.getattr("dtype")?.str()?.to_string(),
                 "ravel object-array dtype must match numpy",
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn reshape_matches_numpy_across_inferred_order_scalar_object_and_errors() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let reshape_fn = module.getattr("reshape")?;
+            let numpy = py.import("numpy")?;
+            let numpy_reshape = numpy.getattr("reshape")?;
+
+            // Simple 1-D to 2-D reshape.
+            let one_d = numeric_array(py, vec![1_i64, 2, 3, 4], "int64");
+            assert_array_matches_numpy(
+                &reshape_fn.call1((one_d.clone(), (2_i64, 2_i64)))?,
+                &numpy_reshape.call1((one_d.clone(), (2_i64, 2_i64)))?,
+            )?;
+
+            // -1 infers the remaining dimension.
+            let infer_source = numeric_array(py, vec![1_i64, 2, 3, 4, 5, 6], "int64");
+            assert_array_matches_numpy(
+                &reshape_fn.call1((infer_source.clone(), (2_i64, -1_i64)))?,
+                &numpy_reshape.call1((infer_source.clone(), (2_i64, -1_i64)))?,
+            )?;
+
+            // Fortran-order reshape traverses in column-major order.
+            assert_array_matches_numpy(
+                &reshape_fn.call1((one_d.clone(), (2_i64, 2_i64), "F"))?,
+                &numpy_reshape.call1((one_d.clone(), (2_i64, 2_i64), "F"))?,
+            )?;
+
+            // Scalar/0-D input parity.
+            let scalar = numpy.getattr("array")?.call1((7_i64,))?;
+            let ours_scalar = reshape_fn.call1((scalar.clone(), (1_i64,)))?;
+            let theirs_scalar = numpy_reshape.call1((scalar.clone(), (1_i64,)))?;
+            assert_array_matches_numpy(&ours_scalar, &theirs_scalar)?;
+            assert_eq!(
+                ours_scalar.getattr("shape")?.str()?.to_string(),
+                theirs_scalar.getattr("shape")?.str()?.to_string(),
+                "reshape scalar shape must match numpy",
+            );
+            assert_eq!(
+                ours_scalar.getattr("dtype")?.str()?.to_string(),
+                theirs_scalar.getattr("dtype")?.str()?.to_string(),
+                "reshape scalar dtype must match numpy",
+            );
+
+            // Object dtype parity.
+            let object_source = object_array(py, vec!["a", "b", "c", "d"]);
+            let ours_object = reshape_fn.call1((object_source.clone(), (2_i64, 2_i64)))?;
+            let theirs_object = numpy_reshape.call1((object_source.clone(), (2_i64, 2_i64)))?;
+            assert_array_matches_numpy(&ours_object, &theirs_object)?;
+            assert_eq!(
+                ours_object.getattr("shape")?.str()?.to_string(),
+                theirs_object.getattr("shape")?.str()?.to_string(),
+                "reshape object-array shape must match numpy",
+            );
+            assert_eq!(
+                ours_object.getattr("dtype")?.str()?.to_string(),
+                theirs_object.getattr("dtype")?.str()?.to_string(),
+                "reshape object-array dtype must match numpy",
+            );
+
+            // Invalid shapes surface NumPy's exact ValueError.
+            let bad_source = numeric_array(py, vec![1_i64, 2, 3], "int64");
+            let actual_err = reshape_fn
+                .call1((bad_source.clone(), (2_i64, 2_i64)))
+                .unwrap_err();
+            let expected_err = numpy_reshape
+                .call1((bad_source.clone(), (2_i64, 2_i64)))
+                .unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
 
             Ok(())
         });
