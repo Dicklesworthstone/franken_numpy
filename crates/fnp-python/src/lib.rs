@@ -5750,6 +5750,41 @@ fn arange(
 }
 
 #[pyfunction]
+#[pyo3(signature = (start, stop, num=50, endpoint=true, retstep=false, dtype=None, axis=0, *, device=None))]
+#[allow(clippy::too_many_arguments)]
+fn linspace(
+    py: Python<'_>,
+    start: Py<PyAny>,
+    stop: Py<PyAny>,
+    num: isize,
+    endpoint: bool,
+    retstep: bool,
+    dtype: Option<Py<PyAny>>,
+    axis: isize,
+    device: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.linspace so endpoint handling, retstep tuple
+    // shape, dtype coercion, integer/float endpoint promotion, and
+    // axis insertion on array endpoints all match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let linspace_fn = numpy.getattr("linspace")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("num", num)?;
+    kwargs.set_item("endpoint", endpoint)?;
+    kwargs.set_item("retstep", retstep)?;
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    kwargs.set_item("axis", axis)?;
+    if let Some(device_val) = device {
+        kwargs.set_item("device", device_val.bind(py))?;
+    }
+    Ok(linspace_fn
+        .call((start.bind(py), stop.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (shape, fill_value, dtype=None, order="C", *, device=None, like=None))]
 fn full(
     py: Python<'_>,
@@ -8486,6 +8521,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(isin, m)?)?;
     m.add_function(wrap_pyfunction!(vander, m)?)?;
     m.add_function(wrap_pyfunction!(arange, m)?)?;
+    m.add_function(wrap_pyfunction!(linspace, m)?)?;
     m.add_function(wrap_pyfunction!(full, m)?)?;
     m.add_function(wrap_pyfunction!(full_like, m)?)?;
     m.add_function(wrap_pyfunction!(zeros_like, m)?)?;
@@ -8918,6 +8954,7 @@ mod tests {
             assert!(module.getattr("isin").is_ok());
             assert!(module.getattr("vander").is_ok());
             assert!(module.getattr("arange").is_ok());
+            assert!(module.getattr("linspace").is_ok());
             assert!(module.getattr("full").is_ok());
             assert!(module.getattr("full_like").is_ok());
             assert!(module.getattr("zeros_like").is_ok());
@@ -29003,6 +29040,74 @@ mod tests {
             assert_array_matches_numpy(
                 &arange_fn.call1((3_i64, 3_i64))?,
                 &numpy_arange.call1((3_i64, 3_i64))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn linspace_matches_numpy_across_endpoint_retstep_dtype_and_axis() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let linspace_fn = module.getattr("linspace")?;
+            let numpy = py.import("numpy")?;
+            let numpy_linspace = numpy.getattr("linspace")?;
+            let isclose = numpy.getattr("isclose")?;
+
+            // Default endpoint=True with integer endpoints.
+            assert_array_matches_numpy(
+                &linspace_fn.call1((0_i64, 5_i64))?,
+                &numpy_linspace.call1((0_i64, 5_i64))?,
+            )?;
+
+            // endpoint=False with float endpoints.
+            let endpoint_kwargs = PyDict::new(py);
+            endpoint_kwargs.set_item("num", 5_i64)?;
+            endpoint_kwargs.set_item("endpoint", false)?;
+            assert_array_matches_numpy(
+                &linspace_fn.call((0.5_f64, 2.5_f64), Some(&endpoint_kwargs))?,
+                &numpy_linspace.call((0.5_f64, 2.5_f64), Some(&endpoint_kwargs))?,
+            )?;
+
+            // retstep=True must return the same array/step tuple surface.
+            let retstep_kwargs = PyDict::new(py);
+            retstep_kwargs.set_item("num", 5_i64)?;
+            retstep_kwargs.set_item("retstep", true)?;
+            let ours_retstep = linspace_fn.call((1.0_f64, 3.0_f64), Some(&retstep_kwargs))?;
+            let theirs_retstep = numpy_linspace.call((1.0_f64, 3.0_f64), Some(&retstep_kwargs))?;
+            let ours_tuple = ours_retstep.downcast::<PyTuple>()?;
+            let theirs_tuple = theirs_retstep.downcast::<PyTuple>()?;
+            assert_eq!(ours_tuple.len()?, theirs_tuple.len()?);
+            assert_array_matches_numpy(&ours_tuple.get_item(0)?, &theirs_tuple.get_item(0)?)?;
+            let step_ok: bool = isclose
+                .call1((&ours_tuple.get_item(1)?, &theirs_tuple.get_item(1)?))?
+                .extract()?;
+            assert!(step_ok, "linspace retstep mismatch");
+
+            // Explicit dtype override should match NumPy exactly.
+            let dtype_kwargs = PyDict::new(py);
+            dtype_kwargs.set_item("dtype", numpy.getattr("float32")?)?;
+            dtype_kwargs.set_item("num", 4_i64)?;
+            assert_array_matches_numpy(
+                &linspace_fn.call((1_i64, 4_i64), Some(&dtype_kwargs))?,
+                &numpy_linspace.call((1_i64, 4_i64), Some(&dtype_kwargs))?,
+            )?;
+
+            // Axis insertion on vectorized start/stop inputs.
+            let starts = numpy.getattr("array")?.call1((vec![0.0_f64, 10.0_f64],))?;
+            let stops = numpy.getattr("array")?.call1((vec![1.0_f64, 20.0_f64],))?;
+            let axis_kwargs = PyDict::new(py);
+            axis_kwargs.set_item("num", 4_i64)?;
+            axis_kwargs.set_item("axis", -1_i64)?;
+            assert_array_matches_numpy(
+                &linspace_fn.call((starts.clone(), stops.clone()), Some(&axis_kwargs))?,
+                &numpy_linspace.call((starts.clone(), stops.clone()), Some(&axis_kwargs))?,
             )?;
 
             Ok(())
