@@ -5344,6 +5344,25 @@ fn tile(py: Python<'_>, a: Py<PyAny>, reps: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (a1, a2, equal_nan=false))]
+fn array_equal(
+    py: Python<'_>,
+    a1: Py<PyAny>,
+    a2: Py<PyAny>,
+    equal_nan: bool,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.array_equal so exact-shape semantics and
+    // optional equal_nan handling match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("equal_nan", equal_nan)?;
+    Ok(numpy
+        .getattr("array_equal")?
+        .call((a1.bind(py), a2.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a1, a2))]
 fn polyadd(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.polyadd. Coefficients in decreasing-power order;
@@ -7700,6 +7719,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(legder, m)?)?;
     m.add_function(wrap_pyfunction!(legint, m)?)?;
     m.add_function(wrap_pyfunction!(tile, m)?)?;
+    m.add_function(wrap_pyfunction!(array_equal, m)?)?;
     m.add_function(wrap_pyfunction!(true_divide, m)?)?;
     m.add_function(wrap_pyfunction!(allclose, m)?)?;
     m.add_function(wrap_pyfunction!(fix, m)?)?;
@@ -8043,6 +8063,7 @@ mod tests {
             assert!(module.getattr("expm1").is_ok());
             assert!(module.getattr("polyder").is_ok());
             assert!(module.getattr("tile").is_ok());
+            assert!(module.getattr("array_equal").is_ok());
             assert!(module.getattr("true_divide").is_ok());
             assert!(module.getattr("allclose").is_ok());
             assert!(module.getattr("fix").is_ok());
@@ -27863,6 +27884,120 @@ mod tests {
                 &tile_fn.call1((one_d.clone(), 10_i64))?,
                 &numpy_tile.call1((one_d.clone(), 10_i64))?,
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn array_equal_matches_numpy_across_shapes_equal_nan_and_objects() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let array_equal_fn = module.getattr("array_equal")?;
+            let numpy = py.import("numpy")?;
+            let numpy_array_equal = numpy.getattr("array_equal")?;
+
+            // Identical arrays compare equal.
+            let left = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2], vec![3, 4]],))?;
+            let right = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2], vec![3, 4]],))?;
+            let ours_identical: bool = array_equal_fn
+                .call1((left.clone(), right.clone()))?
+                .extract()?;
+            let theirs_identical: bool = numpy_array_equal
+                .call1((left.clone(), right.clone()))?
+                .extract()?;
+            assert_eq!(ours_identical, theirs_identical);
+
+            // Shape mismatch returns False instead of broadcasting.
+            let shape_mismatch = numpy.getattr("array")?.call1((vec![1_i64, 2, 3, 4],))?;
+            let ours_shape: bool = array_equal_fn
+                .call1((left.clone(), shape_mismatch.clone()))?
+                .extract()?;
+            let theirs_shape: bool = numpy_array_equal
+                .call1((left.clone(), shape_mismatch.clone()))?
+                .extract()?;
+            assert_eq!(ours_shape, theirs_shape);
+
+            // equal_nan toggles NaN equality.
+            let nan_left = numpy.getattr("array")?.call1((vec![1.0_f64, f64::NAN],))?;
+            let nan_right = numpy.getattr("array")?.call1((vec![1.0_f64, f64::NAN],))?;
+            let ours_nan_default: bool = array_equal_fn
+                .call1((nan_left.clone(), nan_right.clone()))?
+                .extract()?;
+            let theirs_nan_default: bool = numpy_array_equal
+                .call1((nan_left.clone(), nan_right.clone()))?
+                .extract()?;
+            assert_eq!(ours_nan_default, theirs_nan_default);
+
+            let ours_nan_true: bool = array_equal_fn
+                .call(
+                    (nan_left.clone(), nan_right.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("equal_nan", true)?;
+                        kw
+                    }),
+                )?
+                .extract()?;
+            let theirs_nan_true: bool = numpy_array_equal
+                .call(
+                    (nan_left.clone(), nan_right.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("equal_nan", true)?;
+                        kw
+                    }),
+                )?
+                .extract()?;
+            assert_eq!(ours_nan_true, theirs_nan_true);
+
+            // Object dtype parity.
+            let objects_left = numpy
+                .getattr("array")?
+                .call1((vec![vec!["a", "bb"], vec!["ccc", "dddd"]],))?;
+            let objects_right = numpy
+                .getattr("array")?
+                .call1((vec![vec!["a", "bb"], vec!["ccc", "dddd"]],))?;
+            let ours_objects: bool = array_equal_fn
+                .call1((objects_left.clone(), objects_right.clone()))?
+                .extract()?;
+            let theirs_objects: bool = numpy_array_equal
+                .call1((objects_left.clone(), objects_right.clone()))?
+                .extract()?;
+            assert_eq!(ours_objects, theirs_objects);
+
+            // Scalar-vs-array false path.
+            let scalar = numpy.getattr("array")?.call1((1_i64,))?;
+            let vector = numpy.getattr("array")?.call1((vec![1_i64],))?;
+            let ours_scalar: bool = array_equal_fn
+                .call1((scalar.clone(), vector.clone()))?
+                .extract()?;
+            let theirs_scalar: bool = numpy_array_equal
+                .call1((scalar.clone(), vector.clone()))?
+                .extract()?;
+            assert_eq!(ours_scalar, theirs_scalar);
+
+            // Broadcastable shapes still return False when shapes differ.
+            let broadcast_left = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64], vec![2]],))?;
+            let broadcast_right = numpy.getattr("array")?.call1((vec![1_i64, 2],))?;
+            let ours_broadcast: bool = array_equal_fn
+                .call1((broadcast_left.clone(), broadcast_right.clone()))?
+                .extract()?;
+            let theirs_broadcast: bool = numpy_array_equal
+                .call1((broadcast_left.clone(), broadcast_right.clone()))?
+                .extract()?;
+            assert_eq!(ours_broadcast, theirs_broadcast);
 
             Ok(())
         });
