@@ -4667,6 +4667,56 @@ fn nanmin(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=None, keepdims=None, r#where=None, mean=None, correction=None))]
+#[allow(clippy::too_many_arguments)]
+fn nanstd(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    dtype: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
+    ddof: Option<Py<PyAny>>,
+    keepdims: Option<bool>,
+    r#where: Option<Py<PyAny>>,
+    mean: Option<Py<PyAny>>,
+    correction: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.nanstd so NaN-ignoring standard deviation
+    // matches numpy across axis=None/int/tuple, explicit dtype/out,
+    // ddof or correction adjustments, keepdims, and newer optional
+    // where/mean keywords. Optional keywords are forwarded only when
+    // explicitly supplied so numpy's internal defaults remain intact.
+    let numpy = py.import("numpy")?;
+    let nanstd_fn = numpy.getattr("nanstd")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis_val) = axis {
+        kwargs.set_item("axis", axis_val.bind(py))?;
+    }
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    if let Some(ddof_val) = ddof {
+        kwargs.set_item("ddof", ddof_val.bind(py))?;
+    }
+    if let Some(keepdims_val) = keepdims {
+        kwargs.set_item("keepdims", keepdims_val)?;
+    }
+    if let Some(where_val) = r#where {
+        kwargs.set_item("where", where_val.bind(py))?;
+    }
+    if let Some(mean_val) = mean {
+        kwargs.set_item("mean", mean_val.bind(py))?;
+    }
+    if let Some(correction_val) = correction {
+        kwargs.set_item("correction", correction_val.bind(py))?;
+    }
+    Ok(nanstd_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, q, axis=None, out=None, overwrite_input=false, method=None, keepdims=false, weights=None))]
 #[allow(clippy::too_many_arguments)]
 fn percentile(
@@ -7297,6 +7347,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(nansum, m)?)?;
     m.add_function(wrap_pyfunction!(nanmax, m)?)?;
     m.add_function(wrap_pyfunction!(nanmin, m)?)?;
+    m.add_function(wrap_pyfunction!(nanstd, m)?)?;
     m.add_function(wrap_pyfunction!(percentile, m)?)?;
     m.add_function(wrap_pyfunction!(lexsort, m)?)?;
     m.add_function(wrap_pyfunction!(rfftn, m)?)?;
@@ -7674,6 +7725,7 @@ mod tests {
             assert!(module.getattr("nansum").is_ok());
             assert!(module.getattr("nanmax").is_ok());
             assert!(module.getattr("nanmin").is_ok());
+            assert!(module.getattr("nanstd").is_ok());
             assert!(module.getattr("percentile").is_ok());
             assert!(module.getattr("lexsort").is_ok());
             assert!(module.getattr("rfftn").is_ok());
@@ -22780,6 +22832,140 @@ mod tests {
                 ours_shape, theirs_shape,
                 "nanmin keepdims shape must match numpy",
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn nanstd_matches_numpy_across_axis_ddof_keepdims_and_dtype() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let nanstd_fn = module.getattr("nanstd")?;
+            let numpy = py.import("numpy")?;
+            let numpy_nanstd = numpy.getattr("nanstd")?;
+            let isclose = numpy.getattr("isclose")?;
+
+            // 1-D no NaN matches np.std.
+            let clean = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 2.0, 3.0, 4.0, 5.0],))?;
+            let ours_clean = nanstd_fn.call1((clean.clone(),))?;
+            let theirs_clean = numpy_nanstd.call1((clean.clone(),))?;
+            let ok_clean: bool = isclose.call1((&ours_clean, &theirs_clean))?.extract()?;
+            assert!(ok_clean, "nanstd clean 1-D mismatch");
+
+            // 1-D with NaN ignores NaN values.
+            let with_nan =
+                numpy
+                    .getattr("array")?
+                    .call1((vec![1.0_f64, 2.0, f64::NAN, 4.0, 8.0],))?;
+            let ours_nan = nanstd_fn.call1((with_nan.clone(),))?;
+            let theirs_nan = numpy_nanstd.call1((with_nan.clone(),))?;
+            let ok_nan: bool = isclose.call1((&ours_nan, &theirs_nan))?.extract()?;
+            assert!(ok_nan, "nanstd NaN-filtering 1-D mismatch");
+
+            // ddof=1 switches to sample standard deviation.
+            let ours_ddof = nanstd_fn.call(
+                (with_nan.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("ddof", 1_i64)?;
+                    kw
+                }),
+            )?;
+            let theirs_ddof = numpy_nanstd.call(
+                (with_nan.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("ddof", 1_i64)?;
+                    kw
+                }),
+            )?;
+            let ok_ddof: bool = isclose.call1((&ours_ddof, &theirs_ddof))?.extract()?;
+            assert!(ok_ddof, "nanstd ddof=1 mismatch");
+
+            // 2-D mixed NaN with axis reductions.
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![1.0_f64, f64::NAN, 3.0],
+                vec![4.0, 5.0, f64::NAN],
+                vec![7.0, 8.0, 9.0],
+            ],))?;
+            for axis in [0_i64, 1] {
+                let ours = nanstd_fn.call(
+                    (two_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", axis)?;
+                        kw
+                    }),
+                )?;
+                let theirs = numpy_nanstd.call(
+                    (two_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", axis)?;
+                        kw
+                    }),
+                )?;
+                assert_array_matches_numpy(&ours, &theirs)?;
+            }
+
+            // keepdims=True preserves reduced axes.
+            let ours_kd = nanstd_fn.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 1_i64)?;
+                    kw.set_item("keepdims", true)?;
+                    kw
+                }),
+            )?;
+            let theirs_kd = numpy_nanstd.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 1_i64)?;
+                    kw.set_item("keepdims", true)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_kd, &theirs_kd)?;
+            let ours_shape = ours_kd.getattr("shape")?.str()?.to_string();
+            let theirs_shape = theirs_kd.getattr("shape")?.str()?.to_string();
+            assert_eq!(
+                ours_shape, theirs_shape,
+                "nanstd keepdims shape must match numpy",
+            );
+
+            // Integer input promotes to the same floating dtype as numpy.
+            let ints = numpy.getattr("array")?.call1((vec![2_i64, 4, 6, 8],))?;
+            let ours_int = nanstd_fn.call1((ints.clone(),))?;
+            let theirs_int = numpy_nanstd.call1((ints.clone(),))?;
+            let ok_int: bool = isclose.call1((&ours_int, &theirs_int))?.extract()?;
+            assert!(ok_int, "nanstd integer input mismatch");
+            let ours_dtype = ours_int.getattr("dtype")?.str()?.to_string();
+            let theirs_dtype = theirs_int.getattr("dtype")?.str()?.to_string();
+            assert_eq!(
+                ours_dtype, theirs_dtype,
+                "nanstd integer result dtype must match numpy",
+            );
+
+            // Identical non-NaN inputs return zero.
+            let identical = numpy
+                .getattr("array")?
+                .call1((vec![5.0_f64, 5.0, 5.0, 5.0],))?;
+            let ours_zero = nanstd_fn.call1((identical.clone(),))?;
+            let theirs_zero = numpy_nanstd.call1((identical.clone(),))?;
+            let ok_zero: bool = isclose.call1((&ours_zero, &theirs_zero))?.extract()?;
+            assert!(ok_zero, "nanstd identical-input mismatch");
+            let ours_zero_ok: bool = isclose.call1((&ours_zero, 0.0_f64))?.extract()?;
+            assert!(ours_zero_ok, "nanstd identical-input must return 0");
 
             Ok(())
         });
