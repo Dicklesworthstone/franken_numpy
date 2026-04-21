@@ -4484,6 +4484,19 @@ fn moveaxis(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, axis, start=0))]
+fn rollaxis(py: Python<'_>, a: Py<PyAny>, axis: i64, start: i64) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.rollaxis so trailing-axis promotion, nonzero
+    // insertion points, negative-axis normalization, and validation
+    // errors all match numpy exactly.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("rollaxis")?
+        .call1((a.bind(py), axis, start))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, axis=None))]
 fn squeeze(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.squeeze so singleton-axis removal, explicit
@@ -8166,6 +8179,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(transpose, m)?)?;
     m.add_function(wrap_pyfunction!(swapaxes, m)?)?;
     m.add_function(wrap_pyfunction!(moveaxis, m)?)?;
+    m.add_function(wrap_pyfunction!(rollaxis, m)?)?;
     m.add_function(wrap_pyfunction!(squeeze, m)?)?;
     m.add_function(wrap_pyfunction!(rot90, m)?)?;
     m.add_function(wrap_pyfunction!(split, m)?)?;
@@ -8584,6 +8598,7 @@ mod tests {
             assert!(module.getattr("transpose").is_ok());
             assert!(module.getattr("swapaxes").is_ok());
             assert!(module.getattr("moveaxis").is_ok());
+            assert!(module.getattr("rollaxis").is_ok());
             assert!(module.getattr("squeeze").is_ok());
             assert!(module.getattr("rot90").is_ok());
             assert!(module.getattr("expand_dims").is_ok());
@@ -28045,6 +28060,78 @@ mod tests {
                 .call1((three_d.clone(), (0_i64, 2_i64), (1_i64,)))
                 .unwrap_err();
             assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn rollaxis_matches_numpy_across_axis_start_object_and_errors() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let rollaxis_fn = module.getattr("rollaxis")?;
+            let numpy = py.import("numpy")?;
+            let numpy_rollaxis = numpy.getattr("rollaxis")?;
+
+            // Moving the trailing axis to the front on 3-D input.
+            let three_d = numpy.getattr("array")?.call1((vec![
+                vec![vec![1_i64, 2], vec![3, 4], vec![5, 6]],
+                vec![vec![7_i64, 8], vec![9, 10], vec![11, 12]],
+            ],))?;
+            assert_array_matches_numpy(
+                &rollaxis_fn.call1((three_d.clone(), 2_i64))?,
+                &numpy_rollaxis.call1((three_d.clone(), 2_i64))?,
+            )?;
+
+            // Nonzero start inserts the moved axis before the requested position.
+            assert_array_matches_numpy(
+                &rollaxis_fn.call1((three_d.clone(), 2_i64, 1_i64))?,
+                &numpy_rollaxis.call1((three_d.clone(), 2_i64, 1_i64))?,
+            )?;
+
+            // Negative axes normalize like numpy.
+            assert_array_matches_numpy(
+                &rollaxis_fn.call1((three_d.clone(), -1_i64, -2_i64))?,
+                &numpy_rollaxis.call1((three_d.clone(), -1_i64, -2_i64))?,
+            )?;
+
+            // 2-D input parity.
+            let two_d = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2, 3], vec![4, 5, 6]],))?;
+            assert_array_matches_numpy(
+                &rollaxis_fn.call1((two_d.clone(), 1_i64))?,
+                &numpy_rollaxis.call1((two_d.clone(), 1_i64))?,
+            )?;
+
+            // Object dtype parity.
+            let objects = numpy.getattr("array")?.call1((vec![
+                vec![vec!["aa", "bbb"], vec!["cccc", "ddddd"]],
+                vec![vec!["eeeeee", "fffffff"], vec!["gggggggg", "hhhhhhhhh"]],
+            ],))?;
+            assert_array_matches_numpy(
+                &rollaxis_fn.call1((objects.clone(), 2_i64, 1_i64))?,
+                &numpy_rollaxis.call1((objects.clone(), 2_i64, 1_i64))?,
+            )?;
+
+            // Out-of-range axis must raise the same error surface.
+            let actual_axis_err = rollaxis_fn.call1((three_d.clone(), 3_i64)).unwrap_err();
+            let expected_axis_err = numpy_rollaxis.call1((three_d.clone(), 3_i64)).unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_axis_err, expected_axis_err)?;
+
+            // Out-of-range start must also match numpy's validation error.
+            let actual_start_err = rollaxis_fn
+                .call1((three_d.clone(), 0_i64, 5_i64))
+                .unwrap_err();
+            let expected_start_err = numpy_rollaxis
+                .call1((three_d.clone(), 0_i64, 5_i64))
+                .unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_start_err, expected_start_err)?;
 
             Ok(())
         });
