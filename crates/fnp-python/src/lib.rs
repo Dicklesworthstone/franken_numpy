@@ -4823,6 +4823,19 @@ fn bartlett(py: Python<'_>, m: i64) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
+fn iscomplex(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.iscomplex. Returns a bool array marking
+    // elements with a non-zero imaginary part. Real-input arrays
+    // return all-False.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("iscomplex")?
+        .call1((x.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
 fn iscomplexobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.iscomplexobj. Returns True iff input has a
     // complex dtype, regardless of whether imaginary parts are
@@ -5945,6 +5958,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(iscomplexobj, m)?)?;
     m.add_function(wrap_pyfunction!(angle, m)?)?;
     m.add_function(wrap_pyfunction!(bartlett, m)?)?;
+    m.add_function(wrap_pyfunction!(iscomplex, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6236,6 +6250,7 @@ mod tests {
             assert!(module.getattr("iscomplexobj").is_ok());
             assert!(module.getattr("angle").is_ok());
             assert!(module.getattr("bartlett").is_ok());
+            assert!(module.getattr("iscomplex").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -22427,6 +22442,87 @@ mod tests {
             let last: f64 = ours_11.get_item(10_i64)?.extract()?;
             assert!(first.abs() < 1e-12, "bartlett first endpoint must be 0");
             assert!(last.abs() < 1e-12, "bartlett last endpoint must be 0");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn iscomplex_matches_numpy_across_arrays_and_collections() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let isc_fn = module.getattr("iscomplex")?;
+            let numpy = py.import("numpy")?;
+            let numpy_isc = numpy.getattr("iscomplex")?;
+
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+            let make_complex_array = |pairs: Vec<(f64, f64)>| -> PyResult<Bound<'_, PyAny>> {
+                let mut items: Vec<Py<PyAny>> = Vec::with_capacity(pairs.len());
+                for (r, i) in pairs {
+                    items.push(py_complex.call1((r, i))?.unbind());
+                }
+                let lst = PyList::new(py, items)?;
+                numpy.getattr("array")?.call1((lst,))
+            };
+
+            // Mixed complex array: imag-non-zero positions are True.
+            let mixed = make_complex_array(vec![
+                (1.0, 0.0),
+                (2.0, 1.0),
+                (3.0, 0.0),
+                (4.0, -2.5),
+            ])?;
+            assert_array_matches_numpy(
+                &isc_fn.call1((mixed.clone(),))?,
+                &numpy_isc.call1((mixed.clone(),))?,
+            )?;
+
+            // All-real complex dtype array → all False.
+            let all_real = make_complex_array(vec![(1.0, 0.0), (2.0, 0.0), (3.0, 0.0)])?;
+            assert_array_matches_numpy(
+                &isc_fn.call1((all_real.clone(),))?,
+                &numpy_isc.call1((all_real.clone(),))?,
+            )?;
+
+            // Real (float) array → all False element-wise.
+            let real_arr = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            assert_array_matches_numpy(
+                &isc_fn.call1((real_arr.clone(),))?,
+                &numpy_isc.call1((real_arr.clone(),))?,
+            )?;
+
+            // Integer array → all False element-wise.
+            let int_arr = numpy.getattr("array")?.call1((vec![1_i64, 2, 3, 4],))?;
+            assert_array_matches_numpy(
+                &isc_fn.call1((int_arr.clone(),))?,
+                &numpy_isc.call1((int_arr.clone(),))?,
+            )?;
+
+            // 2-D complex element-wise.
+            let row1 = make_complex_array(vec![(1.0, 0.0), (2.0, 1.0)])?;
+            let row2 = make_complex_array(vec![(3.0, -1.0), (4.0, 0.0)])?;
+            let nested = PyList::new(py, [row1.unbind(), row2.unbind()])?;
+            let two_d = numpy.getattr("array")?.call1((nested,))?;
+            assert_array_matches_numpy(
+                &isc_fn.call1((two_d.clone(),))?,
+                &numpy_isc.call1((two_d.clone(),))?,
+            )?;
+
+            // Python list of complex literals.
+            let complex_items: Vec<Py<PyAny>> = vec![
+                py_complex.call1((1.0_f64, 1.0_f64))?.unbind(),
+                py_complex.call1((2.0_f64, 0.0_f64))?.unbind(),
+            ];
+            let lst_c = PyList::new(py, complex_items)?;
+            assert_array_matches_numpy(
+                &isc_fn.call1((lst_c.clone(),))?,
+                &numpy_isc.call1((lst_c.clone(),))?,
+            )?;
 
             Ok(())
         });
