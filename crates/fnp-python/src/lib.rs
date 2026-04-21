@@ -3180,6 +3180,27 @@ fn expand_dims(py: Python<'_>, a: Py<PyAny>, axis: Py<PyAny>) -> PyResult<Py<PyA
     build_numpy_array_from_ufunc(py, &result)
 }
 
+#[pyfunction]
+#[pyo3(signature = (array, shape, subok=false))]
+fn broadcast_to(
+    py: Python<'_>,
+    array: Py<PyAny>,
+    shape: Py<PyAny>,
+    subok: bool,
+) -> PyResult<Py<PyAny>> {
+    // Delegate to NumPy so broadcasting rules, readonly-view behavior,
+    // dtype preservation, and incompatible-shape errors all match exactly.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if subok {
+        kwargs.set_item("subok", true)?;
+    }
+    Ok(numpy
+        .getattr("broadcast_to")?
+        .call((array.bind(py), shape.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
 #[allow(dead_code)]
 fn validate_trim_zeros_mode(trim: &str) -> PyResult<()> {
     if trim.is_empty() || trim.chars().any(|ch| ch != 'f' && ch != 'b') {
@@ -7674,6 +7695,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(argwhere, m)?)?;
     m.add_function(wrap_pyfunction!(count_nonzero, m)?)?;
     m.add_function(wrap_pyfunction!(expand_dims, m)?)?;
+    m.add_function(wrap_pyfunction!(broadcast_to, m)?)?;
     m.add_function(wrap_pyfunction!(structured_to_unstructured, m)?)?;
     m.add_function(wrap_pyfunction!(trim_zeros, m)?)?;
     m.add_function(wrap_pyfunction!(masked_invalid, m)?)?;
@@ -8144,6 +8166,7 @@ mod tests {
             assert!(module.getattr("squeeze").is_ok());
             assert!(module.getattr("rot90").is_ok());
             assert!(module.getattr("expand_dims").is_ok());
+            assert!(module.getattr("broadcast_to").is_ok());
             assert!(module.getattr("structured_to_unstructured").is_ok());
             assert!(module.getattr("trim_zeros").is_ok());
             assert!(module.getattr("masked_invalid").is_ok());
@@ -12537,6 +12560,79 @@ mod tests {
                 actual_err.value(py).str()?.extract::<String>()?,
                 expected_err.value(py).str()?.extract::<String>()?
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn broadcast_to_matches_numpy_shapes_views_and_error_surface() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let broadcast_to_fn = module.getattr("broadcast_to")?;
+            let numpy = py.import("numpy")?;
+            let numpy_broadcast_to = numpy.getattr("broadcast_to")?;
+
+            // Scalar broadcast to a 2-D shape.
+            let scalar = numpy.getattr("array")?.call1((7_i64,))?;
+            let actual_scalar =
+                broadcast_to_fn.call1((scalar.clone(), PyTuple::new(py, [2_usize, 3_usize])?))?;
+            let expected_scalar = numpy_broadcast_to
+                .call1((scalar.clone(), PyTuple::new(py, [2_usize, 3_usize])?))?;
+            assert_array_matches_numpy(&actual_scalar, &expected_scalar)?;
+
+            // 1-D vector broadcast to 2-D rows.
+            let vector = numeric_array(py, vec![1_i64, 2, 3], "int64");
+            let actual_vector =
+                broadcast_to_fn.call1((vector.clone(), PyTuple::new(py, [2_usize, 3_usize])?))?;
+            let expected_vector = numpy_broadcast_to
+                .call1((vector.clone(), PyTuple::new(py, [2_usize, 3_usize])?))?;
+            assert_array_matches_numpy(&actual_vector, &expected_vector)?;
+
+            // 2-D input broadcast over a leading dimension while preserving dtype.
+            let matrix = numpy
+                .getattr("array")?
+                .call1((vec![vec![1.5_f64, 2.5_f64, 3.5_f64]],))?;
+            let actual_matrix = broadcast_to_fn.call1((
+                matrix.clone(),
+                PyTuple::new(py, [4_usize, 1_usize, 3_usize])?,
+            ))?;
+            let expected_matrix = numpy_broadcast_to.call1((
+                matrix.clone(),
+                PyTuple::new(py, [4_usize, 1_usize, 3_usize])?,
+            ))?;
+            assert_array_matches_numpy(&actual_matrix, &expected_matrix)?;
+            assert_eq!(
+                actual_matrix.getattr("dtype")?.str()?.extract::<String>()?,
+                expected_matrix
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?
+            );
+
+            // Both implementations should return a view-like result.
+            assert_eq!(
+                actual_vector.getattr("base")?.is_none(),
+                expected_vector.getattr("base")?.is_none()
+            );
+            assert!(
+                !actual_vector.getattr("base")?.is_none(),
+                "broadcast_to should return a view-like result"
+            );
+
+            // Incompatible shapes must raise the same ValueError surface.
+            let actual_err = broadcast_to_fn
+                .call1((vector.clone(), PyTuple::new(py, [2_usize, 2_usize])?))
+                .unwrap_err();
+            let expected_err = numpy_broadcast_to
+                .call1((vector, PyTuple::new(py, [2_usize, 2_usize])?))
+                .unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
 
             Ok(())
         });
