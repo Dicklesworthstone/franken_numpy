@@ -3272,6 +3272,36 @@ fn repeat(
         .unbind())
 }
 
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn concatenate(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // Delegate to NumPy so sequence handling, axis=None flattening,
+    // explicit out buffers, dtype/casting interactions, and shape
+    // mismatch errors all match exactly.
+    let numpy = py.import("numpy")?;
+    let concatenate_fn = numpy.getattr("concatenate")?;
+    if args.is_empty() || args.len() > 2 {
+        return Ok(concatenate_fn.call(args, kwargs)?.unbind());
+    }
+
+    let call_kwargs = PyDict::new(py);
+    if let Some(kwargs) = kwargs {
+        for (key, value) in kwargs.iter() {
+            call_kwargs.set_item(key, value)?;
+        }
+    }
+
+    if !call_kwargs.contains("axis")? && args.len() == 1 {
+        call_kwargs.set_item("axis", 0_i64)?;
+    }
+
+    Ok(concatenate_fn.call(args, Some(&call_kwargs))?.unbind())
+}
+
 #[allow(dead_code)]
 fn validate_trim_zeros_mode(trim: &str) -> PyResult<()> {
     if trim.is_empty() || trim.chars().any(|ch| ch != 'f' && ch != 'b') {
@@ -7884,6 +7914,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(broadcast_arrays, m)?)?;
     m.add_function(wrap_pyfunction!(clip, m)?)?;
     m.add_function(wrap_pyfunction!(repeat, m)?)?;
+    m.add_function(wrap_pyfunction!(concatenate, m)?)?;
     m.add_function(wrap_pyfunction!(structured_to_unstructured, m)?)?;
     m.add_function(wrap_pyfunction!(trim_zeros, m)?)?;
     m.add_function(wrap_pyfunction!(masked_invalid, m)?)?;
@@ -8365,6 +8396,7 @@ mod tests {
             assert!(module.getattr("broadcast_arrays").is_ok());
             assert!(module.getattr("clip").is_ok());
             assert!(module.getattr("repeat").is_ok());
+            assert!(module.getattr("concatenate").is_ok());
             assert!(module.getattr("structured_to_unstructured").is_ok());
             assert!(module.getattr("trim_zeros").is_ok());
             assert!(module.getattr("masked_invalid").is_ok());
@@ -13268,6 +13300,145 @@ mod tests {
                 &repeat_fn.call1((7_i64, 4_i64))?,
                 &numpy_repeat.call1((7_i64, 4_i64))?,
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn concatenate_matches_numpy_across_axes_flatten_out_dtype_casting_and_errors() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let concatenate_fn = module.getattr("concatenate")?;
+            let numpy = py.import("numpy")?;
+            let numpy_concatenate = numpy.getattr("concatenate")?;
+
+            // Basic 1-D concatenation.
+            let left = numeric_array(py, vec![1_i64, 2], "int64");
+            let right = numeric_array(py, vec![3_i64, 4], "int64");
+            let arrays_1d = PyList::new(py, [left.clone(), right.clone()])?;
+            assert_array_matches_numpy(
+                &concatenate_fn.call1((arrays_1d.clone(),))?,
+                &numpy_concatenate.call1((arrays_1d.clone(),))?,
+            )?;
+
+            // Axis=0 on 2-D arrays.
+            let top = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2], vec![3_i64, 4]],))?;
+            let bottom = numpy.getattr("array")?.call1((vec![vec![5_i64, 6]],))?;
+            let arrays_axis0 = PyList::new(py, [top.clone(), bottom.clone()])?;
+            let axis0_kwargs = PyDict::new(py);
+            axis0_kwargs.set_item("axis", 0_i64)?;
+            assert_array_matches_numpy(
+                &concatenate_fn.call((arrays_axis0.clone(),), Some(&axis0_kwargs))?,
+                &numpy_concatenate.call((arrays_axis0.clone(),), Some(&axis0_kwargs))?,
+            )?;
+
+            // Axis=1 on 2-D arrays.
+            let right_cols = numpy
+                .getattr("array")?
+                .call1((vec![vec![9_i64], vec![8_i64]],))?;
+            let arrays_axis1 = PyList::new(py, [top.clone(), right_cols.clone()])?;
+            let axis1_kwargs = PyDict::new(py);
+            axis1_kwargs.set_item("axis", 1_i64)?;
+            assert_array_matches_numpy(
+                &concatenate_fn.call((arrays_axis1.clone(),), Some(&axis1_kwargs))?,
+                &numpy_concatenate.call((arrays_axis1.clone(),), Some(&axis1_kwargs))?,
+            )?;
+
+            // axis=None flattening.
+            let axis_none_kwargs = PyDict::new(py);
+            axis_none_kwargs.set_item("axis", py.None())?;
+            let arrays_flat = PyList::new(py, [top.clone(), right_cols.clone()])?;
+            assert_array_matches_numpy(
+                &concatenate_fn.call((arrays_flat.clone(),), Some(&axis_none_kwargs))?,
+                &numpy_concatenate.call((arrays_flat.clone(),), Some(&axis_none_kwargs))?,
+            )?;
+
+            // Explicit out buffer parity.
+            let out_actual = numpy.getattr("empty")?.call1(((4_usize,),))?;
+            let out_expected = numpy.getattr("empty")?.call1(((4_usize,),))?;
+            let out_arrays = PyList::new(py, [left.clone(), right.clone()])?;
+            let out_actual_result = concatenate_fn.call(
+                (out_arrays.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 0_i64)?;
+                    kw.set_item("out", out_actual.clone())?;
+                    kw
+                }),
+            )?;
+            let out_expected_result = numpy_concatenate.call(
+                (out_arrays.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 0_i64)?;
+                    kw.set_item("out", out_expected.clone())?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&out_actual_result, &out_expected_result)?;
+            assert_array_matches_numpy(&out_actual, &out_expected)?;
+
+            // dtype/casting keyword behavior.
+            let float_values = numpy.getattr("array")?.call1((vec![1.25_f64, 2.75_f64],))?;
+            let cast_arrays = PyList::new(py, [float_values.clone(), right.clone()])?;
+            let cast_actual = concatenate_fn.call(
+                (cast_arrays.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 0_i64)?;
+                    kw.set_item("dtype", numpy.getattr("int64")?)?;
+                    kw.set_item("casting", "unsafe")?;
+                    kw
+                }),
+            )?;
+            let cast_expected = numpy_concatenate.call(
+                (cast_arrays.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 0_i64)?;
+                    kw.set_item("dtype", numpy.getattr("int64")?)?;
+                    kw.set_item("casting", "unsafe")?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&cast_actual, &cast_expected)?;
+            assert_eq!(
+                cast_actual.getattr("dtype")?.str()?.extract::<String>()?,
+                cast_expected.getattr("dtype")?.str()?.extract::<String>()?
+            );
+
+            // Mismatched-shape error parity.
+            let bad = numpy.getattr("array")?.call1((vec![vec![7_i64, 8, 9]],))?;
+            let bad_arrays = PyList::new(py, [top.clone(), bad.clone()])?;
+            let actual_err = concatenate_fn
+                .call(
+                    (bad_arrays.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", 0_i64)?;
+                        kw
+                    }),
+                )
+                .unwrap_err();
+            let expected_err = numpy_concatenate
+                .call(
+                    (bad_arrays.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", 0_i64)?;
+                        kw
+                    }),
+                )
+                .unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
 
             Ok(())
         });
