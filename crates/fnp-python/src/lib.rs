@@ -3335,6 +3335,29 @@ fn pinv(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, b, rcond=None))]
+fn lstsq(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    b: Py<PyAny>,
+    rcond: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.linalg.lstsq so the 4-tuple return
+    // (solution, residuals, rank, singular_values) and the rcond
+    // default-handling path match numpy exactly across real/complex,
+    // rank-deficient, and broadcasting inputs.
+    let numpy = py.import("numpy")?;
+    let lstsq_fn = numpy.getattr("linalg")?.getattr("lstsq")?;
+    let kwargs = PyDict::new(py);
+    if let Some(value) = rcond {
+        kwargs.set_item("rcond", value.bind(py))?;
+    }
+    Ok(lstsq_fn
+        .call((a.bind(py), b.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, b, axes=None))]
 fn tensorsolve(
     py: Python<'_>,
@@ -4234,6 +4257,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(masked_invalid, m)?)?;
     m.add_function(wrap_pyfunction!(minimum_fill_value, m)?)?;
     m.add_function(wrap_pyfunction!(pinv, m)?)?;
+    m.add_function(wrap_pyfunction!(lstsq, m)?)?;
     m.add_function(wrap_pyfunction!(tensorsolve, m)?)?;
     m.add_function(wrap_pyfunction!(tensorinv, m)?)?;
     m.add_function(wrap_pyfunction!(solve_triangular, m)?)?;
@@ -4316,6 +4340,7 @@ mod tests {
         tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc,
         unravel_index, where_py,
     };
+    use pyo3::Bound;
     use pyo3::IntoPyObject;
     use pyo3::exceptions::{PyTypeError, PyValueError, PyZeroDivisionError};
     use pyo3::types::{
@@ -4511,6 +4536,7 @@ mod tests {
             assert!(module.getattr("pinv").is_ok());
             assert!(module.getattr("rfft").is_ok());
             assert!(module.getattr("irfft").is_ok());
+            assert!(module.getattr("lstsq").is_ok());
             assert!(module.getattr("tensorsolve").is_ok());
             assert!(module.getattr("tensorinv").is_ok());
             assert!(module.getattr("solve_triangular").is_ok());
@@ -6136,6 +6162,124 @@ mod tests {
                 repr_string(true_actual.bind(py)),
                 repr_string(&true_expected)
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn lstsq_matches_numpy_tuple_return_across_shapes_and_rcond() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let lstsq_fn = module.getattr("lstsq")?;
+            let numpy = py.import("numpy")?;
+            let numpy_lstsq = numpy.getattr("linalg")?.getattr("lstsq")?;
+            let allclose = numpy.getattr("allclose")?;
+            let array_equal = numpy.getattr("array_equal")?;
+
+            let tuple_close = |actual: &Bound<'_, PyAny>,
+                               expected: &Bound<'_, PyAny>|
+             -> PyResult<()> {
+                let actual_tuple = actual.downcast::<PyTuple>()?;
+                let expected_tuple = expected.downcast::<PyTuple>()?;
+                assert_eq!(actual_tuple.len()?, expected_tuple.len()?);
+                // 0: solution, 1: residuals, 2: rank (i32), 3: singular values
+                assert!(
+                    allclose
+                        .call1((actual_tuple.get_item(0)?, expected_tuple.get_item(0)?))?
+                        .extract::<bool>()?,
+                    "lstsq solution diverged"
+                );
+                assert!(
+                    array_equal
+                        .call1((actual_tuple.get_item(1)?, expected_tuple.get_item(1)?))?
+                        .extract::<bool>()?
+                        || allclose
+                            .call1((actual_tuple.get_item(1)?, expected_tuple.get_item(1)?))?
+                            .extract::<bool>()?,
+                    "lstsq residuals diverged"
+                );
+                assert_eq!(
+                    actual_tuple.get_item(2)?.extract::<i64>()?,
+                    expected_tuple.get_item(2)?.extract::<i64>()?,
+                    "lstsq rank diverged"
+                );
+                assert!(
+                    allclose
+                        .call1((actual_tuple.get_item(3)?, expected_tuple.get_item(3)?))?
+                        .extract::<bool>()?,
+                    "lstsq singular values diverged"
+                );
+                Ok(())
+            };
+
+            // Overdetermined 3x2 (least-squares fit), b is 1-D.
+            let tall_a = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 0.0])?,
+                    PyList::new(py, [0.0_f64, 1.0])?,
+                    PyList::new(py, [1.0_f64, 1.0])?,
+                ],
+            )?,))?;
+            let tall_b = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            let rcond_kwargs = PyDict::new(py);
+            rcond_kwargs.set_item("rcond", py.None())?;
+            let actual_tall = lstsq_fn.call((tall_a.clone(), tall_b.clone()), Some(&rcond_kwargs))?;
+            let rcond_kwargs_2 = PyDict::new(py);
+            rcond_kwargs_2.set_item("rcond", py.None())?;
+            let expected_tall =
+                numpy_lstsq.call((tall_a.clone(), tall_b.clone()), Some(&rcond_kwargs_2))?;
+            tuple_close(&actual_tall, &expected_tall)?;
+
+            // Square 2x2 exact solve — residuals should be empty.
+            let square_a = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [3.0_f64, 1.0])?,
+                    PyList::new(py, [1.0_f64, 2.0])?,
+                ],
+            )?,))?;
+            let square_b = numpy.getattr("array")?.call1((vec![9.0_f64, 8.0],))?;
+            let rk3 = PyDict::new(py);
+            rk3.set_item("rcond", py.None())?;
+            let actual_square = lstsq_fn.call((square_a.clone(), square_b.clone()), Some(&rk3))?;
+            let rk4 = PyDict::new(py);
+            rk4.set_item("rcond", py.None())?;
+            let expected_square =
+                numpy_lstsq.call((square_a.clone(), square_b.clone()), Some(&rk4))?;
+            tuple_close(&actual_square, &expected_square)?;
+
+            // 2-D b (multiple right-hand-sides).
+            let multi_b = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 10.0])?,
+                    PyList::new(py, [2.0_f64, 20.0])?,
+                    PyList::new(py, [3.0_f64, 30.0])?,
+                ],
+            )?,))?;
+            let rk5 = PyDict::new(py);
+            rk5.set_item("rcond", py.None())?;
+            let actual_multi = lstsq_fn.call((tall_a.clone(), multi_b.clone()), Some(&rk5))?;
+            let rk6 = PyDict::new(py);
+            rk6.set_item("rcond", py.None())?;
+            let expected_multi = numpy_lstsq.call((tall_a.clone(), multi_b.clone()), Some(&rk6))?;
+            tuple_close(&actual_multi, &expected_multi)?;
+
+            // Explicit numeric rcond.
+            let rk7 = PyDict::new(py);
+            rk7.set_item("rcond", 1e-8_f64)?;
+            let actual_r = lstsq_fn.call((tall_a.clone(), tall_b.clone()), Some(&rk7))?;
+            let rk8 = PyDict::new(py);
+            rk8.set_item("rcond", 1e-8_f64)?;
+            let expected_r = numpy_lstsq.call((tall_a.clone(), tall_b.clone()), Some(&rk8))?;
+            tuple_close(&actual_r, &expected_r)?;
 
             Ok(())
         });
