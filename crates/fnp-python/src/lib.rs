@@ -4746,10 +4746,7 @@ fn flipud(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // numpy across 1-D arrays, 2-D row reversal, and N-D arrays
     // leaving non-leading axes intact. Preserves dtype.
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("flipud")?
-        .call1((m.bind(py),))?
-        .unbind())
+    Ok(numpy.getattr("flipud")?.call1((m.bind(py),))?.unbind())
 }
 
 #[pyfunction]
@@ -4758,9 +4755,28 @@ fn fliplr(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.fliplr so left/right (axis=1) reversal matches
     // numpy. Requires at least 2-D input; raises ValueError for 1-D.
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("fliplr")?
-        .call1((m.bind(py),))?
+    Ok(numpy.getattr("fliplr")?.call1((m.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (ar1, ar2, assume_unique=false, return_indices=false))]
+fn intersect1d(
+    py: Python<'_>,
+    ar1: Py<PyAny>,
+    ar2: Py<PyAny>,
+    assume_unique: bool,
+    return_indices: bool,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.intersect1d so sorted-unique output, duplicate
+    // handling, flattened input semantics, and the optional
+    // `return_indices` tuple all match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let intersect1d_fn = numpy.getattr("intersect1d")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("assume_unique", assume_unique)?;
+    kwargs.set_item("return_indices", return_indices)?;
+    Ok(intersect1d_fn
+        .call((ar1.bind(py), ar2.bind(py)), Some(&kwargs))?
         .unbind())
 }
 
@@ -4828,10 +4844,7 @@ fn iscomplex(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // elements with a non-zero imaginary part. Real-input arrays
     // return all-False.
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("iscomplex")?
-        .call1((x.bind(py),))?
-        .unbind())
+    Ok(numpy.getattr("iscomplex")?.call1((x.bind(py),))?.unbind())
 }
 
 #[pyfunction]
@@ -4896,20 +4909,12 @@ fn polyder(py: Python<'_>, p: Py<PyAny>, m: i64) -> PyResult<Py<PyAny>> {
     // polynomial p (decreasing-power coefficients). m=0 returns the
     // input unchanged; m>0 reduces the polynomial degree by m.
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("polyder")?
-        .call1((p.bind(py), m))?
-        .unbind())
+    Ok(numpy.getattr("polyder")?.call1((p.bind(py), m))?.unbind())
 }
 
 #[pyfunction]
 #[pyo3(signature = (p, m=1, k=None))]
-fn polyint(
-    py: Python<'_>,
-    p: Py<PyAny>,
-    m: i64,
-    k: Option<Py<PyAny>>,
-) -> PyResult<Py<PyAny>> {
+fn polyint(py: Python<'_>, p: Py<PyAny>, m: i64, k: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.polyint. Returns the m-th antiderivative of the
     // polynomial p (decreasing-power coefficients). `k` may be None (all
     // zeros), a scalar (reused for every integration), or a rank-1 array
@@ -5060,13 +5065,7 @@ fn chebroots(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 #[pyo3(signature = (c, m=1, scl=1.0, axis=0))]
-fn chebder(
-    py: Python<'_>,
-    c: Py<PyAny>,
-    m: i64,
-    scl: f64,
-    axis: i64,
-) -> PyResult<Py<PyAny>> {
+fn chebder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResult<Py<PyAny>> {
     // Passthrough to numpy.polynomial.chebyshev.chebder. Takes the m-th
     // derivative of a Chebyshev series along `axis`, multiplying by
     // `scl` at each iteration (use for a linear change-of-variable).
@@ -5133,12 +5132,7 @@ fn chebfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 #[pyo3(signature = (c, pow, maxpower=16))]
-fn chebpow(
-    py: Python<'_>,
-    c: Py<PyAny>,
-    pow: Py<PyAny>,
-    maxpower: i64,
-) -> PyResult<Py<PyAny>> {
+fn chebpow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyResult<Py<PyAny>> {
     // Passthrough to numpy.polynomial.chebyshev.chebpow. Raises a
     // Chebyshev series to a non-negative integer power, bounded by
     // `maxpower` to prevent runaway allocation (NumPy raises
@@ -5295,12 +5289,7 @@ fn hermfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 #[pyo3(signature = (c, pow, maxpower=16))]
-fn hermpow(
-    py: Python<'_>,
-    c: Py<PyAny>,
-    pow: Py<PyAny>,
-    maxpower: i64,
-) -> PyResult<Py<PyAny>> {
+fn hermpow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("maxpower", maxpower)?;
@@ -5364,13 +5353,7 @@ fn hermtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 #[pyo3(signature = (c, m=1, scl=1.0, axis=0))]
-fn hermder(
-    py: Python<'_>,
-    c: Py<PyAny>,
-    m: i64,
-    scl: f64,
-    axis: i64,
-) -> PyResult<Py<PyAny>> {
+fn hermder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("scl", scl)?;
@@ -5489,12 +5472,7 @@ fn lagfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 #[pyo3(signature = (c, pow, maxpower=16))]
-fn lagpow(
-    py: Python<'_>,
-    c: Py<PyAny>,
-    pow: Py<PyAny>,
-    maxpower: i64,
-) -> PyResult<Py<PyAny>> {
+fn lagpow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("maxpower", maxpower)?;
@@ -5558,13 +5536,7 @@ fn lagtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 #[pyo3(signature = (c, m=1, scl=1.0, axis=0))]
-fn lagder(
-    py: Python<'_>,
-    c: Py<PyAny>,
-    m: i64,
-    scl: f64,
-    axis: i64,
-) -> PyResult<Py<PyAny>> {
+fn lagder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("scl", scl)?;
@@ -5684,12 +5656,7 @@ fn legfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 #[pyo3(signature = (c, pow, maxpower=16))]
-fn legpow(
-    py: Python<'_>,
-    c: Py<PyAny>,
-    pow: Py<PyAny>,
-    maxpower: i64,
-) -> PyResult<Py<PyAny>> {
+fn legpow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("maxpower", maxpower)?;
@@ -5753,13 +5720,7 @@ fn legtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 #[pyo3(signature = (c, m=1, scl=1.0, axis=0))]
-fn legder(
-    py: Python<'_>,
-    c: Py<PyAny>,
-    m: i64,
-    scl: f64,
-    axis: i64,
-) -> PyResult<Py<PyAny>> {
+fn legder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("scl", scl)?;
@@ -5824,10 +5785,7 @@ fn sliding_window_view(
     kwargs.set_item("writeable", writeable)?;
     Ok(stride_tricks
         .getattr("sliding_window_view")?
-        .call(
-            (x.bind(py), window_shape.bind(py)),
-            Some(&kwargs),
-        )?
+        .call((x.bind(py), window_shape.bind(py)), Some(&kwargs))?
         .unbind())
 }
 
@@ -5935,11 +5893,7 @@ fn i0(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 #[pyo3(signature = (a, dtype=None))]
-fn asfortranarray(
-    py: Python<'_>,
-    a: Py<PyAny>,
-    dtype: Option<Py<PyAny>>,
-) -> PyResult<Py<PyAny>> {
+fn asfortranarray(py: Python<'_>, a: Py<PyAny>, dtype: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.asfortranarray. Returns the input as a
     // Fortran-ordered (column-major) ndarray; copies when needed.
     let numpy = py.import("numpy")?;
@@ -5958,10 +5912,7 @@ fn isrealobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // real (non-complex) dtype, regardless of whether values would
     // round-trip through complex. Logical complement of iscomplexobj.
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("isrealobj")?
-        .call1((x.bind(py),))?
-        .unbind())
+    Ok(numpy.getattr("isrealobj")?.call1((x.bind(py),))?.unbind())
 }
 
 #[pyfunction]
@@ -6008,9 +5959,7 @@ fn testing_assert_allclose(
     // Passthrough to numpy.testing.assert_allclose. Raises
     // AssertionError when arrays are not all-close within tolerance.
     let numpy = py.import("numpy")?;
-    let assert_fn = numpy
-        .getattr("testing")?
-        .getattr("assert_allclose")?;
+    let assert_fn = numpy.getattr("testing")?.getattr("assert_allclose")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("rtol", rtol)?;
     kwargs.set_item("atol", atol)?;
@@ -6019,10 +5968,7 @@ fn testing_assert_allclose(
         kwargs.set_item("err_msg", msg)?;
     }
     kwargs.set_item("verbose", verbose)?;
-    assert_fn.call(
-        (actual.bind(py), desired.bind(py)),
-        Some(&kwargs),
-    )?;
+    assert_fn.call((actual.bind(py), desired.bind(py)), Some(&kwargs))?;
     Ok(())
 }
 
@@ -6041,19 +5987,14 @@ fn testing_assert_array_equal(
     // positions match by default; strict=True additionally enforces
     // dtype equality.
     let numpy = py.import("numpy")?;
-    let assert_fn = numpy
-        .getattr("testing")?
-        .getattr("assert_array_equal")?;
+    let assert_fn = numpy.getattr("testing")?.getattr("assert_array_equal")?;
     let kwargs = PyDict::new(py);
     if let Some(msg) = err_msg {
         kwargs.set_item("err_msg", msg)?;
     }
     kwargs.set_item("verbose", verbose)?;
     kwargs.set_item("strict", strict)?;
-    assert_fn.call(
-        (actual.bind(py), desired.bind(py)),
-        Some(&kwargs),
-    )?;
+    assert_fn.call((actual.bind(py), desired.bind(py)), Some(&kwargs))?;
     Ok(())
 }
 
@@ -6113,7 +6054,6 @@ fn nanmedian(
     Ok(nanmedian_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
 
-
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, weights=None, returned=false))]
 fn ma_average(
@@ -6139,14 +6079,9 @@ fn ma_average(
     Ok(avg_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
 
-
 #[pyfunction]
 #[pyo3(signature = (a, axis=None))]
-fn size_count(
-    py: Python<'_>,
-    a: Py<PyAny>,
-    axis: Option<Py<PyAny>>,
-) -> PyResult<Py<PyAny>> {
+fn size_count(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.size. Returns total elements (axis=None) or
     // count along axis. Exposed as size_count to avoid clashing with
     // std::mem::size_of.
@@ -6158,7 +6093,6 @@ fn size_count(
     }
     Ok(size_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
-
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
@@ -7279,6 +7213,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(flip, m)?)?;
     m.add_function(wrap_pyfunction!(flipud, m)?)?;
     m.add_function(wrap_pyfunction!(fliplr, m)?)?;
+    m.add_function(wrap_pyfunction!(intersect1d, m)?)?;
     m.add_function(wrap_pyfunction!(ascontiguousarray, m)?)?;
     m.add_function(wrap_pyfunction!(real_if_close, m)?)?;
     m.add_function(wrap_pyfunction!(iscomplexobj, m)?)?;
@@ -7651,6 +7586,7 @@ mod tests {
             assert!(module.getattr("flip").is_ok());
             assert!(module.getattr("flipud").is_ok());
             assert!(module.getattr("fliplr").is_ok());
+            assert!(module.getattr("intersect1d").is_ok());
             assert!(module.getattr("ascontiguousarray").is_ok());
             assert!(module.getattr("real_if_close").is_ok());
             assert!(module.getattr("iscomplexobj").is_ok());
@@ -23106,14 +23042,18 @@ mod tests {
             let allclose = numpy.getattr("allclose")?;
 
             // Scalar q on 1-D: q=0.5 (median).
-            let one_d = numpy.getattr("array")?.call1((vec![3.0_f64, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0],))?;
+            let one_d = numpy
+                .getattr("array")?
+                .call1((vec![3.0_f64, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0],))?;
             let ours = quantile_fn.call1((one_d.clone(), 0.5_f64))?;
             let theirs = numpy_quantile.call1((one_d.clone(), 0.5_f64))?;
             let ok: bool = isclose.call1((&ours, &theirs))?.extract()?;
             assert!(ok, "quantile q=0.5 1-D mismatch");
 
             // Vector q (quartiles in [0, 1]).
-            let qs = numpy.getattr("array")?.call1((vec![0.25_f64, 0.5, 0.75],))?;
+            let qs = numpy
+                .getattr("array")?
+                .call1((vec![0.25_f64, 0.5, 0.75],))?;
             let ours_qs = quantile_fn.call1((one_d.clone(), qs.clone()))?;
             let theirs_qs = numpy_quantile.call1((one_d.clone(), qs.clone()))?;
             let ok_qs: bool = allclose.call1((&ours_qs, &theirs_qs))?.extract()?;
@@ -23197,7 +23137,9 @@ mod tests {
             );
 
             // Integer input dtype promoted to float.
-            let ints = numpy.getattr("array")?.call1((vec![1_i64, 2, 3, 4, 5, 6, 7, 8, 9, 10],))?;
+            let ints = numpy
+                .getattr("array")?
+                .call1((vec![1_i64, 2, 3, 4, 5, 6, 7, 8, 9, 10],))?;
             let ours_i = quantile_fn.call1((ints.clone(), 0.5_f64))?;
             let theirs_i = numpy_quantile.call1((ints.clone(), 0.5_f64))?;
             let ok_i: bool = isclose.call1((&ours_i, &theirs_i))?.extract()?;
@@ -23393,6 +23335,106 @@ mod tests {
     }
 
     #[test]
+    fn intersect1d_matches_numpy_across_duplicates_indices_strings_and_flattening() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let intersect1d_fn = module.getattr("intersect1d")?;
+            let numpy = py.import("numpy")?;
+            let numpy_intersect1d = numpy.getattr("intersect1d")?;
+
+            // Duplicate handling collapses to a sorted unique
+            // intersection.
+            let ar1 = numpy.getattr("array")?.call1((vec![1_i64, 3, 4, 3],))?;
+            let ar2 = numpy.getattr("array")?.call1((vec![3_i64, 1, 2, 1],))?;
+            assert_array_matches_numpy(
+                &intersect1d_fn.call1((ar1.clone(), ar2.clone()))?,
+                &numpy_intersect1d.call1((ar1.clone(), ar2.clone()))?,
+            )?;
+
+            // assume_unique fast path with already-unique inputs.
+            let unique_left = numpy.getattr("array")?.call1((vec![1_i64, 2, 4, 7],))?;
+            let unique_right = numpy.getattr("array")?.call1((vec![0_i64, 1, 4, 6],))?;
+            assert_array_matches_numpy(
+                &intersect1d_fn.call(
+                    (unique_left.clone(), unique_right.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("assume_unique", true)?;
+                        kw
+                    }),
+                )?,
+                &numpy_intersect1d.call(
+                    (unique_left.clone(), unique_right.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("assume_unique", true)?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // return_indices=True yields the intersected values plus the
+            // first matching indices from both inputs.
+            let x = numpy.getattr("array")?.call1((vec![1_i64, 1, 2, 3, 4],))?;
+            let y = numpy.getattr("array")?.call1((vec![2_i64, 1, 4, 6],))?;
+            assert_index_tuple_matches_numpy(
+                &intersect1d_fn.call(
+                    (x.clone(), y.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("return_indices", true)?;
+                        kw
+                    }),
+                )?,
+                &numpy_intersect1d.call(
+                    (x.clone(), y.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("return_indices", true)?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // Empty intersection stays a 1-D empty array of the expected
+            // dtype.
+            let empty_left = numpy.getattr("array")?.call1((vec![5_i64, 6],))?;
+            let empty_right = numpy.getattr("array")?.call1((vec![1_i64, 2],))?;
+            assert_array_matches_numpy(
+                &intersect1d_fn.call1((empty_left.clone(), empty_right.clone()))?,
+                &numpy_intersect1d.call1((empty_left.clone(), empty_right.clone()))?,
+            )?;
+
+            // String arrays follow the same sorted-unique semantics.
+            let strings_left = numpy.getattr("array")?.call1((vec!["b", "a", "c", "a"],))?;
+            let strings_right = numpy.getattr("array")?.call1((vec!["c", "a", "d", "a"],))?;
+            assert_array_matches_numpy(
+                &intersect1d_fn.call1((strings_left.clone(), strings_right.clone()))?,
+                &numpy_intersect1d.call1((strings_left.clone(), strings_right.clone()))?,
+            )?;
+
+            // Non-1-D input is flattened before intersection.
+            let two_d_left = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2], vec![3, 4]],))?;
+            let two_d_right = numpy
+                .getattr("array")?
+                .call1((vec![vec![0_i64, 2], vec![3, 5]],))?;
+            assert_array_matches_numpy(
+                &intersect1d_fn.call1((two_d_left.clone(), two_d_right.clone()))?,
+                &numpy_intersect1d.call1((two_d_left.clone(), two_d_right.clone()))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn ascontiguousarray_matches_numpy_across_dtype_and_layouts() {
         with_python(|py| {
             if !numpy_available(py) {
@@ -23406,16 +23448,21 @@ mod tests {
             let numpy_asc = numpy.getattr("ascontiguousarray")?;
 
             // Already-contiguous 2-D input.
-            let two_d = numpy.getattr("array")?.call1((vec![
-                vec![1_i64, 2, 3],
-                vec![4, 5, 6],
-            ],))?;
+            let two_d = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2, 3], vec![4, 5, 6]],))?;
             let ours = asc_fn.call1((two_d.clone(),))?;
             let theirs = numpy_asc.call1((two_d.clone(),))?;
             assert_array_matches_numpy(&ours, &theirs)?;
             let ours_c: bool = ours.getattr("flags")?.get_item("C_CONTIGUOUS")?.extract()?;
-            let theirs_c: bool = theirs.getattr("flags")?.get_item("C_CONTIGUOUS")?.extract()?;
-            assert_eq!(ours_c, theirs_c, "C_CONTIGUOUS flag mismatch on already-contiguous input");
+            let theirs_c: bool = theirs
+                .getattr("flags")?
+                .get_item("C_CONTIGUOUS")?
+                .extract()?;
+            assert_eq!(
+                ours_c, theirs_c,
+                "C_CONTIGUOUS flag mismatch on already-contiguous input"
+            );
             assert!(ours_c, "ascontiguousarray must produce C-contiguous output");
 
             // Transposed (non-contiguous) input gets copied to C-order.
@@ -23424,12 +23471,21 @@ mod tests {
                 .getattr("flags")?
                 .get_item("C_CONTIGUOUS")?
                 .extract()?;
-            assert!(!transposed_c, "transpose must yield non-C-contiguous input for the test");
+            assert!(
+                !transposed_c,
+                "transpose must yield non-C-contiguous input for the test"
+            );
             let ours_t = asc_fn.call1((transposed.clone(),))?;
             let theirs_t = numpy_asc.call1((transposed.clone(),))?;
             assert_array_matches_numpy(&ours_t, &theirs_t)?;
-            let ours_t_c: bool = ours_t.getattr("flags")?.get_item("C_CONTIGUOUS")?.extract()?;
-            assert!(ours_t_c, "ascontiguousarray must convert transposed input to C-contiguous");
+            let ours_t_c: bool = ours_t
+                .getattr("flags")?
+                .get_item("C_CONTIGUOUS")?
+                .extract()?;
+            assert!(
+                ours_t_c,
+                "ascontiguousarray must convert transposed input to C-contiguous"
+            );
 
             // Explicit dtype change promotes output dtype.
             let ours_d = asc_fn.call(
@@ -23456,15 +23512,24 @@ mod tests {
             // Default dtype preservation: int input stays int.
             let plain_dtype = ours.getattr("dtype")?.str()?.to_string();
             let plain_theirs_dtype = theirs.getattr("dtype")?.str()?.to_string();
-            assert_eq!(plain_dtype, plain_theirs_dtype, "default dtype must match numpy");
+            assert_eq!(
+                plain_dtype, plain_theirs_dtype,
+                "default dtype must match numpy"
+            );
 
             // Python list input gets copied to a contiguous ndarray.
             let lst = PyList::new(py, [1_i64, 2, 3, 4, 5])?;
             let ours_l = asc_fn.call1((lst.clone(),))?;
             let theirs_l = numpy_asc.call1((lst.clone(),))?;
             assert_array_matches_numpy(&ours_l, &theirs_l)?;
-            let ours_l_c: bool = ours_l.getattr("flags")?.get_item("C_CONTIGUOUS")?.extract()?;
-            assert!(ours_l_c, "ascontiguousarray on list must yield C-contiguous");
+            let ours_l_c: bool = ours_l
+                .getattr("flags")?
+                .get_item("C_CONTIGUOUS")?
+                .extract()?;
+            assert!(
+                ours_l_c,
+                "ascontiguousarray on list must yield C-contiguous"
+            );
 
             // 1-D input is trivially contiguous in both C and F orders.
             let one_d = numpy.getattr("array")?.call1((vec![10_i64, 20, 30, 40],))?;
@@ -23514,17 +23579,19 @@ mod tests {
             };
 
             // Complex with tiny imag → returns real array.
-            let tiny_imag = make_complex_array(vec![
-                (1.0, 1e-15),
-                (2.0, 1e-15),
-                (3.0, 1e-15),
-            ])?;
+            let tiny_imag = make_complex_array(vec![(1.0, 1e-15), (2.0, 1e-15), (3.0, 1e-15)])?;
             let ours_t = rif_fn.call1((tiny_imag.clone(),))?;
             let theirs_t = numpy_rif.call1((tiny_imag.clone(),))?;
             let ok_t: bool = allclose.call1((&ours_t, &theirs_t))?.extract()?;
             assert!(ok_t, "real_if_close tiny imag mismatch");
-            let ours_t_dtype = ours_t.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
-            let theirs_t_dtype = theirs_t.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+            let ours_t_dtype = ours_t
+                .getattr("dtype")?
+                .getattr("kind")?
+                .extract::<String>()?;
+            let theirs_t_dtype = theirs_t
+                .getattr("dtype")?
+                .getattr("kind")?
+                .extract::<String>()?;
             assert_eq!(
                 ours_t_dtype, theirs_t_dtype,
                 "tiny-imag dtype kind must match (numpy yields 'f' for floats)",
@@ -23536,8 +23603,14 @@ mod tests {
             let theirs_b = numpy_rif.call1((big_imag.clone(),))?;
             let ok_b: bool = allclose.call1((&ours_b, &theirs_b))?.extract()?;
             assert!(ok_b, "real_if_close big imag mismatch");
-            let ours_b_dtype = ours_b.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
-            let theirs_b_dtype = theirs_b.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+            let ours_b_dtype = ours_b
+                .getattr("dtype")?
+                .getattr("kind")?
+                .extract::<String>()?;
+            let theirs_b_dtype = theirs_b
+                .getattr("dtype")?
+                .getattr("kind")?
+                .extract::<String>()?;
             assert_eq!(
                 ours_b_dtype, theirs_b_dtype,
                 "big-imag dtype kind must match (must remain complex)",
@@ -23545,10 +23618,7 @@ mod tests {
             assert_eq!(ours_b_dtype, "c", "big-imag output must remain complex");
 
             // Custom tol scaling: small enough tol forces complex retention.
-            let at_threshold = make_complex_array(vec![
-                (1.0, 1e-10),
-                (2.0, 1e-10),
-            ])?;
+            let at_threshold = make_complex_array(vec![(1.0, 1e-10), (2.0, 1e-10)])?;
             let ours_tol_low = rif_fn.call(
                 (at_threshold.clone(),),
                 Some(&{
@@ -23565,7 +23635,10 @@ mod tests {
                     kw
                 }),
             )?;
-            let ours_tl_dtype = ours_tol_low.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+            let ours_tl_dtype = ours_tol_low
+                .getattr("dtype")?
+                .getattr("kind")?
+                .extract::<String>()?;
             let theirs_tl_dtype = theirs_tol_low
                 .getattr("dtype")?
                 .getattr("kind")?
@@ -23608,12 +23681,13 @@ mod tests {
             let numpy = py.import("numpy")?;
             let numpy_isc = numpy.getattr("iscomplexobj")?;
 
-            let check = |ours: Bound<'_, PyAny>, theirs: Bound<'_, PyAny>, ctx: &str| -> PyResult<()> {
-                let ours_b: bool = ours.extract()?;
-                let theirs_b: bool = theirs.extract()?;
-                assert_eq!(ours_b, theirs_b, "iscomplexobj mismatch: {}", ctx);
-                Ok(())
-            };
+            let check =
+                |ours: Bound<'_, PyAny>, theirs: Bound<'_, PyAny>, ctx: &str| -> PyResult<()> {
+                    let ours_b: bool = ours.extract()?;
+                    let theirs_b: bool = theirs.extract()?;
+                    assert_eq!(ours_b, theirs_b, "iscomplexobj mismatch: {}", ctx);
+                    Ok(())
+                };
 
             // Real float array → False.
             let real_arr = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
@@ -23686,10 +23760,7 @@ mod tests {
             // Nested 2-D complex array → True.
             let two_d_complex_a = make_complex_array(vec![(1.0, 2.0), (3.0, 4.0)])?;
             let two_d_complex_b = make_complex_array(vec![(5.0, 6.0), (7.0, 8.0)])?;
-            let nested_lst = PyList::new(
-                py,
-                [two_d_complex_a.unbind(), two_d_complex_b.unbind()],
-            )?;
+            let nested_lst = PyList::new(py, [two_d_complex_a.unbind(), two_d_complex_b.unbind()])?;
             let two_d_complex = numpy.getattr("array")?.call1((nested_lst,))?;
             check(
                 isc_fn.call1((two_d_complex.clone(),))?,
@@ -23759,12 +23830,7 @@ mod tests {
             assert!(ok_n, "angle(-1+0j) mismatch");
 
             // 1-D complex array.
-            let arr = make_complex_array(vec![
-                (1.0, 0.0),
-                (0.0, 1.0),
-                (-1.0, 0.0),
-                (0.0, -1.0),
-            ])?;
+            let arr = make_complex_array(vec![(1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)])?;
             let ours_a = angle_fn.call1((arr.clone(),))?;
             let theirs_a = numpy_angle.call1((arr.clone(),))?;
             let ok_a: bool = allclose.call1((&ours_a, &theirs_a))?.extract()?;
@@ -23792,7 +23858,9 @@ mod tests {
 
             // Real input (treated as complex with imag=0): positive
             // values yield 0, negative yield π.
-            let real_arr = numpy.getattr("array")?.call1((vec![1.0_f64, -2.0, 3.0, -4.0],))?;
+            let real_arr = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, -2.0, 3.0, -4.0],))?;
             let ours_r = angle_fn.call1((real_arr.clone(),))?;
             let theirs_r = numpy_angle.call1((real_arr.clone(),))?;
             let ok_r: bool = allclose.call1((&ours_r, &theirs_r))?.extract()?;
@@ -23899,12 +23967,7 @@ mod tests {
             };
 
             // Mixed complex array: imag-non-zero positions are True.
-            let mixed = make_complex_array(vec![
-                (1.0, 0.0),
-                (2.0, 1.0),
-                (3.0, 0.0),
-                (4.0, -2.5),
-            ])?;
+            let mixed = make_complex_array(vec![(1.0, 0.0), (2.0, 1.0), (3.0, 0.0), (4.0, -2.5)])?;
             assert_array_matches_numpy(
                 &isc_fn.call1((mixed.clone(),))?,
                 &numpy_isc.call1((mixed.clone(),))?,
@@ -23984,7 +24047,9 @@ mod tests {
             assert!(ok_n, "square negative scalar mismatch");
 
             // 1-D float array.
-            let arr = numpy.getattr("array")?.call1((vec![-2.0_f64, -1.0, 0.0, 1.0, 2.0],))?;
+            let arr = numpy
+                .getattr("array")?
+                .call1((vec![-2.0_f64, -1.0, 0.0, 1.0, 2.0],))?;
             let ours_a = square_fn.call1((arr.clone(),))?;
             let theirs_a = numpy_square.call1((arr.clone(),))?;
             let ok_a: bool = allclose.call1((&ours_a, &theirs_a))?.extract()?;
@@ -24017,27 +24082,30 @@ mod tests {
             let theirs_c = numpy_square.call1((cmplx.clone(),))?;
             let ok_c: bool = allclose.call1((&ours_c, &theirs_c))?.extract()?;
             assert!(ok_c, "square complex mismatch");
-            let ours_c_kind = ours_c.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
-            let theirs_c_kind = theirs_c.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+            let ours_c_kind = ours_c
+                .getattr("dtype")?
+                .getattr("kind")?
+                .extract::<String>()?;
+            let theirs_c_kind = theirs_c
+                .getattr("dtype")?
+                .getattr("kind")?
+                .extract::<String>()?;
             assert_eq!(
                 ours_c_kind, theirs_c_kind,
                 "square complex dtype kind must remain complex",
             );
 
             // 2-D array.
-            let two_d = numpy.getattr("array")?.call1((vec![
-                vec![1.0_f64, 2.0],
-                vec![3.0, 4.0],
-            ],))?;
+            let two_d = numpy
+                .getattr("array")?
+                .call1((vec![vec![1.0_f64, 2.0], vec![3.0, 4.0]],))?;
             let ours_2d = square_fn.call1((two_d.clone(),))?;
             let theirs_2d = numpy_square.call1((two_d.clone(),))?;
             let ok_2d: bool = allclose.call1((&ours_2d, &theirs_2d))?.extract()?;
             assert!(ok_2d, "square 2-D mismatch");
 
             // Cross-check: square(x) ≡ x * x.
-            let via_mul = arr
-                .clone()
-                .call_method1("__mul__", (arr.clone(),))?;
+            let via_mul = arr.clone().call_method1("__mul__", (arr.clone(),))?;
             let ok_mul: bool = allclose.call1((&ours_a, &via_mul))?.extract()?;
             assert!(ok_mul, "square(x) must equal x*x");
 
@@ -24077,16 +24145,18 @@ mod tests {
             assert!((val_n + 3.0).abs() < 1e-12, "cbrt(-27.0) must equal -3.0");
 
             // 1-D mixed-sign array.
-            let arr = numpy.getattr("array")?.call1((vec![
-                -8.0_f64, -1.0, 0.0, 1.0, 8.0, 27.0, 64.0,
-            ],))?;
+            let arr = numpy
+                .getattr("array")?
+                .call1((vec![-8.0_f64, -1.0, 0.0, 1.0, 8.0, 27.0, 64.0],))?;
             let ours_a = cbrt_fn.call1((arr.clone(),))?;
             let theirs_a = numpy_cbrt.call1((arr.clone(),))?;
             let ok_a: bool = allclose.call1((&ours_a, &theirs_a))?.extract()?;
             assert!(ok_a, "cbrt 1-D mixed-sign mismatch");
 
             // Integer input promoted to float.
-            let ints = numpy.getattr("array")?.call1((vec![1_i64, 8, 27, 64, 125],))?;
+            let ints = numpy
+                .getattr("array")?
+                .call1((vec![1_i64, 8, 27, 64, 125],))?;
             let ours_i = cbrt_fn.call1((ints.clone(),))?;
             let theirs_i = numpy_cbrt.call1((ints.clone(),))?;
             let ok_i: bool = allclose.call1((&ours_i, &theirs_i))?.extract()?;
@@ -24096,10 +24166,9 @@ mod tests {
             assert_eq!(ours_dtype, theirs_dtype, "cbrt int dtype must match numpy");
 
             // 2-D input.
-            let two_d = numpy.getattr("array")?.call1((vec![
-                vec![1.0_f64, 8.0, 27.0],
-                vec![64.0, 125.0, 216.0],
-            ],))?;
+            let two_d = numpy
+                .getattr("array")?
+                .call1((vec![vec![1.0_f64, 8.0, 27.0], vec![64.0, 125.0, 216.0]],))?;
             let ours_2d = cbrt_fn.call1((two_d.clone(),))?;
             let theirs_2d = numpy_cbrt.call1((two_d.clone(),))?;
             let ok_2d: bool = allclose.call1((&ours_2d, &theirs_2d))?.extract()?;
@@ -24127,12 +24196,13 @@ mod tests {
             let numpy = py.import("numpy")?;
             let numpy_isc = numpy.getattr("isscalar")?;
 
-            let check = |ours: Bound<'_, PyAny>, theirs: Bound<'_, PyAny>, ctx: &str| -> PyResult<()> {
-                let ours_b: bool = ours.extract()?;
-                let theirs_b: bool = theirs.extract()?;
-                assert_eq!(ours_b, theirs_b, "isscalar mismatch: {}", ctx);
-                Ok(())
-            };
+            let check =
+                |ours: Bound<'_, PyAny>, theirs: Bound<'_, PyAny>, ctx: &str| -> PyResult<()> {
+                    let ours_b: bool = ours.extract()?;
+                    let theirs_b: bool = theirs.extract()?;
+                    assert_eq!(ours_b, theirs_b, "isscalar mismatch: {}", ctx);
+                    Ok(())
+                };
 
             // Python int → True.
             check(
@@ -24249,12 +24319,7 @@ mod tests {
             };
 
             // Mixed complex array.
-            let mixed = make_complex_array(vec![
-                (1.0, 0.0),
-                (2.0, 1.0),
-                (3.0, 0.0),
-                (4.0, -2.5),
-            ])?;
+            let mixed = make_complex_array(vec![(1.0, 0.0), (2.0, 1.0), (3.0, 0.0), (4.0, -2.5)])?;
             assert_array_matches_numpy(
                 &isr_fn.call1((mixed.clone(),))?,
                 &numpy_isr.call1((mixed.clone(),))?,
@@ -24306,9 +24371,7 @@ mod tests {
             let isc_fn = module.getattr("iscomplex")?;
             let isr_mixed = isr_fn.call1((mixed.clone(),))?;
             let isc_mixed = isc_fn.call1((mixed.clone(),))?;
-            let inverted_isc = numpy
-                .getattr("logical_not")?
-                .call1((isc_mixed,))?;
+            let inverted_isc = numpy.getattr("logical_not")?.call1((isc_mixed,))?;
             let array_equal: bool = numpy
                 .getattr("array_equal")?
                 .call1((&isr_mixed, &inverted_isc))?
@@ -24351,7 +24414,10 @@ mod tests {
             let ok_1: bool = isclose.call1((&ours_1, &theirs_1))?.extract()?;
             assert!(ok_1, "expm1(1) mismatch");
             let val_1: f64 = ours_1.extract()?;
-            assert!((val_1 - (std::f64::consts::E - 1.0)).abs() < 1e-12, "expm1(1) must be e-1");
+            assert!(
+                (val_1 - (std::f64::consts::E - 1.0)).abs() < 1e-12,
+                "expm1(1) must be e-1"
+            );
 
             // Very small x: expm1(x) ≈ x with much better precision than exp(x)-1.
             let tiny: f64 = 1e-15;
@@ -24360,10 +24426,15 @@ mod tests {
             let ok_t: bool = isclose.call1((&ours_t, &theirs_t))?.extract()?;
             assert!(ok_t, "expm1 tiny scalar mismatch");
             let val_t: f64 = ours_t.extract()?;
-            assert!((val_t - tiny).abs() < 1e-25, "expm1(tiny) must approximate tiny");
+            assert!(
+                (val_t - tiny).abs() < 1e-25,
+                "expm1(tiny) must approximate tiny"
+            );
 
             // 1-D mixed signs.
-            let arr = numpy.getattr("array")?.call1((vec![-2.0_f64, -0.5, 0.0, 0.5, 1.0, 2.0],))?;
+            let arr = numpy
+                .getattr("array")?
+                .call1((vec![-2.0_f64, -0.5, 0.0, 0.5, 1.0, 2.0],))?;
             let ours_a = expm1_fn.call1((arr.clone(),))?;
             let theirs_a = numpy_expm1.call1((arr.clone(),))?;
             let ok_a: bool = allclose.call1((&ours_a, &theirs_a))?.extract()?;
@@ -24383,10 +24454,9 @@ mod tests {
             );
 
             // 2-D array element-wise.
-            let two_d = numpy.getattr("array")?.call1((vec![
-                vec![0.0_f64, 0.5],
-                vec![1.0, 1.5],
-            ],))?;
+            let two_d = numpy
+                .getattr("array")?
+                .call1((vec![vec![0.0_f64, 0.5], vec![1.0, 1.5]],))?;
             let ours_2d = expm1_fn.call1((two_d.clone(),))?;
             let theirs_2d = numpy_expm1.call1((two_d.clone(),))?;
             let ok_2d: bool = allclose.call1((&ours_2d, &theirs_2d))?.extract()?;
@@ -24481,7 +24551,10 @@ mod tests {
             assert_array_matches_numpy(&ours_i, &theirs_i)?;
             let ours_dtype = ours_i.getattr("dtype")?.str()?.to_string();
             let theirs_dtype = theirs_i.getattr("dtype")?.str()?.to_string();
-            assert_eq!(ours_dtype, theirs_dtype, "polyder int dtype must match numpy");
+            assert_eq!(
+                ours_dtype, theirs_dtype,
+                "polyder int dtype must match numpy"
+            );
 
             Ok(())
         });
@@ -24507,13 +24580,12 @@ mod tests {
             // Helper: call both ours and NumPy's polyint with matching args +
             // a kwargs dict that already carries any k/etc., and assert the
             // outputs agree via allclose-equivalent array comparison.
-            let assert_equiv = |args: (Vec<f64>, i64),
-                                kwargs: &Bound<'_, PyDict>|
-             -> PyResult<()> {
-                let ours = polyint_fn.call(args.clone(), Some(kwargs))?;
-                let theirs = numpy_polyint.call(args, Some(kwargs))?;
-                assert_array_matches_numpy(&ours, &theirs)
-            };
+            let assert_equiv =
+                |args: (Vec<f64>, i64), kwargs: &Bound<'_, PyDict>| -> PyResult<()> {
+                    let ours = polyint_fn.call(args.clone(), Some(kwargs))?;
+                    let theirs = numpy_polyint.call(args, Some(kwargs))?;
+                    assert_array_matches_numpy(&ours, &theirs)
+                };
 
             let base = vec![1.0_f64, 2.0, 3.0];
 
@@ -24594,18 +24666,15 @@ mod tests {
                 for (idx, (a, b)) in cases.iter().enumerate() {
                     let ours_out = ours.call1((a.clone(), b.clone()))?;
                     let theirs_out = theirs.call1((a.clone(), b.clone()))?;
-                    assert_array_matches_numpy(&ours_out, &theirs_out).unwrap_or_else(|_| {
-                        panic!("{op} mismatch on case {idx}: {a:?} vs {b:?}")
-                    });
+                    assert_array_matches_numpy(&ours_out, &theirs_out)
+                        .unwrap_or_else(|_| panic!("{op} mismatch on case {idx}: {a:?} vs {b:?}"));
                 }
             }
 
             // polymul enforces 1-D inputs; 2-D must raise ValueError
             // matching NumPy's "Polynomial must be 1d only." message.
             let pm = module.getattr("polymul")?;
-            let bad = numpy
-                .getattr("array")?
-                .call1((vec![vec![1.0, 2.0]],))?; // 2-D
+            let bad = numpy.getattr("array")?.call1((vec![vec![1.0, 2.0]],))?; // 2-D
             let err = pm.call1((bad.clone(), vec![1.0, 2.0])).err();
             assert!(err.is_some(), "polymul must reject 2-D inputs");
 
@@ -24650,7 +24719,9 @@ mod tests {
             )?;
 
             // 2-D (3x4) windowed on all axes by (2, 3).
-            let a2 = arange.call1((12_i64,))?.call_method1("reshape", (3_i64, 4_i64))?;
+            let a2 = arange
+                .call1((12_i64,))?
+                .call_method1("reshape", (3_i64, 4_i64))?;
             let win2d = PyTuple::new(py, [2_i64, 3_i64])?;
             assert_array_matches_numpy(
                 &ours.call1((a2.clone(), win2d.clone()))?,
@@ -24671,8 +24742,7 @@ mod tests {
 
             // writeable=False default makes the view read-only.
             let result = ours.call1((a1.clone(), 3_i64))?;
-            let writable: bool =
-                result.getattr("flags")?.getattr("writeable")?.extract()?;
+            let writable: bool = result.getattr("flags")?.getattr("writeable")?.extract()?;
             assert!(!writable, "sliding_window_view default must be read-only");
 
             Ok(())
@@ -24699,10 +24769,7 @@ mod tests {
                 .getattr("as_strided")?;
 
             let a = numpy.getattr("arange")?.call1((6_i64,))?;
-            let item_stride: isize = a
-                .getattr("strides")?
-                .get_item(0)?
-                .extract()?;
+            let item_stride: isize = a.getattr("strides")?.get_item(0)?.extract()?;
 
             // shape=(4,) with default strides → same as a[:4] layout.
             let shape4 = PyTuple::new(py, [4_i64])?;
@@ -24973,12 +25040,8 @@ mod tests {
             }
             let kw_maxp = PyDict::new(py);
             kw_maxp.set_item("maxpower", 4_i64)?;
-            let our_err = our_pow
-                .call((base.clone(), 5_i64), Some(&kw_maxp))
-                .err();
-            let np_err = np_pow
-                .call((base.clone(), 5_i64), Some(&kw_maxp))
-                .err();
+            let our_err = our_pow.call((base.clone(), 5_i64), Some(&kw_maxp)).err();
+            let np_err = np_pow.call((base.clone(), 5_i64), Some(&kw_maxp)).err();
             assert_eq!(
                 our_err.is_some(),
                 np_err.is_some(),
@@ -24993,8 +25056,7 @@ mod tests {
             let divisor = vec![1.0_f64, 1.0];
             let ours_tuple: Bound<'_, pyo3::types::PyAny> =
                 our_div.call1((dividend.clone(), divisor.clone()))?;
-            let theirs_tuple: Bound<'_, pyo3::types::PyAny> =
-                np_div.call1((dividend, divisor))?;
+            let theirs_tuple: Bound<'_, pyo3::types::PyAny> = np_div.call1((dividend, divisor))?;
             for idx in 0_i64..2 {
                 assert_array_matches_numpy(
                     &ours_tuple.get_item(idx)?,
@@ -25149,28 +25211,19 @@ mod tests {
             let theirs_tup: Bound<'_, pyo3::types::PyAny> =
                 hd_ref.call1((vec![1.0_f64, 2.0, 3.0], vec![1.0_f64, 1.0]))?;
             for idx in 0_i64..2 {
-                assert_array_matches_numpy(
-                    &ours_tup.get_item(idx)?,
-                    &theirs_tup.get_item(idx)?,
-                )?;
+                assert_array_matches_numpy(&ours_tup.get_item(idx)?, &theirs_tup.get_item(idx)?)?;
             }
 
             let hl = module.getattr("hermline")?;
             let hl_ref = nherm.getattr("hermline")?;
             for (off, scl) in [(3.0_f64, 2.0), (0.0, 1.0), (-1.5, 0.5)] {
-                assert_array_matches_numpy(
-                    &hl.call1((off, scl))?,
-                    &hl_ref.call1((off, scl))?,
-                )?;
+                assert_array_matches_numpy(&hl.call1((off, scl))?, &hl_ref.call1((off, scl))?)?;
             }
 
             let hmx = module.getattr("hermmulx")?;
             let hmx_ref = nherm.getattr("hermmulx")?;
             let cs = vec![1.0_f64, 2.0, 3.0];
-            assert_array_matches_numpy(
-                &hmx.call1((cs.clone(),))?,
-                &hmx_ref.call1((cs.clone(),))?,
-            )?;
+            assert_array_matches_numpy(&hmx.call1((cs.clone(),))?, &hmx_ref.call1((cs.clone(),))?)?;
             let our_mul = module.getattr("hermmul")?;
             assert_array_matches_numpy(
                 &hmx.call1((cs.clone(),))?,
@@ -25332,28 +25385,19 @@ mod tests {
             let theirs_tup: Bound<'_, pyo3::types::PyAny> =
                 ld_ref.call1((vec![1.0_f64, 2.0, 3.0], vec![1.0_f64, 1.0]))?;
             for idx in 0_i64..2 {
-                assert_array_matches_numpy(
-                    &ours_tup.get_item(idx)?,
-                    &theirs_tup.get_item(idx)?,
-                )?;
+                assert_array_matches_numpy(&ours_tup.get_item(idx)?, &theirs_tup.get_item(idx)?)?;
             }
 
             let ll = module.getattr("lagline")?;
             let ll_ref = nlag.getattr("lagline")?;
             for (off, scl) in [(3.0_f64, 2.0), (0.0, 1.0), (-1.5, 0.5)] {
-                assert_array_matches_numpy(
-                    &ll.call1((off, scl))?,
-                    &ll_ref.call1((off, scl))?,
-                )?;
+                assert_array_matches_numpy(&ll.call1((off, scl))?, &ll_ref.call1((off, scl))?)?;
             }
 
             let lmx = module.getattr("lagmulx")?;
             let lmx_ref = nlag.getattr("lagmulx")?;
             let cs = vec![1.0_f64, 2.0, 3.0];
-            assert_array_matches_numpy(
-                &lmx.call1((cs.clone(),))?,
-                &lmx_ref.call1((cs.clone(),))?,
-            )?;
+            assert_array_matches_numpy(&lmx.call1((cs.clone(),))?, &lmx_ref.call1((cs.clone(),))?)?;
             let our_mul = module.getattr("lagmul")?;
             assert_array_matches_numpy(
                 &lmx.call1((cs.clone(),))?,
@@ -25514,28 +25558,19 @@ mod tests {
             let theirs_tup: Bound<'_, pyo3::types::PyAny> =
                 ld_ref.call1((vec![1.0_f64, 2.0, 3.0], vec![1.0_f64, 1.0]))?;
             for idx in 0_i64..2 {
-                assert_array_matches_numpy(
-                    &ours_tup.get_item(idx)?,
-                    &theirs_tup.get_item(idx)?,
-                )?;
+                assert_array_matches_numpy(&ours_tup.get_item(idx)?, &theirs_tup.get_item(idx)?)?;
             }
 
             let ll = module.getattr("legline")?;
             let ll_ref = nleg.getattr("legline")?;
             for (off, scl) in [(3.0_f64, 2.0), (0.0, 1.0), (-1.5, 0.5)] {
-                assert_array_matches_numpy(
-                    &ll.call1((off, scl))?,
-                    &ll_ref.call1((off, scl))?,
-                )?;
+                assert_array_matches_numpy(&ll.call1((off, scl))?, &ll_ref.call1((off, scl))?)?;
             }
 
             let lmx = module.getattr("legmulx")?;
             let lmx_ref = nleg.getattr("legmulx")?;
             let cs = vec![1.0_f64, 2.0, 3.0];
-            assert_array_matches_numpy(
-                &lmx.call1((cs.clone(),))?,
-                &lmx_ref.call1((cs.clone(),))?,
-            )?;
+            assert_array_matches_numpy(&lmx.call1((cs.clone(),))?, &lmx_ref.call1((cs.clone(),))?)?;
             let our_mul = module.getattr("legmul")?;
             assert_array_matches_numpy(
                 &lmx.call1((cs.clone(),))?,
@@ -25615,10 +25650,9 @@ mod tests {
             )?;
 
             // 2-D scalar reps.
-            let two_d = numpy.getattr("array")?.call1((vec![
-                vec![1_i64, 2],
-                vec![3, 4],
-            ],))?;
+            let two_d = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2], vec![3, 4]],))?;
             assert_array_matches_numpy(
                 &tile_fn.call1((two_d.clone(), 2_i64))?,
                 &numpy_tile.call1((two_d.clone(), 2_i64))?,
@@ -25690,11 +25724,18 @@ mod tests {
                 .getattr("dtype")?
                 .getattr("kind")?
                 .extract::<String>()?;
-            assert_eq!(ours_dtype_kind, "f", "true_divide int/int must yield float dtype");
+            assert_eq!(
+                ours_dtype_kind, "f",
+                "true_divide int/int must yield float dtype"
+            );
 
             // Float / float.
-            let f_a = numpy.getattr("array")?.call1((vec![1.5_f64, 2.5, 3.5, 4.5],))?;
-            let f_b = numpy.getattr("array")?.call1((vec![0.5_f64, 0.5, 0.5, 0.5],))?;
+            let f_a = numpy
+                .getattr("array")?
+                .call1((vec![1.5_f64, 2.5, 3.5, 4.5],))?;
+            let f_b = numpy
+                .getattr("array")?
+                .call1((vec![0.5_f64, 0.5, 0.5, 0.5],))?;
             let ours_f = td_fn.call1((f_a.clone(), f_b.clone()))?;
             let theirs_f = numpy_td.call1((f_a.clone(), f_b.clone()))?;
             let ok_f: bool = allclose.call1((&ours_f, &theirs_f))?.extract()?;
@@ -25749,14 +25790,12 @@ mod tests {
             assert!(ok_c, "true_divide complex/complex mismatch");
 
             // 2-D arrays.
-            let two_d_a = numpy.getattr("array")?.call1((vec![
-                vec![1.0_f64, 2.0],
-                vec![3.0, 4.0],
-            ],))?;
-            let two_d_b = numpy.getattr("array")?.call1((vec![
-                vec![2.0_f64, 4.0],
-                vec![6.0, 8.0],
-            ],))?;
+            let two_d_a = numpy
+                .getattr("array")?
+                .call1((vec![vec![1.0_f64, 2.0], vec![3.0, 4.0]],))?;
+            let two_d_b = numpy
+                .getattr("array")?
+                .call1((vec![vec![2.0_f64, 4.0], vec![6.0, 8.0]],))?;
             let ours_2d = td_fn.call1((two_d_a.clone(), two_d_b.clone()))?;
             let theirs_2d = numpy_td.call1((two_d_a.clone(), two_d_b.clone()))?;
             let ok_2d: bool = allclose.call1((&ours_2d, &theirs_2d))?.extract()?;
@@ -25764,10 +25803,9 @@ mod tests {
 
             // Cross-check: true_divide(a, b) ≡ a / b (numpy operator).
             let via_op = f_a.call_method1("__truediv__", (f_b.clone(),))?;
-            let ok_op: bool = isclose.call1((
-                ours_f.get_item(0_i64)?,
-                via_op.get_item(0_i64)?,
-            ))?.extract()?;
+            let ok_op: bool = isclose
+                .call1((ours_f.get_item(0_i64)?, via_op.get_item(0_i64)?))?
+                .extract()?;
             assert!(ok_op, "true_divide must equal __truediv__ result");
 
             Ok(())
@@ -25787,12 +25825,13 @@ mod tests {
             let numpy = py.import("numpy")?;
             let numpy_allclose = numpy.getattr("allclose")?;
 
-            let check = |ours: Bound<'_, PyAny>, theirs: Bound<'_, PyAny>, ctx: &str| -> PyResult<()> {
-                let ours_b: bool = ours.extract()?;
-                let theirs_b: bool = theirs.extract()?;
-                assert_eq!(ours_b, theirs_b, "allclose mismatch: {}", ctx);
-                Ok(())
-            };
+            let check =
+                |ours: Bound<'_, PyAny>, theirs: Bound<'_, PyAny>, ctx: &str| -> PyResult<()> {
+                    let ours_b: bool = ours.extract()?;
+                    let theirs_b: bool = theirs.extract()?;
+                    assert_eq!(ours_b, theirs_b, "allclose mismatch: {}", ctx);
+                    Ok(())
+                };
 
             // Identical arrays → True.
             let arr_a = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
@@ -25804,7 +25843,9 @@ mod tests {
             )?;
 
             // Slightly perturbed within default tol → True.
-            let arr_c = numpy.getattr("array")?.call1((vec![1.0_f64 + 1e-10, 2.0, 3.0],))?;
+            let arr_c = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64 + 1e-10, 2.0, 3.0],))?;
             check(
                 allclose_fn.call1((arr_a.clone(), arr_c.clone()))?,
                 numpy_allclose.call1((arr_a.clone(), arr_c.clone()))?,
@@ -25812,7 +25853,9 @@ mod tests {
             )?;
 
             // Beyond tol → False.
-            let arr_d = numpy.getattr("array")?.call1((vec![1.0_f64 + 1.0, 2.0, 3.0],))?;
+            let arr_d = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64 + 1.0, 2.0, 3.0],))?;
             check(
                 allclose_fn.call1((arr_a.clone(), arr_d.clone()))?,
                 numpy_allclose.call1((arr_a.clone(), arr_d.clone()))?,
@@ -25820,8 +25863,12 @@ mod tests {
             )?;
 
             // NaN with equal_nan=True → True; equal_nan=False → False.
-            let nan_a = numpy.getattr("array")?.call1((vec![1.0_f64, f64::NAN, 3.0],))?;
-            let nan_b = numpy.getattr("array")?.call1((vec![1.0_f64, f64::NAN, 3.0],))?;
+            let nan_a = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, f64::NAN, 3.0],))?;
+            let nan_b = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, f64::NAN, 3.0],))?;
             check(
                 allclose_fn.call(
                     (nan_a.clone(), nan_b.clone()),
@@ -25855,7 +25902,9 @@ mod tests {
             )?;
 
             // Custom rtol scaling.
-            let arr_e = numpy.getattr("array")?.call1((vec![1.0_f64 + 1e-3, 2.0, 3.0],))?;
+            let arr_e = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64 + 1e-3, 2.0, 3.0],))?;
             check(
                 allclose_fn.call(
                     (arr_a.clone(), arr_e.clone()),
@@ -25936,47 +25985,47 @@ mod tests {
             assert!((val_n + 3.0).abs() < 1e-12, "fix(-3.7) must equal -3.0");
 
             // Exact integers unchanged.
-            let exact_arr = numpy.getattr("array")?.call1((vec![-2.0_f64, -1.0, 0.0, 1.0, 2.0],))?;
+            let exact_arr = numpy
+                .getattr("array")?
+                .call1((vec![-2.0_f64, -1.0, 0.0, 1.0, 2.0],))?;
             let ours_e = fix_fn.call1((exact_arr.clone(),))?;
             let theirs_e = numpy_fix.call1((exact_arr.clone(),))?;
             let ok_e: bool = allclose.call1((&ours_e, &theirs_e))?.extract()?;
             assert!(ok_e, "fix exact integers mismatch");
 
             // Mixed-sign 1-D array.
-            let mixed = numpy.getattr("array")?.call1((vec![
-                -3.7_f64, -1.5, -0.5, 0.5, 1.5, 3.7,
-            ],))?;
+            let mixed = numpy
+                .getattr("array")?
+                .call1((vec![-3.7_f64, -1.5, -0.5, 0.5, 1.5, 3.7],))?;
             let ours_m = fix_fn.call1((mixed.clone(),))?;
             let theirs_m = numpy_fix.call1((mixed.clone(),))?;
             let ok_m: bool = allclose.call1((&ours_m, &theirs_m))?.extract()?;
             assert!(ok_m, "fix mixed-sign 1-D mismatch");
 
             // Integer input (passes through unchanged).
-            let ints = numpy.getattr("array")?.call1((vec![-3_i64, -1, 0, 1, 3],))?;
+            let ints = numpy
+                .getattr("array")?
+                .call1((vec![-3_i64, -1, 0, 1, 3],))?;
             let ours_i = fix_fn.call1((ints.clone(),))?;
             let theirs_i = numpy_fix.call1((ints.clone(),))?;
             let ok_i: bool = allclose.call1((&ours_i, &theirs_i))?.extract()?;
             assert!(ok_i, "fix integer input mismatch");
 
             // NaN propagation.
-            let with_nan = numpy.getattr("array")?.call1((vec![1.5_f64, f64::NAN, -2.5],))?;
+            let with_nan = numpy
+                .getattr("array")?
+                .call1((vec![1.5_f64, f64::NAN, -2.5],))?;
             let ours_nan = fix_fn.call1((with_nan.clone(),))?;
             let theirs_nan = numpy_fix.call1((with_nan.clone(),))?;
-            let ours_nan_check: bool = isnan_fn
-                .call1((&ours_nan,))?
-                .get_item(1_i64)?
-                .extract()?;
-            let theirs_nan_check: bool = isnan_fn
-                .call1((&theirs_nan,))?
-                .get_item(1_i64)?
-                .extract()?;
+            let ours_nan_check: bool = isnan_fn.call1((&ours_nan,))?.get_item(1_i64)?.extract()?;
+            let theirs_nan_check: bool =
+                isnan_fn.call1((&theirs_nan,))?.get_item(1_i64)?.extract()?;
             assert!(ours_nan_check && theirs_nan_check, "fix must propagate NaN");
 
             // 2-D array element-wise.
-            let two_d = numpy.getattr("array")?.call1((vec![
-                vec![1.5_f64, -1.5],
-                vec![2.7, -2.7],
-            ],))?;
+            let two_d = numpy
+                .getattr("array")?
+                .call1((vec![vec![1.5_f64, -1.5], vec![2.7, -2.7]],))?;
             let ours_2d = fix_fn.call1((two_d.clone(),))?;
             let theirs_2d = numpy_fix.call1((two_d.clone(),))?;
             let ok_2d: bool = allclose.call1((&ours_2d, &theirs_2d))?.extract()?;
@@ -26092,17 +26141,24 @@ mod tests {
             let ok_1: bool = isclose.call1((&ours_1, &theirs_1))?.extract()?;
             assert!(ok_1, "i0(1) mismatch");
             let val_1: f64 = ours_1.extract()?;
-            assert!((val_1 - 1.2660658777520084).abs() < 1e-10, "i0(1) reference value");
+            assert!(
+                (val_1 - 1.2660658777520084).abs() < 1e-10,
+                "i0(1) reference value"
+            );
 
             // 1-D array of small values.
-            let small = numpy.getattr("array")?.call1((vec![0.0_f64, 0.5, 1.0, 1.5, 2.0],))?;
+            let small = numpy
+                .getattr("array")?
+                .call1((vec![0.0_f64, 0.5, 1.0, 1.5, 2.0],))?;
             let ours_s = i0_fn.call1((small.clone(),))?;
             let theirs_s = numpy_i0.call1((small.clone(),))?;
             let ok_s: bool = allclose.call1((&ours_s, &theirs_s))?.extract()?;
             assert!(ok_s, "i0 1-D small mismatch");
 
             // Large values use asymptotic series; verify no overflow.
-            let large = numpy.getattr("array")?.call1((vec![10.0_f64, 20.0, 50.0],))?;
+            let large = numpy
+                .getattr("array")?
+                .call1((vec![10.0_f64, 20.0, 50.0],))?;
             let ours_l = i0_fn.call1((large.clone(),))?;
             let theirs_l = numpy_i0.call1((large.clone(),))?;
             let ok_l: bool = allclose.call1((&ours_l, &theirs_l))?.extract()?;
@@ -26116,13 +26172,15 @@ mod tests {
             assert!(ok_i, "i0 integer input mismatch");
             let ours_dtype = ours_i.getattr("dtype")?.str()?.to_string();
             let theirs_dtype = theirs_i.getattr("dtype")?.str()?.to_string();
-            assert_eq!(ours_dtype, theirs_dtype, "i0 integer input dtype must match numpy");
+            assert_eq!(
+                ours_dtype, theirs_dtype,
+                "i0 integer input dtype must match numpy"
+            );
 
             // 2-D array element-wise.
-            let two_d = numpy.getattr("array")?.call1((vec![
-                vec![0.0_f64, 1.0],
-                vec![2.0, 3.0],
-            ],))?;
+            let two_d = numpy
+                .getattr("array")?
+                .call1((vec![vec![0.0_f64, 1.0], vec![2.0, 3.0]],))?;
             let ours_2d = i0_fn.call1((two_d.clone(),))?;
             let theirs_2d = numpy_i0.call1((two_d.clone(),))?;
             let ok_2d: bool = allclose.call1((&ours_2d, &theirs_2d))?.extract()?;
@@ -26152,15 +26210,17 @@ mod tests {
             let numpy_asf = numpy.getattr("asfortranarray")?;
 
             // C-order 2-D input → F-order copy.
-            let c_order = numpy.getattr("array")?.call1((vec![
-                vec![1_i64, 2, 3],
-                vec![4, 5, 6],
-            ],))?;
+            let c_order = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2, 3], vec![4, 5, 6]],))?;
             let ours = asf_fn.call1((c_order.clone(),))?;
             let theirs = numpy_asf.call1((c_order.clone(),))?;
             assert_array_matches_numpy(&ours, &theirs)?;
             let ours_f: bool = ours.getattr("flags")?.get_item("F_CONTIGUOUS")?.extract()?;
-            let theirs_f: bool = theirs.getattr("flags")?.get_item("F_CONTIGUOUS")?.extract()?;
+            let theirs_f: bool = theirs
+                .getattr("flags")?
+                .get_item("F_CONTIGUOUS")?
+                .extract()?;
             assert_eq!(ours_f, theirs_f, "F_CONTIGUOUS flag must match");
             assert!(ours_f, "asfortranarray must produce F-contiguous output");
 
@@ -26221,12 +26281,13 @@ mod tests {
             let numpy = py.import("numpy")?;
             let numpy_isr = numpy.getattr("isrealobj")?;
 
-            let check = |ours: Bound<'_, PyAny>, theirs: Bound<'_, PyAny>, ctx: &str| -> PyResult<()> {
-                let ours_b: bool = ours.extract()?;
-                let theirs_b: bool = theirs.extract()?;
-                assert_eq!(ours_b, theirs_b, "isrealobj mismatch: {}", ctx);
-                Ok(())
-            };
+            let check =
+                |ours: Bound<'_, PyAny>, theirs: Bound<'_, PyAny>, ctx: &str| -> PyResult<()> {
+                    let ours_b: bool = ours.extract()?;
+                    let theirs_b: bool = theirs.extract()?;
+                    assert_eq!(ours_b, theirs_b, "isrealobj mismatch: {}", ctx);
+                    Ok(())
+                };
 
             // Float array → True.
             let real_arr = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
@@ -26307,10 +26368,9 @@ mod tests {
             )?;
 
             // 2-D real → True.
-            let two_d = numpy.getattr("array")?.call1((vec![
-                vec![1.0_f64, 2.0],
-                vec![3.0, 4.0],
-            ],))?;
+            let two_d = numpy
+                .getattr("array")?
+                .call1((vec![vec![1.0_f64, 2.0], vec![3.0, 4.0]],))?;
             check(
                 isr_fn.call1((two_d.clone(),))?,
                 numpy_isr.call1((two_d.clone(),))?,
@@ -26355,14 +26415,18 @@ mod tests {
             let allclose = numpy.getattr("allclose")?;
 
             // Unweighted 1-D matches mean.
-            let arr = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0, 4.0, 5.0],))?;
+            let arr = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 2.0, 3.0, 4.0, 5.0],))?;
             let ours = avg_fn.call1((arr.clone(),))?;
             let theirs = numpy_avg.call1((arr.clone(),))?;
             let ok: bool = isclose.call1((&ours, &theirs))?.extract()?;
             assert!(ok, "average unweighted 1-D mismatch");
 
             // Weighted 1-D.
-            let weights = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0, 4.0, 5.0],))?;
+            let weights = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 2.0, 3.0, 4.0, 5.0],))?;
             let ours_w = avg_fn.call(
                 (arr.clone(),),
                 Some(&{
@@ -26431,11 +26495,15 @@ mod tests {
             // Both should be 2-tuples; compare each element.
             let ours_avg_part = ours_r.get_item(0_i64)?;
             let theirs_avg_part = theirs_r.get_item(0_i64)?;
-            let ok_avg: bool = isclose.call1((&ours_avg_part, &theirs_avg_part))?.extract()?;
+            let ok_avg: bool = isclose
+                .call1((&ours_avg_part, &theirs_avg_part))?
+                .extract()?;
             assert!(ok_avg, "average returned=True avg part mismatch");
             let ours_sum_part = ours_r.get_item(1_i64)?;
             let theirs_sum_part = theirs_r.get_item(1_i64)?;
-            let ok_sum: bool = isclose.call1((&ours_sum_part, &theirs_sum_part))?.extract()?;
+            let ok_sum: bool = isclose
+                .call1((&ours_sum_part, &theirs_sum_part))?
+                .extract()?;
             assert!(ok_sum, "average returned=True sum_of_weights mismatch");
 
             // Equal weights produces same as mean.
@@ -26497,11 +26565,15 @@ mod tests {
             assert_fn.call1((a.clone(), b.clone()))?;
 
             // Within default tol → passes.
-            let c = numpy.getattr("array")?.call1((vec![1.0_f64 + 1e-10, 2.0, 3.0],))?;
+            let c = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64 + 1e-10, 2.0, 3.0],))?;
             assert_fn.call1((a.clone(), c.clone()))?;
 
             // Beyond tol → AssertionError.
-            let d = numpy.getattr("array")?.call1((vec![1.0_f64 + 1.0, 2.0, 3.0],))?;
+            let d = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64 + 1.0, 2.0, 3.0],))?;
             let err = assert_fn.call1((a.clone(), d.clone())).err();
             assert!(err.is_some(), "beyond-tol must raise AssertionError");
             let err_type = err
@@ -26515,33 +26587,41 @@ mod tests {
             );
 
             // equal_nan=True (default) with NaN at same positions → passes.
-            let nan_a = numpy.getattr("array")?.call1((vec![1.0_f64, f64::NAN, 3.0],))?;
-            let nan_b = numpy.getattr("array")?.call1((vec![1.0_f64, f64::NAN, 3.0],))?;
+            let nan_a = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, f64::NAN, 3.0],))?;
+            let nan_b = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, f64::NAN, 3.0],))?;
             assert_fn.call1((nan_a.clone(), nan_b.clone()))?;
 
             // equal_nan=False with NaN → raises.
-            let err_nan = assert_fn.call(
-                (nan_a.clone(), nan_b.clone()),
-                Some(&{
-                    let kw = PyDict::new(py);
-                    kw.set_item("equal_nan", false)?;
-                    kw
-                }),
-            ).err();
+            let err_nan = assert_fn
+                .call(
+                    (nan_a.clone(), nan_b.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("equal_nan", false)?;
+                        kw
+                    }),
+                )
+                .err();
             assert!(
                 err_nan.is_some(),
                 "equal_nan=False with NaN must raise AssertionError",
             );
 
             // Custom err_msg appears in raised message.
-            let err_msg_test = assert_fn.call(
-                (a.clone(), d.clone()),
-                Some(&{
-                    let kw = PyDict::new(py);
-                    kw.set_item("err_msg", "custom-marker")?;
-                    kw
-                }),
-            ).err();
+            let err_msg_test = assert_fn
+                .call(
+                    (a.clone(), d.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("err_msg", "custom-marker")?;
+                        kw
+                    }),
+                )
+                .err();
             assert!(err_msg_test.is_some(), "expected error with custom err_msg");
             let err_text = err_msg_test
                 .as_ref()
@@ -26554,7 +26634,10 @@ mod tests {
             );
 
             // Broadcasting: scalar vs array equal-valued → passes.
-            assert_fn.call1((1.0_f64, numpy.getattr("array")?.call1((vec![1.0_f64, 1.0, 1.0],))?))?;
+            assert_fn.call1((
+                1.0_f64,
+                numpy.getattr("array")?.call1((vec![1.0_f64, 1.0, 1.0],))?,
+            ))?;
 
             Ok(())
         });
@@ -26597,8 +26680,12 @@ mod tests {
             assert!(err_shape.is_some(), "different shape must raise");
 
             // NaN at same positions → passes by default.
-            let nan_a = numpy.getattr("array")?.call1((vec![1.0_f64, f64::NAN, 3.0],))?;
-            let nan_b = numpy.getattr("array")?.call1((vec![1.0_f64, f64::NAN, 3.0],))?;
+            let nan_a = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, f64::NAN, 3.0],))?;
+            let nan_b = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, f64::NAN, 3.0],))?;
             assert_fn.call1((nan_a.clone(), nan_b.clone()))?;
 
             // strict=True with dtype mismatch → AssertionError.
@@ -26621,28 +26708,32 @@ mod tests {
             // strict=False (default) → passes despite dtype difference.
             assert_fn.call1((int_arr.clone(), float_arr.clone()))?;
             // strict=True → raises due to dtype mismatch.
-            let err_strict = assert_fn.call(
-                (int_arr.clone(), float_arr.clone()),
-                Some(&{
-                    let kw = PyDict::new(py);
-                    kw.set_item("strict", true)?;
-                    kw
-                }),
-            ).err();
+            let err_strict = assert_fn
+                .call(
+                    (int_arr.clone(), float_arr.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("strict", true)?;
+                        kw
+                    }),
+                )
+                .err();
             assert!(
                 err_strict.is_some(),
                 "strict=True with dtype mismatch must raise",
             );
 
             // Custom err_msg appears in raised text.
-            let err_msg_test = assert_fn.call(
-                (a.clone(), c.clone()),
-                Some(&{
-                    let kw = PyDict::new(py);
-                    kw.set_item("err_msg", "diff-marker")?;
-                    kw
-                }),
-            ).err();
+            let err_msg_test = assert_fn
+                .call(
+                    (a.clone(), c.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("err_msg", "diff-marker")?;
+                        kw
+                    }),
+                )
+                .err();
             let err_text = err_msg_test
                 .as_ref()
                 .map(|e| e.value(py).str().unwrap().to_string())
@@ -26671,10 +26762,9 @@ mod tests {
             let numpy_mt = numpy.getattr("linalg")?.getattr("matrix_transpose")?;
 
             // 2-D matrix transpose.
-            let two_d = numpy.getattr("array")?.call1((vec![
-                vec![1_i64, 2, 3],
-                vec![4, 5, 6],
-            ],))?;
+            let two_d = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2, 3], vec![4, 5, 6]],))?;
             assert_array_matches_numpy(
                 &mt_fn.call1((two_d.clone(),))?,
                 &numpy_mt.call1((two_d.clone(),))?,
@@ -26690,8 +26780,10 @@ mod tests {
                 &numpy_mt.call1((three_d.clone(),))?,
             )?;
             // Verify resulting shape: (2, 3, 2) for input (2, 2, 3).
-            let result_shape: (usize, usize, usize) =
-                mt_fn.call1((three_d.clone(),))?.getattr("shape")?.extract()?;
+            let result_shape: (usize, usize, usize) = mt_fn
+                .call1((three_d.clone(),))?
+                .getattr("shape")?
+                .extract()?;
             assert_eq!(
                 result_shape,
                 (2, 3, 2),
@@ -26700,8 +26792,14 @@ mod tests {
 
             // 4-D batched.
             let four_d = numpy.getattr("array")?.call1((vec![
-                vec![vec![vec![1_i64, 2], vec![3, 4]], vec![vec![5, 6], vec![7, 8]]],
-                vec![vec![vec![9, 10], vec![11, 12]], vec![vec![13, 14], vec![15, 16]]],
+                vec![
+                    vec![vec![1_i64, 2], vec![3, 4]],
+                    vec![vec![5, 6], vec![7, 8]],
+                ],
+                vec![
+                    vec![vec![9, 10], vec![11, 12]],
+                    vec![vec![13, 14], vec![15, 16]],
+                ],
             ],))?;
             assert_array_matches_numpy(
                 &mt_fn.call1((four_d.clone(),))?,
@@ -26736,17 +26834,19 @@ mod tests {
             ];
             let r1_lst = PyList::new(py, row1)?;
             let r2_lst = PyList::new(py, row2)?;
-            let cplx_2d = numpy.getattr("array")?.call1((PyList::new(
-                py,
-                [r1_lst.unbind(), r2_lst.unbind()],
-            )?,))?;
+            let cplx_2d = numpy
+                .getattr("array")?
+                .call1((PyList::new(py, [r1_lst.unbind(), r2_lst.unbind()])?,))?;
             let ours_c = mt_fn.call1((cplx_2d.clone(),))?;
             let theirs_c = numpy_mt.call1((cplx_2d.clone(),))?;
             assert_array_matches_numpy(&ours_c, &theirs_c)?;
             // Verify [0,1] became [1,0]: imag stays positive (no conjugation).
             let entry: Bound<'_, PyAny> = ours_c.get_item(0_i64)?.get_item(1_i64)?;
             let imag_val: f64 = entry.getattr("imag")?.extract()?;
-            assert!(imag_val > 0.0, "matrix_transpose must NOT conjugate complex");
+            assert!(
+                imag_val > 0.0,
+                "matrix_transpose must NOT conjugate complex"
+            );
 
             // 1-D input must raise an error matching numpy.
             let one_d = numpy.getattr("array")?.call1((vec![1_i64, 2, 3],))?;
@@ -26777,10 +26877,9 @@ mod tests {
             let allclose = numpy.getattr("allclose")?;
 
             // 2x2 diagonal matrix → singular values are |diag|.
-            let diag = numpy.getattr("array")?.call1((vec![
-                vec![3.0_f64, 0.0],
-                vec![0.0, 5.0],
-            ],))?;
+            let diag = numpy
+                .getattr("array")?
+                .call1((vec![vec![3.0_f64, 0.0], vec![0.0, 5.0]],))?;
             let ours_d = sv_fn.call1((diag.clone(),))?;
             let theirs_d = numpy_sv.call1((diag.clone(),))?;
             let ok_d: bool = allclose.call1((&ours_d, &theirs_d))?.extract()?;
@@ -26833,7 +26932,10 @@ mod tests {
             assert!(ok_s, "svdvals singular matrix mismatch");
 
             // Equivalence to svd(x)[1].
-            let svd_full = numpy.getattr("linalg")?.getattr("svd")?.call1((wide.clone(),))?;
+            let svd_full = numpy
+                .getattr("linalg")?
+                .getattr("svd")?
+                .call1((wide.clone(),))?;
             let svd_s = svd_full.get_item(1)?;
             let ok_eq: bool = allclose.call1((&ours_w, &svd_s))?.extract()?;
             assert!(ok_eq, "svdvals must equal svd(x)[1]");
