@@ -1931,6 +1931,30 @@ fn build_numpy_complex_array_from_interleaved(
     }
 }
 
+fn build_numpy_complex_vector_from_flat_interleaved(
+    py: Python<'_>,
+    values: &[f64],
+) -> PyResult<Py<PyAny>> {
+    if !values.len().is_multiple_of(2) {
+        return Err(PyTypeError::new_err(
+            "complex output must contain flat interleaved real/imag pairs",
+        ));
+    }
+
+    let numpy = py.import("numpy")?;
+    let builtins = py.import("builtins")?;
+    let complex_values = values
+        .chunks_exact(2)
+        .map(|chunk| builtins.getattr("complex")?.call1((chunk[0], chunk[1])))
+        .collect::<PyResult<Vec<_>>>()?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", numpy.getattr("complex128")?)?;
+    Ok(numpy
+        .getattr("array")?
+        .call((PyList::new(py, complex_values.iter())?,), Some(&kwargs))?
+        .unbind())
+}
+
 fn extract_complex_interleaved_array(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
@@ -3335,6 +3359,26 @@ fn pinv(
 }
 
 #[pyfunction]
+fn eigvals(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let array = extract_numeric_array(py, a.bind(py), "eigvals(a)")?;
+    let shape = array.shape();
+    if shape.len() == 2
+        && shape[0] == shape[1]
+        && !matches!(array.dtype(), DType::Complex64 | DType::Complex128)
+    {
+        let result = array.eigvals().map_err(map_ufunc_error)?;
+        return build_numpy_complex_vector_from_flat_interleaved(py, result.values());
+    }
+
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("linalg")?
+        .getattr("eigvals")?
+        .call1((a.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, b, rcond=None))]
 fn lstsq(
     py: Python<'_>,
@@ -4257,6 +4301,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(masked_invalid, m)?)?;
     m.add_function(wrap_pyfunction!(minimum_fill_value, m)?)?;
     m.add_function(wrap_pyfunction!(pinv, m)?)?;
+    m.add_function(wrap_pyfunction!(eigvals, m)?)?;
     m.add_function(wrap_pyfunction!(lstsq, m)?)?;
     m.add_function(wrap_pyfunction!(tensorsolve, m)?)?;
     m.add_function(wrap_pyfunction!(tensorinv, m)?)?;
@@ -4534,6 +4579,7 @@ mod tests {
             assert!(module.getattr("masked_invalid").is_ok());
             assert!(module.getattr("minimum_fill_value").is_ok());
             assert!(module.getattr("pinv").is_ok());
+            assert!(module.getattr("eigvals").is_ok());
             assert!(module.getattr("rfft").is_ok());
             assert!(module.getattr("irfft").is_ok());
             assert!(module.getattr("lstsq").is_ok());
@@ -6182,41 +6228,40 @@ mod tests {
             let allclose = numpy.getattr("allclose")?;
             let array_equal = numpy.getattr("array_equal")?;
 
-            let tuple_close = |actual: &Bound<'_, PyAny>,
-                               expected: &Bound<'_, PyAny>|
-             -> PyResult<()> {
-                let actual_tuple = actual.downcast::<PyTuple>()?;
-                let expected_tuple = expected.downcast::<PyTuple>()?;
-                assert_eq!(actual_tuple.len()?, expected_tuple.len()?);
-                // 0: solution, 1: residuals, 2: rank (i32), 3: singular values
-                assert!(
-                    allclose
-                        .call1((actual_tuple.get_item(0)?, expected_tuple.get_item(0)?))?
-                        .extract::<bool>()?,
-                    "lstsq solution diverged"
-                );
-                assert!(
-                    array_equal
-                        .call1((actual_tuple.get_item(1)?, expected_tuple.get_item(1)?))?
-                        .extract::<bool>()?
-                        || allclose
-                            .call1((actual_tuple.get_item(1)?, expected_tuple.get_item(1)?))?
+            let tuple_close =
+                |actual: &Bound<'_, PyAny>, expected: &Bound<'_, PyAny>| -> PyResult<()> {
+                    let actual_tuple = actual.downcast::<PyTuple>()?;
+                    let expected_tuple = expected.downcast::<PyTuple>()?;
+                    assert_eq!(actual_tuple.len()?, expected_tuple.len()?);
+                    // 0: solution, 1: residuals, 2: rank (i32), 3: singular values
+                    assert!(
+                        allclose
+                            .call1((actual_tuple.get_item(0)?, expected_tuple.get_item(0)?))?
                             .extract::<bool>()?,
-                    "lstsq residuals diverged"
-                );
-                assert_eq!(
-                    actual_tuple.get_item(2)?.extract::<i64>()?,
-                    expected_tuple.get_item(2)?.extract::<i64>()?,
-                    "lstsq rank diverged"
-                );
-                assert!(
-                    allclose
-                        .call1((actual_tuple.get_item(3)?, expected_tuple.get_item(3)?))?
-                        .extract::<bool>()?,
-                    "lstsq singular values diverged"
-                );
-                Ok(())
-            };
+                        "lstsq solution diverged"
+                    );
+                    assert!(
+                        array_equal
+                            .call1((actual_tuple.get_item(1)?, expected_tuple.get_item(1)?))?
+                            .extract::<bool>()?
+                            || allclose
+                                .call1((actual_tuple.get_item(1)?, expected_tuple.get_item(1)?))?
+                                .extract::<bool>()?,
+                        "lstsq residuals diverged"
+                    );
+                    assert_eq!(
+                        actual_tuple.get_item(2)?.extract::<i64>()?,
+                        expected_tuple.get_item(2)?.extract::<i64>()?,
+                        "lstsq rank diverged"
+                    );
+                    assert!(
+                        allclose
+                            .call1((actual_tuple.get_item(3)?, expected_tuple.get_item(3)?))?
+                            .extract::<bool>()?,
+                        "lstsq singular values diverged"
+                    );
+                    Ok(())
+                };
 
             // Overdetermined 3x2 (least-squares fit), b is 1-D.
             let tall_a = numpy.getattr("array")?.call1((PyList::new(
@@ -6230,7 +6275,8 @@ mod tests {
             let tall_b = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
             let rcond_kwargs = PyDict::new(py);
             rcond_kwargs.set_item("rcond", py.None())?;
-            let actual_tall = lstsq_fn.call((tall_a.clone(), tall_b.clone()), Some(&rcond_kwargs))?;
+            let actual_tall =
+                lstsq_fn.call((tall_a.clone(), tall_b.clone()), Some(&rcond_kwargs))?;
             let rcond_kwargs_2 = PyDict::new(py);
             rcond_kwargs_2.set_item("rcond", py.None())?;
             let expected_tall =
@@ -7138,6 +7184,87 @@ mod tests {
                 Ok(())
             })();
             linalg.setattr("pinv", original)?;
+            result
+        });
+    }
+
+    #[test]
+    fn eigvals_matches_numpy_for_real_and_complex_spectra() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let eigvals_fn = module.getattr("eigvals")?;
+            let numpy = py.import("numpy")?;
+            let numpy_eigvals = numpy.getattr("linalg")?.getattr("eigvals")?;
+
+            let diagonal = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [3.0_f64, 0.0])?,
+                    PyList::new(py, [0.0_f64, 5.0])?,
+                ],
+            )?,))?;
+            let actual_diagonal = eigvals_fn.call1((diagonal.clone(),))?;
+            let expected_diagonal = numpy_eigvals.call1((diagonal.clone(),))?;
+            assert_array_matches_numpy(&actual_diagonal, &expected_diagonal)?;
+
+            let rotation = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [0.0_f64, -1.0])?,
+                    PyList::new(py, [1.0_f64, 0.0])?,
+                ],
+            )?,))?;
+            let actual_rotation = eigvals_fn.call1((rotation.clone(),))?;
+            let expected_rotation = numpy_eigvals.call1((rotation,))?;
+            assert_array_matches_numpy(&actual_rotation, &expected_rotation)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn eigvals_supported_real_square_inputs_do_not_delegate_to_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let eigvals_fn = module.getattr("eigvals")?;
+            let numpy = py.import("numpy")?;
+            let linalg = numpy.getattr("linalg")?;
+            let builtins = py.import("builtins")?;
+            let original = linalg.getattr("eigvals")?;
+            let bomb = py.eval(
+                pyo3::ffi::c_str!(
+                    "lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError('should not delegate'))"
+                ),
+                None,
+                None,
+            )?;
+
+            linalg.setattr("eigvals", bomb)?;
+            let result = (|| -> PyResult<()> {
+                let matrix = numeric_array(py, vec![0.0_f64, -1.0, 1.0, 0.0], "float64")
+                    .call_method1("reshape", ((2, 2),))?;
+                let actual = eigvals_fn.call1((matrix,))?;
+                let expected = numpy.getattr("array")?.call1((PyList::new(
+                    py,
+                    [
+                        builtins.getattr("complex")?.call1((0.0_f64, 1.0))?,
+                        builtins.getattr("complex")?.call1((0.0_f64, -1.0))?,
+                    ],
+                )?,))?;
+                assert_array_matches_numpy(&actual, &expected)?;
+                Ok(())
+            })();
+            linalg.setattr("eigvals", original)?;
             result
         });
     }
