@@ -4890,6 +4890,19 @@ fn expm1(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (p, m=1))]
+fn polyder(py: Python<'_>, p: Py<PyAny>, m: i64) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.polyder. Returns the m-th derivative of the
+    // polynomial p (decreasing-power coefficients). m=0 returns the
+    // input unchanged; m>0 reduces the polynomial degree by m.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polyder")?
+        .call1((p.bind(py), m))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x,))]
 fn iscomplexobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.iscomplexobj. Returns True iff input has a
@@ -6019,6 +6032,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(isscalar, m)?)?;
     m.add_function(wrap_pyfunction!(isreal, m)?)?;
     m.add_function(wrap_pyfunction!(expm1, m)?)?;
+    m.add_function(wrap_pyfunction!(polyder, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6316,6 +6330,7 @@ mod tests {
             assert!(module.getattr("isscalar").is_ok());
             assert!(module.getattr("isreal").is_ok());
             assert!(module.getattr("expm1").is_ok());
+            assert!(module.getattr("polyder").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -23041,6 +23056,84 @@ mod tests {
             let theirs_c = numpy_expm1.call1((cplx_arr.clone(),))?;
             let ok_c: bool = allclose.call1((&ours_c, &theirs_c))?.extract()?;
             assert!(ok_c, "expm1 complex input mismatch");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn polyder_matches_numpy_across_orders_and_dtypes() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let polyder_fn = module.getattr("polyder")?;
+            let numpy = py.import("numpy")?;
+            let numpy_polyder = numpy.getattr("polyder")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Constant → 0 derivative.
+            let const_p = vec![5.0_f64];
+            assert_array_matches_numpy(
+                &polyder_fn.call1((const_p.clone(),))?,
+                &numpy_polyder.call1((const_p.clone(),))?,
+            )?;
+
+            // x²+1 → 2x.
+            let quad = vec![1.0_f64, 0.0, 1.0];
+            assert_array_matches_numpy(
+                &polyder_fn.call1((quad.clone(),))?,
+                &numpy_polyder.call1((quad.clone(),))?,
+            )?;
+
+            // x³+x²+1 → 3x²+2x.
+            let cubic = vec![1.0_f64, 1.0, 0.0, 1.0];
+            let ours_c = polyder_fn.call1((cubic.clone(),))?;
+            let theirs_c = numpy_polyder.call1((cubic.clone(),))?;
+            assert_array_matches_numpy(&ours_c, &theirs_c)?;
+            // Verify exact coefficients [3, 2, 0].
+            let expected = numpy.getattr("array")?.call1((vec![3.0_f64, 2.0, 0.0],))?;
+            let ok_exact: bool = allclose.call1((&ours_c, &expected))?.extract()?;
+            assert!(ok_exact, "polyder(x³+x²+1) must equal 3x²+2x");
+
+            // m=2 second derivative of x³+x²+1 → 6x+2.
+            let ours_m2 = polyder_fn.call1((cubic.clone(), 2_i64))?;
+            let theirs_m2 = numpy_polyder.call1((cubic.clone(), 2_i64))?;
+            assert_array_matches_numpy(&ours_m2, &theirs_m2)?;
+            let expected_m2 = numpy.getattr("array")?.call1((vec![6.0_f64, 2.0],))?;
+            let ok_m2: bool = allclose.call1((&ours_m2, &expected_m2))?.extract()?;
+            assert!(ok_m2, "polyder m=2 must yield 6x+2");
+
+            // m=0 returns input unchanged.
+            let ours_m0 = polyder_fn.call1((cubic.clone(), 0_i64))?;
+            let theirs_m0 = numpy_polyder.call1((cubic.clone(), 0_i64))?;
+            assert_array_matches_numpy(&ours_m0, &theirs_m0)?;
+
+            // Complex coefficients.
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+            let cplx_items: Vec<Py<PyAny>> = vec![
+                py_complex.call1((1.0_f64, 1.0_f64))?.unbind(),
+                py_complex.call1((2.0_f64, 0.0_f64))?.unbind(),
+                py_complex.call1((3.0_f64, -1.0_f64))?.unbind(),
+            ];
+            let cplx_lst = PyList::new(py, cplx_items)?;
+            let cplx_arr = numpy.getattr("array")?.call1((cplx_lst,))?;
+            let ours_cplx = polyder_fn.call1((cplx_arr.clone(),))?;
+            let theirs_cplx = numpy_polyder.call1((cplx_arr.clone(),))?;
+            let ok_cplx: bool = allclose.call1((&ours_cplx, &theirs_cplx))?.extract()?;
+            assert!(ok_cplx, "polyder complex coefficients mismatch");
+
+            // Integer coefficients work and produce numpy's dtype.
+            let int_p = vec![1_i64, 2, 3];
+            let ours_i = polyder_fn.call1((int_p.clone(),))?;
+            let theirs_i = numpy_polyder.call1((int_p.clone(),))?;
+            assert_array_matches_numpy(&ours_i, &theirs_i)?;
+            let ours_dtype = ours_i.getattr("dtype")?.str()?.to_string();
+            let theirs_dtype = theirs_i.getattr("dtype")?.str()?.to_string();
+            assert_eq!(ours_dtype, theirs_dtype, "polyder int dtype must match numpy");
 
             Ok(())
         });
