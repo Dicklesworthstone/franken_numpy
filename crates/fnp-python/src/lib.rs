@@ -4468,6 +4468,37 @@ fn ifft(
 
 #[pyfunction]
 #[pyo3(signature = (a, s=None, axes=None, norm=None, out=None))]
+fn fft2(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    s: Option<Py<PyAny>>,
+    axes: Option<Py<PyAny>>,
+    norm: Option<String>,
+    out: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.fft.fft2 so the 2-D FFT matches numpy exactly
+    // across optional shape `s`, axes tuple/list input, norm conventions,
+    // and optional `out=` destination. Output is complex.
+    let numpy = py.import("numpy")?;
+    let fft2_fn = numpy.getattr("fft")?.getattr("fft2")?;
+    let kwargs = PyDict::new(py);
+    if let Some(s_val) = s {
+        kwargs.set_item("s", s_val.bind(py))?;
+    }
+    if let Some(axes_val) = axes {
+        kwargs.set_item("axes", axes_val.bind(py))?;
+    }
+    if let Some(norm_val) = norm {
+        kwargs.set_item("norm", norm_val)?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    Ok(fft2_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, s=None, axes=None, norm=None, out=None))]
 fn ifft2(
     py: Python<'_>,
     a: Py<PyAny>,
@@ -4496,6 +4527,39 @@ fn ifft2(
         kwargs.set_item("out", out_val.bind(py))?;
     }
     Ok(ifft2_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, s=None, axes=None, norm=None, out=None))]
+fn fftn(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    s: Option<Py<PyAny>>,
+    axes: Option<Py<PyAny>>,
+    norm: Option<String>,
+    out: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.fft.fftn so the N-D FFT matches numpy exactly
+    // across the optional shape tuple `s`, arbitrary axes selection
+    // (default: all axes), norm conventions
+    // ('backward'/'ortho'/'forward'), and optional `out=` destination.
+    // Output is complex.
+    let numpy = py.import("numpy")?;
+    let fftn_fn = numpy.getattr("fft")?.getattr("fftn")?;
+    let kwargs = PyDict::new(py);
+    if let Some(s_val) = s {
+        kwargs.set_item("s", s_val.bind(py))?;
+    }
+    if let Some(axes_val) = axes {
+        kwargs.set_item("axes", axes_val.bind(py))?;
+    }
+    if let Some(norm_val) = norm {
+        kwargs.set_item("norm", norm_val)?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    Ok(fftn_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
 
 #[pyfunction]
@@ -5284,7 +5348,9 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(getmaskarray, m)?)?;
     m.add_function(wrap_pyfunction!(compressed, m)?)?;
     m.add_function(wrap_pyfunction!(ifft, m)?)?;
+    m.add_function(wrap_pyfunction!(fft2, m)?)?;
     m.add_function(wrap_pyfunction!(ifft2, m)?)?;
+    m.add_function(wrap_pyfunction!(fftn, m)?)?;
     m.add_function(wrap_pyfunction!(eigh, m)?)?;
     m.add_function(wrap_pyfunction!(tensordot, m)?)?;
     m.add_function(wrap_pyfunction!(cross, m)?)?;
@@ -5548,7 +5614,9 @@ mod tests {
             assert!(module.getattr("getmaskarray").is_ok());
             assert!(module.getattr("compressed").is_ok());
             assert!(module.getattr("ifft").is_ok());
+            assert!(module.getattr("fft2").is_ok());
             assert!(module.getattr("ifft2").is_ok());
+            assert!(module.getattr("fftn").is_ok());
             assert!(module.getattr("eigh").is_ok());
             assert!(module.getattr("tensordot").is_ok());
             assert!(module.getattr("cross").is_ok());
@@ -17704,12 +17772,13 @@ mod tests {
             let numpy = py.import("numpy")?;
             let numpy_is_masked = numpy.getattr("ma")?.getattr("is_masked")?;
 
-            let check = |ours: Bound<'_, PyAny>, theirs: Bound<'_, PyAny>, ctx: &str| -> PyResult<()> {
-                let ours_bool: bool = ours.extract()?;
-                let theirs_bool: bool = theirs.extract()?;
-                assert_eq!(ours_bool, theirs_bool, "is_masked mismatch: {}", ctx);
-                Ok(())
-            };
+            let check =
+                |ours: Bound<'_, PyAny>, theirs: Bound<'_, PyAny>, ctx: &str| -> PyResult<()> {
+                    let ours_bool: bool = ours.extract()?;
+                    let theirs_bool: bool = theirs.extract()?;
+                    assert_eq!(ours_bool, theirs_bool, "is_masked mismatch: {}", ctx);
+                    Ok(())
+                };
 
             // Partially-masked 1-D array → True.
             let partial = numpy.getattr("ma")?.getattr("array")?.call(
@@ -17853,14 +17922,10 @@ mod tests {
             let kwargs_default = PyDict::new(py);
             kwargs_default.set_item("copy", false)?;
             kwargs_default.set_item("shrink", true)?;
-            let ours_both_nm = mask_or_fn.call(
-                (nomask.clone(), nomask.clone()),
-                Some(&kwargs_default),
-            )?;
-            let theirs_both_nm = numpy_mask_or.call(
-                (nomask.clone(), nomask.clone()),
-                Some(&kwargs_default),
-            )?;
+            let ours_both_nm =
+                mask_or_fn.call((nomask.clone(), nomask.clone()), Some(&kwargs_default))?;
+            let theirs_both_nm =
+                numpy_mask_or.call((nomask.clone(), nomask.clone()), Some(&kwargs_default))?;
             assert_eq!(
                 ours_both_nm.is(&nomask),
                 theirs_both_nm.is(&nomask),
@@ -18083,10 +18148,9 @@ mod tests {
             let allclose = numpy.getattr("allclose")?;
 
             // Build a deterministic 4x4 complex spectrum to invert.
-            let spectrum = numpy
-                .getattr("fft")?
-                .getattr("fft2")?
-                .call1((numpy.getattr("array")?.call(
+            let spectrum = numpy.getattr("fft")?.getattr("fft2")?.call1((numpy
+                .getattr("array")?
+                .call(
                     (vec![
                         vec![1.0_f64, 2.0, 3.0, 4.0],
                         vec![5.0, 6.0, 7.0, 8.0],
@@ -18211,6 +18275,440 @@ mod tests {
             let round_trip = fft2_fn.call1((inverted,))?;
             let ok_rt: bool = allclose.call1((&round_trip, &spectrum))?.extract()?;
             assert!(ok_rt, "fft2(ifft2(x)) must round-trip to x");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn fft2_matches_numpy_across_shape_axes_norm_out_and_errors() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let fft2_fn = module.getattr("fft2")?;
+            let numpy = py.import("numpy")?;
+            let numpy_fft2 = numpy.getattr("fft")?.getattr("fft2")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            let real_2d = numpy
+                .getattr("arange")?
+                .call1((12_i64,))?
+                .call_method1("reshape", (3_i64, 4_i64))?
+                .call_method1("astype", ("float64",))?;
+
+            // Default: s=None, axes=(-2, -1), norm=None.
+            let ours = fft2_fn.call1((real_2d.clone(),))?;
+            let theirs = numpy_fft2.call1((real_2d.clone(),))?;
+            let ok: bool = allclose.call1((&ours, &theirs))?.extract()?;
+            assert!(ok, "fft2 default mismatch");
+
+            // Explicit shape and axes using Python lists preserves the
+            // list-or-tuple call surface accepted by numpy.
+            let s_list = PyList::new(py, [2_usize, 3_usize])?;
+            let axes_list = PyList::new(py, [0_i64, 1_i64])?;
+            let ours_lists = fft2_fn.call(
+                (real_2d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("s", &s_list)?;
+                    kw.set_item("axes", &axes_list)?;
+                    kw
+                }),
+            )?;
+            let theirs_lists = numpy_fft2.call(
+                (real_2d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("s", &s_list)?;
+                    kw.set_item("axes", &axes_list)?;
+                    kw
+                }),
+            )?;
+            let ok_lists: bool = allclose.call1((&ours_lists, &theirs_lists))?.extract()?;
+            assert!(ok_lists, "fft2 list s/axes mismatch");
+
+            // A single-axis 2-D FFT is accepted and should match exactly.
+            let axes_tuple = PyTuple::new(py, [0_i64])?;
+            let ours_axis = fft2_fn.call(
+                (real_2d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axes", &axes_tuple)?;
+                    kw
+                }),
+            )?;
+            let theirs_axis = numpy_fft2.call(
+                (real_2d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axes", &axes_tuple)?;
+                    kw
+                }),
+            )?;
+            let ok_axis: bool = allclose.call1((&ours_axis, &theirs_axis))?.extract()?;
+            assert!(ok_axis, "fft2 axes=(0,) mismatch");
+
+            // norm='ortho' and norm='forward' match numpy scaling exactly.
+            for norm_name in ["ortho", "forward"] {
+                let ours_norm = fft2_fn.call(
+                    (real_2d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("norm", norm_name)?;
+                        kw
+                    }),
+                )?;
+                let theirs_norm = numpy_fft2.call(
+                    (real_2d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("norm", norm_name)?;
+                        kw
+                    }),
+                )?;
+                let ok_norm: bool = allclose.call1((&ours_norm, &theirs_norm))?.extract()?;
+                assert!(ok_norm, "fft2 norm={norm_name} mismatch");
+            }
+
+            // 3-D input defaults to the last two axes for each leading slice.
+            let three_d = numpy
+                .getattr("arange")?
+                .call1((24_i64,))?
+                .call_method1("reshape", (2_i64, 3_i64, 4_i64))?
+                .call_method1("astype", ("float64",))?;
+            let ours_3d = fft2_fn.call1((three_d.clone(),))?;
+            let theirs_3d = numpy_fft2.call1((three_d.clone(),))?;
+            let ok_3d: bool = allclose.call1((&ours_3d, &theirs_3d))?.extract()?;
+            assert!(ok_3d, "fft2 3-D default axes mismatch");
+
+            // out= writes into the supplied complex output buffer.
+            let actual_out_buf = numpy.getattr("zeros")?.call(
+                (PyTuple::new(py, [3_i64, 4_i64])?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "complex128")?;
+                    kw
+                }),
+            )?;
+            let expected_out_buf = numpy.getattr("zeros")?.call(
+                (PyTuple::new(py, [3_i64, 4_i64])?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "complex128")?;
+                    kw
+                }),
+            )?;
+            let ours_out = fft2_fn.call(
+                (real_2d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("out", actual_out_buf.clone())?;
+                    kw
+                }),
+            )?;
+            let theirs_out = numpy_fft2.call(
+                (real_2d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("out", expected_out_buf.clone())?;
+                    kw
+                }),
+            )?;
+            let ok_out: bool = allclose.call1((&ours_out, &theirs_out))?.extract()?;
+            assert!(ok_out, "fft2 out= mismatch");
+
+            // Error text should pass through unchanged for invalid kwargs.
+            let mismatch_err = fft2_fn
+                .call(
+                    (real_2d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("s", PyTuple::new(py, [2_usize, 3_usize])?)?;
+                        kw.set_item("axes", PyTuple::new(py, [0_i64])?)?;
+                        kw
+                    }),
+                )
+                .unwrap_err();
+            let expected_mismatch_err = numpy_fft2
+                .call(
+                    (real_2d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("s", PyTuple::new(py, [2_usize, 3_usize])?)?;
+                        kw.set_item("axes", PyTuple::new(py, [0_i64])?)?;
+                        kw
+                    }),
+                )
+                .unwrap_err();
+            assert_eq!(
+                mismatch_err.get_type(py).name()?.extract::<String>()?,
+                expected_mismatch_err
+                    .get_type(py)
+                    .name()?
+                    .extract::<String>()?
+            );
+            assert_eq!(
+                mismatch_err.value(py).str()?.extract::<String>()?,
+                expected_mismatch_err.value(py).str()?.extract::<String>()?
+            );
+
+            let out_err = fft2_fn
+                .call(
+                    (real_2d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item(
+                            "out",
+                            numpy.getattr("empty")?.call(
+                                (PyTuple::new(py, [2_i64, 2_i64])?,),
+                                Some(&{
+                                    let out_kw = PyDict::new(py);
+                                    out_kw.set_item("dtype", "complex128")?;
+                                    out_kw
+                                }),
+                            )?,
+                        )?;
+                        kw
+                    }),
+                )
+                .unwrap_err();
+            let expected_out_err = numpy_fft2
+                .call(
+                    (real_2d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item(
+                            "out",
+                            numpy.getattr("empty")?.call(
+                                (PyTuple::new(py, [2_i64, 2_i64])?,),
+                                Some(&{
+                                    let out_kw = PyDict::new(py);
+                                    out_kw.set_item("dtype", "complex128")?;
+                                    out_kw
+                                }),
+                            )?,
+                        )?;
+                        kw
+                    }),
+                )
+                .unwrap_err();
+            assert_eq!(
+                out_err.get_type(py).name()?.extract::<String>()?,
+                expected_out_err.get_type(py).name()?.extract::<String>()?
+            );
+            assert_eq!(
+                out_err.value(py).str()?.extract::<String>()?,
+                expected_out_err.value(py).str()?.extract::<String>()?
+            );
+
+            let bad_norm_err = fft2_fn
+                .call(
+                    (real_2d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("norm", "bad")?;
+                        kw
+                    }),
+                )
+                .unwrap_err();
+            let expected_bad_norm_err = numpy_fft2
+                .call(
+                    (real_2d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("norm", "bad")?;
+                        kw
+                    }),
+                )
+                .unwrap_err();
+            assert_eq!(
+                bad_norm_err.get_type(py).name()?.extract::<String>()?,
+                expected_bad_norm_err
+                    .get_type(py)
+                    .name()?
+                    .extract::<String>()?
+            );
+            assert_eq!(
+                bad_norm_err.value(py).str()?.extract::<String>()?,
+                expected_bad_norm_err.value(py).str()?.extract::<String>()?
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn fftn_matches_numpy_across_nd_shape_axes_and_norm() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let fftn_fn = module.getattr("fftn")?;
+            let numpy = py.import("numpy")?;
+            let numpy_fftn = numpy.getattr("fft")?.getattr("fftn")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // 3-D real input — fftn should transform all axes by default.
+            let three_d = numpy.getattr("array")?.call(
+                (vec![
+                    vec![vec![1.0_f64, 2.0, 3.0], vec![4.0, 5.0, 6.0]],
+                    vec![vec![7.0, 8.0, 9.0], vec![10.0, 11.0, 12.0]],
+                    vec![vec![13.0, 14.0, 15.0], vec![16.0, 17.0, 18.0]],
+                ],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("float64")?)?;
+                    kw
+                }),
+            )?;
+            let ours = fftn_fn.call1((three_d.clone(),))?;
+            let theirs = numpy_fftn.call1((three_d.clone(),))?;
+            let ok: bool = allclose.call1((&ours, &theirs))?.extract()?;
+            assert!(ok, "fftn default axes mismatch");
+
+            // Explicit shape s=(4,4,4) zero-pads/truncates each transform axis.
+            let s_tuple = PyTuple::new(py, [4_usize, 4, 4])?;
+            let ours_s = fftn_fn.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("s", &s_tuple)?;
+                    kw
+                }),
+            )?;
+            let theirs_s = numpy_fftn.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("s", &s_tuple)?;
+                    kw
+                }),
+            )?;
+            let ok_s: bool = allclose.call1((&ours_s, &theirs_s))?.extract()?;
+            assert!(ok_s, "fftn s=(4,4,4) mismatch");
+
+            // Explicit axes selects a subset of axes to transform.
+            let axes_subset = PyTuple::new(py, [-1_i64, -2])?;
+            let ours_axes = fftn_fn.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axes", &axes_subset)?;
+                    kw
+                }),
+            )?;
+            let theirs_axes = numpy_fftn.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axes", &axes_subset)?;
+                    kw
+                }),
+            )?;
+            let ok_axes: bool = allclose.call1((&ours_axes, &theirs_axes))?.extract()?;
+            assert!(ok_axes, "fftn axes=(-1,-2) mismatch");
+
+            // Single-axis transform via axes=(0,).
+            let single_axis = PyTuple::new(py, [0_i64])?;
+            let ours_single = fftn_fn.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axes", &single_axis)?;
+                    kw
+                }),
+            )?;
+            let theirs_single = numpy_fftn.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axes", &single_axis)?;
+                    kw
+                }),
+            )?;
+            let ok_single: bool = allclose.call1((&ours_single, &theirs_single))?.extract()?;
+            assert!(ok_single, "fftn axes=(0,) mismatch");
+
+            // norm='ortho' — unitary scaling.
+            let ours_ortho = fftn_fn.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("norm", "ortho")?;
+                    kw
+                }),
+            )?;
+            let theirs_ortho = numpy_fftn.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("norm", "ortho")?;
+                    kw
+                }),
+            )?;
+            let ok_ortho: bool = allclose.call1((&ours_ortho, &theirs_ortho))?.extract()?;
+            assert!(ok_ortho, "fftn norm=ortho mismatch");
+
+            // norm='forward' — forward-normalized.
+            let ours_fwd = fftn_fn.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("norm", "forward")?;
+                    kw
+                }),
+            )?;
+            let theirs_fwd = numpy_fftn.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("norm", "forward")?;
+                    kw
+                }),
+            )?;
+            let ok_fwd: bool = allclose.call1((&ours_fwd, &theirs_fwd))?.extract()?;
+            assert!(ok_fwd, "fftn norm=forward mismatch");
+
+            // Complex input preserves complex dtype.
+            let complex_in = numpy.getattr("array")?.call(
+                (vec![vec![1.0_f64, 2.0], vec![3.0, 4.0]],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("complex128")?)?;
+                    kw
+                }),
+            )?;
+            let ours_c = fftn_fn.call1((complex_in.clone(),))?;
+            let theirs_c = numpy_fftn.call1((complex_in.clone(),))?;
+            let ok_c: bool = allclose.call1((&ours_c, &theirs_c))?.extract()?;
+            assert!(ok_c, "fftn complex input mismatch");
+
+            // 1-D input — fftn should degrade to fft behavior.
+            let one_d = numpy.getattr("array")?.call(
+                (vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("float64")?)?;
+                    kw
+                }),
+            )?;
+            let ours_1d = fftn_fn.call1((one_d.clone(),))?;
+            let theirs_1d = numpy_fftn.call1((one_d.clone(),))?;
+            let ok_1d: bool = allclose.call1((&ours_1d, &theirs_1d))?.extract()?;
+            assert!(ok_1d, "fftn 1-D mismatch");
+
+            // Round-trip identity: ifftn(fftn(x)) ≈ x.
+            let ifftn_fn = numpy.getattr("fft")?.getattr("ifftn")?;
+            let round_trip = ifftn_fn.call1((fftn_fn.call1((three_d.clone(),))?,))?;
+            let ok_rt: bool = allclose.call1((&round_trip, &three_d))?.extract()?;
+            assert!(ok_rt, "ifftn(fftn(x)) must round-trip to x");
 
             Ok(())
         });
