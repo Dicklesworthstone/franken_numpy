@@ -4881,6 +4881,16 @@ fn isreal(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
+fn expm1(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.expm1 (exp(x) - 1 with greater precision near
+    // zero). Integer input promotes to float; complex input is
+    // supported and returns complex.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("expm1")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
 fn iscomplexobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.iscomplexobj. Returns True iff input has a
     // complex dtype, regardless of whether imaginary parts are
@@ -6008,6 +6018,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cbrt, m)?)?;
     m.add_function(wrap_pyfunction!(isscalar, m)?)?;
     m.add_function(wrap_pyfunction!(isreal, m)?)?;
+    m.add_function(wrap_pyfunction!(expm1, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6304,6 +6315,7 @@ mod tests {
             assert!(module.getattr("cbrt").is_ok());
             assert!(module.getattr("isscalar").is_ok());
             assert!(module.getattr("isreal").is_ok());
+            assert!(module.getattr("expm1").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -22942,6 +22954,93 @@ mod tests {
                 array_equal,
                 "isreal must equal logical_not(iscomplex) element-wise",
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn expm1_matches_numpy_across_signs_dtypes_and_precision() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let expm1_fn = module.getattr("expm1")?;
+            let numpy = py.import("numpy")?;
+            let numpy_expm1 = numpy.getattr("expm1")?;
+            let isclose = numpy.getattr("isclose")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // expm1(0) → 0.
+            let ours_z = expm1_fn.call1((0.0_f64,))?;
+            let theirs_z = numpy_expm1.call1((0.0_f64,))?;
+            let ok_z: bool = isclose.call1((&ours_z, &theirs_z))?.extract()?;
+            assert!(ok_z, "expm1(0) mismatch");
+            let val_z: f64 = ours_z.extract()?;
+            assert!(val_z.abs() < 1e-15, "expm1(0) must be exactly 0");
+
+            // expm1(1) ≈ e - 1.
+            let ours_1 = expm1_fn.call1((1.0_f64,))?;
+            let theirs_1 = numpy_expm1.call1((1.0_f64,))?;
+            let ok_1: bool = isclose.call1((&ours_1, &theirs_1))?.extract()?;
+            assert!(ok_1, "expm1(1) mismatch");
+            let val_1: f64 = ours_1.extract()?;
+            assert!((val_1 - (std::f64::consts::E - 1.0)).abs() < 1e-12, "expm1(1) must be e-1");
+
+            // Very small x: expm1(x) ≈ x with much better precision than exp(x)-1.
+            let tiny: f64 = 1e-15;
+            let ours_t = expm1_fn.call1((tiny,))?;
+            let theirs_t = numpy_expm1.call1((tiny,))?;
+            let ok_t: bool = isclose.call1((&ours_t, &theirs_t))?.extract()?;
+            assert!(ok_t, "expm1 tiny scalar mismatch");
+            let val_t: f64 = ours_t.extract()?;
+            assert!((val_t - tiny).abs() < 1e-25, "expm1(tiny) must approximate tiny");
+
+            // 1-D mixed signs.
+            let arr = numpy.getattr("array")?.call1((vec![-2.0_f64, -0.5, 0.0, 0.5, 1.0, 2.0],))?;
+            let ours_a = expm1_fn.call1((arr.clone(),))?;
+            let theirs_a = numpy_expm1.call1((arr.clone(),))?;
+            let ok_a: bool = allclose.call1((&ours_a, &theirs_a))?.extract()?;
+            assert!(ok_a, "expm1 1-D mixed-sign mismatch");
+
+            // Integer input promotes to float.
+            let ints = numpy.getattr("array")?.call1((vec![0_i64, 1, 2, 3],))?;
+            let ours_i = expm1_fn.call1((ints.clone(),))?;
+            let theirs_i = numpy_expm1.call1((ints.clone(),))?;
+            let ok_i: bool = allclose.call1((&ours_i, &theirs_i))?.extract()?;
+            assert!(ok_i, "expm1 integer input mismatch");
+            let ours_dtype = ours_i.getattr("dtype")?.str()?.to_string();
+            let theirs_dtype = theirs_i.getattr("dtype")?.str()?.to_string();
+            assert_eq!(
+                ours_dtype, theirs_dtype,
+                "expm1 integer input dtype must match numpy",
+            );
+
+            // 2-D array element-wise.
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![0.0_f64, 0.5],
+                vec![1.0, 1.5],
+            ],))?;
+            let ours_2d = expm1_fn.call1((two_d.clone(),))?;
+            let theirs_2d = numpy_expm1.call1((two_d.clone(),))?;
+            let ok_2d: bool = allclose.call1((&ours_2d, &theirs_2d))?.extract()?;
+            assert!(ok_2d, "expm1 2-D mismatch");
+
+            // Complex input: expm1 supports complex (returns complex).
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+            let cplx_items: Vec<Py<PyAny>> = vec![
+                py_complex.call1((0.0_f64, 0.0_f64))?.unbind(),
+                py_complex.call1((1.0_f64, 1.0_f64))?.unbind(),
+            ];
+            let cplx_lst = PyList::new(py, cplx_items)?;
+            let cplx_arr = numpy.getattr("array")?.call1((cplx_lst,))?;
+            let ours_c = expm1_fn.call1((cplx_arr.clone(),))?;
+            let theirs_c = numpy_expm1.call1((cplx_arr.clone(),))?;
+            let ok_c: bool = allclose.call1((&ours_c, &theirs_c))?.extract()?;
+            assert!(ok_c, "expm1 complex input mismatch");
 
             Ok(())
         });
