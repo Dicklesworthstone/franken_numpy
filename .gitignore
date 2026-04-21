@@ -107,6 +107,7 @@ storage.sqlite3-wal.corrupt-*
 .beads/*.rebuild_*
 .beads/*.bak-corrupt
 .beads/*.bad_*
+.beads/recovery/
 .beads/recovery_*/
 .beads_snapshot_*/
 
