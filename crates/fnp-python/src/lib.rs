@@ -4836,6 +4836,16 @@ fn iscomplex(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
+fn square(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.square (element-wise x*x). Preserves dtype
+    // (int stays int, float stays float, complex stays complex) and
+    // matches numpy's overflow behavior for narrow integer types.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("square")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
 fn iscomplexobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.iscomplexobj. Returns True iff input has a
     // complex dtype, regardless of whether imaginary parts are
@@ -5959,6 +5969,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(angle, m)?)?;
     m.add_function(wrap_pyfunction!(bartlett, m)?)?;
     m.add_function(wrap_pyfunction!(iscomplex, m)?)?;
+    m.add_function(wrap_pyfunction!(square, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6251,6 +6262,7 @@ mod tests {
             assert!(module.getattr("angle").is_ok());
             assert!(module.getattr("bartlett").is_ok());
             assert!(module.getattr("iscomplex").is_ok());
+            assert!(module.getattr("square").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -22523,6 +22535,95 @@ mod tests {
                 &isc_fn.call1((lst_c.clone(),))?,
                 &numpy_isc.call1((lst_c.clone(),))?,
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn square_matches_numpy_across_dtypes_and_shapes() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let square_fn = module.getattr("square")?;
+            let numpy = py.import("numpy")?;
+            let numpy_square = numpy.getattr("square")?;
+            let isclose = numpy.getattr("isclose")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Positive scalar.
+            let ours_p = square_fn.call1((5.0_f64,))?;
+            let theirs_p = numpy_square.call1((5.0_f64,))?;
+            let ok_p: bool = isclose.call1((&ours_p, &theirs_p))?.extract()?;
+            assert!(ok_p, "square positive scalar mismatch");
+
+            // Negative scalar.
+            let ours_n = square_fn.call1((-3.5_f64,))?;
+            let theirs_n = numpy_square.call1((-3.5_f64,))?;
+            let ok_n: bool = isclose.call1((&ours_n, &theirs_n))?.extract()?;
+            assert!(ok_n, "square negative scalar mismatch");
+
+            // 1-D float array.
+            let arr = numpy.getattr("array")?.call1((vec![-2.0_f64, -1.0, 0.0, 1.0, 2.0],))?;
+            let ours_a = square_fn.call1((arr.clone(),))?;
+            let theirs_a = numpy_square.call1((arr.clone(),))?;
+            let ok_a: bool = allclose.call1((&ours_a, &theirs_a))?.extract()?;
+            assert!(ok_a, "square 1-D float mismatch");
+
+            // Integer array preserves int dtype.
+            let ints = numpy.getattr("array")?.call1((vec![1_i64, 2, 3, 4, 5],))?;
+            let ours_i = square_fn.call1((ints.clone(),))?;
+            let theirs_i = numpy_square.call1((ints.clone(),))?;
+            assert_array_matches_numpy(&ours_i, &theirs_i)?;
+            let ours_i_dtype = ours_i.getattr("dtype")?.str()?.to_string();
+            let theirs_i_dtype = theirs_i.getattr("dtype")?.str()?.to_string();
+            assert_eq!(
+                ours_i_dtype, theirs_i_dtype,
+                "square integer dtype must match numpy",
+            );
+
+            // Complex input squares as complex (via PyComplex).
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+            let make_complex_array = |pairs: Vec<(f64, f64)>| -> PyResult<Bound<'_, PyAny>> {
+                let mut items: Vec<Py<PyAny>> = Vec::with_capacity(pairs.len());
+                for (r, i) in pairs {
+                    items.push(py_complex.call1((r, i))?.unbind());
+                }
+                let lst = PyList::new(py, items)?;
+                numpy.getattr("array")?.call1((lst,))
+            };
+            let cmplx = make_complex_array(vec![(1.0, 2.0), (3.0, -4.0)])?;
+            let ours_c = square_fn.call1((cmplx.clone(),))?;
+            let theirs_c = numpy_square.call1((cmplx.clone(),))?;
+            let ok_c: bool = allclose.call1((&ours_c, &theirs_c))?.extract()?;
+            assert!(ok_c, "square complex mismatch");
+            let ours_c_kind = ours_c.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+            let theirs_c_kind = theirs_c.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+            assert_eq!(
+                ours_c_kind, theirs_c_kind,
+                "square complex dtype kind must remain complex",
+            );
+
+            // 2-D array.
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![1.0_f64, 2.0],
+                vec![3.0, 4.0],
+            ],))?;
+            let ours_2d = square_fn.call1((two_d.clone(),))?;
+            let theirs_2d = numpy_square.call1((two_d.clone(),))?;
+            let ok_2d: bool = allclose.call1((&ours_2d, &theirs_2d))?.extract()?;
+            assert!(ok_2d, "square 2-D mismatch");
+
+            // Cross-check: square(x) ≡ x * x.
+            let via_mul = arr
+                .clone()
+                .call_method1("__mul__", (arr.clone(),))?;
+            let ok_mul: bool = allclose.call1((&ours_a, &via_mul))?.extract()?;
+            assert!(ok_mul, "square(x) must equal x*x");
 
             Ok(())
         });
