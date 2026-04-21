@@ -4433,6 +4433,34 @@ fn ma_count(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, axis=None, out=None, overwrite_input=false, keepdims=false))]
+fn median(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
+    overwrite_input: bool,
+    keepdims: bool,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.median so axis=None/int/tuple, `out=`
+    // destination, overwrite_input, and keepdims behavior matches
+    // numpy exactly. Integer inputs are promoted to float and NaN
+    // values propagate (numpy.median, not numpy.nanmedian).
+    let numpy = py.import("numpy")?;
+    let median_fn = numpy.getattr("median")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis_val) = axis {
+        kwargs.set_item("axis", axis_val.bind(py))?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    kwargs.set_item("overwrite_input", overwrite_input)?;
+    kwargs.set_item("keepdims", keepdims)?;
+    Ok(median_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (arr,))]
 fn getmaskarray(py: Python<'_>, arr: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.ma.getmaskarray. Unlike getmask, this always
@@ -4468,6 +4496,23 @@ fn make_mask(
         kwargs.set_item("dtype", dtype_val.bind(py))?;
     }
     Ok(make_mask_fn.call((m.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (shape, dtype=None))]
+fn masked_all(py: Python<'_>, shape: Py<PyAny>, dtype: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.ma.masked_all so scalar-vs-tuple shape handling,
+    // default float dtype, explicit dtype overrides, and fully-masked
+    // array construction all match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let masked_all_fn = numpy.getattr("ma")?.getattr("masked_all")?;
+    let kwargs = PyDict::new(py);
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    Ok(masked_all_fn
+        .call((shape.bind(py),), Some(&kwargs))?
+        .unbind())
 }
 
 #[pyfunction]
@@ -5428,7 +5473,9 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(mask_or, m)?)?;
     m.add_function(wrap_pyfunction!(getmaskarray, m)?)?;
     m.add_function(wrap_pyfunction!(ma_count, m)?)?;
+    m.add_function(wrap_pyfunction!(median, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
+    m.add_function(wrap_pyfunction!(masked_all, m)?)?;
     m.add_function(wrap_pyfunction!(compressed, m)?)?;
     m.add_function(wrap_pyfunction!(ifft, m)?)?;
     m.add_function(wrap_pyfunction!(fft2, m)?)?;
@@ -5697,7 +5744,9 @@ mod tests {
             assert!(module.getattr("mask_or").is_ok());
             assert!(module.getattr("getmaskarray").is_ok());
             assert!(module.getattr("ma_count").is_ok());
+            assert!(module.getattr("median").is_ok());
             assert!(module.getattr("make_mask").is_ok());
+            assert!(module.getattr("masked_all").is_ok());
             assert!(module.getattr("compressed").is_ok());
             assert!(module.getattr("ifft").is_ok());
             assert!(module.getattr("fft2").is_ok());
@@ -18402,6 +18451,126 @@ mod tests {
     }
 
     #[test]
+    fn masked_all_matches_numpy_shapes_dtypes_and_mask_preservation() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let masked_all_fn = module.getattr("masked_all")?;
+            let numpy = py.import("numpy")?;
+            let numpy_masked_all = numpy.getattr("ma")?.getattr("masked_all")?;
+            let numpy_getmaskarray = numpy.getattr("ma")?.getattr("getmaskarray")?;
+            let numpy_all = numpy.getattr("all")?;
+
+            let cases = [
+                (
+                    "scalar-shape-default-dtype",
+                    3_i64.into_pyobject(py)?.into_any().unbind(),
+                    None,
+                ),
+                (
+                    "2d-shape-default-dtype",
+                    PyTuple::new(py, [2_i64, 3_i64])?.into_any().unbind(),
+                    None,
+                ),
+                (
+                    "3d-shape-default-dtype",
+                    PyTuple::new(py, [2_i64, 2_i64, 1_i64])?.into_any().unbind(),
+                    None,
+                ),
+                (
+                    "scalar-shape-int-dtype",
+                    3_i64.into_pyobject(py)?.into_any().unbind(),
+                    Some(numpy.getattr("int64")?.unbind()),
+                ),
+                (
+                    "2d-shape-complex-dtype",
+                    PyTuple::new(py, [2_i64, 3_i64])?.into_any().unbind(),
+                    Some(numpy.getattr("complex128")?.unbind()),
+                ),
+                (
+                    "3d-shape-bool-dtype",
+                    PyTuple::new(py, [2_i64, 2_i64, 1_i64])?.into_any().unbind(),
+                    Some(numpy.getattr("bool_")?.unbind()),
+                ),
+                (
+                    "zero-sized-shape",
+                    PyTuple::new(py, [0_i64, 2_i64])?.into_any().unbind(),
+                    None,
+                ),
+            ];
+
+            for (label, shape, dtype) in cases {
+                let ours = match &dtype {
+                    Some(dtype_obj) => masked_all_fn.call(
+                        (shape.bind(py),),
+                        Some(&{
+                            let kw = PyDict::new(py);
+                            kw.set_item("dtype", dtype_obj.bind(py))?;
+                            kw
+                        }),
+                    )?,
+                    None => masked_all_fn.call1((shape.bind(py),))?,
+                };
+                let theirs = match &dtype {
+                    Some(dtype_obj) => numpy_masked_all.call(
+                        (shape.bind(py),),
+                        Some(&{
+                            let kw = PyDict::new(py);
+                            kw.set_item("dtype", dtype_obj.bind(py))?;
+                            kw
+                        }),
+                    )?,
+                    None => numpy_masked_all.call1((shape.bind(py),))?,
+                };
+
+                assert_array_matches_numpy(&ours, &theirs)?;
+
+                let ours_mask = numpy_getmaskarray.call1((ours.clone(),))?;
+                let theirs_mask = numpy_getmaskarray.call1((theirs.clone(),))?;
+                assert_array_matches_numpy(&ours_mask, &theirs_mask)?;
+
+                let ours_all_masked = numpy_all.call1((ours_mask.clone(),))?;
+                let theirs_all_masked = numpy_all.call1((theirs_mask.clone(),))?;
+                let ours_all_masked_bool = ours_all_masked.extract::<bool>()?;
+                let theirs_all_masked_bool = theirs_all_masked.extract::<bool>()?;
+                assert_eq!(
+                    ours_all_masked_bool, theirs_all_masked_bool,
+                    "{label} should preserve numpy's fully-masked mask array",
+                );
+                assert!(
+                    ours_all_masked_bool,
+                    "{label} should produce an all-True mask array",
+                );
+
+                let ours_added = ours.call_method1("__add__", (1_i64,))?;
+                let theirs_added = theirs.call_method1("__add__", (1_i64,))?;
+                assert_array_matches_numpy(&ours_added, &theirs_added)?;
+
+                let ours_added_all_masked = numpy_all
+                    .call1((numpy_getmaskarray.call1((ours_added,))?,))?
+                    .extract::<bool>()?;
+                let theirs_added_all_masked = numpy_all
+                    .call1((numpy_getmaskarray.call1((theirs_added,))?,))?
+                    .extract::<bool>()?;
+                assert_eq!(
+                    ours_added_all_masked, theirs_added_all_masked,
+                    "{label} arithmetic must preserve numpy's fully-masked state",
+                );
+                assert!(
+                    ours_added_all_masked,
+                    "{label} arithmetic should keep every element masked",
+                );
+            }
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn ifft2_matches_numpy_across_shape_axes_and_norm() {
         with_python(|py| {
             if !numpy_available(py) {
@@ -19221,7 +19390,9 @@ mod tests {
             )?;
 
             // Plain ndarray → all elements counted.
-            let plain = numpy.getattr("array")?.call1((vec![vec![1_i64, 2], vec![3, 4]],))?;
+            let plain = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2], vec![3, 4]],))?;
             assert_array_matches_numpy(
                 &count_fn.call1((plain.clone(),))?,
                 &numpy_count.call1((plain.clone(),))?,
@@ -19283,6 +19454,147 @@ mod tests {
                 }),
             )?;
             let theirs_tuple = numpy_count.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", &axis_tuple)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_tuple, &theirs_tuple)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn median_matches_numpy_across_axis_keepdims_and_nan() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let median_fn = module.getattr("median")?;
+            let numpy = py.import("numpy")?;
+            let numpy_median = numpy.getattr("median")?;
+            let isclose = numpy.getattr("isclose")?;
+
+            // Odd-length 1-D: exact middle value.
+            let odd = numpy
+                .getattr("array")?
+                .call1((vec![3.0_f64, 1.0, 4.0, 1.0, 5.0],))?;
+            let ours_odd = median_fn.call1((odd.clone(),))?;
+            let theirs_odd = numpy_median.call1((odd.clone(),))?;
+            let ok_odd: bool = isclose.call1((&ours_odd, &theirs_odd))?.extract()?;
+            assert!(ok_odd, "median odd-length 1-D mismatch");
+
+            // Even-length 1-D: average of middle two.
+            let even = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 2.0, 3.0, 4.0],))?;
+            let ours_even = median_fn.call1((even.clone(),))?;
+            let theirs_even = numpy_median.call1((even.clone(),))?;
+            let ok_even: bool = isclose.call1((&ours_even, &theirs_even))?.extract()?;
+            assert!(ok_even, "median even-length 1-D mismatch");
+
+            // 2-D with axis=0 and axis=1.
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![1.0_f64, 5.0, 3.0],
+                vec![4.0, 2.0, 6.0],
+                vec![7.0, 8.0, 9.0],
+            ],))?;
+            for axis in [0_i64, 1] {
+                let ours = median_fn.call(
+                    (two_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", axis)?;
+                        kw
+                    }),
+                )?;
+                let theirs = numpy_median.call(
+                    (two_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", axis)?;
+                        kw
+                    }),
+                )?;
+                assert_array_matches_numpy(&ours, &theirs)?;
+            }
+
+            // axis=None default: overall median of 2-D.
+            let ours_all = median_fn.call1((two_d.clone(),))?;
+            let theirs_all = numpy_median.call1((two_d.clone(),))?;
+            let ok_all: bool = isclose.call1((&ours_all, &theirs_all))?.extract()?;
+            assert!(ok_all, "median axis=None mismatch");
+
+            // keepdims=True preserves shape.
+            let ours_kd = median_fn.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 0_i64)?;
+                    kw.set_item("keepdims", true)?;
+                    kw
+                }),
+            )?;
+            let theirs_kd = numpy_median.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 0_i64)?;
+                    kw.set_item("keepdims", true)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_kd, &theirs_kd)?;
+
+            // NaN propagation: numpy.median returns NaN when any element is NaN.
+            let with_nan = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 2.0, f64::NAN, 4.0],))?;
+            let ours_nan = median_fn.call1((with_nan.clone(),))?;
+            let theirs_nan = numpy_median.call1((with_nan.clone(),))?;
+            let isnan_fn = numpy.getattr("isnan")?;
+            let ours_is_nan: bool = isnan_fn.call1((&ours_nan,))?.extract()?;
+            let theirs_is_nan: bool = isnan_fn.call1((&theirs_nan,))?.extract()?;
+            assert_eq!(
+                ours_is_nan, theirs_is_nan,
+                "median must propagate NaN identically to numpy",
+            );
+
+            // Integer input: dtype promoted to float in result.
+            let int_in = numpy.getattr("array")?.call1((vec![1_i64, 2, 3, 4, 5],))?;
+            let ours_int = median_fn.call1((int_in.clone(),))?;
+            let theirs_int = numpy_median.call1((int_in.clone(),))?;
+            let ok_int: bool = isclose.call1((&ours_int, &theirs_int))?.extract()?;
+            assert!(ok_int, "median integer input mismatch");
+            let ours_dtype = ours_int.getattr("dtype")?.str()?.to_string();
+            let theirs_dtype = theirs_int.getattr("dtype")?.str()?.to_string();
+            assert_eq!(
+                ours_dtype, theirs_dtype,
+                "median integer dtype must match numpy",
+            );
+
+            // 3-D axis=(0, 2) tuple-axis reduction.
+            let three_d = numpy.getattr("array")?.call1((vec![
+                vec![vec![1.0_f64, 2.0], vec![3.0, 4.0]],
+                vec![vec![5.0, 6.0], vec![7.0, 8.0]],
+                vec![vec![9.0, 10.0], vec![11.0, 12.0]],
+            ],))?;
+            let axis_tuple = PyTuple::new(py, [0_i64, 2])?;
+            let ours_tuple = median_fn.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", &axis_tuple)?;
+                    kw
+                }),
+            )?;
+            let theirs_tuple = numpy_median.call(
                 (three_d.clone(),),
                 Some(&{
                     let kw = PyDict::new(py);
