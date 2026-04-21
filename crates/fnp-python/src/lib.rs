@@ -3309,6 +3309,80 @@ fn minimum_fill_value(py: Python<'_>, obj: Py<PyAny>) -> PyResult<Py<PyAny>> {
     minimum_fill_value_for_supported_dtype(py, parsed_dtype)
 }
 
+fn maximum_fill_value_for_supported_dtype(py: Python<'_>, dtype: DType) -> PyResult<Py<PyAny>> {
+    // Mirror ma_maximum_fill_value_for_dtype exactly: opposite polarity of
+    // minimum_fill_value. Bool → False, signed ints → MIN, unsigned ints →
+    // 0, floats → -inf, complex → (-inf, -inf), datetime/timedelta →
+    // -i64::MAX (one past NaT so reductions avoid the sentinel).
+    Ok(match dtype {
+        DType::Bool => 0_i64.into_pyobject(py)?.into_any().unbind(),
+        DType::I8 => i8::MIN.into_pyobject(py)?.into_any().unbind(),
+        DType::I16 => i16::MIN.into_pyobject(py)?.into_any().unbind(),
+        DType::I32 => i32::MIN.into_pyobject(py)?.into_any().unbind(),
+        DType::I64 => i64::MIN.into_pyobject(py)?.into_any().unbind(),
+        DType::U8 => 0_u8.into_pyobject(py)?.into_any().unbind(),
+        DType::U16 => 0_u16.into_pyobject(py)?.into_any().unbind(),
+        DType::U32 => 0_u32.into_pyobject(py)?.into_any().unbind(),
+        DType::U64 => 0_u64.into_pyobject(py)?.into_any().unbind(),
+        DType::F16 | DType::F32 | DType::F64 => f64::NEG_INFINITY
+            .into_pyobject(py)?
+            .into_any()
+            .unbind(),
+        DType::Complex64 | DType::Complex128 => py
+            .import("builtins")?
+            .getattr("complex")?
+            .call1((f64::NEG_INFINITY, f64::NEG_INFINITY))?
+            .unbind(),
+        DType::DateTime64 | DType::TimeDelta64 => {
+            (-i64::MAX).into_pyobject(py)?.into_any().unbind()
+        }
+        DType::Str | DType::Structured => py.None(),
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (obj,))]
+fn maximum_fill_value(py: Python<'_>, obj: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let builtins = py.import("builtins")?;
+    let bound = obj.bind(py);
+    let dtype = if builtins
+        .call_method1("isinstance", (bound, numpy.getattr("dtype")?))?
+        .extract::<bool>()?
+    {
+        bound.clone()
+    } else {
+        numpy.call_method1("asarray", (bound,))?.getattr("dtype")?
+    };
+
+    // Structured dtypes fall back to numpy (compound field unpacking).
+    if !dtype.getattr("names")?.is_none() {
+        return Ok(numpy
+            .getattr("ma")?
+            .getattr("maximum_fill_value")?
+            .call1((bound,))?
+            .unbind());
+    }
+
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if matches!(kind.as_str(), "O" | "S" | "U" | "V") {
+        return Ok(py.None());
+    }
+
+    let parsed_dtype = match kind.as_str() {
+        "M" => DType::DateTime64,
+        "m" => DType::TimeDelta64,
+        _ => {
+            let name = dtype.getattr("name")?.extract::<String>()?;
+            DType::parse(&name).ok_or_else(|| {
+                PyTypeError::new_err(format!("maximum_fill_value: unsupported dtype {name}"))
+            })?
+        }
+    };
+
+    maximum_fill_value_for_supported_dtype(py, parsed_dtype)
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, rcond=None, hermitian=false, **kwargs))]
 fn pinv(
@@ -4506,6 +4580,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(trim_zeros, m)?)?;
     m.add_function(wrap_pyfunction!(masked_invalid, m)?)?;
     m.add_function(wrap_pyfunction!(minimum_fill_value, m)?)?;
+    m.add_function(wrap_pyfunction!(maximum_fill_value, m)?)?;
     m.add_function(wrap_pyfunction!(pinv, m)?)?;
     m.add_function(wrap_pyfunction!(eigvals, m)?)?;
     m.add_function(wrap_pyfunction!(slogdet, m)?)?;
@@ -4793,6 +4868,7 @@ mod tests {
             assert!(module.getattr("trim_zeros").is_ok());
             assert!(module.getattr("masked_invalid").is_ok());
             assert!(module.getattr("minimum_fill_value").is_ok());
+            assert!(module.getattr("maximum_fill_value").is_ok());
             assert!(module.getattr("pinv").is_ok());
             assert!(module.getattr("eigvals").is_ok());
             assert!(module.getattr("rfft").is_ok());
@@ -8334,6 +8410,104 @@ mod tests {
             let actual_dtype = minimum_fill_value_fn.call1((dtype_input.clone(),))?;
             let expected_dtype = numpy_minimum_fill_value.call1((dtype_input,))?;
             assert_eq!(repr_string(&actual_dtype), repr_string(&expected_dtype));
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn maximum_fill_value_matches_numpy_across_dtypes() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let maximum_fill_value_fn = module.getattr("maximum_fill_value")?;
+            let numpy = py.import("numpy")?;
+            let numpy_maximum_fill_value = numpy.getattr("ma")?.getattr("maximum_fill_value")?;
+
+            // Array inputs across numeric/boolean/complex/datetime dtypes.
+            let float_arr = numeric_array(py, vec![1.0_f64, 2.0_f64], "float64");
+            assert_eq!(
+                repr_string(&maximum_fill_value_fn.call1((float_arr.clone(),))?),
+                repr_string(&numpy_maximum_fill_value.call1((float_arr.clone(),))?)
+            );
+
+            let int_arr = numeric_array(py, vec![1_i32, -2_i32], "int32");
+            assert_eq!(
+                repr_string(&maximum_fill_value_fn.call1((int_arr.clone(),))?),
+                repr_string(&numpy_maximum_fill_value.call1((int_arr.clone(),))?)
+            );
+
+            let uint_arr = numeric_array(py, vec![0_u64, 1_u64, 2_u64], "uint64");
+            assert_eq!(
+                repr_string(&maximum_fill_value_fn.call1((uint_arr.clone(),))?),
+                repr_string(&numpy_maximum_fill_value.call1((uint_arr.clone(),))?)
+            );
+
+            let bool_arr = numeric_array(py, vec![true, false], "bool");
+            assert_eq!(
+                repr_string(&maximum_fill_value_fn.call1((bool_arr.clone(),))?),
+                repr_string(&numpy_maximum_fill_value.call1((bool_arr.clone(),))?)
+            );
+
+            let builtins = py.import("builtins")?;
+            let complex_arr = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [builtins.getattr("complex")?.call1((1.0_f64, 2.0_f64))?],
+                )?,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", "complex128")?;
+                    kwargs
+                }),
+            )?;
+            assert_eq!(
+                repr_string(&maximum_fill_value_fn.call1((complex_arr.clone(),))?),
+                repr_string(&numpy_maximum_fill_value.call1((complex_arr.clone(),))?)
+            );
+
+            // Masked array input — dtype comes from the wrapped ndarray.
+            let masked_input = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![1.0_f64, 2.0_f64],),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("mask", vec![false, true])?;
+                    kwargs
+                }),
+            )?;
+            assert_eq!(
+                repr_string(&maximum_fill_value_fn.call1((masked_input.clone(),))?),
+                repr_string(&numpy_maximum_fill_value.call1((masked_input.clone(),))?)
+            );
+
+            // Standalone np.dtype — ma.maximum_fill_value also accepts a dtype.
+            let dtype_obj = numpy.getattr("dtype")?.call1(("float32",))?;
+            assert_eq!(
+                repr_string(&maximum_fill_value_fn.call1((dtype_obj.clone(),))?),
+                repr_string(&numpy_maximum_fill_value.call1((dtype_obj.clone(),))?)
+            );
+
+            // datetime / timedelta must use -i64::MAX (one past NaT).
+            let datetime_arr = numpy.call_method(
+                "array",
+                (PyList::new(
+                    py,
+                    [numpy.getattr("datetime64")?.call1(("2020-01-01",))?],
+                )?,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("dtype", "datetime64[D]")?;
+                    kwargs
+                }),
+            )?;
+            assert_eq!(
+                repr_string(&maximum_fill_value_fn.call1((datetime_arr.clone(),))?),
+                repr_string(&numpy_maximum_fill_value.call1((datetime_arr.clone(),))?)
+            );
 
             Ok(())
         });
