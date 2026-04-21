@@ -4311,6 +4311,29 @@ fn masked_greater_equal(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, b, axes=None))]
+fn tensordot(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    b: Py<PyAny>,
+    axes: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.tensordot. The `axes` argument accepts an int
+    // (sum-over-last-N-axes-of-a vs first-N-of-b) or a 2-tuple of axis
+    // sequences (explicit per-side contraction); both forms forward
+    // unchanged to numpy. Default axes=2 matches numpy's signature.
+    let numpy = py.import("numpy")?;
+    let tensordot_fn = numpy.getattr("tensordot")?;
+    let axes_arg = match axes {
+        Some(value) => value.bind(py).clone(),
+        None => 2_i64.into_pyobject(py)?.into_any(),
+    };
+    Ok(tensordot_fn
+        .call1((a.bind(py), b.bind(py), axes_arg))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, b, axisa=-1, axisb=-1, axisc=-1, axis=None))]
 fn cross(
     py: Python<'_>,
@@ -5054,6 +5077,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(vdot, m)?)?;
     m.add_function(wrap_pyfunction!(masked_inside, m)?)?;
     m.add_function(wrap_pyfunction!(masked_greater_equal, m)?)?;
+    m.add_function(wrap_pyfunction!(tensordot, m)?)?;
     m.add_function(wrap_pyfunction!(cross, m)?)?;
     m.add_function(wrap_pyfunction!(multi_dot, m)?)?;
     m.add_function(wrap_pyfunction!(masked_values, m)?)?;
@@ -5307,6 +5331,7 @@ mod tests {
             assert!(module.getattr("vdot").is_ok());
             assert!(module.getattr("masked_inside").is_ok());
             assert!(module.getattr("masked_greater_equal").is_ok());
+            assert!(module.getattr("tensordot").is_ok());
             assert!(module.getattr("cross").is_ok());
             assert!(module.getattr("multi_dot").is_ok());
             assert!(module.getattr("masked_values").is_ok());
@@ -16518,6 +16543,161 @@ mod tests {
                     ))?
                     .extract::<bool>()?,
                 "cross complex diverged"
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn tensordot_matches_numpy_across_axes_specs_and_complex() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let tensordot_fn = module.getattr("tensordot")?;
+            let numpy = py.import("numpy")?;
+            let numpy_tensordot = numpy.getattr("tensordot")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Default axes=2 — contract last 2 of a with first 2 of b.
+            let a = numpy
+                .getattr("arange")?
+                .call1((24_i64,))?
+                .call_method1("reshape", (2_i64, 3_i64, 4_i64))?
+                .call_method1("astype", ("float64",))?;
+            let b = numpy
+                .getattr("arange")?
+                .call1((60_i64,))?
+                .call_method1("reshape", (3_i64, 4_i64, 5_i64))?
+                .call_method1("astype", ("float64",))?;
+            assert!(
+                allclose
+                    .call1((
+                        &tensordot_fn.call1((a.clone(), b.clone()))?,
+                        &numpy_tensordot.call1((a.clone(), b.clone()))?,
+                    ))?
+                    .extract::<bool>()?,
+                "tensordot default axes=2 diverged"
+            );
+
+            // axes=1 — equivalent to standard matmul on last/first axes.
+            let m1 = numpy
+                .getattr("arange")?
+                .call1((6_i64,))?
+                .call_method1("reshape", (2_i64, 3_i64))?
+                .call_method1("astype", ("float64",))?;
+            let m2 = numpy
+                .getattr("arange")?
+                .call1((12_i64,))?
+                .call_method1("reshape", (3_i64, 4_i64))?
+                .call_method1("astype", ("float64",))?;
+            let kw1 = PyDict::new(py);
+            kw1.set_item("axes", 1_i64)?;
+            let kw1n = PyDict::new(py);
+            kw1n.set_item("axes", 1_i64)?;
+            assert!(
+                allclose
+                    .call1((
+                        &tensordot_fn.call((m1.clone(), m2.clone()), Some(&kw1))?,
+                        &numpy_tensordot.call((m1.clone(), m2.clone()), Some(&kw1n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "tensordot axes=1 diverged"
+            );
+
+            // axes=0 — outer product of all elements.
+            let v1 = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0],))?;
+            let v2 = numpy.getattr("array")?.call1((vec![3.0_f64, 4.0, 5.0],))?;
+            let kw0 = PyDict::new(py);
+            kw0.set_item("axes", 0_i64)?;
+            let kw0n = PyDict::new(py);
+            kw0n.set_item("axes", 0_i64)?;
+            assert!(
+                allclose
+                    .call1((
+                        &tensordot_fn.call((v1.clone(), v2.clone()), Some(&kw0))?,
+                        &numpy_tensordot.call((v1.clone(), v2.clone()), Some(&kw0n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "tensordot axes=0 outer diverged"
+            );
+
+            // 2-tuple of axis sequences — explicit per-side contraction.
+            let axes_kw = PyDict::new(py);
+            axes_kw.set_item(
+                "axes",
+                PyTuple::new(
+                    py,
+                    [PyList::new(py, [1_i64])?, PyList::new(py, [0_i64])?],
+                )?,
+            )?;
+            let axes_kw_n = PyDict::new(py);
+            axes_kw_n.set_item(
+                "axes",
+                PyTuple::new(
+                    py,
+                    [PyList::new(py, [1_i64])?, PyList::new(py, [0_i64])?],
+                )?,
+            )?;
+            assert!(
+                allclose
+                    .call1((
+                        &tensordot_fn.call((m1.clone(), m2.clone()), Some(&axes_kw))?,
+                        &numpy_tensordot.call((m1.clone(), m2.clone()), Some(&axes_kw_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "tensordot 2-tuple axes diverged"
+            );
+
+            // Complex tensordot.
+            let builtins = py.import("builtins")?;
+            let complex_a = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        builtins.getattr("complex")?.call1((1.0_f64, 1.0_f64))?,
+                        builtins.getattr("complex")?.call1((2.0_f64, 0.0_f64))?,
+                    ],
+                )?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "complex128")?;
+                    kw
+                }),
+            )?;
+            let complex_b = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        builtins.getattr("complex")?.call1((0.0_f64, 1.0_f64))?,
+                        builtins.getattr("complex")?.call1((1.0_f64, -1.0_f64))?,
+                    ],
+                )?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "complex128")?;
+                    kw
+                }),
+            )?;
+            let kwc = PyDict::new(py);
+            kwc.set_item("axes", 1_i64)?;
+            let kwcn = PyDict::new(py);
+            kwcn.set_item("axes", 1_i64)?;
+            assert!(
+                allclose
+                    .call1((
+                        &tensordot_fn.call((complex_a.clone(), complex_b.clone()), Some(&kwc))?,
+                        &numpy_tensordot.call(
+                            (complex_a.clone(), complex_b.clone()),
+                            Some(&kwcn),
+                        )?,
+                    ))?
+                    .extract::<bool>()?,
+                "tensordot complex axes=1 diverged"
             );
 
             Ok(())
