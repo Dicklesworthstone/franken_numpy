@@ -3250,6 +3250,28 @@ fn clip(
         .unbind())
 }
 
+#[pyfunction]
+#[pyo3(signature = (a, repeats, axis=None))]
+fn repeat(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    repeats: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Delegate to NumPy so scalar and per-element repeat counts,
+    // flattened default behavior, axis-aware expansion, and zero-count
+    // segments all match exactly.
+    let numpy = py.import("numpy")?;
+    let repeat_fn = numpy.getattr("repeat")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis) = axis {
+        kwargs.set_item("axis", axis.bind(py))?;
+    }
+    Ok(repeat_fn
+        .call((a.bind(py), repeats.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
 #[allow(dead_code)]
 fn validate_trim_zeros_mode(trim: &str) -> PyResult<()> {
     if trim.is_empty() || trim.chars().any(|ch| ch != 'f' && ch != 'b') {
@@ -7861,6 +7883,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(broadcast_to, m)?)?;
     m.add_function(wrap_pyfunction!(broadcast_arrays, m)?)?;
     m.add_function(wrap_pyfunction!(clip, m)?)?;
+    m.add_function(wrap_pyfunction!(repeat, m)?)?;
     m.add_function(wrap_pyfunction!(structured_to_unstructured, m)?)?;
     m.add_function(wrap_pyfunction!(trim_zeros, m)?)?;
     m.add_function(wrap_pyfunction!(masked_invalid, m)?)?;
@@ -8341,6 +8364,7 @@ mod tests {
             assert!(module.getattr("broadcast_to").is_ok());
             assert!(module.getattr("broadcast_arrays").is_ok());
             assert!(module.getattr("clip").is_ok());
+            assert!(module.getattr("repeat").is_ok());
             assert!(module.getattr("structured_to_unstructured").is_ok());
             assert!(module.getattr("trim_zeros").is_ok());
             assert!(module.getattr("masked_invalid").is_ok());
@@ -13177,6 +13201,72 @@ mod tests {
             assert_array_matches_numpy(
                 &clip_fn.call1((nan_values.clone(), -1.0_f64, 3.0_f64))?,
                 &numpy_clip.call1((nan_values.clone(), -1.0_f64, 3.0_f64))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn repeat_matches_numpy_across_scalar_repeat_vector_axes_zero_segments_and_scalar_input() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let repeat_fn = module.getattr("repeat")?;
+            let numpy = py.import("numpy")?;
+            let numpy_repeat = numpy.getattr("repeat")?;
+
+            // Scalar repeat count with the flattened default behavior.
+            let values = numeric_array(py, vec![1_i64, 2, 3], "int64");
+            assert_array_matches_numpy(
+                &repeat_fn.call1((values.clone(), 2_i64))?,
+                &numpy_repeat.call1((values.clone(), 2_i64))?,
+            )?;
+
+            // Per-element repeat vector, including zero-length segments.
+            assert_array_matches_numpy(
+                &repeat_fn.call1((values.clone(), vec![1_i64, 0, 3]))?,
+                &numpy_repeat.call1((values.clone(), vec![1_i64, 0, 3]))?,
+            )?;
+
+            let matrix = numpy.getattr("array")?.call1((vec![
+                vec![1_i64, 2],
+                vec![3_i64, 4],
+                vec![5_i64, 6],
+            ],))?;
+
+            // Axis=0 repeats whole rows.
+            let axis0_kwargs = PyDict::new(py);
+            axis0_kwargs.set_item("axis", 0_i64)?;
+            assert_array_matches_numpy(
+                &repeat_fn.call((matrix.clone(), 2_i64), Some(&axis0_kwargs))?,
+                &numpy_repeat.call((matrix.clone(), 2_i64), Some(&axis0_kwargs))?,
+            )?;
+
+            // Axis=1 repeats columns with a per-column repeat vector.
+            let axis1_kwargs = PyDict::new(py);
+            axis1_kwargs.set_item("axis", 1_i64)?;
+            assert_array_matches_numpy(
+                &repeat_fn.call((matrix.clone(), vec![2_i64, 1]), Some(&axis1_kwargs))?,
+                &numpy_repeat.call((matrix.clone(), vec![2_i64, 1]), Some(&axis1_kwargs))?,
+            )?;
+
+            // Zero-repeat rows collapse to empty segments along the axis.
+            let zero_axis_kwargs = PyDict::new(py);
+            zero_axis_kwargs.set_item("axis", 0_i64)?;
+            assert_array_matches_numpy(
+                &repeat_fn.call((matrix.clone(), vec![0_i64, 2, 0]), Some(&zero_axis_kwargs))?,
+                &numpy_repeat.call((matrix.clone(), vec![0_i64, 2, 0]), Some(&zero_axis_kwargs))?,
+            )?;
+
+            // Scalar input parity.
+            assert_array_matches_numpy(
+                &repeat_fn.call1((7_i64, 4_i64))?,
+                &numpy_repeat.call1((7_i64, 4_i64))?,
             )?;
 
             Ok(())
