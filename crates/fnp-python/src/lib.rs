@@ -4666,6 +4666,30 @@ fn put(py: Python<'_>, a: Py<PyAny>, ind: Py<PyAny>, v: Py<PyAny>) -> PyResult<P
 }
 
 #[pyfunction]
+#[pyo3(signature = (dst, src, casting="same_kind", r#where=None))]
+fn copyto(
+    py: Python<'_>,
+    dst: Py<PyAny>,
+    src: Py<PyAny>,
+    casting: &str,
+    r#where: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Delegate to NumPy so in-place broadcasted writes, boolean-mask
+    // selection, casting policy checks, and shape-mismatch errors stay
+    // exactly aligned with numpy.
+    let numpy = py.import("numpy")?;
+    let copyto_fn = numpy.getattr("copyto")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("casting", casting)?;
+    if let Some(where_val) = r#where {
+        kwargs.set_item("where", where_val.bind(py))?;
+    }
+    Ok(copyto_fn
+        .call((dst.bind(py), src.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 fn place(py: Python<'_>, arr: Py<PyAny>, mask: Py<PyAny>, vals: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let arr = arr.bind(py);
     require_numpy_ndarray(py, arr, "place")?;
@@ -8227,6 +8251,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(dstack, m)?)?;
     m.add_function(wrap_pyfunction!(column_stack, m)?)?;
     m.add_function(wrap_pyfunction!(put, m)?)?;
+    m.add_function(wrap_pyfunction!(copyto, m)?)?;
     m.add_function(wrap_pyfunction!(place, m)?)?;
     m.add_function(wrap_pyfunction!(putmask, m)?)?;
     m.add_function(wrap_pyfunction!(indices, m)?)?;
@@ -8812,6 +8837,7 @@ mod tests {
             assert!(module.getattr("dstack").is_ok());
             assert!(module.getattr("column_stack").is_ok());
             assert!(module.getattr("put").is_ok());
+            assert!(module.getattr("copyto").is_ok());
             assert!(module.getattr("place").is_ok());
             assert!(module.getattr("putmask").is_ok());
             assert!(module.getattr("indices").is_ok());
@@ -16112,6 +16138,134 @@ mod tests {
                 repr_string(&arr.call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn copyto_matches_numpy_across_plain_broadcast_where_casting_and_errors() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let copyto_fn = module.getattr("copyto")?;
+            let numpy = py.import("numpy")?;
+            let numpy_copyto = numpy.getattr("copyto")?;
+
+            // Plain in-place copy returns None and mutates the destination.
+            let dst = numeric_array(py, vec![0_i64, 0, 0], "int64");
+            let expected_dst = numeric_array(py, vec![0_i64, 0, 0], "int64");
+            let src = numeric_array(py, vec![4_i64, 5, 6], "int64");
+            let actual = copyto_fn.call1((dst.clone(), src.clone()))?;
+            let expected = numpy_copyto.call1((expected_dst.clone(), src.clone()))?;
+            assert!(actual.is_none());
+            assert!(expected.is_none());
+            assert_array_matches_numpy(&dst, &expected_dst)?;
+
+            // Broadcasted sources should fill the destination exactly as NumPy does.
+            let broadcast_dst = numpy
+                .getattr("array")?
+                .call1((vec![vec![0_i64, 0, 0], vec![0_i64, 0, 0]],))?;
+            let broadcast_expected = numpy
+                .getattr("array")?
+                .call1((vec![vec![0_i64, 0, 0], vec![0_i64, 0, 0]],))?;
+            let broadcast_src = numeric_array(py, vec![7_i64, 8, 9], "int64");
+            copyto_fn.call1((broadcast_dst.clone(), broadcast_src.clone()))?;
+            numpy_copyto.call1((broadcast_expected.clone(), broadcast_src.clone()))?;
+            assert_array_matches_numpy(&broadcast_dst, &broadcast_expected)?;
+
+            // where= masks gate writes elementwise.
+            let masked_dst = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2, 3], vec![4_i64, 5, 6]],))?;
+            let masked_expected = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2, 3], vec![4_i64, 5, 6]],))?;
+            let masked_src = numpy
+                .getattr("array")?
+                .call1((vec![vec![10_i64, 20, 30], vec![40_i64, 50, 60]],))?;
+            let mask = numpy
+                .getattr("array")?
+                .call1((vec![vec![true, false, true], vec![false, true, false]],))?;
+            copyto_fn.call(
+                (masked_dst.clone(), masked_src.clone()),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("where", mask.clone())?;
+                    kw
+                }),
+            )?;
+            numpy_copyto.call(
+                (masked_expected.clone(), masked_src.clone()),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("where", mask.clone())?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&masked_dst, &masked_expected)?;
+
+            // Float-to-int writes require casting="unsafe".
+            let unsafe_dst = numeric_array(py, vec![0_i64, 0, 0], "int64");
+            let unsafe_expected = numeric_array(py, vec![0_i64, 0, 0], "int64");
+            let float_src = numpy
+                .getattr("array")?
+                .call1((vec![1.25_f64, 2.75, 3.5],))?;
+            copyto_fn.call(
+                (unsafe_dst.clone(), float_src.clone()),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("casting", "unsafe")?;
+                    kw
+                }),
+            )?;
+            numpy_copyto.call(
+                (unsafe_expected.clone(), float_src.clone()),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("casting", "unsafe")?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&unsafe_dst, &unsafe_expected)?;
+            assert_eq!(
+                unsafe_dst.getattr("dtype")?.str()?.extract::<String>()?,
+                unsafe_expected
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?
+            );
+
+            // The default same_kind policy must reject float-to-int copies.
+            let same_kind_dst = numeric_array(py, vec![0_i64, 0, 0], "int64");
+            let expected_same_kind_dst = numeric_array(py, vec![0_i64, 0, 0], "int64");
+            let actual_cast_err = copyto_fn
+                .call1((same_kind_dst.clone(), float_src.clone()))
+                .unwrap_err();
+            let expected_cast_err = numpy_copyto
+                .call1((expected_same_kind_dst.clone(), float_src.clone()))
+                .unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_cast_err, expected_cast_err)?;
+
+            // Incompatible broadcast shapes must raise NumPy's exact error surface.
+            let bad_dst = numpy
+                .getattr("array")?
+                .call1((vec![vec![0_i64, 0], vec![0_i64, 0]],))?;
+            let bad_expected = numpy
+                .getattr("array")?
+                .call1((vec![vec![0_i64, 0], vec![0_i64, 0]],))?;
+            let bad_src = numeric_array(py, vec![1_i64, 2, 3], "int64");
+            let actual_shape_err = copyto_fn
+                .call1((bad_dst.clone(), bad_src.clone()))
+                .unwrap_err();
+            let expected_shape_err = numpy_copyto
+                .call1((bad_expected.clone(), bad_src.clone()))
+                .unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_shape_err, expected_shape_err)?;
+
             Ok(())
         });
     }
