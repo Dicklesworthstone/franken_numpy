@@ -4221,6 +4221,27 @@ fn masked_where(
 }
 
 #[pyfunction]
+#[pyo3(signature = (x, value, copy=true))]
+fn masked_equal(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    value: Py<PyAny>,
+    copy: bool,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.ma.masked_equal so equality-based masking semantics
+    // (including structured dtypes and NaN handling that follows np.ma
+    // conventions), copy flag forwarding, and the MaskedArray return type
+    // match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let masked_equal_fn = numpy.getattr("ma")?.getattr("masked_equal")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("copy", copy)?;
+    Ok(masked_equal_fn
+        .call((x.bind(py), value.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x, p=None))]
 fn cond(py: Python<'_>, x: Py<PyAny>, p: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.linalg.cond so the seven valid p values
@@ -4743,6 +4764,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(indices, m)?)?;
     m.add_function(wrap_pyfunction!(tri, m)?)?;
     m.add_function(wrap_pyfunction!(masked_where, m)?)?;
+    m.add_function(wrap_pyfunction!(masked_equal, m)?)?;
     m.add_function(wrap_pyfunction!(cond, m)?)?;
     m.add_function(wrap_pyfunction!(norm, m)?)?;
     m.add_function(wrap_pyfunction!(fftshift, m)?)?;
@@ -4980,6 +5002,7 @@ mod tests {
             assert!(module.getattr("pinv").is_ok());
             assert!(module.getattr("eigvals").is_ok());
             assert!(module.getattr("masked_where").is_ok());
+            assert!(module.getattr("masked_equal").is_ok());
             assert!(module.getattr("cond").is_ok());
             assert!(module.getattr("norm").is_ok());
             assert!(module.getattr("fftshift").is_ok());
@@ -14474,6 +14497,100 @@ mod tests {
             assert!(
                 err_d.is_instance_of::<pyo3::exceptions::PyZeroDivisionError>(py),
                 "fftfreq(..., d=0) must raise ZeroDivisionError"
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn masked_equal_matches_numpy_across_dtypes_and_copy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let masked_equal_fn = module.getattr("masked_equal")?;
+            let numpy = py.import("numpy")?;
+            let numpy_masked_equal = numpy.getattr("ma")?.getattr("masked_equal")?;
+
+            // Integer data with integer sentinel.
+            let int_data = numpy.getattr("array")?.call(
+                (vec![1_i64, 2, 3, 2, 5],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "int64")?;
+                    kw
+                }),
+            )?;
+            let actual_i = masked_equal_fn.call1((int_data.clone(), 2_i64))?;
+            let expected_i = numpy_masked_equal.call1((int_data.clone(), 2_i64))?;
+            assert_eq!(repr_string(&actual_i), repr_string(&expected_i));
+
+            // Float data with integer sentinel.
+            let float_data = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 2.0, 3.0, 2.0, 5.0],))?;
+            let actual_f = masked_equal_fn.call1((float_data.clone(), 2_i64))?;
+            let expected_f = numpy_masked_equal.call1((float_data.clone(), 2_i64))?;
+            assert_eq!(repr_string(&actual_f), repr_string(&expected_f));
+
+            // No matches — nothing masked.
+            let actual_none = masked_equal_fn.call1((int_data.clone(), 99_i64))?;
+            let expected_none = numpy_masked_equal.call1((int_data.clone(), 99_i64))?;
+            assert_eq!(repr_string(&actual_none), repr_string(&expected_none));
+
+            // All matches — everything masked.
+            let uniform = numpy.getattr("array")?.call(
+                (vec![7_i64, 7, 7, 7],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "int64")?;
+                    kw
+                }),
+            )?;
+            let actual_all = masked_equal_fn.call1((uniform.clone(), 7_i64))?;
+            let expected_all = numpy_masked_equal.call1((uniform.clone(), 7_i64))?;
+            assert_eq!(repr_string(&actual_all), repr_string(&expected_all));
+
+            // 2-D input.
+            let data_2d = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1_i64, 0, 1])?,
+                    PyList::new(py, [0_i64, 1, 0])?,
+                ],
+            )?,))?;
+            let actual_2d = masked_equal_fn.call1((data_2d.clone(), 0_i64))?;
+            let expected_2d = numpy_masked_equal.call1((data_2d.clone(), 0_i64))?;
+            assert_eq!(repr_string(&actual_2d), repr_string(&expected_2d));
+
+            // Boolean data.
+            let bool_data = numpy
+                .getattr("array")?
+                .call1((vec![true, false, true, false],))?;
+            let actual_b = masked_equal_fn.call1((bool_data.clone(), false))?;
+            let expected_b = numpy_masked_equal.call1((bool_data.clone(), false))?;
+            assert_eq!(repr_string(&actual_b), repr_string(&expected_b));
+
+            // copy=False forwarded.
+            let copy_kwargs = PyDict::new(py);
+            copy_kwargs.set_item("copy", false)?;
+            let copy_kwargs_n = PyDict::new(py);
+            copy_kwargs_n.set_item("copy", false)?;
+            let actual_nocopy = masked_equal_fn.call(
+                (int_data.clone(), 2_i64),
+                Some(&copy_kwargs),
+            )?;
+            let expected_nocopy = numpy_masked_equal.call(
+                (int_data.clone(), 2_i64),
+                Some(&copy_kwargs_n),
+            )?;
+            assert_eq!(
+                repr_string(&actual_nocopy),
+                repr_string(&expected_nocopy)
             );
 
             Ok(())
