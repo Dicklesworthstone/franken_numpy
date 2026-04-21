@@ -16691,4 +16691,140 @@ mod tests {
             Ok(())
         });
     }
+
+    #[test]
+    fn eigh_matches_numpy_namedtuple_across_uplo_batched_and_complex() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let eigh_fn = module.getattr("eigh")?;
+            let numpy = py.import("numpy")?;
+            let numpy_eigh = numpy.getattr("linalg")?.getattr("eigh")?;
+            let allclose = numpy.getattr("allclose")?;
+            let abs_fn = numpy.getattr("abs")?;
+
+            // Compare eigenvalues exactly via allclose; compare eigenvector
+            // matrices via abs() then allclose since the sign of an
+            // eigenvector column is non-deterministic across LAPACK builds.
+            let assert_eigh_close = |actual: &Bound<'_, PyAny>,
+                                     expected: &Bound<'_, PyAny>|
+             -> PyResult<()> {
+                let a_vals = actual.getattr("eigenvalues")?;
+                let e_vals = expected.getattr("eigenvalues")?;
+                assert!(
+                    allclose.call1((&a_vals, &e_vals))?.extract::<bool>()?,
+                    "eigh eigenvalues diverged"
+                );
+                let a_vecs = abs_fn.call1((actual.getattr("eigenvectors")?,))?;
+                let e_vecs = abs_fn.call1((expected.getattr("eigenvectors")?,))?;
+                assert!(
+                    allclose.call1((&a_vecs, &e_vecs))?.extract::<bool>()?,
+                    "eigh |eigenvectors| diverged"
+                );
+                Ok(())
+            };
+
+            // Real symmetric 2x2.
+            let spd = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [2.0_f64, 1.0])?,
+                    PyList::new(py, [1.0_f64, 2.0])?,
+                ],
+            )?,))?;
+            assert_eigh_close(
+                &eigh_fn.call1((spd.clone(),))?,
+                &numpy_eigh.call1((spd.clone(),))?,
+            )?;
+
+            // Symmetric 3x3 with explicit UPLO='U'.
+            let sym3 = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [4.0_f64, 1.0, 0.0])?,
+                    PyList::new(py, [1.0_f64, 3.0, 2.0])?,
+                    PyList::new(py, [0.0_f64, 2.0, 5.0])?,
+                ],
+            )?,))?;
+            let kw_u = PyDict::new(py);
+            kw_u.set_item("UPLO", "U")?;
+            let kw_u_n = PyDict::new(py);
+            kw_u_n.set_item("UPLO", "U")?;
+            assert_eigh_close(
+                &eigh_fn.call((sym3.clone(),), Some(&kw_u))?,
+                &numpy_eigh.call((sym3.clone(),), Some(&kw_u_n))?,
+            )?;
+
+            // Identity — eigenvalues all 1, eigenvectors form the identity.
+            let eye = numpy.getattr("eye")?.call1((4_i64,))?;
+            assert_eigh_close(
+                &eigh_fn.call1((eye.clone(),))?,
+                &numpy_eigh.call1((eye.clone(),))?,
+            )?;
+
+            // Batched stack of two 2x2 symmetric matrices.
+            let batched = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(
+                        py,
+                        [
+                            PyList::new(py, [2.0_f64, 0.0])?,
+                            PyList::new(py, [0.0_f64, 3.0])?,
+                        ],
+                    )?,
+                    PyList::new(
+                        py,
+                        [
+                            PyList::new(py, [5.0_f64, 1.0])?,
+                            PyList::new(py, [1.0_f64, 4.0])?,
+                        ],
+                    )?,
+                ],
+            )?,))?;
+            assert_eigh_close(
+                &eigh_fn.call1((batched.clone(),))?,
+                &numpy_eigh.call1((batched.clone(),))?,
+            )?;
+
+            // Complex Hermitian 2x2 — eigenvalues are real, eigenvectors complex.
+            let builtins = py.import("builtins")?;
+            let hermitian = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        PyList::new(
+                            py,
+                            [
+                                builtins.getattr("complex")?.call1((2.0_f64, 0.0_f64))?,
+                                builtins.getattr("complex")?.call1((1.0_f64, -1.0_f64))?,
+                            ],
+                        )?,
+                        PyList::new(
+                            py,
+                            [
+                                builtins.getattr("complex")?.call1((1.0_f64, 1.0_f64))?,
+                                builtins.getattr("complex")?.call1((3.0_f64, 0.0_f64))?,
+                            ],
+                        )?,
+                    ],
+                )?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "complex128")?;
+                    kw
+                }),
+            )?;
+            assert_eigh_close(
+                &eigh_fn.call1((hermitian.clone(),))?,
+                &numpy_eigh.call1((hermitian.clone(),))?,
+            )?;
+
+            Ok(())
+        });
+    }
 }
