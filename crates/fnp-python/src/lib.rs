@@ -4237,6 +4237,33 @@ fn masked_equal(py: Python<'_>, x: Py<PyAny>, value: Py<PyAny>, copy: bool) -> P
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, b))]
+fn vdot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.vdot so the conjugate-of-first-arg semantics
+    // (essential for complex inputs), input flattening, and scalar-typed
+    // return all match numpy exactly across real, complex, integer, and
+    // n-D inputs.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("vdot")?
+        .call1((a.bind(py), b.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, b))]
+fn inner(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.inner so scalar-vs-array return typing, last-axis
+    // contraction semantics, integer overflow behavior, and mismatch error
+    // text all match numpy exactly.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("inner")?
+        .call1((a.bind(py), b.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, b, out=None))]
 fn outer(
     py: Python<'_>,
@@ -4817,6 +4844,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tri, m)?)?;
     m.add_function(wrap_pyfunction!(masked_where, m)?)?;
     m.add_function(wrap_pyfunction!(masked_equal, m)?)?;
+    m.add_function(wrap_pyfunction!(vdot, m)?)?;
+    m.add_function(wrap_pyfunction!(inner, m)?)?;
     m.add_function(wrap_pyfunction!(outer, m)?)?;
     m.add_function(wrap_pyfunction!(masked_less, m)?)?;
     m.add_function(wrap_pyfunction!(masked_greater, m)?)?;
@@ -5058,6 +5087,8 @@ mod tests {
             assert!(module.getattr("eigvals").is_ok());
             assert!(module.getattr("masked_where").is_ok());
             assert!(module.getattr("masked_equal").is_ok());
+            assert!(module.getattr("vdot").is_ok());
+            assert!(module.getattr("inner").is_ok());
             assert!(module.getattr("outer").is_ok());
             assert!(module.getattr("masked_less").is_ok());
             assert!(module.getattr("masked_greater").is_ok());
@@ -14802,18 +14833,11 @@ mod tests {
             copy_kwargs.set_item("copy", false)?;
             let copy_kwargs_n = PyDict::new(py);
             copy_kwargs_n.set_item("copy", false)?;
-            let actual_nocopy = masked_less_fn.call(
-                (int_data.clone(), 3_i64),
-                Some(&copy_kwargs),
-            )?;
-            let expected_nocopy = numpy_masked_less.call(
-                (int_data.clone(), 3_i64),
-                Some(&copy_kwargs_n),
-            )?;
-            assert_eq!(
-                repr_string(&actual_nocopy),
-                repr_string(&expected_nocopy)
-            );
+            let actual_nocopy =
+                masked_less_fn.call((int_data.clone(), 3_i64), Some(&copy_kwargs))?;
+            let expected_nocopy =
+                numpy_masked_less.call((int_data.clone(), 3_i64), Some(&copy_kwargs_n))?;
+            assert_eq!(repr_string(&actual_nocopy), repr_string(&expected_nocopy));
 
             Ok(())
         });
@@ -14947,7 +14971,9 @@ mod tests {
             );
 
             // out= kwarg writes into a pre-allocated array of correct shape.
-            let out_buf = numpy.getattr("zeros")?.call1((PyTuple::new(py, [3_i64, 2_i64])?,))?;
+            let out_buf = numpy
+                .getattr("zeros")?
+                .call1((PyTuple::new(py, [3_i64, 2_i64])?,))?;
             let out_kwargs = PyDict::new(py);
             out_kwargs.set_item("out", out_buf.clone())?;
             let returned = outer_fn.call((a.clone(), b.clone()), Some(&out_kwargs))?;
@@ -14958,6 +14984,235 @@ mod tests {
                     .call1((&returned, &expected_out))?
                     .extract::<bool>()?,
                 "outer out= diverged"
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn inner_matches_numpy_across_scalars_nd_uint64_and_error_surface() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let inner_fn = module.getattr("inner")?;
+            let numpy = py.import("numpy")?;
+            let numpy_inner = numpy.getattr("inner")?;
+
+            // 1-D integer inputs return a NumPy scalar, not a 0-D ndarray.
+            let a_1d = numpy.getattr("array")?.call(
+                (vec![1_i64, 2, 3],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "int64")?;
+                    kw
+                }),
+            )?;
+            let b_1d = numpy.getattr("array")?.call(
+                (vec![4_i64, 5, 6],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "int64")?;
+                    kw
+                }),
+            )?;
+            let actual_scalar = inner_fn.call1((a_1d.clone(), b_1d.clone()))?;
+            let expected_scalar = numpy_inner.call1((a_1d.clone(), b_1d.clone()))?;
+            assert_eq!(repr_string(&actual_scalar), repr_string(&expected_scalar));
+
+            // Boolean inputs also return a NumPy scalar bool for 1-D inputs.
+            let bool_a = numpy.getattr("array")?.call1((vec![true, false, true],))?;
+            let bool_b = numpy.getattr("array")?.call1((vec![true, true, false],))?;
+            let actual_bool = inner_fn.call1((bool_a.clone(), bool_b.clone()))?;
+            let expected_bool = numpy_inner.call1((bool_a.clone(), bool_b.clone()))?;
+            assert_eq!(repr_string(&actual_bool), repr_string(&expected_bool));
+
+            // 2-D x 1-D contracts over the last axis and returns a 1-D array.
+            let a_2d = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1_i64, 2, 3])?,
+                    PyList::new(py, [4_i64, 5, 6])?,
+                ],
+            )?,))?;
+            let basis = numpy.getattr("array")?.call1((vec![1_i64, 1, 1],))?;
+            let actual_2d = inner_fn.call1((a_2d.clone(), basis.clone()))?;
+            let expected_2d = numpy_inner.call1((a_2d.clone(), basis.clone()))?;
+            assert_array_matches_numpy(&actual_2d, &expected_2d)?;
+
+            // 2-D x 2-D contracts over the last axis of both arguments.
+            let b_2d = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [PyList::new(py, [1_i64, 2])?, PyList::new(py, [3_i64, 4])?],
+            )?,))?;
+            let actual_nd = inner_fn.call1((b_2d.clone(), b_2d.clone()))?;
+            let expected_nd = numpy_inner.call1((b_2d.clone(), b_2d.clone()))?;
+            assert_array_matches_numpy(&actual_nd, &expected_nd)?;
+
+            // Unsigned integer overflow behavior must match NumPy exactly.
+            let big_u = numpy.getattr("array")?.call(
+                (vec![1_u64 << 63],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "uint64")?;
+                    kw
+                }),
+            )?;
+            let two_u = numpy.getattr("array")?.call(
+                (vec![2_u64],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "uint64")?;
+                    kw
+                }),
+            )?;
+            let actual_u = inner_fn.call1((big_u.clone(), two_u.clone()))?;
+            let expected_u = numpy_inner.call1((big_u.clone(), two_u.clone()))?;
+            assert_eq!(repr_string(&actual_u), repr_string(&expected_u));
+
+            // Mismatch error text should surface unchanged.
+            let mismatch_a = numpy.getattr("array")?.call1((vec![1_i64, 2, 3],))?;
+            let mismatch_b = numpy.getattr("array")?.call1((vec![1_i64, 2],))?;
+            let actual_err = inner_fn
+                .call1((mismatch_a.clone(), mismatch_b.clone()))
+                .unwrap_err();
+            let expected_err = numpy_inner
+                .call1((mismatch_a.clone(), mismatch_b.clone()))
+                .unwrap_err();
+            assert_eq!(
+                actual_err.get_type(py).name()?.extract::<String>()?,
+                expected_err.get_type(py).name()?.extract::<String>()?
+            );
+            assert_eq!(
+                actual_err.value(py).str()?.extract::<String>()?,
+                expected_err.value(py).str()?.extract::<String>()?
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn vdot_matches_numpy_across_real_complex_and_nd_inputs() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let vdot_fn = module.getattr("vdot")?;
+            let numpy = py.import("numpy")?;
+            let numpy_vdot = numpy.getattr("vdot")?;
+            let isclose = numpy.getattr("isclose")?;
+
+            // Real 1-D x 1-D — basic dot product (no conjugation needed).
+            let a = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            let b = numpy.getattr("array")?.call1((vec![4.0_f64, 5.0, 6.0],))?;
+            assert!(
+                isclose
+                    .call1((
+                        &vdot_fn.call1((a.clone(), b.clone()))?,
+                        &numpy_vdot.call1((a.clone(), b.clone()))?,
+                    ))?
+                    .extract::<bool>()?,
+                "vdot real 1-D diverged"
+            );
+
+            // Integer 1-D — exact equality.
+            let ia = numpy.getattr("array")?.call1((vec![1_i64, 2, 3, 4],))?;
+            let ib = numpy.getattr("array")?.call1((vec![5_i64, 6, 7, 8],))?;
+            assert_eq!(
+                vdot_fn.call1((ia.clone(), ib.clone()))?.extract::<i64>()?,
+                numpy_vdot
+                    .call1((ia.clone(), ib.clone()))?
+                    .extract::<i64>()?,
+                "vdot int diverged"
+            );
+
+            // Complex 1-D — vdot conjugates the first argument, so result is
+            // sum(conj(a) * b). This is the critical asymmetry vs np.dot.
+            let builtins = py.import("builtins")?;
+            let complex_a = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        builtins.getattr("complex")?.call1((1.0_f64, 2.0_f64))?,
+                        builtins.getattr("complex")?.call1((3.0_f64, 4.0_f64))?,
+                    ],
+                )?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "complex128")?;
+                    kw
+                }),
+            )?;
+            let complex_b = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        builtins.getattr("complex")?.call1((5.0_f64, 0.0_f64))?,
+                        builtins.getattr("complex")?.call1((0.0_f64, 1.0_f64))?,
+                    ],
+                )?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "complex128")?;
+                    kw
+                }),
+            )?;
+            assert!(
+                isclose
+                    .call1((
+                        &vdot_fn.call1((complex_a.clone(), complex_b.clone()))?,
+                        &numpy_vdot.call1((complex_a.clone(), complex_b.clone()))?,
+                    ))?
+                    .extract::<bool>()?,
+                "vdot complex diverged (conjugation)"
+            );
+
+            // Asymmetry verification: vdot(a, b) != vdot(b, a) for complex
+            // unless both are real. They should differ by complex conjugation.
+            let ab = vdot_fn.call1((complex_a.clone(), complex_b.clone()))?;
+            let ba = vdot_fn.call1((complex_b.clone(), complex_a.clone()))?;
+            let ab_n = numpy_vdot.call1((complex_a.clone(), complex_b.clone()))?;
+            let ba_n = numpy_vdot.call1((complex_b.clone(), complex_a.clone()))?;
+            assert!(
+                isclose.call1((&ab, &ab_n))?.extract::<bool>()?,
+                "vdot(a,b) complex diverged"
+            );
+            assert!(
+                isclose.call1((&ba, &ba_n))?.extract::<bool>()?,
+                "vdot(b,a) complex diverged"
+            );
+
+            // n-D inputs are flattened by vdot.
+            let m_a = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 2.0])?,
+                    PyList::new(py, [3.0_f64, 4.0])?,
+                ],
+            )?,))?;
+            let m_b = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [5.0_f64, 6.0])?,
+                    PyList::new(py, [7.0_f64, 8.0])?,
+                ],
+            )?,))?;
+            assert!(
+                isclose
+                    .call1((
+                        &vdot_fn.call1((m_a.clone(), m_b.clone()))?,
+                        &numpy_vdot.call1((m_a.clone(), m_b.clone()))?,
+                    ))?
+                    .extract::<bool>()?,
+                "vdot n-D flattened diverged"
             );
 
             Ok(())
