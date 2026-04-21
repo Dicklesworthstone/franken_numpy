@@ -5604,6 +5604,201 @@ fn lagint(
         .unbind())
 }
 
+// numpy.polynomial.legendre wrappers. API shape matches chebyshev,
+// hermite, and laguerre; each is a direct passthrough that preserves
+// NumPy dtype, ValueError, and tuple-return contracts.
+
+#[pyfunction]
+#[pyo3(signature = (c1, c2))]
+fn legadd(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("legendre")?
+        .getattr("legadd")?
+        .call1((c1.bind(py), c2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c1, c2))]
+fn legsub(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("legendre")?
+        .getattr("legsub")?
+        .call1((c1.bind(py), c2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c1, c2))]
+fn legmul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("legendre")?
+        .getattr("legmul")?
+        .call1((c1.bind(py), c2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, c, tensor=true))]
+fn legval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("tensor", tensor)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("legendre")?
+        .getattr("legval")?
+        .call((x.bind(py), c.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c,))]
+fn legroots(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("legendre")?
+        .getattr("legroots")?
+        .call1((c.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (roots,))]
+fn legfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("legendre")?
+        .getattr("legfromroots")?
+        .call1((roots.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c, pow, maxpower=16))]
+fn legpow(
+    py: Python<'_>,
+    c: Py<PyAny>,
+    pow: Py<PyAny>,
+    maxpower: i64,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("maxpower", maxpower)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("legendre")?
+        .getattr("legpow")?
+        .call((c.bind(py), pow.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c1, c2))]
+fn legdiv(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("legendre")?
+        .getattr("legdiv")?
+        .call1((c1.bind(py), c2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (off, scl))]
+fn legline(py: Python<'_>, off: Py<PyAny>, scl: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("legendre")?
+        .getattr("legline")?
+        .call1((off.bind(py), scl.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c,))]
+fn legmulx(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("legendre")?
+        .getattr("legmulx")?
+        .call1((c.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c, tol=0.0))]
+fn legtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("tol", tol)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("legendre")?
+        .getattr("legtrim")?
+        .call((c.bind(py),), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c, m=1, scl=1.0, axis=0))]
+fn legder(
+    py: Python<'_>,
+    c: Py<PyAny>,
+    m: i64,
+    scl: f64,
+    axis: i64,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("scl", scl)?;
+    kwargs.set_item("axis", axis)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("legendre")?
+        .getattr("legder")?
+        .call((c.bind(py), m), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c, m=1, k=None, lbnd=0.0, scl=1.0, axis=0))]
+fn legint(
+    py: Python<'_>,
+    c: Py<PyAny>,
+    m: i64,
+    k: Option<Py<PyAny>>,
+    lbnd: f64,
+    scl: f64,
+    axis: i64,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(k_val) = k {
+        kwargs.set_item("k", k_val.bind(py))?;
+    }
+    kwargs.set_item("lbnd", lbnd)?;
+    kwargs.set_item("scl", scl)?;
+    kwargs.set_item("axis", axis)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("legendre")?
+        .getattr("legint")?
+        .call((c.bind(py), m), Some(&kwargs))?
+        .unbind())
+}
+
 #[pyfunction]
 #[pyo3(signature = (x, window_shape, axis=None, *, subok=false, writeable=false))]
 fn sliding_window_view(
@@ -7113,6 +7308,19 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lagtrim, m)?)?;
     m.add_function(wrap_pyfunction!(lagder, m)?)?;
     m.add_function(wrap_pyfunction!(lagint, m)?)?;
+    m.add_function(wrap_pyfunction!(legadd, m)?)?;
+    m.add_function(wrap_pyfunction!(legsub, m)?)?;
+    m.add_function(wrap_pyfunction!(legmul, m)?)?;
+    m.add_function(wrap_pyfunction!(legval, m)?)?;
+    m.add_function(wrap_pyfunction!(legroots, m)?)?;
+    m.add_function(wrap_pyfunction!(legfromroots, m)?)?;
+    m.add_function(wrap_pyfunction!(legpow, m)?)?;
+    m.add_function(wrap_pyfunction!(legdiv, m)?)?;
+    m.add_function(wrap_pyfunction!(legline, m)?)?;
+    m.add_function(wrap_pyfunction!(legmulx, m)?)?;
+    m.add_function(wrap_pyfunction!(legtrim, m)?)?;
+    m.add_function(wrap_pyfunction!(legder, m)?)?;
+    m.add_function(wrap_pyfunction!(legint, m)?)?;
     m.add_function(wrap_pyfunction!(tile, m)?)?;
     m.add_function(wrap_pyfunction!(true_divide, m)?)?;
     m.add_function(wrap_pyfunction!(allclose, m)?)?;
@@ -25141,6 +25349,188 @@ mod tests {
             let our_int = module.getattr("lagint")?;
             let np_der = nlag.getattr("lagder")?;
             let np_int = nlag.getattr("lagint")?;
+            let base4 = vec![1.0_f64, 2.0, 3.0, 4.0];
+            for m in 0_i64..=2 {
+                let kw = PyDict::new(py);
+                kw.set_item("m", m)?;
+                assert_array_matches_numpy(
+                    &our_der.call((base4.clone(),), Some(&kw))?,
+                    &np_der.call((base4.clone(),), Some(&kw))?,
+                )?;
+            }
+            let kw_int_all = PyDict::new(py);
+            kw_int_all.set_item("m", 2_i64)?;
+            kw_int_all.set_item("k", PyList::new(py, [3.0_f64, 7.0])?)?;
+            kw_int_all.set_item("lbnd", 1.0_f64)?;
+            kw_int_all.set_item("scl", 2.0_f64)?;
+            assert_array_matches_numpy(
+                &our_int.call((base4.clone(),), Some(&kw_int_all))?,
+                &np_int.call((base4.clone(),), Some(&kw_int_all))?,
+            )?;
+            let our_rt = our_der.call1((our_int.call1((base4.clone(),))?,))?;
+            let np_rt = np_der.call1((np_int.call1((base4.clone(),))?,))?;
+            assert_array_matches_numpy(&our_rt, &np_rt)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn legendre_wrappers_match_numpy() {
+        // Pin parity for every numpy.polynomial.legendre passthrough in
+        // one sweep. Mirrors the hermite / laguerre coverage: arithmetic
+        // triad across four shape cases, legval scalar/vector/tensor=False,
+        // legroots quadratic/cubic/constant, legfromroots across 0..3
+        // roots, legpow with maxpower ValueError boundary, legdiv's
+        // tuple return, legline pairs, legmulx vs legmul([0, 1]),
+        // legtrim tolerance sweep, legder/legint kwargs + roundtrip.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let nleg = numpy.getattr("polynomial")?.getattr("legendre")?;
+
+            let arith_cases: Vec<(Vec<f64>, Vec<f64>)> = vec![
+                (vec![1.0, 2.0, 3.0], vec![1.0, 2.0, 3.0]),
+                (vec![1.0, 2.0, 3.0], vec![1.0, 1.0]),
+                (vec![1.0, 2.0], vec![1.0, 2.0, 3.0, 4.0]),
+                (vec![5.0], vec![1.0, 2.0, 3.0]),
+            ];
+            for op in ["legadd", "legsub", "legmul"] {
+                let ours = module.getattr(op)?;
+                let theirs = nleg.getattr(op)?;
+                for (idx, (c1, c2)) in arith_cases.iter().enumerate() {
+                    let o = ours.call1((c1.clone(), c2.clone()))?;
+                    let t = theirs.call1((c1.clone(), c2.clone()))?;
+                    assert_array_matches_numpy(&o, &t)
+                        .unwrap_or_else(|_| panic!("{op} case {idx}"));
+                }
+            }
+
+            let lv = module.getattr("legval")?;
+            let lv_ref = nleg.getattr("legval")?;
+            let c = vec![1.0_f64, 0.5];
+            assert_array_matches_numpy(
+                &lv.call1((2.0_f64, c.clone()))?,
+                &lv_ref.call1((2.0_f64, c.clone()))?,
+            )?;
+            let xs = vec![0.0_f64, 0.5, 1.0];
+            let c2 = vec![1.0_f64, 0.0, 1.0];
+            assert_array_matches_numpy(
+                &lv.call1((xs.clone(), c2.clone()))?,
+                &lv_ref.call1((xs.clone(), c2.clone()))?,
+            )?;
+            let c_multi = numpy
+                .getattr("array")?
+                .call1((vec![vec![1.0, 2.0], vec![3.0, 4.0]],))?;
+            let xs2 = vec![0.5_f64, 1.0];
+            let kw_tf = PyDict::new(py);
+            kw_tf.set_item("tensor", false)?;
+            assert_array_matches_numpy(
+                &lv.call((xs2.clone(), c_multi.clone()), Some(&kw_tf))?,
+                &lv_ref.call((xs2.clone(), c_multi.clone()), Some(&kw_tf))?,
+            )?;
+
+            let lr = module.getattr("legroots")?;
+            let lr_ref = nleg.getattr("legroots")?;
+            for coeffs in [
+                vec![-0.5_f64, 0.0, 1.0],
+                vec![0.0_f64, -0.25, 0.0, 1.0],
+                vec![1.0_f64],
+            ] {
+                assert_array_matches_numpy(
+                    &lr.call1((coeffs.clone(),))?,
+                    &lr_ref.call1((coeffs.clone(),))?,
+                )?;
+            }
+
+            let lfr = module.getattr("legfromroots")?;
+            let lfr_ref = nleg.getattr("legfromroots")?;
+            for roots in [
+                Vec::<f64>::new(),
+                vec![0.5_f64],
+                vec![1.0_f64, -1.0],
+                vec![-2.0_f64, 0.0, 2.0],
+            ] {
+                assert_array_matches_numpy(
+                    &lfr.call1((roots.clone(),))?,
+                    &lfr_ref.call1((roots.clone(),))?,
+                )?;
+            }
+
+            let lp = module.getattr("legpow")?;
+            let lp_ref = nleg.getattr("legpow")?;
+            let base = vec![1.0_f64, 1.0];
+            for pow in [0_i64, 1, 2, 3] {
+                assert_array_matches_numpy(
+                    &lp.call1((base.clone(), pow))?,
+                    &lp_ref.call1((base.clone(), pow))?,
+                )?;
+            }
+            let kw_mp = PyDict::new(py);
+            kw_mp.set_item("maxpower", 4_i64)?;
+            let our_err = lp.call((base.clone(), 5_i64), Some(&kw_mp)).err();
+            let np_err = lp_ref.call((base.clone(), 5_i64), Some(&kw_mp)).err();
+            assert_eq!(our_err.is_some(), np_err.is_some());
+
+            let ld = module.getattr("legdiv")?;
+            let ld_ref = nleg.getattr("legdiv")?;
+            let ours_tup: Bound<'_, pyo3::types::PyAny> =
+                ld.call1((vec![1.0_f64, 2.0, 3.0], vec![1.0_f64, 1.0]))?;
+            let theirs_tup: Bound<'_, pyo3::types::PyAny> =
+                ld_ref.call1((vec![1.0_f64, 2.0, 3.0], vec![1.0_f64, 1.0]))?;
+            for idx in 0_i64..2 {
+                assert_array_matches_numpy(
+                    &ours_tup.get_item(idx)?,
+                    &theirs_tup.get_item(idx)?,
+                )?;
+            }
+
+            let ll = module.getattr("legline")?;
+            let ll_ref = nleg.getattr("legline")?;
+            for (off, scl) in [(3.0_f64, 2.0), (0.0, 1.0), (-1.5, 0.5)] {
+                assert_array_matches_numpy(
+                    &ll.call1((off, scl))?,
+                    &ll_ref.call1((off, scl))?,
+                )?;
+            }
+
+            let lmx = module.getattr("legmulx")?;
+            let lmx_ref = nleg.getattr("legmulx")?;
+            let cs = vec![1.0_f64, 2.0, 3.0];
+            assert_array_matches_numpy(
+                &lmx.call1((cs.clone(),))?,
+                &lmx_ref.call1((cs.clone(),))?,
+            )?;
+            let our_mul = module.getattr("legmul")?;
+            assert_array_matches_numpy(
+                &lmx.call1((cs.clone(),))?,
+                &our_mul.call1((cs.clone(), vec![0.0_f64, 1.0]))?,
+            )?;
+
+            let lt = module.getattr("legtrim")?;
+            let lt_ref = nleg.getattr("legtrim")?;
+            let trail = vec![1.0_f64, 0.0, 2.0, 0.0, 0.0];
+            assert_array_matches_numpy(
+                &lt.call1((trail.clone(),))?,
+                &lt_ref.call1((trail.clone(),))?,
+            )?;
+            let kw_tol = PyDict::new(py);
+            kw_tol.set_item("tol", 0.05_f64)?;
+            let near = vec![1.0_f64, 0.0, 2.0, 0.01, 0.0];
+            assert_array_matches_numpy(
+                &lt.call((near.clone(),), Some(&kw_tol))?,
+                &lt_ref.call((near.clone(),), Some(&kw_tol))?,
+            )?;
+
+            let our_der = module.getattr("legder")?;
+            let our_int = module.getattr("legint")?;
+            let np_der = nleg.getattr("legder")?;
+            let np_int = nleg.getattr("legint")?;
             let base4 = vec![1.0_f64, 2.0, 3.0, 4.0];
             for m in 0_i64..=2 {
                 let kw = PyDict::new(py);
