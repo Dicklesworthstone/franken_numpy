@@ -4408,6 +4408,21 @@ fn mask_or(
 }
 
 #[pyfunction]
+#[pyo3(signature = (arr,))]
+fn getmaskarray(py: Python<'_>, arr: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.ma.getmaskarray. Unlike getmask, this always
+    // returns a concrete boolean ndarray of the same shape as the input:
+    // the MaskedArray's mask when non-trivial, or a full-False array
+    // (for MaskedArrays with nomask and for plain ndarrays/array_like).
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("ma")?
+        .getattr("getmaskarray")?
+        .call1((arr.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x,))]
 fn compressed(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.ma.compressed so masked-element filtering,
@@ -5234,6 +5249,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(getmask, m)?)?;
     m.add_function(wrap_pyfunction!(is_masked, m)?)?;
     m.add_function(wrap_pyfunction!(mask_or, m)?)?;
+    m.add_function(wrap_pyfunction!(getmaskarray, m)?)?;
     m.add_function(wrap_pyfunction!(compressed, m)?)?;
     m.add_function(wrap_pyfunction!(ifft, m)?)?;
     m.add_function(wrap_pyfunction!(eigh, m)?)?;
@@ -5496,6 +5512,7 @@ mod tests {
             assert!(module.getattr("getmask").is_ok());
             assert!(module.getattr("is_masked").is_ok());
             assert!(module.getattr("mask_or").is_ok());
+            assert!(module.getattr("getmaskarray").is_ok());
             assert!(module.getattr("compressed").is_ok());
             assert!(module.getattr("ifft").is_ok());
             assert!(module.getattr("eigh").is_ok());
@@ -17906,6 +17923,112 @@ mod tests {
                 &mask_or_fn.call1((two_d_a.clone(), two_d_b.clone()))?,
                 &numpy_mask_or.call1((two_d_a.clone(), two_d_b.clone()))?,
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn getmaskarray_matches_numpy_across_masked_and_plain_inputs() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let getmaskarray_fn = module.getattr("getmaskarray")?;
+            let numpy = py.import("numpy")?;
+            let numpy_getmaskarray = numpy.getattr("ma")?.getattr("getmaskarray")?;
+
+            // MaskedArray with a non-trivial 1-D mask.
+            let partial = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![1.0_f64, 2.0, 3.0, 4.0, 5.0],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("mask", vec![false, true, false, true, false])?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(
+                &getmaskarray_fn.call1((partial.clone(),))?,
+                &numpy_getmaskarray.call1((partial.clone(),))?,
+            )?;
+
+            // Fully-masked MaskedArray: boolean ndarray of all True.
+            let all_masked = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![10_i64, 20, 30],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("mask", true)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(
+                &getmaskarray_fn.call1((all_masked.clone(),))?,
+                &numpy_getmaskarray.call1((all_masked.clone(),))?,
+            )?;
+
+            // MaskedArray with nomask → full-False array of same shape.
+            let no_mask = numpy
+                .getattr("ma")?
+                .getattr("array")?
+                .call1((vec![1_i64, 2, 3, 4],))?;
+            assert_array_matches_numpy(
+                &getmaskarray_fn.call1((no_mask.clone(),))?,
+                &numpy_getmaskarray.call1((no_mask.clone(),))?,
+            )?;
+
+            // Plain ndarray → full-False array of matching shape.
+            let plain = numpy.getattr("array")?.call1((vec![1_i64, 2, 3, 4, 5],))?;
+            assert_array_matches_numpy(
+                &getmaskarray_fn.call1((plain.clone(),))?,
+                &numpy_getmaskarray.call1((plain.clone(),))?,
+            )?;
+
+            // Python list → full-False array.
+            let lst = PyList::new(py, [1_i64, 2, 3])?;
+            assert_array_matches_numpy(
+                &getmaskarray_fn.call1((lst.clone(),))?,
+                &numpy_getmaskarray.call1((lst.clone(),))?,
+            )?;
+
+            // 2-D MaskedArray with explicit mask.
+            let two_d = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![vec![1_i64, 2], vec![3, 4]],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("mask", vec![vec![false, true], vec![true, false]])?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(
+                &getmaskarray_fn.call1((two_d.clone(),))?,
+                &numpy_getmaskarray.call1((two_d.clone(),))?,
+            )?;
+
+            // Empty MaskedArray with no mask → empty full-False boolean array.
+            let empty = numpy
+                .getattr("ma")?
+                .getattr("array")?
+                .call1((Vec::<i64>::new(),))?;
+            assert_array_matches_numpy(
+                &getmaskarray_fn.call1((empty.clone(),))?,
+                &numpy_getmaskarray.call1((empty.clone(),))?,
+            )?;
+
+            // Verify dtype parity: result is always boolean.
+            let ours_dtype = getmaskarray_fn
+                .call1((partial.clone(),))?
+                .getattr("dtype")?;
+            let theirs_dtype = numpy_getmaskarray
+                .call1((partial.clone(),))?
+                .getattr("dtype")?;
+            assert_eq!(
+                ours_dtype.str()?.to_string(),
+                theirs_dtype.str()?.to_string(),
+                "dtype must match numpy's getmaskarray output",
+            );
 
             Ok(())
         });
