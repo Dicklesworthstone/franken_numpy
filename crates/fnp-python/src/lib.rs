@@ -4085,6 +4085,36 @@ fn histogram(
 }
 
 #[pyfunction]
+#[pyo3(signature = (f, *varargs, axis=None, edge_order=1))]
+fn gradient(
+    py: Python<'_>,
+    f: Py<PyAny>,
+    varargs: &Bound<'_, PyTuple>,
+    axis: Option<Py<PyAny>>,
+    edge_order: usize,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.gradient so spacing-argument handling, axis
+    // selection, return-shape conventions, and boundary schemes match
+    // NumPy exactly.
+    let numpy = py.import("numpy")?;
+    let gradient_fn = numpy.getattr("gradient")?;
+    let mut positional: Vec<Py<PyAny>> = Vec::with_capacity(varargs.len() + 1);
+    positional.push(f);
+    for arg in varargs.iter() {
+        positional.push(arg.unbind());
+    }
+    let args = PyTuple::new(py, positional.iter().map(|item| item.bind(py)))?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis_val) = axis {
+        kwargs.set_item("axis", axis_val.bind(py))?;
+    }
+    if edge_order != 1 {
+        kwargs.set_item("edge_order", edge_order)?;
+    }
+    Ok(gradient_fn.call(args, Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, bins=None, range=None, weights=None))]
 fn histogram_bin_edges(
     py: Python<'_>,
@@ -7749,6 +7779,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(choose, m)?)?;
     m.add_function(wrap_pyfunction!(searchsorted, m)?)?;
     m.add_function(wrap_pyfunction!(histogram, m)?)?;
+    m.add_function(wrap_pyfunction!(gradient, m)?)?;
     m.add_function(wrap_pyfunction!(histogram_bin_edges, m)?)?;
     m.add_function(wrap_pyfunction!(transpose, m)?)?;
     m.add_function(wrap_pyfunction!(swapaxes, m)?)?;
@@ -8160,6 +8191,7 @@ mod tests {
             assert!(module.getattr("argwhere").is_ok());
             assert!(module.getattr("count_nonzero").is_ok());
             assert!(module.getattr("histogram").is_ok());
+            assert!(module.getattr("gradient").is_ok());
             assert!(module.getattr("histogram_bin_edges").is_ok());
             assert!(module.getattr("transpose").is_ok());
             assert!(module.getattr("swapaxes").is_ok());
@@ -9379,6 +9411,70 @@ mod tests {
             let expected = numpy.call_method("trapezoid", (y,), Some(&kwargs))?;
 
             assert_array_matches_numpy(actual.bind(py), &expected)?;
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn gradient_matches_numpy_across_spacing_axes_and_edge_order() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let gradient_fn = module.getattr("gradient")?;
+            let numpy = py.import("numpy")?;
+            let numpy_gradient = numpy.getattr("gradient")?;
+
+            let one_d = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 2.0, 4.0, 7.0],))?;
+            assert_array_matches_numpy(
+                &gradient_fn.call1((one_d.clone(),))?,
+                &numpy_gradient.call1((one_d.clone(),))?,
+            )?;
+
+            assert_array_matches_numpy(
+                &gradient_fn.call1((one_d.clone(), 0.5_f64))?,
+                &numpy_gradient.call1((one_d.clone(), 0.5_f64))?,
+            )?;
+
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![1.0_f64, 2.0, 4.0],
+                vec![3.0_f64, 5.0, 7.0],
+                vec![6.0_f64, 8.0, 9.0],
+            ],))?;
+            assert_index_tuple_matches_numpy(
+                &gradient_fn.call1((two_d.clone(),))?,
+                &numpy_gradient.call1((two_d.clone(),))?,
+            )?;
+
+            let axis_kwargs = PyDict::new(py);
+            axis_kwargs.set_item("axis", 0_i64)?;
+            let axis_kwargs_n = PyDict::new(py);
+            axis_kwargs_n.set_item("axis", 0_i64)?;
+            assert_array_matches_numpy(
+                &gradient_fn.call((two_d.clone(),), Some(&axis_kwargs))?,
+                &numpy_gradient.call((two_d.clone(),), Some(&axis_kwargs_n))?,
+            )?;
+
+            let edge_kwargs = PyDict::new(py);
+            edge_kwargs.set_item("edge_order", 2_usize)?;
+            let edge_kwargs_n = PyDict::new(py);
+            edge_kwargs_n.set_item("edge_order", 2_usize)?;
+            assert_array_matches_numpy(
+                &gradient_fn.call((one_d.clone(),), Some(&edge_kwargs))?,
+                &numpy_gradient.call((one_d.clone(),), Some(&edge_kwargs_n))?,
+            )?;
+
+            let integers = numeric_array(py, vec![1_i64, 2, 4, 7], "int64");
+            assert_array_matches_numpy(
+                &gradient_fn.call1((integers.clone(),))?,
+                &numpy_gradient.call1((integers.clone(),))?,
+            )?;
+
             Ok(())
         });
     }
