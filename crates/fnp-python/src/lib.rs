@@ -4147,6 +4147,28 @@ fn diff(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, shift, axis=None))]
+fn roll(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    shift: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.roll so flat/default rolling, negative shifts,
+    // multi-axis tuple forms, scalar handling, and axis normalization
+    // match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let roll_fn = numpy.getattr("roll")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis_val) = axis {
+        kwargs.set_item("axis", axis_val.bind(py))?;
+    }
+    Ok(roll_fn
+        .call((a.bind(py), shift.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, bins=None, range=None, weights=None))]
 fn histogram_bin_edges(
     py: Python<'_>,
@@ -7825,6 +7847,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(histogram, m)?)?;
     m.add_function(wrap_pyfunction!(gradient, m)?)?;
     m.add_function(wrap_pyfunction!(diff, m)?)?;
+    m.add_function(wrap_pyfunction!(roll, m)?)?;
     m.add_function(wrap_pyfunction!(histogram_bin_edges, m)?)?;
     m.add_function(wrap_pyfunction!(transpose, m)?)?;
     m.add_function(wrap_pyfunction!(swapaxes, m)?)?;
@@ -8239,6 +8262,7 @@ mod tests {
             assert!(module.getattr("histogram").is_ok());
             assert!(module.getattr("gradient").is_ok());
             assert!(module.getattr("diff").is_ok());
+            assert!(module.getattr("roll").is_ok());
             assert!(module.getattr("histogram_bin_edges").is_ok());
             assert!(module.getattr("transpose").is_ok());
             assert!(module.getattr("swapaxes").is_ok());
@@ -9588,6 +9612,76 @@ mod tests {
             assert_array_matches_numpy(
                 &diff_fn.call1((booleans.clone(),))?,
                 &numpy_diff.call1((booleans.clone(),))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn roll_matches_numpy_across_axis_none_negative_tuple_and_scalar() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let roll_fn = module.getattr("roll")?;
+            let numpy = py.import("numpy")?;
+            let numpy_roll = numpy.getattr("roll")?;
+
+            // Flat/default roll with axis=None.
+            let one_d = numpy.getattr("array")?.call1((vec![1_i64, 2, 3, 4, 5],))?;
+            assert_array_matches_numpy(
+                &roll_fn.call1((one_d.clone(), 2_i64))?,
+                &numpy_roll.call1((one_d.clone(), 2_i64))?,
+            )?;
+
+            // Negative shifts.
+            assert_array_matches_numpy(
+                &roll_fn.call1((one_d.clone(), -1_i64))?,
+                &numpy_roll.call1((one_d.clone(), -1_i64))?,
+            )?;
+
+            // Explicit axis on 2-D input.
+            let two_d = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2, 3], vec![4, 5, 6]],))?;
+            let axis_kwargs = PyDict::new(py);
+            axis_kwargs.set_item("axis", 1_i64)?;
+            let axis_kwargs_n = PyDict::new(py);
+            axis_kwargs_n.set_item("axis", 1_i64)?;
+            assert_array_matches_numpy(
+                &roll_fn.call((two_d.clone(), 1_i64), Some(&axis_kwargs))?,
+                &numpy_roll.call((two_d.clone(), 1_i64), Some(&axis_kwargs_n))?,
+            )?;
+
+            // Tuple shift with tuple axis on 3-D input.
+            let three_d = numpy.getattr("array")?.call1((vec![
+                vec![vec![1_i64, 2], vec![3, 4], vec![5, 6]],
+                vec![vec![7_i64, 8], vec![9, 10], vec![11, 12]],
+            ],))?;
+            let tuple_kwargs = PyDict::new(py);
+            tuple_kwargs.set_item("axis", (1_i64, 2_i64))?;
+            let tuple_kwargs_n = PyDict::new(py);
+            tuple_kwargs_n.set_item("axis", (1_i64, 2_i64))?;
+            assert_array_matches_numpy(
+                &roll_fn.call((three_d.clone(), (1_i64, -1_i64)), Some(&tuple_kwargs))?,
+                &numpy_roll.call((three_d.clone(), (1_i64, -1_i64)), Some(&tuple_kwargs_n))?,
+            )?;
+
+            // Zero-shift identity.
+            assert_array_matches_numpy(
+                &roll_fn.call1((two_d.clone(), 0_i64))?,
+                &numpy_roll.call1((two_d.clone(), 0_i64))?,
+            )?;
+
+            // Scalar input parity.
+            let scalar = numpy.getattr("array")?.call1((7_i64,))?;
+            assert_array_matches_numpy(
+                &roll_fn.call1((scalar.clone(), 3_i64))?,
+                &numpy_roll.call1((scalar.clone(), 3_i64))?,
             )?;
 
             Ok(())
