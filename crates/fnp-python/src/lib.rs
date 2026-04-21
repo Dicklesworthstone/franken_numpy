@@ -5489,6 +5489,21 @@ fn matrix_transpose(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
+fn svdvals(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.linalg.svdvals. Returns just the singular
+    // values of x in descending order, equivalent to svd(x)[1] but
+    // avoiding the U/Vh allocation. Supports batched input via the
+    // standard numpy linalg conventions.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("linalg")?
+        .getattr("svdvals")?
+        .call1((x.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
 fn iscomplexobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.iscomplexobj. Returns True iff input has a
     // complex dtype, regardless of whether imaginary parts are
@@ -6649,6 +6664,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(testing_assert_allclose, m)?)?;
     m.add_function(wrap_pyfunction!(testing_assert_array_equal, m)?)?;
     m.add_function(wrap_pyfunction!(matrix_transpose, m)?)?;
+    m.add_function(wrap_pyfunction!(svdvals, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6959,6 +6975,7 @@ mod tests {
             assert!(module.getattr("testing_assert_allclose").is_ok());
             assert!(module.getattr("testing_assert_array_equal").is_ok());
             assert!(module.getattr("matrix_transpose").is_ok());
+            assert!(module.getattr("svdvals").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -25497,6 +25514,96 @@ mod tests {
                 theirs_err.is_some(),
                 "matrix_transpose 1-D must raise iff numpy does",
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn svdvals_matches_numpy_across_shapes_and_batched_input() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let sv_fn = module.getattr("svdvals")?;
+            let numpy = py.import("numpy")?;
+            let numpy_sv = numpy.getattr("linalg")?.getattr("svdvals")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // 2x2 diagonal matrix → singular values are |diag|.
+            let diag = numpy.getattr("array")?.call1((vec![
+                vec![3.0_f64, 0.0],
+                vec![0.0, 5.0],
+            ],))?;
+            let ours_d = sv_fn.call1((diag.clone(),))?;
+            let theirs_d = numpy_sv.call1((diag.clone(),))?;
+            let ok_d: bool = allclose.call1((&ours_d, &theirs_d))?.extract()?;
+            assert!(ok_d, "svdvals 2x2 diagonal mismatch");
+
+            // 3x4 wide matrix returns min(M,N)=3 values.
+            let wide = numpy.getattr("array")?.call1((vec![
+                vec![1.0_f64, 2.0, 3.0, 4.0],
+                vec![5.0, 6.0, 7.0, 8.0],
+                vec![9.0, 10.0, 11.0, 13.0],
+            ],))?;
+            let ours_w = sv_fn.call1((wide.clone(),))?;
+            let theirs_w = numpy_sv.call1((wide.clone(),))?;
+            let ok_w: bool = allclose.call1((&ours_w, &theirs_w))?.extract()?;
+            assert!(ok_w, "svdvals 3x4 wide mismatch");
+            let len_w: usize = ours_w.getattr("shape")?.get_item(0)?.extract()?;
+            assert_eq!(len_w, 3, "svdvals(3x4) must return min(M,N)=3 values");
+
+            // 4x3 tall matrix.
+            let tall = numpy.getattr("array")?.call1((vec![
+                vec![1.0_f64, 2.0, 3.0],
+                vec![4.0, 5.0, 6.0],
+                vec![7.0, 8.0, 9.0],
+                vec![10.0, 11.0, 13.0],
+            ],))?;
+            let ours_t = sv_fn.call1((tall.clone(),))?;
+            let theirs_t = numpy_sv.call1((tall.clone(),))?;
+            let ok_t: bool = allclose.call1((&ours_t, &theirs_t))?.extract()?;
+            assert!(ok_t, "svdvals 4x3 tall mismatch");
+
+            // Identity matrix → all-ones singular values.
+            let ident = numpy.getattr("eye")?.call1((4_i64,))?;
+            let ours_i = sv_fn.call1((ident.clone(),))?;
+            let theirs_i = numpy_sv.call1((ident.clone(),))?;
+            let ones = numpy.getattr("ones")?.call1((4_i64,))?;
+            let ok_i: bool = allclose.call1((&ours_i, &ones))?.extract()?;
+            assert!(ok_i, "svdvals(I) must be all ones");
+            let ok_i_match: bool = allclose.call1((&ours_i, &theirs_i))?.extract()?;
+            assert!(ok_i_match, "svdvals identity mismatch with numpy");
+
+            // Singular matrix (rank-deficient) → at least one ~0.
+            let singular = numpy.getattr("array")?.call1((vec![
+                vec![1.0_f64, 2.0, 3.0],
+                vec![2.0, 4.0, 6.0],
+                vec![3.0, 6.0, 9.0],
+            ],))?;
+            let ours_s = sv_fn.call1((singular.clone(),))?;
+            let theirs_s = numpy_sv.call1((singular.clone(),))?;
+            let ok_s: bool = allclose.call1((&ours_s, &theirs_s))?.extract()?;
+            assert!(ok_s, "svdvals singular matrix mismatch");
+
+            // Equivalence to svd(x)[1].
+            let svd_full = numpy.getattr("linalg")?.getattr("svd")?.call1((wide.clone(),))?;
+            let svd_s = svd_full.get_item(1)?;
+            let ok_eq: bool = allclose.call1((&ours_w, &svd_s))?.extract()?;
+            assert!(ok_eq, "svdvals must equal svd(x)[1]");
+
+            // 3-D batched input.
+            let batched = numpy.getattr("array")?.call1((vec![
+                vec![vec![1.0_f64, 0.0], vec![0.0, 2.0]],
+                vec![vec![3.0, 0.0], vec![0.0, 4.0]],
+            ],))?;
+            let ours_b = sv_fn.call1((batched.clone(),))?;
+            let theirs_b = numpy_sv.call1((batched.clone(),))?;
+            let ok_b: bool = allclose.call1((&ours_b, &theirs_b))?.extract()?;
+            assert!(ok_b, "svdvals batched 3-D mismatch");
 
             Ok(())
         });
