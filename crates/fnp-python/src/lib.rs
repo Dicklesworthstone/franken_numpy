@@ -4252,6 +4252,19 @@ fn vdot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 #[pyo3(signature = (a, b))]
+fn kron(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.kron so the Kronecker product output shape
+    // (broadcasted from a.shape * b.shape), dtype promotion, and
+    // n-dimensional broadcasting semantics match numpy exactly.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("kron")?
+        .call1((a.bind(py), b.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, b))]
 fn inner(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.inner so scalar-vs-array return typing, last-axis
     // contraction semantics, integer overflow behavior, and mismatch error
@@ -4845,6 +4858,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(masked_where, m)?)?;
     m.add_function(wrap_pyfunction!(masked_equal, m)?)?;
     m.add_function(wrap_pyfunction!(vdot, m)?)?;
+    m.add_function(wrap_pyfunction!(kron, m)?)?;
     m.add_function(wrap_pyfunction!(inner, m)?)?;
     m.add_function(wrap_pyfunction!(outer, m)?)?;
     m.add_function(wrap_pyfunction!(masked_less, m)?)?;
@@ -5088,6 +5102,7 @@ mod tests {
             assert!(module.getattr("masked_where").is_ok());
             assert!(module.getattr("masked_equal").is_ok());
             assert!(module.getattr("vdot").is_ok());
+            assert!(module.getattr("kron").is_ok());
             assert!(module.getattr("inner").is_ok());
             assert!(module.getattr("outer").is_ok());
             assert!(module.getattr("masked_less").is_ok());
@@ -15213,6 +15228,171 @@ mod tests {
                     ))?
                     .extract::<bool>()?,
                 "vdot n-D flattened diverged"
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn kron_matches_numpy_across_shapes_and_dtypes() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let kron_fn = module.getattr("kron")?;
+            let numpy = py.import("numpy")?;
+            let numpy_kron = numpy.getattr("kron")?;
+            let allclose = numpy.getattr("allclose")?;
+            let array_equal = numpy.getattr("array_equal")?;
+
+            // 2x2 ⊗ 2x2 — textbook Kronecker.
+            let a = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 2.0])?,
+                    PyList::new(py, [3.0_f64, 4.0])?,
+                ],
+            )?,))?;
+            let b = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [0.0_f64, 5.0])?,
+                    PyList::new(py, [6.0_f64, 7.0])?,
+                ],
+            )?,))?;
+            let actual = kron_fn.call1((a.clone(), b.clone()))?;
+            let expected = numpy_kron.call1((a.clone(), b.clone()))?;
+            assert!(
+                allclose.call1((&actual, &expected))?.extract::<bool>()?,
+                "kron 2x2 x 2x2 diverged"
+            );
+
+            // 1-D ⊗ 1-D — produces a 1-D array.
+            let v1 = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            let v2 = numpy.getattr("array")?.call1((vec![4.0_f64, 5.0],))?;
+            assert!(
+                allclose
+                    .call1((
+                        &kron_fn.call1((v1.clone(), v2.clone()))?,
+                        &numpy_kron.call1((v1.clone(), v2.clone()))?,
+                    ))?
+                    .extract::<bool>()?,
+                "kron 1-D x 1-D diverged"
+            );
+
+            // Integer dtype — exact equality.
+            let ia = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        PyList::new(py, [1_i64, 0])?,
+                        PyList::new(py, [0_i64, 1])?,
+                    ],
+                )?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "int64")?;
+                    kw
+                }),
+            )?;
+            let ib = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        PyList::new(py, [1_i64, 2])?,
+                        PyList::new(py, [3_i64, 4])?,
+                    ],
+                )?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "int64")?;
+                    kw
+                }),
+            )?;
+            assert!(
+                array_equal
+                    .call1((
+                        &kron_fn.call1((ia.clone(), ib.clone()))?,
+                        &numpy_kron.call1((ia.clone(), ib.clone()))?,
+                    ))?
+                    .extract::<bool>()?,
+                "kron int diverged"
+            );
+
+            // Mismatched ranks — numpy broadcasts via leading-axis padding.
+            let mat = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 2.0])?,
+                    PyList::new(py, [3.0_f64, 4.0])?,
+                ],
+            )?,))?;
+            let vec1d = numpy.getattr("array")?.call1((vec![5.0_f64, 6.0],))?;
+            assert!(
+                allclose
+                    .call1((
+                        &kron_fn.call1((mat.clone(), vec1d.clone()))?,
+                        &numpy_kron.call1((mat.clone(), vec1d.clone()))?,
+                    ))?
+                    .extract::<bool>()?,
+                "kron 2-D x 1-D diverged"
+            );
+
+            // Complex dtype.
+            let builtins = py.import("builtins")?;
+            let complex_a = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        builtins.getattr("complex")?.call1((1.0_f64, 1.0_f64))?,
+                        builtins.getattr("complex")?.call1((0.0_f64, -1.0_f64))?,
+                    ],
+                )?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "complex128")?;
+                    kw
+                }),
+            )?;
+            let complex_b = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        builtins.getattr("complex")?.call1((2.0_f64, 0.0_f64))?,
+                        builtins.getattr("complex")?.call1((0.0_f64, 1.0_f64))?,
+                    ],
+                )?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "complex128")?;
+                    kw
+                }),
+            )?;
+            assert!(
+                allclose
+                    .call1((
+                        &kron_fn.call1((complex_a.clone(), complex_b.clone()))?,
+                        &numpy_kron.call1((complex_a.clone(), complex_b.clone()))?,
+                    ))?
+                    .extract::<bool>()?,
+                "kron complex diverged"
+            );
+
+            // Identity ⊗ Identity → block-diagonal larger identity.
+            let i2 = numpy.getattr("eye")?.call1((2_i64,))?;
+            let i3 = numpy.getattr("eye")?.call1((3_i64,))?;
+            assert!(
+                allclose
+                    .call1((
+                        &kron_fn.call1((i2.clone(), i3.clone()))?,
+                        &numpy_kron.call1((i2.clone(), i3.clone()))?,
+                    ))?
+                    .extract::<bool>()?,
+                "kron eye x eye diverged"
             );
 
             Ok(())
