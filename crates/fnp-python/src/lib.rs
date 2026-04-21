@@ -4765,6 +4765,25 @@ fn fliplr(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, dtype=None))]
+fn ascontiguousarray(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    dtype: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.ascontiguousarray so the result is always a
+    // C-contiguous ndarray with the same data, matching numpy's
+    // dtype-promotion rules and copy-when-needed semantics.
+    let numpy = py.import("numpy")?;
+    let asc_fn = numpy.getattr("ascontiguousarray")?;
+    let kwargs = PyDict::new(py);
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    Ok(asc_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, q, axis=None, out=None, overwrite_input=false, method=None, keepdims=false, weights=None))]
 #[allow(clippy::too_many_arguments)]
 fn quantile(
@@ -5869,6 +5888,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(flip, m)?)?;
     m.add_function(wrap_pyfunction!(flipud, m)?)?;
     m.add_function(wrap_pyfunction!(fliplr, m)?)?;
+    m.add_function(wrap_pyfunction!(ascontiguousarray, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6155,6 +6175,7 @@ mod tests {
             assert!(module.getattr("flip").is_ok());
             assert!(module.getattr("flipud").is_ok());
             assert!(module.getattr("fliplr").is_ok());
+            assert!(module.getattr("ascontiguousarray").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -21863,6 +21884,90 @@ mod tests {
                 }),
             )?;
             assert_array_matches_numpy(&fliplr_fn.call1((two_d.clone(),))?, &via_flip)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ascontiguousarray_matches_numpy_across_dtype_and_layouts() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let asc_fn = module.getattr("ascontiguousarray")?;
+            let numpy = py.import("numpy")?;
+            let numpy_asc = numpy.getattr("ascontiguousarray")?;
+
+            // Already-contiguous 2-D input.
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![1_i64, 2, 3],
+                vec![4, 5, 6],
+            ],))?;
+            let ours = asc_fn.call1((two_d.clone(),))?;
+            let theirs = numpy_asc.call1((two_d.clone(),))?;
+            assert_array_matches_numpy(&ours, &theirs)?;
+            let ours_c: bool = ours.getattr("flags")?.get_item("C_CONTIGUOUS")?.extract()?;
+            let theirs_c: bool = theirs.getattr("flags")?.get_item("C_CONTIGUOUS")?.extract()?;
+            assert_eq!(ours_c, theirs_c, "C_CONTIGUOUS flag mismatch on already-contiguous input");
+            assert!(ours_c, "ascontiguousarray must produce C-contiguous output");
+
+            // Transposed (non-contiguous) input gets copied to C-order.
+            let transposed = two_d.call_method0("transpose")?;
+            let transposed_c: bool = transposed
+                .getattr("flags")?
+                .get_item("C_CONTIGUOUS")?
+                .extract()?;
+            assert!(!transposed_c, "transpose must yield non-C-contiguous input for the test");
+            let ours_t = asc_fn.call1((transposed.clone(),))?;
+            let theirs_t = numpy_asc.call1((transposed.clone(),))?;
+            assert_array_matches_numpy(&ours_t, &theirs_t)?;
+            let ours_t_c: bool = ours_t.getattr("flags")?.get_item("C_CONTIGUOUS")?.extract()?;
+            assert!(ours_t_c, "ascontiguousarray must convert transposed input to C-contiguous");
+
+            // Explicit dtype change promotes output dtype.
+            let ours_d = asc_fn.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("float64")?)?;
+                    kw
+                }),
+            )?;
+            let theirs_d = numpy_asc.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("float64")?)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_d, &theirs_d)?;
+            let ours_dtype = ours_d.getattr("dtype")?.str()?.to_string();
+            let theirs_dtype = theirs_d.getattr("dtype")?.str()?.to_string();
+            assert_eq!(ours_dtype, theirs_dtype, "explicit dtype must match numpy");
+
+            // Default dtype preservation: int input stays int.
+            let plain_dtype = ours.getattr("dtype")?.str()?.to_string();
+            let plain_theirs_dtype = theirs.getattr("dtype")?.str()?.to_string();
+            assert_eq!(plain_dtype, plain_theirs_dtype, "default dtype must match numpy");
+
+            // Python list input gets copied to a contiguous ndarray.
+            let lst = PyList::new(py, [1_i64, 2, 3, 4, 5])?;
+            let ours_l = asc_fn.call1((lst.clone(),))?;
+            let theirs_l = numpy_asc.call1((lst.clone(),))?;
+            assert_array_matches_numpy(&ours_l, &theirs_l)?;
+            let ours_l_c: bool = ours_l.getattr("flags")?.get_item("C_CONTIGUOUS")?.extract()?;
+            assert!(ours_l_c, "ascontiguousarray on list must yield C-contiguous");
+
+            // 1-D input is trivially contiguous in both C and F orders.
+            let one_d = numpy.getattr("array")?.call1((vec![10_i64, 20, 30, 40],))?;
+            let ours_o = asc_fn.call1((one_d.clone(),))?;
+            let theirs_o = numpy_asc.call1((one_d.clone(),))?;
+            assert_array_matches_numpy(&ours_o, &theirs_o)?;
 
             Ok(())
         });
