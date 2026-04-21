@@ -4385,6 +4385,29 @@ fn is_masked(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (m1, m2, copy=false, shrink=true))]
+fn mask_or(
+    py: Python<'_>,
+    m1: Py<PyAny>,
+    m2: Py<PyAny>,
+    copy: bool,
+    shrink: bool,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.ma.mask_or so logical-or combination of masks
+    // (including nomask views, shrink=True collapsing all-False to
+    // nomask, and copy=True producing fresh storage) matches numpy
+    // exactly.
+    let numpy = py.import("numpy")?;
+    let mask_or_fn = numpy.getattr("ma")?.getattr("mask_or")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("copy", copy)?;
+    kwargs.set_item("shrink", shrink)?;
+    Ok(mask_or_fn
+        .call((m1.bind(py), m2.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x,))]
 fn compressed(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.ma.compressed so masked-element filtering,
@@ -5210,6 +5233,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(filled, m)?)?;
     m.add_function(wrap_pyfunction!(getmask, m)?)?;
     m.add_function(wrap_pyfunction!(is_masked, m)?)?;
+    m.add_function(wrap_pyfunction!(mask_or, m)?)?;
     m.add_function(wrap_pyfunction!(compressed, m)?)?;
     m.add_function(wrap_pyfunction!(ifft, m)?)?;
     m.add_function(wrap_pyfunction!(eigh, m)?)?;
@@ -5471,6 +5495,7 @@ mod tests {
             assert!(module.getattr("filled").is_ok());
             assert!(module.getattr("getmask").is_ok());
             assert!(module.getattr("is_masked").is_ok());
+            assert!(module.getattr("mask_or").is_ok());
             assert!(module.getattr("compressed").is_ok());
             assert!(module.getattr("ifft").is_ok());
             assert!(module.getattr("eigh").is_ok());
@@ -17723,6 +17748,163 @@ mod tests {
                 is_masked_fn.call1((no_true.clone(),))?,
                 numpy_is_masked.call1((no_true.clone(),))?,
                 "2-D mask with no True entries",
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn mask_or_matches_numpy_across_nomask_shrink_and_copy_paths() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let mask_or_fn = module.getattr("mask_or")?;
+            let numpy = py.import("numpy")?;
+            let numpy_mask_or = numpy.getattr("ma")?.getattr("mask_or")?;
+            let nomask = numpy.getattr("ma")?.getattr("nomask")?;
+
+            // Two non-trivial bool masks with default shrink=True, copy=False.
+            let m1 = numpy.getattr("array")?.call(
+                (vec![true, false, false, true],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("bool_")?)?;
+                    kw
+                }),
+            )?;
+            let m2 = numpy.getattr("array")?.call(
+                (vec![false, true, false, true],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("bool_")?)?;
+                    kw
+                }),
+            )?;
+            let ours = mask_or_fn.call1((m1.clone(), m2.clone()))?;
+            let theirs = numpy_mask_or.call1((m1.clone(), m2.clone()))?;
+            assert_array_matches_numpy(&ours, &theirs)?;
+
+            // nomask | mask returns a view of the mask when copy=False.
+            let ours_nm_left = mask_or_fn.call1((nomask.clone(), m1.clone()))?;
+            let theirs_nm_left = numpy_mask_or.call1((nomask.clone(), m1.clone()))?;
+            assert_array_matches_numpy(&ours_nm_left, &theirs_nm_left)?;
+
+            let ours_nm_right = mask_or_fn.call1((m1.clone(), nomask.clone()))?;
+            let theirs_nm_right = numpy_mask_or.call1((m1.clone(), nomask.clone()))?;
+            assert_array_matches_numpy(&ours_nm_right, &theirs_nm_right)?;
+
+            // Both nomask → nomask identity.
+            let kwargs_default = PyDict::new(py);
+            kwargs_default.set_item("copy", false)?;
+            kwargs_default.set_item("shrink", true)?;
+            let ours_both_nm = mask_or_fn.call(
+                (nomask.clone(), nomask.clone()),
+                Some(&kwargs_default),
+            )?;
+            let theirs_both_nm = numpy_mask_or.call(
+                (nomask.clone(), nomask.clone()),
+                Some(&kwargs_default),
+            )?;
+            assert_eq!(
+                ours_both_nm.is(&nomask),
+                theirs_both_nm.is(&nomask),
+                "nomask identity must be preserved for both-nomask inputs",
+            );
+
+            // All-False masks with shrink=True → nomask; shrink=False keeps array.
+            let zeros_like_mask = numpy.getattr("array")?.call(
+                (vec![false, false, false, false],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("bool_")?)?;
+                    kw
+                }),
+            )?;
+            let shrunk_ours = mask_or_fn.call(
+                (zeros_like_mask.clone(), zeros_like_mask.clone()),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("shrink", true)?;
+                    kw
+                }),
+            )?;
+            let shrunk_theirs = numpy_mask_or.call(
+                (zeros_like_mask.clone(), zeros_like_mask.clone()),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("shrink", true)?;
+                    kw
+                }),
+            )?;
+            assert_eq!(
+                shrunk_ours.is(&nomask),
+                shrunk_theirs.is(&nomask),
+                "shrink=True must collapse all-False masks identically",
+            );
+
+            let kept_ours = mask_or_fn.call(
+                (zeros_like_mask.clone(), zeros_like_mask.clone()),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("shrink", false)?;
+                    kw
+                }),
+            )?;
+            let kept_theirs = numpy_mask_or.call(
+                (zeros_like_mask.clone(), zeros_like_mask.clone()),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("shrink", false)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&kept_ours, &kept_theirs)?;
+            assert!(!kept_ours.is(&nomask));
+
+            // copy=True produces fresh storage (numpy returns array, not view).
+            let copied_ours = mask_or_fn.call(
+                (m1.clone(), m2.clone()),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("copy", true)?;
+                    kw
+                }),
+            )?;
+            let copied_theirs = numpy_mask_or.call(
+                (m1.clone(), m2.clone()),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("copy", true)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&copied_ours, &copied_theirs)?;
+
+            // 2-D masks combine element-wise.
+            let two_d_a = numpy.getattr("array")?.call(
+                (vec![vec![true, false], vec![false, true]],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("bool_")?)?;
+                    kw
+                }),
+            )?;
+            let two_d_b = numpy.getattr("array")?.call(
+                (vec![vec![false, false], vec![true, true]],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("bool_")?)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(
+                &mask_or_fn.call1((two_d_a.clone(), two_d_b.clone()))?,
+                &numpy_mask_or.call1((two_d_a.clone(), two_d_b.clone()))?,
             )?;
 
             Ok(())
