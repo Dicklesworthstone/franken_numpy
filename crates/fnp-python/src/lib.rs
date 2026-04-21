@@ -4356,6 +4356,20 @@ fn filled(py: Python<'_>, a: Py<PyAny>, fill_value: Option<Py<PyAny>>) -> PyResu
 }
 
 #[pyfunction]
+#[pyo3(signature = (a,))]
+fn getmask(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.ma.getmask so mask retrieval returns the ndarray
+    // mask for MaskedArrays with a non-trivial mask, numpy.ma.nomask for
+    // MaskedArrays with nomask, and numpy.ma.nomask for plain inputs.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("ma")?
+        .getattr("getmask")?
+        .call1((a.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x,))]
 fn compressed(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.ma.compressed so masked-element filtering,
@@ -5179,6 +5193,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(masked_greater_equal, m)?)?;
     m.add_function(wrap_pyfunction!(fft, m)?)?;
     m.add_function(wrap_pyfunction!(filled, m)?)?;
+    m.add_function(wrap_pyfunction!(getmask, m)?)?;
     m.add_function(wrap_pyfunction!(compressed, m)?)?;
     m.add_function(wrap_pyfunction!(ifft, m)?)?;
     m.add_function(wrap_pyfunction!(eigh, m)?)?;
@@ -5438,6 +5453,7 @@ mod tests {
             assert!(module.getattr("masked_greater_equal").is_ok());
             assert!(module.getattr("fft").is_ok());
             assert!(module.getattr("filled").is_ok());
+            assert!(module.getattr("getmask").is_ok());
             assert!(module.getattr("compressed").is_ok());
             assert!(module.getattr("ifft").is_ok());
             assert!(module.getattr("eigh").is_ok());
@@ -17479,6 +17495,104 @@ mod tests {
                 &compressed_fn.call1((masked_scalar.clone(),))?,
                 &numpy_compressed.call1((masked_scalar.clone(),))?,
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn getmask_matches_numpy_for_masked_and_plain_inputs() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let getmask_fn = module.getattr("getmask")?;
+            let numpy = py.import("numpy")?;
+            let numpy_getmask = numpy.getattr("ma")?.getattr("getmask")?;
+            let nomask = numpy.getattr("ma")?.getattr("nomask")?;
+
+            // MaskedArray with a non-trivial mask returns the ndarray mask.
+            let mask_vec = vec![false, true, false, true, false];
+            let partial = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![1.0_f64, 2.0, 3.0, 4.0, 5.0],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("mask", mask_vec.clone())?;
+                    kw
+                }),
+            )?;
+            let ours = getmask_fn.call1((partial.clone(),))?;
+            let theirs = numpy_getmask.call1((partial.clone(),))?;
+            assert_array_matches_numpy(&ours, &theirs)?;
+            assert!(ours.is(&theirs) || !ours.is(&nomask));
+
+            // Fully-masked MaskedArray: mask is a single True scalar broadcast.
+            let all_masked = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![10_i64, 20, 30],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("mask", true)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(
+                &getmask_fn.call1((all_masked.clone(),))?,
+                &numpy_getmask.call1((all_masked.clone(),))?,
+            )?;
+
+            // MaskedArray with nomask: getmask returns numpy.ma.nomask (False).
+            let no_mask = numpy
+                .getattr("ma")?
+                .getattr("array")?
+                .call1((vec![1_i64, 2, 3, 4],))?;
+            let ours_nomask = getmask_fn.call1((no_mask.clone(),))?;
+            let theirs_nomask = numpy_getmask.call1((no_mask.clone(),))?;
+            assert!(ours_nomask.is(&nomask));
+            assert!(theirs_nomask.is(&nomask));
+
+            // Plain ndarray returns nomask.
+            let plain = numpy.getattr("array")?.call1((vec![1_i64, 2, 3],))?;
+            let ours_plain = getmask_fn.call1((plain.clone(),))?;
+            assert!(ours_plain.is(&nomask));
+
+            // Python list passes through to nomask (treated as array_like).
+            let list_arg = PyList::new(py, [1_i64, 2, 3])?;
+            let ours_list = getmask_fn.call1((list_arg.clone(),))?;
+            assert!(ours_list.is(&nomask));
+
+            // 2-D MaskedArray: mask is returned as an ndarray of booleans.
+            let two_d = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![vec![1_i64, 2], vec![3, 4]],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("mask", vec![vec![false, true], vec![true, false]])?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(
+                &getmask_fn.call1((two_d.clone(),))?,
+                &numpy_getmask.call1((two_d.clone(),))?,
+            )?;
+
+            // Zero-length MaskedArray with an explicit False mask: numpy returns nomask.
+            let empty = numpy.getattr("ma")?.getattr("array")?.call(
+                (Vec::<i64>::new(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("mask", false)?;
+                    kw
+                }),
+            )?;
+            let ours_empty = getmask_fn.call1((empty.clone(),))?;
+            let theirs_empty = numpy_getmask.call1((empty.clone(),))?;
+            assert_eq!(
+                ours_empty.is(&nomask),
+                theirs_empty.is(&nomask),
+                "nomask identity must match numpy for empty array with mask=False",
+            );
 
             Ok(())
         });
