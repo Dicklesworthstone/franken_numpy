@@ -5079,6 +5079,51 @@ fn nanpercentile(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, q, axis=None, out=None, overwrite_input=false, method=None, keepdims=false, weights=None, interpolation=None))]
+#[allow(clippy::too_many_arguments)]
+fn nanquantile(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    q: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
+    overwrite_input: bool,
+    method: Option<String>,
+    keepdims: bool,
+    weights: Option<Py<PyAny>>,
+    interpolation: Option<String>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.nanquantile so NaN-ignoring quantile
+    // reduction matches numpy across scalar/vector q in [0, 1], axis
+    // selection, overwrite_input, method/interpolation selection,
+    // keepdims, and weighted paths. Optional keywords are forwarded
+    // only when explicitly supplied to preserve numpy defaults.
+    let numpy = py.import("numpy")?;
+    let nanquantile_fn = numpy.getattr("nanquantile")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis_val) = axis {
+        kwargs.set_item("axis", axis_val.bind(py))?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    kwargs.set_item("overwrite_input", overwrite_input)?;
+    if let Some(method_val) = method {
+        kwargs.set_item("method", method_val)?;
+    }
+    kwargs.set_item("keepdims", keepdims)?;
+    if let Some(weights_val) = weights {
+        kwargs.set_item("weights", weights_val.bind(py))?;
+    }
+    if let Some(interpolation_val) = interpolation {
+        kwargs.set_item("interpolation", interpolation_val)?;
+    }
+    Ok(nanquantile_fn
+        .call((a.bind(py), q.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (keys, axis=-1))]
 fn lexsort(py: Python<'_>, keys: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
     // Passthrough to np.lexsort so indirect stable sorting by a
@@ -7716,6 +7761,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(nanargmin, m)?)?;
     m.add_function(wrap_pyfunction!(percentile, m)?)?;
     m.add_function(wrap_pyfunction!(nanpercentile, m)?)?;
+    m.add_function(wrap_pyfunction!(nanquantile, m)?)?;
     m.add_function(wrap_pyfunction!(lexsort, m)?)?;
     m.add_function(wrap_pyfunction!(rfftn, m)?)?;
     m.add_function(wrap_pyfunction!(flip, m)?)?;
@@ -8120,6 +8166,7 @@ mod tests {
             assert!(module.getattr("nanargmin").is_ok());
             assert!(module.getattr("percentile").is_ok());
             assert!(module.getattr("nanpercentile").is_ok());
+            assert!(module.getattr("nanquantile").is_ok());
             assert!(module.getattr("lexsort").is_ok());
             assert!(module.getattr("rfftn").is_ok());
             assert!(module.getattr("flip").is_ok());
@@ -24286,6 +24333,197 @@ mod tests {
             assert!(
                 ours_is_nan && theirs_is_nan,
                 "fully-NaN nanpercentile must be NaN",
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn nanquantile_matches_numpy_across_q_axis_method_keepdims_and_all_nan() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let nanquantile_fn = module.getattr("nanquantile")?;
+            let numpy = py.import("numpy")?;
+            let numpy_nanquantile = numpy.getattr("nanquantile")?;
+            let isclose = numpy.getattr("isclose")?;
+            let allclose = numpy.getattr("allclose")?;
+            let isnan = numpy.getattr("isnan")?;
+            let warnings = py.import("warnings")?;
+
+            // Scalar q on 1-D with NaNs ignored.
+            let one_d = numpy
+                .getattr("array")?
+                .call1((vec![0.2_f64, f64::NAN, 0.4, 0.6, 0.8],))?;
+            let ours = nanquantile_fn.call1((one_d.clone(), 0.5_f64))?;
+            let theirs = numpy_nanquantile.call1((one_d.clone(), 0.5_f64))?;
+            let ok: bool = isclose
+                .call(
+                    (&ours, &theirs),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("equal_nan", true)?;
+                        kw
+                    }),
+                )?
+                .extract()?;
+            assert!(ok, "nanquantile q=0.5 1-D mismatch");
+
+            // Vector q.
+            let qs = numpy
+                .getattr("array")?
+                .call1((vec![0.25_f64, 0.5, 0.75],))?;
+            let ours_qs = nanquantile_fn.call1((one_d.clone(), qs.clone()))?;
+            let theirs_qs = numpy_nanquantile.call1((one_d.clone(), qs.clone()))?;
+            let ok_qs: bool = allclose
+                .call(
+                    (&ours_qs, &theirs_qs),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("equal_nan", true)?;
+                        kw
+                    }),
+                )?
+                .extract()?;
+            assert!(ok_qs, "nanquantile vector q mismatch");
+
+            // Axis tuple reduction.
+            let three_d = numpy.getattr("array")?.call1((vec![
+                vec![vec![1.0_f64, f64::NAN], vec![3.0, 4.0]],
+                vec![vec![5.0, 6.0], vec![f64::NAN, 8.0]],
+            ],))?;
+            let axis_tuple = PyTuple::new(py, [1_i64, 2_i64])?;
+            let ours_axes = nanquantile_fn.call(
+                (three_d.clone(), 0.5_f64),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", &axis_tuple)?;
+                    kw
+                }),
+            )?;
+            let theirs_axes = numpy_nanquantile.call(
+                (three_d.clone(), 0.5_f64),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", &axis_tuple)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_axes, &theirs_axes)?;
+
+            // keepdims=True shape parity.
+            let ours_kd = nanquantile_fn.call(
+                (three_d.clone(), 0.5_f64),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 2_i64)?;
+                    kw.set_item("keepdims", true)?;
+                    kw
+                }),
+            )?;
+            let theirs_kd = numpy_nanquantile.call(
+                (three_d.clone(), 0.5_f64),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 2_i64)?;
+                    kw.set_item("keepdims", true)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_kd, &theirs_kd)?;
+
+            // Method variants requested by the bead.
+            for method in ["nearest", "midpoint"] {
+                let ours_m = nanquantile_fn.call(
+                    (one_d.clone(), 0.5_f64),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("method", method)?;
+                        kw
+                    }),
+                )?;
+                let theirs_m = numpy_nanquantile.call(
+                    (one_d.clone(), 0.5_f64),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("method", method)?;
+                        kw
+                    }),
+                )?;
+                let ok_m: bool = isclose
+                    .call(
+                        (&ours_m, &theirs_m),
+                        Some(&{
+                            let kw = PyDict::new(py);
+                            kw.set_item("equal_nan", true)?;
+                            kw
+                        }),
+                    )?
+                    .extract()?;
+                assert!(ok_m, "nanquantile method={} mismatch", method);
+            }
+
+            // overwrite_input=False parity on integer input.
+            let ints = numpy
+                .getattr("array")?
+                .call1((vec![1_i64, 2, 3, 4, 5, 6, 7, 8],))?;
+            let ours_int = nanquantile_fn.call(
+                (ints.clone(), 0.5_f64),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("overwrite_input", false)?;
+                    kw
+                }),
+            )?;
+            let theirs_int = numpy_nanquantile.call(
+                (ints.clone(), 0.5_f64),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("overwrite_input", false)?;
+                    kw
+                }),
+            )?;
+            let ok_int: bool = isclose
+                .call(
+                    (&ours_int, &theirs_int),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("equal_nan", true)?;
+                        kw
+                    }),
+                )?
+                .extract()?;
+            assert!(ok_int, "nanquantile integer input mismatch");
+
+            // Fully-NaN lane returns NaN with warnings silenced.
+            let all_nan = numpy.getattr("array")?.call1((vec![f64::NAN, f64::NAN],))?;
+            let catch_warnings = warnings.getattr("catch_warnings")?;
+            let suppressed_ours = {
+                let ctx = catch_warnings.call0()?;
+                ctx.call_method0("__enter__")?;
+                warnings.call_method1("simplefilter", ("ignore",))?;
+                let result = nanquantile_fn.call1((all_nan.clone(), 0.5_f64))?;
+                ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+                result
+            };
+            let suppressed_theirs = {
+                let ctx = catch_warnings.call0()?;
+                ctx.call_method0("__enter__")?;
+                warnings.call_method1("simplefilter", ("ignore",))?;
+                let result = numpy_nanquantile.call1((all_nan.clone(), 0.5_f64))?;
+                ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+                result
+            };
+            let ours_is_nan: bool = isnan.call1((&suppressed_ours,))?.extract()?;
+            let theirs_is_nan: bool = isnan.call1((&suppressed_theirs,))?.extract()?;
+            assert!(
+                ours_is_nan && theirs_is_nan,
+                "fully-NaN nanquantile must be NaN",
             );
 
             Ok(())
