@@ -3273,6 +3273,28 @@ fn repeat(
 }
 
 #[pyfunction]
+#[pyo3(signature = (arr, values, axis=None))]
+fn append(
+    py: Python<'_>,
+    arr: Py<PyAny>,
+    values: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Delegate to NumPy so flattened default behavior, axis-aware
+    // appends, scalar coercions, object arrays, and mismatch errors
+    // all stay exact.
+    let numpy = py.import("numpy")?;
+    let append_fn = numpy.getattr("append")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis) = axis {
+        kwargs.set_item("axis", axis.bind(py))?;
+    }
+    Ok(append_fn
+        .call((arr.bind(py), values.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn concatenate(
     py: Python<'_>,
@@ -7952,6 +7974,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(broadcast_arrays, m)?)?;
     m.add_function(wrap_pyfunction!(clip, m)?)?;
     m.add_function(wrap_pyfunction!(repeat, m)?)?;
+    m.add_function(wrap_pyfunction!(append, m)?)?;
     m.add_function(wrap_pyfunction!(concatenate, m)?)?;
     m.add_function(wrap_pyfunction!(stack, m)?)?;
     m.add_function(wrap_pyfunction!(row_stack, m)?)?;
@@ -8436,6 +8459,7 @@ mod tests {
             assert!(module.getattr("broadcast_arrays").is_ok());
             assert!(module.getattr("clip").is_ok());
             assert!(module.getattr("repeat").is_ok());
+            assert!(module.getattr("append").is_ok());
             assert!(module.getattr("concatenate").is_ok());
             assert!(module.getattr("stack").is_ok());
             assert!(module.getattr("row_stack").is_ok());
@@ -13658,6 +13682,83 @@ mod tests {
             let bad_rows = PyTuple::new(py, [first.clone(), bad_row.clone()])?;
             let actual_err = row_stack_fn.call1((bad_rows.clone(),)).unwrap_err();
             let expected_err = numpy_row_stack.call1((bad_rows.clone(),)).unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn append_matches_numpy_across_flattened_axis_scalar_object_empty_and_errors() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let append_fn = module.getattr("append")?;
+            let numpy = py.import("numpy")?;
+            let numpy_append = numpy.getattr("append")?;
+
+            let one_d = numeric_array(py, vec![1_i64, 2, 3], "int64");
+            let values_1d = numeric_array(py, vec![4_i64, 5], "int64");
+
+            // Default axis=None flattens the inputs before append.
+            assert_array_matches_numpy(
+                &append_fn.call1((one_d.clone(), values_1d.clone()))?,
+                &numpy_append.call1((one_d.clone(), values_1d.clone()))?,
+            )?;
+
+            let two_d = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2], vec![3_i64, 4]],))?;
+            let axis0_values = numpy.getattr("array")?.call1((vec![vec![5_i64, 6]],))?;
+            let axis1_values = numpy
+                .getattr("array")?
+                .call1((vec![vec![7_i64], vec![8]],))?;
+
+            // Axis-aware appends across rows and columns.
+            assert_array_matches_numpy(
+                &append_fn.call1((two_d.clone(), axis0_values.clone(), 0_i64))?,
+                &numpy_append.call1((two_d.clone(), axis0_values.clone(), 0_i64))?,
+            )?;
+            assert_array_matches_numpy(
+                &append_fn.call1((two_d.clone(), axis1_values.clone(), 1_i64))?,
+                &numpy_append.call1((two_d.clone(), axis1_values.clone(), 1_i64))?,
+            )?;
+
+            // Scalar values append with NumPy's coercion rules.
+            assert_array_matches_numpy(
+                &append_fn.call1((one_d.clone(), 9_i64))?,
+                &numpy_append.call1((one_d.clone(), 9_i64))?,
+            )?;
+
+            // Object dtype behavior.
+            let object_arr = object_array(py, vec!["north", "south"]);
+            let object_values = object_array(py, vec!["east"]);
+            assert_array_matches_numpy(
+                &append_fn.call1((object_arr.clone(), object_values.clone()))?,
+                &numpy_append.call1((object_arr.clone(), object_values.clone()))?,
+            )?;
+
+            // Empty values preserve NumPy parity.
+            let empty_values = numpy.getattr("array")?.call1((Vec::<i64>::new(),))?;
+            assert_array_matches_numpy(
+                &append_fn.call1((one_d.clone(), empty_values.clone()))?,
+                &numpy_append.call1((one_d.clone(), empty_values.clone()))?,
+            )?;
+
+            // Mismatched shape along an explicit axis surfaces NumPy's error.
+            let bad_axis_values = numpy
+                .getattr("array")?
+                .call1((vec![vec![9_i64, 10, 11]],))?;
+            let actual_err = append_fn
+                .call1((two_d.clone(), bad_axis_values.clone(), 0_i64))
+                .unwrap_err();
+            let expected_err = numpy_append
+                .call1((two_d.clone(), bad_axis_values.clone(), 0_i64))
+                .unwrap_err();
             assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
 
             Ok(())
