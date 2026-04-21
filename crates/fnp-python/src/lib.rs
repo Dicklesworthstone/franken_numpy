@@ -4033,6 +4033,37 @@ fn searchsorted(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, bins=None, range=None, density=None, weights=None))]
+fn histogram(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    bins: Option<Py<PyAny>>,
+    range: Option<Py<PyAny>>,
+    density: Option<Py<PyAny>>,
+    weights: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.histogram so bin edge selection, density
+    // normalization, weighted accumulation, and tuple return surface
+    // match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let histogram_fn = numpy.getattr("histogram")?;
+    let kwargs = PyDict::new(py);
+    if let Some(bins_val) = bins {
+        kwargs.set_item("bins", bins_val.bind(py))?;
+    }
+    if let Some(range_val) = range {
+        kwargs.set_item("range", range_val.bind(py))?;
+    }
+    if let Some(density_val) = density {
+        kwargs.set_item("density", density_val.bind(py))?;
+    }
+    if let Some(weights_val) = weights {
+        kwargs.set_item("weights", weights_val.bind(py))?;
+    }
+    Ok(histogram_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, bins=None, range=None, weights=None))]
 fn histogram_bin_edges(
     py: Python<'_>,
@@ -7592,6 +7623,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(select, m)?)?;
     m.add_function(wrap_pyfunction!(choose, m)?)?;
     m.add_function(wrap_pyfunction!(searchsorted, m)?)?;
+    m.add_function(wrap_pyfunction!(histogram, m)?)?;
     m.add_function(wrap_pyfunction!(histogram_bin_edges, m)?)?;
     m.add_function(wrap_pyfunction!(transpose, m)?)?;
     m.add_function(wrap_pyfunction!(swapaxes, m)?)?;
@@ -7999,6 +8031,7 @@ mod tests {
             assert!(module.getattr("flatnonzero").is_ok());
             assert!(module.getattr("argwhere").is_ok());
             assert!(module.getattr("count_nonzero").is_ok());
+            assert!(module.getattr("histogram").is_ok());
             assert!(module.getattr("histogram_bin_edges").is_ok());
             assert!(module.getattr("transpose").is_ok());
             assert!(module.getattr("swapaxes").is_ok());
@@ -25320,6 +25353,150 @@ mod tests {
                 )
                 .unwrap_err();
             assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn histogram_matches_numpy_across_bins_range_density_weights_and_empty() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let histogram_fn = module.getattr("histogram")?;
+            let numpy = py.import("numpy")?;
+            let numpy_histogram = numpy.getattr("histogram")?;
+
+            let values = numpy
+                .getattr("array")?
+                .call1((vec![0.0_f64, 0.5, 1.0, 1.5, 2.0, 3.0],))?;
+
+            // Default 10-bin path.
+            let actual_default = histogram_fn.call1((values.clone(),))?;
+            let expected_default = numpy_histogram.call1((values.clone(),))?;
+            assert_index_tuple_matches_numpy(&actual_default, &expected_default)?;
+            let actual_default_tuple = actual_default.downcast::<PyTuple>()?;
+            assert_eq!(actual_default_tuple.len()?, 2);
+            let counts = actual_default_tuple.get_item(0)?;
+            let edges = actual_default_tuple.get_item(1)?;
+            assert_eq!(counts.len()?, 10);
+            assert_eq!(edges.len()?, 11);
+
+            // Explicit integer bin count.
+            assert_index_tuple_matches_numpy(
+                &histogram_fn.call(
+                    (values.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("bins", 4_i64)?;
+                        kw
+                    }),
+                )?,
+                &numpy_histogram.call(
+                    (values.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("bins", 4_i64)?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // Explicit bin edges.
+            let explicit_edges = numpy
+                .getattr("array")?
+                .call1((vec![0.0_f64, 1.0, 2.0, 4.0],))?;
+            assert_index_tuple_matches_numpy(
+                &histogram_fn.call(
+                    (values.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("bins", explicit_edges.clone())?;
+                        kw
+                    }),
+                )?,
+                &numpy_histogram.call(
+                    (values.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("bins", explicit_edges.clone())?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // Range clipping with density normalization.
+            assert_index_tuple_matches_numpy(
+                &histogram_fn.call(
+                    (values.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("bins", 3_i64)?;
+                        kw.set_item("range", (0.0_f64, 2.5_f64))?;
+                        kw.set_item("density", true)?;
+                        kw
+                    }),
+                )?,
+                &numpy_histogram.call(
+                    (values.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("bins", 3_i64)?;
+                        kw.set_item("range", (0.0_f64, 2.5_f64))?;
+                        kw.set_item("density", true)?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // Weighted accumulation.
+            let weights = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 0.5, 2.0, 1.5, 1.0, 3.0],))?;
+            assert_index_tuple_matches_numpy(
+                &histogram_fn.call(
+                    (values.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("bins", 5_i64)?;
+                        kw.set_item("weights", weights.clone())?;
+                        kw
+                    }),
+                )?,
+                &numpy_histogram.call(
+                    (values.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("bins", 5_i64)?;
+                        kw.set_item("weights", weights.clone())?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // Empty input parity.
+            let empty = numpy.getattr("array")?.call1((Vec::<f64>::new(),))?;
+            let actual_empty = histogram_fn.call(
+                (empty.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("bins", 4_i64)?;
+                    kw
+                }),
+            )?;
+            let expected_empty = numpy_histogram.call(
+                (empty.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("bins", 4_i64)?;
+                    kw
+                }),
+            )?;
+            assert_index_tuple_matches_numpy(&actual_empty, &expected_empty)?;
 
             Ok(())
         });
