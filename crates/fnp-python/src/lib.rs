@@ -4033,6 +4033,35 @@ fn searchsorted(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, bins=None, range=None, weights=None))]
+fn histogram_bin_edges(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    bins: Option<Py<PyAny>>,
+    range: Option<Py<PyAny>>,
+    weights: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.histogram_bin_edges so estimator strings,
+    // explicit edge arrays, range clipping, and weighted paths all
+    // match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let histogram_bin_edges_fn = numpy.getattr("histogram_bin_edges")?;
+    let kwargs = PyDict::new(py);
+    if let Some(bins_val) = bins {
+        kwargs.set_item("bins", bins_val.bind(py))?;
+    }
+    if let Some(range_val) = range {
+        kwargs.set_item("range", range_val.bind(py))?;
+    }
+    if let Some(weights_val) = weights {
+        kwargs.set_item("weights", weights_val.bind(py))?;
+    }
+    Ok(histogram_bin_edges_fn
+        .call((a.bind(py),), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (tup, *, dtype=None, casting="same_kind"))]
 fn vstack(
     py: Python<'_>,
@@ -7501,6 +7530,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(select, m)?)?;
     m.add_function(wrap_pyfunction!(choose, m)?)?;
     m.add_function(wrap_pyfunction!(searchsorted, m)?)?;
+    m.add_function(wrap_pyfunction!(histogram_bin_edges, m)?)?;
     m.add_function(wrap_pyfunction!(split, m)?)?;
     m.add_function(wrap_pyfunction!(array_split, m)?)?;
     m.add_function(wrap_pyfunction!(hsplit, m)?)?;
@@ -7872,6 +7902,19 @@ mod tests {
         Ok(())
     }
 
+    fn assert_pyerr_matches_numpy(
+        py: Python<'_>,
+        actual: pyo3::PyErr,
+        expected: pyo3::PyErr,
+    ) -> PyResult<()> {
+        assert_eq!(
+            actual.get_type(py).name()?.extract::<String>()?,
+            expected.get_type(py).name()?.extract::<String>()?
+        );
+        assert_eq!(actual.to_string(), expected.to_string());
+        Ok(())
+    }
+
     #[test]
     fn module_exports_python_surface() {
         with_python(|py| {
@@ -7890,6 +7933,7 @@ mod tests {
             assert!(module.getattr("flatnonzero").is_ok());
             assert!(module.getattr("argwhere").is_ok());
             assert!(module.getattr("count_nonzero").is_ok());
+            assert!(module.getattr("histogram_bin_edges").is_ok());
             assert!(module.getattr("expand_dims").is_ok());
             assert!(module.getattr("structured_to_unstructured").is_ok());
             assert!(module.getattr("trim_zeros").is_ok());
@@ -25036,6 +25080,176 @@ mod tests {
             assert!(actual_err.is_instance_of::<PyValueError>(py));
             assert!(expected_err.is_instance_of::<PyValueError>(py));
             assert_eq!(actual_err.to_string(), expected_err.to_string());
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn histogram_bin_edges_matches_numpy_across_bins_range_weights_and_errors() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let histogram_bin_edges_fn = module.getattr("histogram_bin_edges")?;
+            let numpy = py.import("numpy")?;
+            let numpy_histogram_bin_edges = numpy.getattr("histogram_bin_edges")?;
+
+            // Default integer bin count.
+            let ints = numpy
+                .getattr("array")?
+                .call1((vec![0.0_f64, 1.0, 1.5, 2.0, 4.0],))?;
+            assert_array_matches_numpy(
+                &histogram_bin_edges_fn.call1((ints.clone(),))?,
+                &numpy_histogram_bin_edges.call1((ints.clone(),))?,
+            )?;
+
+            // Explicit edge array passthrough.
+            let explicit_edges = numpy
+                .getattr("array")?
+                .call1((vec![0.0_f64, 1.0, 3.0, 5.0],))?;
+            assert_array_matches_numpy(
+                &histogram_bin_edges_fn.call(
+                    (ints.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("bins", explicit_edges.clone())?;
+                        kw
+                    }),
+                )?,
+                &numpy_histogram_bin_edges.call(
+                    (ints.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("bins", explicit_edges.clone())?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // Explicit range clipping with an integer bin count.
+            assert_array_matches_numpy(
+                &histogram_bin_edges_fn.call(
+                    (ints.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("bins", 4_i64)?;
+                        kw.set_item("range", (0.0_f64, 2.0_f64))?;
+                        kw
+                    }),
+                )?,
+                &numpy_histogram_bin_edges.call(
+                    (ints.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("bins", 4_i64)?;
+                        kw.set_item("range", (0.0_f64, 2.0_f64))?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // Estimator string parity.
+            let estimator_input = numpy
+                .getattr("array")?
+                .call1((vec![0.1_f64, 0.4, 0.7, 1.8, 2.0, 2.4, 2.7],))?;
+            assert_array_matches_numpy(
+                &histogram_bin_edges_fn.call(
+                    (estimator_input.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("bins", "fd")?;
+                        kw
+                    }),
+                )?,
+                &numpy_histogram_bin_edges.call(
+                    (estimator_input.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("bins", "fd")?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // Weights parity on supported numeric-bin paths.
+            let weighted = numpy
+                .getattr("array")?
+                .call1((vec![0.0_f64, 0.5, 1.5, 2.0, 2.5],))?;
+            let weights = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 2.0, 1.0, 3.0, 4.0],))?;
+            assert_array_matches_numpy(
+                &histogram_bin_edges_fn.call(
+                    (weighted.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("bins", 3_i64)?;
+                        kw.set_item("weights", weights.clone())?;
+                        kw
+                    }),
+                )?,
+                &numpy_histogram_bin_edges.call(
+                    (weighted.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("bins", 3_i64)?;
+                        kw.set_item("weights", weights.clone())?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // Empty input parity.
+            let empty = numpy.getattr("array")?.call1((Vec::<f64>::new(),))?;
+            assert_array_matches_numpy(
+                &histogram_bin_edges_fn.call(
+                    (empty.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("bins", 4_i64)?;
+                        kw
+                    }),
+                )?,
+                &numpy_histogram_bin_edges.call(
+                    (empty.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("bins", 4_i64)?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // Non-finite input with an automatic estimator must raise
+            // the same error surface.
+            let nonfinite = numpy
+                .getattr("array")?
+                .call1((vec![0.0_f64, 1.0, f64::INFINITY],))?;
+            let actual_err = histogram_bin_edges_fn
+                .call(
+                    (nonfinite.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("bins", "auto")?;
+                        kw
+                    }),
+                )
+                .unwrap_err();
+            let expected_err = numpy_histogram_bin_edges
+                .call(
+                    (nonfinite.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("bins", "auto")?;
+                        kw
+                    }),
+                )
+                .unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
 
             Ok(())
         });
