@@ -5044,6 +5044,40 @@ fn average(
 }
 
 #[pyfunction]
+#[pyo3(signature = (actual, desired, rtol=1e-7, atol=0.0, equal_nan=true, err_msg=None, verbose=true))]
+#[allow(clippy::too_many_arguments)]
+fn testing_assert_allclose(
+    py: Python<'_>,
+    actual: Py<PyAny>,
+    desired: Py<PyAny>,
+    rtol: f64,
+    atol: f64,
+    equal_nan: bool,
+    err_msg: Option<String>,
+    verbose: bool,
+) -> PyResult<()> {
+    // Passthrough to numpy.testing.assert_allclose. Raises
+    // AssertionError when arrays are not all-close within tolerance.
+    let numpy = py.import("numpy")?;
+    let assert_fn = numpy
+        .getattr("testing")?
+        .getattr("assert_allclose")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("rtol", rtol)?;
+    kwargs.set_item("atol", atol)?;
+    kwargs.set_item("equal_nan", equal_nan)?;
+    if let Some(msg) = err_msg {
+        kwargs.set_item("err_msg", msg)?;
+    }
+    kwargs.set_item("verbose", verbose)?;
+    assert_fn.call(
+        (actual.bind(py), desired.bind(py)),
+        Some(&kwargs),
+    )?;
+    Ok(())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x,))]
 fn iscomplexobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.iscomplexobj. Returns True iff input has a
@@ -6183,6 +6217,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(asfortranarray, m)?)?;
     m.add_function(wrap_pyfunction!(isrealobj, m)?)?;
     m.add_function(wrap_pyfunction!(average, m)?)?;
+    m.add_function(wrap_pyfunction!(testing_assert_allclose, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6490,6 +6525,7 @@ mod tests {
             assert!(module.getattr("asfortranarray").is_ok());
             assert!(module.getattr("isrealobj").is_ok());
             assert!(module.getattr("average").is_ok());
+            assert!(module.getattr("testing_assert_allclose").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -24185,6 +24221,87 @@ mod tests {
             )?;
             let ok_2d_w: bool = allclose.call1((&ours_2d_w, &theirs_2d_w))?.extract()?;
             assert!(ok_2d_w, "average 2-D axis=1 with weights mismatch");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn testing_assert_allclose_matches_numpy_pass_and_fail_paths() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let assert_fn = module.getattr("testing_assert_allclose")?;
+            let numpy = py.import("numpy")?;
+
+            // Identical arrays → passes silently.
+            let a = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            let b = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            assert_fn.call1((a.clone(), b.clone()))?;
+
+            // Within default tol → passes.
+            let c = numpy.getattr("array")?.call1((vec![1.0_f64 + 1e-10, 2.0, 3.0],))?;
+            assert_fn.call1((a.clone(), c.clone()))?;
+
+            // Beyond tol → AssertionError.
+            let d = numpy.getattr("array")?.call1((vec![1.0_f64 + 1.0, 2.0, 3.0],))?;
+            let err = assert_fn.call1((a.clone(), d.clone())).err();
+            assert!(err.is_some(), "beyond-tol must raise AssertionError");
+            let err_type = err
+                .as_ref()
+                .map(|e| e.get_type(py).name().unwrap().to_string())
+                .unwrap_or_default();
+            assert!(
+                err_type.contains("AssertionError"),
+                "expected AssertionError, got {}",
+                err_type,
+            );
+
+            // equal_nan=True (default) with NaN at same positions → passes.
+            let nan_a = numpy.getattr("array")?.call1((vec![1.0_f64, f64::NAN, 3.0],))?;
+            let nan_b = numpy.getattr("array")?.call1((vec![1.0_f64, f64::NAN, 3.0],))?;
+            assert_fn.call1((nan_a.clone(), nan_b.clone()))?;
+
+            // equal_nan=False with NaN → raises.
+            let err_nan = assert_fn.call(
+                (nan_a.clone(), nan_b.clone()),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("equal_nan", false)?;
+                    kw
+                }),
+            ).err();
+            assert!(
+                err_nan.is_some(),
+                "equal_nan=False with NaN must raise AssertionError",
+            );
+
+            // Custom err_msg appears in raised message.
+            let err_msg_test = assert_fn.call(
+                (a.clone(), d.clone()),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("err_msg", "custom-marker")?;
+                    kw
+                }),
+            ).err();
+            assert!(err_msg_test.is_some(), "expected error with custom err_msg");
+            let err_text = err_msg_test
+                .as_ref()
+                .map(|e| e.value(py).str().unwrap().to_string())
+                .unwrap_or_default();
+            assert!(
+                err_text.contains("custom-marker"),
+                "err_msg must appear in raised AssertionError message; got: {}",
+                err_text,
+            );
+
+            // Broadcasting: scalar vs array equal-valued → passes.
+            assert_fn.call1((1.0_f64, numpy.getattr("array")?.call1((vec![1.0_f64, 1.0, 1.0],))?))?;
 
             Ok(())
         });
