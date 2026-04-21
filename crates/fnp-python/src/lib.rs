@@ -4812,6 +4812,16 @@ fn angle(py: Python<'_>, z: Py<PyAny>, deg: bool) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (m,))]
+fn bartlett(py: Python<'_>, m: i64) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.bartlett so the Bartlett (triangular) window
+    // matches numpy across small/odd/even M, M=0/M=1 edge cases, and
+    // the float64 dtype convention.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("bartlett")?.call1((m,))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x,))]
 fn iscomplexobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.iscomplexobj. Returns True iff input has a
@@ -5934,6 +5944,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(real_if_close, m)?)?;
     m.add_function(wrap_pyfunction!(iscomplexobj, m)?)?;
     m.add_function(wrap_pyfunction!(angle, m)?)?;
+    m.add_function(wrap_pyfunction!(bartlett, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6224,6 +6235,7 @@ mod tests {
             assert!(module.getattr("real_if_close").is_ok());
             assert!(module.getattr("iscomplexobj").is_ok());
             assert!(module.getattr("angle").is_ok());
+            assert!(module.getattr("bartlett").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -22352,6 +22364,69 @@ mod tests {
             let theirs_2d = numpy_angle.call1((two_d.clone(),))?;
             let ok_2d: bool = allclose.call1((&ours_2d, &theirs_2d))?.extract()?;
             assert!(ok_2d, "angle 2-D complex mismatch");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn bartlett_matches_numpy_across_m_sizes_and_dtype() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let bartlett_fn = module.getattr("bartlett")?;
+            let numpy = py.import("numpy")?;
+            let numpy_bartlett = numpy.getattr("bartlett")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // M=4 endpoints zero, midpoints rising/falling.
+            let ours_4 = bartlett_fn.call1((4_i64,))?;
+            let theirs_4 = numpy_bartlett.call1((4_i64,))?;
+            let ok_4: bool = allclose.call1((&ours_4, &theirs_4))?.extract()?;
+            assert!(ok_4, "bartlett(4) mismatch");
+
+            // M=11 mid-peak ≈ 1.0, symmetric around index 5.
+            let ours_11 = bartlett_fn.call1((11_i64,))?;
+            let theirs_11 = numpy_bartlett.call1((11_i64,))?;
+            let ok_11: bool = allclose.call1((&ours_11, &theirs_11))?.extract()?;
+            assert!(ok_11, "bartlett(11) mismatch");
+            let center: f64 = ours_11.get_item(5_i64)?.extract()?;
+            assert!((center - 1.0).abs() < 1e-12, "bartlett mid-point must be 1");
+
+            // M=1 → [1.0].
+            let ours_1 = bartlett_fn.call1((1_i64,))?;
+            let theirs_1 = numpy_bartlett.call1((1_i64,))?;
+            let ok_1: bool = allclose.call1((&ours_1, &theirs_1))?.extract()?;
+            assert!(ok_1, "bartlett(1) mismatch");
+
+            // M=0 → empty array.
+            let ours_0 = bartlett_fn.call1((0_i64,))?;
+            let theirs_0 = numpy_bartlett.call1((0_i64,))?;
+            let ours_size: usize = ours_0.getattr("size")?.extract()?;
+            let theirs_size: usize = theirs_0.getattr("size")?.extract()?;
+            assert_eq!(ours_size, theirs_size, "bartlett(0) size must match");
+            assert_eq!(ours_size, 0, "bartlett(0) must be empty");
+
+            // dtype float64 parity.
+            let ours_dtype = ours_11.getattr("dtype")?.str()?.to_string();
+            let theirs_dtype = theirs_11.getattr("dtype")?.str()?.to_string();
+            assert_eq!(ours_dtype, theirs_dtype, "bartlett dtype must match numpy");
+
+            // Symmetry around the center for odd-length window.
+            let flip_fn = module.getattr("flip")?;
+            let reversed = flip_fn.call1((ours_11.clone(),))?;
+            let symm: bool = allclose.call1((&ours_11, &reversed))?.extract()?;
+            assert!(symm, "bartlett window must be symmetric around its center");
+
+            // Endpoints are zero for M ≥ 2.
+            let first: f64 = ours_11.get_item(0_i64)?.extract()?;
+            let last: f64 = ours_11.get_item(10_i64)?.extract()?;
+            assert!(first.abs() < 1e-12, "bartlett first endpoint must be 0");
+            assert!(last.abs() < 1e-12, "bartlett last endpoint must be 0");
 
             Ok(())
         });
