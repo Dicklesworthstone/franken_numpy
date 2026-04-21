@@ -4311,6 +4311,66 @@ fn masked_greater_equal(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, n=None, axis=-1, norm=None, out=None))]
+fn fft(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    n: Option<usize>,
+    axis: i64,
+    norm: Option<String>,
+    out: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.fft.fft so the optional truncation/zero-padding
+    // length n, axis selector, norm conventions ('backward'/'ortho'/
+    // 'forward'), optional `out=` destination, and complex output dtype
+    // all match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let fft_fn = numpy.getattr("fft")?.getattr("fft")?;
+    let kwargs = PyDict::new(py);
+    if let Some(n_val) = n {
+        kwargs.set_item("n", n_val)?;
+    }
+    kwargs.set_item("axis", axis)?;
+    if let Some(norm_val) = norm {
+        kwargs.set_item("norm", norm_val)?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    Ok(fft_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, n=None, axis=-1, norm=None, out=None))]
+fn ifft(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    n: Option<usize>,
+    axis: i64,
+    norm: Option<String>,
+    out: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.fft.ifft so the optional truncation/zero-padding
+    // length n, axis selector, norm conventions ('backward'/'ortho'/
+    // 'forward'), optional `out=` destination, and complex output dtype
+    // all match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let ifft_fn = numpy.getattr("fft")?.getattr("ifft")?;
+    let kwargs = PyDict::new(py);
+    if let Some(n_val) = n {
+        kwargs.set_item("n", n_val)?;
+    }
+    kwargs.set_item("axis", axis)?;
+    if let Some(norm_val) = norm {
+        kwargs.set_item("norm", norm_val)?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    Ok(ifft_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, UPLO="L"))]
 #[allow(non_snake_case)]
 fn eigh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
@@ -5088,6 +5148,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(vdot, m)?)?;
     m.add_function(wrap_pyfunction!(masked_inside, m)?)?;
     m.add_function(wrap_pyfunction!(masked_greater_equal, m)?)?;
+    m.add_function(wrap_pyfunction!(fft, m)?)?;
+    m.add_function(wrap_pyfunction!(ifft, m)?)?;
     m.add_function(wrap_pyfunction!(eigh, m)?)?;
     m.add_function(wrap_pyfunction!(tensordot, m)?)?;
     m.add_function(wrap_pyfunction!(cross, m)?)?;
@@ -5343,6 +5405,8 @@ mod tests {
             assert!(module.getattr("vdot").is_ok());
             assert!(module.getattr("masked_inside").is_ok());
             assert!(module.getattr("masked_greater_equal").is_ok());
+            assert!(module.getattr("fft").is_ok());
+            assert!(module.getattr("ifft").is_ok());
             assert!(module.getattr("eigh").is_ok());
             assert!(module.getattr("tensordot").is_ok());
             assert!(module.getattr("cross").is_ok());
@@ -16823,6 +16887,309 @@ mod tests {
                 &eigh_fn.call1((hermitian.clone(),))?,
                 &numpy_eigh.call1((hermitian.clone(),))?,
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn fft_matches_numpy_across_shapes_norms_out_and_complex() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let fft_fn = module.getattr("fft")?;
+            let numpy = py.import("numpy")?;
+            let numpy_fft = numpy.getattr("fft")?.getattr("fft")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Default 1-D real input.
+            let real_data = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],))?;
+            assert!(
+                allclose
+                    .call1((
+                        &fft_fn.call1((real_data.clone(),))?,
+                        &numpy_fft.call1((real_data.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "fft real 1-D diverged"
+            );
+
+            // Explicit n: zero-padding to 16 from length 8.
+            let n_kw = PyDict::new(py);
+            n_kw.set_item("n", 16_usize)?;
+            let n_kw_n = PyDict::new(py);
+            n_kw_n.set_item("n", 16_usize)?;
+            assert!(
+                allclose
+                    .call1((
+                        &fft_fn.call((real_data.clone(),), Some(&n_kw))?,
+                        &numpy_fft.call((real_data.clone(),), Some(&n_kw_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "fft n=16 zero-padded diverged"
+            );
+
+            // norm='ortho' — symmetric scaling.
+            let ortho_kw = PyDict::new(py);
+            ortho_kw.set_item("norm", "ortho")?;
+            let ortho_kw_n = PyDict::new(py);
+            ortho_kw_n.set_item("norm", "ortho")?;
+            assert!(
+                allclose
+                    .call1((
+                        &fft_fn.call((real_data.clone(),), Some(&ortho_kw))?,
+                        &numpy_fft.call((real_data.clone(),), Some(&ortho_kw_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "fft norm='ortho' diverged"
+            );
+
+            // norm='forward' — forward transform applies normalization.
+            let fwd_kw = PyDict::new(py);
+            fwd_kw.set_item("norm", "forward")?;
+            let fwd_kw_n = PyDict::new(py);
+            fwd_kw_n.set_item("norm", "forward")?;
+            assert!(
+                allclose
+                    .call1((
+                        &fft_fn.call((real_data.clone(),), Some(&fwd_kw))?,
+                        &numpy_fft.call((real_data.clone(),), Some(&fwd_kw_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "fft norm='forward' diverged"
+            );
+
+            // 2-D input with axis=0.
+            let data_2d = numpy
+                .getattr("arange")?
+                .call1((24_i64,))?
+                .call_method1("reshape", (4_i64, 6_i64))?
+                .call_method1("astype", ("float64",))?;
+            let ax0_kw = PyDict::new(py);
+            ax0_kw.set_item("axis", 0_i64)?;
+            let ax0_kw_n = PyDict::new(py);
+            ax0_kw_n.set_item("axis", 0_i64)?;
+            assert!(
+                allclose
+                    .call1((
+                        &fft_fn.call((data_2d.clone(),), Some(&ax0_kw))?,
+                        &numpy_fft.call((data_2d.clone(),), Some(&ax0_kw_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "fft 2-D axis=0 diverged"
+            );
+
+            // Complex 1-D input.
+            let builtins = py.import("builtins")?;
+            let complex_data = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        builtins.getattr("complex")?.call1((1.0_f64, 0.0_f64))?,
+                        builtins.getattr("complex")?.call1((0.0_f64, 1.0_f64))?,
+                        builtins.getattr("complex")?.call1((-1.0_f64, 0.0_f64))?,
+                        builtins.getattr("complex")?.call1((0.0_f64, -1.0_f64))?,
+                    ],
+                )?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "complex128")?;
+                    kw
+                }),
+            )?;
+            assert!(
+                allclose
+                    .call1((
+                        &fft_fn.call1((complex_data.clone(),))?,
+                        &numpy_fft.call1((complex_data.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "fft complex diverged"
+            );
+
+            // out= writes into a pre-allocated complex buffer.
+            let out_buf = numpy.getattr("zeros")?.call(
+                (PyTuple::new(py, [8_i64])?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "complex128")?;
+                    kw
+                }),
+            )?;
+            let out_kw = PyDict::new(py);
+            out_kw.set_item("out", out_buf.clone())?;
+            let out_kw_n = PyDict::new(py);
+            out_kw_n.set_item("out", out_buf.clone())?;
+            let returned = fft_fn.call((real_data.clone(),), Some(&out_kw))?;
+            let expected_out = numpy_fft.call((real_data.clone(),), Some(&out_kw_n))?;
+            assert!(
+                allclose
+                    .call1((&returned, &expected_out))?
+                    .extract::<bool>()?,
+                "fft out= diverged"
+            );
+
+            // Invalid norm error text should surface unchanged.
+            let bad_kw = PyDict::new(py);
+            bad_kw.set_item("norm", "bad")?;
+            let bad_kw_n = PyDict::new(py);
+            bad_kw_n.set_item("norm", "bad")?;
+            let actual_err = fft_fn.call((real_data.clone(),), Some(&bad_kw)).unwrap_err();
+            let expected_err = numpy_fft
+                .call((real_data.clone(),), Some(&bad_kw_n))
+                .unwrap_err();
+            assert_eq!(
+                actual_err.get_type(py).name()?.extract::<String>()?,
+                expected_err.get_type(py).name()?.extract::<String>()?
+            );
+            assert_eq!(
+                actual_err.value(py).str()?.extract::<String>()?,
+                expected_err.value(py).str()?.extract::<String>()?
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ifft_matches_numpy_across_shapes_norms_and_complex() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let ifft_fn = module.getattr("ifft")?;
+            let numpy = py.import("numpy")?;
+            let numpy_ifft = numpy.getattr("fft")?.getattr("ifft")?;
+            let numpy_fft = numpy.getattr("fft")?.getattr("fft")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Default 1-D real input — numpy treats real as complex.
+            let real_data = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],))?;
+            assert!(
+                allclose
+                    .call1((
+                        &ifft_fn.call1((real_data.clone(),))?,
+                        &numpy_ifft.call1((real_data.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "ifft real 1-D diverged"
+            );
+
+            // Round-trip: ifft(fft(x)) == x.
+            let x = numpy
+                .getattr("arange")?
+                .call1((16_i64,))?
+                .call_method1("astype", ("float64",))?;
+            let fft_x = numpy_fft.call1((x.clone(),))?;
+            let recovered = ifft_fn.call1((fft_x.clone(),))?;
+            assert!(
+                allclose.call1((&recovered, &x))?.extract::<bool>()?,
+                "ifft(fft(x)) round-trip diverged"
+            );
+
+            // Explicit n: zero-padding to 16 from length 8.
+            let n_kw = PyDict::new(py);
+            n_kw.set_item("n", 16_usize)?;
+            let n_kw_n = PyDict::new(py);
+            n_kw_n.set_item("n", 16_usize)?;
+            assert!(
+                allclose
+                    .call1((
+                        &ifft_fn.call((real_data.clone(),), Some(&n_kw))?,
+                        &numpy_ifft.call((real_data.clone(),), Some(&n_kw_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "ifft n=16 zero-padded diverged"
+            );
+
+            // norm='ortho' — symmetric scaling.
+            let ortho_kw = PyDict::new(py);
+            ortho_kw.set_item("norm", "ortho")?;
+            let ortho_kw_n = PyDict::new(py);
+            ortho_kw_n.set_item("norm", "ortho")?;
+            assert!(
+                allclose
+                    .call1((
+                        &ifft_fn.call((real_data.clone(),), Some(&ortho_kw))?,
+                        &numpy_ifft.call((real_data.clone(),), Some(&ortho_kw_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "ifft norm='ortho' diverged"
+            );
+
+            // norm='forward' — no scaling on inverse.
+            let fwd_kw = PyDict::new(py);
+            fwd_kw.set_item("norm", "forward")?;
+            let fwd_kw_n = PyDict::new(py);
+            fwd_kw_n.set_item("norm", "forward")?;
+            assert!(
+                allclose
+                    .call1((
+                        &ifft_fn.call((real_data.clone(),), Some(&fwd_kw))?,
+                        &numpy_ifft.call((real_data.clone(),), Some(&fwd_kw_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "ifft norm='forward' diverged"
+            );
+
+            // 2-D input with axis=0.
+            let data_2d = numpy
+                .getattr("arange")?
+                .call1((24_i64,))?
+                .call_method1("reshape", (4_i64, 6_i64))?
+                .call_method1("astype", ("float64",))?;
+            let ax0_kw = PyDict::new(py);
+            ax0_kw.set_item("axis", 0_i64)?;
+            let ax0_kw_n = PyDict::new(py);
+            ax0_kw_n.set_item("axis", 0_i64)?;
+            assert!(
+                allclose
+                    .call1((
+                        &ifft_fn.call((data_2d.clone(),), Some(&ax0_kw))?,
+                        &numpy_ifft.call((data_2d.clone(),), Some(&ax0_kw_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "ifft 2-D axis=0 diverged"
+            );
+
+            // Complex 1-D input.
+            let builtins = py.import("builtins")?;
+            let complex_data = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        builtins.getattr("complex")?.call1((1.0_f64, 0.0_f64))?,
+                        builtins.getattr("complex")?.call1((0.0_f64, 1.0_f64))?,
+                        builtins.getattr("complex")?.call1((-1.0_f64, 0.0_f64))?,
+                        builtins.getattr("complex")?.call1((0.0_f64, -1.0_f64))?,
+                    ],
+                )?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "complex128")?;
+                    kw
+                }),
+            )?;
+            assert!(
+                allclose
+                    .call1((
+                        &ifft_fn.call1((complex_data.clone(),))?,
+                        &numpy_ifft.call1((complex_data.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "ifft complex diverged"
+            );
 
             Ok(())
         });
