@@ -4916,6 +4916,20 @@ fn tile(py: Python<'_>, a: Py<PyAny>, reps: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (x1, x2))]
+fn true_divide(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.true_divide so x1/x2 element-wise always
+    // promotes to float (no integer truncation), matches numpy
+    // broadcasting and division-by-zero (yields ±inf for floats with
+    // appropriate sign) semantics.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("true_divide")?
+        .call1((x1.bind(py), x2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x,))]
 fn iscomplexobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.iscomplexobj. Returns True iff input has a
@@ -6047,6 +6061,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(expm1, m)?)?;
     m.add_function(wrap_pyfunction!(polyder, m)?)?;
     m.add_function(wrap_pyfunction!(tile, m)?)?;
+    m.add_function(wrap_pyfunction!(true_divide, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
@@ -6346,6 +6361,7 @@ mod tests {
             assert!(module.getattr("expm1").is_ok());
             assert!(module.getattr("polyder").is_ok());
             assert!(module.getattr("tile").is_ok());
+            assert!(module.getattr("true_divide").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
@@ -23225,6 +23241,117 @@ mod tests {
                 &tile_fn.call1((one_d.clone(), 10_i64))?,
                 &numpy_tile.call1((one_d.clone(), 10_i64))?,
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn true_divide_matches_numpy_across_dtypes_and_zero_division() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let td_fn = module.getattr("true_divide")?;
+            let numpy = py.import("numpy")?;
+            let numpy_td = numpy.getattr("true_divide")?;
+            let isclose = numpy.getattr("isclose")?;
+            let allclose = numpy.getattr("allclose")?;
+            let warnings = py.import("warnings")?;
+
+            // Integer / integer → float (no truncation).
+            let int_a = numpy.getattr("array")?.call1((vec![5_i64, 7, 11, 13],))?;
+            let int_b = numpy.getattr("array")?.call1((vec![2_i64, 3, 4, 5],))?;
+            let ours_i = td_fn.call1((int_a.clone(), int_b.clone()))?;
+            let theirs_i = numpy_td.call1((int_a.clone(), int_b.clone()))?;
+            let ok_i: bool = allclose.call1((&ours_i, &theirs_i))?.extract()?;
+            assert!(ok_i, "true_divide int/int mismatch");
+            let ours_dtype_kind = ours_i
+                .getattr("dtype")?
+                .getattr("kind")?
+                .extract::<String>()?;
+            assert_eq!(ours_dtype_kind, "f", "true_divide int/int must yield float dtype");
+
+            // Float / float.
+            let f_a = numpy.getattr("array")?.call1((vec![1.5_f64, 2.5, 3.5, 4.5],))?;
+            let f_b = numpy.getattr("array")?.call1((vec![0.5_f64, 0.5, 0.5, 0.5],))?;
+            let ours_f = td_fn.call1((f_a.clone(), f_b.clone()))?;
+            let theirs_f = numpy_td.call1((f_a.clone(), f_b.clone()))?;
+            let ok_f: bool = allclose.call1((&ours_f, &theirs_f))?.extract()?;
+            assert!(ok_f, "true_divide float/float mismatch");
+
+            // Broadcasting: scalar / array.
+            let ours_b = td_fn.call1((10.0_f64, f_a.clone()))?;
+            let theirs_b = numpy_td.call1((10.0_f64, f_a.clone()))?;
+            let ok_b: bool = allclose.call1((&ours_b, &theirs_b))?.extract()?;
+            assert!(ok_b, "true_divide scalar/array broadcast mismatch");
+
+            // Division by zero → ±inf with sign (warnings silenced).
+            let zeros = numpy.getattr("array")?.call1((vec![0.0_f64, 0.0],))?;
+            let signed = numpy.getattr("array")?.call1((vec![1.0_f64, -1.0],))?;
+            let catch_warnings = warnings.getattr("catch_warnings")?;
+            let suppressed_ours = {
+                let ctx = catch_warnings.call0()?;
+                ctx.call_method0("__enter__")?;
+                warnings.call_method1("simplefilter", ("ignore",))?;
+                let result = td_fn.call1((signed.clone(), zeros.clone()))?;
+                ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+                result
+            };
+            let suppressed_theirs = {
+                let ctx = catch_warnings.call0()?;
+                ctx.call_method0("__enter__")?;
+                warnings.call_method1("simplefilter", ("ignore",))?;
+                let result = numpy_td.call1((signed.clone(), zeros.clone()))?;
+                ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+                result
+            };
+            let ours_sign_pos: f64 = suppressed_ours.get_item(0_i64)?.extract()?;
+            let theirs_sign_pos: f64 = suppressed_theirs.get_item(0_i64)?.extract()?;
+            assert!(ours_sign_pos.is_infinite() && ours_sign_pos > 0.0);
+            assert!(theirs_sign_pos.is_infinite() && theirs_sign_pos > 0.0);
+            let ours_sign_neg: f64 = suppressed_ours.get_item(1_i64)?.extract()?;
+            let theirs_sign_neg: f64 = suppressed_theirs.get_item(1_i64)?.extract()?;
+            assert!(ours_sign_neg.is_infinite() && ours_sign_neg < 0.0);
+            assert!(theirs_sign_neg.is_infinite() && theirs_sign_neg < 0.0);
+
+            // Complex / complex.
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+            let cplx_items: Vec<Py<PyAny>> = vec![
+                py_complex.call1((1.0_f64, 2.0_f64))?.unbind(),
+                py_complex.call1((3.0_f64, 4.0_f64))?.unbind(),
+            ];
+            let cplx_lst = PyList::new(py, cplx_items)?;
+            let cplx_arr = numpy.getattr("array")?.call1((cplx_lst,))?;
+            let ours_c = td_fn.call1((cplx_arr.clone(), cplx_arr.clone()))?;
+            let theirs_c = numpy_td.call1((cplx_arr.clone(), cplx_arr.clone()))?;
+            let ok_c: bool = allclose.call1((&ours_c, &theirs_c))?.extract()?;
+            assert!(ok_c, "true_divide complex/complex mismatch");
+
+            // 2-D arrays.
+            let two_d_a = numpy.getattr("array")?.call1((vec![
+                vec![1.0_f64, 2.0],
+                vec![3.0, 4.0],
+            ],))?;
+            let two_d_b = numpy.getattr("array")?.call1((vec![
+                vec![2.0_f64, 4.0],
+                vec![6.0, 8.0],
+            ],))?;
+            let ours_2d = td_fn.call1((two_d_a.clone(), two_d_b.clone()))?;
+            let theirs_2d = numpy_td.call1((two_d_a.clone(), two_d_b.clone()))?;
+            let ok_2d: bool = allclose.call1((&ours_2d, &theirs_2d))?.extract()?;
+            assert!(ok_2d, "true_divide 2-D mismatch");
+
+            // Cross-check: true_divide(a, b) ≡ a / b (numpy operator).
+            let via_op = f_a.call_method1("__truediv__", (f_b.clone(),))?;
+            let ok_op: bool = isclose.call1((
+                ours_f.get_item(0_i64)?,
+                via_op.get_item(0_i64)?,
+            ))?.extract()?;
+            assert!(ok_op, "true_divide must equal __truediv__ result");
 
             Ok(())
         });
