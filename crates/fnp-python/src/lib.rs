@@ -3201,6 +3201,23 @@ fn broadcast_to(
         .unbind())
 }
 
+#[pyfunction]
+#[pyo3(signature = (*args, subok=false))]
+fn broadcast_arrays(py: Python<'_>, args: &Bound<'_, PyTuple>, subok: bool) -> PyResult<Py<PyAny>> {
+    // Delegate to NumPy so mixed-rank broadcasting, returned list
+    // length/order, per-result dtypes, and incompatible-shape errors
+    // all match exactly.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if subok {
+        kwargs.set_item("subok", true)?;
+    }
+    Ok(numpy
+        .getattr("broadcast_arrays")?
+        .call(args, Some(&kwargs))?
+        .unbind())
+}
+
 #[allow(dead_code)]
 fn validate_trim_zeros_mode(trim: &str) -> PyResult<()> {
     if trim.is_empty() || trim.chars().any(|ch| ch != 'f' && ch != 'b') {
@@ -7810,6 +7827,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(count_nonzero, m)?)?;
     m.add_function(wrap_pyfunction!(expand_dims, m)?)?;
     m.add_function(wrap_pyfunction!(broadcast_to, m)?)?;
+    m.add_function(wrap_pyfunction!(broadcast_arrays, m)?)?;
     m.add_function(wrap_pyfunction!(structured_to_unstructured, m)?)?;
     m.add_function(wrap_pyfunction!(trim_zeros, m)?)?;
     m.add_function(wrap_pyfunction!(masked_invalid, m)?)?;
@@ -8236,11 +8254,9 @@ mod tests {
         actual: &pyo3::Bound<'_, pyo3::types::PyAny>,
         expected: &pyo3::Bound<'_, pyo3::types::PyAny>,
     ) -> PyResult<()> {
-        let actual_list = actual.downcast::<PyList>()?;
-        let expected_list = expected.downcast::<PyList>()?;
-        assert_eq!(actual_list.len()?, expected_list.len()?);
+        assert_eq!(actual.len()?, expected.len()?);
 
-        for (actual_item, expected_item) in actual_list.try_iter()?.zip(expected_list.try_iter()?) {
+        for (actual_item, expected_item) in actual.try_iter()?.zip(expected.try_iter()?) {
             assert_array_matches_numpy(&actual_item?, &expected_item?)?;
         }
 
@@ -8290,6 +8306,7 @@ mod tests {
             assert!(module.getattr("rot90").is_ok());
             assert!(module.getattr("expand_dims").is_ok());
             assert!(module.getattr("broadcast_to").is_ok());
+            assert!(module.getattr("broadcast_arrays").is_ok());
             assert!(module.getattr("structured_to_unstructured").is_ok());
             assert!(module.getattr("trim_zeros").is_ok());
             assert!(module.getattr("masked_invalid").is_ok());
@@ -12957,6 +12974,81 @@ mod tests {
             let expected_err = numpy_broadcast_to
                 .call1((vector, PyTuple::new(py, [2_usize, 2_usize])?))
                 .unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn broadcast_arrays_matches_numpy_across_shapes_lengths_and_errors() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let broadcast_arrays_fn = module.getattr("broadcast_arrays")?;
+            let numpy = py.import("numpy")?;
+            let numpy_broadcast_arrays = numpy.getattr("broadcast_arrays")?;
+
+            // Scalar plus vector broadcast.
+            let scalar = numpy.getattr("array")?.call1((7_i64,))?;
+            let vector = numeric_array(py, vec![1_i64, 2, 3], "int64");
+            let actual_scalar_vector =
+                broadcast_arrays_fn.call1((scalar.clone(), vector.clone()))?;
+            let expected_scalar_vector =
+                numpy_broadcast_arrays.call1((scalar.clone(), vector.clone()))?;
+            assert_array_list_matches_numpy(&actual_scalar_vector, &expected_scalar_vector)?;
+
+            // 1-D to 2-D broadcast.
+            let matrix = numpy
+                .getattr("array")?
+                .call1((vec![vec![10_i64, 20, 30], vec![40, 50, 60]],))?;
+            let actual_matrix_vector =
+                broadcast_arrays_fn.call1((matrix.clone(), vector.clone()))?;
+            let expected_matrix_vector =
+                numpy_broadcast_arrays.call1((matrix.clone(), vector.clone()))?;
+            assert_array_list_matches_numpy(&actual_matrix_vector, &expected_matrix_vector)?;
+
+            // Three-array mixed-rank broadcast with per-result dtype parity.
+            let column = numpy
+                .getattr("array")?
+                .call1((vec![vec![1.5_f64], vec![2.5_f64]],))?;
+            let row = numpy
+                .getattr("array")?
+                .call1((vec![vec![100_i64, 200, 300]],))?;
+            let mask = numpy.getattr("array")?.call1((vec![true, false, true],))?;
+            let actual_three =
+                broadcast_arrays_fn.call1((column.clone(), row.clone(), mask.clone()))?;
+            let expected_three =
+                numpy_broadcast_arrays.call1((column.clone(), row.clone(), mask.clone()))?;
+            assert_array_list_matches_numpy(&actual_three, &expected_three)?;
+            assert_eq!(actual_three.len()?, 3);
+            assert_eq!(expected_three.len()?, 3);
+            for (actual_item, expected_item) in
+                actual_three.try_iter()?.zip(expected_three.try_iter()?)
+            {
+                let actual_item = actual_item?;
+                let expected_item = expected_item?;
+                assert_eq!(
+                    actual_item.getattr("dtype")?.str()?.extract::<String>()?,
+                    expected_item.getattr("dtype")?.str()?.extract::<String>()?
+                );
+            }
+
+            // Returned list length parity.
+            let actual_two = broadcast_arrays_fn.call1((column.clone(), row.clone()))?;
+            let expected_two = numpy_broadcast_arrays.call1((column.clone(), row.clone()))?;
+            assert_eq!(actual_two.len()?, expected_two.len()?);
+
+            // Incompatible shapes must raise the same ValueError surface.
+            let bad = numeric_array(py, vec![1_i64, 2], "int64");
+            let actual_err = broadcast_arrays_fn
+                .call1((matrix.clone(), bad.clone()))
+                .unwrap_err();
+            let expected_err = numpy_broadcast_arrays.call1((matrix, bad)).unwrap_err();
             assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
 
             Ok(())
