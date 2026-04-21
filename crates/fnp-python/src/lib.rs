@@ -4226,6 +4226,24 @@ fn swapaxes(py: Python<'_>, a: Py<PyAny>, axis1: i64, axis2: i64) -> PyResult<Py
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, source, destination))]
+fn moveaxis(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    source: Py<PyAny>,
+    destination: Py<PyAny>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.moveaxis so tuple-based reordering, negative
+    // axis normalization, identity moves, and validation errors match
+    // numpy exactly.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("moveaxis")?
+        .call1((a.bind(py), source.bind(py), destination.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, axis=None))]
 fn squeeze(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.squeeze so singleton-axis removal, explicit
@@ -7851,6 +7869,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(histogram_bin_edges, m)?)?;
     m.add_function(wrap_pyfunction!(transpose, m)?)?;
     m.add_function(wrap_pyfunction!(swapaxes, m)?)?;
+    m.add_function(wrap_pyfunction!(moveaxis, m)?)?;
     m.add_function(wrap_pyfunction!(squeeze, m)?)?;
     m.add_function(wrap_pyfunction!(rot90, m)?)?;
     m.add_function(wrap_pyfunction!(split, m)?)?;
@@ -8266,6 +8285,7 @@ mod tests {
             assert!(module.getattr("histogram_bin_edges").is_ok());
             assert!(module.getattr("transpose").is_ok());
             assert!(module.getattr("swapaxes").is_ok());
+            assert!(module.getattr("moveaxis").is_ok());
             assert!(module.getattr("squeeze").is_ok());
             assert!(module.getattr("rot90").is_ok());
             assert!(module.getattr("expand_dims").is_ok());
@@ -26586,6 +26606,70 @@ mod tests {
                 .unwrap_err();
             let expected_err = numpy_swapaxes
                 .call1((three_d.clone(), 0_i64, 3_i64))
+                .unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn moveaxis_matches_numpy_across_tuple_negative_axes_and_errors() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let moveaxis_fn = module.getattr("moveaxis")?;
+            let numpy = py.import("numpy")?;
+            let numpy_moveaxis = numpy.getattr("moveaxis")?;
+
+            // Single-axis move on 3-D input.
+            let three_d = numpy.getattr("array")?.call1((vec![
+                vec![vec![1_i64, 2], vec![3, 4], vec![5, 6]],
+                vec![vec![7_i64, 8], vec![9, 10], vec![11, 12]],
+            ],))?;
+            assert_array_matches_numpy(
+                &moveaxis_fn.call1((three_d.clone(), 0_i64, 2_i64))?,
+                &numpy_moveaxis.call1((three_d.clone(), 0_i64, 2_i64))?,
+            )?;
+
+            // Tuple-based simultaneous reordering.
+            assert_array_matches_numpy(
+                &moveaxis_fn.call1((three_d.clone(), (0_i64, 2_i64), (2_i64, 0_i64)))?,
+                &numpy_moveaxis.call1((three_d.clone(), (0_i64, 2_i64), (2_i64, 0_i64)))?,
+            )?;
+
+            // Negative axes normalize like numpy.
+            assert_array_matches_numpy(
+                &moveaxis_fn.call1((three_d.clone(), -1_i64, -3_i64))?,
+                &numpy_moveaxis.call1((three_d.clone(), -1_i64, -3_i64))?,
+            )?;
+
+            // No-op move must preserve values and shape.
+            assert_array_matches_numpy(
+                &moveaxis_fn.call1((three_d.clone(), (0_i64, 2_i64), (0_i64, 2_i64)))?,
+                &numpy_moveaxis.call1((three_d.clone(), (0_i64, 2_i64), (0_i64, 2_i64)))?,
+            )?;
+
+            // Object dtype parity.
+            let objects = numpy.getattr("array")?.call1((vec![
+                vec![vec!["aa", "bbb"], vec!["cccc", "ddddd"]],
+                vec![vec!["eeeeee", "fffffff"], vec!["gggggggg", "hhhhhhhhh"]],
+            ],))?;
+            assert_array_matches_numpy(
+                &moveaxis_fn.call1((objects.clone(), 0_i64, -1_i64))?,
+                &numpy_moveaxis.call1((objects.clone(), 0_i64, -1_i64))?,
+            )?;
+
+            // Source/destination length mismatch must raise the same error.
+            let actual_err = moveaxis_fn
+                .call1((three_d.clone(), (0_i64, 2_i64), (1_i64,)))
+                .unwrap_err();
+            let expected_err = numpy_moveaxis
+                .call1((three_d.clone(), (0_i64, 2_i64), (1_i64,)))
                 .unwrap_err();
             assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
 
