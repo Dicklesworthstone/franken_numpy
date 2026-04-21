@@ -4632,6 +4632,47 @@ fn nansum(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=None, initial=None, r#where=None))]
+#[allow(clippy::too_many_arguments)]
+fn nanprod(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    dtype: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
+    keepdims: Option<bool>,
+    initial: Option<Py<PyAny>>,
+    r#where: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.nanprod so NaN-ignoring product semantics
+    // match numpy across axis=None/int/tuple, explicit dtype/out,
+    // optional keepdims, and newer initial/where keywords. All-NaN
+    // slices return the multiplicative identity just like numpy.
+    let numpy = py.import("numpy")?;
+    let nanprod_fn = numpy.getattr("nanprod")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis_val) = axis {
+        kwargs.set_item("axis", axis_val.bind(py))?;
+    }
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    if let Some(keepdims_val) = keepdims {
+        kwargs.set_item("keepdims", keepdims_val)?;
+    }
+    if let Some(initial_val) = initial {
+        kwargs.set_item("initial", initial_val.bind(py))?;
+    }
+    if let Some(where_val) = r#where {
+        kwargs.set_item("where", where_val.bind(py))?;
+    }
+    Ok(nanprod_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, axis=None, out=None, keepdims=None))]
 fn nanmax(
     py: Python<'_>,
@@ -7477,6 +7518,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(polyval, m)?)?;
     m.add_function(wrap_pyfunction!(nanmean, m)?)?;
     m.add_function(wrap_pyfunction!(nansum, m)?)?;
+    m.add_function(wrap_pyfunction!(nanprod, m)?)?;
     m.add_function(wrap_pyfunction!(nanmax, m)?)?;
     m.add_function(wrap_pyfunction!(nanmin, m)?)?;
     m.add_function(wrap_pyfunction!(nanstd, m)?)?;
@@ -7859,6 +7901,7 @@ mod tests {
             assert!(module.getattr("polyval").is_ok());
             assert!(module.getattr("nanmean").is_ok());
             assert!(module.getattr("nansum").is_ok());
+            assert!(module.getattr("nanprod").is_ok());
             assert!(module.getattr("nanmax").is_ok());
             assert!(module.getattr("nanmin").is_ok());
             assert!(module.getattr("nanstd").is_ok());
@@ -22815,6 +22858,134 @@ mod tests {
                 ours_shape, theirs_shape,
                 "nansum keepdims shape must match numpy",
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn nanprod_matches_numpy_across_axis_dtype_keepdims_and_all_nan_slice() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let nanprod_fn = module.getattr("nanprod")?;
+            let numpy = py.import("numpy")?;
+            let numpy_nanprod = numpy.getattr("nanprod")?;
+            let isclose = numpy.getattr("isclose")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // 1-D with NaN: NaN acts as multiplicative identity.
+            let with_nan = numpy
+                .getattr("array")?
+                .call1((vec![2.0_f64, f64::NAN, 3.0, 4.0],))?;
+            let ours = nanprod_fn.call1((with_nan.clone(),))?;
+            let theirs = numpy_nanprod.call1((with_nan.clone(),))?;
+            let ok: bool = isclose.call1((&ours, &theirs))?.extract()?;
+            assert!(ok, "nanprod 1-D with NaN mismatch");
+
+            // Fully-NaN slice -> multiplicative identity 1.
+            let all_nan = numpy
+                .getattr("array")?
+                .call1((vec![f64::NAN, f64::NAN, f64::NAN],))?;
+            let ours_all = nanprod_fn.call1((all_nan.clone(),))?;
+            let theirs_all = numpy_nanprod.call1((all_nan.clone(),))?;
+            let ok_all: bool = isclose.call1((&ours_all, &theirs_all))?.extract()?;
+            assert!(ok_all, "nanprod fully-NaN must match numpy");
+            let ours_all_ok: bool = isclose.call1((&ours_all, 1.0_f64))?.extract()?;
+            assert!(ours_all_ok, "nanprod of all-NaN must return 1");
+
+            // 2-D mixed NaN, axis=0 and axis=1.
+            let two_d = numpy.getattr("array")?.call1((vec![
+                vec![2.0_f64, f64::NAN, 3.0],
+                vec![4.0, 5.0, f64::NAN],
+                vec![f64::NAN, 8.0, 9.0],
+            ],))?;
+            for axis in [0_i64, 1] {
+                let ours_ax = nanprod_fn.call(
+                    (two_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", axis)?;
+                        kw
+                    }),
+                )?;
+                let theirs_ax = numpy_nanprod.call(
+                    (two_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", axis)?;
+                        kw
+                    }),
+                )?;
+                let ok_ax: bool = allclose.call1((&ours_ax, &theirs_ax))?.extract()?;
+                assert!(ok_ax, "nanprod 2-D axis={} mismatch", axis);
+            }
+
+            // Explicit dtype=float32 promotes output.
+            let ours_d = nanprod_fn.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("float32")?)?;
+                    kw
+                }),
+            )?;
+            let theirs_d = numpy_nanprod.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", numpy.getattr("float32")?)?;
+                    kw
+                }),
+            )?;
+            let ok_d: bool = isclose.call1((&ours_d, &theirs_d))?.extract()?;
+            assert!(ok_d, "nanprod dtype=float32 mismatch");
+            let ours_dtype = ours_d.getattr("dtype")?.str()?.to_string();
+            let theirs_dtype = theirs_d.getattr("dtype")?.str()?.to_string();
+            assert_eq!(
+                ours_dtype, theirs_dtype,
+                "nanprod dtype=float32 output dtype must match numpy",
+            );
+
+            // keepdims=True preserves the reduced axis.
+            let ours_kd = nanprod_fn.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 1_i64)?;
+                    kw.set_item("keepdims", true)?;
+                    kw
+                }),
+            )?;
+            let theirs_kd = numpy_nanprod.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 1_i64)?;
+                    kw.set_item("keepdims", true)?;
+                    kw
+                }),
+            )?;
+            let ok_kd: bool = allclose.call1((&ours_kd, &theirs_kd))?.extract()?;
+            assert!(ok_kd, "nanprod keepdims=True mismatch");
+            let ours_shape = ours_kd.getattr("shape")?.str()?.to_string();
+            let theirs_shape = theirs_kd.getattr("shape")?.str()?.to_string();
+            assert_eq!(
+                ours_shape, theirs_shape,
+                "nanprod keepdims shape must match numpy",
+            );
+
+            // Integer input matches plain product semantics.
+            let ints = numpy.getattr("array")?.call1((vec![2_i64, 3, 4, 5],))?;
+            let ours_i = nanprod_fn.call1((ints.clone(),))?;
+            let theirs_i = numpy_nanprod.call1((ints.clone(),))?;
+            let ours_i_val: i64 = ours_i.extract()?;
+            let theirs_i_val: i64 = theirs_i.extract()?;
+            assert_eq!(ours_i_val, theirs_i_val, "nanprod integer input mismatch");
 
             Ok(())
         });
