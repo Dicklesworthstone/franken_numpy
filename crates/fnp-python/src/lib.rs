@@ -3218,6 +3218,38 @@ fn broadcast_arrays(py: Python<'_>, args: &Bound<'_, PyTuple>, subok: bool) -> P
         .unbind())
 }
 
+#[pyfunction]
+#[pyo3(signature = (a, a_min, a_max, out=None, **kwargs))]
+fn clip(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    a_min: Py<PyAny>,
+    a_max: Py<PyAny>,
+    out: Option<Py<PyAny>>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // Delegate to NumPy so one-sided None bounds, broadcast min/max
+    // arrays, explicit out buffers, dtype preservation, and NaN
+    // handling all match exactly.
+    let numpy = py.import("numpy")?;
+    let clip_fn = numpy.getattr("clip")?;
+    let call_kwargs = PyDict::new(py);
+    if let Some(out) = out {
+        call_kwargs.set_item("out", out.bind(py))?;
+    }
+    if let Some(kwargs) = kwargs {
+        for (key, value) in kwargs.iter() {
+            call_kwargs.set_item(key, value)?;
+        }
+    }
+    Ok(clip_fn
+        .call(
+            (a.bind(py), a_min.bind(py), a_max.bind(py)),
+            Some(&call_kwargs),
+        )?
+        .unbind())
+}
+
 #[allow(dead_code)]
 fn validate_trim_zeros_mode(trim: &str) -> PyResult<()> {
     if trim.is_empty() || trim.chars().any(|ch| ch != 'f' && ch != 'b') {
@@ -7828,6 +7860,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(expand_dims, m)?)?;
     m.add_function(wrap_pyfunction!(broadcast_to, m)?)?;
     m.add_function(wrap_pyfunction!(broadcast_arrays, m)?)?;
+    m.add_function(wrap_pyfunction!(clip, m)?)?;
     m.add_function(wrap_pyfunction!(structured_to_unstructured, m)?)?;
     m.add_function(wrap_pyfunction!(trim_zeros, m)?)?;
     m.add_function(wrap_pyfunction!(masked_invalid, m)?)?;
@@ -8307,6 +8340,7 @@ mod tests {
             assert!(module.getattr("expand_dims").is_ok());
             assert!(module.getattr("broadcast_to").is_ok());
             assert!(module.getattr("broadcast_arrays").is_ok());
+            assert!(module.getattr("clip").is_ok());
             assert!(module.getattr("structured_to_unstructured").is_ok());
             assert!(module.getattr("trim_zeros").is_ok());
             assert!(module.getattr("masked_invalid").is_ok());
@@ -13050,6 +13084,100 @@ mod tests {
                 .unwrap_err();
             let expected_err = numpy_broadcast_arrays.call1((matrix, bad)).unwrap_err();
             assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn clip_matches_numpy_across_bounds_broadcast_out_and_nan_paths() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let clip_fn = module.getattr("clip")?;
+            let numpy = py.import("numpy")?;
+            let numpy_clip = numpy.getattr("clip")?;
+
+            // Scalar lower/upper bounds.
+            let values = numpy
+                .getattr("array")?
+                .call1((vec![-3.0_f64, -1.0, 0.0, 2.0, 9.0],))?;
+            assert_array_matches_numpy(
+                &clip_fn.call1((values.clone(), -1.5_f64, 3.5_f64))?,
+                &numpy_clip.call1((values.clone(), -1.5_f64, 3.5_f64))?,
+            )?;
+
+            // One-sided clipping with None for min/max.
+            let py_none = py.None();
+            assert_array_matches_numpy(
+                &clip_fn.call1((values.clone(), py_none.clone_ref(py), 2.0_f64))?,
+                &numpy_clip.call1((values.clone(), py_none.clone_ref(py), 2.0_f64))?,
+            )?;
+            assert_array_matches_numpy(
+                &clip_fn.call1((values.clone(), 0.0_f64, py_none.clone_ref(py)))?,
+                &numpy_clip.call1((values.clone(), 0.0_f64, py_none.clone_ref(py)))?,
+            )?;
+
+            // Broadcast min/max arrays.
+            let matrix = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 5, 9], vec![2, 6, 10]],))?;
+            let mins = numpy
+                .getattr("array")?
+                .call1((vec![vec![0_i64], vec![4_i64]],))?;
+            let maxs = numpy
+                .getattr("array")?
+                .call1((vec![3_i64, 7_i64, 8_i64],))?;
+            assert_array_matches_numpy(
+                &clip_fn.call1((matrix.clone(), mins.clone(), maxs.clone()))?,
+                &numpy_clip.call1((matrix.clone(), mins.clone(), maxs.clone()))?,
+            )?;
+
+            // Explicit out buffer parity.
+            let out_actual = numpy.getattr("empty_like")?.call1((matrix.clone(),))?;
+            let out_expected = numpy.getattr("empty_like")?.call1((matrix.clone(),))?;
+            let actual_out = clip_fn.call(
+                (matrix.clone(), 2_i64, 8_i64),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("out", out_actual.clone())?;
+                    kw
+                }),
+            )?;
+            let expected_out = numpy_clip.call(
+                (matrix.clone(), 2_i64, 8_i64),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("out", out_expected.clone())?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&actual_out, &expected_out)?;
+            assert_array_matches_numpy(&out_actual, &out_expected)?;
+
+            // Integer dtype preservation.
+            let ints = numeric_array(py, vec![-5_i64, 0, 12, 99], "int64");
+            let actual_ints = clip_fn.call1((ints.clone(), 0_i64, 50_i64))?;
+            let expected_ints = numpy_clip.call1((ints.clone(), 0_i64, 50_i64))?;
+            assert_array_matches_numpy(&actual_ints, &expected_ints)?;
+            assert_eq!(
+                actual_ints.getattr("dtype")?.str()?.extract::<String>()?,
+                expected_ints.getattr("dtype")?.str()?.extract::<String>()?
+            );
+
+            // NaN propagation for float inputs.
+            let nan_values =
+                numpy
+                    .getattr("array")?
+                    .call1((vec![f64::NAN, -4.0_f64, 1.5_f64, 8.0_f64],))?;
+            assert_array_matches_numpy(
+                &clip_fn.call1((nan_values.clone(), -1.0_f64, 3.0_f64))?,
+                &numpy_clip.call1((nan_values.clone(), -1.0_f64, 3.0_f64))?,
+            )?;
 
             Ok(())
         });
