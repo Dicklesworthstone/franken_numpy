@@ -6269,6 +6269,19 @@ fn blackman(py: Python<'_>, m: i64) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (x1, x2))]
+fn heaviside(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.heaviside (step function: 0 for x1 < 0, x2 for
+    // x1 == 0, 1 for x1 > 0). Matches numpy for NaN-valued inputs which
+    // yield NaN result entries and for broadcasted x2 scalars/arrays.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("heaviside")?
+        .call1((x1.bind(py), x2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x,))]
 fn iscomplex(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.iscomplex. Returns a bool array marking
@@ -8974,6 +8987,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hanning, m)?)?;
     m.add_function(wrap_pyfunction!(hamming, m)?)?;
     m.add_function(wrap_pyfunction!(blackman, m)?)?;
+    m.add_function(wrap_pyfunction!(heaviside, m)?)?;
     m.add_function(wrap_pyfunction!(iscomplex, m)?)?;
     m.add_function(wrap_pyfunction!(square, m)?)?;
     m.add_function(wrap_pyfunction!(cbrt, m)?)?;
@@ -9434,6 +9448,7 @@ mod tests {
             assert!(module.getattr("hanning").is_ok());
             assert!(module.getattr("hamming").is_ok());
             assert!(module.getattr("blackman").is_ok());
+            assert!(module.getattr("heaviside").is_ok());
             assert!(module.getattr("iscomplex").is_ok());
             assert!(module.getattr("square").is_ok());
             assert!(module.getattr("cbrt").is_ok());
@@ -35695,6 +35710,68 @@ mod tests {
                 let ok_sym: bool = allclose.call1((&win, &reversed_win))?.extract()?;
                 assert!(ok_sym, "{name}(M={m}) window must be symmetric");
             }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn heaviside_matches_numpy_across_sign_regions_x2_broadcast_nan_and_dtype() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let hv_fn = module.getattr("heaviside")?;
+            let numpy = py.import("numpy")?;
+            let numpy_hv = numpy.getattr("heaviside")?;
+            let array_fn = numpy.getattr("array")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Negative / zero / positive surface with scalar x2.
+            let arr = array_fn.call1((vec![-2.0_f64, -0.5, 0.0, 0.5, 2.0],))?;
+            let ours = hv_fn.call1((arr.clone(), 0.5_f64))?;
+            let theirs = numpy_hv.call1((arr.clone(), 0.5_f64))?;
+            assert_array_matches_numpy(&ours, &theirs)?;
+
+            // x2 = 0.0 and x2 = 1.0 (common conventions).
+            for x2 in [0.0_f64, 1.0_f64] {
+                let ours_x = hv_fn.call1((arr.clone(), x2))?;
+                let theirs_x = numpy_hv.call1((arr.clone(), x2))?;
+                let ok: bool = allclose.call1((&ours_x, &theirs_x))?.extract()?;
+                assert!(ok, "heaviside(arr, {x2}) parity mismatch");
+            }
+
+            // Integer input: numpy promotes to float. Check dtype parity.
+            let int_arr = array_fn.call1((vec![-3_i64, 0, 3],))?;
+            let ours_i = hv_fn.call1((int_arr.clone(), 0.5_f64))?;
+            let theirs_i = numpy_hv.call1((int_arr.clone(), 0.5_f64))?;
+            assert_array_matches_numpy(&ours_i, &theirs_i)?;
+
+            // x2 broadcast: x2 as same-shape array chooses per-element value.
+            let x2_arr = array_fn.call1((vec![0.0_f64, 0.25, 0.5, 0.75, 1.0],))?;
+            let ours_bc = hv_fn.call1((arr.clone(), x2_arr.clone()))?;
+            let theirs_bc = numpy_hv.call1((arr.clone(), x2_arr.clone()))?;
+            assert_array_matches_numpy(&ours_bc, &theirs_bc)?;
+
+            // NaN input produces NaN output positions identically.
+            let nan_arr = array_fn.call1((vec![f64::NAN, 1.0, -1.0, 0.0],))?;
+            let ours_n = hv_fn.call1((nan_arr.clone(), 0.5_f64))?;
+            let theirs_n = numpy_hv.call1((nan_arr.clone(), 0.5_f64))?;
+            let nan_equiv = PyDict::new(py);
+            nan_equiv.set_item("equal_nan", true)?;
+            let ok_n: bool = allclose
+                .call((&ours_n, &theirs_n), Some(&nan_equiv))?
+                .extract()?;
+            assert!(ok_n, "heaviside NaN handling mismatch");
+
+            // 2-D input element-wise.
+            let two_d = array_fn.call1((vec![vec![-1.0_f64, 0.0], vec![0.5, 1.0]],))?;
+            let ours_2d = hv_fn.call1((two_d.clone(), 0.5_f64))?;
+            let theirs_2d = numpy_hv.call1((two_d.clone(), 0.5_f64))?;
+            assert_array_matches_numpy(&ours_2d, &theirs_2d)?;
 
             Ok(())
         });
