@@ -11378,6 +11378,22 @@ mod tests {
         actual: &pyo3::Bound<'_, pyo3::types::PyAny>,
         expected: &pyo3::Bound<'_, pyo3::types::PyAny>,
     ) -> PyResult<()> {
+        // Some numpy entry-points (e.g. np.ma.count with axis=None) return
+        // a plain Python scalar rather than a numpy array. Detect via
+        // absence of `.dtype` and fall back to repr equality in that case.
+        if actual.getattr("dtype").is_err() {
+            assert!(
+                expected.getattr("dtype").is_err(),
+                "assert_array_matches_numpy: sides disagree on array-ness \
+                 (ours is scalar, theirs is array)"
+            );
+            assert_eq!(
+                repr_string(actual),
+                repr_string(expected),
+                "scalar result mismatch"
+            );
+            return Ok(());
+        }
         assert_eq!(
             actual.getattr("dtype")?.str()?.extract::<String>()?,
             expected.getattr("dtype")?.str()?.extract::<String>()?
