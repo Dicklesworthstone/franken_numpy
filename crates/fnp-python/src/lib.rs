@@ -6107,23 +6107,46 @@ fn nanargmax(
     out: Option<Py<PyAny>>,
     keepdims: Option<bool>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.nanargmax so NaN-ignoring index selection
-    // matches numpy across axis=None/int, optional out, and explicit
-    // keepdims forwarding. Fully-NaN slices must raise the same
-    // ValueError surface as numpy instead of returning an index.
     let numpy = py.import("numpy")?;
     let nanargmax_fn = numpy.getattr("nanargmax")?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis_val) = axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(axis_val) = axis.as_ref() {
+            kwargs.set_item("axis", axis_val.bind(py))?;
+        }
+        if let Some(out_val) = out.as_ref() {
+            kwargs.set_item("out", out_val.bind(py))?;
+        }
+        if let Some(keepdims_val) = keepdims {
+            kwargs.set_item("keepdims", keepdims_val)?;
+        }
+        Ok(nanargmax_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    };
+
+    if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) || keepdims.is_some() {
+        return fallback();
     }
-    if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+
+    let a = match extract_numeric_array(py, a.bind(py), "nanargmax(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let axis = match extract_axis_spec(py, axis_for_parse, "nanargmax") {
+        Ok(None) => None,
+        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
+        Ok(Some(_)) => return fallback(),
+        Err(_) => return fallback(),
+    };
+    let result = match a.nanargmax(axis) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
     }
-    if let Some(keepdims_val) = keepdims {
-        kwargs.set_item("keepdims", keepdims_val)?;
-    }
-    Ok(nanargmax_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(output)
 }
 
 #[pyfunction]
@@ -6135,23 +6158,46 @@ fn nanargmin(
     out: Option<Py<PyAny>>,
     keepdims: Option<bool>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.nanargmin so NaN-ignoring index selection
-    // matches numpy across axis=None/int, optional out, and explicit
-    // keepdims forwarding. Fully-NaN slices must raise the same
-    // ValueError surface as numpy instead of returning an index.
     let numpy = py.import("numpy")?;
     let nanargmin_fn = numpy.getattr("nanargmin")?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis_val) = axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(axis_val) = axis.as_ref() {
+            kwargs.set_item("axis", axis_val.bind(py))?;
+        }
+        if let Some(out_val) = out.as_ref() {
+            kwargs.set_item("out", out_val.bind(py))?;
+        }
+        if let Some(keepdims_val) = keepdims {
+            kwargs.set_item("keepdims", keepdims_val)?;
+        }
+        Ok(nanargmin_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    };
+
+    if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) || keepdims.is_some() {
+        return fallback();
     }
-    if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+
+    let a = match extract_numeric_array(py, a.bind(py), "nanargmin(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let axis = match extract_axis_spec(py, axis_for_parse, "nanargmin") {
+        Ok(None) => None,
+        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
+        Ok(Some(_)) => return fallback(),
+        Err(_) => return fallback(),
+    };
+    let result = match a.nanargmin(axis) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
     }
-    if let Some(keepdims_val) = keepdims {
-        kwargs.set_item("keepdims", keepdims_val)?;
-    }
-    Ok(nanargmin_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(output)
 }
 
 #[pyfunction]
