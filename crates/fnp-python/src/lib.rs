@@ -11827,27 +11827,64 @@ fn count_masked(py: Python<'_>, arr: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyRe
 #[pyfunction]
 #[pyo3(signature = (a, b))]
 fn kron(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.kron so the Kronecker product output shape
-    // (broadcasted from a.shape * b.shape), dtype promotion, and
-    // n-dimensional broadcasting semantics match numpy exactly.
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("kron")?
-        .call1((a.bind(py), b.bind(py)))?
-        .unbind())
+    let kron_fn = numpy.getattr("kron")?;
+    let fallback = || -> PyResult<Py<PyAny>> { Ok(kron_fn.call1((a.bind(py), b.bind(py)))?.unbind()) };
+
+    let a = match extract_precise_numeric_array(py, a.bind(py), "kron(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let b = match extract_precise_numeric_array(py, b.bind(py), "kron(b)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    if a.has_integer_sidecar()
+        || b.has_integer_sidecar()
+        || matches!(a.dtype(), DType::Complex64 | DType::Complex128)
+        || matches!(b.dtype(), DType::Complex64 | DType::Complex128)
+    {
+        return fallback();
+    }
+    let result = match a.kron(&b) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, b))]
 fn inner(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.inner so scalar-vs-array return typing, last-axis
-    // contraction semantics, integer overflow behavior, and mismatch error
-    // text all match numpy exactly.
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("inner")?
-        .call1((a.bind(py), b.bind(py)))?
-        .unbind())
+    let inner_fn = numpy.getattr("inner")?;
+    let fallback =
+        || -> PyResult<Py<PyAny>> { Ok(inner_fn.call1((a.bind(py), b.bind(py)))?.unbind()) };
+
+    let a = match extract_precise_numeric_array(py, a.bind(py), "inner(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let b = match extract_precise_numeric_array(py, b.bind(py), "inner(b)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    if a.has_integer_sidecar()
+        || b.has_integer_sidecar()
+        || matches!(a.dtype(), DType::Complex64 | DType::Complex128)
+        || matches!(b.dtype(), DType::Complex64 | DType::Complex128)
+    {
+        return fallback();
+    }
+    let result = match a.inner(&b) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
+    }
+    Ok(output)
 }
 
 #[pyfunction]
@@ -11858,18 +11895,39 @@ fn outer(
     b: Py<PyAny>,
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.outer so input flattening, output shape (M, N),
-    // dtype promotion, and the optional `out` destination semantics match
-    // numpy exactly across real/complex/integer/boolean inputs.
     let numpy = py.import("numpy")?;
     let outer_fn = numpy.getattr("outer")?;
     let kwargs = PyDict::new(py);
-    if let Some(value) = out {
+    if let Some(ref value) = out {
         kwargs.set_item("out", value.bind(py))?;
     }
-    Ok(outer_fn
-        .call((a.bind(py), b.bind(py)), Some(&kwargs))?
-        .unbind())
+    let fallback =
+        || -> PyResult<Py<PyAny>> { Ok(outer_fn.call((a.bind(py), b.bind(py)), Some(&kwargs))?.unbind()) };
+
+    if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+        return fallback();
+    }
+
+    let a = match extract_precise_numeric_array(py, a.bind(py), "outer(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let b = match extract_precise_numeric_array(py, b.bind(py), "outer(b)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    if a.has_integer_sidecar()
+        || b.has_integer_sidecar()
+        || matches!(a.dtype(), DType::Complex64 | DType::Complex128)
+        || matches!(b.dtype(), DType::Complex64 | DType::Complex128)
+    {
+        return fallback();
+    }
+    let result = match a.outer(&b) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
