@@ -10483,7 +10483,7 @@ fn ma_average(
         return build_numpy_scalar_or_array(py, mean.data());
     }
 
-    let mask = if counts.values().iter().any(|&value| value == 0.0) {
+    let mask = if counts.values().contains(&0.0) {
         let mask_values: Vec<f64> = counts
             .values()
             .iter()
