@@ -17890,7 +17890,9 @@ impl UFuncArray {
                         )));
                     }
                     let n_bcast = op.shape.len() - explicit_count;
-                    let (prefix, _) = sub.split_once("...").unwrap();
+                    let (prefix, _) = sub
+                        .split_once("...")
+                        .expect("einsum: '...' ellipsis presence guarded by contains-check upstream");
                     let prefix_len = prefix.chars().count();
                     let dims: Vec<usize> = op.shape[prefix_len..prefix_len + n_bcast].to_vec();
                     match &bcast_dims {

@@ -13144,19 +13144,23 @@ fn poly_family_add(
         "polynomial1d" => a.polyadd(b).map_err(map_ufunc_error_to_polynomial_suite),
         "chebyshev" => {
             let v = chebadd(a.values(), b.values());
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "legendre" => {
             let v = legadd(a.values(), b.values());
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "hermite" => {
             let v = hermadd(a.values(), b.values());
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "laguerre" => {
             let v = lagadd(a.values(), b.values());
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         _ => Err(PolynomialSuiteError::new(
             "polynomial_unknown_family",
@@ -13174,19 +13178,23 @@ fn poly_family_sub(
         "polynomial1d" => a.polysub(b).map_err(map_ufunc_error_to_polynomial_suite),
         "chebyshev" => {
             let v = chebsub(a.values(), b.values());
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "legendre" => {
             let v = legsub(a.values(), b.values());
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "hermite" => {
             let v = hermsub(a.values(), b.values());
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "laguerre" => {
             let v = lagsub(a.values(), b.values());
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         _ => Err(PolynomialSuiteError::new(
             "polynomial_unknown_family",
@@ -13204,19 +13212,23 @@ fn poly_family_mul(
         "polynomial1d" => a.polymul(b).map_err(map_ufunc_error_to_polynomial_suite),
         "chebyshev" => {
             let v = chebmul(a.values(), b.values());
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "legendre" => {
             let v = legmul(a.values(), b.values());
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "hermite" => {
             let v = hermmul(a.values(), b.values());
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "laguerre" => {
             let v = lagmul(a.values(), b.values());
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         _ => Err(PolynomialSuiteError::new(
             "polynomial_unknown_family",
@@ -13230,19 +13242,23 @@ fn poly_family_deriv(family: &str, p: &UFuncArray) -> Result<UFuncArray, Polynom
         "polynomial1d" => p.polyder().map_err(map_ufunc_error_to_polynomial_suite),
         "chebyshev" => {
             let v = chebder(p.values(), 1);
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "legendre" => {
             let v = legder(p.values(), 1);
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "hermite" => {
             let v = hermder(p.values(), 1);
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "laguerre" => {
             let v = lagder(p.values(), 1);
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         _ => Err(PolynomialSuiteError::new(
             "polynomial_unknown_family",
@@ -13268,19 +13284,23 @@ fn poly_family_deriv_m(
         }
         "chebyshev" => {
             let v = chebder(p.values(), m);
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "legendre" => {
             let v = legder(p.values(), m);
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "hermite" => {
             let v = hermder(p.values(), m);
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "laguerre" => {
             let v = lagder(p.values(), m);
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         _ => Err(PolynomialSuiteError::new(
             "polynomial_unknown_family",
@@ -13294,19 +13314,23 @@ fn poly_family_int(family: &str, p: &UFuncArray) -> Result<UFuncArray, Polynomia
         "polynomial1d" => p.polyint().map_err(map_ufunc_error_to_polynomial_suite),
         "chebyshev" => {
             let v = chebint(p.values(), 1);
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "legendre" => {
             let v = legint(p.values(), 1);
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "hermite" => {
             let v = hermint(p.values(), 1);
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         "laguerre" => {
             let v = lagint(p.values(), 1);
-            Ok(UFuncArray::new(vec![v.len()], v, DType::F64).unwrap())
+            Ok(UFuncArray::new(vec![v.len()], v, DType::F64)
+                .expect("fnp-conformance polynomial fixture: F64 UFuncArray::new over 1-D vector of known length"))
         }
         _ => Err(PolynomialSuiteError::new(
             "polynomial_unknown_family",
@@ -13316,7 +13340,8 @@ fn poly_family_int(family: &str, p: &UFuncArray) -> Result<UFuncArray, Polynomia
 }
 
 fn poly_family_val(family: &str, p: &UFuncArray, x: f64) -> Result<f64, PolynomialSuiteError> {
-    let x_arr = UFuncArray::new(vec![1], vec![x], DType::F64).unwrap();
+    let x_arr = UFuncArray::new(vec![1], vec![x], DType::F64)
+        .expect("fnp-conformance polynomial fixture: single-element F64 UFuncArray from scalar x");
     match family {
         "polynomial1d" => {
             let result =
