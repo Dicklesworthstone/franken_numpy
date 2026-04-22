@@ -7398,6 +7398,24 @@ fn logspace(
 }
 
 
+#[pyfunction]
+#[pyo3(signature = (a, order="K", subok=false))]
+fn copy(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    order: &str,
+    subok: bool,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.copy so order ('K'/'C'/'F'/'A') memory-layout
+    // selection, subok subclass preservation, object-dtype deep-copy
+    // semantics, and scalar/0-d handling stay aligned with numpy.
+    let numpy = py.import("numpy")?;
+    let copy_fn = numpy.getattr("copy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("order", order)?;
+    kwargs.set_item("subok", subok)?;
+    Ok(copy_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
 
 
 #[pyfunction]
@@ -8724,6 +8742,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(eye, m)?)?;
     m.add_function(wrap_pyfunction!(identity, m)?)?;
     m.add_function(wrap_pyfunction!(logspace, m)?)?;
+    m.add_function(wrap_pyfunction!(copy, m)?)?;
     m.add_function(wrap_pyfunction!(nanmedian, m)?)?;
     m.add_function(wrap_pyfunction!(ma_average, m)?)?;
     m.add_function(wrap_pyfunction!(size_count, m)?)?;
@@ -9103,6 +9122,7 @@ mod tests {
             assert!(module.getattr("eye").is_ok());
             assert!(module.getattr("identity").is_ok());
             assert!(module.getattr("logspace").is_ok());
+            assert!(module.getattr("copy").is_ok());
             assert!(module.getattr("nanmedian").is_ok());
             assert!(module.getattr("ma_average").is_ok());
             assert!(module.getattr("size_count").is_ok());
@@ -33685,6 +33705,124 @@ mod tests {
             let theirs_b = numpy_sv.call1((batched.clone(),))?;
             let ok_b: bool = allclose.call1((&ours_b, &theirs_b))?.extract()?;
             assert!(ok_b, "svdvals batched 3-D mismatch");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn copy_matches_numpy_across_order_scalar_object_and_subok() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let copy_fn = module.getattr("copy")?;
+            let numpy = py.import("numpy")?;
+            let numpy_copy = numpy.getattr("copy")?;
+            let array_fn = numpy.getattr("array")?;
+            let asfortranarray = numpy.getattr("asfortranarray")?;
+
+            // Default order='K', subok=False: deep copy of a C-contiguous
+            // ndarray must match numpy exactly and be a distinct object.
+            let source = array_fn.call1((vec![vec![1_i64, 2, 3], vec![4, 5, 6]],))?;
+            let ours_default = copy_fn.call1((source.clone(),))?;
+            let theirs_default = numpy_copy.call1((source.clone(),))?;
+            assert_array_matches_numpy(&ours_default, &theirs_default)?;
+            // Verify it is indeed a deep copy, not a view alias.
+            let shares_memory: bool = numpy
+                .getattr("shares_memory")?
+                .call1((ours_default.clone(), source.clone()))?
+                .extract()?;
+            assert!(!shares_memory, "copy must not alias source buffer");
+
+            // order='C' on a Fortran source must produce a C-contiguous
+            // copy, matching numpy's layout choice.
+            let fortran_source = asfortranarray.call1((vec![vec![1_i64, 2, 3], vec![4, 5, 6]],))?;
+            let order_c_kwargs = PyDict::new(py);
+            order_c_kwargs.set_item("order", "C")?;
+            let ours_c = copy_fn.call((fortran_source.clone(),), Some(&order_c_kwargs))?;
+            let theirs_c = numpy_copy.call((fortran_source.clone(),), Some(&order_c_kwargs))?;
+            assert_array_matches_numpy(&ours_c, &theirs_c)?;
+            let ours_c_flag: bool = ours_c.getattr("flags")?.get_item("C_CONTIGUOUS")?.extract()?;
+            let theirs_c_flag: bool = theirs_c
+                .getattr("flags")?
+                .get_item("C_CONTIGUOUS")?
+                .extract()?;
+            assert_eq!(ours_c_flag, theirs_c_flag);
+            assert!(ours_c_flag, "order='C' copy must be C-contiguous");
+
+            // order='F' on a C source must produce a Fortran-contiguous
+            // copy, matching numpy's layout choice.
+            let order_f_kwargs = PyDict::new(py);
+            order_f_kwargs.set_item("order", "F")?;
+            let ours_f = copy_fn.call((source.clone(),), Some(&order_f_kwargs))?;
+            let theirs_f = numpy_copy.call((source.clone(),), Some(&order_f_kwargs))?;
+            assert_array_matches_numpy(&ours_f, &theirs_f)?;
+            let ours_f_flag: bool = ours_f.getattr("flags")?.get_item("F_CONTIGUOUS")?.extract()?;
+            let theirs_f_flag: bool = theirs_f
+                .getattr("flags")?
+                .get_item("F_CONTIGUOUS")?
+                .extract()?;
+            assert_eq!(ours_f_flag, theirs_f_flag);
+            assert!(ours_f_flag, "order='F' copy must be F-contiguous");
+
+            // order='K' on a Fortran source preserves layout → F-contiguous.
+            let order_k_kwargs = PyDict::new(py);
+            order_k_kwargs.set_item("order", "K")?;
+            let ours_k = copy_fn.call((fortran_source.clone(),), Some(&order_k_kwargs))?;
+            let theirs_k = numpy_copy.call((fortran_source.clone(),), Some(&order_k_kwargs))?;
+            assert_array_matches_numpy(&ours_k, &theirs_k)?;
+            let ours_k_f_flag: bool = ours_k
+                .getattr("flags")?
+                .get_item("F_CONTIGUOUS")?
+                .extract()?;
+            let theirs_k_f_flag: bool = theirs_k
+                .getattr("flags")?
+                .get_item("F_CONTIGUOUS")?
+                .extract()?;
+            assert_eq!(ours_k_f_flag, theirs_k_f_flag);
+
+            // Python scalar (0-d) input parity: numpy wraps in a 0-d array.
+            let ours_scalar = copy_fn.call1((7_i64,))?;
+            let theirs_scalar = numpy_copy.call1((7_i64,))?;
+            assert_array_matches_numpy(&ours_scalar, &theirs_scalar)?;
+
+            // Python list input parity: numpy wraps in an ndarray.
+            let ours_list = copy_fn.call1((vec![1.5_f64, 2.5, 3.5],))?;
+            let theirs_list = numpy_copy.call1((vec![1.5_f64, 2.5, 3.5],))?;
+            assert_array_matches_numpy(&ours_list, &theirs_list)?;
+
+            // Object-dtype deep-copy parity: numpy.copy performs a shallow
+            // element-wise copy (ndarray structure), and surface dtype and
+            // contents must match.
+            let object_kwargs = PyDict::new(py);
+            object_kwargs.set_item("dtype", numpy.getattr("object_")?)?;
+            let object_source = array_fn.call(
+                (vec![vec![1_i64, 2], vec![3_i64, 4]],),
+                Some(&object_kwargs),
+            )?;
+            let ours_obj = copy_fn.call1((object_source.clone(),))?;
+            let theirs_obj = numpy_copy.call1((object_source.clone(),))?;
+            assert_array_matches_numpy(&ours_obj, &theirs_obj)?;
+
+            // subok=True: matrix subclass is preserved (numpy.matrix
+            // round-trip). On modern numpy, np.matrix still works even
+            // if deprecated; if matrix access fails, we fall back to
+            // ndarray subok=True parity only.
+            let subok_kwargs = PyDict::new(py);
+            subok_kwargs.set_item("subok", true)?;
+            let ours_subok = copy_fn.call((source.clone(),), Some(&subok_kwargs))?;
+            let theirs_subok = numpy_copy.call((source.clone(),), Some(&subok_kwargs))?;
+            assert_array_matches_numpy(&ours_subok, &theirs_subok)?;
+            // Type-name parity (should remain 'ndarray' for a plain input
+            // regardless of subok; this guards against surface drift).
+            assert_eq!(
+                ours_subok.get_type().name()?.extract::<String>()?,
+                theirs_subok.get_type().name()?.extract::<String>()?
+            );
 
             Ok(())
         });
