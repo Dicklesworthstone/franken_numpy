@@ -793,6 +793,26 @@ fn extract_axis_spec(
     )))
 }
 
+fn ensure_unique_axes(axes: &[isize], ndim: usize) -> PyResult<()> {
+    let mut seen = std::collections::HashSet::with_capacity(axes.len());
+    for &axis in axes {
+        let normalized = if axis < 0 {
+            match isize::try_from(ndim) {
+                Ok(ndim) => ndim + axis,
+                Err(_) => axis,
+            }
+        } else {
+            axis
+        };
+
+        if normalized >= 0 && !seen.insert(normalized) {
+            return Err(PyValueError::new_err("repeated axis"));
+        }
+    }
+
+    Ok(())
+}
+
 #[allow(dead_code)]
 fn extract_tensorsolve_axes(
     py: Python<'_>,
@@ -3411,22 +3431,7 @@ fn extract_expand_dims_axes(
     };
 
     let new_ndim = input_ndim + axes.len();
-    let mut seen = std::collections::HashSet::with_capacity(axes.len());
-    for &axis in &axes {
-        let normalized = if axis < 0 {
-            match isize::try_from(new_ndim) {
-                Ok(new_ndim) => new_ndim + axis,
-                Err(_) => axis,
-            }
-        } else {
-            axis
-        };
-
-        if normalized >= 0 && !seen.insert(normalized) {
-            return Err(PyValueError::new_err("repeated axis"));
-        }
-    }
-
+    ensure_unique_axes(&axes, new_ndim)?;
     Ok(axes)
 }
 
@@ -6114,36 +6119,35 @@ fn rfftn(
 #[pyfunction]
 #[pyo3(signature = (m, axis=None))]
 fn flip(py: Python<'_>, m: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.flip so axis-wise reversal matches numpy
-    // across axis=None (reverse all dimensions), int axis, axis tuple,
-    // and any input dimensionality. dtype is preserved; result is a
-    // view of the input when possible.
-    let numpy = py.import("numpy")?;
-    let flip_fn = numpy.getattr("flip")?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis_val) = axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+    let m = extract_numeric_array(py, m.bind(py), "flip(m)")?;
+    let axes = extract_axis_spec(py, axis, "flip")?;
+    let result = match axes {
+        None => m.flip(None),
+        Some(axes) if axes.is_empty() => Ok(m.clone()),
+        Some(axes) if axes.len() == 1 => m.flip(Some(axes[0])),
+        Some(axes) => {
+            ensure_unique_axes(&axes, m.shape().len())?;
+            m.flip_axes(&axes)
+        }
     }
-    Ok(flip_fn.call((m.bind(py),), Some(&kwargs))?.unbind())
+    .map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
 #[pyo3(signature = (m,))]
 fn flipud(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.flipud so up/down (axis=0) reversal matches
-    // numpy across 1-D arrays, 2-D row reversal, and N-D arrays
-    // leaving non-leading axes intact. Preserves dtype.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("flipud")?.call1((m.bind(py),))?.unbind())
+    let m = extract_numeric_array(py, m.bind(py), "flipud(m)")?;
+    let result = m.flipud().map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
 #[pyo3(signature = (m,))]
 fn fliplr(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.fliplr so left/right (axis=1) reversal matches
-    // numpy. Requires at least 2-D input; raises ValueError for 1-D.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("fliplr")?.call1((m.bind(py),))?.unbind())
+    let m = extract_numeric_array(py, m.bind(py), "fliplr(m)")?;
+    let result = m.fliplr().map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
