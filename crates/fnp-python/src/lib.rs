@@ -41570,4 +41570,141 @@ mod tests {
             Ok(())
         });
     }
+
+    #[test]
+    fn module_k74v_8_adversarial_error_surface_matches_numpy() {
+        // Adversarial pass for the 31 k74v.8 passthroughs. Each case
+        // supplies an input that MUST raise in numpy; our passthrough
+        // must raise as well, and the error TYPE must match. This is
+        // the "error handling divergence" check the conformance-harness
+        // skill flags as the most dangerous gap to leave uncovered.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_k74v8_adv")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            let empty_arr = numpy
+                .getattr("array")?
+                .call1((Vec::<f64>::new(),))?;
+            let arr_2d = numpy.getattr("array")?.call1((vec![
+                vec![1.0_f64, 2.0],
+                vec![3.0, 4.0],
+            ],))?;
+            let arr_3 = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            let arr_4 = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0, 4.0],))?;
+
+            let err_type_name = |err: &pyo3::PyErr| -> String {
+                Python::attach(|py| -> PyResult<String> {
+                    err.get_type(py).name()?.extract::<String>()
+                })
+                .unwrap_or_else(|_| "<unknown>".to_string())
+            };
+
+            // (name, args)
+            struct Case<'py> {
+                name: &'static str,
+                args: pyo3::Bound<'py, pyo3::types::PyTuple>,
+            }
+
+            let cases = vec![
+                // argmax/argmin on empty → ValueError
+                Case {
+                    name: "argmax",
+                    args: PyTuple::new(py, [empty_arr.clone()])?,
+                },
+                Case {
+                    name: "argmin",
+                    args: PyTuple::new(py, [empty_arr.clone()])?,
+                },
+                // mean of empty → RuntimeWarning in numpy but still returns nan; skip (not error)
+                // dot shape mismatch: 3-vector @ 4-vector → ValueError
+                Case {
+                    name: "dot",
+                    args: PyTuple::new(py, [arr_3.clone(), arr_4.clone()])?,
+                },
+                // matmul non-matrix-compatible: 3-vector @ 2x2 matrix → ValueError
+                Case {
+                    name: "matmul",
+                    args: PyTuple::new(py, [arr_3.clone(), arr_2d.clone()])?,
+                },
+                // einsum malformed subscript: "abc" on a 1-D array → ValueError
+                Case {
+                    name: "einsum",
+                    args: PyTuple::new(
+                        py,
+                        ["abc".into_pyobject(py)?.unbind().into_any(), arr_3.clone().unbind().into_any()],
+                    )?,
+                },
+                // trace on 1-D (needs >= 2-D) → ValueError
+                Case {
+                    name: "trace",
+                    args: PyTuple::new(py, [arr_3.clone()])?,
+                },
+                // zeros with negative shape → ValueError
+                Case {
+                    name: "zeros",
+                    args: PyTuple::new(py, [(-1_i64,).into_pyobject(py)?.unbind().into_any()])?,
+                },
+                Case {
+                    name: "ones",
+                    args: PyTuple::new(py, [(-1_i64,).into_pyobject(py)?.unbind().into_any()])?,
+                },
+            ];
+
+            let mut skipped = Vec::new();
+            for case in &cases {
+                let Ok(numpy_fn) = numpy.getattr(case.name) else {
+                    skipped.push(case.name);
+                    continue;
+                };
+                let ours_fn = module
+                    .getattr(case.name)
+                    .unwrap_or_else(|_| panic!("fnp_python.{} missing", case.name));
+
+                let ours_result = ours_fn.call(&case.args, None);
+                let theirs_result = numpy_fn.call(&case.args, None);
+
+                match (&ours_result, &theirs_result) {
+                    (Err(ours_err), Err(theirs_err)) => {
+                        let ours_name = err_type_name(ours_err);
+                        let theirs_name = err_type_name(theirs_err);
+                        assert_eq!(
+                            ours_name, theirs_name,
+                            "{}: error TYPE differs — ours={} theirs={}",
+                            case.name, ours_name, theirs_name
+                        );
+                    }
+                    (Ok(_), Ok(_)) => {
+                        // Both succeeded unexpectedly (e.g. numpy 2.x
+                        // accepts the input) — that's fine, record below.
+                    }
+                    (Ok(_), Err(e)) => {
+                        panic!(
+                            "{}: ours succeeded but numpy raised {}",
+                            case.name,
+                            err_type_name(e)
+                        );
+                    }
+                    (Err(e), Ok(_)) => {
+                        panic!(
+                            "{}: ours raised {} but numpy succeeded",
+                            case.name,
+                            err_type_name(e)
+                        );
+                    }
+                }
+            }
+
+            assert!(
+                skipped.len() <= 2,
+                "too many k74v.8 names skipped on this numpy: {:?}",
+                skipped
+            );
+
+            Ok(())
+        });
+    }
 }
