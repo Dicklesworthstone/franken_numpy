@@ -29,6 +29,12 @@
 - **Cargo.lock:** already at 1.1.9 (transitive refresh from a prior session pulled it forward; manifest caught up here).
 - **Verified:** `cargo check -p fnp-io --all-targets` pass. `cargo test -p fnp-io` 222/222 pass.
 
+#### ftui: 0.2.1 -> 0.3.1 (fnp-runtime, feature-gated optional)
+
+- **Research:** ftui 0.3.1 is the latest stable on crates.io (published 2026-04-12), described as "FrankenTUI public facade and prelude." The 0.3.x line introduces `ftui-a11y`, `ftui-backend`, `ftui-i18n`, `ftui-runtime` subcrates and splits responsibilities further; all are additive from fnp-runtime's standpoint because the `frankentui` feature in fnp-runtime is currently a stub (only exports `ui_tag() -> "frankentui"`; does not call into any ftui type).
+- **Lockfile churn:** ftui + ftui-core/layout/render/style/text/widgets 0.2.1 -> 0.3.1; new crates `ftui-a11y 0.3.1`, `ftui-backend 0.3.1`, `ftui-i18n 0.3.1`, `ftui-runtime 0.3.1`; removes `itertools 0.10.5` (old internal dep).
+- **Verified:** `cargo check -p fnp-runtime --features frankentui --all-targets` clean. `cargo test -p fnp-runtime --all-features --lib` 55/55 pass. A broader `cargo test -p fnp-runtime --all-features` flaked in a **transitive** asupersync internal crate `frankenlibc-membrane::runtime_math::localization_chooser::observe_throughput_below_strict_budget` (timing budget 2000ns exceeded by 55ns on a shared build host). That is unrelated to ftui and is a performance-regression test owned by the asupersync project.
+
 #### criterion: 0.5.1 -> 0.8.2 (fnp-conformance, dev-dependency)
 
 - **Research:** Official CHANGELOG only documents up to 0.7.0; no new breaking changes recorded beyond 0.6.0. 0.6.0 removed the `real_blackbox` feature flag (no-op since then) and bumped MSRV to 1.80, with `criterion::black_box` deprecated in favor of `std::hint::black_box()`. All re-exports we rely on (`Criterion`, `BenchmarkId`, `criterion_group!`, `criterion_main!`) are preserved in 0.8.2 per docs.rs.

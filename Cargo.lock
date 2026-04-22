@@ -325,7 +325,7 @@ dependencies = [
  "ciborium",
  "clap",
  "criterion-plot",
- "itertools 0.13.0",
+ "itertools",
  "num-traits",
  "oorandom",
  "page_size",
@@ -345,7 +345,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8d80a2f4f5b554395e47b5d8305bc3d27813bacb73493eb1001e8f76dae29ea"
 dependencies = [
  "cast",
- "itertools 0.13.0",
+ "itertools",
 ]
 
 [[package]]
@@ -600,9 +600,9 @@ dependencies = [
 
 [[package]]
 name = "ftui"
-version = "0.2.1"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c067649514af6d1cc308f78826fd8e7655b05bb001f44824e04d296fdb7d43c3"
+checksum = "900bf8d3d1a7c167a07cce908118d1adecf777451200d34f54a25d84906350a3"
 dependencies = [
  "ftui-core",
  "ftui-layout",
@@ -613,14 +613,35 @@ dependencies = [
 ]
 
 [[package]]
-name = "ftui-core"
-version = "0.2.1"
+name = "ftui-a11y"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07f72a180b002371a31ad286c396801adc47a095df6a4f5f5d3e4f91ee0a3c06"
+checksum = "105dc9742b4b7d46f94a276b3b3d95eb33b248944619c8365b79eff1571cc817"
+dependencies = [
+ "ahash",
+ "ftui-core",
+]
+
+[[package]]
+name = "ftui-backend"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7f2599c0890f529da66184d4f70a0f755340694e1910243ebc47b6686e795db"
+dependencies = [
+ "ftui-core",
+ "ftui-render",
+]
+
+[[package]]
+name = "ftui-core"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fac919691de3e2752ea689d3665a142d6885f67f859d3a8fa754f22faaf99b82"
 dependencies = [
  "ahash",
  "arc-swap",
  "bitflags",
+ "libc",
  "signal-hook",
  "unicode-display-width",
  "unicode-segmentation",
@@ -629,21 +650,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "ftui-layout"
-version = "0.2.1"
+name = "ftui-i18n"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cebeada8b3b542471ed2e43b3e9fae43d8fc7f275f340861fdcab6794b4ce4e"
+checksum = "f8511cfff5709b203550a764ec261ca28d8fe75c103d1ab5bc3ebd830eb8a85c"
+
+[[package]]
+name = "ftui-layout"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3691b957ebba9bea9ce86b74dc28368ca21018f614ec671840644c506d2e6430"
 dependencies = [
  "ftui-core",
  "rustc-hash",
  "serde",
+ "smallvec",
 ]
 
 [[package]]
 name = "ftui-render"
-version = "0.2.1"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66559719b7cf30a9824fcb368b82e36eacee7178ef85c8bc2ec4c588dc3dfdf9"
+checksum = "e05eafaeb0b449cf7f18141cbe1fee78bba723d93d6ffe50e92c52da8a5823ad"
 dependencies = [
  "ahash",
  "bitflags",
@@ -656,10 +684,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "ftui-style"
-version = "0.2.1"
+name = "ftui-runtime"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9d0f4c1a06ca3ec677dd52d7418ee7dc38fe5df983b62a4f91938cf52185906"
+checksum = "d70020c8019013da3314e12d554f405a8ea8246fd7a74bf1edf0c508508323f9"
+dependencies = [
+ "arc-swap",
+ "ftui-backend",
+ "ftui-core",
+ "ftui-i18n",
+ "ftui-layout",
+ "ftui-render",
+ "ftui-style",
+ "ftui-text",
+ "tracing",
+ "unicode-segmentation",
+ "unicode-width",
+ "web-time",
+]
+
+[[package]]
+name = "ftui-style"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dcd2f8ee8eeffd651b40e1c81a8be9ed400550b0926631198744ed80f1174943"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -669,9 +717,9 @@ dependencies = [
 
 [[package]]
 name = "ftui-text"
-version = "0.2.1"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4936f5a4d61e9c99e96e23240fc6084d70eef5b0ecd4a726609a6bedbae77c44"
+checksum = "a20ca45ebbc7db9940ec028d607c4a260bdb1fbb9591697bd88bbcf41dfa1cfc"
 dependencies = [
  "ftui-core",
  "ftui-layout",
@@ -688,15 +736,17 @@ dependencies = [
 
 [[package]]
 name = "ftui-widgets"
-version = "0.2.1"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5cd953320541aafc80ca0546ff26a9478e161baf421d9e0372c2f503b1e881b"
+checksum = "383129a44d20f2684b69f05d16b6ba794e85883978548c038dbed6ddee1af2d6"
 dependencies = [
  "ahash",
  "bitflags",
+ "ftui-a11y",
  "ftui-core",
  "ftui-layout",
  "ftui-render",
+ "ftui-runtime",
  "ftui-style",
  "ftui-text",
  "unicode-segmentation",
@@ -871,15 +921,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "79cf5c93f93228cf8efb3ba362535fb11199ac548a09ce117c9b1adc3030d706"
 dependencies = [
  "rustversion",
-]
-
-[[package]]
-name = "itertools"
-version = "0.10.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
-dependencies = [
- "either",
 ]
 
 [[package]]
@@ -1174,7 +1215,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools",
  "proc-macro2",
  "quote",
  "syn",
