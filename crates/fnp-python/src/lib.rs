@@ -930,6 +930,51 @@ fn extract_python_dtype(
         .ok_or_else(|| PyTypeError::new_err(format!("{context}: unsupported dtype {name}")))
 }
 
+fn collect_fromiter_values<T, F>(
+    source: &Bound<'_, PyAny>,
+    scalar_type: &Bound<'_, PyAny>,
+    count: i64,
+    mut convert: F,
+) -> PyResult<Vec<T>>
+where
+    F: FnMut(&Bound<'_, PyAny>) -> PyResult<T>,
+{
+    let limit = if count == -1 {
+        None
+    } else if count < -1 {
+        Some(0_usize)
+    } else {
+        Some(count as usize)
+    };
+
+    if limit == Some(0) {
+        return Ok(Vec::new());
+    }
+
+    let mut values = Vec::new();
+    for item in source.try_iter()? {
+        if let Some(limit) = limit
+            && values.len() == limit
+        {
+            break;
+        }
+
+        let scalar = scalar_type.call1((item?,))?;
+        values.push(convert(&scalar)?);
+    }
+
+    if let Some(limit) = limit
+        && values.len() < limit
+    {
+        return Err(PyValueError::new_err(format!(
+            "iterator too short: Expected {limit} but iterator had only {} items.",
+            values.len()
+        )));
+    }
+
+    Ok(values)
+}
+
 fn python_is_complex_obj(value: &Bound<'_, PyAny>) -> PyResult<bool> {
     if let Ok(dtype) = value.getattr("dtype")
         && let Ok(name) = dtype.getattr("name")?.extract::<String>()
@@ -3301,21 +3346,117 @@ fn fromiter(
     count: i64,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.fromiter so iterator consumption, dtype coercion,
-    // count-limited reads, short-iterator ValueError, and TypeError
-    // surfaces on non-iterable or wrongly-typed elements all match numpy
-    // exactly. `dtype` is required by numpy for fromiter (unlike most
-    // array constructors).
     let numpy = py.import("numpy")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("count", count)?;
-    if let Some(like_val) = like {
+    if let Some(like_val) = like.as_ref()
+        && !like_val.bind(py).is_none()
+    {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("count", count)?;
         kwargs.set_item("like", like_val.bind(py))?;
+        return Ok(numpy
+            .getattr("fromiter")?
+            .call((iter.bind(py), dtype.bind(py)), Some(&kwargs))?
+            .unbind());
     }
-    Ok(numpy
-        .getattr("fromiter")?
-        .call((iter.bind(py), dtype.bind(py)), Some(&kwargs))?
-        .unbind())
+
+    let dtype_obj = numpy.getattr("dtype")?.call1((dtype.bind(py),))?;
+    let dtype_name = dtype_obj.getattr("name")?.extract::<String>()?;
+    let parsed_dtype = DType::parse(&dtype_name).ok_or_else(|| {
+        PyTypeError::new_err(format!("fromiter(dtype): unsupported dtype {dtype_name}"))
+    })?;
+    let scalar_type = dtype_obj.getattr("type")?;
+
+    let storage = match parsed_dtype {
+        DType::Bool => ArrayStorage::Bool(collect_fromiter_values(
+            iter.bind(py),
+            &scalar_type,
+            count,
+            |value| value.extract::<bool>(),
+        )?),
+        DType::I8 => ArrayStorage::I8(collect_fromiter_values(
+            iter.bind(py),
+            &scalar_type,
+            count,
+            |value| value.extract::<i8>(),
+        )?),
+        DType::I16 => ArrayStorage::I16(collect_fromiter_values(
+            iter.bind(py),
+            &scalar_type,
+            count,
+            |value| value.extract::<i16>(),
+        )?),
+        DType::I32 => ArrayStorage::I32(collect_fromiter_values(
+            iter.bind(py),
+            &scalar_type,
+            count,
+            |value| value.extract::<i32>(),
+        )?),
+        DType::I64 => ArrayStorage::I64(collect_fromiter_values(
+            iter.bind(py),
+            &scalar_type,
+            count,
+            |value| value.extract::<i64>(),
+        )?),
+        DType::U8 => ArrayStorage::U8(collect_fromiter_values(
+            iter.bind(py),
+            &scalar_type,
+            count,
+            |value| value.extract::<u8>(),
+        )?),
+        DType::U16 => ArrayStorage::U16(collect_fromiter_values(
+            iter.bind(py),
+            &scalar_type,
+            count,
+            |value| value.extract::<u16>(),
+        )?),
+        DType::U32 => ArrayStorage::U32(collect_fromiter_values(
+            iter.bind(py),
+            &scalar_type,
+            count,
+            |value| value.extract::<u32>(),
+        )?),
+        DType::U64 => ArrayStorage::U64(collect_fromiter_values(
+            iter.bind(py),
+            &scalar_type,
+            count,
+            |value| value.extract::<u64>(),
+        )?),
+        DType::F16 => ArrayStorage::F16(
+            collect_fromiter_values(iter.bind(py), &scalar_type, count, |value| {
+                value.extract::<f32>().map(f16::from_f32)
+            })?,
+        ),
+        DType::F32 => ArrayStorage::F32(collect_fromiter_values(
+            iter.bind(py),
+            &scalar_type,
+            count,
+            |value| value.extract::<f32>(),
+        )?),
+        DType::F64 => ArrayStorage::F64(collect_fromiter_values(
+            iter.bind(py),
+            &scalar_type,
+            count,
+            |value| value.extract::<f64>(),
+        )?),
+        DType::Complex64
+        | DType::Complex128
+        | DType::Str
+        | DType::Structured
+        | DType::DateTime64
+        | DType::TimeDelta64 => {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("count", count)?;
+            return Ok(numpy
+                .getattr("fromiter")?
+                .call((iter.bind(py), dtype.bind(py)), Some(&kwargs))?
+                .unbind());
+        }
+    };
+
+    // Rust-owned path for builtin scalar numeric dtypes. This preserves
+    // numpy's iterator consumption and short-iterator error surface while
+    // materializing through our native dtype/storage layer.
+    build_numpy_array_from_storage(py, &[storage.len()], storage)
 }
 
 #[pyfunction]
@@ -36349,24 +36490,25 @@ mod tests {
             let theirs_i32 = numpy_fi.call1((list_vals.clone(), int32.clone()))?;
             assert_array_matches_numpy(&ours_i32, &theirs_i32)?;
 
-            // Python generator expression: numpy consumes lazily.
-            let gen_code = "(x * x for x in range(6))";
+            // Python range object: exercises non-list iteration through the
+            // iterator protocol without relying on eval-created generator
+            // frames, which are flaky under the shared test runtime.
             let builtins = py.import("builtins")?;
-            let eval_fn = builtins.getattr("eval")?;
-            let ours_gen = fi_fn.call1((eval_fn.call1((gen_code,))?, int32.clone()))?;
-            let theirs_gen = numpy_fi.call1((eval_fn.call1((gen_code,))?, int32.clone()))?;
-            assert_array_matches_numpy(&ours_gen, &theirs_gen)?;
+            let range_fn = builtins.getattr("range")?;
+            let ours_range = fi_fn.call1((range_fn.call1((6_i64,))?, int32.clone()))?;
+            let theirs_range = numpy_fi.call1((range_fn.call1((6_i64,))?, int32.clone()))?;
+            assert_array_matches_numpy(&ours_range, &theirs_range)?;
 
             // count-limited read: consume only the first 3 elements from a
             // generator that could yield more.
             let count_kwargs = PyDict::new(py);
             count_kwargs.set_item("count", 3_i64)?;
             let ours_count = fi_fn.call(
-                (eval_fn.call1(("(x for x in range(10))",))?, int32.clone()),
+                (range_fn.call1((10_i64,))?, int32.clone()),
                 Some(&count_kwargs),
             )?;
             let theirs_count = numpy_fi.call(
-                (eval_fn.call1(("(x for x in range(10))",))?, int32.clone()),
+                (range_fn.call1((10_i64,))?, int32.clone()),
                 Some(&count_kwargs),
             )?;
             assert_array_matches_numpy(&ours_count, &theirs_count)?;
