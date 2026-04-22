@@ -6325,34 +6325,66 @@ fn nanpercentile(
     weights: Option<Py<PyAny>>,
     interpolation: Option<String>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.nanpercentile so NaN-ignoring percentile
-    // reduction matches numpy across scalar/vector q, axis selection,
-    // overwrite_input, method/interpolation selection, keepdims, and
-    // weighted paths. Optional keywords are forwarded only when
-    // explicitly supplied to preserve numpy defaults.
     let numpy = py.import("numpy")?;
     let nanpercentile_fn = numpy.getattr("nanpercentile")?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis_val) = axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(axis_val) = axis.as_ref() {
+            kwargs.set_item("axis", axis_val.bind(py))?;
+        }
+        if let Some(out_val) = out.as_ref() {
+            kwargs.set_item("out", out_val.bind(py))?;
+        }
+        kwargs.set_item("overwrite_input", overwrite_input)?;
+        if let Some(method_val) = method.as_ref() {
+            kwargs.set_item("method", method_val)?;
+        }
+        kwargs.set_item("keepdims", keepdims)?;
+        if let Some(weights_val) = weights.as_ref() {
+            kwargs.set_item("weights", weights_val.bind(py))?;
+        }
+        if let Some(interpolation_val) = interpolation.as_ref() {
+            kwargs.set_item("interpolation", interpolation_val)?;
+        }
+        Ok(nanpercentile_fn
+            .call((a.bind(py), q.bind(py)), Some(&kwargs))?
+            .unbind())
+    };
+
+    if out.as_ref().is_some_and(|value| !value.bind(py).is_none())
+        || overwrite_input
+        || keepdims
+        || method.is_some()
+        || weights.is_some()
+        || interpolation.is_some()
+    {
+        return fallback();
     }
-    if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+
+    let a = match extract_numeric_array(py, a.bind(py), "nanpercentile(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let q = match q.bind(py).extract::<f64>() {
+        Ok(value) => value,
+        Err(_) => return fallback(),
+    };
+    let axis = match extract_axis_spec(py, axis_for_parse, "nanpercentile") {
+        Ok(None) => None,
+        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
+        Ok(Some(_)) => return fallback(),
+        Err(_) => return fallback(),
+    };
+    let result = match a.nanpercentile(q, axis) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
     }
-    kwargs.set_item("overwrite_input", overwrite_input)?;
-    if let Some(method_val) = method {
-        kwargs.set_item("method", method_val)?;
-    }
-    kwargs.set_item("keepdims", keepdims)?;
-    if let Some(weights_val) = weights {
-        kwargs.set_item("weights", weights_val.bind(py))?;
-    }
-    if let Some(interpolation_val) = interpolation {
-        kwargs.set_item("interpolation", interpolation_val)?;
-    }
-    Ok(nanpercentile_fn
-        .call((a.bind(py), q.bind(py)), Some(&kwargs))?
-        .unbind())
+    Ok(output)
 }
 
 #[pyfunction]
@@ -6370,34 +6402,66 @@ fn nanquantile(
     weights: Option<Py<PyAny>>,
     interpolation: Option<String>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.nanquantile so NaN-ignoring quantile
-    // reduction matches numpy across scalar/vector q in [0, 1], axis
-    // selection, overwrite_input, method/interpolation selection,
-    // keepdims, and weighted paths. Optional keywords are forwarded
-    // only when explicitly supplied to preserve numpy defaults.
     let numpy = py.import("numpy")?;
     let nanquantile_fn = numpy.getattr("nanquantile")?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis_val) = axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(axis_val) = axis.as_ref() {
+            kwargs.set_item("axis", axis_val.bind(py))?;
+        }
+        if let Some(out_val) = out.as_ref() {
+            kwargs.set_item("out", out_val.bind(py))?;
+        }
+        kwargs.set_item("overwrite_input", overwrite_input)?;
+        if let Some(method_val) = method.as_ref() {
+            kwargs.set_item("method", method_val)?;
+        }
+        kwargs.set_item("keepdims", keepdims)?;
+        if let Some(weights_val) = weights.as_ref() {
+            kwargs.set_item("weights", weights_val.bind(py))?;
+        }
+        if let Some(interpolation_val) = interpolation.as_ref() {
+            kwargs.set_item("interpolation", interpolation_val)?;
+        }
+        Ok(nanquantile_fn
+            .call((a.bind(py), q.bind(py)), Some(&kwargs))?
+            .unbind())
+    };
+
+    if out.as_ref().is_some_and(|value| !value.bind(py).is_none())
+        || overwrite_input
+        || keepdims
+        || method.is_some()
+        || weights.is_some()
+        || interpolation.is_some()
+    {
+        return fallback();
     }
-    if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+
+    let a = match extract_numeric_array(py, a.bind(py), "nanquantile(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let q = match q.bind(py).extract::<f64>() {
+        Ok(value) => value,
+        Err(_) => return fallback(),
+    };
+    let axis = match extract_axis_spec(py, axis_for_parse, "nanquantile") {
+        Ok(None) => None,
+        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
+        Ok(Some(_)) => return fallback(),
+        Err(_) => return fallback(),
+    };
+    let result = match a.nanquantile(q, axis) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
     }
-    kwargs.set_item("overwrite_input", overwrite_input)?;
-    if let Some(method_val) = method {
-        kwargs.set_item("method", method_val)?;
-    }
-    kwargs.set_item("keepdims", keepdims)?;
-    if let Some(weights_val) = weights {
-        kwargs.set_item("weights", weights_val.bind(py))?;
-    }
-    if let Some(interpolation_val) = interpolation {
-        kwargs.set_item("interpolation", interpolation_val)?;
-    }
-    Ok(nanquantile_fn
-        .call((a.bind(py), q.bind(py)), Some(&kwargs))?
-        .unbind())
+    Ok(output)
 }
 
 #[pyfunction]
