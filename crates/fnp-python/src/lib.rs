@@ -5636,22 +5636,45 @@ fn median(
     overwrite_input: bool,
     keepdims: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.median so axis=None/int/tuple, `out=`
-    // destination, overwrite_input, and keepdims behavior matches
-    // numpy exactly. Integer inputs are promoted to float and NaN
-    // values propagate (numpy.median, not numpy.nanmedian).
     let numpy = py.import("numpy")?;
     let median_fn = numpy.getattr("median")?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis_val) = axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(axis_val) = axis.as_ref() {
+            kwargs.set_item("axis", axis_val.bind(py))?;
+        }
+        if let Some(out_val) = out.as_ref() {
+            kwargs.set_item("out", out_val.bind(py))?;
+        }
+        kwargs.set_item("overwrite_input", overwrite_input)?;
+        kwargs.set_item("keepdims", keepdims)?;
+        Ok(median_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    };
+
+    if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) || overwrite_input || keepdims {
+        return fallback();
     }
-    if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+
+    let a = match extract_numeric_array(py, a.bind(py), "median(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let axis = match extract_axis_spec(py, axis_for_parse, "median") {
+        Ok(None) => None,
+        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
+        Ok(Some(_)) => return fallback(),
+        Err(_) => return fallback(),
+    };
+    let result = match a.median(axis) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
     }
-    kwargs.set_item("overwrite_input", overwrite_input)?;
-    kwargs.set_item("keepdims", keepdims)?;
-    Ok(median_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(output)
 }
 
 #[pyfunction]
@@ -6282,32 +6305,62 @@ fn percentile(
     keepdims: bool,
     weights: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.percentile so percentile reduction matches
-    // numpy across scalar/vector q, axis=None/int/tuple, optional
-    // `out=` destination, overwrite_input flag, method selector
-    // ('linear'/'lower'/'higher'/'nearest'/'midpoint'/...), keepdims,
-    // and optional weights kwarg. Integer inputs are promoted to
-    // float and the result dtype matches numpy exactly.
     let numpy = py.import("numpy")?;
     let percentile_fn = numpy.getattr("percentile")?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis_val) = axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(axis_val) = axis.as_ref() {
+            kwargs.set_item("axis", axis_val.bind(py))?;
+        }
+        if let Some(out_val) = out.as_ref() {
+            kwargs.set_item("out", out_val.bind(py))?;
+        }
+        kwargs.set_item("overwrite_input", overwrite_input)?;
+        if let Some(method_val) = method.as_ref() {
+            kwargs.set_item("method", method_val)?;
+        }
+        kwargs.set_item("keepdims", keepdims)?;
+        if let Some(weights_val) = weights.as_ref() {
+            kwargs.set_item("weights", weights_val.bind(py))?;
+        }
+        Ok(percentile_fn
+            .call((a.bind(py), q.bind(py)), Some(&kwargs))?
+            .unbind())
+    };
+
+    if out.as_ref().is_some_and(|value| !value.bind(py).is_none())
+        || overwrite_input
+        || keepdims
+        || method.is_some()
+        || weights.is_some()
+    {
+        return fallback();
     }
-    if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+
+    let a = match extract_numeric_array(py, a.bind(py), "percentile(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let q = match q.bind(py).extract::<f64>() {
+        Ok(value) => value,
+        Err(_) => return fallback(),
+    };
+    let axis = match extract_axis_spec(py, axis_for_parse, "percentile") {
+        Ok(None) => None,
+        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
+        Ok(Some(_)) => return fallback(),
+        Err(_) => return fallback(),
+    };
+    let result = match a.percentile(q, axis) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
     }
-    kwargs.set_item("overwrite_input", overwrite_input)?;
-    if let Some(method_val) = method {
-        kwargs.set_item("method", method_val)?;
-    }
-    kwargs.set_item("keepdims", keepdims)?;
-    if let Some(weights_val) = weights {
-        kwargs.set_item("weights", weights_val.bind(py))?;
-    }
-    Ok(percentile_fn
-        .call((a.bind(py), q.bind(py)), Some(&kwargs))?
-        .unbind())
+    Ok(output)
 }
 
 #[pyfunction]
@@ -9800,31 +9853,62 @@ fn quantile(
     keepdims: bool,
     weights: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.quantile so quantile reduction matches numpy
-    // across scalar/vector q in [0, 1], axis=None/int/tuple, optional
-    // `out=` destination, overwrite_input, method selector
-    // ('linear'/'lower'/'higher'/'nearest'/'midpoint'/...), keepdims,
-    // and the keyword-only weights argument.
     let numpy = py.import("numpy")?;
     let quantile_fn = numpy.getattr("quantile")?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis_val) = axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(axis_val) = axis.as_ref() {
+            kwargs.set_item("axis", axis_val.bind(py))?;
+        }
+        if let Some(out_val) = out.as_ref() {
+            kwargs.set_item("out", out_val.bind(py))?;
+        }
+        kwargs.set_item("overwrite_input", overwrite_input)?;
+        if let Some(method_val) = method.as_ref() {
+            kwargs.set_item("method", method_val)?;
+        }
+        kwargs.set_item("keepdims", keepdims)?;
+        if let Some(weights_val) = weights.as_ref() {
+            kwargs.set_item("weights", weights_val.bind(py))?;
+        }
+        Ok(quantile_fn
+            .call((a.bind(py), q.bind(py)), Some(&kwargs))?
+            .unbind())
+    };
+
+    if out.as_ref().is_some_and(|value| !value.bind(py).is_none())
+        || overwrite_input
+        || keepdims
+        || method.is_some()
+        || weights.is_some()
+    {
+        return fallback();
     }
-    if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+
+    let a = match extract_numeric_array(py, a.bind(py), "quantile(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let q = match q.bind(py).extract::<f64>() {
+        Ok(value) => value,
+        Err(_) => return fallback(),
+    };
+    let axis = match extract_axis_spec(py, axis_for_parse, "quantile") {
+        Ok(None) => None,
+        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
+        Ok(Some(_)) => return fallback(),
+        Err(_) => return fallback(),
+    };
+    let result = match a.quantile(q, axis) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
     }
-    kwargs.set_item("overwrite_input", overwrite_input)?;
-    if let Some(method_val) = method {
-        kwargs.set_item("method", method_val)?;
-    }
-    kwargs.set_item("keepdims", keepdims)?;
-    if let Some(weights_val) = weights {
-        kwargs.set_item("weights", weights_val.bind(py))?;
-    }
-    Ok(quantile_fn
-        .call((a.bind(py), q.bind(py)), Some(&kwargs))?
-        .unbind())
+    Ok(output)
 }
 
 #[pyfunction]
@@ -34306,9 +34390,12 @@ mod tests {
             let cs = vec![1.0_f64, 2.0, 3.0];
             assert_array_matches_numpy(&hmx.call1((cs.clone(),))?, &hmx_ref.call1((cs.clone(),))?)?;
             let our_mul = module.getattr("hermmul")?;
+            // physicist's Hermite: H_1(x) = 2x  ⇒  x = H_1/2, so "multiply
+            // by x" is hermmul(c, [0.0, 0.5]). (Using [0.0, 1.0] here would
+            // be correct for probabilist's He, not for H.)
             assert_array_matches_numpy(
                 &hmx.call1((cs.clone(),))?,
-                &our_mul.call1((cs.clone(), vec![0.0_f64, 1.0]))?,
+                &our_mul.call1((cs.clone(), vec![0.0_f64, 0.5]))?,
             )?;
 
             let ht = module.getattr("hermtrim")?;
@@ -34480,9 +34567,12 @@ mod tests {
             let cs = vec![1.0_f64, 2.0, 3.0];
             assert_array_matches_numpy(&lmx.call1((cs.clone(),))?, &lmx_ref.call1((cs.clone(),))?)?;
             let our_mul = module.getattr("lagmul")?;
+            // Laguerre: L_1(x) = 1 - x  ⇒  x = L_0 - L_1, so "multiply by x"
+            // is lagmul(c, [1.0, -1.0]).  (Using [0.0, 1.0] here is the
+            // Chebyshev/HermiteE convention, not Laguerre's.)
             assert_array_matches_numpy(
                 &lmx.call1((cs.clone(),))?,
-                &our_mul.call1((cs.clone(), vec![0.0_f64, 1.0]))?,
+                &our_mul.call1((cs.clone(), vec![1.0_f64, -1.0]))?,
             )?;
 
             let lt = module.getattr("lagtrim")?;
