@@ -6283,6 +6283,60 @@ fn heaviside(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
+fn rad2deg(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.rad2deg (multiply by 180/pi). Inverse of
+    // deg2rad. Matches numpy for pi, pi/2, 2*pi canonical conversions
+    // and for integer dtype promotion to float.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("rad2deg")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
+fn positive(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.positive (element-wise +x, returns a fresh
+    // array with preserved dtype). TypeError surface on non-numeric
+    // dtypes (e.g. string) must match numpy exactly.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("positive")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
+fn reciprocal(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.reciprocal (element-wise 1/x). Integer dtype
+    // is preserved, which means integer inputs use integer division
+    // (1//x); numpy's divide-by-zero behavior and RuntimeWarning
+    // emission are surfaced identically.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("reciprocal")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
+fn conjugate(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.conjugate (element-wise complex conjugate).
+    // Real dtype returns the input unchanged; complex dtype negates
+    // the imaginary component. Aliased as np.conj in numpy.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("conjugate")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x1, x2))]
+fn fmod(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.fmod (C-style remainder: sign follows the
+    // dividend, unlike np.remainder which follows the divisor).
+    // Integer divide-by-zero and float nan/inf surfacing match numpy.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("fmod")?
+        .call1((x1.bind(py), x2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
 fn iscomplex(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.iscomplex. Returns a bool array marking
     // elements with a non-zero imaginary part. Real-input arrays
@@ -8988,6 +9042,11 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hamming, m)?)?;
     m.add_function(wrap_pyfunction!(blackman, m)?)?;
     m.add_function(wrap_pyfunction!(heaviside, m)?)?;
+    m.add_function(wrap_pyfunction!(rad2deg, m)?)?;
+    m.add_function(wrap_pyfunction!(positive, m)?)?;
+    m.add_function(wrap_pyfunction!(reciprocal, m)?)?;
+    m.add_function(wrap_pyfunction!(conjugate, m)?)?;
+    m.add_function(wrap_pyfunction!(fmod, m)?)?;
     m.add_function(wrap_pyfunction!(iscomplex, m)?)?;
     m.add_function(wrap_pyfunction!(square, m)?)?;
     m.add_function(wrap_pyfunction!(cbrt, m)?)?;
@@ -9449,6 +9508,11 @@ mod tests {
             assert!(module.getattr("hamming").is_ok());
             assert!(module.getattr("blackman").is_ok());
             assert!(module.getattr("heaviside").is_ok());
+            assert!(module.getattr("rad2deg").is_ok());
+            assert!(module.getattr("positive").is_ok());
+            assert!(module.getattr("reciprocal").is_ok());
+            assert!(module.getattr("conjugate").is_ok());
+            assert!(module.getattr("fmod").is_ok());
             assert!(module.getattr("iscomplex").is_ok());
             assert!(module.getattr("square").is_ok());
             assert!(module.getattr("cbrt").is_ok());
@@ -35772,6 +35836,325 @@ mod tests {
             let ours_2d = hv_fn.call1((two_d.clone(), 0.5_f64))?;
             let theirs_2d = numpy_hv.call1((two_d.clone(), 0.5_f64))?;
             assert_array_matches_numpy(&ours_2d, &theirs_2d)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn rad2deg_matches_numpy_across_canonical_array_int_and_roundtrip() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let r2d_fn = module.getattr("rad2deg")?;
+            let d2r_fn = module.getattr("deg2rad")?;
+            let numpy = py.import("numpy")?;
+            let numpy_r2d = numpy.getattr("rad2deg")?;
+            let allclose = numpy.getattr("allclose")?;
+            let array_fn = numpy.getattr("array")?;
+            let pi = std::f64::consts::PI;
+
+            // Canonical conversions.
+            for (rad, expected_deg) in [
+                (0.0_f64, 0.0_f64),
+                (pi / 2.0, 90.0),
+                (pi, 180.0),
+                (2.0 * pi, 360.0),
+                (-pi, -180.0),
+            ] {
+                let ours: f64 = r2d_fn.call1((rad,))?.extract()?;
+                let theirs: f64 = numpy_r2d.call1((rad,))?.extract()?;
+                assert_eq!(ours, theirs);
+                assert!(
+                    (ours - expected_deg).abs() < 1e-12,
+                    "rad2deg({rad}) must be {expected_deg}"
+                );
+            }
+
+            // 1-D array.
+            let arr = array_fn.call1((vec![-pi, -pi / 2.0, 0.0_f64, pi / 4.0, pi, 2.0 * pi],))?;
+            let ours_a = r2d_fn.call1((arr.clone(),))?;
+            let theirs_a = numpy_r2d.call1((arr.clone(),))?;
+            let ok_a: bool = allclose.call1((&ours_a, &theirs_a))?.extract()?;
+            assert!(ok_a, "rad2deg array mismatch");
+
+            // Integer input: numpy promotes to float.
+            let ints = array_fn.call1((vec![0_i64, 1, 2, 3],))?;
+            let ours_i = r2d_fn.call1((ints.clone(),))?;
+            let theirs_i = numpy_r2d.call1((ints.clone(),))?;
+            let ok_i: bool = allclose.call1((&ours_i, &theirs_i))?.extract()?;
+            assert!(ok_i, "rad2deg integer input mismatch");
+            assert_eq!(
+                ours_i.getattr("dtype")?.str()?.to_string(),
+                theirs_i.getattr("dtype")?.str()?.to_string()
+            );
+
+            // Round-trip: rad2deg(deg2rad(x)) ≈ x on a degree grid.
+            let degrees = array_fn.call1((vec![-180.0_f64, -90.0, 0.0, 45.0, 90.0, 180.0, 360.0],))?;
+            let rt = r2d_fn.call1((d2r_fn.call1((degrees.clone(),))?,))?;
+            let ok_rt: bool = allclose.call1((&rt, &degrees))?.extract()?;
+            assert!(ok_rt, "rad2deg(deg2rad(x)) must roundtrip");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn positive_matches_numpy_across_scalar_array_int_complex_and_dtype() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let pos_fn = module.getattr("positive")?;
+            let numpy = py.import("numpy")?;
+            let numpy_pos = numpy.getattr("positive")?;
+            let array_fn = numpy.getattr("array")?;
+
+            // Scalar float: positive is identity.
+            for v in [-3.5_f64, 0.0, 2.5] {
+                let ours: f64 = pos_fn.call1((v,))?.extract()?;
+                let theirs: f64 = numpy_pos.call1((v,))?.extract()?;
+                assert_eq!(ours, theirs);
+                assert_eq!(ours, v);
+            }
+
+            // 1-D arrays and dtype preservation.
+            let arr = array_fn.call1((vec![-2.0_f64, 0.0, 3.0],))?;
+            let ours_a = pos_fn.call1((arr.clone(),))?;
+            let theirs_a = numpy_pos.call1((arr.clone(),))?;
+            assert_array_matches_numpy(&ours_a, &theirs_a)?;
+
+            let ints = array_fn.call1((vec![-5_i64, 0, 5],))?;
+            let ours_i = pos_fn.call1((ints.clone(),))?;
+            let theirs_i = numpy_pos.call1((ints.clone(),))?;
+            assert_array_matches_numpy(&ours_i, &theirs_i)?;
+            assert_eq!(
+                ours_i.getattr("dtype")?.str()?.to_string(),
+                theirs_i.getattr("dtype")?.str()?.to_string()
+            );
+
+            // Complex input preserves complex values.
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+            let cplx_items: Vec<Py<PyAny>> = vec![
+                py_complex.call1((1.0_f64, 2.0_f64))?.unbind(),
+                py_complex.call1((-3.0_f64, 4.0_f64))?.unbind(),
+            ];
+            let cplx = array_fn.call1((PyList::new(py, cplx_items)?,))?;
+            let ours_c = pos_fn.call1((cplx.clone(),))?;
+            let theirs_c = numpy_pos.call1((cplx.clone(),))?;
+            assert_array_matches_numpy(&ours_c, &theirs_c)?;
+
+            // String dtype: both must raise identically.
+            let strings = array_fn.call1((vec!["a", "b", "c"],))?;
+            let ours_err = pos_fn
+                .call1((strings.clone(),))
+                .expect_err("string positive must error");
+            let theirs_err = numpy_pos
+                .call1((strings.clone(),))
+                .expect_err("numpy string positive must error");
+            assert_pyerr_matches_numpy(py, ours_err, theirs_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn reciprocal_matches_numpy_across_scalar_float_complex_2d_and_int_dtype() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let rc_fn = module.getattr("reciprocal")?;
+            let numpy = py.import("numpy")?;
+            let numpy_rc = numpy.getattr("reciprocal")?;
+            let allclose = numpy.getattr("allclose")?;
+            let array_fn = numpy.getattr("array")?;
+
+            // Scalar float.
+            for v in [0.5_f64, 1.0, 2.0, -4.0] {
+                let ours: f64 = rc_fn.call1((v,))?.extract()?;
+                let theirs: f64 = numpy_rc.call1((v,))?.extract()?;
+                assert_eq!(ours, theirs);
+                assert!(
+                    (ours - 1.0 / v).abs() < 1e-15,
+                    "reciprocal({v}) must equal 1/v"
+                );
+            }
+
+            // 1-D float array.
+            let arr = array_fn.call1((vec![1.0_f64, 2.0, 4.0, 8.0, 16.0],))?;
+            let ours_a = rc_fn.call1((arr.clone(),))?;
+            let theirs_a = numpy_rc.call1((arr.clone(),))?;
+            let ok_a: bool = allclose.call1((&ours_a, &theirs_a))?.extract()?;
+            assert!(ok_a, "reciprocal 1-D mismatch");
+
+            // Integer dtype: integer reciprocal is integer division.
+            // reciprocal(1) == 1; reciprocal(2) == 0; etc. — match numpy's
+            // surface exactly (this is a well-known numpy gotcha).
+            let ints = array_fn.call1((vec![1_i64, 2, 3, 5, -1],))?;
+            let ours_i = rc_fn.call1((ints.clone(),))?;
+            let theirs_i = numpy_rc.call1((ints.clone(),))?;
+            assert_array_matches_numpy(&ours_i, &theirs_i)?;
+            assert_eq!(
+                ours_i.getattr("dtype")?.str()?.to_string(),
+                theirs_i.getattr("dtype")?.str()?.to_string()
+            );
+
+            // 2-D array.
+            let two_d = array_fn.call1((vec![vec![1.0_f64, 2.0], vec![4.0, 8.0]],))?;
+            let ours_2d = rc_fn.call1((two_d.clone(),))?;
+            let theirs_2d = numpy_rc.call1((two_d.clone(),))?;
+            let ok_2d: bool = allclose.call1((&ours_2d, &theirs_2d))?.extract()?;
+            assert!(ok_2d, "reciprocal 2-D mismatch");
+
+            // Complex: 1/(a+bi) = (a-bi)/(a²+b²).
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+            let cplx_items: Vec<Py<PyAny>> = vec![
+                py_complex.call1((1.0_f64, 0.0_f64))?.unbind(),
+                py_complex.call1((0.0_f64, 1.0_f64))?.unbind(),
+                py_complex.call1((1.0_f64, 1.0_f64))?.unbind(),
+            ];
+            let cplx = array_fn.call1((PyList::new(py, cplx_items)?,))?;
+            let ours_c = rc_fn.call1((cplx.clone(),))?;
+            let theirs_c = numpy_rc.call1((cplx.clone(),))?;
+            let ok_c: bool = allclose.call1((&ours_c, &theirs_c))?.extract()?;
+            assert!(ok_c, "reciprocal complex mismatch");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn conjugate_matches_numpy_across_real_complex_array_scalar_and_dtype() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let cj_fn = module.getattr("conjugate")?;
+            let numpy = py.import("numpy")?;
+            let numpy_cj = numpy.getattr("conjugate")?;
+            let array_fn = numpy.getattr("array")?;
+
+            // Complex scalar parity.
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+            for (re, im) in [(1.5_f64, -2.25_f64), (-1.0, 1.0), (0.0, 3.0)] {
+                let c = py_complex.call1((re, im))?;
+                let ours = cj_fn.call1((c.clone(),))?;
+                let theirs = numpy_cj.call1((c.clone(),))?;
+                assert_eq!(
+                    ours.call_method0("__repr__")?.extract::<String>()?,
+                    theirs.call_method0("__repr__")?.extract::<String>()?
+                );
+            }
+
+            // 1-D complex array.
+            let cplx_items: Vec<Py<PyAny>> = vec![
+                py_complex.call1((1.0_f64, 2.0_f64))?.unbind(),
+                py_complex.call1((-3.0_f64, 4.0_f64))?.unbind(),
+                py_complex.call1((0.0_f64, -5.0_f64))?.unbind(),
+            ];
+            let cplx = array_fn.call1((PyList::new(py, cplx_items)?,))?;
+            let ours_a = cj_fn.call1((cplx.clone(),))?;
+            let theirs_a = numpy_cj.call1((cplx.clone(),))?;
+            assert_array_matches_numpy(&ours_a, &theirs_a)?;
+
+            // Real-dtype input: conjugate is identity (returns unchanged).
+            let real = array_fn.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            let ours_r = cj_fn.call1((real.clone(),))?;
+            let theirs_r = numpy_cj.call1((real.clone(),))?;
+            assert_array_matches_numpy(&ours_r, &theirs_r)?;
+
+            // Integer dtype: conjugate is identity with dtype preserved.
+            let ints = array_fn.call1((vec![-1_i64, 0, 1, 2],))?;
+            let ours_i = cj_fn.call1((ints.clone(),))?;
+            let theirs_i = numpy_cj.call1((ints.clone(),))?;
+            assert_array_matches_numpy(&ours_i, &theirs_i)?;
+            assert_eq!(
+                ours_i.getattr("dtype")?.str()?.to_string(),
+                theirs_i.getattr("dtype")?.str()?.to_string()
+            );
+
+            // Double-conjugate identity: conj(conj(x)) == x on complex input.
+            let rt = cj_fn.call1((cj_fn.call1((cplx.clone(),))?,))?;
+            assert_array_matches_numpy(&rt, &cplx)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn fmod_matches_numpy_across_sign_follows_dividend_float_broadcast_and_zero() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let fm_fn = module.getattr("fmod")?;
+            let numpy = py.import("numpy")?;
+            let numpy_fm = numpy.getattr("fmod")?;
+            let allclose = numpy.getattr("allclose")?;
+            let array_fn = numpy.getattr("array")?;
+
+            // Positive dividend: fmod matches Python's math.fmod.
+            assert_array_matches_numpy(
+                &fm_fn.call1((vec![7_i64, 8, 9, 10], 3_i64))?,
+                &numpy_fm.call1((vec![7_i64, 8, 9, 10], 3_i64))?,
+            )?;
+
+            // Negative dividend: fmod's sign follows the dividend (unlike
+            // mod/remainder which follows the divisor). This is the
+            // defining behavioral difference from np.mod.
+            assert_array_matches_numpy(
+                &fm_fn.call1((vec![-7_i64, -8, -9, -10], 3_i64))?,
+                &numpy_fm.call1((vec![-7_i64, -8, -9, -10], 3_i64))?,
+            )?;
+
+            // Float fmod.
+            assert_array_matches_numpy(
+                &fm_fn.call1((vec![7.5_f64, -7.5, 0.25], 2.0_f64))?,
+                &numpy_fm.call1((vec![7.5_f64, -7.5, 0.25], 2.0_f64))?,
+            )?;
+
+            // Broadcast: array dividend + array divisor.
+            let lhs = array_fn.call1((vec![10_i64, -10, 15, -15],))?;
+            let rhs = array_fn.call1((vec![3_i64, 3, 4, 4],))?;
+            assert_array_matches_numpy(
+                &fm_fn.call1((lhs.clone(), rhs.clone()))?,
+                &numpy_fm.call1((lhs.clone(), rhs.clone()))?,
+            )?;
+
+            // Float fmod by zero surfaces nan under errstate-ignore.
+            let errstate_kw = PyDict::new(py);
+            errstate_kw.set_item("divide", "ignore")?;
+            errstate_kw.set_item("invalid", "ignore")?;
+            let errstate_ctx = numpy.getattr("errstate")?.call((), Some(&errstate_kw))?;
+            errstate_ctx.call_method0("__enter__")?;
+            let nums = array_fn.call1((vec![1.0_f64, -1.0, 0.0],))?;
+            let zeros = array_fn.call1((vec![0.0_f64, 0.0, 0.0],))?;
+            let ours_zero = fm_fn.call1((nums.clone(), zeros.clone()))?;
+            let theirs_zero = numpy_fm.call1((nums.clone(), zeros.clone()))?;
+            let nan_equiv = PyDict::new(py);
+            nan_equiv.set_item("equal_nan", true)?;
+            let ok_zero: bool = allclose
+                .call((&ours_zero, &theirs_zero), Some(&nan_equiv))?
+                .extract()?;
+            assert!(ok_zero, "fmod by zero must agree with numpy under equal_nan");
+            errstate_ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
 
             Ok(())
         });
