@@ -12,7 +12,7 @@ use fnp_ufunc::{
 };
 use pyo3::exceptions::{PyTypeError, PyValueError, PyZeroDivisionError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBool, PyDict, PyList, PyModule, PyTuple};
+use pyo3::types::{PyAny, PyBool, PyComplex, PyDict, PyList, PyModule, PyTuple};
 use pyo3::wrap_pyfunction;
 use pyo3::{Bound, IntoPyObject};
 
@@ -928,6 +928,41 @@ fn extract_python_dtype(
     let name = parsed.getattr("name")?.extract::<String>()?;
     DType::parse(&name)
         .ok_or_else(|| PyTypeError::new_err(format!("{context}: unsupported dtype {name}")))
+}
+
+fn python_is_complex_obj(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if let Ok(dtype) = value.getattr("dtype")
+        && let Ok(name) = dtype.getattr("name")?.extract::<String>()
+    {
+        return Ok(matches!(
+            DType::parse(&name),
+            Some(DType::Complex64) | Some(DType::Complex128)
+        ));
+    }
+
+    if value.is_instance_of::<PyComplex>() {
+        return Ok(true);
+    }
+
+    if let Ok(list) = value.cast::<PyList>() {
+        for item in list.iter() {
+            if python_is_complex_obj(&item)? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+
+    if let Ok(tuple) = value.cast::<PyTuple>() {
+        for item in tuple.iter() {
+            if python_is_complex_obj(&item)? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+
+    Ok(false)
 }
 
 #[allow(dead_code)]
@@ -8283,12 +8318,12 @@ fn asfortranarray(py: Python<'_>, a: Py<PyAny>, dtype: Option<Py<PyAny>>) -> PyR
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
-fn isrealobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.isrealobj. Returns True iff input has a
-    // real (non-complex) dtype, regardless of whether values would
-    // round-trip through complex. Logical complement of iscomplexobj.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("isrealobj")?.call1((x.bind(py),))?.unbind())
+fn isrealobj(x: Py<PyAny>) -> PyResult<bool> {
+    // Rust-owned port of np.isrealobj. NumPy arrays and scalar dtypes
+    // are classified by dtype; plain Python sequences recurse so lists
+    // of complex values still report False while object arrays remain
+    // non-complex because their dtype is object.
+    Python::attach(|py| Ok(!python_is_complex_obj(x.bind(py))?))
 }
 
 #[pyfunction]
@@ -8746,16 +8781,12 @@ fn size_count(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
-fn iscomplexobj(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.iscomplexobj. Returns True iff input has a
-    // complex dtype, regardless of whether imaginary parts are
-    // nonzero. Matches numpy's behavior across ndarray, scalar, and
-    // Python list inputs.
-    let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("iscomplexobj")?
-        .call1((x.bind(py),))?
-        .unbind())
+fn iscomplexobj(x: Py<PyAny>) -> PyResult<bool> {
+    // Rust-owned port of np.iscomplexobj. This mirrors NumPy's
+    // object-vs-complex distinction: ndarray/scalar inputs use their
+    // dtype when available, while plain Python sequences recurse to the
+    // complex element type they would coerce to under array creation.
+    Python::attach(|py| python_is_complex_obj(x.bind(py)))
 }
 
 #[pyfunction]
@@ -31584,6 +31615,33 @@ mod tests {
                 "complex array with zero imag",
             )?;
 
+            // Object array containing complex scalars stays object dtype → False.
+            let object_complex = numpy.getattr("array")?.call(
+                (lst_complex.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "object")?;
+                    kw
+                }),
+            )?;
+            check(
+                isc_fn.call1((object_complex.clone(),))?,
+                numpy_isc.call1((object_complex.clone(),))?,
+                "object array containing complex scalars",
+            )?;
+
+            // Non-array Python objects are non-complex unless they are actual complex scalars.
+            check(
+                isc_fn.call1(("hello",))?,
+                numpy_isc.call1(("hello",))?,
+                "string scalar",
+            )?;
+            check(
+                isc_fn.call1((py.None(),))?,
+                numpy_isc.call1((py.None(),))?,
+                "none scalar",
+            )?;
+
             Ok(())
         });
     }
@@ -34511,6 +34569,33 @@ mod tests {
                 "2-D real",
             )?;
 
+            // Object array containing complex scalars stays object dtype → True.
+            let object_complex = numpy.getattr("array")?.call(
+                (lst_complex.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "object")?;
+                    kw
+                }),
+            )?;
+            check(
+                isr_fn.call1((object_complex.clone(),))?,
+                numpy_isr.call1((object_complex.clone(),))?,
+                "object array containing complex scalars",
+            )?;
+
+            // Non-array Python objects without complex dtype stay real.
+            check(
+                isr_fn.call1(("hello",))?,
+                numpy_isr.call1(("hello",))?,
+                "string scalar",
+            )?;
+            check(
+                isr_fn.call1((py.None(),))?,
+                numpy_isr.call1((py.None(),))?,
+                "none scalar",
+            )?;
+
             // Complement-of-iscomplexobj cross-check.
             let isc_fn = module.getattr("iscomplexobj")?;
             let cases = [
@@ -34518,6 +34603,8 @@ mod tests {
                 int_arr.clone().into_any(),
                 cplx_arr.clone().into_any(),
                 zero_imag.clone().into_any(),
+                object_complex.clone().into_any(),
+                py.None().into_bound(py).into_any(),
             ];
             for (i, case) in cases.iter().enumerate() {
                 let isr_val: bool = isr_fn.call1((case,))?.extract()?;
