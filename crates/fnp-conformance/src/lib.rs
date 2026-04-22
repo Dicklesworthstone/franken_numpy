@@ -7423,10 +7423,7 @@ pub fn run_linalg_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteRepor
                 let mut product = [[0.0_f64; 2]; 2];
                 for i in 0..2 {
                     for j in 0..2 {
-                        let mut sum = 0.0;
-                        for k in 0..2 {
-                            sum += l_mat[i][k] * l_mat[j][k];
-                        }
+                        let sum: f64 = l_mat[i].iter().zip(l_mat[j].iter()).map(|(a, b)| a * b).sum();
                         product[i][j] = sum;
                     }
                 }
@@ -20470,7 +20467,7 @@ fn evaluate_rng_metamorphic_relation(case: &RngMetamorphicCase) -> Result<(), Rn
             let resumed = filled_rng.next_u64();
             let mut iter_rng = DeterministicRng::new(case.seed);
             for _ in 0..len {
-                iter_rng.next_u64();
+                let _ = iter_rng.next_u64();
             }
             let expected_next = iter_rng.next_u64();
             if resumed == expected_next {
