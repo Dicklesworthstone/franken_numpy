@@ -3258,6 +3258,36 @@ fn may_share_memory(
 }
 
 #[pyfunction]
+#[pyo3(signature = (buffer, dtype=None, count=-1_i64, offset=0_i64, *, like=None))]
+fn frombuffer(
+    py: Python<'_>,
+    buffer: Py<PyAny>,
+    dtype: Option<Py<PyAny>>,
+    count: i64,
+    offset: i64,
+    like: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.frombuffer so bytes/bytearray/memoryview buffer
+    // protocol handling, dtype coercion, count=-1 "fill buffer" behavior,
+    // nonzero offset byte skipping, buffer-too-short ValueError surface,
+    // and the keyword-only `like` argument all match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    kwargs.set_item("count", count)?;
+    kwargs.set_item("offset", offset)?;
+    if let Some(like_val) = like {
+        kwargs.set_item("like", like_val.bind(py))?;
+    }
+    Ok(numpy
+        .getattr("frombuffer")?
+        .call((buffer.bind(py),), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, b, max_work=-1_i64))]
 fn shares_memory(
     py: Python<'_>,
@@ -8830,6 +8860,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_broadcast_shapes, m)?)?;
     m.add_function(wrap_pyfunction!(may_share_memory, m)?)?;
     m.add_function(wrap_pyfunction!(shares_memory, m)?)?;
+    m.add_function(wrap_pyfunction!(frombuffer, m)?)?;
     m.add_function(wrap_pyfunction!(sort_complex, m)?)?;
     m.add_function(wrap_pyfunction!(nanmedian, m)?)?;
     m.add_function(wrap_pyfunction!(ma_average, m)?)?;
@@ -9217,6 +9248,7 @@ mod tests {
             assert!(module.getattr("broadcast_shapes").is_ok());
             assert!(module.getattr("may_share_memory").is_ok());
             assert!(module.getattr("shares_memory").is_ok());
+            assert!(module.getattr("frombuffer").is_ok());
             assert!(module.getattr("sort_complex").is_ok());
             assert!(module.getattr("nanmedian").is_ok());
             assert!(module.getattr("ma_average").is_ok());
@@ -34493,6 +34525,114 @@ mod tests {
                 (Err(ours), Err(theirs)) => assert_pyerr_matches_numpy(py, ours, theirs)?,
                 _ => panic!("shares_memory list-arg success/error surface must match numpy"),
             }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn frombuffer_matches_numpy_across_bytes_bytearray_dtype_count_offset_and_errors() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let fb_fn = module.getattr("frombuffer")?;
+            let numpy = py.import("numpy")?;
+            let numpy_fb = numpy.getattr("frombuffer")?;
+
+            // Build a known bytes buffer of 8 int32 values as little-endian.
+            let int_vals: Vec<i32> = vec![0, 1, 2, 3, 4, 5, 6, 7];
+            let int_bytes_vec: Vec<u8> = int_vals
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect();
+            let int_buf = py
+                .import("builtins")?
+                .getattr("bytes")?
+                .call1((int_bytes_vec,))?;
+
+            // Explicit int32 dtype with default count=-1/offset=0.
+            let i32_kwargs = PyDict::new(py);
+            i32_kwargs.set_item("dtype", numpy.getattr("int32")?)?;
+            let ours_i32 = fb_fn.call((int_buf.clone(),), Some(&i32_kwargs))?;
+            let theirs_i32 = numpy_fb.call((int_buf.clone(),), Some(&i32_kwargs))?;
+            assert_array_matches_numpy(&ours_i32, &theirs_i32)?;
+
+            // bytearray input parity.
+            let bytearray_buf = py
+                .import("builtins")?
+                .getattr("bytearray")?
+                .call1((int_buf.clone(),))?;
+            let ours_ba = fb_fn.call((bytearray_buf.clone(),), Some(&i32_kwargs))?;
+            let theirs_ba = numpy_fb.call((bytearray_buf.clone(),), Some(&i32_kwargs))?;
+            assert_array_matches_numpy(&ours_ba, &theirs_ba)?;
+
+            // count-limited read: 3 int32 values.
+            let count_kwargs = PyDict::new(py);
+            count_kwargs.set_item("dtype", numpy.getattr("int32")?)?;
+            count_kwargs.set_item("count", 3_i64)?;
+            let ours_count = fb_fn.call((int_buf.clone(),), Some(&count_kwargs))?;
+            let theirs_count = numpy_fb.call((int_buf.clone(),), Some(&count_kwargs))?;
+            assert_array_matches_numpy(&ours_count, &theirs_count)?;
+
+            // Nonzero byte offset: skip the first int32.
+            let offset_kwargs = PyDict::new(py);
+            offset_kwargs.set_item("dtype", numpy.getattr("int32")?)?;
+            offset_kwargs.set_item("offset", 4_i64)?;
+            let ours_off = fb_fn.call((int_buf.clone(),), Some(&offset_kwargs))?;
+            let theirs_off = numpy_fb.call((int_buf.clone(),), Some(&offset_kwargs))?;
+            assert_array_matches_numpy(&ours_off, &theirs_off)?;
+
+            // Float64 dtype parity.
+            let mut float_bytes = Vec::with_capacity(4 * 8);
+            for v in [1.5_f64, -2.25, 3.125, 0.0] {
+                float_bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            let float_buf = py
+                .import("builtins")?
+                .getattr("bytes")?
+                .call1((float_bytes,))?;
+            let f64_kwargs = PyDict::new(py);
+            f64_kwargs.set_item("dtype", numpy.getattr("float64")?)?;
+            let ours_f64 = fb_fn.call((float_buf.clone(),), Some(&f64_kwargs))?;
+            let theirs_f64 = numpy_fb.call((float_buf.clone(),), Some(&f64_kwargs))?;
+            assert_array_matches_numpy(&ours_f64, &theirs_f64)?;
+
+            // View semantics: the returned array should view the underlying
+            // buffer when possible. For bytearray input both implementations
+            // expose a writeable view; mutating the result should reflect
+            // the same behavior in both.
+            let mutable_ba = py
+                .import("builtins")?
+                .getattr("bytearray")?
+                .call1((int_buf.clone(),))?;
+            let ours_view = fb_fn.call((mutable_ba.clone(),), Some(&i32_kwargs))?;
+            let theirs_view = numpy_fb.call((mutable_ba.clone(),), Some(&i32_kwargs))?;
+            // Writeable flag must match (typically True for bytearray).
+            let ours_w: bool = ours_view
+                .getattr("flags")?
+                .get_item("WRITEABLE")?
+                .extract()?;
+            let theirs_w: bool = theirs_view
+                .getattr("flags")?
+                .get_item("WRITEABLE")?
+                .extract()?;
+            assert_eq!(ours_w, theirs_w);
+
+            // Insufficient buffer: count exceeds available elements.
+            let short_kwargs = PyDict::new(py);
+            short_kwargs.set_item("dtype", numpy.getattr("int32")?)?;
+            short_kwargs.set_item("count", 1000_i64)?;
+            let ours_err = fb_fn
+                .call((int_buf.clone(),), Some(&short_kwargs))
+                .expect_err("count exceeding buffer must raise");
+            let theirs_err = numpy_fb
+                .call((int_buf.clone(),), Some(&short_kwargs))
+                .expect_err("numpy must also raise on excessive count");
+            assert_pyerr_matches_numpy(py, ours_err, theirs_err)?;
 
             Ok(())
         });
