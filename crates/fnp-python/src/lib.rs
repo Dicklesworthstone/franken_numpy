@@ -6013,39 +6013,73 @@ fn nanstd(
     mean: Option<Py<PyAny>>,
     correction: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.nanstd so NaN-ignoring standard deviation
-    // matches numpy across axis=None/int/tuple, explicit dtype/out,
-    // ddof or correction adjustments, keepdims, and newer optional
-    // where/mean keywords. Optional keywords are forwarded only when
-    // explicitly supplied so numpy's internal defaults remain intact.
     let numpy = py.import("numpy")?;
     let nanstd_fn = numpy.getattr("nanstd")?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis_val) = axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(axis_val) = axis.as_ref() {
+            kwargs.set_item("axis", axis_val.bind(py))?;
+        }
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        if let Some(out_val) = out.as_ref() {
+            kwargs.set_item("out", out_val.bind(py))?;
+        }
+        if let Some(ddof_val) = ddof.as_ref() {
+            kwargs.set_item("ddof", ddof_val.bind(py))?;
+        }
+        if let Some(keepdims_val) = keepdims {
+            kwargs.set_item("keepdims", keepdims_val)?;
+        }
+        if let Some(where_val) = r#where.as_ref() {
+            kwargs.set_item("where", where_val.bind(py))?;
+        }
+        if let Some(mean_val) = mean.as_ref() {
+            kwargs.set_item("mean", mean_val.bind(py))?;
+        }
+        if let Some(correction_val) = correction.as_ref() {
+            kwargs.set_item("correction", correction_val.bind(py))?;
+        }
+        Ok(nanstd_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    };
+
+    if dtype.is_some()
+        || out.as_ref().is_some_and(|value| !value.bind(py).is_none())
+        || r#where.is_some()
+        || mean.is_some()
+        || correction.is_some()
+    {
+        return fallback();
     }
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+
+    let a = match extract_numeric_array(py, a.bind(py), "nanstd(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let axis = match extract_axis_spec(py, axis_for_parse, "nanstd") {
+        Ok(None) => None,
+        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
+        Ok(Some(_)) => return fallback(),
+        Err(_) => return fallback(),
+    };
+    let ddof = match ddof.as_ref() {
+        None => 0,
+        Some(value) => match value.bind(py).extract::<isize>() {
+            Ok(parsed) if parsed >= 0 => parsed as usize,
+            _ => return fallback(),
+        },
+    };
+    let result = match a.nanstd(axis, keepdims.unwrap_or(false), ddof) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
     }
-    if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
-    }
-    if let Some(ddof_val) = ddof {
-        kwargs.set_item("ddof", ddof_val.bind(py))?;
-    }
-    if let Some(keepdims_val) = keepdims {
-        kwargs.set_item("keepdims", keepdims_val)?;
-    }
-    if let Some(where_val) = r#where {
-        kwargs.set_item("where", where_val.bind(py))?;
-    }
-    if let Some(mean_val) = mean {
-        kwargs.set_item("mean", mean_val.bind(py))?;
-    }
-    if let Some(correction_val) = correction {
-        kwargs.set_item("correction", correction_val.bind(py))?;
-    }
-    Ok(nanstd_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(output)
 }
 
 #[pyfunction]
@@ -6063,39 +6097,73 @@ fn nanvar(
     mean: Option<Py<PyAny>>,
     correction: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.nanvar so NaN-ignoring variance matches
-    // numpy across axis=None/int/tuple, explicit dtype/out, ddof or
-    // correction adjustments, keepdims, and optional where/mean
-    // keywords. Optional keywords are forwarded only when explicitly
-    // supplied so numpy's internal defaults remain intact.
     let numpy = py.import("numpy")?;
     let nanvar_fn = numpy.getattr("nanvar")?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis_val) = axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(axis_val) = axis.as_ref() {
+            kwargs.set_item("axis", axis_val.bind(py))?;
+        }
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        if let Some(out_val) = out.as_ref() {
+            kwargs.set_item("out", out_val.bind(py))?;
+        }
+        if let Some(ddof_val) = ddof.as_ref() {
+            kwargs.set_item("ddof", ddof_val.bind(py))?;
+        }
+        if let Some(keepdims_val) = keepdims {
+            kwargs.set_item("keepdims", keepdims_val)?;
+        }
+        if let Some(where_val) = r#where.as_ref() {
+            kwargs.set_item("where", where_val.bind(py))?;
+        }
+        if let Some(mean_val) = mean.as_ref() {
+            kwargs.set_item("mean", mean_val.bind(py))?;
+        }
+        if let Some(correction_val) = correction.as_ref() {
+            kwargs.set_item("correction", correction_val.bind(py))?;
+        }
+        Ok(nanvar_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    };
+
+    if dtype.is_some()
+        || out.as_ref().is_some_and(|value| !value.bind(py).is_none())
+        || r#where.is_some()
+        || mean.is_some()
+        || correction.is_some()
+    {
+        return fallback();
     }
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+
+    let a = match extract_numeric_array(py, a.bind(py), "nanvar(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let axis = match extract_axis_spec(py, axis_for_parse, "nanvar") {
+        Ok(None) => None,
+        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
+        Ok(Some(_)) => return fallback(),
+        Err(_) => return fallback(),
+    };
+    let ddof = match ddof.as_ref() {
+        None => 0,
+        Some(value) => match value.bind(py).extract::<isize>() {
+            Ok(parsed) if parsed >= 0 => parsed as usize,
+            _ => return fallback(),
+        },
+    };
+    let result = match a.nanvar(axis, keepdims.unwrap_or(false), ddof) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
     }
-    if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
-    }
-    if let Some(ddof_val) = ddof {
-        kwargs.set_item("ddof", ddof_val.bind(py))?;
-    }
-    if let Some(keepdims_val) = keepdims {
-        kwargs.set_item("keepdims", keepdims_val)?;
-    }
-    if let Some(where_val) = r#where {
-        kwargs.set_item("where", where_val.bind(py))?;
-    }
-    if let Some(mean_val) = mean {
-        kwargs.set_item("mean", mean_val.bind(py))?;
-    }
-    if let Some(correction_val) = correction {
-        kwargs.set_item("correction", correction_val.bind(py))?;
-    }
-    Ok(nanvar_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(output)
 }
 
 #[pyfunction]
@@ -37066,11 +37134,13 @@ mod tests {
             assert_array_matches_numpy(&ours_count, &theirs_count)?;
 
             // Bytes input parity: numpy accepts bytes and decodes via the
-            // same text-parsing path when sep is provided.
+            // same text-parsing path when sep is provided. Python 3's
+            // `bytes(str)` requires an explicit encoding — we pass utf-8
+            // since the payload is ASCII-only.
             let bytes_input = py
                 .import("builtins")?
                 .getattr("bytes")?
-                .call1(("1 2 3",))?;
+                .call1(("1 2 3", "utf-8"))?;
             let bytes_sep_kwargs = PyDict::new(py);
             bytes_sep_kwargs.set_item("sep", " ")?;
             let ours_bytes_r = fs_fn.call((bytes_input.clone(),), Some(&bytes_sep_kwargs));
@@ -38954,12 +39024,16 @@ mod tests {
             assert_pyerr_matches_numpy(py, ours_al_err, theirs_al_err)?;
 
             // assert_approx_equal: significant-digit scalar comparison.
+            // The default tolerance is 1.5 * 10**(floor(log10(|desired|))
+            // - significant=7); for desired ~ 1.234567e5 that's 0.015, so
+            // the pair must agree to within ~0.01. 1.234567e5 and
+            // 1.2345671e5 differ by 0.01 → within tolerance.
             let aprx_fn = module.getattr("testing_assert_approx_equal")?;
             let aprx_numpy = numpy
                 .getattr("testing")?
                 .getattr("assert_approx_equal")?;
-            aprx_fn.call1((1.234567e5_f64, 1.234568e5_f64))?;
-            aprx_numpy.call1((1.234567e5_f64, 1.234568e5_f64))?;
+            aprx_fn.call1((1.234567e5_f64, 1.2345671e5_f64))?;
+            aprx_numpy.call1((1.234567e5_f64, 1.2345671e5_f64))?;
             let ours_aprx_err = aprx_fn
                 .call1((1.0_f64, 2.0_f64))
                 .expect_err("approx equal 1 vs 2 must fail");
