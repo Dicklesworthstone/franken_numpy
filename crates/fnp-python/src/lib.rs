@@ -11263,18 +11263,33 @@ fn count_masked(py: Python<'_>, arr: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyRe
         .unbind())
     };
 
-    if axis.is_some() {
-        return fallback();
-    }
-    let (_, mask, _) = match extract_mask_metadata(py, arr.bind(py), "count_masked") {
+    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
+    let (_, mask, shape) = match extract_mask_metadata(py, arr.bind(py), "count_masked") {
         Ok(result) => result,
         Err(_) => return fallback(),
     };
-    let count = mask
-        .as_ref()
-        .map_or(0_usize, |mask| mask.values().iter().filter(|&&value| value != 0.0).count());
-    let count = i64::try_from(count).unwrap_or(i64::MAX);
-    Ok(py.import("numpy")?.getattr("int64")?.call1((count,))?.unbind())
+    let mask = match mask {
+        Some(mask) => mask,
+        None => build_boolean_array(&shape, false, "count_masked")?,
+    };
+    let axes = match extract_axis_spec(py, axis_for_parse, "count_masked") {
+        Ok(axes) => axes,
+        Err(_) => return fallback(),
+    };
+    if let Some(axes) = axes.as_ref() {
+        ensure_unique_axes(axes, mask.shape().len())?;
+    }
+    let result = match axes.as_ref() {
+        None => mask.count_nonzero(None, false),
+        Some(axes) if axes.len() == 1 => mask.count_nonzero(Some(axes[0]), false),
+        Some(axes) => mask.count_nonzero_axes(axes, false),
+    }
+    .map_err(map_ufunc_error)?;
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
+    }
+    Ok(output)
 }
 
 #[pyfunction]
