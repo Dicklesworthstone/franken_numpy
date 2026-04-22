@@ -4338,17 +4338,61 @@ fn trim_zeros(py: Python<'_>, filt: Py<PyAny>, trim: &str) -> PyResult<Py<PyAny>
 #[pyfunction]
 #[pyo3(signature = (a, copy=true))]
 fn masked_invalid(py: Python<'_>, a: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny>> {
+    let a_for_fallback = a.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let masked_invalid_fn = numpy.getattr("ma")?.getattr("masked_invalid")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("copy", copy)?;
+        Ok(masked_invalid_fn
+            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
+    if !copy {
+        return fallback();
+    }
+
     let numpy = py.import("numpy")?;
-    let ma = numpy.getattr("ma")?;
-    let finite = numpy.getattr("isfinite")?.call1((a.bind(py),))?;
-    let invalid = numpy.getattr("logical_not")?.call1((finite,))?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("copy", copy)?;
-    kwargs.set_item("mask", invalid)?;
-    Ok(ma
-        .getattr("array")?
-        .call((a.bind(py),), Some(&kwargs))?
-        .unbind())
+    let builtins = py.import("builtins")?;
+    let asanyarray = numpy.call_method1("asanyarray", (a.bind(py),))?;
+    let masked_array_type = numpy.getattr("ma")?.getattr("MaskedArray")?;
+    let input_is_masked = builtins
+        .call_method1("isinstance", (&asanyarray, masked_array_type))?
+        .extract::<bool>()?;
+
+    let Some(masked) = extract_numeric_masked_array(py, a.bind(py), "masked_invalid(a)")? else {
+        return fallback();
+    };
+    if matches!(
+        masked.data().dtype(),
+        DType::Complex64
+            | DType::Complex128
+            | DType::DateTime64
+            | DType::TimeDelta64
+            | DType::Str
+            | DType::Structured
+    ) {
+        return fallback();
+    }
+
+    let invalid = masked
+        .data()
+        .elementwise_unary(UnaryOp::Isfinite)
+        .elementwise_unary(UnaryOp::LogicalNot);
+    let result = MaskedArray::new(
+        masked.data().clone(),
+        ma_mask_or(masked.mask(), Some(&invalid)),
+        None,
+    )
+    .map_err(|err| map_ma_error("masked_invalid", err))?;
+    let py_result = build_numpy_masked_array(py, &result)?;
+    if input_is_masked {
+        py_result
+            .bind(py)
+            .call_method1("set_fill_value", (asanyarray.getattr("fill_value")?,))?;
+    }
+    Ok(py_result)
 }
 
 #[pyfunction]
@@ -11277,7 +11321,18 @@ fn count_masked(py: Python<'_>, arr: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyRe
         Err(_) => return fallback(),
     };
     if let Some(axes) = axes.as_ref() {
-        ensure_unique_axes(axes, mask.shape().len())?;
+        // numpy.ma.count_masked raises AxisError (a subclass of
+        // ValueError) on out-of-bounds / duplicate axes. Fall back
+        // to numpy so the error type and message match exactly.
+        let ndim = mask.shape().len();
+        if ensure_unique_axes(axes, ndim).is_err() {
+            return fallback();
+        }
+        for &ax in axes {
+            if try_normalize_axis(ax, ndim).is_none() {
+                return fallback();
+            }
+        }
     }
     let result = match axes.as_ref() {
         None => mask.count_nonzero(None, false),
