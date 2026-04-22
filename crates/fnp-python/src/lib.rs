@@ -6315,6 +6315,16 @@ fn log1p(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (x,))]
+fn deg2rad(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.deg2rad (convert angles from degrees to radians
+    // element-wise, multiplying by pi/180). Integer input promotes to
+    // float; matches numpy for 0, 90, 180, 360 canonical conversions.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("deg2rad")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (p, m=1))]
 fn polyder(py: Python<'_>, p: Py<PyAny>, m: i64) -> PyResult<Py<PyAny>> {
     // Passthrough to np.polyder. Returns the m-th derivative of the
@@ -8845,6 +8855,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(isreal, m)?)?;
     m.add_function(wrap_pyfunction!(expm1, m)?)?;
     m.add_function(wrap_pyfunction!(log1p, m)?)?;
+    m.add_function(wrap_pyfunction!(deg2rad, m)?)?;
     m.add_function(wrap_pyfunction!(polyder, m)?)?;
     m.add_function(wrap_pyfunction!(polyint, m)?)?;
     m.add_function(wrap_pyfunction!(polyadd, m)?)?;
@@ -9294,6 +9305,7 @@ mod tests {
             assert!(module.getattr("isreal").is_ok());
             assert!(module.getattr("expm1").is_ok());
             assert!(module.getattr("log1p").is_ok());
+            assert!(module.getattr("deg2rad").is_ok());
             assert!(module.getattr("polyder").is_ok());
             assert!(module.getattr("tile").is_ok());
             assert!(module.getattr("array_equal").is_ok());
@@ -34967,6 +34979,89 @@ mod tests {
             assert!(val_neg1.is_infinite() && val_neg1 < 0.0, "log1p(-1) must be -inf");
             assert_eq!(val_neg1.is_infinite(), val_neg1_theirs.is_infinite());
             assert_eq!(val_neg1 < 0.0, val_neg1_theirs < 0.0);
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn deg2rad_matches_numpy_across_scalar_array_int_canonical_and_negative() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let d2r_fn = module.getattr("deg2rad")?;
+            let numpy = py.import("numpy")?;
+            let numpy_d2r = numpy.getattr("deg2rad")?;
+            let isclose = numpy.getattr("isclose")?;
+            let allclose = numpy.getattr("allclose")?;
+            let array_fn = numpy.getattr("array")?;
+
+            // deg2rad(0) is exactly 0.
+            let ours_z = d2r_fn.call1((0.0_f64,))?;
+            let theirs_z = numpy_d2r.call1((0.0_f64,))?;
+            let val_z: f64 = ours_z.extract()?;
+            let val_z_t: f64 = theirs_z.extract()?;
+            assert_eq!(val_z, val_z_t);
+            assert!(val_z.abs() < 1e-15, "deg2rad(0) must be 0");
+
+            // deg2rad(180) ≈ pi; deg2rad(90) ≈ pi/2; deg2rad(360) ≈ 2*pi.
+            for (deg, expected) in [
+                (90.0_f64, std::f64::consts::FRAC_PI_2),
+                (180.0_f64, std::f64::consts::PI),
+                (360.0_f64, 2.0_f64 * std::f64::consts::PI),
+            ] {
+                let ours = d2r_fn.call1((deg,))?;
+                let theirs = numpy_d2r.call1((deg,))?;
+                let ok: bool = isclose.call1((&ours, &theirs))?.extract()?;
+                assert!(ok, "deg2rad({deg}) scalar parity mismatch");
+                let val: f64 = ours.extract()?;
+                assert!(
+                    (val - expected).abs() < 1e-12,
+                    "deg2rad({deg}) must be ~{expected}, got {val}"
+                );
+            }
+
+            // Negative angles.
+            let ours_neg = d2r_fn.call1((-45.0_f64,))?;
+            let theirs_neg = numpy_d2r.call1((-45.0_f64,))?;
+            let ok_neg: bool = isclose.call1((&ours_neg, &theirs_neg))?.extract()?;
+            assert!(ok_neg, "deg2rad(-45) mismatch");
+
+            // 1-D mixed-sign array.
+            let arr = array_fn.call1((vec![-180.0_f64, -90.0, 0.0, 90.0, 180.0, 270.0],))?;
+            let ours_a = d2r_fn.call1((arr.clone(),))?;
+            let theirs_a = numpy_d2r.call1((arr.clone(),))?;
+            let ok_a: bool = allclose.call1((&ours_a, &theirs_a))?.extract()?;
+            assert!(ok_a, "deg2rad 1-D mixed-sign mismatch");
+
+            // Integer input: dtype promotion to float must match numpy.
+            let ints = array_fn.call1((vec![0_i64, 45, 90, 180, 360],))?;
+            let ours_i = d2r_fn.call1((ints.clone(),))?;
+            let theirs_i = numpy_d2r.call1((ints.clone(),))?;
+            let ok_i: bool = allclose.call1((&ours_i, &theirs_i))?.extract()?;
+            assert!(ok_i, "deg2rad integer input mismatch");
+            assert_eq!(
+                ours_i.getattr("dtype")?.str()?.to_string(),
+                theirs_i.getattr("dtype")?.str()?.to_string()
+            );
+
+            // 2-D array element-wise.
+            let two_d = array_fn.call1((vec![vec![0.0_f64, 45.0], vec![90.0, 180.0]],))?;
+            let ours_2d = d2r_fn.call1((two_d.clone(),))?;
+            let theirs_2d = numpy_d2r.call1((two_d.clone(),))?;
+            let ok_2d: bool = allclose.call1((&ours_2d, &theirs_2d))?.extract()?;
+            assert!(ok_2d, "deg2rad 2-D mismatch");
+
+            // radians(x) should agree with deg2rad(x) on both implementations
+            // (they are aliased in numpy); surface equivalence check.
+            let radians_ours = d2r_fn.call1((arr.clone(),))?;
+            let radians_theirs = numpy.getattr("radians")?.call1((arr.clone(),))?;
+            let ok_alias: bool = allclose.call1((&radians_ours, &radians_theirs))?.extract()?;
+            assert!(ok_alias, "deg2rad must equal radians on numeric input");
 
             Ok(())
         });
