@@ -42215,4 +42215,185 @@ mod tests {
             Ok(())
         });
     }
+
+    #[test]
+    fn shape_and_axis_edge_parity_across_reductions() {
+        // Probes the dimension-bookkeeping paths of cod's rust-ported
+        // reductions + k74v.8 passthroughs. Shape preservation bugs are
+        // among the most invisible classes — the numerical value is
+        // correct, but a downstream matmul / broadcast silently fails
+        // because the keepdims dimension is missing or collapsed wrong.
+        //
+        // Cases probed for each reduction fn:
+        //   1. axis=-1  (last-axis reduction, negative wrap-around)
+        //   2. axis=(0,)  (single-element tuple → same as axis=0)
+        //   3. axis=(0, 2)  (multi-axis tuple on 3-D input)
+        //   4. keepdims=True on axis=0   (result shape preserves the reduced dim as length-1)
+        //   5. keepdims=True with axis=None   (full reduction, result is 0-D with trailing 1s)
+        //
+        // Comparison: assert that both RESULT VALUES (via allclose) and
+        // RESULT SHAPES (via shape tuple) match numpy exactly. A shape
+        // mismatch is considered a HIGH divergence.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_shape_axis")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let array_fn = numpy.getattr("array")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // 3-D input so we can exercise multi-axis tuples.
+            let arr_3d = array_fn.call1((vec![
+                vec![vec![1.0_f64, 2.0, 3.0], vec![4.0, 5.0, 6.0]],
+                vec![vec![7.0, 8.0, 9.0], vec![10.0, 11.0, 12.0]],
+            ],))?;
+
+            let mut divergences: Vec<String> = Vec::new();
+
+            // Ops that support axis + keepdims in numpy (reductions only).
+            // sort/argsort are not reductions — they don't change rank.
+            let reduction_ops = [
+                "sum", "prod", "mean", "std", "var", "amax", "amin", "max", "min",
+                "all", "any", "argmax", "argmin",
+            ];
+
+            let check = |ours: &Bound<'_, PyAny>, theirs: &Bound<'_, PyAny>, label: &str|
+             -> PyResult<Option<String>> {
+                // Shape parity first.
+                let os: Vec<usize> = ours.getattr("shape")?.extract()?;
+                let ts: Vec<usize> = theirs.getattr("shape")?.extract()?;
+                if os != ts {
+                    return Ok(Some(format!(
+                        "{label}: shape divergence ours={os:?} theirs={ts:?}"
+                    )));
+                }
+                // Value parity (allclose tolerates FP noise).
+                // Use equal_nan=True for nan-returning reductions on all-NaN slices.
+                let kw = PyDict::new(py);
+                kw.set_item("equal_nan", true)?;
+                let ok: bool = allclose.call((ours, theirs), Some(&kw))?.extract()?;
+                if !ok {
+                    return Ok(Some(format!("{label}: value divergence")));
+                }
+                Ok(None)
+            };
+
+            for name in reduction_ops {
+                let Ok(numpy_fn) = numpy.getattr(name) else {
+                    continue;
+                };
+                let ours_fn = module.getattr(name).unwrap_or_else(|_| {
+                    panic!("fnp_python.{name} missing for shape-axis probe")
+                });
+
+                // --- Case 1: axis=-1 (negative wrap-around on last axis) ---
+                let kw = PyDict::new(py);
+                kw.set_item("axis", -1_i64)?;
+                let o = ours_fn.call((arr_3d.clone(),), Some(&kw))?;
+                let t = numpy_fn.call((arr_3d.clone(),), Some(&kw))?;
+                if let Some(msg) = check(&o, &t, &format!("{name} axis=-1"))? {
+                    divergences.push(msg);
+                }
+
+                // --- Case 2: axis=(0,) single-element tuple ---
+                let kw = PyDict::new(py);
+                kw.set_item("axis", (0_i64,))?;
+                let o_res = ours_fn.call((arr_3d.clone(),), Some(&kw));
+                let t_res = numpy_fn.call((arr_3d.clone(),), Some(&kw));
+                match (&o_res, &t_res) {
+                    (Ok(o), Ok(t)) => {
+                        if let Some(msg) =
+                            check(o, t, &format!("{name} axis=(0,)"))?
+                        {
+                            divergences.push(msg);
+                        }
+                    }
+                    (Err(_), Err(_)) => { /* both reject — e.g. argmax only takes int axis in older numpy */ }
+                    (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
+                        divergences.push(format!(
+                            "{name} axis=(0,): success-surface divergence"
+                        ));
+                    }
+                }
+
+                // --- Case 3: axis=(0, 2) multi-axis tuple on 3-D ---
+                let kw = PyDict::new(py);
+                kw.set_item("axis", (0_i64, 2_i64))?;
+                let o_res = ours_fn.call((arr_3d.clone(),), Some(&kw));
+                let t_res = numpy_fn.call((arr_3d.clone(),), Some(&kw));
+                match (&o_res, &t_res) {
+                    (Ok(o), Ok(t)) => {
+                        if let Some(msg) =
+                            check(o, t, &format!("{name} axis=(0,2)"))?
+                        {
+                            divergences.push(msg);
+                        }
+                    }
+                    (Err(_), Err(_)) => { /* argmax/argmin don't accept tuple axis */ }
+                    (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
+                        divergences.push(format!(
+                            "{name} axis=(0,2): success-surface divergence"
+                        ));
+                    }
+                }
+
+                // --- Case 4: keepdims=True on axis=0 ---
+                let kw = PyDict::new(py);
+                kw.set_item("axis", 0_i64)?;
+                kw.set_item("keepdims", true)?;
+                let o_res = ours_fn.call((arr_3d.clone(),), Some(&kw));
+                let t_res = numpy_fn.call((arr_3d.clone(),), Some(&kw));
+                match (&o_res, &t_res) {
+                    (Ok(o), Ok(t)) => {
+                        if let Some(msg) = check(
+                            o, t, &format!("{name} axis=0, keepdims=True"),
+                        )? {
+                            divergences.push(msg);
+                        }
+                    }
+                    (Err(_), Err(_)) => { /* both unsupported — skip */ }
+                    (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
+                        divergences.push(format!(
+                            "{name} axis=0,keepdims=True: success-surface divergence"
+                        ));
+                    }
+                }
+
+                // --- Case 5: axis=None, keepdims=True (full reduction) ---
+                let kw = PyDict::new(py);
+                kw.set_item("axis", py.None())?;
+                kw.set_item("keepdims", true)?;
+                let o_res = ours_fn.call((arr_3d.clone(),), Some(&kw));
+                let t_res = numpy_fn.call((arr_3d.clone(),), Some(&kw));
+                match (&o_res, &t_res) {
+                    (Ok(o), Ok(t)) => {
+                        if let Some(msg) = check(
+                            o,
+                            t,
+                            &format!("{name} axis=None, keepdims=True"),
+                        )? {
+                            divergences.push(msg);
+                        }
+                    }
+                    (Err(_), Err(_)) => { /* skip */ }
+                    (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
+                        divergences.push(format!(
+                            "{name} axis=None,keepdims=True: success-surface divergence"
+                        ));
+                    }
+                }
+            }
+
+            assert!(
+                divergences.is_empty(),
+                "shape/axis divergences from numpy ({} total):\n  {}",
+                divergences.len(),
+                divergences.join("\n  ")
+            );
+
+            Ok(())
+        });
+    }
 }
