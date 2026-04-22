@@ -5748,25 +5748,45 @@ fn nanmean(
     out: Option<Py<PyAny>>,
     keepdims: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.nanmean so NaN-ignoring mean matches numpy
-    // across axis=None/int/tuple, explicit output dtype, optional
-    // `out=` destination, and keepdims shape preservation. Fully-NaN
-    // slices emit a RuntimeWarning and produce NaN in numpy; the
-    // wrapper preserves this identical behavior.
     let numpy = py.import("numpy")?;
     let nanmean_fn = numpy.getattr("nanmean")?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis_val) = axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(axis_val) = axis.as_ref() {
+            kwargs.set_item("axis", axis_val.bind(py))?;
+        }
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        if let Some(out_val) = out.as_ref() {
+            kwargs.set_item("out", out_val.bind(py))?;
+        }
+        kwargs.set_item("keepdims", keepdims)?;
+        Ok(nanmean_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    };
+
+    if dtype.as_ref().is_some_and(|value| !value.bind(py).is_none())
+        || out.as_ref().is_some_and(|value| !value.bind(py).is_none())
+    {
+        return fallback();
     }
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
-    }
-    if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
-    }
-    kwargs.set_item("keepdims", keepdims)?;
-    Ok(nanmean_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+
+    let a = match extract_numeric_array(py, a.bind(py), "nanmean(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let axis = match extract_axis_spec(py, axis_for_parse, "nanmean") {
+        Ok(None) => None,
+        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
+        Ok(Some(_)) => return fallback(),
+        Err(_) => return fallback(),
+    };
+    let result = match a.nanmean(axis, keepdims) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -5779,25 +5799,45 @@ fn nansum(
     out: Option<Py<PyAny>>,
     keepdims: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.nansum so NaN-ignoring summation (treating NaN
-    // as 0) matches numpy across axis=None/int/tuple, explicit output
-    // dtype, optional `out=` destination, and keepdims. Unlike
-    // nanmean, an all-NaN slice returns 0 (no warning). Integer input
-    // produces no NaN but must preserve numpy's dtype-promotion rules.
     let numpy = py.import("numpy")?;
     let nansum_fn = numpy.getattr("nansum")?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis_val) = axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(axis_val) = axis.as_ref() {
+            kwargs.set_item("axis", axis_val.bind(py))?;
+        }
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        if let Some(out_val) = out.as_ref() {
+            kwargs.set_item("out", out_val.bind(py))?;
+        }
+        kwargs.set_item("keepdims", keepdims)?;
+        Ok(nansum_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    };
+
+    if dtype.as_ref().is_some_and(|value| !value.bind(py).is_none())
+        || out.as_ref().is_some_and(|value| !value.bind(py).is_none())
+    {
+        return fallback();
     }
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
-    }
-    if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
-    }
-    kwargs.set_item("keepdims", keepdims)?;
-    Ok(nansum_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+
+    let a = match extract_numeric_array(py, a.bind(py), "nansum(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let axis = match extract_axis_spec(py, axis_for_parse, "nansum") {
+        Ok(None) => None,
+        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
+        Ok(Some(_)) => return fallback(),
+        Err(_) => return fallback(),
+    };
+    let result = match a.nansum(axis, keepdims) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -10212,6 +10252,100 @@ fn irfft(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, n=None, axis=-1, norm=None, out=None))]
+fn hfft(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    n: Option<usize>,
+    axis: i64,
+    norm: Option<String>,
+    out: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.fft.hfft: FFT of a Hermitian-symmetric signal,
+    // returning a real spectrum. Optional truncation/zero-padding length
+    // n, axis selector, norm conventions ('backward'/'ortho'/'forward'),
+    // and optional `out=` destination all match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let hfft_fn = numpy.getattr("fft")?.getattr("hfft")?;
+    let kwargs = PyDict::new(py);
+    if let Some(n_val) = n {
+        kwargs.set_item("n", n_val)?;
+    }
+    kwargs.set_item("axis", axis)?;
+    if let Some(norm_val) = norm {
+        kwargs.set_item("norm", norm_val)?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    Ok(hfft_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, s=None, axes=None, norm=None, out=None))]
+fn rfft2(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    s: Option<Py<PyAny>>,
+    axes: Option<Py<PyAny>>,
+    norm: Option<String>,
+    out: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.fft.rfft2: 2-D real-input FFT. Optional shape
+    // `s`, axes tuple/list (default (-2, -1) in numpy), norm conventions,
+    // and optional `out=` destination all match numpy exactly. Output
+    // last-axis length is s[-1]//2+1; output dtype is complex.
+    let numpy = py.import("numpy")?;
+    let rfft2_fn = numpy.getattr("fft")?.getattr("rfft2")?;
+    let kwargs = PyDict::new(py);
+    if let Some(s_val) = s {
+        kwargs.set_item("s", s_val.bind(py))?;
+    }
+    if let Some(axes_val) = axes {
+        kwargs.set_item("axes", axes_val.bind(py))?;
+    }
+    if let Some(norm_val) = norm {
+        kwargs.set_item("norm", norm_val)?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    Ok(rfft2_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, s=None, axes=None, norm=None, out=None))]
+fn irfft2(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    s: Option<Py<PyAny>>,
+    axes: Option<Py<PyAny>>,
+    norm: Option<String>,
+    out: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.fft.irfft2: 2-D inverse real FFT. Optional shape
+    // `s`, axes tuple/list (default (-2, -1) in numpy), norm conventions,
+    // and optional `out=` destination all match numpy exactly. Output
+    // dtype is real (float64).
+    let numpy = py.import("numpy")?;
+    let irfft2_fn = numpy.getattr("fft")?.getattr("irfft2")?;
+    let kwargs = PyDict::new(py);
+    if let Some(s_val) = s {
+        kwargs.set_item("s", s_val.bind(py))?;
+    }
+    if let Some(axes_val) = axes {
+        kwargs.set_item("axes", axes_val.bind(py))?;
+    }
+    if let Some(norm_val) = norm {
+        kwargs.set_item("norm", norm_val)?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    Ok(irfft2_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (v, k=0))]
 fn diag(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
     let v = extract_precise_numeric_array(py, v.bind(py), "diag(v)")?;
@@ -10853,6 +10987,9 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(irfft, m)?)?;
     m.add_function(wrap_pyfunction!(rfftfreq, m)?)?;
     m.add_function(wrap_pyfunction!(fftfreq, m)?)?;
+    m.add_function(wrap_pyfunction!(hfft, m)?)?;
+    m.add_function(wrap_pyfunction!(rfft2, m)?)?;
+    m.add_function(wrap_pyfunction!(irfft2, m)?)?;
     m.add_function(wrap_pyfunction!(diag, m)?)?;
     m.add_function(wrap_pyfunction!(diagflat, m)?)?;
     m.add_function(wrap_pyfunction!(diagonal, m)?)?;
@@ -40064,6 +40201,133 @@ mod tests {
                     }
                 }
             }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn hfft_rfft2_irfft2_match_numpy_across_shapes_axes_norms_and_roundtrip() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_fft_r2c")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let np_fft = numpy.getattr("fft")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // --- hfft ---
+            // 1-D Hermitian-symmetric signal: first element real, last
+            // element real (for even length), remaining conjugate-paired.
+            let hin = numpy.call_method(
+                "array",
+                ([1.0_f64, 2.0, 3.0, 2.0, 1.0].to_vec(),),
+                None,
+            )?;
+            let ours_h = module.getattr("hfft")?.call1((hin.clone(),))?;
+            let theirs_h = np_fft.getattr("hfft")?.call1((hin.clone(),))?;
+            let eq_h: bool = allclose
+                .call1((&ours_h, &theirs_h))?
+                .extract()?;
+            assert!(eq_h, "hfft default 1-D parity");
+
+            let hdtype: String = ours_h.getattr("dtype")?.getattr("name")?.extract()?;
+            assert!(
+                hdtype == "float64" || hdtype == "float32",
+                "hfft output must be real (got {hdtype})"
+            );
+
+            // hfft with explicit n and norm='ortho'
+            let hkwargs = PyDict::new(py);
+            hkwargs.set_item("n", 8_usize)?;
+            hkwargs.set_item("norm", "ortho")?;
+            let ours_h2 = module
+                .getattr("hfft")?
+                .call((hin.clone(),), Some(&hkwargs))?;
+            let theirs_h2 = np_fft
+                .getattr("hfft")?
+                .call((hin.clone(),), Some(&hkwargs))?;
+            let eq_h2: bool = allclose.call1((&ours_h2, &theirs_h2))?.extract()?;
+            assert!(eq_h2, "hfft n=8 norm=ortho parity");
+
+            // hfft(ihfft(x)) round-trip — numpy guarantees real-to-real
+            // recovery up to FP noise.
+            let real_signal =
+                numpy.call_method("array", ([1.0_f64, 2.0, 3.0, 4.0].to_vec(),), None)?;
+            let ihfft_of_x = np_fft.getattr("ihfft")?.call1((real_signal.clone(),))?;
+            let hfft_of_ihfft = module.getattr("hfft")?.call1((ihfft_of_x.clone(),))?;
+            let rt_h: bool = allclose
+                .call1((&hfft_of_ihfft, &real_signal))?
+                .extract()?;
+            assert!(rt_h, "hfft(ihfft(x)) ≈ x round-trip");
+
+            // --- rfft2 ---
+            // 4x4 real input → 4x3 complex output (last axis n//2+1)
+            let arange = numpy.getattr("arange")?;
+            let reshape = numpy.getattr("reshape")?;
+            let flat = arange.call1((16_i64,))?;
+            let two_d = reshape.call1((flat, (4_i64, 4_i64)))?;
+            let ours_r = module.getattr("rfft2")?.call1((two_d.clone(),))?;
+            let theirs_r = np_fft.getattr("rfft2")?.call1((two_d.clone(),))?;
+            let eq_r: bool = allclose.call1((&ours_r, &theirs_r))?.extract()?;
+            assert!(eq_r, "rfft2 default 4x4 parity");
+
+            let shape_r: Vec<i64> =
+                ours_r.getattr("shape")?.extract()?;
+            assert_eq!(
+                shape_r,
+                vec![4, 3],
+                "rfft2 last-axis should be n//2+1 = 3 for n=4"
+            );
+
+            // explicit axes=(0, 1) + norm='ortho'
+            let rkwargs = PyDict::new(py);
+            rkwargs.set_item("axes", (0_i64, 1_i64))?;
+            rkwargs.set_item("norm", "ortho")?;
+            let ours_r2 = module
+                .getattr("rfft2")?
+                .call((two_d.clone(),), Some(&rkwargs))?;
+            let theirs_r2 = np_fft
+                .getattr("rfft2")?
+                .call((two_d.clone(),), Some(&rkwargs))?;
+            let eq_r2: bool = allclose.call1((&ours_r2, &theirs_r2))?.extract()?;
+            assert!(eq_r2, "rfft2 axes=(0,1) norm=ortho parity");
+
+            // --- irfft2 ---
+            // Round-trip: irfft2(rfft2(x)) ≈ x for even-shape input.
+            let ours_ri = module.getattr("irfft2")?.call1((ours_r.clone(),))?;
+            let theirs_ri = np_fft.getattr("irfft2")?.call1((theirs_r.clone(),))?;
+            let eq_ri: bool = allclose.call1((&ours_ri, &theirs_ri))?.extract()?;
+            assert!(eq_ri, "irfft2 default 4x3 parity");
+
+            let rt_rt: bool = allclose.call1((&ours_ri, &two_d))?.extract()?;
+            assert!(rt_rt, "irfft2(rfft2(x)) ≈ x round-trip");
+
+            let ridtype: String = ours_ri.getattr("dtype")?.getattr("name")?.extract()?;
+            assert!(
+                ridtype == "float64" || ridtype == "float32",
+                "irfft2 output must be real (got {ridtype})"
+            );
+
+            // explicit s shape + norm='forward' round-trip
+            let ri_kwargs = PyDict::new(py);
+            ri_kwargs.set_item("s", (4_i64, 4_i64))?;
+            ri_kwargs.set_item("norm", "forward")?;
+            let fwd_kwargs = PyDict::new(py);
+            fwd_kwargs.set_item("norm", "forward")?;
+            let forward_spec = module
+                .getattr("rfft2")?
+                .call((two_d.clone(),), Some(&fwd_kwargs))?;
+            let ours_ri2 = module
+                .getattr("irfft2")?
+                .call((forward_spec.clone(),), Some(&ri_kwargs))?;
+            let theirs_ri2 = np_fft
+                .getattr("irfft2")?
+                .call((forward_spec.clone(),), Some(&ri_kwargs))?;
+            let eq_ri2: bool = allclose.call1((&ours_ri2, &theirs_ri2))?.extract()?;
+            assert!(eq_ri2, "irfft2 s=(4,4) norm=forward parity");
 
             Ok(())
         });
