@@ -10738,6 +10738,9 @@ fn ma_average(
         Ok(avg_fn.call((a_for_fallback.bind(py),), Some(&kwargs))?.unbind())
     };
 
+    let input_is_masked_array = extract_mask_metadata(py, a.bind(py), "ma_average(a)")
+        .map(|(is_masked, _, _)| is_masked)
+        .unwrap_or(false);
     let Some(masked) = extract_numeric_masked_array(py, a.bind(py), "ma_average(a)")? else {
         return fallback();
     };
@@ -10748,59 +10751,221 @@ fn ma_average(
         Err(_) => return fallback(),
     };
     if let Some(weights) = weights.as_ref() {
-        if axis.is_some() {
-            return fallback();
-        }
         let Some(masked_weights) =
             extract_numeric_masked_array(py, weights.bind(py), "ma_average(weights)")?
         else {
             return fallback();
         };
-        if masked.shape() != masked_weights.shape() {
-            return fallback();
-        }
-
-        let combined_mask = ma_mask_or(masked.mask(), masked_weights.mask());
-        let mut numerator = 0.0;
-        let mut denominator = 0.0;
-        let mut any_valid = false;
-        for index in 0..masked.data().values().len() {
-            let is_masked = combined_mask
-                .as_ref()
-                .is_some_and(|mask| mask.values()[index] != 0.0);
-            if is_masked {
-                continue;
-            }
-            any_valid = true;
-            let weight = masked_weights.data().values()[index];
-            denominator += weight;
-            numerator += masked.data().values()[index] * weight;
-        }
-
         let masked_scalar = numpy.getattr("ma")?.getattr("masked")?.unbind();
-        if !any_valid {
-            if returned {
-                return Ok(
-                    PyTuple::new(py, [masked_scalar.bind(py), masked_scalar.bind(py)])?
-                        .into_any()
-                        .unbind(),
-                );
-            }
-            return Ok(masked_scalar);
-        }
+        match axis {
+            None => {
+                if masked.shape() != masked_weights.shape() {
+                    return fallback();
+                }
 
-        let average_output =
-            build_numpy_scalar_or_array(py, &UFuncArray::scalar(numerator / denominator, DType::F64))?;
-        if returned {
-            let sum_output =
-                build_numpy_scalar_or_array(py, &UFuncArray::scalar(denominator, DType::F64))?;
-            return Ok(
-                PyTuple::new(py, [average_output.bind(py), sum_output.bind(py)])?
-                    .into_any()
-                    .unbind(),
-            );
+                let combined_mask = ma_mask_or(masked.mask(), masked_weights.mask());
+                let mut numerator = 0.0;
+                let mut denominator = 0.0;
+                let mut any_valid = false;
+                for index in 0..masked.data().values().len() {
+                    let is_masked = combined_mask
+                        .as_ref()
+                        .is_some_and(|mask| mask.values()[index] != 0.0);
+                    if is_masked {
+                        continue;
+                    }
+                    any_valid = true;
+                    let weight = masked_weights.data().values()[index];
+                    denominator += weight;
+                    numerator += masked.data().values()[index] * weight;
+                }
+
+                if !any_valid {
+                    if returned {
+                        return Ok(
+                            PyTuple::new(py, [masked_scalar.bind(py), masked_scalar.bind(py)])?
+                                .into_any()
+                                .unbind(),
+                        );
+                    }
+                    return Ok(masked_scalar);
+                }
+
+                let average_output = build_numpy_scalar_or_array(
+                    py,
+                    &UFuncArray::scalar(numerator / denominator, DType::F64),
+                )?;
+                if returned {
+                    let sum_output = build_numpy_scalar_or_array(
+                        py,
+                        &UFuncArray::scalar(denominator, DType::F64),
+                    )?;
+                    return Ok(
+                        PyTuple::new(py, [average_output.bind(py), sum_output.bind(py)])?
+                            .into_any()
+                            .unbind(),
+                    );
+                }
+                return Ok(average_output);
+            }
+            Some(axis) => {
+                let Some(normalized_axis) = try_normalize_axis(axis, masked.shape().len()) else {
+                    return fallback();
+                };
+                let axis_len = masked.shape()[normalized_axis];
+                if masked_weights.shape() != [axis_len] {
+                    return fallback();
+                }
+
+                let outer = element_count(&masked.shape()[..normalized_axis])
+                    .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                let inner = element_count(&masked.shape()[normalized_axis + 1..])
+                    .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                let out_shape = masked
+                    .count(Some(axis))
+                    .map_err(|err| map_ma_error("ma_average", err))?
+                    .shape()
+                    .to_vec();
+                let out_len = outer * inner;
+                let mut avg_values = vec![0.0; out_len];
+                let mut avg_mask_values = vec![0.0; out_len];
+                let mut sum_values = vec![0.0; out_len];
+                let mut sum_mask_values = vec![0.0; out_len];
+                let mut any_valid_values = vec![false; out_len];
+
+                for outer_idx in 0..outer {
+                    let base = outer_idx * axis_len * inner;
+                    for inner_idx in 0..inner {
+                        let dst = outer_idx * inner + inner_idx;
+                        let mut numerator = 0.0;
+                        let mut denominator = 0.0;
+                        let mut any_valid = false;
+                        for lane_idx in 0..axis_len {
+                            let src = base + lane_idx * inner + inner_idx;
+                            let data_masked = masked
+                                .mask()
+                                .is_some_and(|mask| mask.values()[src] != 0.0);
+                            let weight_masked = masked_weights
+                                .mask()
+                                .is_some_and(|mask| mask.values()[lane_idx] != 0.0);
+                            if data_masked || weight_masked {
+                                continue;
+                            }
+                            any_valid = true;
+                            let weight = masked_weights.data().values()[lane_idx];
+                            denominator += weight;
+                            numerator += masked.data().values()[src] * weight;
+                        }
+                        any_valid_values[dst] = any_valid;
+
+                        if !any_valid {
+                            avg_mask_values[dst] = 1.0;
+                            if input_is_masked_array {
+                                sum_mask_values[dst] = 1.0;
+                            } else {
+                                sum_values[dst] = 0.0;
+                            }
+                            continue;
+                        }
+
+                        sum_values[dst] = denominator;
+                        if denominator == 0.0 {
+                            if out_shape.is_empty() {
+                                avg_values[dst] = numerator / denominator;
+                            } else {
+                                avg_mask_values[dst] = 1.0;
+                                avg_values[dst] = f64::NAN;
+                            }
+                        } else {
+                            avg_values[dst] = numerator / denominator;
+                        }
+                    }
+                }
+
+                if out_shape.is_empty() {
+                    if !any_valid_values[0] {
+                        if returned {
+                            return Ok(
+                                PyTuple::new(
+                                    py,
+                                    [masked_scalar.bind(py), masked_scalar.bind(py)],
+                                )?
+                                .into_any()
+                                .unbind(),
+                            );
+                        }
+                        return Ok(masked_scalar);
+                    }
+
+                    let average_output = build_numpy_scalar_or_array(
+                        py,
+                        &UFuncArray::scalar(avg_values[0], DType::F64),
+                    )?;
+                    if returned {
+                        let sum_output = build_numpy_scalar_or_array(
+                            py,
+                            &UFuncArray::scalar(sum_values[0], DType::F64),
+                        )?;
+                        return Ok(
+                            PyTuple::new(py, [average_output.bind(py), sum_output.bind(py)])?
+                                .into_any()
+                                .unbind(),
+                        );
+                    }
+                    return Ok(average_output);
+                }
+
+                let average = MaskedArray::new(
+                    UFuncArray::new(out_shape.clone(), avg_values, DType::F64)
+                        .map_err(map_ufunc_error)?,
+                    Some(
+                        UFuncArray::new(out_shape.clone(), avg_mask_values, DType::Bool)
+                            .map_err(map_ufunc_error)?,
+                    ),
+                    Some(masked.fill_value()),
+                )
+                .map_err(|err| map_ma_error("ma_average", err))?;
+                let average_output = build_numpy_masked_array(py, &average)?;
+                average_output
+                    .bind(py)
+                    .call_method1("set_fill_value", (masked.fill_value(),))?;
+                if returned {
+                    let sum_output = if input_is_masked_array {
+                        let sum_weights = MaskedArray::new(
+                            UFuncArray::new(out_shape, sum_values, DType::F64)
+                                .map_err(map_ufunc_error)?,
+                            Some(
+                                UFuncArray::new(
+                                    average.data().shape().to_vec(),
+                                    sum_mask_values,
+                                    DType::Bool,
+                                )
+                                .map_err(map_ufunc_error)?,
+                            ),
+                            Some(masked.fill_value()),
+                        )
+                        .map_err(|err| map_ma_error("ma_average", err))?;
+                        let sum_output = build_numpy_masked_array(py, &sum_weights)?;
+                        sum_output
+                            .bind(py)
+                            .call_method1("set_fill_value", (masked.fill_value(),))?;
+                        sum_output
+                    } else {
+                        build_numpy_scalar_or_array(
+                            py,
+                            &UFuncArray::new(out_shape, sum_values, DType::F64)
+                                .map_err(map_ufunc_error)?,
+                        )?
+                    };
+                    return Ok(
+                        PyTuple::new(py, [average_output.bind(py), sum_output.bind(py)])?
+                            .into_any()
+                            .unbind(),
+                    );
+                }
+                return Ok(average_output);
+            }
         }
-        return Ok(average_output);
     }
 
     let counts = match masked.count(axis) {
@@ -38264,6 +38429,116 @@ mod tests {
             assert_eq!(
                 repr_string(&ours_weighted_returned),
                 repr_string(&theirs_weighted_returned)
+            );
+
+            let axis_weights = numpy.getattr("array")?.call1((vec![1.0_f64, 10.0],))?;
+            let ours_axis1_weighted_returned = ma_average_fn.call(
+                (plain_2d.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("axis", 1_i64)?;
+                    kwargs.set_item("weights", axis_weights.clone())?;
+                    kwargs.set_item("returned", true)?;
+                    kwargs
+                }),
+            )?;
+            let theirs_axis1_weighted_returned = numpy_ma_average.call(
+                (plain_2d.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("axis", 1_i64)?;
+                    kwargs.set_item("weights", axis_weights.clone())?;
+                    kwargs.set_item("returned", true)?;
+                    kwargs
+                }),
+            )?;
+            assert_eq!(
+                repr_string(&ours_axis1_weighted_returned),
+                repr_string(&theirs_axis1_weighted_returned)
+            );
+
+            let zero_axis_weights = numpy.getattr("array")?.call1((vec![0.0_f64, 0.0],))?;
+            let ours_axis1_zero_weights = ma_average_fn.call(
+                (plain_2d.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("axis", 1_i64)?;
+                    kwargs.set_item("weights", zero_axis_weights.clone())?;
+                    kwargs.set_item("returned", true)?;
+                    kwargs
+                }),
+            )?;
+            let theirs_axis1_zero_weights = numpy_ma_average.call(
+                (plain_2d.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("axis", 1_i64)?;
+                    kwargs.set_item("weights", zero_axis_weights.clone())?;
+                    kwargs.set_item("returned", true)?;
+                    kwargs
+                }),
+            )?;
+            assert_eq!(
+                repr_string(&ours_axis1_zero_weights),
+                repr_string(&theirs_axis1_zero_weights)
+            );
+
+            let ours_masked_axis1_weighted_returned = ma_average_fn.call(
+                (masked_2d.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("axis", 1_i64)?;
+                    kwargs.set_item("weights", axis_weights.clone())?;
+                    kwargs.set_item("returned", true)?;
+                    kwargs
+                }),
+            )?;
+            let theirs_masked_axis1_weighted_returned = numpy_ma_average.call(
+                (masked_2d.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("axis", 1_i64)?;
+                    kwargs.set_item("weights", axis_weights.clone())?;
+                    kwargs.set_item("returned", true)?;
+                    kwargs
+                }),
+            )?;
+            assert_eq!(
+                repr_string(&ours_masked_axis1_weighted_returned),
+                repr_string(&theirs_masked_axis1_weighted_returned)
+            );
+
+            let masked_axis_weights = ma.getattr("array")?.call(
+                (vec![1.0_f64, 10.0],),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("mask", vec![true, false])?;
+                    kwargs
+                }),
+            )?;
+            let ours_masked_axis1_masked_weights = ma_average_fn.call(
+                (masked_2d.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("axis", 1_i64)?;
+                    kwargs.set_item("weights", masked_axis_weights.clone())?;
+                    kwargs.set_item("returned", true)?;
+                    kwargs
+                }),
+            )?;
+            let theirs_masked_axis1_masked_weights = numpy_ma_average.call(
+                (masked_2d.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("axis", 1_i64)?;
+                    kwargs.set_item("weights", masked_axis_weights.clone())?;
+                    kwargs.set_item("returned", true)?;
+                    kwargs
+                }),
+            )?;
+            assert_eq!(
+                repr_string(&ours_masked_axis1_masked_weights),
+                repr_string(&theirs_masked_axis1_masked_weights)
             );
 
             let all_masked_weights = ma.getattr("array")?.call(
