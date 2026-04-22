@@ -5832,23 +5832,16 @@ fn filled(py: Python<'_>, a: Py<PyAny>, fill_value: Option<Py<PyAny>>) -> PyResu
 #[pyfunction]
 #[pyo3(signature = (a,))]
 fn getmask(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
-        Ok(numpy
-            .getattr("ma")?
-            .getattr("getmask")?
-            .call1((a.bind(py),))?
-            .unbind())
-    };
-
-    let (_, mask, _) = match extract_mask_metadata(py, a.bind(py), "getmask") {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    if let Some(mask) = mask {
-        return build_numpy_array_from_ufunc(py, &mask);
-    }
     let numpy = py.import("numpy")?;
+    let builtins = py.import("builtins")?;
+    let asanyarray = numpy.call_method1("asanyarray", (a.bind(py),))?;
+    let masked_array_type = numpy.getattr("ma")?.getattr("MaskedArray")?;
+    let is_masked_array = builtins
+        .call_method1("isinstance", (&asanyarray, masked_array_type))?
+        .extract::<bool>()?;
+    if is_masked_array {
+        return Ok(asanyarray.getattr("mask")?.unbind());
+    }
     Ok(numpy.getattr("ma")?.getattr("nomask")?.unbind())
 }
 
@@ -10791,7 +10784,8 @@ fn count_masked(py: Python<'_>, arr: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyRe
     let count = mask
         .as_ref()
         .map_or(0_usize, |mask| mask.values().iter().filter(|&&value| value != 0.0).count());
-    Ok(count.into_pyobject(py)?.into_any().unbind())
+    let count = i64::try_from(count).unwrap_or(i64::MAX);
+    Ok(py.import("numpy")?.getattr("int64")?.call1((count,))?.unbind())
 }
 
 #[pyfunction]
