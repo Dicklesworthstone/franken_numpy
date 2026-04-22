@@ -10788,6 +10788,25 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 m.add(*name, value)?;
             }
         }
+
+        // numpy class passthroughs (numpy.__all__ reality-check). The 19
+        // names here are disjoint from NUMPY_DTYPE_SCALARS — `uint` and
+        // `ulong` are already re-exported there. These are type objects
+        // that users construct (errstate, finfo, iinfo, matrix, poly1d, …)
+        // or introspect (dtype, ndarray, ufunc, nditer, recarray, record).
+        // For the parity-oracle mode we re-export numpy's class object so
+        // that `fnp_python.errstate() == numpy.errstate()` behaviourally.
+        const NUMPY_CLASS_NAMES: &[&str] = &[
+            "broadcast", "busdaycalendar", "dtype", "errstate", "finfo",
+            "flatiter", "iinfo", "int_", "long", "matrix", "memmap", "ndarray",
+            "ndenumerate", "ndindex", "nditer", "poly1d", "recarray", "record",
+            "ufunc",
+        ];
+        for name in NUMPY_CLASS_NAMES {
+            if let Ok(value) = numpy.getattr(*name) {
+                m.add(*name, value)?;
+            }
+        }
     }
 
     Ok(())
@@ -39855,6 +39874,74 @@ mod tests {
                             module.getattr(name).is_err(),
                             "fnp_python.{name} re-exported something numpy \
                              itself does not expose on this platform"
+                        );
+                    }
+                }
+            }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn module_reexports_numpy_class_types_matching_numpy() {
+        with_python(|py| {
+            let module = PyModule::new(py, "fnp_python_test_class_types")?;
+            fnp_python(&module)?;
+
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+
+            // Disjoint from the dtype-scalar test above: uint and ulong
+            // live in the dtype scalar set, not here. Every name in this
+            // list is a numpy class / type object — users either construct
+            // them (errstate, finfo, iinfo, matrix, poly1d, memmap,
+            // recarray, record, busdaycalendar, ndindex, ndenumerate) or
+            // introspect them (dtype, ndarray, ufunc, nditer, broadcast,
+            // flatiter). The int_ / long aliases changed between NumPy
+            // 1.x and 2.x so we treat them as platform-optional.
+            let universal_required = [
+                "broadcast", "busdaycalendar", "dtype", "errstate", "finfo",
+                "flatiter", "iinfo", "matrix", "memmap", "ndarray",
+                "ndenumerate", "ndindex", "nditer", "poly1d", "recarray",
+                "record", "ufunc",
+            ];
+            let version_optional = ["int_", "long"];
+
+            for name in universal_required {
+                let theirs = numpy.getattr(name).unwrap_or_else(|_| {
+                    panic!("numpy.{name} must exist on this numpy build — \
+                           if this panics, update universal_required")
+                });
+                let ours = module.getattr(name).unwrap_or_else(|_| {
+                    panic!("fnp_python.{name} missing: required class \
+                           re-export dropped?")
+                });
+                assert!(
+                    ours.is(&theirs),
+                    "fnp_python.{name} is not the same object as numpy.{name}"
+                );
+            }
+
+            for name in version_optional {
+                match numpy.getattr(name) {
+                    Ok(theirs) => {
+                        let ours = module.getattr(name).unwrap_or_else(|_| {
+                            panic!("numpy.{name} exists on this numpy build \
+                                   but fnp_python.{name} was not re-exported")
+                        });
+                        assert!(
+                            ours.is(&theirs),
+                            "fnp_python.{name} version-optional identity drift"
+                        );
+                    }
+                    Err(_) => {
+                        assert!(
+                            module.getattr(name).is_err(),
+                            "fnp_python.{name} re-exported something numpy \
+                             itself does not expose on this build"
                         );
                     }
                 }
