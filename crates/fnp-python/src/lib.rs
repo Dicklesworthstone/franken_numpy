@@ -6266,11 +6266,11 @@ fn angle(py: Python<'_>, z: Py<PyAny>, deg: bool) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (m,))]
 fn bartlett(py: Python<'_>, m: i64) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.bartlett so the Bartlett (triangular) window
-    // matches numpy across small/odd/even M, M=0/M=1 edge cases, and
-    // the float64 dtype convention.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("bartlett")?.call1((m,))?.unbind())
+    // Rust-owned port of np.bartlett. NumPy maps negative lengths to an
+    // empty float64 array, keeps M <= 1 special-cased, and otherwise
+    // emits the triangular Bartlett window.
+    let result = UFuncArray::bartlett(m.max(0) as usize);
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -31787,6 +31787,13 @@ mod tests {
             let theirs_size: usize = theirs_0.getattr("size")?.extract()?;
             assert_eq!(ours_size, theirs_size, "bartlett(0) size must match");
             assert_eq!(ours_size, 0, "bartlett(0) must be empty");
+
+            // Negative M also maps to an empty array.
+            let ours_neg = bartlett_fn.call1((-3_i64,))?;
+            let theirs_neg = numpy_bartlett.call1((-3_i64,))?;
+            assert_array_matches_numpy(&ours_neg, &theirs_neg)?;
+            let neg_size: usize = ours_neg.getattr("size")?.extract()?;
+            assert_eq!(neg_size, 0, "bartlett(-3) must be empty");
 
             // dtype float64 parity.
             let ours_dtype = ours_11.getattr("dtype")?.str()?.to_string();
