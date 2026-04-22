@@ -1195,6 +1195,7 @@ fn masked_scalar_compare(
     Ok(py_result)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn masked_interval_compare(
     py: Python<'_>,
     x: Py<PyAny>,
@@ -3785,7 +3786,6 @@ fn count_nonzero(
 ) -> PyResult<Py<PyAny>> {
     let a = extract_numeric_array(py, a.bind(py), "count_nonzero(a)")?;
     let axes = extract_axis_spec(py, axis, "count_nonzero")?;
-    let axis_was_none = axes.is_none();
     let result = match axes.as_ref() {
         None => a.count_nonzero(None, keepdims),
         Some(axes) if axes.len() == 1 => a.count_nonzero(Some(axes[0]), keepdims),
@@ -9049,15 +9049,26 @@ fn mask_indices(
     mask_func: Py<PyAny>,
     k: i64,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.mask_indices. Given a mask-producing function
-    // (e.g. numpy.triu, numpy.tril) and an n×n base shape, returns the
-    // (rows, cols) tuple indexing the nonzero positions. Matches numpy
-    // for k offsets and for all builtin mask functions.
-    let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("mask_indices")?
-        .call1((n, mask_func.bind(py), k))?
-        .unbind())
+    let n = usize::try_from(n)
+        .map_err(|_| PyValueError::new_err("negative dimensions are not allowed"))?;
+
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        Ok(numpy
+            .getattr("mask_indices")?
+            .call1((n, mask_func.bind(py), k))?
+            .unbind())
+    };
+
+    let base = build_boolean_array(&[n, n], true, "mask_indices")?;
+    let base_py = build_numpy_array_from_ufunc(py, &base)?;
+    let mask_output = mask_func.bind(py).call1((base_py.bind(py), k))?;
+    let mask = match extract_numeric_array(py, &mask_output, "mask_indices(mask_func)") {
+        Ok(mask) => mask,
+        Err(_) => return fallback(),
+    };
+    let indices = where_nonzero(&mask).map_err(map_ufunc_error)?;
+    build_numpy_tuple_from_ufuncs(py, &indices)
 }
 
 #[pyfunction]
