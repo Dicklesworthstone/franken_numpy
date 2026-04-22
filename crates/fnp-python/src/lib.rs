@@ -975,6 +975,70 @@ where
     Ok(values)
 }
 
+fn dtype_item_size(dtype: DType) -> Option<usize> {
+    match dtype {
+        DType::Bool | DType::I8 | DType::U8 => Some(1),
+        DType::I16 | DType::U16 | DType::F16 => Some(2),
+        DType::I32 | DType::U32 | DType::F32 => Some(4),
+        DType::I64 | DType::U64 | DType::F64 => Some(8),
+        DType::Complex64 => Some(8),
+        DType::Complex128 => Some(16),
+        DType::Str | DType::Structured | DType::DateTime64 | DType::TimeDelta64 => None,
+    }
+}
+
+fn collect_frombuffer_bytes(
+    py: Python<'_>,
+    buffer: &Bound<'_, PyAny>,
+    offset: i64,
+) -> PyResult<Vec<u8>> {
+    let builtins = py.import("builtins")?;
+    let view = builtins.getattr("memoryview")?.call1((buffer,))?;
+    let len = view.getattr("nbytes")?.extract::<usize>()?;
+
+    if offset < 0 || offset as usize > len {
+        return Err(PyValueError::new_err(format!(
+            "offset must be non-negative and no greater than buffer length ({len})"
+        )));
+    }
+
+    let raw = view.call_method0("tobytes")?;
+    let bytes = raw.extract::<Vec<u8>>()?;
+    Ok(bytes[offset as usize..].to_vec())
+}
+
+fn collect_frombuffer_values<T, F>(
+    bytes: &[u8],
+    count: i64,
+    item_size: usize,
+    mut convert: F,
+) -> PyResult<Vec<T>>
+where
+    F: FnMut(&[u8]) -> T,
+{
+    if count < 0 {
+        if bytes.len() % item_size != 0 {
+            return Err(PyValueError::new_err(
+                "buffer size must be a multiple of element size",
+            ));
+        }
+        Ok(bytes.chunks_exact(item_size).map(&mut convert).collect())
+    } else {
+        let requested = (count as usize)
+            .checked_mul(item_size)
+            .ok_or_else(|| PyValueError::new_err("buffer is smaller than requested size"))?;
+        if requested > bytes.len() {
+            return Err(PyValueError::new_err(
+                "buffer is smaller than requested size",
+            ));
+        }
+        Ok(bytes[..requested]
+            .chunks_exact(item_size)
+            .map(convert)
+            .collect())
+    }
+}
+
 fn python_is_complex_obj(value: &Bound<'_, PyAny>) -> PyResult<bool> {
     if let Ok(dtype) = value.getattr("dtype")
         && let Ok(name) = dtype.getattr("name")?.extract::<String>()
@@ -3499,24 +3563,133 @@ fn frombuffer(
     offset: i64,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.frombuffer so bytes/bytearray/memoryview buffer
-    // protocol handling, dtype coercion, count=-1 "fill buffer" behavior,
-    // nonzero offset byte skipping, buffer-too-short ValueError surface,
-    // and the keyword-only `like` argument all match numpy exactly.
     let numpy = py.import("numpy")?;
-    let kwargs = PyDict::new(py);
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
-    }
-    kwargs.set_item("count", count)?;
-    kwargs.set_item("offset", offset)?;
-    if let Some(like_val) = like {
+    if let Some(like_val) = like.as_ref()
+        && !like_val.bind(py).is_none()
+    {
+        let kwargs = PyDict::new(py);
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        kwargs.set_item("count", count)?;
+        kwargs.set_item("offset", offset)?;
         kwargs.set_item("like", like_val.bind(py))?;
+        return Ok(numpy
+            .getattr("frombuffer")?
+            .call((buffer.bind(py),), Some(&kwargs))?
+            .unbind());
     }
-    Ok(numpy
-        .getattr("frombuffer")?
-        .call((buffer.bind(py),), Some(&kwargs))?
-        .unbind())
+
+    let parsed_dtype = extract_python_dtype(py, dtype, DType::F64, "frombuffer(dtype)")?;
+    let Some(item_size) = dtype_item_size(parsed_dtype) else {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", parsed_dtype.name())?;
+        kwargs.set_item("count", count)?;
+        kwargs.set_item("offset", offset)?;
+        return Ok(numpy
+            .getattr("frombuffer")?
+            .call((buffer.bind(py),), Some(&kwargs))?
+            .unbind());
+    };
+
+    let bytes = collect_frombuffer_bytes(py, buffer.bind(py), offset)?;
+    let storage = match parsed_dtype {
+        DType::Bool => ArrayStorage::Bool(collect_frombuffer_values(
+            &bytes,
+            count,
+            item_size,
+            |chunk| chunk[0] != 0,
+        )?),
+        DType::I8 => ArrayStorage::I8(collect_frombuffer_values(
+            &bytes,
+            count,
+            item_size,
+            |chunk| i8::from_ne_bytes([chunk[0]]),
+        )?),
+        DType::I16 => ArrayStorage::I16(collect_frombuffer_values(
+            &bytes,
+            count,
+            item_size,
+            |chunk| i16::from_ne_bytes([chunk[0], chunk[1]]),
+        )?),
+        DType::I32 => ArrayStorage::I32(collect_frombuffer_values(
+            &bytes,
+            count,
+            item_size,
+            |chunk| i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
+        )?),
+        DType::I64 => ArrayStorage::I64(collect_frombuffer_values(
+            &bytes,
+            count,
+            item_size,
+            |chunk| {
+                i64::from_ne_bytes([
+                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
+                    chunk[7],
+                ])
+            },
+        )?),
+        DType::U8 => ArrayStorage::U8(collect_frombuffer_values(
+            &bytes,
+            count,
+            item_size,
+            |chunk| u8::from_ne_bytes([chunk[0]]),
+        )?),
+        DType::U16 => ArrayStorage::U16(collect_frombuffer_values(
+            &bytes,
+            count,
+            item_size,
+            |chunk| u16::from_ne_bytes([chunk[0], chunk[1]]),
+        )?),
+        DType::U32 => ArrayStorage::U32(collect_frombuffer_values(
+            &bytes,
+            count,
+            item_size,
+            |chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
+        )?),
+        DType::U64 => ArrayStorage::U64(collect_frombuffer_values(
+            &bytes,
+            count,
+            item_size,
+            |chunk| {
+                u64::from_ne_bytes([
+                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
+                    chunk[7],
+                ])
+            },
+        )?),
+        DType::F16 => ArrayStorage::F16(collect_frombuffer_values(
+            &bytes,
+            count,
+            item_size,
+            |chunk| f16::from_bits(u16::from_ne_bytes([chunk[0], chunk[1]])),
+        )?),
+        DType::F32 => ArrayStorage::F32(collect_frombuffer_values(
+            &bytes,
+            count,
+            item_size,
+            |chunk| f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
+        )?),
+        DType::F64 => ArrayStorage::F64(collect_frombuffer_values(
+            &bytes,
+            count,
+            item_size,
+            |chunk| {
+                f64::from_ne_bytes([
+                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
+                    chunk[7],
+                ])
+            },
+        )?),
+        DType::Complex64
+        | DType::Complex128
+        | DType::Str
+        | DType::Structured
+        | DType::DateTime64
+        | DType::TimeDelta64 => unreachable!("unsupported dtype must have fallen back"),
+    };
+
+    build_numpy_array_from_storage(py, &[storage.len()], storage)
 }
 
 #[pyfunction]
