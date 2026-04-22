@@ -3258,6 +3258,27 @@ fn may_share_memory(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, b, max_work=-1_i64))]
+fn shares_memory(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    b: Py<PyAny>,
+    max_work: i64,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.shares_memory so the exact overlap solver (when
+    // max_work permits it), view/copy behavior, stride-based disjointness,
+    // and max_work kwarg surface all match numpy exactly. Unlike
+    // may_share_memory, shares_memory defaults to max_work=-1 (solve).
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("max_work", max_work)?;
+    Ok(numpy
+        .getattr("shares_memory")?
+        .call((a.bind(py), b.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, a_min, a_max, out=None, **kwargs))]
 fn clip(
     py: Python<'_>,
@@ -8808,6 +8829,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(argsort, m)?)?;
     m.add_function(wrap_pyfunction!(py_broadcast_shapes, m)?)?;
     m.add_function(wrap_pyfunction!(may_share_memory, m)?)?;
+    m.add_function(wrap_pyfunction!(shares_memory, m)?)?;
     m.add_function(wrap_pyfunction!(sort_complex, m)?)?;
     m.add_function(wrap_pyfunction!(nanmedian, m)?)?;
     m.add_function(wrap_pyfunction!(ma_average, m)?)?;
@@ -9194,6 +9216,7 @@ mod tests {
             assert!(module.getattr("argsort").is_ok());
             assert!(module.getattr("broadcast_shapes").is_ok());
             assert!(module.getattr("may_share_memory").is_ok());
+            assert!(module.getattr("shares_memory").is_ok());
             assert!(module.getattr("sort_complex").is_ok());
             assert!(module.getattr("nanmedian").is_ok());
             assert!(module.getattr("ma_average").is_ok());
@@ -34368,6 +34391,108 @@ mod tests {
                 .call1((cols_a.clone(), cols_b.clone()))?
                 .extract()?;
             assert_eq!(ours_cols, theirs_cols);
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn shares_memory_matches_numpy_across_self_view_copy_strided_max_work_and_errors() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let sm_fn = module.getattr("shares_memory")?;
+            let numpy = py.import("numpy")?;
+            let numpy_sm = numpy.getattr("shares_memory")?;
+            let arange = numpy.getattr("arange")?;
+            let builtins = py.import("builtins")?;
+
+            let a = arange.call1((20_i64,))?;
+
+            // Self vs self must return True.
+            let ours_self: bool = sm_fn.call1((a.clone(), a.clone()))?.extract()?;
+            let theirs_self: bool = numpy_sm.call1((a.clone(), a.clone()))?.extract()?;
+            assert_eq!(ours_self, theirs_self);
+            assert!(ours_self, "shares_memory(a,a) must be True");
+
+            // Overlapping slice views: exact solver must confirm overlap.
+            let s1 = builtins
+                .getattr("slice")?
+                .call1((0_i64, 12_i64))?;
+            let s2 = builtins
+                .getattr("slice")?
+                .call1((6_i64, 18_i64))?;
+            let ov_a = a.call_method1("__getitem__", (s1,))?;
+            let ov_b = a.call_method1("__getitem__", (s2,))?;
+            let ours_ov: bool = sm_fn.call1((ov_a.clone(), ov_b.clone()))?.extract()?;
+            let theirs_ov: bool = numpy_sm.call1((ov_a.clone(), ov_b.clone()))?.extract()?;
+            assert_eq!(ours_ov, theirs_ov);
+            assert!(ours_ov, "overlapping views must share memory");
+
+            // Strided, non-overlapping even/odd views on the same buffer
+            // must report False under the exact solver, matching numpy.
+            let even_slice = builtins
+                .getattr("slice")?
+                .call1((0_i64, py.None(), 2_i64))?;
+            let odd_slice = builtins
+                .getattr("slice")?
+                .call1((1_i64, py.None(), 2_i64))?;
+            let evens = a.call_method1("__getitem__", (even_slice,))?;
+            let odds = a.call_method1("__getitem__", (odd_slice,))?;
+            let ours_strided: bool = sm_fn.call1((evens.clone(), odds.clone()))?.extract()?;
+            let theirs_strided: bool = numpy_sm.call1((evens.clone(), odds.clone()))?.extract()?;
+            assert_eq!(ours_strided, theirs_strided);
+            assert!(
+                !ours_strided,
+                "even/odd strided views of the same array must not share memory under the exact solver"
+            );
+
+            // A flatten() copy must not share memory with its source.
+            let copy = a.call_method0("flatten")?;
+            let ours_copy: bool = sm_fn.call1((a.clone(), copy.clone()))?.extract()?;
+            let theirs_copy: bool = numpy_sm.call1((a.clone(), copy.clone()))?.extract()?;
+            assert_eq!(ours_copy, theirs_copy);
+            assert!(!ours_copy, "flatten() copy must not share memory with source");
+
+            // Independent arrays: clearly False on both.
+            let b = arange.call1((20_i64,))?;
+            let ours_disjoint: bool = sm_fn.call1((a.clone(), b.clone()))?.extract()?;
+            let theirs_disjoint: bool = numpy_sm.call1((a.clone(), b.clone()))?.extract()?;
+            assert_eq!(ours_disjoint, theirs_disjoint);
+            assert!(!ours_disjoint, "independent arange arrays must not share memory");
+
+            // max_work=0 surface parity: numpy raises MayShareMemoryError for
+            // ambiguous cases where the heuristic is forced instead of the
+            // solver; ensure both implementations agree (either both succeed
+            // with identical bool, or both raise the same error type).
+            let zero_kwargs = PyDict::new(py);
+            zero_kwargs.set_item("max_work", 0_i64)?;
+            let ours_zero = sm_fn.call((ov_a.clone(), ov_b.clone()), Some(&zero_kwargs));
+            let theirs_zero = numpy_sm.call((ov_a.clone(), ov_b.clone()), Some(&zero_kwargs));
+            match (ours_zero, theirs_zero) {
+                (Ok(x), Ok(y)) => assert_eq!(
+                    x.extract::<bool>()?,
+                    y.extract::<bool>()?,
+                    "max_work=0 bool surface must match numpy"
+                ),
+                (Err(ours), Err(theirs)) => assert_pyerr_matches_numpy(py, ours, theirs)?,
+                _ => panic!("shares_memory max_work=0 success/error surface must match numpy"),
+            }
+
+            // Non-array argument surface: both must report identical
+            // error (or identical success) on python-list inputs. numpy
+            // coerces via asanyarray internally — match whatever it does.
+            let ours_list = sm_fn.call1((vec![1_i64, 2, 3], vec![1_i64, 2, 3]));
+            let theirs_list = numpy_sm.call1((vec![1_i64, 2, 3], vec![1_i64, 2, 3]));
+            match (ours_list, theirs_list) {
+                (Ok(x), Ok(y)) => assert_eq!(x.extract::<bool>()?, y.extract::<bool>()?),
+                (Err(ours), Err(theirs)) => assert_pyerr_matches_numpy(py, ours, theirs)?,
+                _ => panic!("shares_memory list-arg success/error surface must match numpy"),
+            }
 
             Ok(())
         });
