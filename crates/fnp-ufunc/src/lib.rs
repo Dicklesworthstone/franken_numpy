@@ -26491,53 +26491,143 @@ impl MaskedArray {
         ma_maximum_fill_value(&self.data)
     }
 
-    /// Return data with masked elements replaced by `fill_value`.
-    pub fn filled(&self, fill_value: f64) -> Result<UFuncArray, UFuncError> {
+    fn write_masked_fill_storage(
+        output: &mut ArrayStorage,
+        mask: &UFuncArray,
+        fill_value: &ArrayStorage,
+    ) -> Result<(), UFuncError> {
+        let mask_values = mask.values();
+        match (output, fill_value) {
+            (ArrayStorage::Bool(values), ArrayStorage::Bool(fill)) => {
+                let fill = fill[0];
+                for (index, value) in values.iter_mut().enumerate() {
+                    if mask_values[index] != 0.0 {
+                        *value = fill;
+                    }
+                }
+            }
+            (ArrayStorage::I8(values), ArrayStorage::I8(fill)) => {
+                let fill = fill[0];
+                for (index, value) in values.iter_mut().enumerate() {
+                    if mask_values[index] != 0.0 {
+                        *value = fill;
+                    }
+                }
+            }
+            (ArrayStorage::I16(values), ArrayStorage::I16(fill)) => {
+                let fill = fill[0];
+                for (index, value) in values.iter_mut().enumerate() {
+                    if mask_values[index] != 0.0 {
+                        *value = fill;
+                    }
+                }
+            }
+            (ArrayStorage::I32(values), ArrayStorage::I32(fill)) => {
+                let fill = fill[0];
+                for (index, value) in values.iter_mut().enumerate() {
+                    if mask_values[index] != 0.0 {
+                        *value = fill;
+                    }
+                }
+            }
+            (ArrayStorage::I64(values), ArrayStorage::I64(fill)) => {
+                let fill = fill[0];
+                for (index, value) in values.iter_mut().enumerate() {
+                    if mask_values[index] != 0.0 {
+                        *value = fill;
+                    }
+                }
+            }
+            (ArrayStorage::U8(values), ArrayStorage::U8(fill)) => {
+                let fill = fill[0];
+                for (index, value) in values.iter_mut().enumerate() {
+                    if mask_values[index] != 0.0 {
+                        *value = fill;
+                    }
+                }
+            }
+            (ArrayStorage::U16(values), ArrayStorage::U16(fill)) => {
+                let fill = fill[0];
+                for (index, value) in values.iter_mut().enumerate() {
+                    if mask_values[index] != 0.0 {
+                        *value = fill;
+                    }
+                }
+            }
+            (ArrayStorage::U32(values), ArrayStorage::U32(fill)) => {
+                let fill = fill[0];
+                for (index, value) in values.iter_mut().enumerate() {
+                    if mask_values[index] != 0.0 {
+                        *value = fill;
+                    }
+                }
+            }
+            (ArrayStorage::U64(values), ArrayStorage::U64(fill)) => {
+                let fill = fill[0];
+                for (index, value) in values.iter_mut().enumerate() {
+                    if mask_values[index] != 0.0 {
+                        *value = fill;
+                    }
+                }
+            }
+            (ArrayStorage::F16(values), ArrayStorage::F16(fill)) => {
+                let fill = fill[0];
+                for (index, value) in values.iter_mut().enumerate() {
+                    if mask_values[index] != 0.0 {
+                        *value = fill;
+                    }
+                }
+            }
+            (ArrayStorage::F32(values), ArrayStorage::F32(fill)) => {
+                let fill = fill[0];
+                for (index, value) in values.iter_mut().enumerate() {
+                    if mask_values[index] != 0.0 {
+                        *value = fill;
+                    }
+                }
+            }
+            (ArrayStorage::F64(values), ArrayStorage::F64(fill)) => {
+                let fill = fill[0];
+                for (index, value) in values.iter_mut().enumerate() {
+                    if mask_values[index] != 0.0 {
+                        *value = fill;
+                    }
+                }
+            }
+            _ => {
+                return Err(UFuncError::Msg(
+                    "filled: internal storage dtype mismatch".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn filled_with_storage(&self, fill_value: ArrayStorage) -> Result<UFuncArray, UFuncError> {
+        if fill_value.len() != 1 {
+            return Err(UFuncError::Msg(
+                "filled: fill_value must be a numeric scalar".to_string(),
+            ));
+        }
+
         match &self.mask {
             None => Ok(self.data.clone()),
             Some(mask) => {
-                let n = self.data.values().len();
-                if matches!(self.data.dtype(), DType::I64 | DType::U64)
-                    && self.data.has_integer_sidecar()
-                    && self.data.constant_integer_sidecar(fill_value, 1).is_none()
-                {
-                    ensure_exact_integer_bridge_value_supported(
-                        fill_value,
-                        self.data.dtype(),
-                        "filled",
-                        0,
-                    )?;
-                }
-                let mut vals = Vec::with_capacity(n);
-                let mut sidecar_vals = self.data.constant_integer_sidecar(fill_value, n);
-
-                for i in 0..n {
-                    let is_masked = mask.values()[i] != 0.0;
-                    if is_masked {
-                        vals.push(fill_value);
-                    } else {
-                        vals.push(self.data.values()[i]);
-                        if let Some(ref mut sidecar) = sidecar_vals {
-                            match (sidecar, &self.data.integer_sidecar) {
-                                (IntegerSidecar::I64(v_out), Some(IntegerSidecar::I64(v_in))) => {
-                                    v_out[i] = v_in[i];
-                                }
-                                (IntegerSidecar::U64(v_out), Some(IntegerSidecar::U64(v_in))) => {
-                                    v_out[i] = v_in[i];
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-                Ok(UFuncArray {
-                    shape: self.data.shape().to_vec(),
-                    values: vals,
-                    dtype: self.data.dtype(),
-                    integer_sidecar: sidecar_vals,
-                })
+                ensure_bridge_dtype_supported(fill_value.dtype(), "filled")?;
+                ensure_storage_cast_target_supported(&fill_value, self.data.dtype(), "filled")?;
+                let fill_value = fill_value
+                    .cast_to(self.data.dtype())
+                    .map_err(|err| UFuncError::Msg(format!("filled: storage cast failed: {err}")))?;
+                let mut output = self.data.to_storage()?;
+                Self::write_masked_fill_storage(&mut output, mask, &fill_value)?;
+                UFuncArray::from_storage(self.data.shape().to_vec(), output)
             }
         }
+    }
+
+    /// Return data with masked elements replaced by `fill_value`.
+    pub fn filled(&self, fill_value: f64) -> Result<UFuncArray, UFuncError> {
+        self.filled_with_storage(ArrayStorage::F64(vec![fill_value]))
     }
 
     /// Return only the valid (non-masked) elements as a 1-D array.
@@ -46815,29 +46905,48 @@ print(json.dumps(payload))
     }
 
     #[test]
-    fn masked_array_filled_rejects_fractional_i64_fill() {
+    fn masked_array_filled_truncates_fractional_i64_fill() {
         let large_val = (1_i64 << 53) + 7;
         let data = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![large_val, 3]))
             .expect("from_storage");
         let mask = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::Bool).unwrap();
         let ma = MaskedArray::new(data, Some(mask), None).unwrap();
-        let err = ma
-            .filled(1.5)
-            .expect_err("filled must reject fractional integer fills");
-        assert!(matches!(err, UFuncError::Msg(message) if message.contains("filled")));
+        let filled = ma.filled(1.5).unwrap();
+        assert_eq!(
+            filled.to_storage().expect("to_storage"),
+            ArrayStorage::I64(vec![large_val, 1])
+        );
     }
 
     #[test]
-    fn masked_array_filled_rejects_negative_u64_fill() {
+    fn masked_array_filled_wraps_negative_u64_fill_from_f64_bridge() {
         let large_val = (1_u64 << 53) + 42;
         let data = UFuncArray::from_storage(vec![2], ArrayStorage::U64(vec![large_val, 3]))
             .expect("from_storage");
         let mask = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::Bool).unwrap();
         let ma = MaskedArray::new(data, Some(mask), None).unwrap();
-        let err = ma
-            .filled(-1.0)
-            .expect_err("filled must reject negative u64 fills");
-        assert!(matches!(err, UFuncError::Msg(message) if message.contains("filled")));
+        let filled = ma.filled(-1.0).unwrap();
+        assert_eq!(
+            filled.to_storage().expect("to_storage"),
+            ArrayStorage::U64(vec![large_val, u64::MAX])
+        );
+    }
+
+    #[test]
+    fn masked_array_filled_preserves_large_explicit_i64_fill_storage() {
+        let keep_val = (1_i64 << 53) + 7;
+        let fill_val = (1_i64 << 53) + 29;
+        let data = UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![keep_val, 3]))
+            .expect("from_storage");
+        let mask = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::Bool).unwrap();
+        let ma = MaskedArray::new(data, Some(mask), None).unwrap();
+        let filled = ma
+            .filled_with_storage(ArrayStorage::I64(vec![fill_val]))
+            .expect("filled_with_storage");
+        assert_eq!(
+            filled.to_storage().expect("to_storage"),
+            ArrayStorage::I64(vec![keep_val, fill_val])
+        );
     }
 
     #[test]

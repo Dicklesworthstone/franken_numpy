@@ -1059,6 +1059,65 @@ fn extract_numeric_masked_array(
         .map_err(|err| map_ma_error(context, err))
 }
 
+enum FilledScalarStorage {
+    Storage(ArrayStorage),
+    PythonInt(ArrayStorage),
+    PythonFloat(f64),
+}
+
+impl FilledScalarStorage {
+    fn into_storage(self) -> ArrayStorage {
+        match self {
+            Self::Storage(storage) | Self::PythonInt(storage) => storage,
+            Self::PythonFloat(value) => ArrayStorage::F64(vec![value]),
+        }
+    }
+}
+
+fn dtype_is_unsigned_integer(dtype: DType) -> bool {
+    matches!(dtype, DType::U8 | DType::U16 | DType::U32 | DType::U64)
+}
+
+fn extract_filled_scalar_storage(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    context: &str,
+) -> PyResult<Option<FilledScalarStorage>> {
+    let type_name = value.get_type().name()?.extract::<String>()?;
+    match type_name.as_str() {
+        "bool" => Ok(Some(FilledScalarStorage::Storage(ArrayStorage::Bool(vec![
+            value.extract::<bool>()?,
+        ])))),
+        "int" => {
+            if let Ok(value) = value.extract::<i64>() {
+                return Ok(Some(FilledScalarStorage::PythonInt(ArrayStorage::I64(
+                    vec![value],
+                ))));
+            }
+            if let Ok(value) = value.extract::<u64>() {
+                return Ok(Some(FilledScalarStorage::PythonInt(ArrayStorage::U64(
+                    vec![value],
+                ))));
+            }
+            Ok(None)
+        }
+        "float" => Ok(Some(FilledScalarStorage::PythonFloat(
+            value.extract::<f64>()?,
+        ))),
+        _ => {
+            let scalar = match extract_precise_numeric_array(py, value, context) {
+                Ok(scalar) => scalar,
+                Err(_) => return Ok(None),
+            };
+            if !scalar.shape().is_empty() {
+                return Ok(None);
+            }
+            let storage = scalar.to_storage().map_err(map_ufunc_error)?;
+            Ok(Some(FilledScalarStorage::Storage(storage)))
+        }
+    }
+}
+
 fn extract_mask_operand(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
@@ -6043,14 +6102,25 @@ fn filled(py: Python<'_>, a: Py<PyAny>, fill_value: Option<Py<PyAny>>) -> PyResu
         return fallback();
     };
     let fill_value = match fill_value.as_ref() {
-        Some(value) => match value.bind(py).extract::<f64>() {
-            Ok(fill_value) => fill_value,
-            Err(_) => return fallback(),
+        Some(value) => match extract_filled_scalar_storage(py, value.bind(py), "filled(fill_value)")? {
+            Some(fill_value) => fill_value,
+            None => return fallback(),
         },
-        None => masked.fill_value(),
+        None => FilledScalarStorage::Storage(ArrayStorage::F64(vec![masked.fill_value()])),
     };
+
+    if dtype_is_unsigned_integer(masked.dtype()) {
+        match &fill_value {
+            FilledScalarStorage::PythonFloat(value) if *value < 0.0 => return fallback(),
+            FilledScalarStorage::PythonInt(ArrayStorage::I64(values)) if values[0] < 0 => {
+                return fallback();
+            }
+            _ => {}
+        }
+    }
+
     let result = masked
-        .filled(fill_value)
+        .filled_with_storage(fill_value.into_storage())
         .map_err(|err| map_ufunc_error(format!("filled: {err}")))?;
     build_numpy_scalar_or_array(py, &result)
 }
@@ -26640,6 +26710,83 @@ mod tests {
                     ))?
                     .extract::<bool>()?,
                 "filled fully-masked diverged"
+            );
+
+            // Integer masked array truncates Python float fills toward zero.
+            let masked_i64 = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![1_i64, 2, 3],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("mask", vec![false, true, false])?;
+                    kw.set_item("dtype", "int64")?;
+                    kw
+                }),
+            )?;
+            let kw_frac = PyDict::new(py);
+            kw_frac.set_item("fill_value", 1.5_f64)?;
+            let kw_frac_n = PyDict::new(py);
+            kw_frac_n.set_item("fill_value", 1.5_f64)?;
+            assert!(
+                array_equal
+                    .call1((
+                        &filled_fn.call((masked_i64.clone(),), Some(&kw_frac))?,
+                        &numpy_filled.call((masked_i64.clone(),), Some(&kw_frac_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "filled int64 fractional fill diverged"
+            );
+
+            // Exact Python ints above f64 precision keep their integer identity.
+            let large_fill = (1_i64 << 53) + 7;
+            let kw_large = PyDict::new(py);
+            kw_large.set_item("fill_value", large_fill)?;
+            let kw_large_n = PyDict::new(py);
+            kw_large_n.set_item("fill_value", large_fill)?;
+            assert!(
+                array_equal
+                    .call1((
+                        &filled_fn.call((masked_i64.clone(),), Some(&kw_large))?,
+                        &numpy_filled.call((masked_i64.clone(),), Some(&kw_large_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "filled int64 large integer fill diverged"
+            );
+
+            // Unsigned arrays preserve NumPy's Python-scalar TypeError surface.
+            let masked_u64 = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![1_u64, 2, 3],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("mask", vec![false, true, false])?;
+                    kw.set_item("dtype", "uint64")?;
+                    kw
+                }),
+            )?;
+            let kw_py_neg = PyDict::new(py);
+            kw_py_neg.set_item("fill_value", -1.0_f64)?;
+            let kw_py_neg_n = PyDict::new(py);
+            kw_py_neg_n.set_item("fill_value", -1.0_f64)?;
+            let ours_py_neg = filled_fn
+                .call((masked_u64.clone(),), Some(&kw_py_neg))
+                .expect_err("python float fill into uint64 must error");
+            let theirs_py_neg = numpy_filled
+                .call((masked_u64.clone(),), Some(&kw_py_neg_n))
+                .expect_err("numpy python float fill into uint64 must error");
+            assert_pyerr_matches_numpy(py, ours_py_neg, theirs_py_neg)?;
+
+            // NumPy scalar fills still wrap on the Rust path.
+            let kw_np_neg = PyDict::new(py);
+            kw_np_neg.set_item("fill_value", numpy.getattr("float32")?.call1((-1.0_f32,))?)?;
+            let kw_np_neg_n = PyDict::new(py);
+            kw_np_neg_n.set_item("fill_value", numpy.getattr("float32")?.call1((-1.0_f32,))?)?;
+            assert!(
+                array_equal
+                    .call1((
+                        &filled_fn.call((masked_u64.clone(),), Some(&kw_np_neg))?,
+                        &numpy_filled.call((masked_u64.clone(),), Some(&kw_np_neg_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "filled uint64 numpy-scalar negative fill diverged"
             );
 
             // No-mask masked array — filled returns the data unchanged.
