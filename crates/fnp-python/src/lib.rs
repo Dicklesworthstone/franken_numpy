@@ -1183,6 +1183,99 @@ fn masked_scalar_compare(
     build_numpy_masked_array(py, &result)
 }
 
+fn masked_interval_compare(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    v1: Py<PyAny>,
+    v2: Py<PyAny>,
+    copy: bool,
+    context: &str,
+    numpy_name: &str,
+    outside: bool,
+) -> PyResult<Py<PyAny>> {
+    let x_for_fallback = x.clone_ref(py);
+    let v1_for_fallback = v1.clone_ref(py);
+    let v2_for_fallback = v2.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let masked_fn = numpy.getattr("ma")?.getattr(numpy_name)?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("copy", copy)?;
+        Ok(masked_fn
+            .call(
+                (
+                    x_for_fallback.bind(py),
+                    v1_for_fallback.bind(py),
+                    v2_for_fallback.bind(py),
+                ),
+                Some(&kwargs),
+            )?
+            .unbind())
+    };
+
+    let Some(masked_x) = extract_numeric_masked_array(py, x.bind(py), context)? else {
+        return fallback();
+    };
+    let left = match extract_precise_numeric_array(py, v1.bind(py), &format!("{context}: v1")) {
+        Ok(value) if value.shape().is_empty() => value,
+        _ => return fallback(),
+    };
+    let right = match extract_precise_numeric_array(py, v2.bind(py), &format!("{context}: v2")) {
+        Ok(value) if value.shape().is_empty() => value,
+        _ => return fallback(),
+    };
+
+    let left_first = match left.elementwise_binary(&right, BinaryOp::LessEqual) {
+        Ok(ordering) => ordering.values()[0] != 0.0,
+        Err(_) => return fallback(),
+    };
+    let (lo, hi) = if left_first {
+        (left, right)
+    } else {
+        (right, left)
+    };
+
+    let interval_mask = if outside {
+        let below = match masked_x.data().elementwise_binary(&lo, BinaryOp::Less) {
+            Ok(value) => value,
+            Err(_) => return fallback(),
+        };
+        let above = match masked_x.data().elementwise_binary(&hi, BinaryOp::Greater) {
+            Ok(value) => value,
+            Err(_) => return fallback(),
+        };
+        match below.elementwise_binary(&above, BinaryOp::LogicalOr) {
+            Ok(mask) => mask,
+            Err(_) => return fallback(),
+        }
+    } else {
+        let ge_lo = match masked_x.data().elementwise_binary(&lo, BinaryOp::GreaterEqual) {
+            Ok(value) => value,
+            Err(_) => return fallback(),
+        };
+        let le_hi = match masked_x.data().elementwise_binary(&hi, BinaryOp::LessEqual) {
+            Ok(value) => value,
+            Err(_) => return fallback(),
+        };
+        match ge_lo.elementwise_binary(&le_hi, BinaryOp::LogicalAnd) {
+            Ok(mask) => mask,
+            Err(_) => return fallback(),
+        }
+    };
+
+    let mut mask = ma_mask_or(masked_x.mask(), Some(&interval_mask));
+    if mask
+        .as_ref()
+        .is_some_and(|mask| mask.values().iter().all(|&value| value == 0.0))
+    {
+        mask = None;
+    }
+
+    let result = MaskedArray::new(masked_x.data().clone(), mask, Some(masked_x.fill_value()))
+        .map_err(|err| map_ma_error(context, err))?;
+    build_numpy_masked_array(py, &result)
+}
+
 fn extract_python_dtype(
     py: Python<'_>,
     dtype: Option<Py<PyAny>>,
@@ -5738,16 +5831,16 @@ fn masked_inside(
     v2: Py<PyAny>,
     copy: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ma.masked_inside so the inclusive interval
-    // [min(v1,v2), max(v1,v2)] masking semantics, copy-flag forwarding,
-    // and MaskedArray return type all match numpy exactly.
-    let numpy = py.import("numpy")?;
-    let masked_inside_fn = numpy.getattr("ma")?.getattr("masked_inside")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("copy", copy)?;
-    Ok(masked_inside_fn
-        .call((x.bind(py), v1.bind(py), v2.bind(py)), Some(&kwargs))?
-        .unbind())
+    masked_interval_compare(
+        py,
+        x,
+        v1,
+        v2,
+        copy,
+        "masked_inside",
+        "masked_inside",
+        false,
+    )
 }
 
 #[pyfunction]
@@ -10749,16 +10842,16 @@ fn masked_outside(
     v2: Py<PyAny>,
     copy: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ma.masked_outside — the complement of
-    // masked_inside. Values strictly outside [min(v1,v2), max(v1,v2)]
-    // are masked; copy flag and MaskedArray return type forwarded.
-    let numpy = py.import("numpy")?;
-    let masked_outside_fn = numpy.getattr("ma")?.getattr("masked_outside")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("copy", copy)?;
-    Ok(masked_outside_fn
-        .call((x.bind(py), v1.bind(py), v2.bind(py)), Some(&kwargs))?
-        .unbind())
+    masked_interval_compare(
+        py,
+        x,
+        v1,
+        v2,
+        copy,
+        "masked_outside",
+        "masked_outside",
+        true,
+    )
 }
 
 #[pyfunction]
