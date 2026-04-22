@@ -41652,7 +41652,99 @@ mod tests {
                     name: "ones",
                     args: PyTuple::new(py, [(-1_i64,).into_pyobject(py)?.unbind().into_any()])?,
                 },
+                Case {
+                    name: "empty",
+                    args: PyTuple::new(py, [(-1_i64,).into_pyobject(py)?.unbind().into_any()])?,
+                },
+                // numpy.array with inhomogeneous / ragged list → ValueError on
+                // numpy >= 1.24 (stricter than older numpy).
+                Case {
+                    name: "array",
+                    args: PyTuple::new(
+                        py,
+                        [vec![vec![1_i64, 2], vec![3_i64]]
+                            .into_pyobject(py)?
+                            .unbind()
+                            .into_any()],
+                    )?,
+                },
             ];
+
+            // Axis-out-of-bounds cases for reduction / cumulative / arg ops:
+            // calling with axis=5 on a 2-D array must raise AxisError
+            // (ValueError subclass in numpy 2.x) on both sides.
+            for name in [
+                "sum", "prod", "mean", "std", "var", "min", "max", "amax", "amin",
+                "all", "any", "cumsum", "cumprod", "argmax", "argmin",
+            ] {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("axis", 5_i64)?;
+                let args = PyTuple::new(py, [arr_2d.clone()])?;
+                // We push into the main cases vec below via a secondary
+                // loop rather than reusing the Case struct, since we
+                // need kwargs.
+                let numpy_fn = match numpy.getattr(name) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+                let ours_fn = module.getattr(name).unwrap_or_else(|_| {
+                    panic!("fnp_python.{name} missing for axis-OOB adversarial case")
+                });
+                let ours_result = ours_fn.call(&args, Some(&kwargs));
+                let theirs_result = numpy_fn.call(&args, Some(&kwargs));
+                match (&ours_result, &theirs_result) {
+                    (Err(ours_err), Err(theirs_err)) => {
+                        // Check TYPE parity across both sides. numpy 2.x
+                        // raises numpy.exceptions.AxisError (subclass of
+                        // ValueError); pyo3 surfaces this as ValueError on
+                        // the Python side. We accept ValueError-or-AxisError
+                        // as equivalent.
+                        let ours_name = Python::attach(|py| {
+                            ours_err
+                                .get_type(py)
+                                .name()
+                                .and_then(|s| s.extract::<String>())
+                                .unwrap_or_default()
+                        });
+                        let theirs_name = Python::attach(|py| {
+                            theirs_err
+                                .get_type(py)
+                                .name()
+                                .and_then(|s| s.extract::<String>())
+                                .unwrap_or_default()
+                        });
+                        assert_eq!(
+                            ours_name, theirs_name,
+                            "{name} axis=5 OOB: error TYPE differs — ours={ours_name} theirs={theirs_name}"
+                        );
+                    }
+                    (Ok(_), Ok(_)) => {
+                        // Both accepted it (unlikely on an OOB axis)
+                    }
+                    (Ok(_), Err(e)) => {
+                        let n = Python::attach(|py| {
+                            e.get_type(py)
+                                .name()
+                                .and_then(|s| s.extract::<String>())
+                                .unwrap_or_default()
+                        });
+                        panic!(
+                            "{name} axis=5 OOB: ours succeeded but numpy raised {n}"
+                        );
+                    }
+                    (Err(e), Ok(_)) => {
+                        let n = Python::attach(|py| {
+                            e.get_type(py)
+                                .name()
+                                .and_then(|s| s.extract::<String>())
+                                .unwrap_or_default()
+                        });
+                        panic!(
+                            "{name} axis=5 OOB: ours raised {n} but numpy succeeded"
+                        );
+                    }
+                }
+            }
 
             let mut skipped = Vec::new();
             for case in &cases {
