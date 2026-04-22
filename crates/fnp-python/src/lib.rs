@@ -6366,6 +6366,58 @@ fn imag(py: Python<'_>, val: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (x1, x2))]
+fn floor_divide(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.floor_divide (element-wise floor of x1/x2).
+    // Preserves numpy's integer/integer-> integer, float/float -> float
+    // dtype rules and numpy's division-by-zero behavior (inf/nan with
+    // RuntimeWarning on float, integer divide-by-zero warning).
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("floor_divide")?
+        .call1((x1.bind(py), x2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
+fn invert(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.invert (bitwise NOT for integer and boolean
+    // dtypes; aliased as bitwise_not). Rejects float/complex with a
+    // TypeError that must surface identically.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("invert")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (p, discont=None, axis=-1_i64, *, period=None))]
+fn unwrap(
+    py: Python<'_>,
+    p: Py<PyAny>,
+    discont: Option<Py<PyAny>>,
+    axis: i64,
+    period: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.unwrap (phase unwrapping). `discont` defaults to
+    // period/2 in numpy; we forward None explicitly only when provided so
+    // numpy applies its own default. `period` is keyword-only in modern
+    // numpy and defaults to 2*pi.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(discont_val) = discont {
+        kwargs.set_item("discont", discont_val.bind(py))?;
+    }
+    kwargs.set_item("axis", axis)?;
+    if let Some(period_val) = period {
+        kwargs.set_item("period", period_val.bind(py))?;
+    }
+    Ok(numpy
+        .getattr("unwrap")?
+        .call((p.bind(py),), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (p, m=1))]
 fn polyder(py: Python<'_>, p: Py<PyAny>, m: i64) -> PyResult<Py<PyAny>> {
     // Passthrough to np.polyder. Returns the m-th derivative of the
@@ -8901,6 +8953,9 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(negative, m)?)?;
     m.add_function(wrap_pyfunction!(real, m)?)?;
     m.add_function(wrap_pyfunction!(imag, m)?)?;
+    m.add_function(wrap_pyfunction!(floor_divide, m)?)?;
+    m.add_function(wrap_pyfunction!(invert, m)?)?;
+    m.add_function(wrap_pyfunction!(unwrap, m)?)?;
     m.add_function(wrap_pyfunction!(polyder, m)?)?;
     m.add_function(wrap_pyfunction!(polyint, m)?)?;
     m.add_function(wrap_pyfunction!(polyadd, m)?)?;
@@ -9355,6 +9410,9 @@ mod tests {
             assert!(module.getattr("negative").is_ok());
             assert!(module.getattr("real").is_ok());
             assert!(module.getattr("imag").is_ok());
+            assert!(module.getattr("floor_divide").is_ok());
+            assert!(module.getattr("invert").is_ok());
+            assert!(module.getattr("unwrap").is_ok());
             assert!(module.getattr("polyder").is_ok());
             assert!(module.getattr("tile").is_ok());
             assert!(module.getattr("array_equal").is_ok());
@@ -35354,6 +35412,198 @@ mod tests {
                 .call1((theirs_view_r.clone(), cplx_arr.clone()))?
                 .extract()?;
             assert_eq!(ours_shares, theirs_shares);
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn floor_divide_matches_numpy_across_int_float_broadcast_negatives_and_zero() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let fd_fn = module.getattr("floor_divide")?;
+            let numpy = py.import("numpy")?;
+            let numpy_fd = numpy.getattr("floor_divide")?;
+            let array_fn = numpy.getattr("array")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Integer / integer → integer floor division (matches Python //).
+            assert_array_matches_numpy(
+                &fd_fn.call1((vec![7_i64, 8, 9, 10], vec![3_i64, 3, 3, 3]))?,
+                &numpy_fd.call1((vec![7_i64, 8, 9, 10], vec![3_i64, 3, 3, 3]))?,
+            )?;
+
+            // Negative numerator: floor toward -inf, matching Python and numpy.
+            assert_array_matches_numpy(
+                &fd_fn.call1((vec![-7_i64, -8, -9, -10], vec![3_i64, 3, 3, 3]))?,
+                &numpy_fd.call1((vec![-7_i64, -8, -9, -10], vec![3_i64, 3, 3, 3]))?,
+            )?;
+
+            // Float / float → float.
+            assert_array_matches_numpy(
+                &fd_fn.call1((vec![7.5_f64, 8.5, 9.5], vec![2.0_f64, 2.0, 2.0]))?,
+                &numpy_fd.call1((vec![7.5_f64, 8.5, 9.5], vec![2.0_f64, 2.0, 2.0]))?,
+            )?;
+
+            // Broadcasting: scalar divisor over an array numerator.
+            let arr = array_fn.call1((vec![10_i64, 20, 30, 40],))?;
+            assert_array_matches_numpy(
+                &fd_fn.call1((arr.clone(), 7_i64))?,
+                &numpy_fd.call1((arr.clone(), 7_i64))?,
+            )?;
+
+            // Division by zero (float) must surface identically. Both
+            // implementations raise RuntimeWarning (suppress via numpy
+            // errstate) and return inf/nan.
+            let errstate_kw = PyDict::new(py);
+            errstate_kw.set_item("divide", "ignore")?;
+            errstate_kw.set_item("invalid", "ignore")?;
+            let errstate_ctx = numpy
+                .getattr("errstate")?
+                .call((), Some(&errstate_kw))?;
+            errstate_ctx.call_method0("__enter__")?;
+            let nums = array_fn.call1((vec![1.0_f64, -1.0, 0.0],))?;
+            let zeros = array_fn.call1((vec![0.0_f64, 0.0, 0.0],))?;
+            let ours_div0 = fd_fn.call1((nums.clone(), zeros.clone()))?;
+            let theirs_div0 = numpy_fd.call1((nums.clone(), zeros.clone()))?;
+            assert_eq!(
+                ours_div0.getattr("dtype")?.str()?.to_string(),
+                theirs_div0.getattr("dtype")?.str()?.to_string()
+            );
+            // Compare element-wise with NaN-aware tolerance.
+            let nan_equiv_kw = PyDict::new(py);
+            nan_equiv_kw.set_item("equal_nan", true)?;
+            let ok_div0: bool = allclose
+                .call((&ours_div0, &theirs_div0), Some(&nan_equiv_kw))?
+                .extract()?;
+            assert!(ok_div0, "floor_divide by zero (float) surface must match numpy");
+            errstate_ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+
+            // 2-D broadcast: (2,1) divisors and (1,3) numerators.
+            let lhs = array_fn
+                .call1((vec![vec![6_i64, 12, 18]],))?;
+            let rhs = array_fn
+                .call1((vec![vec![2_i64], vec![3_i64]],))?;
+            let ours_bc = fd_fn.call1((lhs.clone(), rhs.clone()))?;
+            let theirs_bc = numpy_fd.call1((lhs.clone(), rhs.clone()))?;
+            assert_array_matches_numpy(&ours_bc, &theirs_bc)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn invert_matches_numpy_across_int_bool_arrays_and_float_error() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let inv_fn = module.getattr("invert")?;
+            let numpy = py.import("numpy")?;
+            let numpy_inv = numpy.getattr("invert")?;
+            let array_fn = numpy.getattr("array")?;
+
+            // Integer bitwise NOT: ~0 == -1, ~-1 == 0, etc.
+            assert_array_matches_numpy(
+                &inv_fn.call1((vec![0_i64, 1, -1, 255],))?,
+                &numpy_inv.call1((vec![0_i64, 1, -1, 255],))?,
+            )?;
+
+            // uint8 bitwise NOT preserves width.
+            let u8_kw = PyDict::new(py);
+            u8_kw.set_item("dtype", numpy.getattr("uint8")?)?;
+            let u8_arr = array_fn.call((vec![0_i64, 1, 128, 255],), Some(&u8_kw))?;
+            assert_array_matches_numpy(
+                &inv_fn.call1((u8_arr.clone(),))?,
+                &numpy_inv.call1((u8_arr.clone(),))?,
+            )?;
+
+            // Boolean invert: logical NOT surface.
+            let bool_arr = array_fn.call1((vec![true, false, true, true],))?;
+            assert_array_matches_numpy(
+                &inv_fn.call1((bool_arr.clone(),))?,
+                &numpy_inv.call1((bool_arr.clone(),))?,
+            )?;
+
+            // Float input must raise TypeError on both implementations.
+            let ours_err = inv_fn
+                .call1((vec![1.0_f64, 2.0],))
+                .expect_err("float invert must error");
+            let theirs_err = numpy_inv
+                .call1((vec![1.0_f64, 2.0],))
+                .expect_err("numpy float invert must error");
+            assert_pyerr_matches_numpy(py, ours_err, theirs_err)?;
+
+            // 2-D integer array.
+            let two_d = array_fn.call1((vec![vec![0_i64, 1], vec![2_i64, -1]],))?;
+            assert_array_matches_numpy(
+                &inv_fn.call1((two_d.clone(),))?,
+                &numpy_inv.call1((two_d.clone(),))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn unwrap_matches_numpy_across_default_axis_discont_and_period() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let uw_fn = module.getattr("unwrap")?;
+            let numpy = py.import("numpy")?;
+            let numpy_uw = numpy.getattr("unwrap")?;
+            let array_fn = numpy.getattr("array")?;
+            let allclose = numpy.getattr("allclose")?;
+            let pi = std::f64::consts::PI;
+
+            // Default unwrap across a 2*pi jump.
+            let jumpy = array_fn.call1((vec![0.0_f64, pi / 2.0, pi, -pi + 0.1, -pi / 2.0, 0.0],))?;
+            let ours_default = uw_fn.call1((jumpy.clone(),))?;
+            let theirs_default = numpy_uw.call1((jumpy.clone(),))?;
+            let ok_default: bool = allclose.call1((&ours_default, &theirs_default))?.extract()?;
+            assert!(ok_default, "unwrap default-param mismatch");
+
+            // 2-D input with explicit axis.
+            let two_d = array_fn.call1((vec![
+                vec![0.0_f64, pi / 2.0, pi, -pi + 0.1],
+                vec![0.1_f64, pi / 2.0 + 0.1, pi + 0.1, -pi + 0.2],
+            ],))?;
+            let axis_kwargs = PyDict::new(py);
+            axis_kwargs.set_item("axis", 1_i64)?;
+            let ours_ax = uw_fn.call((two_d.clone(),), Some(&axis_kwargs))?;
+            let theirs_ax = numpy_uw.call((two_d.clone(),), Some(&axis_kwargs))?;
+            let ok_ax: bool = allclose.call1((&ours_ax, &theirs_ax))?.extract()?;
+            assert!(ok_ax, "unwrap axis=1 mismatch");
+
+            // Custom discont threshold: larger discont suppresses unwrap.
+            let discont_kwargs = PyDict::new(py);
+            discont_kwargs.set_item("discont", 10.0_f64)?;
+            let ours_dc = uw_fn.call((jumpy.clone(),), Some(&discont_kwargs))?;
+            let theirs_dc = numpy_uw.call((jumpy.clone(),), Some(&discont_kwargs))?;
+            let ok_dc: bool = allclose.call1((&ours_dc, &theirs_dc))?.extract()?;
+            assert!(ok_dc, "unwrap custom-discont mismatch");
+
+            // Custom period: unwrap on a 360-degree grid.
+            let deg = array_fn.call1((vec![0.0_f64, 90.0, 180.0, -170.0, -90.0, 0.0],))?;
+            let period_kwargs = PyDict::new(py);
+            period_kwargs.set_item("period", 360.0_f64)?;
+            let ours_p = uw_fn.call((deg.clone(),), Some(&period_kwargs))?;
+            let theirs_p = numpy_uw.call((deg.clone(),), Some(&period_kwargs))?;
+            let ok_p: bool = allclose.call1((&ours_p, &theirs_p))?.extract()?;
+            assert!(ok_p, "unwrap period=360 mismatch");
 
             Ok(())
         });
