@@ -7350,6 +7350,55 @@ fn eye(
     Ok(eye_fn.call((n,), Some(&kwargs))?.unbind())
 }
 
+#[pyfunction]
+#[pyo3(signature = (n, dtype=None))]
+fn identity(
+    py: Python<'_>,
+    n: i64,
+    dtype: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.identity. Returns the (n, n) identity matrix
+    // with the requested dtype (default float64).
+    let numpy = py.import("numpy")?;
+    let id_fn = numpy.getattr("identity")?;
+    let kwargs = PyDict::new(py);
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    Ok(id_fn.call((n,), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (start, stop, num=50, endpoint=true, base=10.0, dtype=None, axis=0))]
+#[allow(clippy::too_many_arguments)]
+fn logspace(
+    py: Python<'_>,
+    start: Py<PyAny>,
+    stop: Py<PyAny>,
+    num: i64,
+    endpoint: bool,
+    base: Py<PyAny>,
+    dtype: Option<Py<PyAny>>,
+    axis: i64,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.logspace. Returns num samples spaced evenly
+    // on a log scale between base**start and base**stop. Matches
+    // numpy across endpoint, base, dtype, and axis kwargs.
+    let numpy = py.import("numpy")?;
+    let ls_fn = numpy.getattr("logspace")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("num", num)?;
+    kwargs.set_item("endpoint", endpoint)?;
+    kwargs.set_item("base", base.bind(py))?;
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    kwargs.set_item("axis", axis)?;
+    Ok(ls_fn.call((start.bind(py), stop.bind(py)), Some(&kwargs))?.unbind())
+}
+
+
+
 
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, out=None, overwrite_input=false, keepdims=false))]
@@ -8673,6 +8722,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(matrix_transpose, m)?)?;
     m.add_function(wrap_pyfunction!(svdvals, m)?)?;
     m.add_function(wrap_pyfunction!(eye, m)?)?;
+    m.add_function(wrap_pyfunction!(identity, m)?)?;
+    m.add_function(wrap_pyfunction!(logspace, m)?)?;
     m.add_function(wrap_pyfunction!(nanmedian, m)?)?;
     m.add_function(wrap_pyfunction!(ma_average, m)?)?;
     m.add_function(wrap_pyfunction!(size_count, m)?)?;
@@ -9050,6 +9101,8 @@ mod tests {
             assert!(module.getattr("matrix_transpose").is_ok());
             assert!(module.getattr("svdvals").is_ok());
             assert!(module.getattr("eye").is_ok());
+            assert!(module.getattr("identity").is_ok());
+            assert!(module.getattr("logspace").is_ok());
             assert!(module.getattr("nanmedian").is_ok());
             assert!(module.getattr("ma_average").is_ok());
             assert!(module.getattr("size_count").is_ok());
