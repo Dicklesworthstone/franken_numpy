@@ -10,7 +10,7 @@ use fnp_ufunc::{
     logaddexp2 as ufunc_logaddexp2, modf as ufunc_modf, nextafter as ufunc_nextafter,
     reduce_frompyfunc_values, signbit as ufunc_signbit, spacing as ufunc_spacing, where_nonzero,
 };
-use pyo3::exceptions::{PyTypeError, PyValueError, PyZeroDivisionError};
+use pyo3::exceptions::{PyOSError, PyTypeError, PyValueError, PyZeroDivisionError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBool, PyComplex, PyDict, PyList, PyModule, PyTuple};
 use pyo3::wrap_pyfunction;
@@ -1036,6 +1036,114 @@ where
             .chunks_exact(item_size)
             .map(convert)
             .collect())
+    }
+}
+
+fn storage_from_bytes(bytes: &[u8], parsed_dtype: DType, count: i64) -> PyResult<ArrayStorage> {
+    let Some(item_size) = dtype_item_size(parsed_dtype) else {
+        return Err(PyTypeError::new_err(format!(
+            "buffer parsing: unsupported dtype {}",
+            parsed_dtype.name()
+        )));
+    };
+
+    match parsed_dtype {
+        DType::Bool => Ok(ArrayStorage::Bool(collect_frombuffer_values(
+            bytes,
+            count,
+            item_size,
+            |chunk| chunk[0] != 0,
+        )?)),
+        DType::I8 => Ok(ArrayStorage::I8(collect_frombuffer_values(
+            bytes,
+            count,
+            item_size,
+            |chunk| i8::from_ne_bytes([chunk[0]]),
+        )?)),
+        DType::I16 => Ok(ArrayStorage::I16(collect_frombuffer_values(
+            bytes,
+            count,
+            item_size,
+            |chunk| i16::from_ne_bytes([chunk[0], chunk[1]]),
+        )?)),
+        DType::I32 => Ok(ArrayStorage::I32(collect_frombuffer_values(
+            bytes,
+            count,
+            item_size,
+            |chunk| i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
+        )?)),
+        DType::I64 => Ok(ArrayStorage::I64(collect_frombuffer_values(
+            bytes,
+            count,
+            item_size,
+            |chunk| {
+                i64::from_ne_bytes([
+                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
+                    chunk[7],
+                ])
+            },
+        )?)),
+        DType::U8 => Ok(ArrayStorage::U8(collect_frombuffer_values(
+            bytes,
+            count,
+            item_size,
+            |chunk| u8::from_ne_bytes([chunk[0]]),
+        )?)),
+        DType::U16 => Ok(ArrayStorage::U16(collect_frombuffer_values(
+            bytes,
+            count,
+            item_size,
+            |chunk| u16::from_ne_bytes([chunk[0], chunk[1]]),
+        )?)),
+        DType::U32 => Ok(ArrayStorage::U32(collect_frombuffer_values(
+            bytes,
+            count,
+            item_size,
+            |chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
+        )?)),
+        DType::U64 => Ok(ArrayStorage::U64(collect_frombuffer_values(
+            bytes,
+            count,
+            item_size,
+            |chunk| {
+                u64::from_ne_bytes([
+                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
+                    chunk[7],
+                ])
+            },
+        )?)),
+        DType::F16 => Ok(ArrayStorage::F16(collect_frombuffer_values(
+            bytes,
+            count,
+            item_size,
+            |chunk| f16::from_bits(u16::from_ne_bytes([chunk[0], chunk[1]])),
+        )?)),
+        DType::F32 => Ok(ArrayStorage::F32(collect_frombuffer_values(
+            bytes,
+            count,
+            item_size,
+            |chunk| f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
+        )?)),
+        DType::F64 => Ok(ArrayStorage::F64(collect_frombuffer_values(
+            bytes,
+            count,
+            item_size,
+            |chunk| {
+                f64::from_ne_bytes([
+                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
+                    chunk[7],
+                ])
+            },
+        )?)),
+        DType::Complex64
+        | DType::Complex128
+        | DType::Str
+        | DType::Structured
+        | DType::DateTime64
+        | DType::TimeDelta64 => Err(PyTypeError::new_err(format!(
+            "buffer parsing: unsupported dtype {}",
+            parsed_dtype.name()
+        ))),
     }
 }
 
@@ -3581,7 +3689,7 @@ fn frombuffer(
     }
 
     let parsed_dtype = extract_python_dtype(py, dtype, DType::F64, "frombuffer(dtype)")?;
-    let Some(item_size) = dtype_item_size(parsed_dtype) else {
+    if dtype_item_size(parsed_dtype).is_none() {
         let kwargs = PyDict::new(py);
         kwargs.set_item("dtype", parsed_dtype.name())?;
         kwargs.set_item("count", count)?;
@@ -3593,101 +3701,7 @@ fn frombuffer(
     };
 
     let bytes = collect_frombuffer_bytes(py, buffer.bind(py), offset)?;
-    let storage = match parsed_dtype {
-        DType::Bool => ArrayStorage::Bool(collect_frombuffer_values(
-            &bytes,
-            count,
-            item_size,
-            |chunk| chunk[0] != 0,
-        )?),
-        DType::I8 => ArrayStorage::I8(collect_frombuffer_values(
-            &bytes,
-            count,
-            item_size,
-            |chunk| i8::from_ne_bytes([chunk[0]]),
-        )?),
-        DType::I16 => ArrayStorage::I16(collect_frombuffer_values(
-            &bytes,
-            count,
-            item_size,
-            |chunk| i16::from_ne_bytes([chunk[0], chunk[1]]),
-        )?),
-        DType::I32 => ArrayStorage::I32(collect_frombuffer_values(
-            &bytes,
-            count,
-            item_size,
-            |chunk| i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
-        )?),
-        DType::I64 => ArrayStorage::I64(collect_frombuffer_values(
-            &bytes,
-            count,
-            item_size,
-            |chunk| {
-                i64::from_ne_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
-                    chunk[7],
-                ])
-            },
-        )?),
-        DType::U8 => ArrayStorage::U8(collect_frombuffer_values(
-            &bytes,
-            count,
-            item_size,
-            |chunk| u8::from_ne_bytes([chunk[0]]),
-        )?),
-        DType::U16 => ArrayStorage::U16(collect_frombuffer_values(
-            &bytes,
-            count,
-            item_size,
-            |chunk| u16::from_ne_bytes([chunk[0], chunk[1]]),
-        )?),
-        DType::U32 => ArrayStorage::U32(collect_frombuffer_values(
-            &bytes,
-            count,
-            item_size,
-            |chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
-        )?),
-        DType::U64 => ArrayStorage::U64(collect_frombuffer_values(
-            &bytes,
-            count,
-            item_size,
-            |chunk| {
-                u64::from_ne_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
-                    chunk[7],
-                ])
-            },
-        )?),
-        DType::F16 => ArrayStorage::F16(collect_frombuffer_values(
-            &bytes,
-            count,
-            item_size,
-            |chunk| f16::from_bits(u16::from_ne_bytes([chunk[0], chunk[1]])),
-        )?),
-        DType::F32 => ArrayStorage::F32(collect_frombuffer_values(
-            &bytes,
-            count,
-            item_size,
-            |chunk| f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
-        )?),
-        DType::F64 => ArrayStorage::F64(collect_frombuffer_values(
-            &bytes,
-            count,
-            item_size,
-            |chunk| {
-                f64::from_ne_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
-                    chunk[7],
-                ])
-            },
-        )?),
-        DType::Complex64
-        | DType::Complex128
-        | DType::Str
-        | DType::Structured
-        | DType::DateTime64
-        | DType::TimeDelta64 => unreachable!("unsupported dtype must have fallen back"),
-    };
+    let storage = storage_from_bytes(&bytes, parsed_dtype, count)?;
 
     build_numpy_array_from_storage(py, &[storage.len()], storage)
 }
@@ -8310,26 +8324,60 @@ fn fromfile(
     offset: i64,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.fromfile. Accepts a file path (str/PathLike) or
-    // open file object; reads binary (sep='') or text (sep=' ' etc.)
-    // numeric data into an ndarray. Matches numpy on dtype coercion,
-    // count-limited reads, nonzero byte offset for binary mode, and
-    // file-path vs file-object surface parity.
     let numpy = py.import("numpy")?;
-    let kwargs = PyDict::new(py);
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    let dtype_for_parse = dtype.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        kwargs.set_item("count", count)?;
+        kwargs.set_item("sep", sep)?;
+        kwargs.set_item("offset", offset)?;
+        if let Some(like_val) = like.as_ref() {
+            kwargs.set_item("like", like_val.bind(py))?;
+        }
+        Ok(numpy
+            .getattr("fromfile")?
+            .call((file.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
+    if !sep.is_empty() {
+        return fallback();
     }
-    kwargs.set_item("count", count)?;
-    kwargs.set_item("sep", sep)?;
-    kwargs.set_item("offset", offset)?;
-    if let Some(like_val) = like {
-        kwargs.set_item("like", like_val.bind(py))?;
+    if let Some(like_val) = like.as_ref()
+        && !like_val.bind(py).is_none()
+    {
+        return fallback();
     }
-    Ok(numpy
-        .getattr("fromfile")?
-        .call((file.bind(py),), Some(&kwargs))?
-        .unbind())
+
+    let parsed_dtype = extract_python_dtype(py, dtype_for_parse, DType::F64, "fromfile(dtype)")?;
+    if dtype_item_size(parsed_dtype).is_none() {
+        return fallback();
+    }
+
+    let os = py.import("os")?;
+    let path_obj = match os.getattr("fspath")?.call1((file.bind(py),)) {
+        Ok(path) => path,
+        Err(_) => return fallback(),
+    };
+    let path = match path_obj.extract::<String>() {
+        Ok(path) => path,
+        Err(_) => return fallback(),
+    };
+
+    let bytes = std::fs::read(&path)
+        .map_err(|err| PyOSError::new_err(err.to_string()))?;
+    if offset < 0 || offset as usize > bytes.len() {
+        return Err(PyValueError::new_err(format!(
+            "offset must be non-negative and no greater than buffer length ({})",
+            bytes.len()
+        )));
+    }
+
+    let storage = storage_from_bytes(&bytes[offset as usize..], parsed_dtype, count)?;
+    build_numpy_array_from_storage(py, &[storage.len()], storage)
 }
 
 #[pyfunction]
