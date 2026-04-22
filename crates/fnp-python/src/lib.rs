@@ -7743,6 +7743,153 @@ fn average(
 }
 
 #[pyfunction]
+#[pyo3(signature = (actual, desired, err_msg=None, verbose=true, *, strict=false))]
+fn testing_assert_equal(
+    py: Python<'_>,
+    actual: Py<PyAny>,
+    desired: Py<PyAny>,
+    err_msg: Option<String>,
+    verbose: bool,
+    strict: bool,
+) -> PyResult<()> {
+    // Passthrough to numpy.testing.assert_equal. Raises AssertionError
+    // if the two inputs are not element-wise equal. Supports nested
+    // dict/list structures, NaN-aware equality, and (in modern numpy)
+    // strict dtype/shape enforcement.
+    let numpy = py.import("numpy")?;
+    let assert_fn = numpy.getattr("testing")?.getattr("assert_equal")?;
+    let kwargs = PyDict::new(py);
+    if let Some(msg) = err_msg {
+        kwargs.set_item("err_msg", msg)?;
+    }
+    kwargs.set_item("verbose", verbose)?;
+    if strict {
+        kwargs.set_item("strict", true)?;
+    }
+    assert_fn.call((actual.bind(py), desired.bind(py)), Some(&kwargs))?;
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature = (actual, desired, decimal=7_i64, err_msg=None, verbose=true))]
+fn testing_assert_almost_equal(
+    py: Python<'_>,
+    actual: Py<PyAny>,
+    desired: Py<PyAny>,
+    decimal: i64,
+    err_msg: Option<String>,
+    verbose: bool,
+) -> PyResult<()> {
+    // Passthrough to numpy.testing.assert_almost_equal. Compares scalars
+    // or arrays up to `decimal` places; raises AssertionError on
+    // disagreement. Kept for backward compatibility with legacy numpy.
+    let numpy = py.import("numpy")?;
+    let assert_fn = numpy.getattr("testing")?.getattr("assert_almost_equal")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("decimal", decimal)?;
+    if let Some(msg) = err_msg {
+        kwargs.set_item("err_msg", msg)?;
+    }
+    kwargs.set_item("verbose", verbose)?;
+    assert_fn.call((actual.bind(py), desired.bind(py)), Some(&kwargs))?;
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, y, decimal=6_i64, err_msg=None, verbose=true))]
+fn testing_assert_array_almost_equal(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    y: Py<PyAny>,
+    decimal: i64,
+    err_msg: Option<String>,
+    verbose: bool,
+) -> PyResult<()> {
+    // Passthrough to numpy.testing.assert_array_almost_equal. Arrays
+    // are compared element-wise up to `decimal` places; NaN positions
+    // must match and shapes must agree.
+    let numpy = py.import("numpy")?;
+    let assert_fn = numpy
+        .getattr("testing")?
+        .getattr("assert_array_almost_equal")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("decimal", decimal)?;
+    if let Some(msg) = err_msg {
+        kwargs.set_item("err_msg", msg)?;
+    }
+    kwargs.set_item("verbose", verbose)?;
+    assert_fn.call((x.bind(py), y.bind(py)), Some(&kwargs))?;
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, y, err_msg=None, verbose=true, *, strict=false))]
+fn testing_assert_array_less(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    y: Py<PyAny>,
+    err_msg: Option<String>,
+    verbose: bool,
+    strict: bool,
+) -> PyResult<()> {
+    // Passthrough to numpy.testing.assert_array_less. Raises
+    // AssertionError unless all x[i] < y[i] element-wise. NaN positions
+    // cause failure on both implementations.
+    let numpy = py.import("numpy")?;
+    let assert_fn = numpy.getattr("testing")?.getattr("assert_array_less")?;
+    let kwargs = PyDict::new(py);
+    if let Some(msg) = err_msg {
+        kwargs.set_item("err_msg", msg)?;
+    }
+    kwargs.set_item("verbose", verbose)?;
+    if strict {
+        kwargs.set_item("strict", true)?;
+    }
+    assert_fn.call((x.bind(py), y.bind(py)), Some(&kwargs))?;
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature = (actual, desired, significant=7_i64, err_msg=None, verbose=true))]
+fn testing_assert_approx_equal(
+    py: Python<'_>,
+    actual: f64,
+    desired: f64,
+    significant: i64,
+    err_msg: Option<String>,
+    verbose: bool,
+) -> PyResult<()> {
+    // Passthrough to numpy.testing.assert_approx_equal. Scalar-only
+    // comparison up to `significant` significant digits; raises
+    // AssertionError on disagreement.
+    let numpy = py.import("numpy")?;
+    let assert_fn = numpy.getattr("testing")?.getattr("assert_approx_equal")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("significant", significant)?;
+    if let Some(msg) = err_msg {
+        kwargs.set_item("err_msg", msg)?;
+    }
+    kwargs.set_item("verbose", verbose)?;
+    assert_fn.call((actual, desired), Some(&kwargs))?;
+    Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature = (actual, desired))]
+fn testing_assert_string_equal(
+    py: Python<'_>,
+    actual: &str,
+    desired: &str,
+) -> PyResult<()> {
+    // Passthrough to numpy.testing.assert_string_equal. Raises
+    // AssertionError if the two strings differ; otherwise returns None.
+    let numpy = py.import("numpy")?;
+    let assert_fn = numpy.getattr("testing")?.getattr("assert_string_equal")?;
+    assert_fn.call1((actual, desired))?;
+    Ok(())
+}
+
+#[pyfunction]
 #[pyo3(signature = (actual, desired, rtol=1e-7, atol=0.0, equal_nan=true, err_msg=None, verbose=true))]
 #[allow(clippy::too_many_arguments)]
 fn testing_assert_allclose(
@@ -9298,6 +9445,12 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(isrealobj, m)?)?;
     m.add_function(wrap_pyfunction!(average, m)?)?;
     m.add_function(wrap_pyfunction!(testing_assert_allclose, m)?)?;
+    m.add_function(wrap_pyfunction!(testing_assert_equal, m)?)?;
+    m.add_function(wrap_pyfunction!(testing_assert_almost_equal, m)?)?;
+    m.add_function(wrap_pyfunction!(testing_assert_array_almost_equal, m)?)?;
+    m.add_function(wrap_pyfunction!(testing_assert_array_less, m)?)?;
+    m.add_function(wrap_pyfunction!(testing_assert_approx_equal, m)?)?;
+    m.add_function(wrap_pyfunction!(testing_assert_string_equal, m)?)?;
     m.add_function(wrap_pyfunction!(testing_assert_array_equal, m)?)?;
     m.add_function(wrap_pyfunction!(matrix_transpose, m)?)?;
     m.add_function(wrap_pyfunction!(svdvals, m)?)?;
@@ -9715,6 +9868,12 @@ mod tests {
             assert!(module.getattr("isrealobj").is_ok());
             assert!(module.getattr("average").is_ok());
             assert!(module.getattr("testing_assert_allclose").is_ok());
+            assert!(module.getattr("testing_assert_equal").is_ok());
+            assert!(module.getattr("testing_assert_almost_equal").is_ok());
+            assert!(module.getattr("testing_assert_array_almost_equal").is_ok());
+            assert!(module.getattr("testing_assert_array_less").is_ok());
+            assert!(module.getattr("testing_assert_approx_equal").is_ok());
+            assert!(module.getattr("testing_assert_string_equal").is_ok());
             assert!(module.getattr("testing_assert_array_equal").is_ok());
             assert!(module.getattr("matrix_transpose").is_ok());
             assert!(module.getattr("svdvals").is_ok());
@@ -36892,6 +37051,111 @@ mod tests {
                     "einsum_path optimize=False success/error surface must match numpy"
                 ),
             }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn testing_assert_family_matches_numpy_across_pass_fail_and_surface() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let array_fn = numpy.getattr("array")?;
+
+            // assert_equal: scalar pass/fail and nested-structure surface.
+            let ae_fn = module.getattr("testing_assert_equal")?;
+            let ae_numpy = numpy.getattr("testing")?.getattr("assert_equal")?;
+            ae_fn.call1((1_i64, 1_i64))?; // pass
+            ae_numpy.call1((1_i64, 1_i64))?;
+            let ours_err = ae_fn
+                .call1((1_i64, 2_i64))
+                .expect_err("1 != 2 must fail");
+            let theirs_err = ae_numpy
+                .call1((1_i64, 2_i64))
+                .expect_err("numpy: 1 != 2 must fail");
+            assert_pyerr_matches_numpy(py, ours_err, theirs_err)?;
+
+            // assert_almost_equal: scalar within decimal places.
+            let aae_fn = module.getattr("testing_assert_almost_equal")?;
+            let aae_numpy = numpy.getattr("testing")?.getattr("assert_almost_equal")?;
+            aae_fn.call1((1.0_f64, 1.0000001_f64))?; // pass at default decimal=7
+            aae_numpy.call1((1.0_f64, 1.0000001_f64))?;
+            let ours_aae_err = aae_fn
+                .call1((1.0_f64, 1.1_f64))
+                .expect_err("mismatch at decimal=7 must fail");
+            let theirs_aae_err = aae_numpy
+                .call1((1.0_f64, 1.1_f64))
+                .expect_err("numpy mismatch must fail");
+            assert_pyerr_matches_numpy(py, ours_aae_err, theirs_aae_err)?;
+
+            // assert_array_almost_equal: arrays up to decimal places.
+            let aaae_fn = module.getattr("testing_assert_array_almost_equal")?;
+            let aaae_numpy = numpy
+                .getattr("testing")?
+                .getattr("assert_array_almost_equal")?;
+            let a = array_fn.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            let b = array_fn.call1((vec![1.000001_f64, 2.000001, 3.000001],))?;
+            aaae_fn.call1((a.clone(), b.clone()))?;
+            aaae_numpy.call1((a.clone(), b.clone()))?;
+            let c = array_fn.call1((vec![1.1_f64, 2.1, 3.1],))?;
+            let ours_aaae_err = aaae_fn
+                .call1((a.clone(), c.clone()))
+                .expect_err("array mismatch at decimal=6 must fail");
+            let theirs_aaae_err = aaae_numpy
+                .call1((a.clone(), c.clone()))
+                .expect_err("numpy array mismatch must fail");
+            assert_pyerr_matches_numpy(py, ours_aaae_err, theirs_aaae_err)?;
+
+            // assert_array_less: elementwise strict less.
+            let al_fn = module.getattr("testing_assert_array_less")?;
+            let al_numpy = numpy.getattr("testing")?.getattr("assert_array_less")?;
+            let lo = array_fn.call1((vec![1_i64, 2, 3],))?;
+            let hi = array_fn.call1((vec![10_i64, 20, 30],))?;
+            al_fn.call1((lo.clone(), hi.clone()))?;
+            al_numpy.call1((lo.clone(), hi.clone()))?;
+            let ours_al_err = al_fn
+                .call1((hi.clone(), lo.clone()))
+                .expect_err("hi<lo must fail");
+            let theirs_al_err = al_numpy
+                .call1((hi.clone(), lo.clone()))
+                .expect_err("numpy hi<lo must fail");
+            assert_pyerr_matches_numpy(py, ours_al_err, theirs_al_err)?;
+
+            // assert_approx_equal: significant-digit scalar comparison.
+            let aprx_fn = module.getattr("testing_assert_approx_equal")?;
+            let aprx_numpy = numpy
+                .getattr("testing")?
+                .getattr("assert_approx_equal")?;
+            aprx_fn.call1((1.234567e5_f64, 1.234568e5_f64))?;
+            aprx_numpy.call1((1.234567e5_f64, 1.234568e5_f64))?;
+            let ours_aprx_err = aprx_fn
+                .call1((1.0_f64, 2.0_f64))
+                .expect_err("approx equal 1 vs 2 must fail");
+            let theirs_aprx_err = aprx_numpy
+                .call1((1.0_f64, 2.0_f64))
+                .expect_err("numpy approx mismatch must fail");
+            assert_pyerr_matches_numpy(py, ours_aprx_err, theirs_aprx_err)?;
+
+            // assert_string_equal: string pass/fail.
+            let as_fn = module.getattr("testing_assert_string_equal")?;
+            let as_numpy = numpy
+                .getattr("testing")?
+                .getattr("assert_string_equal")?;
+            as_fn.call1(("hello", "hello"))?;
+            as_numpy.call1(("hello", "hello"))?;
+            let ours_as_err = as_fn
+                .call1(("foo", "bar"))
+                .expect_err("'foo' != 'bar' must fail");
+            let theirs_as_err = as_numpy
+                .call1(("foo", "bar"))
+                .expect_err("numpy string mismatch must fail");
+            assert_pyerr_matches_numpy(py, ours_as_err, theirs_as_err)?;
 
             Ok(())
         });
