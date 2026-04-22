@@ -4242,15 +4242,37 @@ fn rint(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 fn degrees(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let x = extract_numeric_array(py, x.bind(py), "degrees(x)")?;
-    let x = x.astype(DType::F64);
+    let x = extract_precise_numeric_array(py, x.bind(py), "degrees(x)")?;
+    let x = match x.dtype() {
+        DType::Bool => x.astype(DType::F16),
+        DType::I8
+        | DType::I16
+        | DType::I32
+        | DType::I64
+        | DType::U8
+        | DType::U16
+        | DType::U32
+        | DType::U64 => x.astype(DType::F64),
+        _ => x,
+    };
     build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Degrees))
 }
 
 #[pyfunction]
 fn radians(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let x = extract_numeric_array(py, x.bind(py), "radians(x)")?;
-    let x = x.astype(DType::F64);
+    let x = extract_precise_numeric_array(py, x.bind(py), "radians(x)")?;
+    let x = match x.dtype() {
+        DType::Bool => x.astype(DType::F16),
+        DType::I8
+        | DType::I16
+        | DType::I32
+        | DType::I64
+        | DType::U8
+        | DType::U16
+        | DType::U32
+        | DType::U64 => x.astype(DType::F64),
+        _ => x,
+    };
     build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Radians))
 }
 
@@ -6319,11 +6341,10 @@ fn heaviside(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn rad2deg(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.rad2deg (multiply by 180/pi). Inverse of
-    // deg2rad. Matches numpy for pi, pi/2, 2*pi canonical conversions
-    // and for integer dtype promotion to float.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("rad2deg")?.call1((x.bind(py),))?.unbind())
+    // Rust-owned alias of np.degrees. Matches numpy's dtype surface:
+    // bool -> float16, integers -> float64, and inexact inputs preserve
+    // their floating width while multiplying by 180/pi.
+    degrees(py, x)
 }
 
 #[pyfunction]
@@ -6449,11 +6470,10 @@ fn log1p(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn deg2rad(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.deg2rad (convert angles from degrees to radians
-    // element-wise, multiplying by pi/180). Integer input promotes to
-    // float; matches numpy for 0, 90, 180, 360 canonical conversions.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("deg2rad")?.call1((x.bind(py),))?.unbind())
+    // Rust-owned alias of np.radians. Matches numpy's dtype surface:
+    // bool -> float16, integers -> float64, and inexact inputs preserve
+    // their floating width while multiplying by pi/180.
+    radians(py, x)
 }
 
 #[pyfunction]
@@ -36497,6 +36517,7 @@ mod tests {
             let module = PyModule::new(py, "fnp_python_test")?;
             fnp_python(&module)?;
             let d2r_fn = module.getattr("deg2rad")?;
+            let radians_fn = module.getattr("radians")?;
             let numpy = py.import("numpy")?;
             let numpy_d2r = numpy.getattr("deg2rad")?;
             let isclose = numpy.getattr("isclose")?;
@@ -36552,6 +36573,33 @@ mod tests {
                 theirs_i.getattr("dtype")?.str()?.to_string()
             );
 
+            // Bool input promotes to float16.
+            let bools = array_fn.call1((vec![false, true, true],))?;
+            let ours_b = d2r_fn.call1((bools.clone(),))?;
+            let theirs_b = numpy_d2r.call1((bools.clone(),))?;
+            let ok_b: bool = allclose.call1((&ours_b, &theirs_b))?.extract()?;
+            assert!(ok_b, "deg2rad bool input mismatch");
+            assert_eq!(
+                ours_b.getattr("dtype")?.str()?.to_string(),
+                theirs_b.getattr("dtype")?.str()?.to_string()
+            );
+
+            // float32 input preserves float32.
+            let float32_kwargs = PyDict::new(py);
+            float32_kwargs.set_item("dtype", numpy.getattr("float32")?)?;
+            let float32s = array_fn.call(
+                (vec![0.0_f32, 1.0_f32, 45.0_f32, 90.0_f32],),
+                Some(&float32_kwargs),
+            )?;
+            let ours_f32 = d2r_fn.call1((float32s.clone(),))?;
+            let theirs_f32 = numpy_d2r.call1((float32s.clone(),))?;
+            let ok_f32: bool = allclose.call1((&ours_f32, &theirs_f32))?.extract()?;
+            assert!(ok_f32, "deg2rad float32 input mismatch");
+            assert_eq!(
+                ours_f32.getattr("dtype")?.str()?.to_string(),
+                theirs_f32.getattr("dtype")?.str()?.to_string()
+            );
+
             // 2-D array element-wise.
             let two_d = array_fn.call1((vec![vec![0.0_f64, 45.0], vec![90.0, 180.0]],))?;
             let ours_2d = d2r_fn.call1((two_d.clone(),))?;
@@ -36559,12 +36607,15 @@ mod tests {
             let ok_2d: bool = allclose.call1((&ours_2d, &theirs_2d))?.extract()?;
             assert!(ok_2d, "deg2rad 2-D mismatch");
 
-            // radians(x) should agree with deg2rad(x) on both implementations
-            // (they are aliased in numpy); surface equivalence check.
-            let radians_ours = d2r_fn.call1((arr.clone(),))?;
-            let radians_theirs = numpy.getattr("radians")?.call1((arr.clone(),))?;
+            // radians(x) should agree with deg2rad(x) on both implementations.
+            let radians_ours = radians_fn.call1((arr.clone(),))?;
+            let radians_theirs = d2r_fn.call1((arr.clone(),))?;
             let ok_alias: bool = allclose.call1((&radians_ours, &radians_theirs))?.extract()?;
             assert!(ok_alias, "deg2rad must equal radians on numeric input");
+            assert_eq!(
+                radians_ours.getattr("dtype")?.str()?.to_string(),
+                radians_theirs.getattr("dtype")?.str()?.to_string()
+            );
 
             Ok(())
         });
@@ -37133,6 +37184,7 @@ mod tests {
             fnp_python(&module)?;
             let r2d_fn = module.getattr("rad2deg")?;
             let d2r_fn = module.getattr("deg2rad")?;
+            let degrees_fn = module.getattr("degrees")?;
             let numpy = py.import("numpy")?;
             let numpy_r2d = numpy.getattr("rad2deg")?;
             let allclose = numpy.getattr("allclose")?;
@@ -37174,11 +37226,48 @@ mod tests {
                 theirs_i.getattr("dtype")?.str()?.to_string()
             );
 
+            // Bool input promotes to float16.
+            let bools = array_fn.call1((vec![false, true, true],))?;
+            let ours_b = r2d_fn.call1((bools.clone(),))?;
+            let theirs_b = numpy_r2d.call1((bools.clone(),))?;
+            let ok_b: bool = allclose.call1((&ours_b, &theirs_b))?.extract()?;
+            assert!(ok_b, "rad2deg bool input mismatch");
+            assert_eq!(
+                ours_b.getattr("dtype")?.str()?.to_string(),
+                theirs_b.getattr("dtype")?.str()?.to_string()
+            );
+
+            // float32 input preserves float32.
+            let float32_kwargs = PyDict::new(py);
+            float32_kwargs.set_item("dtype", numpy.getattr("float32")?)?;
+            let float32s = array_fn.call(
+                (vec![0.0_f32, 1.0_f32, 2.0_f32, 3.0_f32],),
+                Some(&float32_kwargs),
+            )?;
+            let ours_f32 = r2d_fn.call1((float32s.clone(),))?;
+            let theirs_f32 = numpy_r2d.call1((float32s.clone(),))?;
+            let ok_f32: bool = allclose.call1((&ours_f32, &theirs_f32))?.extract()?;
+            assert!(ok_f32, "rad2deg float32 input mismatch");
+            assert_eq!(
+                ours_f32.getattr("dtype")?.str()?.to_string(),
+                theirs_f32.getattr("dtype")?.str()?.to_string()
+            );
+
             // Round-trip: rad2deg(deg2rad(x)) ≈ x on a degree grid.
             let degrees = array_fn.call1((vec![-180.0_f64, -90.0, 0.0, 45.0, 90.0, 180.0, 360.0],))?;
             let rt = r2d_fn.call1((d2r_fn.call1((degrees.clone(),))?,))?;
             let ok_rt: bool = allclose.call1((&rt, &degrees))?.extract()?;
             assert!(ok_rt, "rad2deg(deg2rad(x)) must roundtrip");
+
+            // degrees(x) should agree with rad2deg(x) on both implementations.
+            let alias_ours = degrees_fn.call1((arr.clone(),))?;
+            let alias_theirs = r2d_fn.call1((arr.clone(),))?;
+            let ok_alias: bool = allclose.call1((&alias_ours, &alias_theirs))?.extract()?;
+            assert!(ok_alias, "rad2deg must equal degrees on numeric input");
+            assert_eq!(
+                alias_ours.getattr("dtype")?.str()?.to_string(),
+                alias_theirs.getattr("dtype")?.str()?.to_string()
+            );
 
             Ok(())
         });
