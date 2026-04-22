@@ -7,9 +7,10 @@ use fnp_ufunc::{
     FromPyFuncReduceOptions, GridSpec, MAError, MaskedArray, UFuncArray, UnaryOp,
     copysign as ufunc_copysign, frexp as ufunc_frexp, hypot as ufunc_hypot,
     isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, ldexp as ufunc_ldexp,
-    logaddexp as ufunc_logaddexp, logaddexp2 as ufunc_logaddexp2, ma_is_masked,
-    modf as ufunc_modf, nextafter as ufunc_nextafter, reduce_frompyfunc_values,
-    signbit as ufunc_signbit, spacing as ufunc_spacing, where_nonzero,
+    logaddexp as ufunc_logaddexp, logaddexp2 as ufunc_logaddexp2,
+    ma_is_masked, ma_make_mask, ma_mask_or, modf as ufunc_modf,
+    nextafter as ufunc_nextafter, reduce_frompyfunc_values, signbit as ufunc_signbit,
+    spacing as ufunc_spacing, where_nonzero,
 };
 use pyo3::exceptions::{PyOSError, PyTypeError, PyValueError, PyZeroDivisionError};
 use pyo3::prelude::*;
@@ -17,7 +18,7 @@ use pyo3::types::{PyAny, PyBool, PyComplex, PyDict, PyList, PyModule, PyTuple};
 use pyo3::wrap_pyfunction;
 use pyo3::{Bound, IntoPyObject};
 
-#[pyclass(name = "NditerStep", get_all, unsendable)]
+#[pyclass(name = "NditerStep", get_all, unsendable, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyNditerStep {
     pub iterindex: usize,
@@ -867,7 +868,7 @@ fn extract_tensorsolve_axes(
 
     let mut normalized = Vec::with_capacity(ndim);
     for axis in permutation.iter() {
-        if axis.downcast::<PyBool>().is_ok() {
+        if axis.cast::<PyBool>().is_ok() {
             return Err(PyTypeError::new_err("an integer is required"));
         }
         match axis.extract::<usize>() {
@@ -1058,6 +1059,75 @@ fn extract_numeric_masked_array(
         .map_err(|err| map_ma_error(context, err))
 }
 
+fn extract_mask_operand(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    context: &str,
+) -> PyResult<Option<UFuncArray>> {
+    let numpy = py.import("numpy")?;
+    let nomask = numpy.getattr("ma")?.getattr("nomask")?;
+    if value.is(&nomask) {
+        return Ok(None);
+    }
+
+    let array = match extract_numeric_array(py, value, context) {
+        Ok(array) => array,
+        Err(_) => return Err(PyTypeError::new_err(format!("{context}: unsupported mask input"))),
+    };
+    Ok(Some(ma_make_mask(&array)))
+}
+
+fn count_valid_elements(
+    shape: &[usize],
+    mask: Option<&UFuncArray>,
+    axis: Option<usize>,
+    keepdims: bool,
+) -> PyResult<(Vec<usize>, Vec<i64>)> {
+    let total = element_count(shape).map_err(|err| PyValueError::new_err(err.to_string()))?;
+    match axis {
+        None => {
+            let count = match mask {
+                Some(mask) => mask.values().iter().filter(|&&value| value == 0.0).count(),
+                None => total,
+            };
+            let output_shape = if keepdims { vec![1; shape.len()] } else { Vec::new() };
+            Ok((output_shape, vec![i64::try_from(count).unwrap_or(i64::MAX)]))
+        }
+        Some(axis) => {
+            let axis_len = shape[axis];
+            let inner =
+                element_count(&shape[axis + 1..]).map_err(|err| PyValueError::new_err(err.to_string()))?;
+            let outer =
+                element_count(&shape[..axis]).map_err(|err| PyValueError::new_err(err.to_string()))?;
+            let mut counts = vec![0_i64; outer * inner];
+
+            for outer_idx in 0..outer {
+                let base = outer_idx * axis_len * inner;
+                for lane_idx in 0..axis_len {
+                    for inner_idx in 0..inner {
+                        let src_idx = base + lane_idx * inner + inner_idx;
+                        let valid = mask.is_none_or(|mask| mask.values()[src_idx] == 0.0);
+                        if valid {
+                            counts[outer_idx * inner + inner_idx] += 1;
+                        }
+                    }
+                }
+            }
+
+            let output_shape = if keepdims {
+                let mut shape = shape.to_vec();
+                shape[axis] = 1;
+                shape
+            } else {
+                let mut shape = shape.to_vec();
+                shape.remove(axis);
+                shape
+            };
+            Ok((output_shape, counts))
+        }
+    }
+}
+
 fn extract_python_dtype(
     py: Python<'_>,
     dtype: Option<Py<PyAny>>,
@@ -1167,7 +1237,7 @@ where
     F: FnMut(&[u8]) -> T,
 {
     if count < 0 {
-        if bytes.len() % item_size != 0 {
+        if !bytes.len().is_multiple_of(item_size) {
             return Err(PyValueError::new_err(
                 "buffer size must be a multiple of element size",
             ));
@@ -2015,12 +2085,12 @@ fn parse_grid_key(
 ) -> PyResult<(Vec<GridSpec>, Py<PyAny>, bool)> {
     let numpy = py.import("numpy")?;
 
-    if let Ok(tuple) = key.downcast::<PyTuple>() {
+    if let Ok(tuple) = key.cast::<PyTuple>() {
         let mut specs = Vec::with_capacity(tuple.len());
         let mut dtype_args = vec![0_i64.into_pyobject(py)?.into_any().unbind()];
         for (index, item) in tuple.try_iter()?.enumerate() {
             let item = item?;
-            let slice = item.downcast::<pyo3::types::PySlice>().map_err(|_| {
+            let slice = item.cast::<pyo3::types::PySlice>().map_err(|_| {
                 PyTypeError::new_err(format!(
                     "{context}: index {index} must be a slice expression",
                 ))
@@ -2037,7 +2107,7 @@ fn parse_grid_key(
         )?)?;
         Ok((specs, dtype.unbind(), true))
     } else {
-        let slice = key.downcast::<pyo3::types::PySlice>().map_err(|_| {
+        let slice = key.cast::<pyo3::types::PySlice>().map_err(|_| {
             PyTypeError::new_err(format!("{context}: expected slice syntax, e.g. [0:5:2]"))
         })?;
         let parsed = parse_grid_slice(py, slice.as_any(), context)?;
@@ -2123,7 +2193,7 @@ fn grid_getitem(py: Python<'_>, key: &Bound<'_, PyAny>, sparse: bool) -> PyResul
 }
 
 fn axis_concatenator_items(key: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
-    if let Ok(tuple) = key.downcast::<PyTuple>() {
+    if let Ok(tuple) = key.cast::<PyTuple>() {
         tuple.try_iter()?.map(|item| Ok(item?.unbind())).collect()
     } else {
         Ok(vec![key.clone().unbind()])
@@ -2151,7 +2221,7 @@ fn axis_concatenator_array(
         return Ok(None);
     }
 
-    if let Ok(slice) = value.downcast::<pyo3::types::PySlice>() {
+    if let Ok(slice) = value.cast::<pyo3::types::PySlice>() {
         return axis_concatenator_slice_array(py, kind, slice.as_any()).map(Some);
     }
 
@@ -2497,7 +2567,7 @@ fn build_meshgrid_numpy_outputs(
             py,
             reshaped.iter().map(|array| array.bind(py)),
         )?)?;
-        let broadcast = broadcast.downcast::<PyTuple>()?;
+        let broadcast = broadcast.cast::<PyTuple>()?;
         broadcast
             .try_iter()?
             .map(|item| Ok(item?.unbind()))
@@ -2605,12 +2675,12 @@ fn build_numpy_scalar_or_array_from_object_values(
 }
 
 fn normalize_reduce_out_argument(py: Python<'_>, out: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-    let candidate = if let Ok(tuple) = out.downcast::<PyTuple>() {
+    let candidate = if let Ok(tuple) = out.cast::<PyTuple>() {
         if tuple.len() != 1 {
             return Err(PyTypeError::new_err("output must be an array"));
         }
         tuple.get_item(0)?
-    } else if out.downcast::<PyList>().is_ok() {
+    } else if out.cast::<PyList>().is_ok() {
         return Err(PyTypeError::new_err("output must be an array"));
     } else {
         out.clone()
@@ -2878,7 +2948,7 @@ impl PyFromPyFunc {
                 continue;
             }
 
-            if let Ok(values) = result.downcast::<PyTuple>() {
+            if let Ok(values) = result.cast::<PyTuple>() {
                 if values.len() != self.nout {
                     return Err(PyValueError::new_err(format!(
                         "frompyfunc: expected {} outputs, got {}",
@@ -2893,7 +2963,7 @@ impl PyFromPyFunc {
                 continue;
             }
 
-            if let Ok(values) = result.downcast::<PyList>() {
+            if let Ok(values) = result.cast::<PyList>() {
                 if values.len() != self.nout {
                     return Err(PyValueError::new_err(format!(
                         "frompyfunc: expected {} outputs, got {}",
@@ -3033,7 +3103,7 @@ impl PyVectorize {
                 }),
             )?;
             let result = self.callable.bind(py).call1(call_args)?;
-            let values = if let Ok(tuple) = result.downcast::<PyTuple>() {
+            let values = if let Ok(tuple) = result.cast::<PyTuple>() {
                 tuple.iter().map(|value| value.unbind()).collect::<Vec<_>>()
             } else {
                 vec![result.unbind()]
@@ -5765,18 +5835,45 @@ fn mask_or(
     copy: bool,
     shrink: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ma.mask_or so logical-or combination of masks
-    // (including nomask views, shrink=True collapsing all-False to
-    // nomask, and copy=True producing fresh storage) matches numpy
-    // exactly.
-    let numpy = py.import("numpy")?;
-    let mask_or_fn = numpy.getattr("ma")?.getattr("mask_or")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("copy", copy)?;
-    kwargs.set_item("shrink", shrink)?;
-    Ok(mask_or_fn
-        .call((m1.bind(py), m2.bind(py)), Some(&kwargs))?
-        .unbind())
+    let m1_for_fallback = m1.clone_ref(py);
+    let m2_for_fallback = m2.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let mask_or_fn = numpy.getattr("ma")?.getattr("mask_or")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("copy", copy)?;
+        kwargs.set_item("shrink", shrink)?;
+        Ok(mask_or_fn
+            .call((m1_for_fallback.bind(py), m2_for_fallback.bind(py)), Some(&kwargs))?
+            .unbind())
+    };
+
+    let left = match extract_mask_operand(py, m1.bind(py), "mask_or(m1)") {
+        Ok(mask) => mask,
+        Err(_) => return fallback(),
+    };
+    let right = match extract_mask_operand(py, m2.bind(py), "mask_or(m2)") {
+        Ok(mask) => mask,
+        Err(_) => return fallback(),
+    };
+    if let (Some(left), Some(right)) = (&left, &right)
+        && left.shape() != right.shape()
+    {
+        return fallback();
+    }
+
+    let Some(result) = ma_mask_or(left.as_ref(), right.as_ref()) else {
+        return Ok(py.import("numpy")?.getattr("ma")?.getattr("nomask")?.unbind());
+    };
+    if shrink && result.values().iter().all(|&value| value == 0.0) {
+        return Ok(py.import("numpy")?.getattr("ma")?.getattr("nomask")?.unbind());
+    }
+
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if !copy && left.is_none() && right.is_none() {
+        return Ok(py.import("numpy")?.getattr("ma")?.getattr("nomask")?.unbind());
+    }
+    Ok(output)
 }
 
 #[pyfunction]
@@ -5787,21 +5884,53 @@ fn ma_count(
     axis: Option<Py<PyAny>>,
     keepdims: Option<bool>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ma.count so counting of non-masked elements
-    // matches numpy exactly across axis=None/int/tuple, keepdims, and
-    // both MaskedArray and plain ndarray inputs. `keepdims` is only
-    // forwarded when an explicit value is supplied so numpy's
-    // `_NoValue` sentinel behavior is preserved for the default path.
-    let numpy = py.import("numpy")?;
-    let count_fn = numpy.getattr("ma")?.getattr("count")?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis_val) = axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let count_fn = numpy.getattr("ma")?.getattr("count")?;
+        let kwargs = PyDict::new(py);
+        if let Some(axis_val) = axis.as_ref() {
+            kwargs.set_item("axis", axis_val.bind(py))?;
+        }
+        if let Some(keepdims_val) = keepdims {
+            kwargs.set_item("keepdims", keepdims_val)?;
+        }
+        Ok(count_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    };
+
+    let keepdims = keepdims.unwrap_or(false);
+    let axis_spec = match extract_axis_spec(py, axis_for_parse, "ma_count") {
+        Ok(spec) => spec,
+        Err(_) => return fallback(),
+    };
+    if axis_spec.as_ref().is_some_and(|axes| axes.len() > 1) {
+        return fallback();
     }
-    if let Some(keepdims_val) = keepdims {
-        kwargs.set_item("keepdims", keepdims_val)?;
+
+    let (_, mask, shape) = match extract_mask_metadata(py, a.bind(py), "ma_count") {
+        Ok(metadata) => metadata,
+        Err(_) => return fallback(),
+    };
+    let axis = match axis_spec.as_ref().and_then(|axes| axes.first().copied()) {
+        Some(axis) => match try_normalize_axis(axis, shape.len()) {
+            Some(axis) => Some(axis),
+            None => return fallback(),
+        },
+        None => {
+            if keepdims && shape.is_empty() {
+                return fallback();
+            }
+            None
+        }
+    };
+
+    let (output_shape, counts) = count_valid_elements(&shape, mask.as_ref(), axis, keepdims)?;
+    let output = build_numpy_array_from_storage(py, &output_shape, ArrayStorage::I64(counts))?;
+    if output_shape.is_empty() {
+        Ok(output.bind(py).get_item(())?.unbind())
+    } else {
+        Ok(output)
     }
-    Ok(count_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
 
 #[pyfunction]
@@ -12076,8 +12205,8 @@ mod tests {
         actual: &pyo3::Bound<'_, pyo3::types::PyAny>,
         expected: &pyo3::Bound<'_, pyo3::types::PyAny>,
     ) -> PyResult<()> {
-        let actual_tuple = actual.downcast::<PyTuple>()?;
-        let expected_tuple = expected.downcast::<PyTuple>()?;
+        let actual_tuple = actual.cast::<PyTuple>()?;
+        let expected_tuple = expected.cast::<PyTuple>()?;
         assert_eq!(actual_tuple.len()?, expected_tuple.len()?);
 
         for (actual_item, expected_item) in actual_tuple.try_iter()?.zip(expected_tuple.try_iter()?)
@@ -12518,8 +12647,8 @@ mod tests {
                 .call1((callable.bind(py), 2, 2))?
                 .call1(expected_args)?;
 
-            let actual_tuple = actual.bind(py).downcast::<PyTuple>()?;
-            let expected_tuple = expected.downcast::<PyTuple>()?;
+            let actual_tuple = actual.bind(py).cast::<PyTuple>()?;
+            let expected_tuple = expected.cast::<PyTuple>()?;
             assert_eq!(actual_tuple.len()?, 2);
             assert_eq!(expected_tuple.len()?, 2);
 
@@ -12566,8 +12695,8 @@ mod tests {
 
             let actual_repr = repr_string(actual.bind(py));
             let expected_repr = repr_string(&expected);
-            let actual_tuple = actual.bind(py).downcast::<PyTuple>()?;
-            let expected_tuple = expected.downcast::<PyTuple>()?;
+            let actual_tuple = actual.bind(py).cast::<PyTuple>()?;
+            let expected_tuple = expected.cast::<PyTuple>()?;
             assert_eq!(actual_tuple.len()?, 0);
             assert_eq!(expected_tuple.len()?, 0);
             assert_eq!(actual_repr, expected_repr);
@@ -13024,8 +13153,8 @@ mod tests {
                 .call1((callable.bind(py),))?
                 .call1(expected_args)?;
 
-            let actual_tuple = actual.bind(py).downcast::<PyTuple>()?;
-            let expected_tuple = expected.downcast::<PyTuple>()?;
+            let actual_tuple = actual.bind(py).cast::<PyTuple>()?;
+            let expected_tuple = expected.cast::<PyTuple>()?;
             assert_eq!(actual_tuple.len()?, 2);
             assert_eq!(expected_tuple.len()?, 2);
 
@@ -13777,8 +13906,8 @@ mod tests {
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("where")?.call1((condition,))?;
 
-            let actual = actual.bind(py).downcast::<PyTuple>()?;
-            let expected = expected.downcast::<PyTuple>()?;
+            let actual = actual.bind(py).cast::<PyTuple>()?;
+            let expected = expected.cast::<PyTuple>()?;
             assert_eq!(actual.len()?, 2);
             assert_eq!(expected.len()?, 2);
 
@@ -13824,7 +13953,7 @@ mod tests {
             let theirs_two_d = numpy_nonzero.call1((two_d.clone(),))?;
             assert_index_tuple_matches_numpy(&ours_two_d, &theirs_two_d)?;
             assert_eq!(
-                ours_two_d.downcast::<PyTuple>()?.len()?,
+                ours_two_d.cast::<PyTuple>()?.len()?,
                 two_d.getattr("ndim")?.extract::<usize>()?,
                 "nonzero tuple length must match ndim",
             );
@@ -13861,7 +13990,7 @@ mod tests {
             let theirs_object = numpy_nonzero.call1((object_arr.clone(),))?;
             assert_index_tuple_matches_numpy(&ours_object, &theirs_object)?;
             assert_eq!(
-                ours_object.downcast::<PyTuple>()?.len()?,
+                ours_object.cast::<PyTuple>()?.len()?,
                 object_arr.getattr("ndim")?.extract::<usize>()?,
                 "nonzero object tuple length must match ndim",
             );
@@ -15653,8 +15782,8 @@ mod tests {
 
             let tuple_close =
                 |actual: &Bound<'_, PyAny>, expected: &Bound<'_, PyAny>| -> PyResult<()> {
-                    let actual_tuple = actual.downcast::<PyTuple>()?;
-                    let expected_tuple = expected.downcast::<PyTuple>()?;
+                    let actual_tuple = actual.cast::<PyTuple>()?;
+                    let expected_tuple = expected.cast::<PyTuple>()?;
                     assert_eq!(actual_tuple.len()?, expected_tuple.len()?);
                     // 0: solution, 1: residuals, 2: rank (i32), 3: singular values
                     assert!(
@@ -19261,8 +19390,8 @@ mod tests {
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("frexp")?.call1((x,))?;
 
-            let actual_tuple = actual.bind(py).downcast::<PyTuple>()?;
-            let expected_tuple = expected.downcast::<PyTuple>()?;
+            let actual_tuple = actual.bind(py).cast::<PyTuple>()?;
+            let expected_tuple = expected.cast::<PyTuple>()?;
             assert_eq!(actual_tuple.len()?, 2);
             assert_eq!(expected_tuple.len()?, 2);
 
@@ -19318,8 +19447,8 @@ mod tests {
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("frexp")?.call1((x,))?;
 
-            let actual_tuple = actual.bind(py).downcast::<PyTuple>()?;
-            let expected_tuple = expected.downcast::<PyTuple>()?;
+            let actual_tuple = actual.bind(py).cast::<PyTuple>()?;
+            let expected_tuple = expected.cast::<PyTuple>()?;
             let actual_mantissa = actual_tuple.get_item(0)?;
             let actual_exponent = actual_tuple.get_item(1)?;
             let expected_mantissa = expected_tuple.get_item(0)?;
@@ -19369,8 +19498,8 @@ mod tests {
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("modf")?.call1((x,))?;
 
-            let actual_tuple = actual.bind(py).downcast::<PyTuple>()?;
-            let expected_tuple = expected.downcast::<PyTuple>()?;
+            let actual_tuple = actual.bind(py).cast::<PyTuple>()?;
+            let expected_tuple = expected.cast::<PyTuple>()?;
             assert_eq!(actual_tuple.len()?, 2);
             assert_eq!(expected_tuple.len()?, 2);
 
@@ -19407,8 +19536,8 @@ mod tests {
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("modf")?.call1((x,))?;
 
-            let actual_tuple = actual.bind(py).downcast::<PyTuple>()?;
-            let expected_tuple = expected.downcast::<PyTuple>()?;
+            let actual_tuple = actual.bind(py).cast::<PyTuple>()?;
+            let expected_tuple = expected.cast::<PyTuple>()?;
             let actual_fractional = actual_tuple.get_item(0)?;
             let actual_integral = actual_tuple.get_item(1)?;
             let expected_fractional = expected_tuple.get_item(0)?;
@@ -20443,8 +20572,8 @@ mod tests {
             )?;
             assert_index_tuple_matches_numpy(actual.bind(py), &expected)?;
 
-            let actual_tuple = actual.bind(py).downcast::<PyTuple>()?;
-            let expected_tuple = expected.downcast::<PyTuple>()?;
+            let actual_tuple = actual.bind(py).cast::<PyTuple>()?;
+            let expected_tuple = expected.cast::<PyTuple>()?;
             let actual_x_grid = actual_tuple.get_item(0)?;
             let actual_y_grid = actual_tuple.get_item(1)?;
             let expected_x_grid = expected_tuple.get_item(0)?;
@@ -31311,7 +31440,7 @@ mod tests {
             let actual_default = histogram_fn.call1((values.clone(),))?;
             let expected_default = numpy_histogram.call1((values.clone(),))?;
             assert_index_tuple_matches_numpy(&actual_default, &expected_default)?;
-            let actual_default_tuple = actual_default.downcast::<PyTuple>()?;
+            let actual_default_tuple = actual_default.cast::<PyTuple>()?;
             assert_eq!(actual_default_tuple.len()?, 2);
             let counts = actual_default_tuple.get_item(0)?;
             let edges = actual_default_tuple.get_item(1)?;
@@ -32431,8 +32560,8 @@ mod tests {
             retstep_kwargs.set_item("retstep", true)?;
             let ours_retstep = linspace_fn.call((1.0_f64, 3.0_f64), Some(&retstep_kwargs))?;
             let theirs_retstep = numpy_linspace.call((1.0_f64, 3.0_f64), Some(&retstep_kwargs))?;
-            let ours_tuple = ours_retstep.downcast::<PyTuple>()?;
-            let theirs_tuple = theirs_retstep.downcast::<PyTuple>()?;
+            let ours_tuple = ours_retstep.cast::<PyTuple>()?;
+            let theirs_tuple = theirs_retstep.cast::<PyTuple>()?;
             assert_eq!(ours_tuple.len()?, theirs_tuple.len()?);
             assert_array_matches_numpy(&ours_tuple.get_item(0)?, &theirs_tuple.get_item(0)?)?;
             let step_ok: bool = isclose
@@ -39604,8 +39733,8 @@ mod tests {
                 numpy_ep.call1(("ijk,jkl,kl->il", a.clone(), b.clone(), c.clone()))?;
             // Tuple length must match; second item is a human-readable
             // string — compare for exact equality.
-            let ours_tuple = ours_def.downcast::<PyTuple>()?;
-            let theirs_tuple = theirs_def.downcast::<PyTuple>()?;
+            let ours_tuple = ours_def.cast::<PyTuple>()?;
+            let theirs_tuple = theirs_def.cast::<PyTuple>()?;
             assert_eq!(ours_tuple.len()?, theirs_tuple.len()?);
             assert_eq!(
                 ours_tuple.get_item(1)?.extract::<String>()?,
@@ -39625,11 +39754,11 @@ mod tests {
             )?;
             assert_eq!(
                 ours_g
-                    .downcast::<PyTuple>()?
+                    .cast::<PyTuple>()?
                     .get_item(1)?
                     .extract::<String>()?,
                 theirs_g
-                    .downcast::<PyTuple>()?
+                    .cast::<PyTuple>()?
                     .get_item(1)?
                     .extract::<String>()?
             );
@@ -39647,8 +39776,8 @@ mod tests {
             );
             match (ours_no, theirs_no) {
                 (Ok(our_t), Ok(their_t)) => {
-                    let ours_t = our_t.downcast::<PyTuple>()?;
-                    let theirs_t = their_t.downcast::<PyTuple>()?;
+                    let ours_t = our_t.cast::<PyTuple>()?;
+                    let theirs_t = their_t.cast::<PyTuple>()?;
                     assert_eq!(ours_t.len()?, theirs_t.len()?);
                 }
                 (Err(ours), Err(theirs)) => assert_pyerr_matches_numpy(py, ours, theirs)?,
@@ -39796,10 +39925,10 @@ mod tests {
             assert!(ok_s, "vecdot 1-D real mismatch");
 
             // vecdot: 2-D batch (rows as vectors).
-            let A = array_fn.call1((vec![vec![1.0_f64, 0.0], vec![0.0, 1.0]],))?;
-            let B = array_fn.call1((vec![vec![1.0_f64, 2.0], vec![3.0, 4.0]],))?;
-            let ours_b = vd_fn.call1((A.clone(), B.clone()))?;
-            let theirs_b = numpy_vd.call1((A.clone(), B.clone()))?;
+            let mat_a = array_fn.call1((vec![vec![1.0_f64, 0.0], vec![0.0, 1.0]],))?;
+            let mat_b = array_fn.call1((vec![vec![1.0_f64, 2.0], vec![3.0, 4.0]],))?;
+            let ours_b = vd_fn.call1((mat_a.clone(), mat_b.clone()))?;
+            let theirs_b = numpy_vd.call1((mat_a.clone(), mat_b.clone()))?;
             let ok_b: bool = allclose.call1((&ours_b, &theirs_b))?.extract()?;
             assert!(ok_b, "vecdot 2-D batch mismatch");
 
@@ -39823,8 +39952,8 @@ mod tests {
             // vecdot: explicit axis=0 on 2-D input (contract rows).
             let axis0_kw = PyDict::new(py);
             axis0_kw.set_item("axis", 0_i64)?;
-            let ours_ax = vd_fn.call((A.clone(), B.clone()), Some(&axis0_kw))?;
-            let theirs_ax = numpy_vd.call((A.clone(), B.clone()), Some(&axis0_kw))?;
+            let ours_ax = vd_fn.call((mat_a.clone(), mat_b.clone()), Some(&axis0_kw))?;
+            let theirs_ax = numpy_vd.call((mat_a.clone(), mat_b.clone()), Some(&axis0_kw))?;
             let ok_ax: bool = allclose.call1((&ours_ax, &theirs_ax))?.extract()?;
             assert!(ok_ax, "vecdot axis=0 mismatch");
 
@@ -39899,8 +40028,8 @@ mod tests {
             let diag = array_fn.call1((vec![vec![2.0_f64, 0.0], vec![0.0, 3.0]],))?;
             let ours = eig_fn.call1((diag.clone(),))?;
             let theirs = numpy_eig.call1((diag.clone(),))?;
-            let ours_tuple = ours.downcast::<PyTuple>()?;
-            let theirs_tuple = theirs.downcast::<PyTuple>()?;
+            let ours_tuple = ours.cast::<PyTuple>()?;
+            let theirs_tuple = theirs.cast::<PyTuple>()?;
             let ours_vals = sort.call1((ours_tuple.get_item(0)?.getattr("real")?,))?;
             let theirs_vals = sort.call1((theirs_tuple.get_item(0)?.getattr("real")?,))?;
             let ok_d: bool = allclose.call1((&ours_vals, &theirs_vals))?.extract()?;
@@ -39912,13 +40041,13 @@ mod tests {
             let theirs_s = numpy_eig.call1((sym.clone(),))?;
             let ours_sv = sort.call1((
                 ours_s
-                    .downcast::<PyTuple>()?
+                    .cast::<PyTuple>()?
                     .get_item(0)?
                     .getattr("real")?,
             ))?;
             let theirs_sv = sort.call1((
                 theirs_s
-                    .downcast::<PyTuple>()?
+                    .cast::<PyTuple>()?
                     .get_item(0)?
                     .getattr("real")?,
             ))?;
@@ -39932,13 +40061,13 @@ mod tests {
             // dtype must be complex on both.
             assert_eq!(
                 ours_r
-                    .downcast::<PyTuple>()?
+                    .cast::<PyTuple>()?
                     .get_item(0)?
                     .getattr("dtype")?
                     .str()?
                     .to_string(),
                 theirs_r
-                    .downcast::<PyTuple>()?
+                    .cast::<PyTuple>()?
                     .get_item(0)?
                     .getattr("dtype")?
                     .str()?
@@ -39948,8 +40077,8 @@ mod tests {
             // Eigendecomposition invariant: A @ v = λ * v for each (λ,v).
             let a = array_fn.call1((vec![vec![4.0_f64, 1.0], vec![2.0, 3.0]],))?;
             let result = eig_fn.call1((a.clone(),))?;
-            let vals = result.downcast::<PyTuple>()?.get_item(0)?;
-            let vecs = result.downcast::<PyTuple>()?.get_item(1)?;
+            let vals = result.cast::<PyTuple>()?.get_item(0)?;
+            let vecs = result.cast::<PyTuple>()?.get_item(1)?;
             let av = numpy.getattr("matmul")?.call1((a.clone(), vecs.clone()))?;
             let lv = numpy.getattr("multiply")?.call1((vals.clone(), vecs.clone()))?;
             let ok_inv: bool = allclose.call1((&av, &lv))?.extract()?;
@@ -39994,8 +40123,8 @@ mod tests {
             full_kw.set_item("full", true)?;
             let ours_f = pf_fn.call((x.clone(), y.clone(), 1_i64), Some(&full_kw))?;
             let theirs_f = numpy_pf.call((x.clone(), y.clone(), 1_i64), Some(&full_kw))?;
-            let ours_t = ours_f.downcast::<PyTuple>()?;
-            let theirs_t = theirs_f.downcast::<PyTuple>()?;
+            let ours_t = ours_f.cast::<PyTuple>()?;
+            let theirs_t = theirs_f.cast::<PyTuple>()?;
             assert_eq!(ours_t.len()?, theirs_t.len()?);
             // rank is the third element and must agree on well-conditioned input.
             assert_eq!(
@@ -40017,8 +40146,8 @@ mod tests {
             cov_kw.set_item("cov", true)?;
             let ours_c = pf_fn.call((x.clone(), y.clone(), 1_i64), Some(&cov_kw))?;
             let theirs_c = numpy_pf.call((x.clone(), y.clone(), 1_i64), Some(&cov_kw))?;
-            let ours_ct = ours_c.downcast::<PyTuple>()?;
-            let theirs_ct = theirs_c.downcast::<PyTuple>()?;
+            let ours_ct = ours_c.cast::<PyTuple>()?;
+            let theirs_ct = theirs_c.cast::<PyTuple>()?;
             assert_eq!(ours_ct.len()?, theirs_ct.len()?);
             assert_eq!(
                 ours_ct
