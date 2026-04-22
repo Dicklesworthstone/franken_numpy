@@ -7377,7 +7377,7 @@ fn logspace(
     stop: Py<PyAny>,
     num: i64,
     endpoint: bool,
-    base: Py<PyAny>,
+    base: f64,
     dtype: Option<Py<PyAny>>,
     axis: i64,
 ) -> PyResult<Py<PyAny>> {
@@ -7389,7 +7389,7 @@ fn logspace(
     let kwargs = PyDict::new(py);
     kwargs.set_item("num", num)?;
     kwargs.set_item("endpoint", endpoint)?;
-    kwargs.set_item("base", base.bind(py))?;
+    kwargs.set_item("base", base)?;
     if let Some(dtype_val) = dtype {
         kwargs.set_item("dtype", dtype_val.bind(py))?;
     }
