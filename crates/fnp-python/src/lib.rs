@@ -7420,6 +7420,21 @@ fn copy(py: Python<'_>, a: Py<PyAny>, order: &str, subok: bool) -> PyResult<Py<P
 }
 
 #[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn sort(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // Raw passthrough to np.sort so omitted-vs-None axis behavior,
+    // stable sorting semantics, and structured dtype field ordering
+    // remain exactly aligned with numpy's current Python surface.
+    let numpy = py.import("numpy")?;
+    let sort_fn = numpy.getattr("sort")?;
+    Ok(sort_fn.call(args, kwargs)?.unbind())
+}
+
+#[pyfunction]
 fn sort_complex(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.sort_complex so integer inputs upcast to complex,
     // complex lexicographic ordering, NaN placement, and copy semantics
@@ -8754,6 +8769,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(identity, m)?)?;
     m.add_function(wrap_pyfunction!(logspace, m)?)?;
     m.add_function(wrap_pyfunction!(copy, m)?)?;
+    m.add_function(wrap_pyfunction!(sort, m)?)?;
     m.add_function(wrap_pyfunction!(py_broadcast_shapes, m)?)?;
     m.add_function(wrap_pyfunction!(sort_complex, m)?)?;
     m.add_function(wrap_pyfunction!(nanmedian, m)?)?;
@@ -8826,7 +8842,8 @@ mod tests {
     use pyo3::IntoPyObject;
     use pyo3::exceptions::{PyTypeError, PyValueError, PyZeroDivisionError};
     use pyo3::types::{
-        PyAny, PyAnyMethods, PyDict, PyDictMethods, PyList, PyModule, PyTuple, PyTypeMethods,
+        PyAny, PyAnyMethods, PyDict, PyDictMethods, PyList, PyListMethods, PyModule, PyTuple,
+        PyTypeMethods,
     };
     use pyo3::{Py, PyResult, Python};
 
@@ -9136,6 +9153,7 @@ mod tests {
             assert!(module.getattr("identity").is_ok());
             assert!(module.getattr("logspace").is_ok());
             assert!(module.getattr("copy").is_ok());
+            assert!(module.getattr("sort").is_ok());
             assert!(module.getattr("broadcast_shapes").is_ok());
             assert!(module.getattr("sort_complex").is_ok());
             assert!(module.getattr("nanmedian").is_ok());
@@ -33927,6 +33945,105 @@ mod tests {
     }
 
     #[test]
+    fn sort_matches_numpy_across_numeric_axes_stability_and_structured_order() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let sort_fn = module.getattr("sort")?;
+            let numpy = py.import("numpy")?;
+            let numpy_sort = numpy.getattr("sort")?;
+            let array_fn = numpy.getattr("array")?;
+            let dtype_fn = numpy.getattr("dtype")?;
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+
+            // 1-D numeric input.
+            let ints = array_fn.call1((vec![3_i64, 1, 2, -5, 0],))?;
+            assert_array_matches_numpy(
+                &sort_fn.call1((ints.clone(),))?,
+                &numpy_sort.call1((ints.clone(),))?,
+            )?;
+
+            // axis=None flattens and returns a copy.
+            let matrix = array_fn.call1((vec![vec![3_i64, 1], vec![2_i64, 4]],))?;
+            let flatten_kwargs = PyDict::new(py);
+            flatten_kwargs.set_item("axis", py.None())?;
+            let ours_flat = sort_fn.call((matrix.clone(),), Some(&flatten_kwargs))?;
+            let theirs_flat = numpy_sort.call((matrix.clone(),), Some(&flatten_kwargs))?;
+            assert_array_matches_numpy(&ours_flat, &theirs_flat)?;
+            let ours_alias: bool = numpy
+                .getattr("shares_memory")?
+                .call1((ours_flat.clone(), matrix.clone()))?
+                .extract()?;
+            let theirs_alias: bool = numpy
+                .getattr("shares_memory")?
+                .call1((theirs_flat.clone(), matrix.clone()))?
+                .extract()?;
+            assert_eq!(ours_alias, theirs_alias);
+
+            // axis=0 / axis=1 on 2-D input.
+            let axis0_kwargs = PyDict::new(py);
+            axis0_kwargs.set_item("axis", 0_i64)?;
+            assert_array_matches_numpy(
+                &sort_fn.call((matrix.clone(),), Some(&axis0_kwargs))?,
+                &numpy_sort.call((matrix.clone(),), Some(&axis0_kwargs))?,
+            )?;
+            let axis1_kwargs = PyDict::new(py);
+            axis1_kwargs.set_item("axis", 1_i64)?;
+            assert_array_matches_numpy(
+                &sort_fn.call((matrix.clone(),), Some(&axis1_kwargs))?,
+                &numpy_sort.call((matrix.clone(),), Some(&axis1_kwargs))?,
+            )?;
+
+            // Structured dtype ordering via order=...
+            let dtype_spec = PyList::empty(py);
+            dtype_spec.append(PyTuple::new(py, ["x", "i4"])?)?;
+            dtype_spec.append(PyTuple::new(py, ["y", "i4"])?)?;
+            let structured_dtype = dtype_fn.call1((dtype_spec,))?;
+            let structured_rows = PyList::empty(py);
+            structured_rows.append(PyTuple::new(py, [2_i32, 8_i32])?)?;
+            structured_rows.append(PyTuple::new(py, [1_i32, 7_i32])?)?;
+            structured_rows.append(PyTuple::new(py, [2_i32, 3_i32])?)?;
+            structured_rows.append(PyTuple::new(py, [1_i32, 9_i32])?)?;
+            let structured_kwargs = PyDict::new(py);
+            structured_kwargs.set_item("dtype", structured_dtype)?;
+            let structured = array_fn.call((structured_rows,), Some(&structured_kwargs))?;
+            let order_kwargs = PyDict::new(py);
+            order_kwargs.set_item("order", "x")?;
+            assert_array_matches_numpy(
+                &sort_fn.call((structured.clone(),), Some(&order_kwargs))?,
+                &numpy_sort.call((structured.clone(),), Some(&order_kwargs))?,
+            )?;
+
+            // stable=True parity on tied values.
+            let tied = array_fn.call1((vec![2_i64, 1, 2, 1, 2, 1],))?;
+            let stable_kwargs = PyDict::new(py);
+            stable_kwargs.set_item("stable", true)?;
+            assert_array_matches_numpy(
+                &sort_fn.call((tied.clone(),), Some(&stable_kwargs))?,
+                &numpy_sort.call((tied.clone(),), Some(&stable_kwargs))?,
+            )?;
+
+            // Complex / NaN ordering surface behavior.
+            let complex_items = PyList::empty(py);
+            complex_items.append(py_complex.call1((1.0_f64, 5.0_f64))?)?;
+            complex_items.append(py_complex.call1((f64::NAN, 1.0_f64))?)?;
+            complex_items.append(py_complex.call1((1.0_f64, -2.0_f64))?)?;
+            complex_items.append(py_complex.call1((0.0_f64, 0.0_f64))?)?;
+            let complex_input = array_fn.call1((complex_items,))?;
+            assert_array_matches_numpy(
+                &sort_fn.call1((complex_input.clone(),))?,
+                &numpy_sort.call1((complex_input.clone(),))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn broadcast_shapes_matches_numpy_across_pairwise_nary_scalar_rank_and_errors() {
         with_python(|py| {
             if !numpy_available(py) {
@@ -33950,8 +34067,7 @@ mod tests {
 
             // N-ary broadcast with 3 inputs of mixed rank.
             let ours_nary = bs_fn.call1(((1_i64,), (5_i64, 1_i64), (1_i64, 1_i64, 4_i64)))?;
-            let theirs_nary =
-                numpy_bs.call1(((1_i64,), (5_i64, 1_i64), (1_i64, 1_i64, 4_i64)))?;
+            let theirs_nary = numpy_bs.call1(((1_i64,), (5_i64, 1_i64), (1_i64, 1_i64, 4_i64)))?;
             assert_eq!(
                 repr_string(&ours_nary),
                 repr_string(&theirs_nary),
