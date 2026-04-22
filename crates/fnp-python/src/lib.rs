@@ -7579,6 +7579,108 @@ fn common_type(py: Python<'_>, arrays: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny
 }
 
 #[pyfunction]
+#[pyo3(signature = (p,))]
+fn roots(py: Python<'_>, p: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.roots. Returns the complex roots of a polynomial
+    // given by its coefficients in decreasing-degree order. Matches
+    // numpy on dtype (always complex), leading-zero trimming, empty and
+    // degree-0 polynomial handling, and real vs complex coefficient input.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("roots")?.call1((p.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (seq_of_zeros,))]
+fn poly(py: Python<'_>, seq_of_zeros: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.poly. Given a sequence of roots or a square
+    // matrix (characteristic polynomial), returns the polynomial
+    // coefficients in decreasing-degree order. Matches numpy on real vs
+    // complex-root input, 2-D square matrix input, and error surface
+    // for non-square 2-D or >2-D arrays.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("poly")?.call1((seq_of_zeros.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, dtype=None, requirements=None, *, like=None))]
+fn require(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    dtype: Option<Py<PyAny>>,
+    requirements: Option<Py<PyAny>>,
+    like: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.require. Coerces an input array to meet the
+    // listed requirements (C/F contiguity, aligned, writeable, owndata).
+    // Matches numpy for the single-char and multi-requirement forms
+    // and for no-op behavior when the input already meets every flag.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    if let Some(req_val) = requirements {
+        kwargs.set_item("requirements", req_val.bind(py))?;
+    }
+    if let Some(like_val) = like {
+        kwargs.set_item("like", like_val.bind(py))?;
+    }
+    Ok(numpy
+        .getattr("require")?
+        .call((a.bind(py),), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (n, mask_func, k=0))]
+fn mask_indices(
+    py: Python<'_>,
+    n: i64,
+    mask_func: Py<PyAny>,
+    k: i64,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.mask_indices. Given a mask-producing function
+    // (e.g. numpy.triu, numpy.tril) and an n×n base shape, returns the
+    // (rows, cols) tuple indexing the nonzero positions. Matches numpy
+    // for k offsets and for all builtin mask functions.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("mask_indices")?
+        .call1((n, mask_func.bind(py), k))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (subscripts, *operands, optimize=None))]
+fn einsum_path(
+    py: Python<'_>,
+    subscripts: &str,
+    operands: &Bound<'_, PyTuple>,
+    optimize: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.einsum_path. Returns a (path_list, path_string)
+    // tuple describing the optimal contraction order for an einsum
+    // expression. The optimize kwarg accepts True/False/str/path-list
+    // inputs exactly as numpy does; numpy's default is True so we
+    // forward the caller value as-is without substituting our own.
+    let numpy = py.import("numpy")?;
+    let subscripts_obj = subscripts.into_pyobject(py)?.unbind();
+    let mut call_items: Vec<Py<PyAny>> = vec![subscripts_obj.into_any()];
+    for o in operands.iter() {
+        call_items.push(o.clone().unbind());
+    }
+    let call_args = PyTuple::new(py, call_items)?;
+    let kwargs = PyDict::new(py);
+    if let Some(opt_val) = optimize {
+        kwargs.set_item("optimize", opt_val.bind(py))?;
+    }
+    Ok(numpy
+        .getattr("einsum_path")?
+        .call(&call_args, Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x,))]
 fn i0(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.i0 (modified Bessel function of the first
@@ -9186,6 +9288,11 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(kaiser, m)?)?;
     m.add_function(wrap_pyfunction!(asarray_chkfinite, m)?)?;
     m.add_function(wrap_pyfunction!(common_type, m)?)?;
+    m.add_function(wrap_pyfunction!(roots, m)?)?;
+    m.add_function(wrap_pyfunction!(poly, m)?)?;
+    m.add_function(wrap_pyfunction!(require, m)?)?;
+    m.add_function(wrap_pyfunction!(mask_indices, m)?)?;
+    m.add_function(wrap_pyfunction!(einsum_path, m)?)?;
     m.add_function(wrap_pyfunction!(i0, m)?)?;
     m.add_function(wrap_pyfunction!(asfortranarray, m)?)?;
     m.add_function(wrap_pyfunction!(isrealobj, m)?)?;
@@ -9598,6 +9705,11 @@ mod tests {
             assert!(module.getattr("kaiser").is_ok());
             assert!(module.getattr("asarray_chkfinite").is_ok());
             assert!(module.getattr("common_type").is_ok());
+            assert!(module.getattr("roots").is_ok());
+            assert!(module.getattr("poly").is_ok());
+            assert!(module.getattr("require").is_ok());
+            assert!(module.getattr("mask_indices").is_ok());
+            assert!(module.getattr("einsum_path").is_ok());
             assert!(module.getattr("i0").is_ok());
             assert!(module.getattr("asfortranarray").is_ok());
             assert!(module.getattr("isrealobj").is_ok());
@@ -36504,6 +36616,282 @@ mod tests {
                 .call1((bool_arr.clone(),))
                 .expect_err("numpy bool common_type must error");
             assert_pyerr_matches_numpy(py, ours_err, theirs_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn roots_poly_matches_numpy_across_real_complex_matrix_trim_and_roundtrip() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let roots_fn = module.getattr("roots")?;
+            let poly_fn = module.getattr("poly")?;
+            let numpy = py.import("numpy")?;
+            let numpy_roots = numpy.getattr("roots")?;
+            let numpy_poly = numpy.getattr("poly")?;
+            let array_fn = numpy.getattr("array")?;
+            let sort = numpy.getattr("sort")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Real coefficients with real roots: x^2 - 3x + 2 = (x-1)(x-2).
+            let coeff = vec![1.0_f64, -3.0, 2.0];
+            let ours_r = roots_fn.call1((coeff.clone(),))?;
+            let theirs_r = numpy_roots.call1((coeff.clone(),))?;
+            // Sort by real part before comparing — root order is not stable.
+            let ours_sorted = sort.call1((ours_r.call_method0("real")?,))?;
+            let theirs_sorted = sort.call1((theirs_r.call_method0("real")?,))?;
+            let ok_r: bool = allclose.call1((&ours_sorted, &theirs_sorted))?.extract()?;
+            assert!(ok_r, "roots real-quadratic mismatch");
+
+            // Complex roots: x^2 + 1 has roots ±i.
+            let coeff_i = vec![1.0_f64, 0.0, 1.0];
+            let ours_i = roots_fn.call1((coeff_i.clone(),))?;
+            let theirs_i = numpy_roots.call1((coeff_i.clone(),))?;
+            assert_eq!(
+                ours_i.getattr("dtype")?.str()?.to_string(),
+                theirs_i.getattr("dtype")?.str()?.to_string()
+            );
+            // Both imaginary parts must sum to ~0 (conjugate pair) and
+            // be of magnitude 1.
+            let ours_abs = numpy
+                .getattr("abs")?
+                .call1((ours_i.clone(),))?;
+            let expected_abs = array_fn.call1((vec![1.0_f64, 1.0],))?;
+            let ok_abs: bool = allclose.call1((&ours_abs, &expected_abs))?.extract()?;
+            assert!(ok_abs, "roots of x^2+1 must have magnitude 1");
+
+            // Leading-zero trim: numpy.roots handles leading zeros silently.
+            let padded = vec![0.0_f64, 0.0, 1.0, -3.0, 2.0];
+            let ours_p = roots_fn.call1((padded.clone(),))?;
+            let theirs_p = numpy_roots.call1((padded.clone(),))?;
+            let ours_ps = sort.call1((ours_p.call_method0("real")?,))?;
+            let theirs_ps = sort.call1((theirs_p.call_method0("real")?,))?;
+            let ok_p: bool = allclose.call1((&ours_ps, &theirs_ps))?.extract()?;
+            assert!(ok_p, "roots with leading zeros mismatch");
+
+            // poly from roots.
+            let zeros = vec![1.0_f64, 2.0, 3.0];
+            let ours_pc = poly_fn.call1((zeros.clone(),))?;
+            let theirs_pc = numpy_poly.call1((zeros.clone(),))?;
+            assert_array_matches_numpy(&ours_pc, &theirs_pc)?;
+
+            // poly from 2-D square matrix: characteristic polynomial.
+            let mat = array_fn.call1((vec![vec![1.0_f64, 0.0], vec![0.0, 2.0]],))?;
+            let ours_m = poly_fn.call1((mat.clone(),))?;
+            let theirs_m = numpy_poly.call1((mat.clone(),))?;
+            assert_array_matches_numpy(&ours_m, &theirs_m)?;
+
+            // Round-trip: poly(roots(coeff)) ≈ coeff up to leading coefficient.
+            let monic = vec![1.0_f64, -6.0, 11.0, -6.0];
+            let rt = poly_fn.call1((roots_fn.call1((monic.clone(),))?,))?;
+            let expected = array_fn.call1((monic.clone(),))?;
+            let ok_rt: bool = allclose.call1((&rt, &expected))?.extract()?;
+            assert!(ok_rt, "poly(roots(monic)) must roundtrip");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn require_matches_numpy_across_contiguity_dtype_writeable_and_noop() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let req_fn = module.getattr("require")?;
+            let numpy = py.import("numpy")?;
+            let numpy_req = numpy.getattr("require")?;
+            let array_fn = numpy.getattr("array")?;
+            let asfortran = numpy.getattr("asfortranarray")?;
+
+            // C-contiguous requirement on a Fortran source: produces a
+            // C-contiguous copy matching numpy.
+            let f_src = asfortran.call1((vec![vec![1.0_f64, 2.0, 3.0], vec![4.0, 5.0, 6.0]],))?;
+            let ours_c = req_fn.call1((f_src.clone(), py.None(), "C"))?;
+            let theirs_c = numpy_req.call1((f_src.clone(), py.None(), "C"))?;
+            assert_array_matches_numpy(&ours_c, &theirs_c)?;
+            let ours_c_flag: bool = ours_c
+                .getattr("flags")?
+                .get_item("C_CONTIGUOUS")?
+                .extract()?;
+            let theirs_c_flag: bool = theirs_c
+                .getattr("flags")?
+                .get_item("C_CONTIGUOUS")?
+                .extract()?;
+            assert_eq!(ours_c_flag, theirs_c_flag);
+            assert!(ours_c_flag);
+
+            // F-contiguous requirement on a C source: produces F-contiguous.
+            let c_src = array_fn.call1((vec![vec![1.0_f64, 2.0, 3.0], vec![4.0, 5.0, 6.0]],))?;
+            let ours_f = req_fn.call1((c_src.clone(), py.None(), "F"))?;
+            let theirs_f = numpy_req.call1((c_src.clone(), py.None(), "F"))?;
+            assert_array_matches_numpy(&ours_f, &theirs_f)?;
+            let ours_f_flag: bool = ours_f
+                .getattr("flags")?
+                .get_item("F_CONTIGUOUS")?
+                .extract()?;
+            let theirs_f_flag: bool = theirs_f
+                .getattr("flags")?
+                .get_item("F_CONTIGUOUS")?
+                .extract()?;
+            assert_eq!(ours_f_flag, theirs_f_flag);
+            assert!(ours_f_flag);
+
+            // Dtype coercion as second arg.
+            let ours_d = req_fn.call1((c_src.clone(), numpy.getattr("float32")?, "C"))?;
+            let theirs_d = numpy_req.call1((c_src.clone(), numpy.getattr("float32")?, "C"))?;
+            assert_array_matches_numpy(&ours_d, &theirs_d)?;
+
+            // Multiple requirements as a list: ['C', 'W'] (C-contig + writeable).
+            let ours_cw = req_fn.call1((f_src.clone(), py.None(), vec!["C", "W"]))?;
+            let theirs_cw = numpy_req.call1((f_src.clone(), py.None(), vec!["C", "W"]))?;
+            assert_array_matches_numpy(&ours_cw, &theirs_cw)?;
+            let ours_w: bool = ours_cw.getattr("flags")?.get_item("WRITEABLE")?.extract()?;
+            let theirs_w: bool = theirs_cw
+                .getattr("flags")?
+                .get_item("WRITEABLE")?
+                .extract()?;
+            assert_eq!(ours_w, theirs_w);
+
+            // No-op: already-satisfies-requirements input should return
+            // the same identity/shape/content.
+            let ours_n = req_fn.call1((c_src.clone(), py.None(), "C"))?;
+            let theirs_n = numpy_req.call1((c_src.clone(), py.None(), "C"))?;
+            assert_array_matches_numpy(&ours_n, &theirs_n)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn mask_indices_matches_numpy_across_triu_tril_mask_funcs_and_k_offsets() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let mi_fn = module.getattr("mask_indices")?;
+            let numpy = py.import("numpy")?;
+            let numpy_mi = numpy.getattr("mask_indices")?;
+            let triu_fn = numpy.getattr("triu")?;
+            let tril_fn = numpy.getattr("tril")?;
+
+            // triu mask on 5×5.
+            for k in [-2_i64, -1, 0, 1, 2] {
+                let ours = mi_fn.call1((5_i64, triu_fn.clone(), k))?;
+                let theirs = numpy_mi.call1((5_i64, triu_fn.clone(), k))?;
+                assert_index_tuple_matches_numpy(&ours, &theirs)?;
+            }
+
+            // tril mask on 4×4.
+            for k in [-1_i64, 0, 1] {
+                let ours = mi_fn.call1((4_i64, tril_fn.clone(), k))?;
+                let theirs = numpy_mi.call1((4_i64, tril_fn.clone(), k))?;
+                assert_index_tuple_matches_numpy(&ours, &theirs)?;
+            }
+
+            // Default k=0 explicitly with no offset.
+            let ours_def = mi_fn.call1((6_i64, triu_fn.clone(), 0_i64))?;
+            let theirs_def = numpy_mi.call1((6_i64, triu_fn.clone(), 0_i64))?;
+            assert_index_tuple_matches_numpy(&ours_def, &theirs_def)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn einsum_path_matches_numpy_across_subscripts_optimize_default_and_greedy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let ep_fn = module.getattr("einsum_path")?;
+            let numpy = py.import("numpy")?;
+            let numpy_ep = numpy.getattr("einsum_path")?;
+            let arange = numpy.getattr("arange")?;
+
+            let a = arange
+                .call1((24_i64,))?
+                .call_method1("reshape", ((2_i64, 3_i64, 4_i64),))?;
+            let b = arange
+                .call1((24_i64,))?
+                .call_method1("reshape", ((3_i64, 4_i64, 2_i64),))?;
+            let c = arange
+                .call1((8_i64,))?
+                .call_method1("reshape", ((4_i64, 2_i64),))?;
+
+            // Default optimize (True → 'greedy').
+            let ours_def = ep_fn.call1(("ijk,jkl,kl->il", a.clone(), b.clone(), c.clone()))?;
+            let theirs_def =
+                numpy_ep.call1(("ijk,jkl,kl->il", a.clone(), b.clone(), c.clone()))?;
+            // Tuple length must match; second item is a human-readable
+            // string — compare for exact equality.
+            let ours_tuple = ours_def.downcast::<PyTuple>()?;
+            let theirs_tuple = theirs_def.downcast::<PyTuple>()?;
+            assert_eq!(ours_tuple.len()?, theirs_tuple.len()?);
+            assert_eq!(
+                ours_tuple.get_item(1)?.extract::<String>()?,
+                theirs_tuple.get_item(1)?.extract::<String>()?
+            );
+
+            // Explicit optimize='greedy'.
+            let greedy_kwargs = PyDict::new(py);
+            greedy_kwargs.set_item("optimize", "greedy")?;
+            let ours_g = ep_fn.call(
+                ("ijk,jkl,kl->il", a.clone(), b.clone(), c.clone()),
+                Some(&greedy_kwargs),
+            )?;
+            let theirs_g = numpy_ep.call(
+                ("ijk,jkl,kl->il", a.clone(), b.clone(), c.clone()),
+                Some(&greedy_kwargs),
+            )?;
+            assert_eq!(
+                ours_g
+                    .downcast::<PyTuple>()?
+                    .get_item(1)?
+                    .extract::<String>()?,
+                theirs_g
+                    .downcast::<PyTuple>()?
+                    .get_item(1)?
+                    .extract::<String>()?
+            );
+
+            // optimize=False: no-optimization path.
+            let no_opt_kwargs = PyDict::new(py);
+            no_opt_kwargs.set_item("optimize", false)?;
+            let ours_no = ep_fn.call(
+                ("ij,jk->ik", a.clone(), b.clone()),
+                Some(&no_opt_kwargs),
+            );
+            let theirs_no = numpy_ep.call(
+                ("ij,jk->ik", a.clone(), b.clone()),
+                Some(&no_opt_kwargs),
+            );
+            match (ours_no, theirs_no) {
+                (Ok(our_t), Ok(their_t)) => {
+                    let ours_t = our_t.downcast::<PyTuple>()?;
+                    let theirs_t = their_t.downcast::<PyTuple>()?;
+                    assert_eq!(ours_t.len()?, theirs_t.len()?);
+                }
+                (Err(ours), Err(theirs)) => assert_pyerr_matches_numpy(py, ours, theirs)?,
+                _ => panic!(
+                    "einsum_path optimize=False success/error surface must match numpy"
+                ),
+            }
 
             Ok(())
         });
