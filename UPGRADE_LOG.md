@@ -29,6 +29,12 @@
 - **Cargo.lock:** already at 1.1.9 (transitive refresh from a prior session pulled it forward; manifest caught up here).
 - **Verified:** `cargo check -p fnp-io --all-targets` pass. `cargo test -p fnp-io` 222/222 pass.
 
+#### sha2: 0.10.9 -> 0.11.0 (fnp-conformance)
+
+- **Research:** sha2 0.11 updates to `digest` 0.11 and converts hash types (`Sha256`, `Sha512`, ...) from type aliases to newtype structs. Module reorg: `compress256`/`compress512` moved to `block_api`. Features `asm`/`asm-aarch64`/`loongarch64_asm`/`compress`/`soft`/`force-soft-compact`/`std` removed; new `alloc` feature. MSRV bumped to 1.85 (we're on edition 2024/nightly — fine).
+- **fnp-conformance usage audit:** only `use sha2::{Digest, Sha256};` + `Sha256::digest(bytes)` / `Sha256::new()` / `hasher.update(...)` / `hasher.finalize()`. These APIs are preserved in 0.11 via the `Digest` trait; the newtype conversion does not affect this call style. Transitive removals: `block-buffer`, `cpufeatures`, `crypto-common`, `digest 0.10.x`, `generic-array 0.14.x` (all replaced by digest 0.11 / hybrid-array internals).
+- **Verified:** `cargo check -p fnp-conformance --all-targets` passes cleanly. Targeted `cargo test -p fnp-conformance --lib raptorq` (4 tests that exercise the sha2 code paths via `raptorq_artifacts::sha256_hex`) passes 4/4. A broader `cargo test -p fnp-conformance --lib` shows 3 pre-existing failures in `test_contracts::*test_contract_suite_is_green` and `tests::core_suites_are_green` — all complaining about `linalg_differential_cases invalid fixture id linalg_cholesky_solve_identity_L_returns_b`, which is a fixture-registry / data-file issue entirely unrelated to sha2. Confirmed by grep: the failing ID is only defined in `fixtures/linalg_differential_cases.json` and is not registered in the linalg fixture ID enum — pre-existing breakage owned by another agent / the linalg team.
+
 ---
 
 ## 2026-02-20 Session (legacy)
