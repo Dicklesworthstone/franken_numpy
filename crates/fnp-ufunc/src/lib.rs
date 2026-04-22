@@ -32264,7 +32264,10 @@ mod tests {
         match result {
             None => "none".to_string(),
             Some(arr) => match arr.dtype() {
-                DType::Bool => format!("bool:{}", arr.values()[0] != 0.0),
+                DType::Bool => format!(
+                    "bool:{}",
+                    if arr.values()[0] != 0.0 { "True" } else { "False" }
+                ),
                 DType::I8 => format!("int:{}", arr.values()[0] as i8),
                 DType::I16 => format!("int:{}", arr.values()[0] as i16),
                 DType::I32 => format!("int:{}", arr.values()[0] as i32),
@@ -47330,7 +47333,7 @@ print(json.dumps(payload))
     fn masked_minimum_fill_value_supported_dtypes() {
         assert_eq!(
             normalize_minimum_fill_value(ma_minimum_fill_value_for_dtype(DType::Bool)),
-            "bool:true"
+            "bool:True"
         );
         assert_eq!(
             normalize_minimum_fill_value(ma_minimum_fill_value_for_dtype(DType::I8)),
@@ -47419,7 +47422,7 @@ print(json.dumps(payload))
     fn masked_maximum_fill_value_supported_dtypes() {
         assert_eq!(
             normalize_fill_value(ma_maximum_fill_value_for_dtype(DType::Bool)),
-            "bool:false"
+            "bool:False"
         );
         assert_eq!(
             normalize_fill_value(ma_maximum_fill_value_for_dtype(DType::I8)),
