@@ -3755,10 +3755,33 @@ fn take(
     indices: Py<PyAny>,
     axis: Option<isize>,
 ) -> PyResult<Py<PyAny>> {
+    let a_for_fallback = a.clone_ref(py);
+    let indices_for_fallback = indices.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let kwargs = PyDict::new(py);
+        if let Some(axis) = axis {
+            kwargs.set_item("axis", axis)?;
+        }
+        Ok(numpy
+            .getattr("take")?
+            .call(
+                (a_for_fallback.bind(py), indices_for_fallback.bind(py)),
+                Some(&kwargs),
+            )?
+            .unbind())
+    };
     let a = extract_numeric_array(py, a.bind(py), "take(a)")?;
     let (indices_shape, flat_indices) =
         extract_take_indices(py, indices.bind(py), "take(indices)")?;
-    let mut result = a.take(&flat_indices, axis).map_err(map_ufunc_error)?;
+    // numpy.take raises IndexError (not ValueError) for out-of-range index.
+    // Our ufunc layer returns Msg("take: index X out of bounds ..."), which
+    // map_ufunc_error would flatten to PyValueError. Fall back so the
+    // exception type, message, and traceback all match numpy exactly.
+    let mut result = match a.take(&flat_indices, axis) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
 
     let desired_shape = match axis {
         None => indices_shape.clone(),
@@ -15644,6 +15667,36 @@ mod tests {
                 repr_string(&true_expected)
             );
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn take_index_out_of_bounds_matches_numpy_indexerror() {
+        // numpy.take(arr, idx) raises IndexError (not ValueError) when idx
+        // is out of range. Our take raised PyValueError via map_ufunc_error.
+        // Fall back to numpy (or raise PyIndexError) so downstream code
+        // catching IndexError specifically keeps working.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let take_fn = module.getattr("take")?;
+            let numpy_take = numpy.getattr("take")?;
+
+            let arr = numeric_array(py, vec![1_i64, 2, 3], "int64");
+            let ours = take_fn.call1((arr.clone(), 10_i64)).expect_err("take(10) must error");
+            let theirs = numpy_take
+                .call1((arr, 10_i64))
+                .expect_err("numpy take(10) must error");
+            assert_eq!(
+                ours.get_type(py).name()?.extract::<String>()?,
+                theirs.get_type(py).name()?.extract::<String>()?,
+                "take out-of-bounds error type diverges from numpy"
+            );
             Ok(())
         });
     }
