@@ -5763,16 +5763,43 @@ fn masked_where(
     a: Py<PyAny>,
     copy: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ma.masked_where so truthy condition broadcasting,
-    // copy semantics, and the MaskedArray result type (with compatible
-    // fill_value / dtype inference) match numpy exactly.
-    let numpy = py.import("numpy")?;
-    let masked_where_fn = numpy.getattr("ma")?.getattr("masked_where")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("copy", copy)?;
-    Ok(masked_where_fn
-        .call((condition.bind(py), a.bind(py)), Some(&kwargs))?
-        .unbind())
+    let condition_for_fallback = condition.clone_ref(py);
+    let a_for_fallback = a.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let masked_where_fn = numpy.getattr("ma")?.getattr("masked_where")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("copy", copy)?;
+        Ok(masked_where_fn
+            .call(
+                (condition_for_fallback.bind(py), a_for_fallback.bind(py)),
+                Some(&kwargs),
+            )?
+            .unbind())
+    };
+
+    let condition = match extract_numeric_array(py, condition.bind(py), "masked_where(condition)") {
+        Ok(condition) => condition,
+        Err(_) => return fallback(),
+    };
+    let Some(masked_a) = extract_numeric_masked_array(py, a.bind(py), "masked_where(a)")? else {
+        return fallback();
+    };
+    if condition.shape() != masked_a.data().shape() {
+        return fallback();
+    }
+
+    let mut mask = ma_mask_or(masked_a.mask(), Some(&ma_make_mask(&condition)));
+    if mask
+        .as_ref()
+        .is_some_and(|mask| mask.values().iter().all(|&value| value == 0.0))
+    {
+        mask = None;
+    }
+
+    let result = MaskedArray::new(masked_a.data().clone(), mask, Some(masked_a.fill_value()))
+        .map_err(|err| map_ma_error("masked_where", err))?;
+    build_numpy_masked_array(py, &result)
 }
 
 #[pyfunction]
@@ -23480,6 +23507,24 @@ mod tests {
             let actual_i = masked_where_fn.call1((int_cond.clone(), int_data.clone()))?;
             let expected_i = numpy_masked_where.call1((int_cond.clone(), int_data.clone()))?;
             assert_eq!(repr_string(&actual_i), repr_string(&expected_i));
+
+            // Existing masked input should merge the original mask with the condition mask.
+            let masked_input = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![10.0_f64, 20.0, 30.0, 40.0],),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("mask", vec![false, true, false, false])?;
+                    kwargs
+                }),
+            )?;
+            let merge_cond = numpy
+                .getattr("array")?
+                .call1((vec![false, false, true, false],))?;
+            let actual_masked =
+                masked_where_fn.call1((merge_cond.clone(), masked_input.clone()))?;
+            let expected_masked =
+                numpy_masked_where.call1((merge_cond.clone(), masked_input.clone()))?;
+            assert_eq!(repr_string(&actual_masked), repr_string(&expected_masked));
 
             // copy=False flag forwarded.
             let copy_kwargs = PyDict::new(py);
