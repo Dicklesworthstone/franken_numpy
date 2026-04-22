@@ -5883,9 +5883,17 @@ fn masked_where(
     let Some(masked_a) = extract_numeric_masked_array(py, a.bind(py), "masked_where(a)")? else {
         return fallback();
     };
-    if condition.shape() != masked_a.data().shape() {
-        return fallback();
-    }
+    let condition = if condition.shape().is_empty() {
+        match condition.broadcast_to(masked_a.data().shape()) {
+            Ok(condition) => condition,
+            Err(_) => return fallback(),
+        }
+    } else {
+        if condition.shape() != masked_a.data().shape() {
+            return fallback();
+        }
+        condition
+    };
 
     let mut mask = ma_mask_or(masked_a.mask(), Some(&ma_make_mask(&condition)));
     if mask
@@ -23925,6 +23933,17 @@ mod tests {
             let expected_2d = numpy_masked_where.call1((cond_2d.clone(), data_2d.clone()))?;
             assert_eq!(repr_string(&actual_2d), repr_string(&expected_2d));
 
+            // Scalar condition broadcasts across the input.
+            let scalar_true = numpy.getattr("bool_")?.call1((true,))?;
+            let actual_scalar_true =
+                masked_where_fn.call1((scalar_true.clone(), data_2d.clone()))?;
+            let expected_scalar_true =
+                numpy_masked_where.call1((scalar_true.clone(), data_2d.clone()))?;
+            assert_eq!(
+                repr_string(&actual_scalar_true),
+                repr_string(&expected_scalar_true)
+            );
+
             // Integer dtype data.
             let int_data = numpy.getattr("array")?.call(
                 (vec![10_i64, 20, 30, 40],),
@@ -23958,6 +23977,16 @@ mod tests {
             let expected_masked =
                 numpy_masked_where.call1((merge_cond.clone(), masked_input.clone()))?;
             assert_eq!(repr_string(&actual_masked), repr_string(&expected_masked));
+
+            let scalar_false = numpy.getattr("bool_")?.call1((false,))?;
+            let actual_scalar_false =
+                masked_where_fn.call1((scalar_false.clone(), masked_input.clone()))?;
+            let expected_scalar_false =
+                numpy_masked_where.call1((scalar_false.clone(), masked_input.clone()))?;
+            assert_eq!(
+                repr_string(&actual_scalar_false),
+                repr_string(&expected_scalar_false)
+            );
 
             // copy=False flag forwarded.
             let copy_kwargs = PyDict::new(py);
