@@ -7810,6 +7810,107 @@ fn sqrt(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (x,))]
+fn arcsin(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.arcsin. Element-wise inverse sine over the
+    // closed real domain [-1, 1]; outside that range the real branch
+    // returns NaN with RuntimeWarning (complex input returns complex).
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("arcsin")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
+fn arccos(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.arccos. Element-wise inverse cosine over [-1, 1];
+    // outside that range the real branch returns NaN; complex input
+    // returns complex output.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("arccos")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
+fn arctan(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.arctan. Element-wise inverse tangent over the
+    // entire real line, returning values in [-pi/2, pi/2].
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("arctan")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x1, x2))]
+fn arctan2(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.arctan2. Two-argument arctangent that uses the
+    // signs of x1 and x2 to determine the correct quadrant; result in
+    // [-pi, pi]. Critical for cartesian-to-polar conversion.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("arctan2")?
+        .call1((x1.bind(py), x2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
+fn arcsinh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.arcsinh. Element-wise inverse hyperbolic sine.
+    // Defined for all real and complex input.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("arcsinh")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
+fn arccosh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.arccosh. Element-wise inverse hyperbolic cosine
+    // defined on x >= 1; the real branch returns NaN for x < 1, while
+    // complex input returns complex output.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("arccosh")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
+fn arctanh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.arctanh. Element-wise inverse hyperbolic tangent
+    // defined on (-1, 1); ±1 returns ±inf with RuntimeWarning, outside
+    // (-1, 1) returns NaN. Complex input returns complex output.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("arctanh")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
+fn sinh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.sinh. Element-wise hyperbolic sine. Integer
+    // input promotes to float; complex input returns complex output;
+    // matches numpy overflow behavior for large |x| (returns inf).
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("sinh")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
+fn cosh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.cosh. Element-wise hyperbolic cosine. Integer
+    // input promotes to float; complex input returns complex output;
+    // matches numpy overflow behavior for large |x| (returns inf).
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("cosh")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
+fn tanh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.tanh. Element-wise hyperbolic tangent in (-1, 1).
+    // Integer input promotes to float; complex input returns complex
+    // output. Saturates to ±1 for very large |x| (matching numpy).
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("tanh")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, kth, axis=-1_i64, kind="introselect", order=None))]
 fn partition(
     py: Python<'_>,
@@ -10162,6 +10263,16 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(log, m)?)?;
     m.add_function(wrap_pyfunction!(exp, m)?)?;
     m.add_function(wrap_pyfunction!(sqrt, m)?)?;
+    m.add_function(wrap_pyfunction!(arcsin, m)?)?;
+    m.add_function(wrap_pyfunction!(arccos, m)?)?;
+    m.add_function(wrap_pyfunction!(arctan, m)?)?;
+    m.add_function(wrap_pyfunction!(arctan2, m)?)?;
+    m.add_function(wrap_pyfunction!(arcsinh, m)?)?;
+    m.add_function(wrap_pyfunction!(arccosh, m)?)?;
+    m.add_function(wrap_pyfunction!(arctanh, m)?)?;
+    m.add_function(wrap_pyfunction!(sinh, m)?)?;
+    m.add_function(wrap_pyfunction!(cosh, m)?)?;
+    m.add_function(wrap_pyfunction!(tanh, m)?)?;
     m.add_function(wrap_pyfunction!(linalg_eig, m)?)?;
     m.add_function(wrap_pyfunction!(polyfit, m)?)?;
     m.add_function(wrap_pyfunction!(pad, m)?)?;
@@ -10612,6 +10723,16 @@ mod tests {
             assert!(module.getattr("log").is_ok());
             assert!(module.getattr("exp").is_ok());
             assert!(module.getattr("sqrt").is_ok());
+            assert!(module.getattr("arcsin").is_ok());
+            assert!(module.getattr("arccos").is_ok());
+            assert!(module.getattr("arctan").is_ok());
+            assert!(module.getattr("arctan2").is_ok());
+            assert!(module.getattr("arcsinh").is_ok());
+            assert!(module.getattr("arccosh").is_ok());
+            assert!(module.getattr("arctanh").is_ok());
+            assert!(module.getattr("sinh").is_ok());
+            assert!(module.getattr("cosh").is_ok());
+            assert!(module.getattr("tanh").is_ok());
             assert!(module.getattr("linalg_eig").is_ok());
             assert!(module.getattr("polyfit").is_ok());
             assert!(module.getattr("pad").is_ok());
@@ -38940,6 +39061,145 @@ mod tests {
             assert_eq!(sqrt_0, 0.0);
             let sqrt_4: f64 = sqrt_fn.call1((4.0_f64,))?.extract()?;
             assert_eq!(sqrt_4, 2.0);
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn core_ufunc_batch2_trig_hyperbolic_match_numpy_across_scalar_array_and_round_trips() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let allclose = numpy.getattr("allclose")?;
+            let array_fn = numpy.getattr("array")?;
+            let isclose = numpy.getattr("isclose")?;
+
+            // Inverse trig domain [-1, 1].
+            let in_unit_interval = array_fn.call1((vec![-1.0_f64, -0.5, 0.0, 0.5, 1.0],))?;
+            for name in ["arcsin", "arccos"] {
+                let ours = module.getattr(name)?.call1((in_unit_interval.clone(),))?;
+                let theirs = numpy.getattr(name)?.call1((in_unit_interval.clone(),))?;
+                let ok: bool = allclose.call1((&ours, &theirs))?.extract()?;
+                assert!(ok, "{name} on [-1,1] mismatch");
+            }
+
+            // arctan defined on the entire real line.
+            let real_line = array_fn.call1((vec![-100.0_f64, -1.0, 0.0, 1.0, 100.0],))?;
+            let ours_at = module.getattr("arctan")?.call1((real_line.clone(),))?;
+            let theirs_at = numpy.getattr("arctan")?.call1((real_line.clone(),))?;
+            let ok_at: bool = allclose.call1((&ours_at, &theirs_at))?.extract()?;
+            assert!(ok_at, "arctan real-line mismatch");
+
+            // arctan2: two-arg quadrant resolution.
+            let y = array_fn.call1((vec![1.0_f64, 1.0, -1.0, -1.0, 0.0, 1.0, 0.0, -1.0],))?;
+            let x = array_fn.call1((vec![1.0_f64, -1.0, -1.0, 1.0, 1.0, 0.0, -1.0, 0.0],))?;
+            let ours_a2 = module.getattr("arctan2")?.call1((y.clone(), x.clone()))?;
+            let theirs_a2 = numpy.getattr("arctan2")?.call1((y.clone(), x.clone()))?;
+            let ok_a2: bool = allclose.call1((&ours_a2, &theirs_a2))?.extract()?;
+            assert!(ok_a2, "arctan2 quadrant mismatch");
+
+            // arcsinh defined for all real input.
+            let arcsinh_input = array_fn.call1((vec![-100.0_f64, -1.0, 0.0, 1.0, 100.0],))?;
+            let ours_as = module.getattr("arcsinh")?.call1((arcsinh_input.clone(),))?;
+            let theirs_as = numpy.getattr("arcsinh")?.call1((arcsinh_input.clone(),))?;
+            let ok_as: bool = allclose.call1((&ours_as, &theirs_as))?.extract()?;
+            assert!(ok_as, "arcsinh mismatch");
+
+            // arccosh defined on x >= 1.
+            let arccosh_input = array_fn.call1((vec![1.0_f64, 1.5, 2.0, 10.0, 100.0],))?;
+            let ours_ac = module.getattr("arccosh")?.call1((arccosh_input.clone(),))?;
+            let theirs_ac = numpy.getattr("arccosh")?.call1((arccosh_input.clone(),))?;
+            let ok_ac: bool = allclose.call1((&ours_ac, &theirs_ac))?.extract()?;
+            assert!(ok_ac, "arccosh on x>=1 mismatch");
+
+            // arctanh on (-1, 1).
+            let arctanh_input = array_fn.call1((vec![-0.99_f64, -0.5, 0.0, 0.5, 0.99],))?;
+            let ours_ath = module.getattr("arctanh")?.call1((arctanh_input.clone(),))?;
+            let theirs_ath = numpy.getattr("arctanh")?.call1((arctanh_input.clone(),))?;
+            let ok_ath: bool = allclose.call1((&ours_ath, &theirs_ath))?.extract()?;
+            assert!(ok_ath, "arctanh on (-1,1) mismatch");
+
+            // Hyperbolic on a generic real range.
+            let hyp_input = array_fn.call1((vec![-3.0_f64, -1.0, -0.5, 0.0, 0.5, 1.0, 3.0],))?;
+            for name in ["sinh", "cosh", "tanh"] {
+                let ours = module.getattr(name)?.call1((hyp_input.clone(),))?;
+                let theirs = numpy.getattr(name)?.call1((hyp_input.clone(),))?;
+                let ok: bool = allclose.call1((&ours, &theirs))?.extract()?;
+                assert!(ok, "{name} mismatch");
+            }
+
+            // Round-trip identities.
+            //   sin(arcsin(x)) == x for x in [-1, 1]
+            //   tan(arctan(x)) == x for x in real line  (numpy.tan, not yet wrapped)
+            //   sinh(arcsinh(x)) == x for x in real line
+            //   tanh(arctanh(x)) == x for x in (-1, 1)
+            let sin_of_arcsin = module.getattr("sin")?.call1((
+                module.getattr("arcsin")?.call1((in_unit_interval.clone(),))?,
+            ))?;
+            let ok_rt1: bool = allclose
+                .call1((&sin_of_arcsin, &in_unit_interval))?
+                .extract()?;
+            assert!(ok_rt1, "sin(arcsin(x)) round-trip");
+
+            let tan_of_arctan = numpy.getattr("tan")?.call1((
+                module.getattr("arctan")?.call1((real_line.clone(),))?,
+            ))?;
+            let ok_rt2: bool = allclose
+                .call1((&tan_of_arctan, &real_line))?
+                .extract()?;
+            assert!(ok_rt2, "tan(arctan(x)) round-trip");
+
+            let sinh_of_arcsinh = module.getattr("sinh")?.call1((
+                module.getattr("arcsinh")?.call1((arcsinh_input.clone(),))?,
+            ))?;
+            let ok_rt3: bool = allclose
+                .call1((&sinh_of_arcsinh, &arcsinh_input))?
+                .extract()?;
+            assert!(ok_rt3, "sinh(arcsinh(x)) round-trip");
+
+            let tanh_of_arctanh = module.getattr("tanh")?.call1((
+                module.getattr("arctanh")?.call1((arctanh_input.clone(),))?,
+            ))?;
+            let ok_rt4: bool = allclose
+                .call1((&tanh_of_arctanh, &arctanh_input))?
+                .extract()?;
+            assert!(ok_rt4, "tanh(arctanh(x)) round-trip");
+
+            // Canonical scalar values.
+            //   arccos(0) == pi/2; arctan2(1, 0) == pi/2; arccosh(1) == 0.
+            let pi = std::f64::consts::PI;
+            let ok_arccos_0: bool = isclose
+                .call1((module.getattr("arccos")?.call1((0.0_f64,))?, pi / 2.0))?
+                .extract()?;
+            assert!(ok_arccos_0, "arccos(0) == pi/2");
+            let ok_arctan2_1_0: bool = isclose
+                .call1((
+                    module.getattr("arctan2")?.call1((1.0_f64, 0.0_f64))?,
+                    pi / 2.0,
+                ))?
+                .extract()?;
+            assert!(ok_arctan2_1_0, "arctan2(1,0) == pi/2");
+            let arccosh_1: f64 = module.getattr("arccosh")?.call1((1.0_f64,))?.extract()?;
+            assert!(arccosh_1.abs() < 1e-12, "arccosh(1) == 0");
+
+            // Integer input dtype promotion parity for one representative
+            // unary in each family.
+            let ints = array_fn.call1((vec![0_i64, 1, 2],))?;
+            for name in ["sinh", "cosh", "tanh", "arctan", "arcsinh"] {
+                let ours = module.getattr(name)?.call1((ints.clone(),))?;
+                let theirs = numpy.getattr(name)?.call1((ints.clone(),))?;
+                assert_eq!(
+                    ours.getattr("dtype")?.str()?.to_string(),
+                    theirs.getattr("dtype")?.str()?.to_string(),
+                    "{name} integer dtype parity"
+                );
+            }
 
             Ok(())
         });
