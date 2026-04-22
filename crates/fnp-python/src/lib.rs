@@ -7546,6 +7546,39 @@ fn kaiser(py: Python<'_>, m: i64, beta: f64) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, dtype=None))]
+fn asarray_chkfinite(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    dtype: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.asarray_chkfinite. Equivalent to np.asarray with
+    // an explicit NaN/inf check that raises ValueError on any non-finite
+    // element. dtype coercion and array-passthrough-when-already-numpy
+    // semantics match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    Ok(numpy
+        .getattr("asarray_chkfinite")?
+        .call((a.bind(py),), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (*arrays))]
+fn common_type(py: Python<'_>, arrays: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.common_type. Returns the common scalar dtype
+    // (float or complex) of the input arrays, promoting integer dtypes
+    // to float64 per numpy's rules. Rejects non-inexact arrays with
+    // a TypeError that must surface identically.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("common_type")?.call1(arrays)?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x,))]
 fn i0(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.i0 (modified Bessel function of the first
@@ -9151,6 +9184,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tril, m)?)?;
     m.add_function(wrap_pyfunction!(triu, m)?)?;
     m.add_function(wrap_pyfunction!(kaiser, m)?)?;
+    m.add_function(wrap_pyfunction!(asarray_chkfinite, m)?)?;
+    m.add_function(wrap_pyfunction!(common_type, m)?)?;
     m.add_function(wrap_pyfunction!(i0, m)?)?;
     m.add_function(wrap_pyfunction!(asfortranarray, m)?)?;
     m.add_function(wrap_pyfunction!(isrealobj, m)?)?;
@@ -9561,6 +9596,8 @@ mod tests {
             assert!(module.getattr("tril").is_ok());
             assert!(module.getattr("triu").is_ok());
             assert!(module.getattr("kaiser").is_ok());
+            assert!(module.getattr("asarray_chkfinite").is_ok());
+            assert!(module.getattr("common_type").is_ok());
             assert!(module.getattr("i0").is_ok());
             assert!(module.getattr("asfortranarray").is_ok());
             assert!(module.getattr("isrealobj").is_ok());
@@ -36314,6 +36351,159 @@ mod tests {
             )?;
             let ok_sym: bool = allclose.call1((&win, &reversed))?.extract()?;
             assert!(ok_sym, "kaiser window must be symmetric");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn asarray_chkfinite_matches_numpy_across_list_array_dtype_nan_and_inf() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let acf_fn = module.getattr("asarray_chkfinite")?;
+            let numpy = py.import("numpy")?;
+            let numpy_acf = numpy.getattr("asarray_chkfinite")?;
+            let array_fn = numpy.getattr("array")?;
+
+            // Finite list input.
+            assert_array_matches_numpy(
+                &acf_fn.call1((vec![1.0_f64, 2.0, 3.0, 4.0],))?,
+                &numpy_acf.call1((vec![1.0_f64, 2.0, 3.0, 4.0],))?,
+            )?;
+
+            // Finite ndarray passthrough: should return same object (np.asarray behavior).
+            let arr = array_fn.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            let ours_a = acf_fn.call1((arr.clone(),))?;
+            let theirs_a = numpy_acf.call1((arr.clone(),))?;
+            assert_array_matches_numpy(&ours_a, &theirs_a)?;
+
+            // Explicit dtype coercion.
+            let dtype_kw = PyDict::new(py);
+            dtype_kw.set_item("dtype", numpy.getattr("float32")?)?;
+            let ours_d = acf_fn.call((vec![1_i64, 2, 3],), Some(&dtype_kw))?;
+            let theirs_d = numpy_acf.call((vec![1_i64, 2, 3],), Some(&dtype_kw))?;
+            assert_array_matches_numpy(&ours_d, &theirs_d)?;
+
+            // NaN input must raise ValueError on both implementations.
+            let nan_arr = array_fn.call1((vec![1.0_f64, f64::NAN, 3.0],))?;
+            let ours_err = acf_fn
+                .call1((nan_arr.clone(),))
+                .expect_err("NaN must trigger asarray_chkfinite error");
+            let theirs_err = numpy_acf
+                .call1((nan_arr.clone(),))
+                .expect_err("numpy must also error on NaN");
+            assert_pyerr_matches_numpy(py, ours_err, theirs_err)?;
+
+            // +inf and -inf both trigger errors identically.
+            let inf_arr = array_fn.call1((vec![1.0_f64, f64::INFINITY, 3.0],))?;
+            let ours_err_i = acf_fn
+                .call1((inf_arr.clone(),))
+                .expect_err("inf must trigger asarray_chkfinite error");
+            let theirs_err_i = numpy_acf
+                .call1((inf_arr.clone(),))
+                .expect_err("numpy must also error on inf");
+            assert_pyerr_matches_numpy(py, ours_err_i, theirs_err_i)?;
+
+            let neg_inf = array_fn.call1((vec![f64::NEG_INFINITY, 2.0_f64],))?;
+            let ours_err_ni = acf_fn
+                .call1((neg_inf.clone(),))
+                .expect_err("-inf must trigger asarray_chkfinite error");
+            let theirs_err_ni = numpy_acf
+                .call1((neg_inf.clone(),))
+                .expect_err("numpy must also error on -inf");
+            assert_pyerr_matches_numpy(py, ours_err_ni, theirs_err_ni)?;
+
+            // Integer input is trivially finite; should pass through.
+            let ints = array_fn.call1((vec![1_i64, 2, 3, 4],))?;
+            assert_array_matches_numpy(
+                &acf_fn.call1((ints.clone(),))?,
+                &numpy_acf.call1((ints.clone(),))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn common_type_matches_numpy_across_single_mixed_int_float_complex_and_error() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let ct_fn = module.getattr("common_type")?;
+            let numpy = py.import("numpy")?;
+            let numpy_ct = numpy.getattr("common_type")?;
+            let array_fn = numpy.getattr("array")?;
+
+            // Single float32 array: result is float32.
+            let f32_kw = PyDict::new(py);
+            f32_kw.set_item("dtype", numpy.getattr("float32")?)?;
+            let a32 = array_fn.call((vec![1.0_f64, 2.0, 3.0],), Some(&f32_kw))?;
+            let ours_1 = ct_fn.call1((a32.clone(),))?;
+            let theirs_1 = numpy_ct.call1((a32.clone(),))?;
+            assert_eq!(
+                ours_1.call_method0("__name__")?.extract::<String>()?,
+                theirs_1.call_method0("__name__")?.extract::<String>()?
+            );
+
+            // Mixed float32 + float64 → float64.
+            let a64 = array_fn.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            let ours_mix = ct_fn.call1((a32.clone(), a64.clone()))?;
+            let theirs_mix = numpy_ct.call1((a32.clone(), a64.clone()))?;
+            assert_eq!(
+                ours_mix.call_method0("__name__")?.extract::<String>()?,
+                theirs_mix.call_method0("__name__")?.extract::<String>()?
+            );
+
+            // Integer input: numpy.common_type promotes to float64.
+            let ints = array_fn.call1((vec![1_i64, 2, 3],))?;
+            let ours_i = ct_fn.call1((ints.clone(),))?;
+            let theirs_i = numpy_ct.call1((ints.clone(),))?;
+            assert_eq!(
+                ours_i.call_method0("__name__")?.extract::<String>()?,
+                theirs_i.call_method0("__name__")?.extract::<String>()?
+            );
+
+            // Complex input → complex scalar type.
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+            let cplx_items: Vec<Py<PyAny>> = vec![
+                py_complex.call1((1.0_f64, 1.0_f64))?.unbind(),
+                py_complex.call1((2.0_f64, 2.0_f64))?.unbind(),
+            ];
+            let cplx = array_fn.call1((PyList::new(py, cplx_items)?,))?;
+            let ours_c = ct_fn.call1((cplx.clone(),))?;
+            let theirs_c = numpy_ct.call1((cplx.clone(),))?;
+            assert_eq!(
+                ours_c.call_method0("__name__")?.extract::<String>()?,
+                theirs_c.call_method0("__name__")?.extract::<String>()?
+            );
+
+            // Float + complex → complex common type.
+            let ours_fc = ct_fn.call1((a64.clone(), cplx.clone()))?;
+            let theirs_fc = numpy_ct.call1((a64.clone(), cplx.clone()))?;
+            assert_eq!(
+                ours_fc.call_method0("__name__")?.extract::<String>()?,
+                theirs_fc.call_method0("__name__")?.extract::<String>()?
+            );
+
+            // Non-inexact surface: numpy.common_type raises TypeError
+            // for boolean arrays. Match that error type.
+            let bool_arr = array_fn.call1((vec![true, false, true],))?;
+            let ours_err = ct_fn
+                .call1((bool_arr.clone(),))
+                .expect_err("bool common_type must error");
+            let theirs_err = numpy_ct
+                .call1((bool_arr.clone(),))
+                .expect_err("numpy bool common_type must error");
+            assert_pyerr_matches_numpy(py, ours_err, theirs_err)?;
 
             Ok(())
         });
