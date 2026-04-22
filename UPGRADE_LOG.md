@@ -1,5 +1,35 @@
 # Dependency Upgrade Log
 
+## 2026-04-22 Session (cod-numpy no-op workspace sweep)
+
+**Date:** 2026-04-22  |  **Project:** franken_numpy  |  **Language:** Rust
+**Agent:** cod-numpy
+
+### Summary (this session)
+
+- Ran `cargo update --workspace` at the repo root.
+- Result: `Locking 0 packages to latest compatible versions`.
+- No manifest edits were needed in `Cargo.toml` or any `crates/fnp-*/Cargo.toml`.
+- Re-verified current stable pins across the workspace:
+  - `asupersync 0.3.1`
+  - `ftui 0.3.1`
+  - `pyo3 0.28.3`
+  - `serde 1.0.228`
+  - `serde_json 1.0.149`
+  - `serde_yaml_ng 0.10.0`
+  - `sha2 0.11.0`
+  - `base64 0.22.1`
+  - `criterion 0.8.2`
+  - `half 2.7.1`
+  - `bytemuck 1.25.0`
+  - `flate2 1.1.9`
+- Validation: `env CARGO_TARGET_DIR=/tmp/rch_target_franken_numpy_cod rch exec -- cargo check --workspace` passed.
+
+### Notes
+
+- This session intentionally records a no-op dependency sweep so the absence of a deps commit is explicit rather than implied.
+- `asupersync 0.3.1` remains consistent in `crates/fnp-runtime`, `crates/fnp-conformance`, and `Cargo.lock`.
+
 ## 2026-04-22 Session (Clawdstein-libupdater-franken_numpy)
 
 **Date:** 2026-04-22  |  **Project:** franken_numpy  |  **Language:** Rust
