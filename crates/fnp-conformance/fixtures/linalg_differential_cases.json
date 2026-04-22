@@ -1507,7 +1507,7 @@
     "expected_tolerance": 1e-8
   },
   {
-    "id": "linalg_cholesky_solve_identity_L_returns_b",
+    "id": "linalg_cholesky_solve_identity_l_returns_b",
     "operation": "cholesky_solve",
     "seed": 8343,
     "mode": "strict",

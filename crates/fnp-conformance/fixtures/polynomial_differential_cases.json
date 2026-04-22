@@ -1692,7 +1692,7 @@
     "rel_tol": 1e-12
   },
   {
-    "id": "chebroots_T1_x_has_zero",
+    "id": "chebroots_t1_x_has_zero",
     "operation": "chebroots",
     "seed": 10050,
     "mode": "strict",
@@ -1710,7 +1710,7 @@
     "rel_tol": 1e-12
   },
   {
-    "id": "chebroots_T2_double_root_pair",
+    "id": "chebroots_t2_double_root_pair",
     "operation": "chebroots",
     "seed": 10051,
     "mode": "strict",
@@ -1728,7 +1728,7 @@
     "rel_tol": 1e-10
   },
   {
-    "id": "chebroots_T3_three_real_roots",
+    "id": "chebroots_t3_three_real_roots",
     "operation": "chebroots",
     "seed": 10052,
     "mode": "strict",
@@ -1800,7 +1800,7 @@
     "rel_tol": 1e-8
   },
   {
-    "id": "chebroots_linear_shift_T0_plus_T1",
+    "id": "chebroots_linear_shift_t0_plus_t1",
     "operation": "chebroots",
     "seed": 10056,
     "mode": "strict",
@@ -1818,7 +1818,7 @@
     "rel_tol": 1e-12
   },
   {
-    "id": "hermroots_H1_linear_has_zero",
+    "id": "hermroots_h1_linear_has_zero",
     "operation": "hermroots",
     "seed": 10060,
     "mode": "strict",
@@ -1836,7 +1836,7 @@
     "rel_tol": 1e-12
   },
   {
-    "id": "hermroots_H2_symmetric_pair",
+    "id": "hermroots_h2_symmetric_pair",
     "operation": "hermroots",
     "seed": 10061,
     "mode": "strict",
@@ -1872,7 +1872,7 @@
     "rel_tol": 1e-10
   },
   {
-    "id": "hermeroots_He1_linear_has_zero",
+    "id": "hermeroots_he1_linear_has_zero",
     "operation": "hermeroots",
     "seed": 10063,
     "mode": "strict",
@@ -1890,7 +1890,7 @@
     "rel_tol": 1e-12
   },
   {
-    "id": "hermeroots_He2_unit_roots",
+    "id": "hermeroots_he2_unit_roots",
     "operation": "hermeroots",
     "seed": 10064,
     "mode": "strict",
@@ -1926,7 +1926,7 @@
     "rel_tol": 1e-8
   },
   {
-    "id": "lagroots_L0_minus_L1_has_zero",
+    "id": "lagroots_l0_minus_l1_has_zero",
     "operation": "lagroots",
     "seed": 10066,
     "mode": "strict",
@@ -1944,7 +1944,7 @@
     "rel_tol": 1e-12
   },
   {
-    "id": "lagroots_L2_textbook_pair",
+    "id": "lagroots_l2_textbook_pair",
     "operation": "lagroots",
     "seed": 10067,
     "mode": "strict",
@@ -1980,7 +1980,7 @@
     "rel_tol": 1e-10
   },
   {
-    "id": "legroots_P1_linear_has_zero",
+    "id": "legroots_p1_linear_has_zero",
     "operation": "legroots",
     "seed": 10069,
     "mode": "strict",
@@ -1998,7 +1998,7 @@
     "rel_tol": 1e-12
   },
   {
-    "id": "legroots_P2_quadrature_pair",
+    "id": "legroots_p2_quadrature_pair",
     "operation": "legroots",
     "seed": 10070,
     "mode": "strict",
@@ -2160,7 +2160,7 @@
     "rel_tol": 1e-12
   },
   {
-    "id": "chebmul_T0_plus_T1_squared_identity",
+    "id": "chebmul_t0_plus_t1_squared_identity",
     "operation": "chebmul",
     "seed": 10107,
     "mode": "strict",
@@ -2214,7 +2214,7 @@
     "rel_tol": 1e-12
   },
   {
-    "id": "chebval_at_symmetric_points_T2",
+    "id": "chebval_at_symmetric_points_t2",
     "operation": "chebval",
     "seed": 10110,
     "mode": "strict",
@@ -2340,7 +2340,7 @@
     "rel_tol": 1e-12
   },
   {
-    "id": "hermmul_H0_plus_H1_squared_physicist",
+    "id": "hermmul_h0_plus_h1_squared_physicist",
     "operation": "hermmul",
     "seed": 10205,
     "mode": "strict",
@@ -2377,7 +2377,7 @@
     "rel_tol": 1e-10
   },
   {
-    "id": "hermval_H2_at_symmetric_points",
+    "id": "hermval_h2_at_symmetric_points",
     "operation": "hermval",
     "seed": 10207,
     "mode": "strict",
@@ -2449,7 +2449,7 @@
     "rel_tol": 1e-12
   },
   {
-    "id": "hermemul_He0_plus_He1_squared_probabilist",
+    "id": "hermemul_he0_plus_he1_squared_probabilist",
     "operation": "hermemul",
     "seed": 10211,
     "mode": "strict",
@@ -2486,7 +2486,7 @@
     "rel_tol": 1e-10
   },
   {
-    "id": "hermeval_He2_at_symmetric_points",
+    "id": "hermeval_he2_at_symmetric_points",
     "operation": "hermeval",
     "seed": 10213,
     "mode": "strict",
@@ -2594,7 +2594,7 @@
     "rel_tol": 1e-12
   },
   {
-    "id": "lagmul_L0_plus_L1_squared_recurrence",
+    "id": "lagmul_l0_plus_l1_squared_recurrence",
     "operation": "lagmul",
     "seed": 10304,
     "mode": "strict",
@@ -2631,7 +2631,7 @@
     "rel_tol": 1e-10
   },
   {
-    "id": "lagval_L2_at_0_1_2",
+    "id": "lagval_l2_at_0_1_2",
     "operation": "lagval",
     "seed": 10306,
     "mode": "strict",
@@ -2685,7 +2685,7 @@
     "rel_tol": 1e-12
   },
   {
-    "id": "legmul_P0_plus_P1_squared_recurrence",
+    "id": "legmul_p0_plus_p1_squared_recurrence",
     "operation": "legmul",
     "seed": 10309,
     "mode": "strict",
@@ -2722,7 +2722,7 @@
     "rel_tol": 1e-10
   },
   {
-    "id": "legval_P2_at_symmetric_points",
+    "id": "legval_p2_at_symmetric_points",
     "operation": "legval",
     "seed": 10311,
     "mode": "strict",
