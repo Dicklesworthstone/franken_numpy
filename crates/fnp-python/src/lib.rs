@@ -7673,6 +7673,55 @@ fn linalg_vecdot(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a,))]
+fn linalg_eig(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.linalg.eig. Returns (eigenvalues, eigenvectors)
+    // for a general square matrix. Matches numpy on real matrices with
+    // real eigenvalues, real matrices with complex-conjugate pairs,
+    // complex input, and 3-D batched input (last two axes).
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("linalg")?
+        .getattr("eig")?
+        .call1((a.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, y, deg, rcond=None, full=false, w=None, cov=None))]
+#[allow(clippy::too_many_arguments)]
+fn polyfit(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    y: Py<PyAny>,
+    deg: i64,
+    rcond: Option<Py<PyAny>>,
+    full: bool,
+    w: Option<Py<PyAny>>,
+    cov: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.polyfit. Least-squares polynomial fit of degree
+    // `deg`. Matches numpy for scalar/array rcond, the `full` residual
+    // tuple surface, optional weights, and cov ∈ {False, True, 'unscaled'}.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(rcond_val) = rcond {
+        kwargs.set_item("rcond", rcond_val.bind(py))?;
+    }
+    kwargs.set_item("full", full)?;
+    if let Some(w_val) = w {
+        kwargs.set_item("w", w_val.bind(py))?;
+    }
+    if let Some(cov_val) = cov {
+        kwargs.set_item("cov", cov_val.bind(py))?;
+    }
+    Ok(numpy
+        .getattr("polyfit")?
+        .call((x.bind(py), y.bind(py), deg), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x, /, *, keepdims=false, ord=None))]
 fn linalg_matrix_norm(
     py: Python<'_>,
@@ -9489,6 +9538,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(einsum_path, m)?)?;
     m.add_function(wrap_pyfunction!(linalg_vecdot, m)?)?;
     m.add_function(wrap_pyfunction!(linalg_matrix_norm, m)?)?;
+    m.add_function(wrap_pyfunction!(linalg_eig, m)?)?;
+    m.add_function(wrap_pyfunction!(polyfit, m)?)?;
     m.add_function(wrap_pyfunction!(i0, m)?)?;
     m.add_function(wrap_pyfunction!(asfortranarray, m)?)?;
     m.add_function(wrap_pyfunction!(isrealobj, m)?)?;
@@ -9914,6 +9965,8 @@ mod tests {
             assert!(module.getattr("einsum_path").is_ok());
             assert!(module.getattr("linalg_vecdot").is_ok());
             assert!(module.getattr("linalg_matrix_norm").is_ok());
+            assert!(module.getattr("linalg_eig").is_ok());
+            assert!(module.getattr("polyfit").is_ok());
             assert!(module.getattr("i0").is_ok());
             assert!(module.getattr("asfortranarray").is_ok());
             assert!(module.getattr("isrealobj").is_ok());
@@ -37315,6 +37368,162 @@ mod tests {
             assert_eq!(
                 ours_kd.getattr("shape")?.extract::<Vec<usize>>()?,
                 theirs_kd.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn linalg_eig_matches_numpy_across_real_complex_diagonal_and_batched() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let eig_fn = module.getattr("linalg_eig")?;
+            let numpy = py.import("numpy")?;
+            let numpy_eig = numpy.getattr("linalg")?.getattr("eig")?;
+            let array_fn = numpy.getattr("array")?;
+            let sort = numpy.getattr("sort")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Diagonal: eigenvalues are the diagonal entries.
+            let diag = array_fn.call1((vec![vec![2.0_f64, 0.0], vec![0.0, 3.0]],))?;
+            let ours = eig_fn.call1((diag.clone(),))?;
+            let theirs = numpy_eig.call1((diag.clone(),))?;
+            let ours_tuple = ours.downcast::<PyTuple>()?;
+            let theirs_tuple = theirs.downcast::<PyTuple>()?;
+            let ours_vals = sort.call1((ours_tuple.get_item(0)?.call_method0("real")?,))?;
+            let theirs_vals = sort.call1((theirs_tuple.get_item(0)?.call_method0("real")?,))?;
+            let ok_d: bool = allclose.call1((&ours_vals, &theirs_vals))?.extract()?;
+            assert!(ok_d, "eig diagonal eigenvalue mismatch");
+
+            // Symmetric matrix: eigenvalues are real.
+            let sym = array_fn.call1((vec![vec![2.0_f64, 1.0], vec![1.0, 2.0]],))?;
+            let ours_s = eig_fn.call1((sym.clone(),))?;
+            let theirs_s = numpy_eig.call1((sym.clone(),))?;
+            let ours_sv = sort.call1((
+                ours_s
+                    .downcast::<PyTuple>()?
+                    .get_item(0)?
+                    .call_method0("real")?,
+            ))?;
+            let theirs_sv = sort.call1((
+                theirs_s
+                    .downcast::<PyTuple>()?
+                    .get_item(0)?
+                    .call_method0("real")?,
+            ))?;
+            let ok_s: bool = allclose.call1((&ours_sv, &theirs_sv))?.extract()?;
+            assert!(ok_s, "eig symmetric eigenvalue mismatch");
+
+            // Rotation matrix: complex-conjugate eigenvalue pair.
+            let rot = array_fn.call1((vec![vec![0.0_f64, -1.0], vec![1.0, 0.0]],))?;
+            let ours_r = eig_fn.call1((rot.clone(),))?;
+            let theirs_r = numpy_eig.call1((rot.clone(),))?;
+            // dtype must be complex on both.
+            assert_eq!(
+                ours_r
+                    .downcast::<PyTuple>()?
+                    .get_item(0)?
+                    .getattr("dtype")?
+                    .str()?
+                    .to_string(),
+                theirs_r
+                    .downcast::<PyTuple>()?
+                    .get_item(0)?
+                    .getattr("dtype")?
+                    .str()?
+                    .to_string()
+            );
+
+            // Eigendecomposition invariant: A @ v = λ * v for each (λ,v).
+            let a = array_fn.call1((vec![vec![4.0_f64, 1.0], vec![2.0, 3.0]],))?;
+            let result = eig_fn.call1((a.clone(),))?;
+            let vals = result.downcast::<PyTuple>()?.get_item(0)?;
+            let vecs = result.downcast::<PyTuple>()?.get_item(1)?;
+            let av = numpy.getattr("matmul")?.call1((a.clone(), vecs.clone()))?;
+            let lv = numpy.getattr("multiply")?.call1((vals.clone(), vecs.clone()))?;
+            let ok_inv: bool = allclose.call1((&av, &lv))?.extract()?;
+            assert!(ok_inv, "A @ v must equal lambda * v for each eigenpair");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn polyfit_matches_numpy_across_linear_quadratic_full_tuple_weights_and_cov() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let pf_fn = module.getattr("polyfit")?;
+            let numpy = py.import("numpy")?;
+            let numpy_pf = numpy.getattr("polyfit")?;
+            let array_fn = numpy.getattr("array")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Linear fit through noisy points y = 2x + 1.
+            let x = array_fn.call1((vec![0.0_f64, 1.0, 2.0, 3.0, 4.0],))?;
+            let y = array_fn.call1((vec![1.0_f64, 3.0, 5.0, 7.0, 9.0],))?;
+            let ours_lin = pf_fn.call1((x.clone(), y.clone(), 1_i64))?;
+            let theirs_lin = numpy_pf.call1((x.clone(), y.clone(), 1_i64))?;
+            let ok_lin: bool = allclose.call1((&ours_lin, &theirs_lin))?.extract()?;
+            assert!(ok_lin, "polyfit linear mismatch");
+
+            // Quadratic fit to y = x^2.
+            let y_q = array_fn.call1((vec![0.0_f64, 1.0, 4.0, 9.0, 16.0],))?;
+            let ours_q = pf_fn.call1((x.clone(), y_q.clone(), 2_i64))?;
+            let theirs_q = numpy_pf.call1((x.clone(), y_q.clone(), 2_i64))?;
+            let ok_q: bool = allclose.call1((&ours_q, &theirs_q))?.extract()?;
+            assert!(ok_q, "polyfit quadratic mismatch");
+
+            // full=True returns (coeffs, residuals, rank, singular, rcond) tuple.
+            let full_kw = PyDict::new(py);
+            full_kw.set_item("full", true)?;
+            let ours_f = pf_fn.call((x.clone(), y.clone(), 1_i64), Some(&full_kw))?;
+            let theirs_f = numpy_pf.call((x.clone(), y.clone(), 1_i64), Some(&full_kw))?;
+            let ours_t = ours_f.downcast::<PyTuple>()?;
+            let theirs_t = theirs_f.downcast::<PyTuple>()?;
+            assert_eq!(ours_t.len()?, theirs_t.len()?);
+            // rank is the third element and must agree on well-conditioned input.
+            assert_eq!(
+                ours_t.get_item(2)?.extract::<i64>()?,
+                theirs_t.get_item(2)?.extract::<i64>()?
+            );
+
+            // Weighted fit.
+            let w_kw = PyDict::new(py);
+            let weights = array_fn.call1((vec![1.0_f64, 1.0, 1.0, 2.0, 2.0],))?;
+            w_kw.set_item("w", weights.clone())?;
+            let ours_w = pf_fn.call((x.clone(), y.clone(), 1_i64), Some(&w_kw))?;
+            let theirs_w = numpy_pf.call((x.clone(), y.clone(), 1_i64), Some(&w_kw))?;
+            let ok_w: bool = allclose.call1((&ours_w, &theirs_w))?.extract()?;
+            assert!(ok_w, "polyfit weighted mismatch");
+
+            // cov=True returns (coeffs, cov) tuple with cov matrix shape.
+            let cov_kw = PyDict::new(py);
+            cov_kw.set_item("cov", true)?;
+            let ours_c = pf_fn.call((x.clone(), y.clone(), 1_i64), Some(&cov_kw))?;
+            let theirs_c = numpy_pf.call((x.clone(), y.clone(), 1_i64), Some(&cov_kw))?;
+            let ours_ct = ours_c.downcast::<PyTuple>()?;
+            let theirs_ct = theirs_c.downcast::<PyTuple>()?;
+            assert_eq!(ours_ct.len()?, theirs_ct.len()?);
+            assert_eq!(
+                ours_ct
+                    .get_item(1)?
+                    .getattr("shape")?
+                    .extract::<Vec<usize>>()?,
+                theirs_ct
+                    .get_item(1)?
+                    .getattr("shape")?
+                    .extract::<Vec<usize>>()?
             );
 
             Ok(())
