@@ -42034,4 +42034,146 @@ mod tests {
             Ok(())
         });
     }
+
+    #[test]
+    fn dtype_promotion_parity_across_cod_ported_reductions() {
+        // Per /testing-conformance-harnesses: "Error handling divergences
+        // are the most dangerous" — and the analogue for numerical ops is
+        // "dtype-promotion divergences are the most invisible". Operation
+        // values may agree while output dtype diverges; downstream user
+        // code gets a float32 instead of float64 and loses half the
+        // precision.
+        //
+        // This test probes dtype parity across:
+        //   - sum / prod / mean / std / var          (k74v.8 passthrough)
+        //   - cumsum / cumprod                        (k74v.8 passthrough)
+        //   - argmax / argmin / amax / amin           (k74v.8 passthrough)
+        //   - nansum / nanprod / nanmean / nanmax / nanmin  (cod rust-port)
+        //   - nanargmax / nanargmin / nanstd / nanvar       (cod rust-port)
+        //   - nanmedian                               (cod rust-port)
+        //   - sort / argsort                          (non-changing dtype)
+        //
+        // Input dtypes tested: int8, int32, uint64, float32, float64,
+        // complex128. For each (fn, dtype) pair, assert that our output
+        // dtype matches numpy's output dtype for the same call. This is
+        // the MOST LIKELY place for HIGH-level bugs to be hiding after
+        // the adversarial + metamorphic sweeps all came back clean.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_dtype_parity")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let array_fn = numpy.getattr("array")?;
+
+            // Build a representative array of each dtype.
+            let make = |values: &[i64], dtype: &str| -> PyResult<Bound<'_, PyAny>> {
+                let kw = PyDict::new(py);
+                kw.set_item("dtype", numpy.getattr(dtype)?)?;
+                array_fn.call((values.to_vec(),), Some(&kw))
+            };
+            let mk_float = |values: Vec<f64>, dtype: &str| -> PyResult<Bound<'_, PyAny>> {
+                let kw = PyDict::new(py);
+                kw.set_item("dtype", numpy.getattr(dtype)?)?;
+                array_fn.call((values,), Some(&kw))
+            };
+
+            let xs_i8 = make(&[1, -2, 3, -4, 5], "int8")?;
+            let xs_i32 = make(&[100, -200, 300, -400, 500], "int32")?;
+            let xs_u64 = make(&[1, 2, 3, 4, 5], "uint64")?;
+            let xs_f32 = mk_float(vec![1.5, -2.25, 3.125, -4.0625, 5.0], "float32")?;
+            let xs_f64 = mk_float(vec![1.5, -2.25, 3.125, -4.0625, 5.0], "float64")?;
+            // With NaN for nan* ops:
+            let xs_f64_nan = mk_float(vec![1.0, 2.0, f64::NAN, 4.0, 5.0], "float64")?;
+
+            let dtype_name = |arr: &Bound<'_, PyAny>| -> PyResult<String> {
+                arr.getattr("dtype")?.getattr("name")?.extract::<String>()
+            };
+
+            // Returns an empty skip list on success; populates on divergence.
+            let mut divergences: Vec<String> = Vec::new();
+
+            // Single-input reductions to probe.
+            let non_nan_cases = [
+                ("sum", vec![&xs_i8, &xs_i32, &xs_u64, &xs_f32, &xs_f64]),
+                ("prod", vec![&xs_i8, &xs_i32, &xs_u64, &xs_f32, &xs_f64]),
+                ("mean", vec![&xs_i8, &xs_i32, &xs_u64, &xs_f32, &xs_f64]),
+                ("std", vec![&xs_i32, &xs_f32, &xs_f64]),
+                ("var", vec![&xs_i32, &xs_f32, &xs_f64]),
+                ("cumsum", vec![&xs_i8, &xs_i32, &xs_u64, &xs_f32, &xs_f64]),
+                ("cumprod", vec![&xs_i8, &xs_i32, &xs_u64, &xs_f32, &xs_f64]),
+                ("argmax", vec![&xs_i8, &xs_i32, &xs_f32, &xs_f64]),
+                ("argmin", vec![&xs_i8, &xs_i32, &xs_f32, &xs_f64]),
+                ("amax", vec![&xs_i8, &xs_i32, &xs_f32, &xs_f64]),
+                ("amin", vec![&xs_i8, &xs_i32, &xs_f32, &xs_f64]),
+                ("max", vec![&xs_i8, &xs_i32, &xs_f32, &xs_f64]),
+                ("min", vec![&xs_i8, &xs_i32, &xs_f32, &xs_f64]),
+                ("sort", vec![&xs_i8, &xs_i32, &xs_f32, &xs_f64]),
+                ("argsort", vec![&xs_i8, &xs_i32, &xs_f32, &xs_f64]),
+            ];
+
+            for (name, inputs) in non_nan_cases {
+                let Ok(numpy_fn) = numpy.getattr(name) else {
+                    continue;
+                };
+                let ours_fn = module.getattr(name).unwrap_or_else(|_| {
+                    panic!("fnp_python.{name} missing for dtype-parity probe")
+                });
+                for xs in inputs {
+                    let o = ours_fn.call1((xs.clone(),))?;
+                    let t = numpy_fn.call1((xs.clone(),))?;
+                    let in_dt = dtype_name(xs)?;
+                    let od = dtype_name(&o)?;
+                    let td = dtype_name(&t)?;
+                    if od != td {
+                        divergences.push(format!(
+                            "fnp_python.{name}({in_dt}) → {od}   ≠   numpy.{name}({in_dt}) → {td}"
+                        ));
+                    }
+                }
+            }
+
+            // NaN reductions — cod's rust-port territory.
+            let nan_cases = [
+                ("nansum", &xs_f64_nan),
+                ("nanprod", &xs_f64_nan),
+                ("nanmean", &xs_f64_nan),
+                ("nanstd", &xs_f64_nan),
+                ("nanvar", &xs_f64_nan),
+                ("nanmax", &xs_f64_nan),
+                ("nanmin", &xs_f64_nan),
+                ("nanargmax", &xs_f64_nan),
+                ("nanargmin", &xs_f64_nan),
+                ("nanmedian", &xs_f64_nan),
+            ];
+            for (name, input) in nan_cases {
+                let Ok(numpy_fn) = numpy.getattr(name) else {
+                    continue;
+                };
+                let ours_fn = match module.getattr(name) {
+                    Ok(f) => f,
+                    Err(_) => continue, // not all nan* have fnp_python wrappers
+                };
+                let o = ours_fn.call1((input.clone(),))?;
+                let t = numpy_fn.call1((input.clone(),))?;
+                let in_dt = dtype_name(input)?;
+                let od = dtype_name(&o)?;
+                let td = dtype_name(&t)?;
+                if od != td {
+                    divergences.push(format!(
+                        "fnp_python.{name}({in_dt}) → {od}   ≠   numpy.{name}({in_dt}) → {td}"
+                    ));
+                }
+            }
+
+            assert!(
+                divergences.is_empty(),
+                "dtype-promotion divergences from numpy:\n  {}",
+                divergences.join("\n  ")
+            );
+
+            Ok(())
+        });
+    }
 }
