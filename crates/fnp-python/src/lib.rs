@@ -3228,6 +3228,16 @@ fn broadcast_arrays(py: Python<'_>, args: &Bound<'_, PyTuple>, subok: bool) -> P
 }
 
 #[pyfunction]
+#[pyo3(name = "broadcast_shapes", signature = (*args))]
+fn py_broadcast_shapes(py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+    // Delegate to NumPy so pairwise/N-ary shape broadcasting, scalar
+    // and empty-shape handling, integer-as-1-D-shape permissions, and
+    // incompatible-shape ValueError surface all match exactly.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("broadcast_shapes")?.call1(args)?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, a_min, a_max, out=None, **kwargs))]
 fn clip(
     py: Python<'_>,
@@ -8744,6 +8754,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(identity, m)?)?;
     m.add_function(wrap_pyfunction!(logspace, m)?)?;
     m.add_function(wrap_pyfunction!(copy, m)?)?;
+    m.add_function(wrap_pyfunction!(py_broadcast_shapes, m)?)?;
     m.add_function(wrap_pyfunction!(sort_complex, m)?)?;
     m.add_function(wrap_pyfunction!(nanmedian, m)?)?;
     m.add_function(wrap_pyfunction!(ma_average, m)?)?;
@@ -9125,6 +9136,7 @@ mod tests {
             assert!(module.getattr("identity").is_ok());
             assert!(module.getattr("logspace").is_ok());
             assert!(module.getattr("copy").is_ok());
+            assert!(module.getattr("broadcast_shapes").is_ok());
             assert!(module.getattr("sort_complex").is_ok());
             assert!(module.getattr("nanmedian").is_ok());
             assert!(module.getattr("ma_average").is_ok());
@@ -33909,6 +33921,89 @@ mod tests {
             let ours_scalar_err = sort_complex_fn.call1((5_i64,)).unwrap_err();
             let theirs_scalar_err = numpy_sort_complex.call1((5_i64,)).unwrap_err();
             assert_pyerr_matches_numpy(py, ours_scalar_err, theirs_scalar_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn broadcast_shapes_matches_numpy_across_pairwise_nary_scalar_rank_and_errors() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let bs_fn = module.getattr("broadcast_shapes")?;
+            let numpy = py.import("numpy")?;
+            let numpy_bs = numpy.getattr("broadcast_shapes")?;
+
+            // Pairwise broadcast of compatible shapes.
+            let ours_pair = bs_fn.call1(((3_i64, 1_i64), (1_i64, 4_i64)))?;
+            let theirs_pair = numpy_bs.call1(((3_i64, 1_i64), (1_i64, 4_i64)))?;
+            assert_eq!(
+                repr_string(&ours_pair),
+                repr_string(&theirs_pair),
+                "pairwise (3,1) vs (1,4) broadcast shape"
+            );
+
+            // N-ary broadcast with 3 inputs of mixed rank.
+            let ours_nary = bs_fn.call1(((1_i64,), (5_i64, 1_i64), (1_i64, 1_i64, 4_i64)))?;
+            let theirs_nary =
+                numpy_bs.call1(((1_i64,), (5_i64, 1_i64), (1_i64, 1_i64, 4_i64)))?;
+            assert_eq!(
+                repr_string(&ours_nary),
+                repr_string(&theirs_nary),
+                "3-ary (1,) (5,1) (1,1,4) broadcast shape"
+            );
+
+            // Zero inputs: numpy returns () on no-arg call; our wrapper
+            // must match whatever numpy does (success or error surface).
+            let ours_zero = bs_fn.call0();
+            let theirs_zero = numpy_bs.call0();
+            match (ours_zero, theirs_zero) {
+                (Ok(a), Ok(b)) => assert_eq!(repr_string(&a), repr_string(&b)),
+                (Err(_), Err(_)) => {}
+                _ => panic!("broadcast_shapes zero-arg success/error surface must match numpy"),
+            }
+
+            // Single scalar-empty shape () passes through unchanged.
+            let empty: Vec<i64> = Vec::new();
+            let ours_empty = bs_fn.call1((empty.clone(),))?;
+            let theirs_empty = numpy_bs.call1((empty.clone(),))?;
+            assert_eq!(
+                repr_string(&ours_empty),
+                repr_string(&theirs_empty),
+                "single empty-shape passthrough"
+            );
+
+            // Large rank alignment (ranks 1, 3, 5) with leading 1s and
+            // matching trailing dims.
+            let ours_rank = bs_fn.call1((
+                (7_i64,),
+                (1_i64, 6_i64, 7_i64),
+                (2_i64, 1_i64, 1_i64, 1_i64, 7_i64),
+            ))?;
+            let theirs_rank = numpy_bs.call1((
+                (7_i64,),
+                (1_i64, 6_i64, 7_i64),
+                (2_i64, 1_i64, 1_i64, 1_i64, 7_i64),
+            ))?;
+            assert_eq!(
+                repr_string(&ours_rank),
+                repr_string(&theirs_rank),
+                "large-rank mixed alignment broadcast shape"
+            );
+
+            // Incompatible shapes raise ValueError with matching type.
+            let ours_err = bs_fn
+                .call1(((3_i64, 4_i64), (2_i64, 4_i64)))
+                .expect_err("incompatible shapes must error");
+            let theirs_err = numpy_bs
+                .call1(((3_i64, 4_i64), (2_i64, 4_i64)))
+                .expect_err("numpy must also error on incompatible shapes");
+            assert_pyerr_matches_numpy(py, ours_err, theirs_err)?;
 
             Ok(())
         });
