@@ -10483,16 +10483,19 @@ fn ma_average(
         return build_numpy_scalar_or_array(py, mean.data());
     }
 
-    let mask = counts.values().iter().any(|&value| value == 0.0).then(|| UFuncArray {
-        shape: counts.shape().to_vec(),
-        values: counts
+    let mask = if counts.values().iter().any(|&value| value == 0.0) {
+        let mask_values: Vec<f64> = counts
             .values()
             .iter()
             .map(|&value| if value == 0.0 { 1.0 } else { 0.0 })
-            .collect(),
-        dtype: DType::Bool,
-        integer_sidecar: None,
-    });
+            .collect();
+        Some(
+            UFuncArray::new(counts.shape().to_vec(), mask_values, DType::Bool)
+                .map_err(map_ufunc_error)?,
+        )
+    } else {
+        None
+    };
     let result = MaskedArray::new(mean.data().clone(), mask, Some(masked.fill_value()))
         .map_err(|err| map_ma_error("ma_average", err))?;
     let py_result = build_numpy_masked_array(py, &result)?;
@@ -11182,24 +11185,27 @@ fn ma_ediff1d(
     py_result
         .bind(py)
         .call_method1("set_fill_value", (fill_value.bind(py),))?;
-    // numpy.ma.ediff1d produces a MaskedArray whose .mask is an explicit
-    // all-False bool array (not the nomask scalar) whenever the result
-    // has non-zero length — build_numpy_masked_array emits mask=nomask
-    // when our Rust struct has mask=None, which reprs as `mask=False`.
-    // Force an explicit zeros-mask to match numpy's repr (tuf2).
-    let mask_attr = py_result.bind(py).getattr("mask")?;
-    let ma = numpy.getattr("ma")?;
-    let is_nomask: bool = mask_attr.is(&ma.getattr("nomask")?);
-    if is_nomask {
-        let shape = py_result.bind(py).getattr("shape")?;
-        let zeros_kwargs = PyDict::new(py);
-        zeros_kwargs.set_item("dtype", numpy.getattr("bool_")?)?;
-        let explicit_mask = numpy
-            .getattr("zeros")?
-            .call((shape,), Some(&zeros_kwargs))?;
-        py_result
-            .bind(py)
-            .setattr("mask", explicit_mask)?;
+    // numpy.ma.ediff1d uses an explicit all-False bool mask (not the
+    // nomask scalar) ONLY when to_begin or to_end is provided — in that
+    // case numpy's concat path synthesises an explicit mask for the
+    // boundary entries. Without boundaries it reuses the input's
+    // nomask. Match that asymmetry so repr parity holds (tuf2).
+    let had_boundary = begin.is_some() || end.is_some();
+    if had_boundary {
+        let mask_attr = py_result.bind(py).getattr("mask")?;
+        let ma = numpy.getattr("ma")?;
+        let is_nomask: bool = mask_attr.is(&ma.getattr("nomask")?);
+        if is_nomask {
+            let shape = py_result.bind(py).getattr("shape")?;
+            let zeros_kwargs = PyDict::new(py);
+            zeros_kwargs.set_item("dtype", numpy.getattr("bool_")?)?;
+            let explicit_mask = numpy
+                .getattr("zeros")?
+                .call((shape,), Some(&zeros_kwargs))?;
+            py_result
+                .bind(py)
+                .setattr("mask", explicit_mask)?;
+        }
     }
     Ok(py_result)
 }
