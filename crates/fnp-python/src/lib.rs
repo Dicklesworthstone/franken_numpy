@@ -6304,6 +6304,17 @@ fn expm1(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (x,))]
+fn log1p(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.log1p (log(1 + x) with greater precision for
+    // small x). Integer input promotes to float; complex input is
+    // supported and returns complex. Matches numpy for boundary values
+    // x == -1 (returns -inf) and x < -1 (returns NaN with warning).
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("log1p")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (p, m=1))]
 fn polyder(py: Python<'_>, p: Py<PyAny>, m: i64) -> PyResult<Py<PyAny>> {
     // Passthrough to np.polyder. Returns the m-th derivative of the
@@ -8833,6 +8844,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(isscalar, m)?)?;
     m.add_function(wrap_pyfunction!(isreal, m)?)?;
     m.add_function(wrap_pyfunction!(expm1, m)?)?;
+    m.add_function(wrap_pyfunction!(log1p, m)?)?;
     m.add_function(wrap_pyfunction!(polyder, m)?)?;
     m.add_function(wrap_pyfunction!(polyint, m)?)?;
     m.add_function(wrap_pyfunction!(polyadd, m)?)?;
@@ -9281,6 +9293,7 @@ mod tests {
             assert!(module.getattr("isscalar").is_ok());
             assert!(module.getattr("isreal").is_ok());
             assert!(module.getattr("expm1").is_ok());
+            assert!(module.getattr("log1p").is_ok());
             assert!(module.getattr("polyder").is_ok());
             assert!(module.getattr("tile").is_ok());
             assert!(module.getattr("array_equal").is_ok());
@@ -34856,6 +34869,104 @@ mod tests {
                 .call1((42_i64, int32.clone()))
                 .expect_err("numpy must error too");
             assert_pyerr_matches_numpy(py, ours_err, theirs_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn log1p_matches_numpy_across_scalar_array_int_complex_and_boundary() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let log1p_fn = module.getattr("log1p")?;
+            let numpy = py.import("numpy")?;
+            let numpy_log1p = numpy.getattr("log1p")?;
+            let isclose = numpy.getattr("isclose")?;
+            let allclose = numpy.getattr("allclose")?;
+            let array_fn = numpy.getattr("array")?;
+
+            // log1p(0) exactly 0.
+            let ours_z = log1p_fn.call1((0.0_f64,))?;
+            let theirs_z = numpy_log1p.call1((0.0_f64,))?;
+            let ok_z: bool = isclose.call1((&ours_z, &theirs_z))?.extract()?;
+            assert!(ok_z, "log1p(0) mismatch");
+            let val_z: f64 = ours_z.extract()?;
+            assert!(val_z.abs() < 1e-15, "log1p(0) must be exactly 0");
+
+            // log1p(e-1) ≈ 1.
+            let e_minus_1 = std::f64::consts::E - 1.0;
+            let ours_e = log1p_fn.call1((e_minus_1,))?;
+            let theirs_e = numpy_log1p.call1((e_minus_1,))?;
+            let ok_e: bool = isclose.call1((&ours_e, &theirs_e))?.extract()?;
+            assert!(ok_e, "log1p(e-1) mismatch");
+            let val_e: f64 = ours_e.extract()?;
+            assert!((val_e - 1.0).abs() < 1e-12, "log1p(e-1) must be 1.0");
+
+            // Very small x: log1p(x) ≈ x with precision far better than
+            // naive log(1 + x) which loses digits near zero.
+            let tiny: f64 = 1e-15;
+            let ours_t = log1p_fn.call1((tiny,))?;
+            let theirs_t = numpy_log1p.call1((tiny,))?;
+            let ok_t: bool = isclose.call1((&ours_t, &theirs_t))?.extract()?;
+            assert!(ok_t, "log1p tiny scalar mismatch");
+            let val_t: f64 = ours_t.extract()?;
+            assert!(
+                (val_t - tiny).abs() < 1e-25,
+                "log1p(tiny) must approximate tiny"
+            );
+
+            // 1-D mixed-sign array across valid domain.
+            let arr = array_fn.call1((vec![-0.5_f64, -0.1, 0.0, 0.1, 0.5, 1.0, 10.0],))?;
+            let ours_a = log1p_fn.call1((arr.clone(),))?;
+            let theirs_a = numpy_log1p.call1((arr.clone(),))?;
+            let ok_a: bool = allclose.call1((&ours_a, &theirs_a))?.extract()?;
+            assert!(ok_a, "log1p 1-D mixed-sign mismatch");
+
+            // Integer input promotes to float with matching dtype.
+            let ints = array_fn.call1((vec![0_i64, 1, 2, 3, 10],))?;
+            let ours_i = log1p_fn.call1((ints.clone(),))?;
+            let theirs_i = numpy_log1p.call1((ints.clone(),))?;
+            let ok_i: bool = allclose.call1((&ours_i, &theirs_i))?.extract()?;
+            assert!(ok_i, "log1p integer input mismatch");
+            assert_eq!(
+                ours_i.getattr("dtype")?.str()?.to_string(),
+                theirs_i.getattr("dtype")?.str()?.to_string()
+            );
+
+            // 2-D input element-wise.
+            let two_d = array_fn.call1((vec![vec![0.0_f64, 0.5], vec![1.0, 2.5]],))?;
+            let ours_2d = log1p_fn.call1((two_d.clone(),))?;
+            let theirs_2d = numpy_log1p.call1((two_d.clone(),))?;
+            let ok_2d: bool = allclose.call1((&ours_2d, &theirs_2d))?.extract()?;
+            assert!(ok_2d, "log1p 2-D mismatch");
+
+            // Complex input: log1p supports complex values.
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+            let cplx_items: Vec<Py<PyAny>> = vec![
+                py_complex.call1((0.0_f64, 0.0_f64))?.unbind(),
+                py_complex.call1((1.0_f64, 1.0_f64))?.unbind(),
+                py_complex.call1((-0.5_f64, 0.5_f64))?.unbind(),
+            ];
+            let cplx_lst = PyList::new(py, cplx_items)?;
+            let cplx_arr = array_fn.call1((cplx_lst,))?;
+            let ours_c = log1p_fn.call1((cplx_arr.clone(),))?;
+            let theirs_c = numpy_log1p.call1((cplx_arr.clone(),))?;
+            let ok_c: bool = allclose.call1((&ours_c, &theirs_c))?.extract()?;
+            assert!(ok_c, "log1p complex input mismatch");
+
+            // Boundary: log1p(-1) returns -inf on both implementations.
+            let ours_neg1 = log1p_fn.call1((-1.0_f64,))?;
+            let theirs_neg1 = numpy_log1p.call1((-1.0_f64,))?;
+            let val_neg1: f64 = ours_neg1.extract()?;
+            let val_neg1_theirs: f64 = theirs_neg1.extract()?;
+            assert!(val_neg1.is_infinite() && val_neg1 < 0.0, "log1p(-1) must be -inf");
+            assert_eq!(val_neg1.is_infinite(), val_neg1_theirs.is_infinite());
+            assert_eq!(val_neg1 < 0.0, val_neg1_theirs < 0.0);
 
             Ok(())
         });
