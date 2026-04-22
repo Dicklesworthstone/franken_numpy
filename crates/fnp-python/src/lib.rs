@@ -10766,6 +10766,30 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("nan", f64::NAN)?;
     m.add("little_endian", cfg!(target_endian = "little"))?;
 
+    // numpy dtype scalar types (numpy.__all__ reality-check). Re-exported
+    // directly from numpy so `fnp_python.<name> is numpy.<name>` holds —
+    // users can pass e.g. `fnp_python.int8` as the dtype= argument to any
+    // wrapper and numpy recognises it. Platform-specific types (float128,
+    // complex256) are skipped gracefully on systems that lack them.
+    if let Ok(numpy) = py.import("numpy") {
+        const NUMPY_DTYPE_SCALARS: &[&str] = &[
+            "bool", "bool_", "byte", "bytes_", "cdouble", "character",
+            "clongdouble", "complex128", "complex256", "complex64",
+            "complexfloating", "csingle", "datetime64", "double", "flexible",
+            "float128", "float16", "float32", "float64", "floating", "generic",
+            "half", "inexact", "int16", "int32", "int64", "int8", "intc",
+            "integer", "intp", "longdouble", "longlong", "number", "object_",
+            "short", "signedinteger", "single", "str_", "timedelta64", "ubyte",
+            "uint", "uint16", "uint32", "uint64", "uint8", "uintc", "uintp",
+            "ulong", "ulonglong", "ushort", "unsignedinteger", "void",
+        ];
+        for name in NUMPY_DTYPE_SCALARS {
+            if let Ok(value) = numpy.getattr(*name) {
+                m.add(*name, value)?;
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -39760,6 +39784,81 @@ mod tests {
                 ours_le, theirs_le,
                 "little_endian parity with numpy.little_endian"
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn module_reexports_numpy_dtype_scalar_types_matching_numpy() {
+        with_python(|py| {
+            let module = PyModule::new(py, "fnp_python_test_dtype_scalars")?;
+            fnp_python(&module)?;
+
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+
+            // Every name fnp_python re-exports must be the *same* object
+            // as the corresponding numpy attribute (identity check). The
+            // universal types (cross-platform) are a required subset so
+            // the test fails if the re-export list regresses.
+            let universal_required = [
+                "bool_", "byte", "bytes_", "cdouble", "character",
+                "clongdouble", "complex128", "complex64", "complexfloating",
+                "csingle", "datetime64", "double", "flexible", "float16",
+                "float32", "float64", "floating", "generic", "half", "inexact",
+                "int16", "int32", "int64", "int8", "intc", "integer", "intp",
+                "longdouble", "longlong", "number", "object_", "short",
+                "signedinteger", "single", "str_", "timedelta64", "ubyte",
+                "uint", "uint16", "uint32", "uint64", "uint8", "uintc",
+                "uintp", "ulong", "ulonglong", "ushort", "unsignedinteger",
+                "void",
+            ];
+            let platform_optional = ["complex256", "float128", "bool"];
+
+            for name in universal_required {
+                let theirs = numpy.getattr(name).unwrap_or_else(|_| {
+                    panic!("numpy.{name} must exist on this build — if this \
+                           panics, the universal_required list in this test \
+                           needs pruning")
+                });
+                let ours = module.getattr(name).unwrap_or_else(|_| {
+                    panic!("fnp_python.{name} missing: required dtype scalar \
+                           re-export dropped?")
+                });
+                assert!(
+                    ours.is(&theirs),
+                    "fnp_python.{name} is not the same object as numpy.{name}"
+                );
+            }
+
+            // Platform-optional names: if numpy exposes them, we must too;
+            // if numpy does not, we must also not expose them (no stale
+            // caches).
+            for name in platform_optional {
+                match numpy.getattr(name) {
+                    Ok(theirs) => {
+                        let ours = module.getattr(name).unwrap_or_else(|_| {
+                            panic!("numpy.{name} exists on this platform but \
+                                   fnp_python.{name} was not re-exported")
+                        });
+                        assert!(
+                            ours.is(&theirs),
+                            "fnp_python.{name} platform-optional identity drift"
+                        );
+                    }
+                    Err(_) => {
+                        // numpy lacks it — we should lack it too (graceful skip).
+                        assert!(
+                            module.getattr(name).is_err(),
+                            "fnp_python.{name} re-exported something numpy \
+                             itself does not expose on this platform"
+                        );
+                    }
+                }
+            }
 
             Ok(())
         });
