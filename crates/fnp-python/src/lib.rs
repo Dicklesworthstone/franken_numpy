@@ -6345,6 +6345,27 @@ fn negative(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (val,))]
+fn real(py: Python<'_>, val: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.real (return real part of a complex array; view
+    // into the same buffer when the input is complex, and simply the
+    // input array when the dtype is real). Preserves numpy's write-view
+    // semantics for complex inputs so downstream mutations agree.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("real")?.call1((val.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (val,))]
+fn imag(py: Python<'_>, val: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.imag (imaginary part of a complex array; for
+    // real-dtype inputs numpy returns a zero-valued array with the real
+    // dtype). Preserves numpy's write-view semantics for complex inputs.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("imag")?.call1((val.bind(py),))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (p, m=1))]
 fn polyder(py: Python<'_>, p: Py<PyAny>, m: i64) -> PyResult<Py<PyAny>> {
     // Passthrough to np.polyder. Returns the m-th derivative of the
@@ -8878,6 +8899,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(deg2rad, m)?)?;
     m.add_function(wrap_pyfunction!(fabs, m)?)?;
     m.add_function(wrap_pyfunction!(negative, m)?)?;
+    m.add_function(wrap_pyfunction!(real, m)?)?;
+    m.add_function(wrap_pyfunction!(imag, m)?)?;
     m.add_function(wrap_pyfunction!(polyder, m)?)?;
     m.add_function(wrap_pyfunction!(polyint, m)?)?;
     m.add_function(wrap_pyfunction!(polyadd, m)?)?;
@@ -9330,6 +9353,8 @@ mod tests {
             assert!(module.getattr("deg2rad").is_ok());
             assert!(module.getattr("fabs").is_ok());
             assert!(module.getattr("negative").is_ok());
+            assert!(module.getattr("real").is_ok());
+            assert!(module.getattr("imag").is_ok());
             assert!(module.getattr("polyder").is_ok());
             assert!(module.getattr("tile").is_ok());
             assert!(module.getattr("array_equal").is_ok());
@@ -35229,6 +35254,106 @@ mod tests {
             let roundtrip = neg_fn.call1((neg_fn.call1((arr.clone(),))?,))?;
             let ok_rt: bool = allclose.call1((&roundtrip, &arr))?.extract()?;
             assert!(ok_rt, "negative is its own inverse");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn real_imag_match_numpy_across_complex_real_arrays_scalars_and_views() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let real_fn = module.getattr("real")?;
+            let imag_fn = module.getattr("imag")?;
+            let numpy = py.import("numpy")?;
+            let numpy_real = numpy.getattr("real")?;
+            let numpy_imag = numpy.getattr("imag")?;
+            let allclose = numpy.getattr("allclose")?;
+            let array_fn = numpy.getattr("array")?;
+
+            // Complex scalar parity (Python complex input).
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+            let cplx_scalar = py_complex.call1((1.5_f64, -2.25_f64))?;
+            let ours_r: f64 = real_fn.call1((cplx_scalar.clone(),))?.extract()?;
+            let theirs_r: f64 = numpy_real.call1((cplx_scalar.clone(),))?.extract()?;
+            assert_eq!(ours_r, theirs_r);
+            assert_eq!(ours_r, 1.5);
+            let ours_i: f64 = imag_fn.call1((cplx_scalar.clone(),))?.extract()?;
+            let theirs_i: f64 = numpy_imag.call1((cplx_scalar.clone(),))?.extract()?;
+            assert_eq!(ours_i, theirs_i);
+            assert_eq!(ours_i, -2.25);
+
+            // 1-D complex array.
+            let cplx_items: Vec<Py<PyAny>> = vec![
+                py_complex.call1((1.0_f64, 2.0_f64))?.unbind(),
+                py_complex.call1((-3.0_f64, 4.0_f64))?.unbind(),
+                py_complex.call1((0.0_f64, -5.0_f64))?.unbind(),
+            ];
+            let cplx_arr = array_fn.call1((PyList::new(py, cplx_items)?,))?;
+            let ours_rv = real_fn.call1((cplx_arr.clone(),))?;
+            let theirs_rv = numpy_real.call1((cplx_arr.clone(),))?;
+            assert_array_matches_numpy(&ours_rv, &theirs_rv)?;
+            let ours_iv = imag_fn.call1((cplx_arr.clone(),))?;
+            let theirs_iv = numpy_imag.call1((cplx_arr.clone(),))?;
+            assert_array_matches_numpy(&ours_iv, &theirs_iv)?;
+
+            // Real-dtype input: np.real is identity view; np.imag yields
+            // an all-zero array with the same (real) dtype.
+            let real_arr = array_fn.call1((vec![1.0_f64, 2.0, 3.0, 4.0],))?;
+            let ours_real_in = real_fn.call1((real_arr.clone(),))?;
+            let theirs_real_in = numpy_real.call1((real_arr.clone(),))?;
+            assert_array_matches_numpy(&ours_real_in, &theirs_real_in)?;
+            let ok_rid: bool = allclose.call1((&ours_real_in, &real_arr))?.extract()?;
+            assert!(ok_rid, "real(real_array) must equal the array");
+
+            let ours_imag_in = imag_fn.call1((real_arr.clone(),))?;
+            let theirs_imag_in = numpy_imag.call1((real_arr.clone(),))?;
+            assert_array_matches_numpy(&ours_imag_in, &theirs_imag_in)?;
+            let zeros = numpy.getattr("zeros_like")?.call1((real_arr.clone(),))?;
+            let ok_iid: bool = allclose.call1((&ours_imag_in, &zeros))?.extract()?;
+            assert!(ok_iid, "imag(real_array) must equal zeros_like(array)");
+
+            // Integer input: imag is all-zero integer array.
+            let int_arr = array_fn.call1((vec![1_i64, 2, 3],))?;
+            let ours_int_imag = imag_fn.call1((int_arr.clone(),))?;
+            let theirs_int_imag = numpy_imag.call1((int_arr.clone(),))?;
+            assert_array_matches_numpy(&ours_int_imag, &theirs_int_imag)?;
+
+            // 2-D complex array.
+            let cplx_2d_items: Vec<Vec<Py<PyAny>>> = vec![vec![
+                py_complex.call1((1.0_f64, 10.0_f64))?.unbind(),
+                py_complex.call1((2.0_f64, 20.0_f64))?.unbind(),
+            ]];
+            let flat: Vec<Py<PyAny>> = cplx_2d_items.into_iter().flatten().collect();
+            let flat_list = PyList::new(py, flat)?;
+            let cplx_2d = array_fn
+                .call1((flat_list,))?
+                .call_method1("reshape", ((1_i64, 2_i64),))?;
+            let ours_2d_r = real_fn.call1((cplx_2d.clone(),))?;
+            let theirs_2d_r = numpy_real.call1((cplx_2d.clone(),))?;
+            assert_array_matches_numpy(&ours_2d_r, &theirs_2d_r)?;
+            let ours_2d_i = imag_fn.call1((cplx_2d.clone(),))?;
+            let theirs_2d_i = numpy_imag.call1((cplx_2d.clone(),))?;
+            assert_array_matches_numpy(&ours_2d_i, &theirs_2d_i)?;
+
+            // View semantics: for complex input both implementations
+            // return arrays that may share memory with the source (numpy
+            // behavior), and the shares_memory surface must agree.
+            let ours_view_r = real_fn.call1((cplx_arr.clone(),))?;
+            let theirs_view_r = numpy_real.call1((cplx_arr.clone(),))?;
+            let shares_memory = numpy.getattr("shares_memory")?;
+            let ours_shares: bool = shares_memory
+                .call1((ours_view_r.clone(), cplx_arr.clone()))?
+                .extract()?;
+            let theirs_shares: bool = shares_memory
+                .call1((theirs_view_r.clone(), cplx_arr.clone()))?
+                .extract()?;
+            assert_eq!(ours_shares, theirs_shares);
 
             Ok(())
         });
