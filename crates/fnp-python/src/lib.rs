@@ -3258,6 +3258,32 @@ fn may_share_memory(
 }
 
 #[pyfunction]
+#[pyo3(signature = (iter, dtype, count=-1_i64, *, like=None))]
+fn fromiter(
+    py: Python<'_>,
+    iter: Py<PyAny>,
+    dtype: Py<PyAny>,
+    count: i64,
+    like: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.fromiter so iterator consumption, dtype coercion,
+    // count-limited reads, short-iterator ValueError, and TypeError
+    // surfaces on non-iterable or wrongly-typed elements all match numpy
+    // exactly. `dtype` is required by numpy for fromiter (unlike most
+    // array constructors).
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("count", count)?;
+    if let Some(like_val) = like {
+        kwargs.set_item("like", like_val.bind(py))?;
+    }
+    Ok(numpy
+        .getattr("fromiter")?
+        .call((iter.bind(py), dtype.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (string, dtype=None, count=-1_i64, *, sep="", like=None))]
 fn fromstring(
     py: Python<'_>,
@@ -8892,6 +8918,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(shares_memory, m)?)?;
     m.add_function(wrap_pyfunction!(frombuffer, m)?)?;
     m.add_function(wrap_pyfunction!(fromstring, m)?)?;
+    m.add_function(wrap_pyfunction!(fromiter, m)?)?;
     m.add_function(wrap_pyfunction!(sort_complex, m)?)?;
     m.add_function(wrap_pyfunction!(nanmedian, m)?)?;
     m.add_function(wrap_pyfunction!(ma_average, m)?)?;
@@ -9281,6 +9308,7 @@ mod tests {
             assert!(module.getattr("shares_memory").is_ok());
             assert!(module.getattr("frombuffer").is_ok());
             assert!(module.getattr("fromstring").is_ok());
+            assert!(module.getattr("fromiter").is_ok());
             assert!(module.getattr("sort_complex").is_ok());
             assert!(module.getattr("nanmedian").is_ok());
             assert!(module.getattr("ma_average").is_ok());
@@ -34742,6 +34770,92 @@ mod tests {
                 (Err(ours), Err(theirs)) => assert_pyerr_matches_numpy(py, ours, theirs)?,
                 _ => panic!("fromstring malformed-token success/error surface must match numpy"),
             }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn fromiter_matches_numpy_across_list_gen_dtype_count_empty_and_errors() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let fi_fn = module.getattr("fromiter")?;
+            let numpy = py.import("numpy")?;
+            let numpy_fi = numpy.getattr("fromiter")?;
+
+            // Default list input with float64 dtype.
+            let float64 = numpy.getattr("float64")?;
+            let list_vals = vec![1_i64, 2, 3, 4, 5];
+            let ours_list = fi_fn.call1((list_vals.clone(), float64.clone()))?;
+            let theirs_list = numpy_fi.call1((list_vals.clone(), float64.clone()))?;
+            assert_array_matches_numpy(&ours_list, &theirs_list)?;
+
+            // int32 dtype coercion.
+            let int32 = numpy.getattr("int32")?;
+            let ours_i32 = fi_fn.call1((list_vals.clone(), int32.clone()))?;
+            let theirs_i32 = numpy_fi.call1((list_vals.clone(), int32.clone()))?;
+            assert_array_matches_numpy(&ours_i32, &theirs_i32)?;
+
+            // Python generator expression: numpy consumes lazily.
+            let gen_code = "(x * x for x in range(6))";
+            let builtins = py.import("builtins")?;
+            let eval_fn = builtins.getattr("eval")?;
+            let ours_gen = fi_fn.call1((eval_fn.call1((gen_code,))?, int32.clone()))?;
+            let theirs_gen = numpy_fi.call1((eval_fn.call1((gen_code,))?, int32.clone()))?;
+            assert_array_matches_numpy(&ours_gen, &theirs_gen)?;
+
+            // count-limited read: consume only the first 3 elements from a
+            // generator that could yield more.
+            let count_kwargs = PyDict::new(py);
+            count_kwargs.set_item("count", 3_i64)?;
+            let ours_count = fi_fn.call(
+                (eval_fn.call1(("(x for x in range(10))",))?, int32.clone()),
+                Some(&count_kwargs),
+            )?;
+            let theirs_count = numpy_fi.call(
+                (eval_fn.call1(("(x for x in range(10))",))?, int32.clone()),
+                Some(&count_kwargs),
+            )?;
+            assert_array_matches_numpy(&ours_count, &theirs_count)?;
+
+            // Empty iterable → zero-element ndarray with matching dtype.
+            let empty: Vec<i64> = Vec::new();
+            let ours_empty = fi_fn.call1((empty.clone(), float64.clone()))?;
+            let theirs_empty = numpy_fi.call1((empty.clone(), float64.clone()))?;
+            assert_array_matches_numpy(&ours_empty, &theirs_empty)?;
+
+            // Short iterator with count > len must raise matching error.
+            let short_kwargs = PyDict::new(py);
+            short_kwargs.set_item("count", 10_i64)?;
+            let ours_short = fi_fn.call(
+                (vec![1_i64, 2, 3], int32.clone()),
+                Some(&short_kwargs),
+            );
+            let theirs_short = numpy_fi.call(
+                (vec![1_i64, 2, 3], int32.clone()),
+                Some(&short_kwargs),
+            );
+            match (ours_short, theirs_short) {
+                (Ok(a), Ok(b)) => assert_array_matches_numpy(&a, &b)?,
+                (Err(ours), Err(theirs)) => assert_pyerr_matches_numpy(py, ours, theirs)?,
+                _ => panic!(
+                    "fromiter short-iterator success/error surface must match numpy"
+                ),
+            }
+
+            // Non-iterable input: TypeError parity.
+            let ours_err = fi_fn.call1((42_i64, int32.clone())).expect_err(
+                "non-iterable must error",
+            );
+            let theirs_err = numpy_fi
+                .call1((42_i64, int32.clone()))
+                .expect_err("numpy must error too");
+            assert_pyerr_matches_numpy(py, ours_err, theirs_err)?;
 
             Ok(())
         });
