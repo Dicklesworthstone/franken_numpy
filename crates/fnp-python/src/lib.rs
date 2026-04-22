@@ -7352,11 +7352,7 @@ fn eye(
 
 #[pyfunction]
 #[pyo3(signature = (n, dtype=None))]
-fn identity(
-    py: Python<'_>,
-    n: i64,
-    dtype: Option<Py<PyAny>>,
-) -> PyResult<Py<PyAny>> {
+fn identity(py: Python<'_>, n: i64, dtype: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.identity. Returns the (n, n) identity matrix
     // with the requested dtype (default float64).
     let numpy = py.import("numpy")?;
@@ -7394,18 +7390,14 @@ fn logspace(
         kwargs.set_item("dtype", dtype_val.bind(py))?;
     }
     kwargs.set_item("axis", axis)?;
-    Ok(ls_fn.call((start.bind(py), stop.bind(py)), Some(&kwargs))?.unbind())
+    Ok(ls_fn
+        .call((start.bind(py), stop.bind(py)), Some(&kwargs))?
+        .unbind())
 }
-
 
 #[pyfunction]
 #[pyo3(signature = (a, order="K", subok=false))]
-fn copy(
-    py: Python<'_>,
-    a: Py<PyAny>,
-    order: &str,
-    subok: bool,
-) -> PyResult<Py<PyAny>> {
+fn copy(py: Python<'_>, a: Py<PyAny>, order: &str, subok: bool) -> PyResult<Py<PyAny>> {
     // Passthrough to np.copy so order ('K'/'C'/'F'/'A') memory-layout
     // selection, subok subclass preservation, object-dtype deep-copy
     // semantics, and scalar/0-d handling stay aligned with numpy.
@@ -7417,6 +7409,15 @@ fn copy(
     Ok(copy_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
 
+#[pyfunction]
+fn sort_complex(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.sort_complex so integer inputs upcast to complex,
+    // complex lexicographic ordering, NaN placement, and copy semantics
+    // remain aligned with numpy.
+    let numpy = py.import("numpy")?;
+    let sort_complex_fn = numpy.getattr("sort_complex")?;
+    Ok(sort_complex_fn.call1((a.bind(py),))?.unbind())
+}
 
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, out=None, overwrite_input=false, keepdims=false))]
@@ -8743,6 +8744,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(identity, m)?)?;
     m.add_function(wrap_pyfunction!(logspace, m)?)?;
     m.add_function(wrap_pyfunction!(copy, m)?)?;
+    m.add_function(wrap_pyfunction!(sort_complex, m)?)?;
     m.add_function(wrap_pyfunction!(nanmedian, m)?)?;
     m.add_function(wrap_pyfunction!(ma_average, m)?)?;
     m.add_function(wrap_pyfunction!(size_count, m)?)?;
@@ -9123,6 +9125,7 @@ mod tests {
             assert!(module.getattr("identity").is_ok());
             assert!(module.getattr("logspace").is_ok());
             assert!(module.getattr("copy").is_ok());
+            assert!(module.getattr("sort_complex").is_ok());
             assert!(module.getattr("nanmedian").is_ok());
             assert!(module.getattr("ma_average").is_ok());
             assert!(module.getattr("size_count").is_ok());
@@ -33746,7 +33749,10 @@ mod tests {
             let ours_c = copy_fn.call((fortran_source.clone(),), Some(&order_c_kwargs))?;
             let theirs_c = numpy_copy.call((fortran_source.clone(),), Some(&order_c_kwargs))?;
             assert_array_matches_numpy(&ours_c, &theirs_c)?;
-            let ours_c_flag: bool = ours_c.getattr("flags")?.get_item("C_CONTIGUOUS")?.extract()?;
+            let ours_c_flag: bool = ours_c
+                .getattr("flags")?
+                .get_item("C_CONTIGUOUS")?
+                .extract()?;
             let theirs_c_flag: bool = theirs_c
                 .getattr("flags")?
                 .get_item("C_CONTIGUOUS")?
@@ -33761,7 +33767,10 @@ mod tests {
             let ours_f = copy_fn.call((source.clone(),), Some(&order_f_kwargs))?;
             let theirs_f = numpy_copy.call((source.clone(),), Some(&order_f_kwargs))?;
             assert_array_matches_numpy(&ours_f, &theirs_f)?;
-            let ours_f_flag: bool = ours_f.getattr("flags")?.get_item("F_CONTIGUOUS")?.extract()?;
+            let ours_f_flag: bool = ours_f
+                .getattr("flags")?
+                .get_item("F_CONTIGUOUS")?
+                .extract()?;
             let theirs_f_flag: bool = theirs_f
                 .getattr("flags")?
                 .get_item("F_CONTIGUOUS")?
@@ -33823,6 +33832,83 @@ mod tests {
                 ours_subok.get_type().name()?.extract::<String>()?,
                 theirs_subok.get_type().name()?.extract::<String>()?
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn sort_complex_matches_numpy_across_integer_complex_nan_matrix_and_scalar_inputs() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let sort_complex_fn = module.getattr("sort_complex")?;
+            let numpy = py.import("numpy")?;
+            let numpy_sort_complex = numpy.getattr("sort_complex")?;
+            let array_fn = numpy.getattr("array")?;
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+
+            let make_complex_array = |pairs: Vec<(f64, f64)>| -> PyResult<Bound<'_, PyAny>> {
+                let mut items: Vec<Py<PyAny>> = Vec::with_capacity(pairs.len());
+                for (real, imag) in pairs {
+                    items.push(py_complex.call1((real, imag))?.unbind());
+                }
+                let list = PyList::new(py, items)?;
+                array_fn.call1((list,))
+            };
+
+            // Integer input upcasts to a complex dtype and sorts by value.
+            let ints = array_fn.call1((vec![3_i64, 1, 2],))?;
+            let ours_ints = sort_complex_fn.call1((ints.clone(),))?;
+            let theirs_ints = numpy_sort_complex.call1((ints.clone(),))?;
+            assert_array_matches_numpy(&ours_ints, &theirs_ints)?;
+            let ours_kind = ours_ints
+                .getattr("dtype")?
+                .getattr("kind")?
+                .extract::<String>()?;
+            let theirs_kind = theirs_ints
+                .getattr("dtype")?
+                .getattr("kind")?
+                .extract::<String>()?;
+            assert_eq!(ours_kind, theirs_kind);
+            assert_eq!(ours_kind, "c");
+
+            // Complex values sort lexicographically by real then imaginary part.
+            let complex_input = make_complex_array(vec![(2.0, -1.0), (1.0, 5.0), (1.0, -2.0)])?;
+            let ours_complex = sort_complex_fn.call1((complex_input.clone(),))?;
+            let theirs_complex = numpy_sort_complex.call1((complex_input.clone(),))?;
+            assert_array_matches_numpy(&ours_complex, &theirs_complex)?;
+
+            // NaN-containing complex inputs must preserve numpy's observable ordering surface.
+            let complex_nan_input =
+                make_complex_array(vec![(f64::NAN, 1.0), (1.0, f64::NAN), (0.0, 0.0)])?;
+            let ours_nan = sort_complex_fn.call1((complex_nan_input.clone(),))?;
+            let theirs_nan = numpy_sort_complex.call1((complex_nan_input.clone(),))?;
+            assert_array_matches_numpy(&ours_nan, &theirs_nan)?;
+
+            // Matrix input parity: shape/result surface and copy-vs-alias behavior.
+            let matrix = array_fn.call1((vec![vec![3_i64, 1], vec![2_i64, 4]],))?;
+            let ours_matrix = sort_complex_fn.call1((matrix.clone(),))?;
+            let theirs_matrix = numpy_sort_complex.call1((matrix.clone(),))?;
+            assert_array_matches_numpy(&ours_matrix, &theirs_matrix)?;
+            let ours_alias: bool = numpy
+                .getattr("shares_memory")?
+                .call1((ours_matrix.clone(), matrix.clone()))?
+                .extract()?;
+            let theirs_alias: bool = numpy
+                .getattr("shares_memory")?
+                .call1((theirs_matrix.clone(), matrix.clone()))?
+                .extract()?;
+            assert_eq!(ours_alias, theirs_alias);
+
+            // Scalar input parity: current numpy raises AxisError on a bare scalar.
+            let ours_scalar_err = sort_complex_fn.call1((5_i64,)).unwrap_err();
+            let theirs_scalar_err = numpy_sort_complex.call1((5_i64,)).unwrap_err();
+            assert_pyerr_matches_numpy(py, ours_scalar_err, theirs_scalar_err)?;
 
             Ok(())
         });
