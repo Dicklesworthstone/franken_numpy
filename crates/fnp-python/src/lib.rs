@@ -3258,6 +3258,36 @@ fn may_share_memory(
 }
 
 #[pyfunction]
+#[pyo3(signature = (string, dtype=None, count=-1_i64, *, sep="", like=None))]
+fn fromstring(
+    py: Python<'_>,
+    string: Py<PyAny>,
+    dtype: Option<Py<PyAny>>,
+    count: i64,
+    sep: &str,
+    like: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.fromstring so separator-based text parsing,
+    // bytes-input acceptance, dtype coercion, count-limited reads,
+    // malformed-token ValueError surface, and numpy's own
+    // DeprecationWarning emission on empty sep all match exactly.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    kwargs.set_item("count", count)?;
+    kwargs.set_item("sep", sep)?;
+    if let Some(like_val) = like {
+        kwargs.set_item("like", like_val.bind(py))?;
+    }
+    Ok(numpy
+        .getattr("fromstring")?
+        .call((string.bind(py),), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (buffer, dtype=None, count=-1_i64, offset=0_i64, *, like=None))]
 fn frombuffer(
     py: Python<'_>,
@@ -8861,6 +8891,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(may_share_memory, m)?)?;
     m.add_function(wrap_pyfunction!(shares_memory, m)?)?;
     m.add_function(wrap_pyfunction!(frombuffer, m)?)?;
+    m.add_function(wrap_pyfunction!(fromstring, m)?)?;
     m.add_function(wrap_pyfunction!(sort_complex, m)?)?;
     m.add_function(wrap_pyfunction!(nanmedian, m)?)?;
     m.add_function(wrap_pyfunction!(ma_average, m)?)?;
@@ -9249,6 +9280,7 @@ mod tests {
             assert!(module.getattr("may_share_memory").is_ok());
             assert!(module.getattr("shares_memory").is_ok());
             assert!(module.getattr("frombuffer").is_ok());
+            assert!(module.getattr("fromstring").is_ok());
             assert!(module.getattr("sort_complex").is_ok());
             assert!(module.getattr("nanmedian").is_ok());
             assert!(module.getattr("ma_average").is_ok());
@@ -34633,6 +34665,83 @@ mod tests {
                 .call((int_buf.clone(),), Some(&short_kwargs))
                 .expect_err("numpy must also raise on excessive count");
             assert_pyerr_matches_numpy(py, ours_err, theirs_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn fromstring_matches_numpy_across_sep_whitespace_dtype_count_and_errors() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let fs_fn = module.getattr("fromstring")?;
+            let numpy = py.import("numpy")?;
+            let numpy_fs = numpy.getattr("fromstring")?;
+
+            // numpy.fromstring with empty sep is deprecated in modern numpy
+            // and emits DeprecationWarning; for text parsing we always pass
+            // an explicit sep so both implementations traverse the same path.
+            // Whitespace-separated numeric text with sep=' '.
+            let sep_ws_kwargs = PyDict::new(py);
+            sep_ws_kwargs.set_item("sep", " ")?;
+            let ours_ws = fs_fn.call(("1 2 3 4 5",), Some(&sep_ws_kwargs))?;
+            let theirs_ws = numpy_fs.call(("1 2 3 4 5",), Some(&sep_ws_kwargs))?;
+            assert_array_matches_numpy(&ours_ws, &theirs_ws)?;
+
+            // Explicit comma separator with mixed whitespace.
+            let sep_comma_kwargs = PyDict::new(py);
+            sep_comma_kwargs.set_item("sep", ",")?;
+            let ours_comma = fs_fn.call(("1.5, 2.5, -3.25, 0.0",), Some(&sep_comma_kwargs))?;
+            let theirs_comma = numpy_fs.call(("1.5, 2.5, -3.25, 0.0",), Some(&sep_comma_kwargs))?;
+            assert_array_matches_numpy(&ours_comma, &theirs_comma)?;
+
+            // Explicit int32 dtype override.
+            let dtype_kwargs = PyDict::new(py);
+            dtype_kwargs.set_item("sep", " ")?;
+            dtype_kwargs.set_item("dtype", numpy.getattr("int32")?)?;
+            let ours_i32 = fs_fn.call(("10 20 30 40",), Some(&dtype_kwargs))?;
+            let theirs_i32 = numpy_fs.call(("10 20 30 40",), Some(&dtype_kwargs))?;
+            assert_array_matches_numpy(&ours_i32, &theirs_i32)?;
+
+            // Count-limited read: take first 3 tokens only.
+            let count_kwargs = PyDict::new(py);
+            count_kwargs.set_item("sep", " ")?;
+            count_kwargs.set_item("count", 3_i64)?;
+            let ours_count = fs_fn.call(("1 2 3 4 5 6 7",), Some(&count_kwargs))?;
+            let theirs_count = numpy_fs.call(("1 2 3 4 5 6 7",), Some(&count_kwargs))?;
+            assert_array_matches_numpy(&ours_count, &theirs_count)?;
+
+            // Bytes input parity: numpy accepts bytes and decodes via the
+            // same text-parsing path when sep is provided.
+            let bytes_input = py
+                .import("builtins")?
+                .getattr("bytes")?
+                .call1(("1 2 3",))?;
+            let bytes_sep_kwargs = PyDict::new(py);
+            bytes_sep_kwargs.set_item("sep", " ")?;
+            let ours_bytes_r = fs_fn.call((bytes_input.clone(),), Some(&bytes_sep_kwargs));
+            let theirs_bytes_r = numpy_fs.call((bytes_input.clone(),), Some(&bytes_sep_kwargs));
+            match (ours_bytes_r, theirs_bytes_r) {
+                (Ok(a), Ok(b)) => assert_array_matches_numpy(&a, &b)?,
+                (Err(ours), Err(theirs)) => assert_pyerr_matches_numpy(py, ours, theirs)?,
+                _ => panic!("fromstring bytes-input success/error surface must match numpy"),
+            }
+
+            // Malformed-token surface must match numpy (ValueError).
+            let bad_sep_kwargs = PyDict::new(py);
+            bad_sep_kwargs.set_item("sep", " ")?;
+            let ours_err = fs_fn.call(("1 2 not_a_number",), Some(&bad_sep_kwargs));
+            let theirs_err = numpy_fs.call(("1 2 not_a_number",), Some(&bad_sep_kwargs));
+            match (ours_err, theirs_err) {
+                (Ok(a), Ok(b)) => assert_array_matches_numpy(&a, &b)?,
+                (Err(ours), Err(theirs)) => assert_pyerr_matches_numpy(py, ours, theirs)?,
+                _ => panic!("fromstring malformed-token success/error surface must match numpy"),
+            }
 
             Ok(())
         });
