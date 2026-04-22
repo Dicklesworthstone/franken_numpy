@@ -1,8 +1,41 @@
 # Dependency Upgrade Log
 
+## 2026-04-22 Session (Clawdstein-libupdater-franken_numpy)
+
+**Date:** 2026-04-22  |  **Project:** franken_numpy  |  **Language:** Rust
+**Agent:** Clawdstein-libupdater-franken_numpy
+
+### Summary (this session)
+
+- **Updated (pre-session, separate commit):** asupersync 0.3.0 -> 0.3.1
+- **Updated (this session):** _TBD_
+- **Skipped (already latest):** half 2.7.1, bytemuck 1.25.0, serde 1.0.228, serde_json 1.0.149, base64 0.22.1, serde_yaml_ng 0.10.0
+- **Failed:** _TBD_
+- **Needs attention:** _TBD_
+
+### Asupersync bump (separate commit, aadd732)
+
+- `crates/fnp-runtime/Cargo.toml`: asupersync 0.3.0 -> 0.3.1 (feature-gated, optional, default-features = false)
+- `crates/fnp-conformance/Cargo.toml`: asupersync 0.3.0 -> 0.3.1 (direct dep used by conformance harness)
+- Cargo.lock: companion crates `asupersync-macros`, `franken-decision`, `franken-evidence`, `franken-kernel` all moved 0.3.0 -> 0.3.1.
+- asupersync 0.3.1 was published to crates.io on 2026-04-21 (~3h before this session); patch release with no API changes required.
+- Verified: `cargo check -p fnp-runtime --features asupersync --all-targets` and `cargo check -p fnp-conformance --all-targets` both pass via `rch exec`.
+
+### Updates (this session)
+
+#### flate2: 1.0.35 -> 1.1.9 (fnp-io)
+
+- **Research:** flate2 1.1.x moved from C-bindings (cloudflare-zlib-sys, libz-rs-sys) to the pure-Rust `zlib-rs` backend; MSRV bumped to 1.67. Public API of `DeflateEncoder`, `DeflateDecoder`, `GzDecoder`, etc. unchanged. Minor additions: `(de)compress_uninit` taking `MaybeUninit<u8>`, `Clone` on error types. No breaking changes for fnp-io's usage (`DeflateDecoder` / `DeflateEncoder` from `flate2::read`/`flate2::write`).
+- **Cargo.lock:** already at 1.1.9 (transitive refresh from a prior session pulled it forward; manifest caught up here).
+- **Verified:** `cargo check -p fnp-io --all-targets` pass. `cargo test -p fnp-io` 222/222 pass.
+
+---
+
+## 2026-02-20 Session (legacy)
+
 **Date:** 2026-02-20  |  **Project:** FrankenNumPy  |  **Language:** Rust
 
-## Summary
+### Summary
 - **Updated:** 5 direct + 5 transitive  |  **Skipped:** 1 (base64, already latest)  |  **Failed:** 0  |  **Needs attention:** 1 (serde_yaml deprecated)
 
 ## Toolchain

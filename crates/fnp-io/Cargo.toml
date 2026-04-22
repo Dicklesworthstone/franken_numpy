@@ -6,4 +6,4 @@ license-file = "../../LICENSE"
 
 [dependencies]
 bytemuck = "1.25.0"
-flate2 = "1.0.35"
+flate2 = "1.1.9"
