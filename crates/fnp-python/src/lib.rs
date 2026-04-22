@@ -10939,20 +10939,71 @@ fn masked_values(
     copy: bool,
     shrink: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ma.masked_values: floating-point approximate-equality
-    // masking using rtol/atol thresholds (mirrors np.isclose semantics for the
-    // mask predicate). For integer / non-floating dtypes numpy falls back to
-    // exact equality. Forwards copy and shrink kwargs.
-    let numpy = py.import("numpy")?;
-    let masked_values_fn = numpy.getattr("ma")?.getattr("masked_values")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("rtol", rtol)?;
-    kwargs.set_item("atol", atol)?;
-    kwargs.set_item("copy", copy)?;
-    kwargs.set_item("shrink", shrink)?;
-    Ok(masked_values_fn
-        .call((x.bind(py), value.bind(py)), Some(&kwargs))?
-        .unbind())
+    let x_for_fallback = x.clone_ref(py);
+    let value_for_fallback = value.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let masked_values_fn = numpy.getattr("ma")?.getattr("masked_values")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("rtol", rtol)?;
+        kwargs.set_item("atol", atol)?;
+        kwargs.set_item("copy", copy)?;
+        kwargs.set_item("shrink", shrink)?;
+        Ok(masked_values_fn
+            .call(
+                (x_for_fallback.bind(py), value_for_fallback.bind(py)),
+                Some(&kwargs),
+            )?
+            .unbind())
+    };
+
+    let Some(masked_x) = extract_numeric_masked_array(py, x.bind(py), "masked_values(x)")? else {
+        return fallback();
+    };
+    let scalar = match extract_precise_numeric_array(py, value.bind(py), "masked_values(value)") {
+        Ok(value) if value.shape().is_empty() => value,
+        _ => return fallback(),
+    };
+
+    let condition = if matches!(masked_x.data().dtype(), DType::F16 | DType::F32 | DType::F64)
+        || matches!(scalar.dtype(), DType::F16 | DType::F32 | DType::F64)
+    {
+        match masked_x.data().isclose(&scalar, rtol, atol) {
+            Ok(condition) => condition,
+            Err(_) => return fallback(),
+        }
+    } else {
+        match masked_x.data().elementwise_binary(&scalar, BinaryOp::Equal) {
+            Ok(condition) => condition,
+            Err(_) => return fallback(),
+        }
+    };
+
+    let filled_data = if masked_x.mask().is_some() {
+        match masked_x.filled(scalar.values()[0]) {
+            Ok(data) => data,
+            Err(_) => return fallback(),
+        }
+    } else {
+        masked_x.data().clone()
+    };
+
+    let mut mask = ma_mask_or(masked_x.mask(), Some(&condition));
+    if shrink
+        && mask
+            .as_ref()
+            .is_some_and(|mask| mask.values().iter().all(|&value| value == 0.0))
+    {
+        mask = None;
+    }
+
+    let result = MaskedArray::new(filled_data, mask, Some(scalar.values()[0]))
+        .map_err(|err| map_ma_error("masked_values", err))?;
+    let py_result = build_numpy_masked_array(py, &result)?;
+    py_result
+        .bind(py)
+        .call_method1("set_fill_value", (value.bind(py),))?;
+    Ok(py_result)
 }
 
 #[pyfunction]
@@ -25088,6 +25139,11 @@ mod tests {
             let expected_i = numpy_masked_values.call1((int_data.clone(), 2_i64))?;
             assert_eq!(repr_string(&actual_i), repr_string(&expected_i));
 
+            // Integer data with non-integral sentinel still uses exact equality.
+            let actual_i_float = masked_values_fn.call1((int_data.clone(), 2.1_f64))?;
+            let expected_i_float = numpy_masked_values.call1((int_data.clone(), 2.1_f64))?;
+            assert_eq!(repr_string(&actual_i_float), repr_string(&expected_i_float));
+
             // 2-D float input.
             let data_2d = numpy.getattr("array")?.call1((PyList::new(
                 py,
@@ -25113,6 +25169,24 @@ mod tests {
             let expected_shrink = numpy_masked_values
                 .call((no_match_data.clone(), 99.0_f64), Some(&shrink_kwargs_n))?;
             assert_eq!(repr_string(&actual_shrink), repr_string(&expected_shrink));
+
+            // Existing mask is preserved and masked storage is filled with the sentinel.
+            let masked_input = numpy.getattr("ma")?.getattr("array")?.call(
+                (vec![1.0_f64, 2.0, 3.0],),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("mask", PyList::new(py, [false, true, false])?)?;
+                    kw.set_item("fill_value", 77.0_f64)?;
+                    kw
+                }),
+            )?;
+            let actual_masked = masked_values_fn.call1((masked_input.clone(), 3.0_f64))?;
+            let expected_masked = numpy_masked_values.call1((masked_input.clone(), 3.0_f64))?;
+            assert_eq!(repr_string(&actual_masked), repr_string(&expected_masked));
+            assert_eq!(
+                repr_string(&actual_masked.getattr("data")?),
+                repr_string(&expected_masked.getattr("data")?)
+            );
 
             Ok(())
         });
