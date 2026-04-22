@@ -9265,18 +9265,39 @@ fn linalg_vecdot(
     x2: Py<PyAny>,
     axis: i64,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.linalg.vecdot (Array-API batched vector dot
-    // product along `axis`, conjugating x1 for complex inputs). Matches
-    // numpy on real/complex inputs, broadcasting of batch dims, and
-    // the axis=-1 default.
     let numpy = py.import("numpy")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("axis", axis)?;
-    Ok(numpy
-        .getattr("linalg")?
-        .getattr("vecdot")?
-        .call((x1.bind(py), x2.bind(py)), Some(&kwargs))?
-        .unbind())
+    let vecdot_fn = numpy.getattr("linalg")?.getattr("vecdot")?;
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("axis", axis)?;
+        Ok(vecdot_fn
+            .call((x1.bind(py), x2.bind(py)), Some(&kwargs))?
+            .unbind())
+    };
+
+    let x1 = match extract_precise_numeric_array(py, x1.bind(py), "linalg.vecdot(x1)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let x2 = match extract_precise_numeric_array(py, x2.bind(py), "linalg.vecdot(x2)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    if x1.has_integer_sidecar()
+        || x2.has_integer_sidecar()
+        || matches!(x1.dtype(), DType::Complex64 | DType::Complex128)
+        || matches!(x2.dtype(), DType::Complex64 | DType::Complex128)
+        || x1.shape() != x2.shape()
+    {
+        return fallback();
+    }
+
+    let result = match x1.vecdot(&x2, Some(axis as isize)) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -41954,6 +41975,14 @@ mod tests {
             let theirs_ax = numpy_vd.call((mat_a.clone(), mat_b.clone()), Some(&axis0_kw))?;
             let ok_ax: bool = allclose.call1((&ours_ax, &theirs_ax))?.extract()?;
             assert!(ok_ax, "vecdot axis=0 mismatch");
+
+            // vecdot: broadcasted batch dims should still match numpy via
+            // fallback when the precise Rust path cannot accept the shapes.
+            let bcast = array_fn.call1((vec![1.0_f64, 2.0],))?;
+            let ours_bc = vd_fn.call1((mat_a.clone(), bcast.clone()))?;
+            let theirs_bc = numpy_vd.call1((mat_a.clone(), bcast.clone()))?;
+            let ok_bc: bool = allclose.call1((&ours_bc, &theirs_bc))?.extract()?;
+            assert!(ok_bc, "vecdot broadcast mismatch");
 
             // matrix_norm: default (Frobenius).
             let m = array_fn.call1((vec![vec![1.0_f64, 2.0], vec![3.0, 4.0]],))?;
