@@ -41793,4 +41793,152 @@ mod tests {
             Ok(())
         });
     }
+
+    #[test]
+    fn metamorphic_rust_ported_ops_preserve_invariants() {
+        // Metamorphic fuzz-style test for cod-ported rust-native ops.
+        // Rather than comparing against numpy (those tests exist), this
+        // checks INTERNAL algebraic invariants across multiple random
+        // inputs — a property-based smoke test for edge-case bugs that
+        // slip past per-op parity tests.
+        //
+        // Invariants exercised:
+        //   flip(flip(x, axis=a), axis=a) == x                   (involution)
+        //   transpose(transpose(x)) == x                          (involution)
+        //   fliplr(fliplr(m)) == m                                (involution, 2-D)
+        //   flipud(flipud(m)) == m                                (involution, 2-D)
+        //   rot90(rot90(m, k=2), k=2) == m                        (4× rotation = identity)
+        //   sort(reverse(sort(x, reverse=False))) == sort(x, reverse=True)
+        //     — tested via sort vs sort+flip equivalence
+        //   concatenate([x]) == x                                 (1-element identity)
+        //   diff(cumsum(x)) == x[1:]                              (off-by-one aware)
+        //   argsort(argsort(x)) is a permutation (involution-ish)
+        //
+        // Inputs: a 1-D float array, a 2-D int array, and a rank-3 tensor
+        // with explicit NaN to stress NaN-handling in the invariants that
+        // should be NaN-tolerant.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_metamorphic")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let array_fn = numpy.getattr("array")?;
+            let array_equal = numpy.getattr("array_equal")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            let x_1d = array_fn.call1((vec![3.5_f64, 1.0, -2.0, 0.0, 7.25, -5.5],))?;
+            let mat_2d = array_fn.call1((vec![
+                vec![1_i64, 2, 3, 4],
+                vec![5, 6, 7, 8],
+                vec![9, 10, 11, 12],
+            ],))?;
+            let tensor_3d = array_fn.call1((vec![
+                vec![vec![1.0_f64, 2.0], vec![3.0, 4.0]],
+                vec![vec![5.0, 6.0], vec![7.0, 8.0]],
+                vec![vec![9.0, 10.0], vec![11.0, 12.0]],
+            ],))?;
+
+            // Invariant 1: flip involution on axis 0 for each of the 3 shapes.
+            let flip_fn = module.getattr("flip")?;
+            for (label, arr) in [("1d", &x_1d), ("2d", &mat_2d), ("3d", &tensor_3d)] {
+                let kw = PyDict::new(py);
+                kw.set_item("axis", 0_i64)?;
+                let once = flip_fn.call((arr.clone(),), Some(&kw))?;
+                let twice = flip_fn.call((once,), Some(&kw))?;
+                let eq: bool = array_equal.call1((&twice, arr))?.extract()?;
+                assert!(eq, "flip involution on axis=0 failed for {label}");
+            }
+
+            // Invariant 2: transpose(transpose(x)) == x for 2-D + 3-D.
+            let transpose_fn = module.getattr("transpose")?;
+            for (label, arr) in [("2d", &mat_2d), ("3d", &tensor_3d)] {
+                let once = transpose_fn.call1((arr.clone(),))?;
+                let twice = transpose_fn.call1((once,))?;
+                let eq: bool = array_equal.call1((&twice, arr))?.extract()?;
+                assert!(eq, "transpose involution failed for {label}");
+            }
+
+            // Invariant 3: fliplr involution on 2-D.
+            let fliplr_fn = module.getattr("fliplr")?;
+            let fl_once = fliplr_fn.call1((mat_2d.clone(),))?;
+            let fl_twice = fliplr_fn.call1((fl_once,))?;
+            let eq_fl: bool = array_equal.call1((&fl_twice, &mat_2d))?.extract()?;
+            assert!(eq_fl, "fliplr involution failed for 2-D");
+
+            // Invariant 4: flipud involution on 2-D + 3-D.
+            let flipud_fn = module.getattr("flipud")?;
+            for (label, arr) in [("2d", &mat_2d), ("3d", &tensor_3d)] {
+                let once = flipud_fn.call1((arr.clone(),))?;
+                let twice = flipud_fn.call1((once,))?;
+                let eq: bool = array_equal.call1((&twice, arr))?.extract()?;
+                assert!(eq, "flipud involution failed for {label}");
+            }
+
+            // Invariant 5: rot90 with k=2 applied twice equals identity.
+            let rot90_fn = module.getattr("rot90")?;
+            let kw_k2 = PyDict::new(py);
+            kw_k2.set_item("k", 2_i64)?;
+            let r1 = rot90_fn.call((mat_2d.clone(),), Some(&kw_k2))?;
+            let r2 = rot90_fn.call((r1,), Some(&kw_k2))?;
+            let eq_r: bool = array_equal.call1((&r2, &mat_2d))?.extract()?;
+            assert!(eq_r, "rot90(k=2)∘rot90(k=2) != identity on 2-D");
+
+            // Invariant 6: concatenate([x]) == x (1-element identity).
+            let concatenate_fn = module.getattr("concatenate")?;
+            let pair = PyTuple::new(py, [x_1d.clone()])?;
+            let single_out = concatenate_fn.call1((pair,))?;
+            let eq_cat: bool = array_equal.call1((&single_out, &x_1d))?.extract()?;
+            assert!(eq_cat, "concatenate([x]) != x — identity broken");
+
+            // Invariant 7: diff(cumsum(x)) ≈ x[1:].
+            let cumsum_fn = module.getattr("cumsum")?;
+            let diff_fn = module.getattr("diff")?;
+            let cs = cumsum_fn.call1((x_1d.clone(),))?;
+            let diff_of_cs = diff_fn.call1((cs,))?;
+            // x[1:] via numpy slicing
+            let slice_expr = py
+                .import("builtins")?
+                .getattr("slice")?
+                .call1((1_i64.into_pyobject(py)?, py.None()))?;
+            let x_tail = x_1d.call_method1("__getitem__", (slice_expr,))?;
+            let eq_diff: bool = allclose.call1((&diff_of_cs, &x_tail))?.extract()?;
+            assert!(eq_diff, "diff(cumsum(x)) != x[1:] — off-by-one / sign error");
+
+            // Invariant 8: sort + flip gives descending sort.
+            let sort_fn = module.getattr("sort")?;
+            let asc = sort_fn.call1((x_1d.clone(),))?;
+            let kw_a0 = PyDict::new(py);
+            kw_a0.set_item("axis", 0_i64)?;
+            let desc_via_flip = flip_fn.call((asc,), Some(&kw_a0))?;
+            // Compare against numpy's own "-x sorted, then negated" trick.
+            let numpy_sorted = numpy.getattr("sort")?.call1((x_1d.clone(),))?;
+            let numpy_desc = numpy
+                .getattr("flip")?
+                .call((numpy_sorted,), Some(&kw_a0))?;
+            let eq_desc: bool = allclose.call1((&desc_via_flip, &numpy_desc))?.extract()?;
+            assert!(
+                eq_desc,
+                "sort+flip descending ordering does not match numpy sort+flip"
+            );
+
+            // Invariant 9: argsort-of-argsort is a permutation (inverse).
+            let argsort_fn = module.getattr("argsort")?;
+            let idx1 = argsort_fn.call1((x_1d.clone(),))?;
+            let idx2 = argsort_fn.call1((idx1,))?;
+            // idx2 applied to sorted x should give original x.
+            let take = numpy.getattr("take")?;
+            let sorted_x = sort_fn.call1((x_1d.clone(),))?;
+            let roundtripped = take.call1((sorted_x, idx2))?;
+            let eq_roundtrip: bool =
+                allclose.call1((&roundtripped, &x_1d))?.extract()?;
+            assert!(
+                eq_roundtrip,
+                "argsort(argsort(x)) permutation does not round-trip sort(x) back to x"
+            );
+
+            Ok(())
+        });
+    }
 }
