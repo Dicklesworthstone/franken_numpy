@@ -12686,6 +12686,37 @@ mod tests {
         });
     }
 
+    /// RAII guard that restores a Python attribute to its original value on
+    /// drop. Tests use it to swap numpy/ma/linalg attributes with sentinels
+    /// ("bomb" / "poison" lambdas) to prove our code path does NOT delegate
+    /// back to numpy. If the scope panics before manually restoring, other
+    /// parallel tests would see the polluted global state — this guard
+    /// prevents that.
+    struct AttrGuard {
+        owner: Py<pyo3::types::PyAny>,
+        name: &'static str,
+        original: Py<pyo3::types::PyAny>,
+    }
+
+    impl AttrGuard {
+        fn new(owner: &pyo3::Bound<'_, pyo3::types::PyAny>, name: &'static str) -> PyResult<Self> {
+            let original = owner.getattr(name)?.unbind();
+            Ok(Self {
+                owner: owner.clone().unbind(),
+                name,
+                original,
+            })
+        }
+    }
+
+    impl Drop for AttrGuard {
+        fn drop(&mut self) {
+            Python::attach(|py| {
+                let _ = self.owner.bind(py).setattr(self.name, self.original.bind(py));
+            });
+        }
+    }
+
     fn numpy_available(py: Python<'_>) -> bool {
         py.import("numpy").is_ok()
     }
@@ -13701,7 +13732,6 @@ mod tests {
 
             let numpy = py.import("numpy")?;
             let operator = py.import("operator")?;
-            let original = numpy.getattr("frompyfunc")?.unbind();
             let poison = PyModule::from_code(
                 py,
                 pyo3::ffi::c_str!(
@@ -13711,28 +13741,24 @@ mod tests {
                 pyo3::ffi::c_str!("poison_frompyfunc"),
             )?;
 
-            let result = (|| -> PyResult<()> {
-                numpy.setattr("frompyfunc", poison.getattr("fail")?)?;
-                let ufunc =
-                    module
-                        .getattr("frompyfunc")?
-                        .call1((operator.getattr("mul")?, 2, 1))?;
+            let _guard = AttrGuard::new(&numpy, "frompyfunc")?;
+            numpy.setattr("frompyfunc", poison.getattr("fail")?)?;
+            let ufunc =
+                module
+                    .getattr("frompyfunc")?
+                    .call1((operator.getattr("mul")?, 2, 1))?;
 
-                assert_eq!(repr_string(&ufunc.getattr("identity")?), "None");
-                assert_eq!(
-                    reduce_outcome(
-                        py,
-                        &ufunc,
-                        &object_array(py, vec![2_i64, 3_i64, 4_i64]),
-                        None
-                    )?,
-                    "ok:24"
-                );
-                Ok(())
-            })();
-
-            numpy.setattr("frompyfunc", original.bind(py))?;
-            result
+            assert_eq!(repr_string(&ufunc.getattr("identity")?), "None");
+            assert_eq!(
+                reduce_outcome(
+                    py,
+                    &ufunc,
+                    &object_array(py, vec![2_i64, 3_i64, 4_i64]),
+                    None
+                )?,
+                "ok:24"
+            );
+            Ok(())
         });
     }
 
@@ -17289,7 +17315,6 @@ mod tests {
             let minimum_fill_value_fn = module.getattr("minimum_fill_value")?;
             let numpy = py.import("numpy")?;
             let ma = numpy.getattr("ma")?;
-            let original = ma.getattr("minimum_fill_value")?;
             let bomb = py.eval(
                 pyo3::ffi::c_str!(
                     "lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError('should not delegate'))"
@@ -17298,19 +17323,17 @@ mod tests {
                 None,
             )?;
 
+            let _guard = AttrGuard::new(&ma, "minimum_fill_value")?;
             ma.setattr("minimum_fill_value", bomb)?;
-            let result = (|| -> PyResult<()> {
-                let int_input = numeric_array(py, vec![1_i8, 2, 3], "int8");
-                let actual_int = minimum_fill_value_fn.call1((int_input,))?;
-                assert_eq!(repr_string(&actual_int), "127");
 
-                let dtype_input = numpy.getattr("dtype")?.call1(("int32",))?;
-                let actual_dtype = minimum_fill_value_fn.call1((dtype_input,))?;
-                assert_eq!(repr_string(&actual_dtype), "2147483647");
-                Ok(())
-            })();
-            ma.setattr("minimum_fill_value", original)?;
-            result
+            let int_input = numeric_array(py, vec![1_i8, 2, 3], "int8");
+            let actual_int = minimum_fill_value_fn.call1((int_input,))?;
+            assert_eq!(repr_string(&actual_int), "127");
+
+            let dtype_input = numpy.getattr("dtype")?.call1(("int32",))?;
+            let actual_dtype = minimum_fill_value_fn.call1((dtype_input,))?;
+            assert_eq!(repr_string(&actual_dtype), "2147483647");
+            Ok(())
         });
     }
 
@@ -17530,7 +17553,6 @@ mod tests {
             let numpy = py.import("numpy")?;
             let linalg = numpy.getattr("linalg")?;
             let allclose = numpy.getattr("allclose")?;
-            let original = linalg.getattr("pinv")?;
             let bomb = py.eval(
                 pyo3::ffi::c_str!(
                     "lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError('should not delegate'))"
@@ -17539,48 +17561,46 @@ mod tests {
                 None,
             )?;
 
+            let _guard = AttrGuard::new(&linalg, "pinv")?;
             linalg.setattr("pinv", bomb)?;
-            let result = (|| -> PyResult<()> {
-                let matrix = numeric_array(py, vec![1.0_f64, 2.0, 3.0, 4.0], "float64")
-                    .call_method1("reshape", ((2, 2),))?;
-                let actual = pinv_fn.call1((matrix,))?;
-                let expected = numeric_array(py, vec![-2.0_f64, 1.0, 1.5, -0.5], "float64")
-                    .call_method1("reshape", ((2, 2),))?;
-                if !allclose.call1((&actual, &expected))?.extract::<bool>()? {
-                    return Err(PyValueError::new_err(
-                        "pinv: local real 2-D path diverged from expected inverse",
-                    ));
-                }
 
-                let hermitian_matrix = numeric_array(py, vec![2.0_f64, 1.0, 1.0, 2.0], "float64")
-                    .call_method1("reshape", ((2, 2),))?;
-                let actual_hermitian = pinv_fn.call(
-                    (hermitian_matrix,),
-                    Some(&{
-                        let kwargs = PyDict::new(py);
-                        kwargs.set_item("hermitian", true)?;
-                        kwargs
-                    }),
-                )?;
-                let expected_hermitian = numeric_array(
-                    py,
-                    vec![2.0_f64 / 3.0, -1.0 / 3.0, -1.0 / 3.0, 2.0 / 3.0],
-                    "float64",
-                )
+            let matrix = numeric_array(py, vec![1.0_f64, 2.0, 3.0, 4.0], "float64")
                 .call_method1("reshape", ((2, 2),))?;
-                if !allclose
-                    .call1((&actual_hermitian, &expected_hermitian))?
-                    .extract::<bool>()?
-                {
-                    return Err(PyValueError::new_err(
-                        "pinv: local hermitian path diverged from expected inverse",
-                    ));
-                }
+            let actual = pinv_fn.call1((matrix,))?;
+            let expected = numeric_array(py, vec![-2.0_f64, 1.0, 1.5, -0.5], "float64")
+                .call_method1("reshape", ((2, 2),))?;
+            if !allclose.call1((&actual, &expected))?.extract::<bool>()? {
+                return Err(PyValueError::new_err(
+                    "pinv: local real 2-D path diverged from expected inverse",
+                ));
+            }
 
-                Ok(())
-            })();
-            linalg.setattr("pinv", original)?;
-            result
+            let hermitian_matrix = numeric_array(py, vec![2.0_f64, 1.0, 1.0, 2.0], "float64")
+                .call_method1("reshape", ((2, 2),))?;
+            let actual_hermitian = pinv_fn.call(
+                (hermitian_matrix,),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("hermitian", true)?;
+                    kwargs
+                }),
+            )?;
+            let expected_hermitian = numeric_array(
+                py,
+                vec![2.0_f64 / 3.0, -1.0 / 3.0, -1.0 / 3.0, 2.0 / 3.0],
+                "float64",
+            )
+            .call_method1("reshape", ((2, 2),))?;
+            if !allclose
+                .call1((&actual_hermitian, &expected_hermitian))?
+                .extract::<bool>()?
+            {
+                return Err(PyValueError::new_err(
+                    "pinv: local hermitian path diverged from expected inverse",
+                ));
+            }
+
+            Ok(())
         });
     }
 
@@ -17636,7 +17656,6 @@ mod tests {
             let numpy = py.import("numpy")?;
             let linalg = numpy.getattr("linalg")?;
             let builtins = py.import("builtins")?;
-            let original = linalg.getattr("eigvals")?;
             let bomb = py.eval(
                 pyo3::ffi::c_str!(
                     "lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError('should not delegate'))"
@@ -17645,23 +17664,21 @@ mod tests {
                 None,
             )?;
 
+            let _guard = AttrGuard::new(&linalg, "eigvals")?;
             linalg.setattr("eigvals", bomb)?;
-            let result = (|| -> PyResult<()> {
-                let matrix = numeric_array(py, vec![0.0_f64, -1.0, 1.0, 0.0], "float64")
-                    .call_method1("reshape", ((2, 2),))?;
-                let actual = eigvals_fn.call1((matrix,))?;
-                let expected = numpy.getattr("array")?.call1((PyList::new(
-                    py,
-                    [
-                        builtins.getattr("complex")?.call1((0.0_f64, 1.0))?,
-                        builtins.getattr("complex")?.call1((0.0_f64, -1.0))?,
-                    ],
-                )?,))?;
-                assert_array_matches_numpy(&actual, &expected)?;
-                Ok(())
-            })();
-            linalg.setattr("eigvals", original)?;
-            result
+
+            let matrix = numeric_array(py, vec![0.0_f64, -1.0, 1.0, 0.0], "float64")
+                .call_method1("reshape", ((2, 2),))?;
+            let actual = eigvals_fn.call1((matrix,))?;
+            let expected = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    builtins.getattr("complex")?.call1((0.0_f64, 1.0))?,
+                    builtins.getattr("complex")?.call1((0.0_f64, -1.0))?,
+                ],
+            )?,))?;
+            assert_array_matches_numpy(&actual, &expected)?;
+            Ok(())
         });
     }
 
