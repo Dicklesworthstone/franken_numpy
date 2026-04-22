@@ -1080,50 +1080,27 @@ fn extract_mask_operand(
 fn count_valid_elements(
     shape: &[usize],
     mask: Option<&UFuncArray>,
-    axis: Option<usize>,
+    axes: Option<&[usize]>,
     keepdims: bool,
-) -> PyResult<(Vec<usize>, Vec<i64>)> {
-    let total = element_count(shape).map_err(|err| PyValueError::new_err(err.to_string()))?;
-    match axis {
-        None => {
-            let count = match mask {
-                Some(mask) => mask.values().iter().filter(|&&value| value == 0.0).count(),
-                None => total,
-            };
-            let output_shape = if keepdims { vec![1; shape.len()] } else { Vec::new() };
-            Ok((output_shape, vec![i64::try_from(count).unwrap_or(i64::MAX)]))
-        }
-        Some(axis) => {
-            let axis_len = shape[axis];
-            let inner =
-                element_count(&shape[axis + 1..]).map_err(|err| PyValueError::new_err(err.to_string()))?;
-            let outer =
-                element_count(&shape[..axis]).map_err(|err| PyValueError::new_err(err.to_string()))?;
-            let mut counts = vec![0_i64; outer * inner];
+) -> PyResult<UFuncArray> {
+    let valid_values = match mask {
+        Some(mask) => mask
+            .values()
+            .iter()
+            .map(|&value| if value == 0.0 { 1.0 } else { 0.0 })
+            .collect(),
+        None => vec![1.0; element_count(shape).map_err(|err| PyValueError::new_err(err.to_string()))?],
+    };
+    let valid = UFuncArray::new(shape.to_vec(), valid_values, DType::Bool).map_err(map_ufunc_error)?;
 
-            for outer_idx in 0..outer {
-                let base = outer_idx * axis_len * inner;
-                for lane_idx in 0..axis_len {
-                    for inner_idx in 0..inner {
-                        let src_idx = base + lane_idx * inner + inner_idx;
-                        let valid = mask.is_none_or(|mask| mask.values()[src_idx] == 0.0);
-                        if valid {
-                            counts[outer_idx * inner + inner_idx] += 1;
-                        }
-                    }
-                }
-            }
-
-            let output_shape = if keepdims {
-                let mut shape = shape.to_vec();
-                shape[axis] = 1;
-                shape
-            } else {
-                let mut shape = shape.to_vec();
-                shape.remove(axis);
-                shape
-            };
-            Ok((output_shape, counts))
+    match axes {
+        None => valid.count_nonzero(None, keepdims).map_err(map_ufunc_error),
+        Some([axis]) => valid
+            .count_nonzero(Some(*axis as isize), keepdims)
+            .map_err(map_ufunc_error),
+        Some(axes) => {
+            let axes = axes.iter().map(|&axis| axis as isize).collect::<Vec<_>>();
+            valid.count_nonzero_axes(&axes, keepdims).map_err(map_ufunc_error)
         }
     }
 }
@@ -6189,19 +6166,24 @@ fn ma_count(
         Ok(spec) => spec,
         Err(_) => return fallback(),
     };
-    if axis_spec.as_ref().is_some_and(|axes| axes.len() > 1) {
-        return fallback();
-    }
-
     let (_, mask, shape) = match extract_mask_metadata(py, a.bind(py), "ma_count") {
         Ok(metadata) => metadata,
         Err(_) => return fallback(),
     };
-    let axis = match axis_spec.as_ref().and_then(|axes| axes.first().copied()) {
-        Some(axis) => match try_normalize_axis(axis, shape.len()) {
-            Some(axis) => Some(axis),
-            None => return fallback(),
-        },
+    let axes = match axis_spec.as_ref() {
+        Some(axes) => {
+            if ensure_unique_axes(axes, shape.len()).is_err() {
+                return fallback();
+            }
+            let mut normalized = Vec::with_capacity(axes.len());
+            for &axis in axes {
+                match try_normalize_axis(axis, shape.len()) {
+                    Some(axis) => normalized.push(axis),
+                    None => return fallback(),
+                }
+            }
+            Some(normalized)
+        }
         None => {
             if keepdims && shape.is_empty() {
                 return fallback();
@@ -6210,13 +6192,8 @@ fn ma_count(
         }
     };
 
-    let (output_shape, counts) = count_valid_elements(&shape, mask.as_ref(), axis, keepdims)?;
-    let output = build_numpy_array_from_storage(py, &output_shape, ArrayStorage::I64(counts))?;
-    if output_shape.is_empty() {
-        Ok(output.bind(py).get_item(())?.unbind())
-    } else {
-        Ok(output)
-    }
+    let counts = count_valid_elements(&shape, mask.as_ref(), axes.as_deref(), keepdims)?;
+    build_numpy_scalar_or_array(py, &counts)
 }
 
 #[pyfunction]
@@ -28456,6 +28433,64 @@ mod tests {
                 }),
             )?;
             assert_array_matches_numpy(&ours_tuple, &theirs_tuple)?;
+
+            let ours_tuple_keepdims = count_fn.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", &axis_tuple)?;
+                    kw.set_item("keepdims", true)?;
+                    kw
+                }),
+            )?;
+            let theirs_tuple_keepdims = numpy_count.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", &axis_tuple)?;
+                    kw.set_item("keepdims", true)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_tuple_keepdims, &theirs_tuple_keepdims)?;
+
+            let reversed_axis_tuple = PyTuple::new(py, [1_i64, 0])?;
+            let ours_tuple_reversed = count_fn.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", &reversed_axis_tuple)?;
+                    kw
+                }),
+            )?;
+            let theirs_tuple_reversed = numpy_count.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", &reversed_axis_tuple)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_tuple_reversed, &theirs_tuple_reversed)?;
+
+            let empty_axis_tuple = PyTuple::empty(py);
+            let ours_tuple_empty = count_fn.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", &empty_axis_tuple)?;
+                    kw
+                }),
+            )?;
+            let theirs_tuple_empty = numpy_count.call(
+                (three_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", &empty_axis_tuple)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_tuple_empty, &theirs_tuple_empty)?;
 
             Ok(())
         });
