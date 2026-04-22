@@ -3795,9 +3795,11 @@ fn count_nonzero(
 
     let output = build_numpy_array_from_ufunc(py, &result)?;
     if result.shape().is_empty() {
-        if axis_was_none {
-            return Ok(output.bind(py).call_method0("item")?.unbind());
-        }
+        // numpy.count_nonzero(arr, axis=None) returns a numpy.int64 (0-D
+        // scalar), NOT a plain Python int — its repr is "np.int64(3)".
+        // Unlike numpy.ma.count which *does* return Python int for
+        // axis=None, count_nonzero preserves the numpy scalar type.
+        // Extract via get_item(()) which yields the 0-D numpy scalar.
         return Ok(output.bind(py).get_item(())?.unbind());
     }
 
@@ -4417,7 +4419,13 @@ fn fix_invalid(
     fixed.fix_invalid();
 
     let result = build_numpy_masked_array(py, &fixed)?;
-    if fill_value.is_some() || input_is_masked {
+    // numpy.ma.fix_invalid(a, fill_value=F) uses F as a REPLACEMENT value
+    // for invalid entries in .data — it does NOT set the output's
+    // .fill_value attribute from that argument. The output's fill_value
+    // is inherited from the input (if a was already a MaskedArray) or
+    // left at the dtype default. Only propagate when the input was
+    // already masked so its fill_value survives the rust-port path.
+    if input_is_masked {
         result
             .bind(py)
             .setattr("fill_value", resolved_fill_value)?;
@@ -11014,19 +11022,89 @@ fn ma_ediff1d(
     to_end: Option<Py<PyAny>>,
     to_begin: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ma.ediff1d so masked-array flattening, mask-aware
-    // first differences, and optional to_begin/to_end prefix/suffix values
-    // all match numpy exactly.
-    let numpy = py.import("numpy")?;
-    let ma_ediff1d_fn = numpy.getattr("ma")?.getattr("ediff1d")?;
-    let kwargs = PyDict::new(py);
-    if let Some(value) = to_end {
-        kwargs.set_item("to_end", value.bind(py))?;
-    }
-    if let Some(value) = to_begin {
-        kwargs.set_item("to_begin", value.bind(py))?;
-    }
-    Ok(ma_ediff1d_fn.call((arr.bind(py),), Some(&kwargs))?.unbind())
+    let arr_for_fallback = arr.clone_ref(py);
+    let to_end_for_fallback = to_end.as_ref().map(|value| value.clone_ref(py));
+    let to_begin_for_fallback = to_begin.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let ma_ediff1d_fn = numpy.getattr("ma")?.getattr("ediff1d")?;
+        let kwargs = PyDict::new(py);
+        if let Some(value) = &to_end_for_fallback {
+            kwargs.set_item("to_end", value.bind(py))?;
+        }
+        if let Some(value) = &to_begin_for_fallback {
+            kwargs.set_item("to_begin", value.bind(py))?;
+        }
+        Ok(ma_ediff1d_fn
+            .call((arr_for_fallback.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
+    let Some(flat) = extract_numeric_masked_array(py, arr.bind(py), "ma_ediff1d(arr)")?
+        .map(|array| array.ravel())
+    else {
+        return fallback();
+    };
+
+    let diff = if flat.data().values().len() < 2 {
+        MaskedArray::new(
+            flat.data().ediff1d().map_err(map_ufunc_error)?,
+            None,
+            Some(flat.fill_value()),
+        )
+        .map_err(|err| map_ma_error("ma_ediff1d", err))?
+    } else {
+        let right_indices = (1..flat.data().values().len())
+            .map(|index| index as i64)
+            .collect::<Vec<_>>();
+        let left_indices = (0..flat.data().values().len() - 1)
+            .map(|index| index as i64)
+            .collect::<Vec<_>>();
+        let right = flat
+            .take(&right_indices)
+            .map_err(|err| map_ma_error("ma_ediff1d", err))?;
+        let left = flat
+            .take(&left_indices)
+            .map_err(|err| map_ma_error("ma_ediff1d", err))?;
+        right
+            .elementwise_binary(&left, BinaryOp::Sub)
+            .map_err(|err| map_ma_error("ma_ediff1d", err))?
+    };
+
+    let begin = match to_begin {
+        Some(value) => match extract_numeric_masked_array(py, value.bind(py), "ma_ediff1d(to_begin)")?
+        {
+            Some(value) => Some(value.ravel()),
+            None => return fallback(),
+        },
+        None => None,
+    };
+    let end = match to_end {
+        Some(value) => match extract_numeric_masked_array(py, value.bind(py), "ma_ediff1d(to_end)")?
+        {
+            Some(value) => Some(value.ravel()),
+            None => return fallback(),
+        },
+        None => None,
+    };
+
+    let result = match (begin.as_ref(), end.as_ref()) {
+        (None, None) => diff,
+        (Some(begin), None) => {
+            MaskedArray::concatenate(&[begin, &diff], 0).map_err(|err| map_ma_error("ma_ediff1d", err))?
+        }
+        (None, Some(end)) => {
+            MaskedArray::concatenate(&[&diff, end], 0).map_err(|err| map_ma_error("ma_ediff1d", err))?
+        }
+        (Some(begin), Some(end)) => MaskedArray::concatenate(&[begin, &diff, end], 0)
+            .map_err(|err| map_ma_error("ma_ediff1d", err))?,
+    };
+
+    let py_result = build_numpy_masked_array(py, &result)?;
+    py_result
+        .bind(py)
+        .call_method1("set_fill_value", (flat.fill_value(),))?;
+    Ok(py_result)
 }
 
 #[pyfunction]
