@@ -10747,6 +10747,21 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(triu_indices_from, m)?)?;
     m.add_function(wrap_pyfunction!(put_along_axis, m)?)?;
     m.add_function(wrap_pyfunction!(take_along_axis, m)?)?;
+
+    // Module version (numpy parity: numpy.__version__). Sourced from the
+    // fnp-python crate's Cargo.toml via env!() so a version bump in the
+    // workspace manifest propagates automatically.
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+
+    // numpy top-level constants (numpy.__all__ reality-check). Values
+    // pinned to match numpy: pi, e, euler_gamma, inf, nan, little_endian.
+    m.add("pi", std::f64::consts::PI)?;
+    m.add("e", std::f64::consts::E)?;
+    m.add("euler_gamma", 0.577_215_664_901_532_9_f64)?;
+    m.add("inf", f64::INFINITY)?;
+    m.add("nan", f64::NAN)?;
+    m.add("little_endian", cfg!(target_endian = "little"))?;
+
     Ok(())
 }
 
@@ -39652,6 +39667,95 @@ mod tests {
                     "{name} integer dtype parity"
                 );
             }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn module_exposes_version_matching_cargo_pkg_version() {
+        with_python(|py| {
+            let module = PyModule::new(py, "fnp_python_test_version")?;
+            fnp_python(&module)?;
+
+            let version: String = module.getattr("__version__")?.extract()?;
+            assert!(!version.is_empty(), "__version__ must not be empty");
+            assert!(
+                version.contains('.'),
+                "__version__ must be dotted (got {version:?})"
+            );
+            assert_eq!(
+                version,
+                env!("CARGO_PKG_VERSION"),
+                "__version__ must track the fnp-python crate's Cargo.toml version"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn module_exposes_numpy_top_level_constants_matching_numpy() {
+        with_python(|py| {
+            let module = PyModule::new(py, "fnp_python_test_constants")?;
+            fnp_python(&module)?;
+
+            // Constants should always be present regardless of numpy availability.
+            let ours_pi: f64 = module.getattr("pi")?.extract()?;
+            let ours_e: f64 = module.getattr("e")?.extract()?;
+            let ours_euler: f64 = module.getattr("euler_gamma")?.extract()?;
+            let ours_inf: f64 = module.getattr("inf")?.extract()?;
+            let ours_nan: f64 = module.getattr("nan")?.extract()?;
+            let ours_le: bool = module.getattr("little_endian")?.extract()?;
+
+            assert!(
+                (ours_pi - std::f64::consts::PI).abs() < f64::EPSILON,
+                "pi value mismatch"
+            );
+            assert!(
+                (ours_e - std::f64::consts::E).abs() < f64::EPSILON,
+                "e value mismatch"
+            );
+            assert!(
+                (ours_euler - 0.577_215_664_901_532_9_f64).abs() < 1e-15,
+                "euler_gamma value mismatch"
+            );
+            assert!(
+                ours_inf.is_infinite() && ours_inf.is_sign_positive(),
+                "inf must be +infinity"
+            );
+            assert!(ours_nan.is_nan(), "nan must be NaN");
+            assert_eq!(
+                ours_le,
+                cfg!(target_endian = "little"),
+                "little_endian must match the compile target endianness"
+            );
+
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+
+            // Finite constants compare bit-identical with numpy's values.
+            for name in ["pi", "e", "euler_gamma"] {
+                let ours: f64 = module.getattr(name)?.extract()?;
+                let theirs: f64 = numpy.getattr(name)?.extract()?;
+                assert!(
+                    (ours - theirs).abs() < 1e-15,
+                    "{name}: ours={ours} theirs={theirs}"
+                );
+            }
+
+            let theirs_inf: f64 = numpy.getattr("inf")?.extract()?;
+            assert_eq!(ours_inf, theirs_inf, "inf parity with numpy.inf");
+
+            let theirs_nan: f64 = numpy.getattr("nan")?.extract()?;
+            assert!(theirs_nan.is_nan(), "numpy.nan should be NaN");
+
+            let theirs_le: bool = numpy.getattr("little_endian")?.extract()?;
+            assert_eq!(
+                ours_le, theirs_le,
+                "little_endian parity with numpy.little_endian"
+            );
 
             Ok(())
         });
