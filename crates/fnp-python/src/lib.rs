@@ -6325,6 +6325,26 @@ fn deg2rad(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (x,))]
+fn fabs(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.fabs (element-wise absolute value, real-valued
+    // only). Unlike np.abs, numpy.fabs rejects complex inputs with
+    // TypeError — match that behavior. Integer input promotes to float.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("fabs")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
+fn negative(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.negative (element-wise unary minus). Preserves
+    // dtype: int stays int, float stays float, complex stays complex.
+    // Matches numpy wrap-around behavior for signed narrow integers.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("negative")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (p, m=1))]
 fn polyder(py: Python<'_>, p: Py<PyAny>, m: i64) -> PyResult<Py<PyAny>> {
     // Passthrough to np.polyder. Returns the m-th derivative of the
@@ -8856,6 +8876,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(expm1, m)?)?;
     m.add_function(wrap_pyfunction!(log1p, m)?)?;
     m.add_function(wrap_pyfunction!(deg2rad, m)?)?;
+    m.add_function(wrap_pyfunction!(fabs, m)?)?;
+    m.add_function(wrap_pyfunction!(negative, m)?)?;
     m.add_function(wrap_pyfunction!(polyder, m)?)?;
     m.add_function(wrap_pyfunction!(polyint, m)?)?;
     m.add_function(wrap_pyfunction!(polyadd, m)?)?;
@@ -9306,6 +9328,8 @@ mod tests {
             assert!(module.getattr("expm1").is_ok());
             assert!(module.getattr("log1p").is_ok());
             assert!(module.getattr("deg2rad").is_ok());
+            assert!(module.getattr("fabs").is_ok());
+            assert!(module.getattr("negative").is_ok());
             assert!(module.getattr("polyder").is_ok());
             assert!(module.getattr("tile").is_ok());
             assert!(module.getattr("array_equal").is_ok());
@@ -35062,6 +35086,149 @@ mod tests {
             let radians_theirs = numpy.getattr("radians")?.call1((arr.clone(),))?;
             let ok_alias: bool = allclose.call1((&radians_ours, &radians_theirs))?.extract()?;
             assert!(ok_alias, "deg2rad must equal radians on numeric input");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn fabs_matches_numpy_across_scalar_array_int_signed_zero_and_complex_error() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let fabs_fn = module.getattr("fabs")?;
+            let numpy = py.import("numpy")?;
+            let numpy_fabs = numpy.getattr("fabs")?;
+            let allclose = numpy.getattr("allclose")?;
+            let array_fn = numpy.getattr("array")?;
+
+            // Scalar float parity, including negative.
+            for v in [-3.5_f64, 0.0, 1.25, 7.75] {
+                let ours = fabs_fn.call1((v,))?;
+                let theirs = numpy_fabs.call1((v,))?;
+                let ours_v: f64 = ours.extract()?;
+                let theirs_v: f64 = theirs.extract()?;
+                assert_eq!(ours_v, theirs_v);
+                assert_eq!(ours_v, v.abs());
+            }
+
+            // Signed zero: fabs(-0.0) must equal 0.0 on both.
+            let neg_zero = -0.0_f64;
+            let ours_nz: f64 = fabs_fn.call1((neg_zero,))?.extract()?;
+            let theirs_nz: f64 = numpy_fabs.call1((neg_zero,))?.extract()?;
+            assert_eq!(ours_nz, theirs_nz);
+            assert!(ours_nz == 0.0 && !ours_nz.is_sign_negative(), "fabs(-0.0) must be +0.0");
+
+            // 1-D mixed-sign array.
+            let arr = array_fn.call1((vec![-2.5_f64, -1.0, 0.0, 1.0, 2.5, -100.0],))?;
+            let ours_a = fabs_fn.call1((arr.clone(),))?;
+            let theirs_a = numpy_fabs.call1((arr.clone(),))?;
+            let ok_a: bool = allclose.call1((&ours_a, &theirs_a))?.extract()?;
+            assert!(ok_a, "fabs 1-D mixed-sign mismatch");
+
+            // Integer input promotes to float with matching dtype.
+            let ints = array_fn.call1((vec![-5_i64, -1, 0, 1, 5],))?;
+            let ours_i = fabs_fn.call1((ints.clone(),))?;
+            let theirs_i = numpy_fabs.call1((ints.clone(),))?;
+            let ok_i: bool = allclose.call1((&ours_i, &theirs_i))?.extract()?;
+            assert!(ok_i, "fabs integer input mismatch");
+            assert_eq!(
+                ours_i.getattr("dtype")?.str()?.to_string(),
+                theirs_i.getattr("dtype")?.str()?.to_string()
+            );
+
+            // 2-D array element-wise.
+            let two_d = array_fn.call1((vec![vec![-1.0_f64, 2.0], vec![-3.0, 4.0]],))?;
+            let ours_2d = fabs_fn.call1((two_d.clone(),))?;
+            let theirs_2d = numpy_fabs.call1((two_d.clone(),))?;
+            let ok_2d: bool = allclose.call1((&ours_2d, &theirs_2d))?.extract()?;
+            assert!(ok_2d, "fabs 2-D mismatch");
+
+            // Complex input: numpy.fabs rejects complex with TypeError;
+            // both implementations must surface an identical error type.
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+            let cplx = py_complex.call1((1.0_f64, 2.0_f64))?;
+            let ours_err = fabs_fn
+                .call1((cplx.clone(),))
+                .expect_err("complex input must error on fabs");
+            let theirs_err = numpy_fabs
+                .call1((cplx.clone(),))
+                .expect_err("numpy fabs must error on complex");
+            assert_pyerr_matches_numpy(py, ours_err, theirs_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn negative_matches_numpy_across_scalar_array_int_complex_and_dtype_preservation() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let neg_fn = module.getattr("negative")?;
+            let numpy = py.import("numpy")?;
+            let numpy_neg = numpy.getattr("negative")?;
+            let allclose = numpy.getattr("allclose")?;
+            let array_fn = numpy.getattr("array")?;
+
+            // Scalar float parity.
+            for v in [-3.5_f64, 0.0, 1.25, 7.75] {
+                let ours: f64 = neg_fn.call1((v,))?.extract()?;
+                let theirs: f64 = numpy_neg.call1((v,))?.extract()?;
+                assert_eq!(ours, theirs);
+                assert_eq!(ours, -v);
+            }
+
+            // 1-D float array.
+            let arr = array_fn.call1((vec![-2.5_f64, -1.0, 0.0, 1.0, 2.5],))?;
+            let ours_a = neg_fn.call1((arr.clone(),))?;
+            let theirs_a = numpy_neg.call1((arr.clone(),))?;
+            let ok_a: bool = allclose.call1((&ours_a, &theirs_a))?.extract()?;
+            assert!(ok_a, "negative 1-D mismatch");
+
+            // Integer input preserves integer dtype (unlike fabs which
+            // promotes to float).
+            let ints = array_fn.call1((vec![-5_i64, -1, 0, 1, 5],))?;
+            let ours_i = neg_fn.call1((ints.clone(),))?;
+            let theirs_i = numpy_neg.call1((ints.clone(),))?;
+            let ok_i: bool = allclose.call1((&ours_i, &theirs_i))?.extract()?;
+            assert!(ok_i, "negative integer input mismatch");
+            assert_eq!(
+                ours_i.getattr("dtype")?.str()?.to_string(),
+                theirs_i.getattr("dtype")?.str()?.to_string()
+            );
+
+            // 2-D array.
+            let two_d = array_fn.call1((vec![vec![1.0_f64, -2.0], vec![3.0, -4.0]],))?;
+            let ours_2d = neg_fn.call1((two_d.clone(),))?;
+            let theirs_2d = numpy_neg.call1((two_d.clone(),))?;
+            let ok_2d: bool = allclose.call1((&ours_2d, &theirs_2d))?.extract()?;
+            assert!(ok_2d, "negative 2-D mismatch");
+
+            // Complex input: both components negated.
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+            let cplx_items: Vec<Py<PyAny>> = vec![
+                py_complex.call1((1.0_f64, 2.0_f64))?.unbind(),
+                py_complex.call1((-3.0_f64, 4.0_f64))?.unbind(),
+            ];
+            let cplx_arr = array_fn.call1((PyList::new(py, cplx_items)?,))?;
+            let ours_c = neg_fn.call1((cplx_arr.clone(),))?;
+            let theirs_c = numpy_neg.call1((cplx_arr.clone(),))?;
+            let ok_c: bool = allclose.call1((&ours_c, &theirs_c))?.extract()?;
+            assert!(ok_c, "negative complex mismatch");
+
+            // Double-negation identity: negative(negative(x)) == x.
+            let roundtrip = neg_fn.call1((neg_fn.call1((arr.clone(),))?,))?;
+            let ok_rt: bool = allclose.call1((&roundtrip, &arr))?.extract()?;
+            assert!(ok_rt, "negative is its own inverse");
 
             Ok(())
         });
