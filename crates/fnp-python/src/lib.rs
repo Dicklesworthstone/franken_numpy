@@ -813,6 +813,34 @@ fn ensure_unique_axes(axes: &[isize], ndim: usize) -> PyResult<()> {
     Ok(())
 }
 
+fn try_normalize_axis(axis: isize, ndim: usize) -> Option<usize> {
+    let ndim = isize::try_from(ndim).ok()?;
+    let normalized = if axis < 0 {
+        ndim.checked_add(axis)?
+    } else {
+        axis
+    };
+    let normalized = usize::try_from(normalized).ok()?;
+    (normalized < usize::try_from(ndim).ok()?).then_some(normalized)
+}
+
+fn try_normalize_permutation_axes(axes: &[isize], ndim: usize) -> Option<Vec<usize>> {
+    if axes.len() != ndim {
+        return None;
+    }
+
+    let mut seen = std::collections::HashSet::with_capacity(axes.len());
+    let mut normalized = Vec::with_capacity(axes.len());
+    for &axis in axes {
+        let normalized_axis = try_normalize_axis(axis, ndim)?;
+        if !seen.insert(normalized_axis) {
+            return None;
+        }
+        normalized.push(normalized_axis);
+    }
+    Some(normalized)
+}
+
 #[allow(dead_code)]
 fn extract_tensorsolve_axes(
     py: Python<'_>,
@@ -4967,29 +4995,57 @@ fn reshape(py: Python<'_>, a: Py<PyAny>, newshape: Py<PyAny>, order: &str) -> Py
 #[pyfunction]
 #[pyo3(signature = (a, axes=None))]
 fn transpose(py: Python<'_>, a: Py<PyAny>, axes: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.transpose so default axis reversal, explicit
-    // axis tuples, scalar/1-D identity behavior, and error surfaces
-    // match numpy exactly.
     let numpy = py.import("numpy")?;
     let transpose_fn = numpy.getattr("transpose")?;
-    let kwargs = PyDict::new(py);
-    if let Some(axes_val) = axes {
-        kwargs.set_item("axes", axes_val.bind(py))?;
-    }
-    Ok(transpose_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    let axes_for_parse = axes.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(axes_val) = axes.as_ref() {
+            kwargs.set_item("axes", axes_val.bind(py))?;
+        }
+        Ok(transpose_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    };
+
+    let a = match extract_numeric_array(py, a.bind(py), "transpose(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let axes = match extract_axis_spec(py, axes_for_parse, "transpose") {
+        Ok(axes) => axes,
+        Err(_) => return fallback(),
+    };
+    let normalized_axes = match axes.as_deref() {
+        None => None,
+        Some(axes) => match try_normalize_permutation_axes(axes, a.shape().len()) {
+            Some(axes) => Some(axes),
+            None => return fallback(),
+        },
+    };
+    let result = match a.transpose(normalized_axes.as_deref()) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, axis1, axis2))]
 fn swapaxes(py: Python<'_>, a: Py<PyAny>, axis1: i64, axis2: i64) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.swapaxes so non-adjacent axis swaps, negative
-    // axis normalization, scalar/1-D identity behavior, and out-of-
-    // range errors match numpy exactly.
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("swapaxes")?
-        .call1((a.bind(py), axis1, axis2))?
-        .unbind())
+    let swapaxes_fn = numpy.getattr("swapaxes")?;
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(swapaxes_fn.call1((a.bind(py), axis1, axis2))?.unbind())
+    };
+
+    let a = match extract_numeric_array(py, a.bind(py), "swapaxes(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let result = match a.swapaxes(axis1 as isize, axis2 as isize) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -5000,42 +5056,104 @@ fn moveaxis(
     source: Py<PyAny>,
     destination: Py<PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.moveaxis so tuple-based reordering, negative
-    // axis normalization, identity moves, and validation errors match
-    // numpy exactly.
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("moveaxis")?
-        .call1((a.bind(py), source.bind(py), destination.bind(py)))?
-        .unbind())
+    let moveaxis_fn = numpy.getattr("moveaxis")?;
+    let source_for_parse = source.clone_ref(py);
+    let destination_for_parse = destination.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(moveaxis_fn
+            .call1((a.bind(py), source.bind(py), destination.bind(py)))?
+            .unbind())
+    };
+
+    let a = match extract_numeric_array(py, a.bind(py), "moveaxis(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let Some(source_axes) =
+        (match extract_axis_spec(py, Some(source_for_parse), "moveaxis(source)") {
+            Ok(axes) => axes,
+            Err(_) => return fallback(),
+        })
+    else {
+        return fallback();
+    };
+    let Some(destination_axes) = (match extract_axis_spec(
+        py,
+        Some(destination_for_parse),
+        "moveaxis(destination)",
+    ) {
+        Ok(axes) => axes,
+        Err(_) => return fallback(),
+    }) else {
+        return fallback();
+    };
+
+    let result = if source_axes.len() == 1 && destination_axes.len() == 1 {
+        a.moveaxis(source_axes[0], destination_axes[0])
+    } else {
+        a.moveaxis_multi(&source_axes, &destination_axes)
+    };
+    let result = match result {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, axis, start=0))]
 fn rollaxis(py: Python<'_>, a: Py<PyAny>, axis: i64, start: i64) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.rollaxis so trailing-axis promotion, nonzero
-    // insertion points, negative-axis normalization, and validation
-    // errors all match numpy exactly.
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("rollaxis")?
-        .call1((a.bind(py), axis, start))?
-        .unbind())
+    let rollaxis_fn = numpy.getattr("rollaxis")?;
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(rollaxis_fn.call1((a.bind(py), axis, start))?.unbind())
+    };
+
+    let a = match extract_numeric_array(py, a.bind(py), "rollaxis(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let result = match a.rollaxis(axis as isize, start as isize) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, axis=None))]
 fn squeeze(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.squeeze so singleton-axis removal, explicit
-    // axis selectors, scalar identity behavior, and numpy's error
-    // surface all stay exact.
     let numpy = py.import("numpy")?;
     let squeeze_fn = numpy.getattr("squeeze")?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis_val) = axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
-    }
-    Ok(squeeze_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(axis_val) = axis.as_ref() {
+            kwargs.set_item("axis", axis_val.bind(py))?;
+        }
+        Ok(squeeze_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    };
+
+    let a = match extract_numeric_array(py, a.bind(py), "squeeze(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let axes = match extract_axis_spec(py, axis_for_parse, "squeeze") {
+        Ok(axes) => axes,
+        Err(_) => return fallback(),
+    };
+    let result = match axes {
+        None => a.squeeze(None),
+        Some(axes) if axes.is_empty() => Ok(a.clone()),
+        Some(axes) if axes.len() == 1 => a.squeeze(Some(axes[0])),
+        Some(axes) => a.squeeze_axes(&axes),
+    };
+    let result = match result {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
