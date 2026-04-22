@@ -7651,6 +7651,53 @@ fn mask_indices(
 }
 
 #[pyfunction]
+#[pyo3(signature = (x1, x2, *, axis=-1_i64))]
+fn linalg_vecdot(
+    py: Python<'_>,
+    x1: Py<PyAny>,
+    x2: Py<PyAny>,
+    axis: i64,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.linalg.vecdot (Array-API batched vector dot
+    // product along `axis`, conjugating x1 for complex inputs). Matches
+    // numpy on real/complex inputs, broadcasting of batch dims, and
+    // the axis=-1 default.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("axis", axis)?;
+    Ok(numpy
+        .getattr("linalg")?
+        .getattr("vecdot")?
+        .call((x1.bind(py), x2.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, /, *, keepdims=false, ord=None))]
+fn linalg_matrix_norm(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    keepdims: bool,
+    ord: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.linalg.matrix_norm (Array-API matrix norm on the
+    // last two axes). Matches numpy on default (Frobenius), ord='fro',
+    // ord='nuc', ord in {1, -1, 2, -2, inf, -inf}, and the keepdims
+    // shape-preservation flag.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("keepdims", keepdims)?;
+    if let Some(ord_val) = ord {
+        kwargs.set_item("ord", ord_val.bind(py))?;
+    }
+    Ok(numpy
+        .getattr("linalg")?
+        .getattr("matrix_norm")?
+        .call((x.bind(py),), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (subscripts, *operands, optimize=None))]
 fn einsum_path(
     py: Python<'_>,
@@ -9440,6 +9487,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(require, m)?)?;
     m.add_function(wrap_pyfunction!(mask_indices, m)?)?;
     m.add_function(wrap_pyfunction!(einsum_path, m)?)?;
+    m.add_function(wrap_pyfunction!(linalg_vecdot, m)?)?;
+    m.add_function(wrap_pyfunction!(linalg_matrix_norm, m)?)?;
     m.add_function(wrap_pyfunction!(i0, m)?)?;
     m.add_function(wrap_pyfunction!(asfortranarray, m)?)?;
     m.add_function(wrap_pyfunction!(isrealobj, m)?)?;
@@ -9863,6 +9912,8 @@ mod tests {
             assert!(module.getattr("require").is_ok());
             assert!(module.getattr("mask_indices").is_ok());
             assert!(module.getattr("einsum_path").is_ok());
+            assert!(module.getattr("linalg_vecdot").is_ok());
+            assert!(module.getattr("linalg_matrix_norm").is_ok());
             assert!(module.getattr("i0").is_ok());
             assert!(module.getattr("asfortranarray").is_ok());
             assert!(module.getattr("isrealobj").is_ok());
@@ -37156,6 +37207,115 @@ mod tests {
                 .call1(("foo", "bar"))
                 .expect_err("numpy string mismatch must fail");
             assert_pyerr_matches_numpy(py, ours_as_err, theirs_as_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn linalg_vecdot_matrix_norm_match_numpy_across_axis_broadcast_ord_and_keepdims() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let vd_fn = module.getattr("linalg_vecdot")?;
+            let mn_fn = module.getattr("linalg_matrix_norm")?;
+            let numpy = py.import("numpy")?;
+            let numpy_vd = numpy.getattr("linalg")?.getattr("vecdot")?;
+            let numpy_mn = numpy.getattr("linalg")?.getattr("matrix_norm")?;
+            let array_fn = numpy.getattr("array")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // vecdot: basic 1-D real.
+            let a = array_fn.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            let b = array_fn.call1((vec![4.0_f64, -5.0, 6.0],))?;
+            let ours_s = vd_fn.call1((a.clone(), b.clone()))?;
+            let theirs_s = numpy_vd.call1((a.clone(), b.clone()))?;
+            let ok_s: bool = allclose.call1((&ours_s, &theirs_s))?.extract()?;
+            assert!(ok_s, "vecdot 1-D real mismatch");
+
+            // vecdot: 2-D batch (rows as vectors).
+            let A = array_fn.call1((vec![vec![1.0_f64, 0.0], vec![0.0, 1.0]],))?;
+            let B = array_fn.call1((vec![vec![1.0_f64, 2.0], vec![3.0, 4.0]],))?;
+            let ours_b = vd_fn.call1((A.clone(), B.clone()))?;
+            let theirs_b = numpy_vd.call1((A.clone(), B.clone()))?;
+            let ok_b: bool = allclose.call1((&ours_b, &theirs_b))?.extract()?;
+            assert!(ok_b, "vecdot 2-D batch mismatch");
+
+            // vecdot: complex with conjugation of x1.
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+            let c1_items: Vec<Py<PyAny>> = vec![
+                py_complex.call1((1.0_f64, 1.0_f64))?.unbind(),
+                py_complex.call1((2.0_f64, -1.0_f64))?.unbind(),
+            ];
+            let c2_items: Vec<Py<PyAny>> = vec![
+                py_complex.call1((1.0_f64, 0.0_f64))?.unbind(),
+                py_complex.call1((0.0_f64, 1.0_f64))?.unbind(),
+            ];
+            let c1 = array_fn.call1((PyList::new(py, c1_items)?,))?;
+            let c2 = array_fn.call1((PyList::new(py, c2_items)?,))?;
+            let ours_c = vd_fn.call1((c1.clone(), c2.clone()))?;
+            let theirs_c = numpy_vd.call1((c1.clone(), c2.clone()))?;
+            let ok_c: bool = allclose.call1((&ours_c, &theirs_c))?.extract()?;
+            assert!(ok_c, "vecdot complex (conjugate x1) mismatch");
+
+            // vecdot: explicit axis=0 on 2-D input (contract rows).
+            let axis0_kw = PyDict::new(py);
+            axis0_kw.set_item("axis", 0_i64)?;
+            let ours_ax = vd_fn.call((A.clone(), B.clone()), Some(&axis0_kw))?;
+            let theirs_ax = numpy_vd.call((A.clone(), B.clone()), Some(&axis0_kw))?;
+            let ok_ax: bool = allclose.call1((&ours_ax, &theirs_ax))?.extract()?;
+            assert!(ok_ax, "vecdot axis=0 mismatch");
+
+            // matrix_norm: default (Frobenius).
+            let m = array_fn.call1((vec![vec![1.0_f64, 2.0], vec![3.0, 4.0]],))?;
+            let ours_fn_norm = mn_fn.call1((m.clone(),))?;
+            let theirs_fn_norm = numpy_mn.call1((m.clone(),))?;
+            let ok_def: bool = allclose
+                .call1((&ours_fn_norm, &theirs_fn_norm))?
+                .extract()?;
+            assert!(ok_def, "matrix_norm default mismatch");
+
+            // Ord variants: 'fro', 'nuc', 1, -1, 2, -2, inf, -inf.
+            let builtins = py.import("builtins")?;
+            let py_float = builtins.getattr("float")?;
+            let inf = py_float.call1(("inf",))?;
+            let neg_inf = py_float.call1(("-inf",))?;
+            let ord_values: Vec<Py<PyAny>> = vec![
+                "fro".into_pyobject(py)?.unbind().into_any(),
+                "nuc".into_pyobject(py)?.unbind().into_any(),
+                1_i64.into_pyobject(py)?.unbind().into_any(),
+                (-1_i64).into_pyobject(py)?.unbind().into_any(),
+                2_i64.into_pyobject(py)?.unbind().into_any(),
+                (-2_i64).into_pyobject(py)?.unbind().into_any(),
+                inf.unbind(),
+                neg_inf.unbind(),
+            ];
+            for ord_val in &ord_values {
+                let ord_kw = PyDict::new(py);
+                ord_kw.set_item("ord", ord_val.bind(py))?;
+                let ours_o = mn_fn.call((m.clone(),), Some(&ord_kw))?;
+                let theirs_o = numpy_mn.call((m.clone(),), Some(&ord_kw))?;
+                let ok_o: bool = allclose.call1((&ours_o, &theirs_o))?.extract()?;
+                assert!(ok_o, "matrix_norm ord surface mismatch");
+            }
+
+            // keepdims=True shape parity on a 3-D stack.
+            let stack = array_fn.call1((vec![
+                vec![vec![1.0_f64, 0.0], vec![0.0, 2.0]],
+                vec![vec![3.0, 0.0], vec![0.0, 4.0]],
+            ],))?;
+            let kd_kw = PyDict::new(py);
+            kd_kw.set_item("keepdims", true)?;
+            let ours_kd = mn_fn.call((stack.clone(),), Some(&kd_kw))?;
+            let theirs_kd = numpy_mn.call((stack.clone(),), Some(&kd_kw))?;
+            assert_eq!(
+                ours_kd.getattr("shape")?.extract::<Vec<usize>>()?,
+                theirs_kd.getattr("shape")?.extract::<Vec<usize>>()?
+            );
 
             Ok(())
         });
