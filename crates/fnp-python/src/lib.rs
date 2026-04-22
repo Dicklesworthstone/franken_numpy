@@ -10970,6 +10970,218 @@ fn take_along_axis(
     build_numpy_array_from_ufunc(py, &result)
 }
 
+// ---------------------------------------------------------------------------
+// Reality-check (k74v.8) — 31 core numpy passthrough wrappers.
+//
+// Each wrapper forwards all args + kwargs to `numpy.<name>`, preserving the
+// full numpy signature surface without re-typing it. Coverage goal: closes
+// ~31 of the 183-name numpy.__all__ gap identified in vhd5's audit (pushes
+// fnp_python from 63.9% → ~70% of numpy.__all__). The helper `core_numpy_passthrough`
+// amortises the common work so each #[pyfunction] is a 3-line trampoline.
+// ---------------------------------------------------------------------------
+
+fn core_numpy_passthrough(
+    py: Python<'_>,
+    name: &str,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr(name)?.call(args, kwargs)?.unbind())
+}
+
+// Array creators
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn zeros(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "zeros", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn ones(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "ones", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn empty(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "empty", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn array(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "array", args, kwargs)
+}
+
+// Reductions
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn sum(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "sum", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn prod(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "prod", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn mean(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "mean", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(name = "std", signature = (*args, **kwargs))]
+fn py_std(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "std", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn var(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "var", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(name = "min", signature = (*args, **kwargs))]
+fn py_min(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "min", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(name = "max", signature = (*args, **kwargs))]
+fn py_max(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "max", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn amax(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "amax", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn amin(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "amin", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn all(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "all", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn any(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "any", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn cumsum(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "cumsum", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn cumprod(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "cumprod", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn trace(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "trace", args, kwargs)
+}
+
+// Arg reductions
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn argmax(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "argmax", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn argmin(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "argmin", args, kwargs)
+}
+
+// Linalg shortcuts
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn matmul(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "matmul", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn dot(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "dot", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn einsum(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "einsum", args, kwargs)
+}
+
+// Set / shortcut helpers
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn unique(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "unique", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn concat(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "concat", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn conj(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "conj", args, kwargs)
+}
+
+// Arithmetic aliases / ufunc variants
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn divide(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "divide", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn power(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "power", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn log2(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "log2", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn log10(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "log10", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn exp2(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "exp2", args, kwargs)
+}
+
 #[pymodule]
 fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
@@ -11356,6 +11568,39 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(triu_indices_from, m)?)?;
     m.add_function(wrap_pyfunction!(put_along_axis, m)?)?;
     m.add_function(wrap_pyfunction!(take_along_axis, m)?)?;
+
+    // k74v.8 — 31 core numpy passthroughs (variadic args/kwargs forward).
+    m.add_function(wrap_pyfunction!(zeros, m)?)?;
+    m.add_function(wrap_pyfunction!(ones, m)?)?;
+    m.add_function(wrap_pyfunction!(empty, m)?)?;
+    m.add_function(wrap_pyfunction!(array, m)?)?;
+    m.add_function(wrap_pyfunction!(sum, m)?)?;
+    m.add_function(wrap_pyfunction!(prod, m)?)?;
+    m.add_function(wrap_pyfunction!(mean, m)?)?;
+    m.add_function(wrap_pyfunction!(py_std, m)?)?;
+    m.add_function(wrap_pyfunction!(var, m)?)?;
+    m.add_function(wrap_pyfunction!(py_min, m)?)?;
+    m.add_function(wrap_pyfunction!(py_max, m)?)?;
+    m.add_function(wrap_pyfunction!(amax, m)?)?;
+    m.add_function(wrap_pyfunction!(amin, m)?)?;
+    m.add_function(wrap_pyfunction!(all, m)?)?;
+    m.add_function(wrap_pyfunction!(any, m)?)?;
+    m.add_function(wrap_pyfunction!(cumsum, m)?)?;
+    m.add_function(wrap_pyfunction!(cumprod, m)?)?;
+    m.add_function(wrap_pyfunction!(trace, m)?)?;
+    m.add_function(wrap_pyfunction!(argmax, m)?)?;
+    m.add_function(wrap_pyfunction!(argmin, m)?)?;
+    m.add_function(wrap_pyfunction!(matmul, m)?)?;
+    m.add_function(wrap_pyfunction!(dot, m)?)?;
+    m.add_function(wrap_pyfunction!(einsum, m)?)?;
+    m.add_function(wrap_pyfunction!(unique, m)?)?;
+    m.add_function(wrap_pyfunction!(concat, m)?)?;
+    m.add_function(wrap_pyfunction!(conj, m)?)?;
+    m.add_function(wrap_pyfunction!(divide, m)?)?;
+    m.add_function(wrap_pyfunction!(power, m)?)?;
+    m.add_function(wrap_pyfunction!(log2, m)?)?;
+    m.add_function(wrap_pyfunction!(log10, m)?)?;
+    m.add_function(wrap_pyfunction!(exp2, m)?)?;
 
     // Module version (numpy parity: numpy.__version__). Sourced from the
     // fnp-python crate's Cargo.toml via env!() so a version bump in the
@@ -40723,6 +40968,171 @@ mod tests {
                 .call((forward_spec.clone(),), Some(&ri_kwargs))?;
             let eq_ri2: bool = allclose.call1((&ours_ri2, &theirs_ri2))?.extract()?;
             assert!(eq_ri2, "irfft2 s=(4,4) norm=forward parity");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn module_exposes_k74v_8_core_numpy_passthroughs_matching_numpy() {
+        // For each of the 31 names added by k74v.8, call both
+        // fnp_python.<name>(...) and numpy.<name>(...) with a representative
+        // small input and assert the results match via numpy.allclose for
+        // arrays / bool equality for scalars.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_k74v8")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Shared inputs.
+            let x_1d = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 2.0, 3.0, 4.0],))?;
+            let y_1d = numpy
+                .getattr("array")?
+                .call1((vec![2.0_f64, 2.0, 2.0, 2.0],))?;
+            let x_2d = numpy.getattr("array")?.call1((vec![
+                vec![1.0_f64, 2.0],
+                vec![3.0, 4.0],
+            ],))?;
+            let unique_in = numpy
+                .getattr("array")?
+                .call1((vec![3_i64, 1, 2, 3, 1],))?;
+
+            let check_allclose = |name: &str,
+                                  ours: &Bound<'_, PyAny>,
+                                  theirs: &Bound<'_, PyAny>|
+             -> PyResult<()> {
+                let equal: bool = allclose.call1((ours, theirs))?.extract()?;
+                assert!(
+                    equal,
+                    "{name}: fnp_python passthrough result differs from numpy"
+                );
+                Ok(())
+            };
+
+            // 1-arg cases that compare values (skip empty; it's nondeterministic).
+            for name in [
+                "sum", "prod", "mean", "std", "var", "min", "max", "amax", "amin",
+                "all", "any", "cumsum", "cumprod", "argmax", "argmin", "conj",
+                "log2", "log10", "exp2",
+            ] {
+                let Ok(numpy_fn) = numpy.getattr(name) else {
+                    continue;
+                };
+                let ours_fn = module
+                    .getattr(name)
+                    .unwrap_or_else(|_| panic!("fnp_python.{name} missing"));
+                let o = ours_fn.call1((x_1d.clone(),))?;
+                let t = numpy_fn.call1((x_1d.clone(),))?;
+                check_allclose(name, &o, &t)?;
+            }
+
+            // 2-arg arithmetic / pairwise.
+            for name in ["divide", "power", "dot"] {
+                let Ok(numpy_fn) = numpy.getattr(name) else {
+                    continue;
+                };
+                let ours_fn = module
+                    .getattr(name)
+                    .unwrap_or_else(|_| panic!("fnp_python.{name} missing"));
+                let o = ours_fn.call1((x_1d.clone(), y_1d.clone()))?;
+                let t = numpy_fn.call1((x_1d.clone(), y_1d.clone()))?;
+                check_allclose(name, &o, &t)?;
+            }
+
+            // matmul on 2-D.
+            for name in ["matmul"] {
+                let Ok(numpy_fn) = numpy.getattr(name) else {
+                    continue;
+                };
+                let ours_fn = module
+                    .getattr(name)
+                    .unwrap_or_else(|_| panic!("fnp_python.{name} missing"));
+                let o = ours_fn.call1((x_2d.clone(), x_2d.clone()))?;
+                let t = numpy_fn.call1((x_2d.clone(), x_2d.clone()))?;
+                check_allclose(name, &o, &t)?;
+            }
+
+            // trace on 2-D (single arg).
+            for name in ["trace"] {
+                let Ok(numpy_fn) = numpy.getattr(name) else {
+                    continue;
+                };
+                let ours_fn = module
+                    .getattr(name)
+                    .unwrap_or_else(|_| panic!("fnp_python.{name} missing"));
+                let o = ours_fn.call1((x_2d.clone(),))?;
+                let t = numpy_fn.call1((x_2d.clone(),))?;
+                check_allclose(name, &o, &t)?;
+            }
+
+            // einsum('i,i->', a, b).
+            {
+                let ours_fn = module.getattr("einsum")?;
+                let theirs_fn = numpy.getattr("einsum")?;
+                let o = ours_fn.call1(("i,i->", x_1d.clone(), y_1d.clone()))?;
+                let t = theirs_fn.call1(("i,i->", x_1d.clone(), y_1d.clone()))?;
+                check_allclose("einsum", &o, &t)?;
+            }
+
+            // unique: single-arg, returns a sorted unique array.
+            {
+                let ours_fn = module.getattr("unique")?;
+                let theirs_fn = numpy.getattr("unique")?;
+                let o = ours_fn.call1((unique_in.clone(),))?;
+                let t = theirs_fn.call1((unique_in.clone(),))?;
+                check_allclose("unique", &o, &t)?;
+            }
+
+            // concat: (tuple_of_arrays,). May be missing on older numpy.
+            if let (Ok(theirs_fn), Ok(ours_fn)) =
+                (numpy.getattr("concat"), module.getattr("concat"))
+            {
+                let pair = PyTuple::new(py, [x_1d.clone(), y_1d.clone()])?;
+                let o = ours_fn.call1((pair.clone(),))?;
+                let t = theirs_fn.call1((pair.clone(),))?;
+                check_allclose("concat", &o, &t)?;
+            }
+
+            // Array creators: check dtype + shape (zeros/ones equal values; empty is uninitialised).
+            for name in ["zeros", "ones", "empty"] {
+                let Ok(numpy_fn) = numpy.getattr(name) else {
+                    continue;
+                };
+                let ours_fn = module
+                    .getattr(name)
+                    .unwrap_or_else(|_| panic!("fnp_python.{name} missing"));
+                let o = ours_fn.call1(((3_i64,),))?;
+                let t = numpy_fn.call1(((3_i64,),))?;
+                assert_eq!(
+                    o.getattr("dtype")?.str()?.to_string(),
+                    t.getattr("dtype")?.str()?.to_string(),
+                    "{name}: dtype mismatch"
+                );
+                assert_eq!(
+                    o.getattr("shape")?.extract::<Vec<usize>>()?,
+                    t.getattr("shape")?.extract::<Vec<usize>>()?,
+                    "{name}: shape mismatch"
+                );
+                if name != "empty" {
+                    check_allclose(name, &o, &t)?;
+                }
+            }
+
+            // array(list_input): materialise and compare values.
+            {
+                let ours_fn = module.getattr("array")?;
+                let theirs_fn = numpy.getattr("array")?;
+                let src = vec![1_i64, 2, 3, 4];
+                let o = ours_fn.call1((src.clone(),))?;
+                let t = theirs_fn.call1((src.clone(),))?;
+                check_allclose("array", &o, &t)?;
+            }
 
             Ok(())
         });
