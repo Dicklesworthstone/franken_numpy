@@ -4,11 +4,12 @@ use fnp_linalg::{pinv_hermitian_nxn_with_tolerance_aliases, pinv_mxn_with_tolera
 use fnp_ndarray::{broadcast_shapes, element_count};
 use fnp_ufunc::{
     FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
-    FromPyFuncReduceOptions, GridSpec, UFuncArray, UnaryOp, copysign as ufunc_copysign,
-    frexp as ufunc_frexp, hypot as ufunc_hypot, isneginf as ufunc_isneginf,
-    isposinf as ufunc_isposinf, ldexp as ufunc_ldexp, logaddexp as ufunc_logaddexp,
-    logaddexp2 as ufunc_logaddexp2, modf as ufunc_modf, nextafter as ufunc_nextafter,
-    reduce_frompyfunc_values, signbit as ufunc_signbit, spacing as ufunc_spacing, where_nonzero,
+    FromPyFuncReduceOptions, GridSpec, MAError, MaskedArray, UFuncArray, UnaryOp,
+    copysign as ufunc_copysign, frexp as ufunc_frexp, hypot as ufunc_hypot,
+    isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, ldexp as ufunc_ldexp,
+    logaddexp as ufunc_logaddexp, logaddexp2 as ufunc_logaddexp2, ma_is_masked,
+    modf as ufunc_modf, nextafter as ufunc_nextafter, reduce_frompyfunc_values,
+    signbit as ufunc_signbit, spacing as ufunc_spacing, where_nonzero,
 };
 use pyo3::exceptions::{PyOSError, PyTypeError, PyValueError, PyZeroDivisionError};
 use pyo3::prelude::*;
@@ -954,6 +955,107 @@ fn extract_array_shape(
         .getattr("shape")?
         .extract::<Vec<usize>>()
         .map_err(|err| PyTypeError::new_err(format!("{context}: could not read shape: {err}")))
+}
+
+fn map_ma_error(context: &str, err: MAError) -> PyErr {
+    PyValueError::new_err(format!("{context}: {err}"))
+}
+
+fn build_boolean_array(shape: &[usize], value: bool, context: &str) -> PyResult<UFuncArray> {
+    let len = element_count(shape)
+        .map_err(|err| PyValueError::new_err(format!("{context}: {err}")))?;
+    UFuncArray::from_storage(shape.to_vec(), ArrayStorage::Bool(vec![value; len]))
+        .map_err(map_ufunc_error)
+}
+
+fn dtype_supported_by_numpy_export_bridge(dtype: DType) -> bool {
+    matches!(
+        dtype,
+        DType::Bool
+            | DType::I8
+            | DType::I16
+            | DType::I32
+            | DType::I64
+            | DType::U8
+            | DType::U16
+            | DType::U32
+            | DType::U64
+            | DType::F16
+            | DType::F32
+            | DType::F64
+    )
+}
+
+fn extract_mask_metadata(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    context: &str,
+) -> PyResult<(bool, Option<UFuncArray>, Vec<usize>)> {
+    let numpy = py.import("numpy")?;
+    let builtins = py.import("builtins")?;
+    let asanyarray = numpy.call_method1("asanyarray", (value,))?;
+    let shape = asanyarray.getattr("shape")?.extract::<Vec<usize>>()?;
+    let masked_array_type = numpy.getattr("ma")?.getattr("MaskedArray")?;
+    let is_masked_array = builtins
+        .call_method1("isinstance", (&asanyarray, masked_array_type))?
+        .extract::<bool>()?;
+
+    if !is_masked_array {
+        return Ok((false, None, shape));
+    }
+
+    let mask_object = numpy.getattr("ma")?.getattr("getmaskarray")?.call1((&asanyarray,))?;
+    let mask = extract_precise_numeric_array(py, &mask_object, &format!("{context}: mask"))?;
+    let mask = mask.values().iter().any(|&value| value != 0.0).then_some(mask);
+    Ok((true, mask, shape))
+}
+
+fn extract_numeric_masked_array(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    context: &str,
+) -> PyResult<Option<MaskedArray>> {
+    let numpy = py.import("numpy")?;
+    let builtins = py.import("builtins")?;
+    let asanyarray = numpy.call_method1("asanyarray", (value,))?;
+    let masked_array_type = numpy.getattr("ma")?.getattr("MaskedArray")?;
+    let is_masked_array = builtins
+        .call_method1("isinstance", (&asanyarray, masked_array_type))?
+        .extract::<bool>()?;
+
+    let mask = if is_masked_array {
+        let mask_object = numpy.getattr("ma")?.getattr("getmaskarray")?.call1((&asanyarray,))?;
+        let mask = match extract_precise_numeric_array(py, &mask_object, &format!("{context}: mask"))
+        {
+            Ok(mask) => mask,
+            Err(_) => return Ok(None),
+        };
+        mask.values().iter().any(|&value| value != 0.0).then_some(mask)
+    } else {
+        None
+    };
+
+    let data_source = if is_masked_array {
+        asanyarray.getattr("data")?
+    } else {
+        numpy.call_method1("asarray", (value,))?
+    };
+    let data = match extract_precise_numeric_array(py, &data_source, context) {
+        Ok(data) => data,
+        Err(_) => return Ok(None),
+    };
+    let fill_value = if is_masked_array {
+        asanyarray
+            .getattr("fill_value")
+            .ok()
+            .and_then(|value| value.extract::<f64>().ok())
+    } else {
+        None
+    };
+
+    MaskedArray::new(data, mask, fill_value)
+        .map(Some)
+        .map_err(|err| map_ma_error(context, err))
 }
 
 fn extract_python_dtype(
@@ -2147,6 +2249,31 @@ fn build_numpy_array_from_storage(
 fn build_numpy_array_from_ufunc(py: Python<'_>, array: &UFuncArray) -> PyResult<Py<PyAny>> {
     let storage = array.to_storage().map_err(map_ufunc_error)?;
     build_numpy_array_from_storage(py, array.shape(), storage)
+}
+
+fn build_numpy_scalar_or_array(py: Python<'_>, array: &UFuncArray) -> PyResult<Py<PyAny>> {
+    let output = build_numpy_array_from_ufunc(py, array)?;
+    if array.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
+    }
+    Ok(output)
+}
+
+fn build_numpy_masked_array(py: Python<'_>, array: &MaskedArray) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let ma = numpy.getattr("ma")?;
+    let data = build_numpy_array_from_ufunc(py, array.data())?;
+    let kwargs = PyDict::new(py);
+    if let Some(mask) = array.mask() {
+        let mask = build_numpy_array_from_ufunc(py, mask)?;
+        kwargs.set_item("mask", mask.bind(py))?;
+    } else {
+        kwargs.set_item("mask", ma.getattr("nomask")?)?;
+    }
+    Ok(ma
+        .getattr("array")?
+        .call((data.bind(py),), Some(&kwargs))?
+        .unbind())
 }
 
 fn build_numpy_complex_array_from_interleaved(
@@ -5553,45 +5680,80 @@ fn fft(
 #[pyfunction]
 #[pyo3(signature = (a, fill_value=None))]
 fn filled(py: Python<'_>, a: Py<PyAny>, fill_value: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ma.filled so masked-element replacement using either
-    // the explicit fill_value or the array's intrinsic fill_value attribute
-    // matches numpy exactly. Returns an ndarray (not a MaskedArray).
-    let numpy = py.import("numpy")?;
-    let filled_fn = numpy.getattr("ma")?.getattr("filled")?;
-    let kwargs = PyDict::new(py);
-    if let Some(value) = fill_value {
-        kwargs.set_item("fill_value", value.bind(py))?;
-    }
-    Ok(filled_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    let fill_value_for_fallback = fill_value.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let filled_fn = numpy.getattr("ma")?.getattr("filled")?;
+        let kwargs = PyDict::new(py);
+        if let Some(value) = &fill_value_for_fallback {
+            kwargs.set_item("fill_value", value.bind(py))?;
+        }
+        Ok(filled_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    };
+
+    let Some(masked) = extract_numeric_masked_array(py, a.bind(py), "filled")? else {
+        return fallback();
+    };
+    let fill_value = match fill_value.as_ref() {
+        Some(value) => match value.bind(py).extract::<f64>() {
+            Ok(fill_value) => fill_value,
+            Err(_) => return fallback(),
+        },
+        None => masked.fill_value(),
+    };
+    let result = masked
+        .filled(fill_value)
+        .map_err(|err| map_ufunc_error(format!("filled: {err}")))?;
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
 #[pyo3(signature = (a,))]
 fn getmask(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ma.getmask so mask retrieval returns the ndarray
-    // mask for MaskedArrays with a non-trivial mask, numpy.ma.nomask for
-    // MaskedArrays with nomask, and numpy.ma.nomask for plain inputs.
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        Ok(numpy
+            .getattr("ma")?
+            .getattr("getmask")?
+            .call1((a.bind(py),))?
+            .unbind())
+    };
+
+    let (_, mask, _) = match extract_mask_metadata(py, a.bind(py), "getmask") {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    if let Some(mask) = mask {
+        return build_numpy_array_from_ufunc(py, &mask);
+    }
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("ma")?
-        .getattr("getmask")?
-        .call1((a.bind(py),))?
-        .unbind())
+    Ok(numpy.getattr("ma")?.getattr("nomask")?.unbind())
 }
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn is_masked(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ma.is_masked. Returns True only when the input is
-    // a MaskedArray containing at least one masked element; False for all
-    // other inputs (plain ndarrays, lists, scalars, MaskedArrays with
-    // nomask).
-    let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("ma")?
-        .getattr("is_masked")?
-        .call1((x.bind(py),))?
-        .unbind())
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        Ok(numpy
+            .getattr("ma")?
+            .getattr("is_masked")?
+            .call1((x.bind(py),))?
+            .unbind())
+    };
+
+    let (is_masked_array, mask, shape) = match extract_mask_metadata(py, x.bind(py), "is_masked") {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    let masked = if is_masked_array {
+        let data = build_boolean_array(&shape, false, "is_masked")?;
+        let array = MaskedArray::new(data, mask, None).map_err(|err| map_ma_error("is_masked", err))?;
+        ma_is_masked(&array)
+    } else {
+        false
+    };
+    Ok(py.import("builtins")?.getattr("bool")?.call1((masked,))?.unbind())
 }
 
 #[pyfunction]
@@ -9142,27 +9304,51 @@ fn ma_argmax(
     out: Option<Py<PyAny>>,
     keepdims: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to numpy.ma.argmax. Returns index of the maximum along
-    // an axis, respecting the MaskedArray mask so masked positions are
-    // ignored when possible. Matches numpy on masked/fully-masked input,
-    // axis=None flatten semantics, and keepdims shape parity.
-    let numpy = py.import("numpy")?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis_val) = axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let kwargs = PyDict::new(py);
+        if let Some(axis_val) = &axis {
+            kwargs.set_item("axis", axis_val.bind(py))?;
+        }
+        if let Some(fv) = &fill_value {
+            kwargs.set_item("fill_value", fv.bind(py))?;
+        }
+        if let Some(out_val) = &out {
+            kwargs.set_item("out", out_val.bind(py))?;
+        }
+        kwargs.set_item("keepdims", keepdims)?;
+        Ok(numpy
+            .getattr("ma")?
+            .getattr("argmax")?
+            .call((a.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
+    if fill_value.is_some() || out.is_some() {
+        return fallback();
     }
-    if let Some(fv) = fill_value {
-        kwargs.set_item("fill_value", fv.bind(py))?;
+    let Some(masked) = extract_numeric_masked_array(py, a.bind(py), "ma_argmax")? else {
+        return fallback();
+    };
+    let axis = match extract_axis_spec(py, axis_for_parse, "ma_argmax") {
+        Ok(None) => None,
+        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
+        Ok(Some(_)) => return fallback(),
+        Err(_) => return fallback(),
+    };
+    if keepdims && axis.is_none() {
+        return fallback();
     }
-    if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+    let mut result = masked
+        .argmax(axis)
+        .map_err(|err| map_ma_error("ma_argmax", err))?;
+    if keepdims && let Some(axis) = axis {
+        result = result
+            .expand_dims(axis)
+            .map_err(|err| map_ufunc_error(format!("ma_argmax: {err}")))?;
     }
-    kwargs.set_item("keepdims", keepdims)?;
-    Ok(numpy
-        .getattr("ma")?
-        .getattr("argmax")?
-        .call((a.bind(py),), Some(&kwargs))?
-        .unbind())
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -9175,27 +9361,51 @@ fn ma_argmin(
     out: Option<Py<PyAny>>,
     keepdims: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to numpy.ma.argmin. Returns index of the minimum along
-    // an axis, respecting the MaskedArray mask so masked positions are
-    // ignored when possible. Matches numpy on masked/fully-masked input,
-    // axis=None flatten semantics, and keepdims shape parity.
-    let numpy = py.import("numpy")?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis_val) = axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let kwargs = PyDict::new(py);
+        if let Some(axis_val) = &axis {
+            kwargs.set_item("axis", axis_val.bind(py))?;
+        }
+        if let Some(fv) = &fill_value {
+            kwargs.set_item("fill_value", fv.bind(py))?;
+        }
+        if let Some(out_val) = &out {
+            kwargs.set_item("out", out_val.bind(py))?;
+        }
+        kwargs.set_item("keepdims", keepdims)?;
+        Ok(numpy
+            .getattr("ma")?
+            .getattr("argmin")?
+            .call((a.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
+    if fill_value.is_some() || out.is_some() {
+        return fallback();
     }
-    if let Some(fv) = fill_value {
-        kwargs.set_item("fill_value", fv.bind(py))?;
+    let Some(masked) = extract_numeric_masked_array(py, a.bind(py), "ma_argmin")? else {
+        return fallback();
+    };
+    let axis = match extract_axis_spec(py, axis_for_parse, "ma_argmin") {
+        Ok(None) => None,
+        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
+        Ok(Some(_)) => return fallback(),
+        Err(_) => return fallback(),
+    };
+    if keepdims && axis.is_none() {
+        return fallback();
     }
-    if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+    let mut result = masked
+        .argmin(axis)
+        .map_err(|err| map_ma_error("ma_argmin", err))?;
+    if keepdims && let Some(axis) = axis {
+        result = result
+            .expand_dims(axis)
+            .map_err(|err| map_ufunc_error(format!("ma_argmin: {err}")))?;
     }
-    kwargs.set_item("keepdims", keepdims)?;
-    Ok(numpy
-        .getattr("ma")?
-        .getattr("argmin")?
-        .call((a.bind(py),), Some(&kwargs))?
-        .unbind())
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -9944,16 +10154,24 @@ fn polyval(py: Python<'_>, p: Py<PyAny>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (arr,))]
 fn getmaskarray(py: Python<'_>, arr: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ma.getmaskarray. Unlike getmask, this always
-    // returns a concrete boolean ndarray of the same shape as the input:
-    // the MaskedArray's mask when non-trivial, or a full-False array
-    // (for MaskedArrays with nomask and for plain ndarrays/array_like).
-    let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("ma")?
-        .getattr("getmaskarray")?
-        .call1((arr.bind(py),))?
-        .unbind())
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        Ok(numpy
+            .getattr("ma")?
+            .getattr("getmaskarray")?
+            .call1((arr.bind(py),))?
+            .unbind())
+    };
+
+    let (_, mask, shape) = match extract_mask_metadata(py, arr.bind(py), "getmaskarray") {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    let mask = match mask {
+        Some(mask) => mask,
+        None => build_boolean_array(&shape, false, "getmaskarray")?,
+    };
+    build_numpy_array_from_ufunc(py, &mask)
 }
 
 #[pyfunction]
@@ -9982,32 +10200,57 @@ fn make_mask(
 #[pyfunction]
 #[pyo3(signature = (shape, dtype=None))]
 fn masked_all(py: Python<'_>, shape: Py<PyAny>, dtype: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ma.masked_all so scalar-vs-tuple shape handling,
-    // default float dtype, explicit dtype overrides, and fully-masked
-    // array construction all match numpy exactly.
-    let numpy = py.import("numpy")?;
-    let masked_all_fn = numpy.getattr("ma")?.getattr("masked_all")?;
-    let kwargs = PyDict::new(py);
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    let dtype_for_fallback = dtype.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let masked_all_fn = numpy.getattr("ma")?.getattr("masked_all")?;
+        let kwargs = PyDict::new(py);
+        if let Some(dtype_val) = &dtype_for_fallback {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        Ok(masked_all_fn
+            .call((shape.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
+    let shape = match extract_index_shape(py, shape.bind(py), "masked_all") {
+        Ok(shape) => shape,
+        Err(_) => return fallback(),
+    };
+    let dtype = match extract_python_dtype(
+        py,
+        dtype.as_ref().map(|value| value.clone_ref(py)),
+        DType::F64,
+        "masked_all",
+    ) {
+        Ok(dtype) => dtype,
+        Err(_) => return fallback(),
+    };
+    if !dtype_supported_by_numpy_export_bridge(dtype) {
+        return fallback();
     }
-    Ok(masked_all_fn
-        .call((shape.bind(py),), Some(&kwargs))?
-        .unbind())
+    let result =
+        MaskedArray::masked_all(shape, dtype).map_err(|err| map_ma_error("masked_all", err))?;
+    build_numpy_masked_array(py, &result)
 }
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn compressed(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ma.compressed so masked-element filtering,
-    // flatten-to-1-D semantics, and dtype preservation all match numpy
-    // exactly for masked arrays, plain ndarrays, and scalar inputs.
-    let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("ma")?
-        .getattr("compressed")?
-        .call1((x.bind(py),))?
-        .unbind())
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        Ok(numpy
+            .getattr("ma")?
+            .getattr("compressed")?
+            .call1((x.bind(py),))?
+            .unbind())
+    };
+
+    let Some(masked) = extract_numeric_masked_array(py, x.bind(py), "compressed")? else {
+        return fallback();
+    };
+    let result = masked.compressed();
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -10347,16 +10590,27 @@ fn masked_outside(
 #[pyfunction]
 #[pyo3(signature = (arr, axis=None))]
 fn count_masked(py: Python<'_>, arr: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ma.count_masked so default scalar-vs-array return
-    // typing, axis reductions, and invalid-axis error text all match numpy
-    // exactly for masked and unmasked inputs.
-    let numpy = py.import("numpy")?;
-    let count_masked_fn = numpy.getattr("ma")?.getattr("count_masked")?;
-    Ok(match axis {
-        Some(axis) => count_masked_fn.call1((arr.bind(py), axis.bind(py)))?,
-        None => count_masked_fn.call1((arr.bind(py),))?,
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let count_masked_fn = numpy.getattr("ma")?.getattr("count_masked")?;
+        Ok(match &axis {
+            Some(axis) => count_masked_fn.call1((arr.bind(py), axis.bind(py)))?,
+            None => count_masked_fn.call1((arr.bind(py),))?,
+        }
+        .unbind())
+    };
+
+    if axis.is_some() {
+        return fallback();
     }
-    .unbind())
+    let (_, mask, _) = match extract_mask_metadata(py, arr.bind(py), "count_masked") {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    let count = mask
+        .as_ref()
+        .map_or(0_usize, |mask| mask.values().iter().filter(|&&value| value != 0.0).count());
+    Ok(count.into_pyobject(py)?.into_any().unbind())
 }
 
 #[pyfunction]
