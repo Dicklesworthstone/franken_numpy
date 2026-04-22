@@ -11022,11 +11022,27 @@ fn ma_ediff1d(
     to_end: Option<Py<PyAny>>,
     to_begin: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let builtins = py.import("builtins")?;
+    let arr_any = numpy.call_method1("asanyarray", (arr.bind(py),))?;
+    let masked_array_type = numpy.getattr("ma")?.getattr("MaskedArray")?;
+    let input_is_masked_array = builtins
+        .call_method1("isinstance", (&arr_any, masked_array_type))?
+        .extract::<bool>()?;
+    let fill_value = if input_is_masked_array {
+        arr_any.getattr("fill_value")?.unbind()
+    } else {
+        numpy
+            .getattr("ma")?
+            .getattr("default_fill_value")?
+            .call1((&arr_any,))?
+            .unbind()
+    };
+
     let arr_for_fallback = arr.clone_ref(py);
     let to_end_for_fallback = to_end.as_ref().map(|value| value.clone_ref(py));
     let to_begin_for_fallback = to_begin.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
         let ma_ediff1d_fn = numpy.getattr("ma")?.getattr("ediff1d")?;
         let kwargs = PyDict::new(py);
         if let Some(value) = &to_end_for_fallback {
@@ -11103,7 +11119,7 @@ fn ma_ediff1d(
     let py_result = build_numpy_masked_array(py, &result)?;
     py_result
         .bind(py)
-        .call_method1("set_fill_value", (flat.fill_value(),))?;
+        .call_method1("set_fill_value", (fill_value.bind(py),))?;
     Ok(py_result)
 }
 
