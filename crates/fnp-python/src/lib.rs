@@ -9631,21 +9631,45 @@ fn nanmedian(
     overwrite_input: bool,
     keepdims: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.nanmedian. NaN-ignoring median along axis;
-    // fully-NaN slices emit a RuntimeWarning and return NaN (numpy
-    // behavior preserved).
     let numpy = py.import("numpy")?;
     let nanmedian_fn = numpy.getattr("nanmedian")?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis_val) = axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(axis_val) = axis.as_ref() {
+            kwargs.set_item("axis", axis_val.bind(py))?;
+        }
+        if let Some(out_val) = out.as_ref() {
+            kwargs.set_item("out", out_val.bind(py))?;
+        }
+        kwargs.set_item("overwrite_input", overwrite_input)?;
+        kwargs.set_item("keepdims", keepdims)?;
+        Ok(nanmedian_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    };
+
+    if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) || overwrite_input || keepdims {
+        return fallback();
     }
-    if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+
+    let a = match extract_numeric_array(py, a.bind(py), "nanmedian(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let axis = match extract_axis_spec(py, axis_for_parse, "nanmedian") {
+        Ok(None) => None,
+        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
+        Ok(Some(_)) => return fallback(),
+        Err(_) => return fallback(),
+    };
+    let result = match a.nanmedian(axis) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
     }
-    kwargs.set_item("overwrite_input", overwrite_input)?;
-    kwargs.set_item("keepdims", keepdims)?;
-    Ok(nanmedian_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(output)
 }
 
 #[pyfunction]
