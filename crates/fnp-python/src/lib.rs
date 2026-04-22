@@ -10450,18 +10450,57 @@ fn make_mask(
     shrink: bool,
     dtype: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ma.make_mask so nomask handling, integer-to-bool
-    // casting, copy/shrink behavior, and optional structured mask dtype
-    // construction all match numpy exactly.
+    let m_for_fallback = m.clone_ref(py);
+    let dtype_for_fallback = dtype.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let make_mask_fn = numpy.getattr("ma")?.getattr("make_mask")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("copy", copy)?;
+        kwargs.set_item("shrink", shrink)?;
+        if let Some(dtype_val) = &dtype_for_fallback {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        Ok(make_mask_fn
+            .call((m_for_fallback.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
     let numpy = py.import("numpy")?;
-    let make_mask_fn = numpy.getattr("ma")?.getattr("make_mask")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("copy", copy)?;
-    kwargs.set_item("shrink", shrink)?;
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    let source = m.bind(py);
+    let nomask = numpy.getattr("ma")?.getattr("nomask")?;
+    if source.is(&nomask) {
+        return Ok(nomask.clone().unbind());
     }
-    Ok(make_mask_fn.call((m.bind(py),), Some(&kwargs))?.unbind())
+    if let Some(dtype_val) = &dtype
+        && !dtype_val.bind(py).is_none()
+    {
+        return fallback();
+    }
+
+    let Some(mask) = (match extract_mask_operand(py, source, "make_mask") {
+        Ok(mask) => mask,
+        Err(_) => return fallback(),
+    }) else {
+        return Ok(nomask.clone().unbind());
+    };
+
+    let all_false = mask.values().iter().all(|&value| value == 0.0);
+    if shrink && all_false {
+        return Ok(nomask.unbind());
+    }
+
+    if !copy {
+        let builtins = py.import("builtins")?;
+        let is_ndarray = builtins
+            .call_method1("isinstance", (source, numpy.getattr("ndarray")?))?
+            .extract::<bool>()?;
+        if is_ndarray && source.getattr("dtype")?.getattr("kind")?.extract::<String>()? == "b" {
+            return Ok(source.clone().unbind());
+        }
+    }
+
+    build_numpy_array_from_ufunc(py, &mask)
 }
 
 #[pyfunction]
