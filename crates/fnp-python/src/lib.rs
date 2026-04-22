@@ -1180,7 +1180,19 @@ fn masked_scalar_compare(
     };
     let result = MaskedArray::new(masked_x.data().clone(), mask, Some(fill_value))
         .map_err(|err| map_ma_error(context, err))?;
-    build_numpy_masked_array(py, &result)
+    let py_result = build_numpy_masked_array(py, &result)?;
+    // numpy.ma.masked_equal(data, sentinel) sets fill_value=sentinel in
+    // the result, regardless of data dtype. build_numpy_masked_array
+    // does not propagate our Rust struct's fill_value (that would
+    // regress 10 other masked tests that rely on numpy's dtype-default),
+    // so we apply the override here for the masked_equal convention
+    // only. bead franken_numpy-ijry.
+    if numpy_name == "masked_equal" {
+        py_result
+            .bind(py)
+            .call_method1("set_fill_value", (scalar.values()[0],))?;
+    }
+    Ok(py_result)
 }
 
 fn masked_interval_compare(
@@ -6307,8 +6319,11 @@ fn allequal(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, fill_value: bool) -> PyR
             let lhs_masked = a_mask.as_ref().is_some_and(|mask| mask[idx] != 0.0);
             let rhs_masked = b_mask.as_ref().is_some_and(|mask| mask[idx] != 0.0);
             match (lhs_masked, rhs_masked) {
-                (true, true) => true,
-                (true, false) | (false, true) => fill_value,
+                // numpy.ma.allequal treats any masked entry as fill_value
+                // (controls whether masked positions count as equal). When
+                // fill_value=False, both-masked should return False too,
+                // not True as a naive "both masked ⇒ trivially equal".
+                (true, true) | (true, false) | (false, true) => fill_value,
                 (false, false) => !lhs.is_nan() && !rhs.is_nan() && lhs == rhs,
             }
         });
