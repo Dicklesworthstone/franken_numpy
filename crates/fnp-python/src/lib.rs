@@ -4978,23 +4978,34 @@ fn inv(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // batched / non-2-D passthrough to np.linalg.inv.
     let bound = a.bind(py);
     let numpy = py.import("numpy")?;
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(numpy
+            .getattr("linalg")?
+            .getattr("inv")?
+            .call1((bound,))?
+            .unbind())
+    };
     if let Ok(array) = extract_numeric_array(py, bound, "inv(a)") {
         let shape = array.shape();
         if shape.len() == 2
             && shape[0] == shape[1]
             && !matches!(array.dtype(), DType::Complex64 | DType::Complex128)
         {
-            let values = fnp_linalg::inv_nxn(array.values(), shape[0]).map_err(map_ufunc_error)?;
+            // inv_nxn returns Err on singular inputs. numpy raises LinAlgError
+            // (subclass of ValueError); mapping via map_ufunc_error would
+            // flatten to PyValueError and drop the LinAlgError identity.
+            // Fall back to numpy so the exception type, message, and chain
+            // match exactly.
+            let values = match fnp_linalg::inv_nxn(array.values(), shape[0]) {
+                Ok(values) => values,
+                Err(_) => return fallback(),
+            };
             let result = UFuncArray::new(vec![shape[0], shape[0]], values, DType::F64)
                 .map_err(map_ufunc_error)?;
             return build_numpy_array_from_ufunc(py, &result);
         }
     }
-    Ok(numpy
-        .getattr("linalg")?
-        .getattr("inv")?
-        .call1((bound,))?
-        .unbind())
+    fallback()
 }
 
 #[pyfunction]
@@ -15612,6 +15623,58 @@ mod tests {
                 repr_string(&true_expected)
             );
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn linalg_error_surface_probe() {
+        // Regression probe for LinAlgError parity. numpy.linalg raises
+        // LinAlgError (subclass of ValueError) on singular / non-square
+        // inputs. Passthrough paths preserve it; in-Rust fast paths must
+        // raise LinAlgError (not plain ValueError) so downstream user code
+        // catching LinAlgError specifically continues to work.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+
+            let numpy = py.import("numpy")?;
+            let linalg = numpy.getattr("linalg")?;
+
+            // Singular 2x2 real square matrix — hits our inv_nxn fast path.
+            let singular: Py<PyAny> =
+                numeric_array(py, vec![vec![1.0_f64, 2.0], vec![2.0, 4.0]], "float64").unbind();
+
+            let ours_err = module.getattr("inv")?.call1((singular.bind(py),));
+            let theirs_err = linalg.getattr("inv")?.call1((singular.bind(py),));
+
+            let mut divergences: Vec<String> = Vec::new();
+            match (ours_err, theirs_err) {
+                (Err(our), Err(theirs)) => {
+                    let ours_type = our.get_type(py).name()?.extract::<String>()?;
+                    let theirs_type = theirs.get_type(py).name()?.extract::<String>()?;
+                    if ours_type != theirs_type {
+                        divergences.push(format!(
+                            "inv(singular): ours={ours_type}, theirs={theirs_type}"
+                        ));
+                    }
+                }
+                (Ok(_), _) => divergences.push("inv(singular): ours=OK, theirs raises".into()),
+                (Err(our), Ok(_)) => {
+                    let ours_type = our.get_type(py).name()?.extract::<String>()?;
+                    divergences
+                        .push(format!("inv(singular): ours={ours_type}, theirs=OK"));
+                }
+            }
+
+            assert!(
+                divergences.is_empty(),
+                "LinAlgError divergences detected:\n  {}",
+                divergences.join("\n  ")
+            );
             Ok(())
         });
     }
