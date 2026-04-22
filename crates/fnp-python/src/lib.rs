@@ -7673,6 +7673,38 @@ fn linalg_vecdot(
 }
 
 #[pyfunction]
+#[pyo3(signature = (array, pad_width, mode="constant", **kwargs))]
+fn pad(
+    py: Python<'_>,
+    array: Py<PyAny>,
+    pad_width: Py<PyAny>,
+    mode: &str,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.pad. Supports scalar/tuple/ndarray pad_width,
+    // the full mode set (constant, edge, linear_ramp, maximum, mean,
+    // median, minimum, reflect, symmetric, wrap, empty), and all
+    // mode-specific kwargs (constant_values, end_values, stat_length,
+    // reflect_type). Extra kwargs forward through verbatim so the full
+    // numpy surface is exposed.
+    let numpy = py.import("numpy")?;
+    let call_kwargs = PyDict::new(py);
+    call_kwargs.set_item("mode", mode)?;
+    if let Some(extras) = kwargs {
+        for (k, v) in extras.iter() {
+            call_kwargs.set_item(k, v)?;
+        }
+    }
+    Ok(numpy
+        .getattr("pad")?
+        .call(
+            (array.bind(py), pad_width.bind(py)),
+            Some(&call_kwargs),
+        )?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a,))]
 fn linalg_eig(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.linalg.eig. Returns (eigenvalues, eigenvectors)
@@ -9540,6 +9572,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(linalg_matrix_norm, m)?)?;
     m.add_function(wrap_pyfunction!(linalg_eig, m)?)?;
     m.add_function(wrap_pyfunction!(polyfit, m)?)?;
+    m.add_function(wrap_pyfunction!(pad, m)?)?;
     m.add_function(wrap_pyfunction!(i0, m)?)?;
     m.add_function(wrap_pyfunction!(asfortranarray, m)?)?;
     m.add_function(wrap_pyfunction!(isrealobj, m)?)?;
@@ -9967,6 +10000,7 @@ mod tests {
             assert!(module.getattr("linalg_matrix_norm").is_ok());
             assert!(module.getattr("linalg_eig").is_ok());
             assert!(module.getattr("polyfit").is_ok());
+            assert!(module.getattr("pad").is_ok());
             assert!(module.getattr("i0").is_ok());
             assert!(module.getattr("asfortranarray").is_ok());
             assert!(module.getattr("isrealobj").is_ok());
@@ -37525,6 +37559,104 @@ mod tests {
                     .getattr("shape")?
                     .extract::<Vec<usize>>()?
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn pad_matches_numpy_across_modes_scalar_tuple_widths_and_nd_input() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let pad_fn = module.getattr("pad")?;
+            let numpy = py.import("numpy")?;
+            let numpy_pad = numpy.getattr("pad")?;
+            let array_fn = numpy.getattr("array")?;
+
+            // Default mode='constant' with scalar pad_width=1.
+            let a1 = array_fn.call1((vec![1_i64, 2, 3, 4],))?;
+            assert_array_matches_numpy(
+                &pad_fn.call1((a1.clone(), 1_i64))?,
+                &numpy_pad.call1((a1.clone(), 1_i64))?,
+            )?;
+
+            // Tuple pad_width: (before, after) asymmetric.
+            assert_array_matches_numpy(
+                &pad_fn.call1((a1.clone(), (2_i64, 1_i64)))?,
+                &numpy_pad.call1((a1.clone(), (2_i64, 1_i64)))?,
+            )?;
+
+            // constant with explicit constant_values.
+            let const_kwargs = PyDict::new(py);
+            const_kwargs.set_item("mode", "constant")?;
+            const_kwargs.set_item("constant_values", 7_i64)?;
+            assert_array_matches_numpy(
+                &pad_fn.call((a1.clone(), 2_i64), Some(&const_kwargs))?,
+                &numpy_pad.call((a1.clone(), 2_i64), Some(&const_kwargs))?,
+            )?;
+
+            // edge mode.
+            let edge_kwargs = PyDict::new(py);
+            edge_kwargs.set_item("mode", "edge")?;
+            assert_array_matches_numpy(
+                &pad_fn.call((a1.clone(), 2_i64), Some(&edge_kwargs))?,
+                &numpy_pad.call((a1.clone(), 2_i64), Some(&edge_kwargs))?,
+            )?;
+
+            // reflect mode.
+            let refl_kwargs = PyDict::new(py);
+            refl_kwargs.set_item("mode", "reflect")?;
+            assert_array_matches_numpy(
+                &pad_fn.call((a1.clone(), 2_i64), Some(&refl_kwargs))?,
+                &numpy_pad.call((a1.clone(), 2_i64), Some(&refl_kwargs))?,
+            )?;
+
+            // symmetric mode.
+            let sym_kwargs = PyDict::new(py);
+            sym_kwargs.set_item("mode", "symmetric")?;
+            assert_array_matches_numpy(
+                &pad_fn.call((a1.clone(), 2_i64), Some(&sym_kwargs))?,
+                &numpy_pad.call((a1.clone(), 2_i64), Some(&sym_kwargs))?,
+            )?;
+
+            // wrap mode.
+            let wrap_kwargs = PyDict::new(py);
+            wrap_kwargs.set_item("mode", "wrap")?;
+            assert_array_matches_numpy(
+                &pad_fn.call((a1.clone(), 2_i64), Some(&wrap_kwargs))?,
+                &numpy_pad.call((a1.clone(), 2_i64), Some(&wrap_kwargs))?,
+            )?;
+
+            // 2-D array with per-axis pad widths: ((1, 2), (3, 0)).
+            let a2 = array_fn.call1((vec![vec![1_i64, 2, 3], vec![4, 5, 6]],))?;
+            assert_array_matches_numpy(
+                &pad_fn.call1((a2.clone(), vec![(1_i64, 2_i64), (3_i64, 0_i64)]))?,
+                &numpy_pad.call1((a2.clone(), vec![(1_i64, 2_i64), (3_i64, 0_i64)]))?,
+            )?;
+
+            // linear_ramp mode with explicit end_values.
+            let lr_kwargs = PyDict::new(py);
+            lr_kwargs.set_item("mode", "linear_ramp")?;
+            lr_kwargs.set_item("end_values", 0_i64)?;
+            assert_array_matches_numpy(
+                &pad_fn.call((a1.clone(), 2_i64), Some(&lr_kwargs))?,
+                &numpy_pad.call((a1.clone(), 2_i64), Some(&lr_kwargs))?,
+            )?;
+
+            // maximum / mean / minimum stat modes.
+            for mode_name in ["maximum", "mean", "minimum"] {
+                let stat_kwargs = PyDict::new(py);
+                stat_kwargs.set_item("mode", mode_name)?;
+                assert_array_matches_numpy(
+                    &pad_fn.call((a1.clone(), 2_i64), Some(&stat_kwargs))?,
+                    &numpy_pad.call((a1.clone(), 2_i64), Some(&stat_kwargs))?,
+                )?;
+            }
 
             Ok(())
         });
