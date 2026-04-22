@@ -3895,8 +3895,25 @@ fn extract_expand_dims_axes(
 
 #[pyfunction]
 fn expand_dims(py: Python<'_>, a: Py<PyAny>, axis: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let a_for_fallback = a.clone_ref(py);
+    let axis_for_fallback = axis.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        Ok(numpy
+            .getattr("expand_dims")?
+            .call1((a_for_fallback.bind(py), axis_for_fallback.bind(py)))?
+            .unbind())
+    };
     let a = extract_numeric_array(py, a.bind(py), "expand_dims(a)")?;
     let axes = extract_expand_dims_axes(py, axis, a.shape().len())?;
+    // Out-of-bounds axis: numpy raises AxisError (subclass of ValueError).
+    // Fall back so the error type and message match exactly.
+    let new_ndim = a.shape().len() + axes.len();
+    for &ax in &axes {
+        if try_normalize_axis(ax, new_ndim).is_none() {
+            return fallback();
+        }
+    }
     let result = match axes.as_slice() {
         [axis] => a.expand_dims(*axis).map_err(map_ufunc_error)?,
         axes => a.expand_dims_axes(axes).map_err(map_ufunc_error)?,
@@ -7277,8 +7294,32 @@ fn rfftn(
 #[pyfunction]
 #[pyo3(signature = (m, axis=None))]
 fn flip(py: Python<'_>, m: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    let m_for_fallback = m.clone_ref(py);
+    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let kwargs = PyDict::new(py);
+        if let Some(ax) = &axis_for_fallback {
+            kwargs.set_item("axis", ax.bind(py))?;
+        }
+        Ok(numpy
+            .getattr("flip")?
+            .call((m_for_fallback.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
     let m = extract_numeric_array(py, m.bind(py), "flip(m)")?;
     let axes = extract_axis_spec(py, axis, "flip")?;
+    // Out-of-bounds axis: numpy raises AxisError (subclass of ValueError).
+    // Fall back so the error type and message match exactly.
+    if let Some(axes) = axes.as_ref() {
+        let ndim = m.shape().len();
+        for &ax in axes {
+            if try_normalize_axis(ax, ndim).is_none() {
+                return fallback();
+            }
+        }
+    }
     let result = match axes {
         None => m.flip(None),
         Some(axes) if axes.is_empty() => Ok(m.clone()),
@@ -15354,11 +15395,12 @@ mod tests {
 
     #[test]
     fn axis_out_of_bounds_error_surface_probe() {
-        // Probe for AxisError vs ValueError divergence across axis-taking
-        // functions. numpy raises AxisError (subclass of ValueError) on
-        // out-of-range axis. Our map_ufunc_error converts to ValueError.
-        // This test documents which functions currently diverge — XFAIL
-        // expectations may reveal work still to do.
+        // Regression probe for AxisError vs ValueError divergence across
+        // axis-taking functions. numpy raises AxisError (subclass of
+        // ValueError) on out-of-range axis; fnp-python's map_ufunc_error
+        // converts unconditionally to ValueError. Each probed function MUST
+        // match numpy's error type so downstream user code catching
+        // AxisError keeps working.
         with_python(|py| {
             if !numpy_available(py) {
                 return Ok(());
@@ -15372,6 +15414,7 @@ mod tests {
                 ("flip", "flip"),
                 ("squeeze", "squeeze"),
                 ("expand_dims", "expand_dims"),
+                ("count_nonzero", "count_nonzero"),
             ];
 
             let module = PyModule::new(py, "fnp_python_test")?;
@@ -15418,16 +15461,11 @@ mod tests {
                 }
             }
 
-            // Diagnostic print — visible with `cargo test -- --nocapture`.
-            if !divergences.is_empty() {
-                eprintln!("AxisError divergences detected:");
-                for d in &divergences {
-                    eprintln!("  - {d}");
-                }
-            }
-
-            // For now, document known divergences. If count_masked / count_nonzero
-            // parity is required elsewhere, apply the same fallback pattern.
+            assert!(
+                divergences.is_empty(),
+                "AxisError divergences detected:\n  {}",
+                divergences.join("\n  ")
+            );
             Ok(())
         });
     }
