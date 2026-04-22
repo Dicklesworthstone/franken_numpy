@@ -29,6 +29,13 @@
 - **Cargo.lock:** already at 1.1.9 (transitive refresh from a prior session pulled it forward; manifest caught up here).
 - **Verified:** `cargo check -p fnp-io --all-targets` pass. `cargo test -p fnp-io` 222/222 pass.
 
+#### criterion: 0.5.1 -> 0.8.2 (fnp-conformance, dev-dependency)
+
+- **Research:** Official CHANGELOG only documents up to 0.7.0; no new breaking changes recorded beyond 0.6.0. 0.6.0 removed the `real_blackbox` feature flag (no-op since then) and bumped MSRV to 1.80, with `criterion::black_box` deprecated in favor of `std::hint::black_box()`. All re-exports we rely on (`Criterion`, `BenchmarkId`, `criterion_group!`, `criterion_main!`) are preserved in 0.8.2 per docs.rs.
+- **Lockfile churn:** Adds `alloca 0.4.0`, `cc 1.2.60`, `find-msvc-tools 0.1.9`, `itertools 0.13.0`, `page_size 0.6.0`, `shlex 1.3.0`, plus winapi family. Removes `is-terminal` (pulled by older criterion-plot). criterion-plot 0.5.0 -> 0.8.2.
+- **Code change:** `crates/fnp-conformance/benches/criterion_core_ops.rs` — switch `use criterion::{..., black_box, ...}` to `use std::hint::black_box;` (11 call sites, all in one file) to eliminate the deprecation warnings that would otherwise become hard errors in a future major.
+- **Verified:** `cargo check -p fnp-conformance --all-targets` + `--benches` both clean; 0 warnings from criterion. (Not running `cargo bench` because nothing broke at compile-time and the bench harness is unchanged beyond the import.)
+
 #### sha2: 0.10.9 -> 0.11.0 (fnp-conformance)
 
 - **Research:** sha2 0.11 updates to `digest` 0.11 and converts hash types (`Sha256`, `Sha512`, ...) from type aliases to newtype structs. Module reorg: `compress256`/`compress512` moved to `block_api`. Features `asm`/`asm-aarch64`/`loongarch64_asm`/`compress`/`soft`/`force-soft-compact`/`std` removed; new `alloc` feature. MSRV bumped to 1.85 (we're on edition 2024/nightly — fine).

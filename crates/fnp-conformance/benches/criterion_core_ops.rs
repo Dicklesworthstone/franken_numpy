@@ -1,9 +1,10 @@
 #![forbid(unsafe_code)]
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_dtype::DType;
 use fnp_io::{IOSupportedDType, load, save};
 use fnp_ufunc::{BinaryOp, UFuncArray};
+use std::hint::black_box;
 use std::time::Duration;
 
 fn build_matrix_values(dim: usize, step: usize, modulo: usize) -> Vec<f64> {
