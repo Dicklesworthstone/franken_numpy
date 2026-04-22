@@ -3826,8 +3826,37 @@ fn count_nonzero(
     axis: Option<Py<PyAny>>,
     keepdims: bool,
 ) -> PyResult<Py<PyAny>> {
-    let a = extract_numeric_array(py, a.bind(py), "count_nonzero(a)")?;
+    let a_for_fallback = a.clone_ref(py);
+    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let kwargs = PyDict::new(py);
+        if let Some(ax) = &axis_for_fallback {
+            kwargs.set_item("axis", ax.bind(py))?;
+        }
+        kwargs.set_item("keepdims", keepdims)?;
+        Ok(numpy
+            .getattr("count_nonzero")?
+            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
+    let a_array = extract_numeric_array(py, a.bind(py), "count_nonzero(a)")?;
     let axes = extract_axis_spec(py, axis, "count_nonzero")?;
+    // Out-of-bounds / duplicate axes: numpy raises AxisError (a subclass of
+    // ValueError). Fall back to numpy so the error type matches exactly.
+    if let Some(axes) = axes.as_ref() {
+        let ndim = a_array.shape().len();
+        if ensure_unique_axes(axes, ndim).is_err() {
+            return fallback();
+        }
+        for &ax in axes {
+            if try_normalize_axis(ax, ndim).is_none() {
+                return fallback();
+            }
+        }
+    }
+    let a = a_array;
     let result = match axes.as_ref() {
         None => a.count_nonzero(None, keepdims),
         Some(axes) if axes.len() == 1 => a.count_nonzero(Some(axes[0]), keepdims),
@@ -10104,22 +10133,133 @@ fn average(
     returned: bool,
     keepdims: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.average so weighted/unweighted mean matches
-    // numpy across axis=None/int/tuple, optional weights with
-    // broadcasting, returned=True (returns (avg, sum_of_weights)
-    // tuple), and keepdims shape preservation.
     let numpy = py.import("numpy")?;
     let avg_fn = numpy.getattr("average")?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis_val) = axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
+    let a_for_fallback = a.clone_ref(py);
+    let weights_for_fallback = weights.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(axis_val) = axis.as_ref() {
+            kwargs.set_item("axis", axis_val.bind(py))?;
+        }
+        if let Some(weights_val) = weights_for_fallback.as_ref() {
+            kwargs.set_item("weights", weights_val.bind(py))?;
+        }
+        kwargs.set_item("returned", returned)?;
+        kwargs.set_item("keepdims", keepdims)?;
+        Ok(avg_fn.call((a_for_fallback.bind(py),), Some(&kwargs))?.unbind())
+    };
+
+    if keepdims {
+        return fallback();
     }
-    if let Some(weights_val) = weights {
-        kwargs.set_item("weights", weights_val.bind(py))?;
+
+    let a = match extract_numeric_array(py, a.bind(py), "average(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let axis = match extract_axis_spec(py, axis_for_parse, "average") {
+        Ok(None) => None,
+        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
+        Ok(Some(_)) => return fallback(),
+        Err(_) => return fallback(),
+    };
+
+    let mut sum_of_weights = None;
+    let average = match weights.as_ref() {
+        None => {
+            let average = match a.average(None, axis) {
+                Ok(average) => average,
+                Err(_) => return fallback(),
+            };
+            if returned {
+                let sum = match axis {
+                    None => UFuncArray::new(vec![], vec![a.values().len() as f64], DType::F64),
+                    Some(axis) => {
+                        let Some(axis) = try_normalize_axis(axis, a.shape().len()) else {
+                            return fallback();
+                        };
+                        let out_len = match element_count(average.shape()) {
+                            Ok(out_len) => out_len,
+                            Err(_) => return fallback(),
+                        };
+                        UFuncArray::new(
+                            average.shape().to_vec(),
+                            vec![a.shape()[axis] as f64; out_len],
+                            DType::F64,
+                        )
+                    }
+                }
+                .map_err(map_ufunc_error)?;
+                sum_of_weights = Some(sum);
+            }
+            average
+        }
+        Some(weights) => {
+            let weights = match extract_numeric_array(py, weights.bind(py), "average(weights)") {
+                Ok(weights) => weights,
+                Err(_) => return fallback(),
+            };
+            match axis {
+                None => {
+                    if weights.shape() != a.shape() {
+                        return fallback();
+                    }
+                    if returned {
+                        sum_of_weights = Some(
+                            weights
+                                .reduce_sum(None, false)
+                                .map_err(map_ufunc_error)?,
+                        );
+                    }
+                    match a.average(Some(&weights), None) {
+                        Ok(average) => average,
+                        Err(_) => return fallback(),
+                    }
+                }
+                Some(axis) => {
+                    let Some(normalized_axis) = try_normalize_axis(axis, a.shape().len()) else {
+                        return fallback();
+                    };
+                    if weights.shape() != [a.shape()[normalized_axis]] {
+                        return fallback();
+                    }
+
+                    let average = match a.average(Some(&weights), Some(axis)) {
+                        Ok(average) => average,
+                        Err(_) => return fallback(),
+                    };
+                    if returned {
+                        let weight_total = weights.values().iter().sum::<f64>();
+                        let out_len = match element_count(average.shape()) {
+                            Ok(out_len) => out_len,
+                            Err(_) => return fallback(),
+                        };
+                        sum_of_weights = Some(
+                            UFuncArray::new(
+                                average.shape().to_vec(),
+                                vec![weight_total; out_len],
+                                DType::F64,
+                            )
+                            .map_err(map_ufunc_error)?,
+                        );
+                    }
+                    average
+                }
+            }
+        }
+    };
+
+    let average_output = build_numpy_scalar_or_array(py, &average)?;
+    if returned {
+        let sum_of_weights = sum_of_weights.expect("sum_of_weights must be set when returned=true");
+        let sum_output = build_numpy_scalar_or_array(py, &sum_of_weights)?;
+        return Ok(PyTuple::new(py, [average_output.bind(py), sum_output.bind(py)])?
+            .into_any()
+            .unbind());
     }
-    kwargs.set_item("returned", returned)?;
-    kwargs.set_item("keepdims", keepdims)?;
-    Ok(avg_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(average_output)
 }
 
 #[pyfunction]
@@ -15156,6 +15296,88 @@ mod tests {
                 repr_string(&true_expected)
             );
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn count_nonzero_matches_numpy_error_surface_out_of_bounds_axis() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+
+            // 1-D array with int axis out of range. numpy raises AxisError
+            // (subclass of ValueError); our error type must match.
+            let one_d = numeric_array(py, vec![1_i64, 2, 3], "int64");
+            let axis_int_big: Py<PyAny> = 5_i64.into_pyobject(py)?.unbind().into_any();
+            let ours_int = count_nonzero(py, one_d.clone().unbind(), Some(axis_int_big), false)
+                .expect_err("count_nonzero 1-D axis=5 must error");
+            let theirs_int = numpy
+                .call_method(
+                    "count_nonzero",
+                    (one_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", 5_i64)?;
+                        kw
+                    }),
+                )
+                .expect_err("numpy 1-D axis=5 must error");
+            assert_eq!(
+                ours_int.get_type(py).name()?.extract::<String>()?,
+                theirs_int.get_type(py).name()?.extract::<String>()?,
+                "1-D int axis error type should match numpy"
+            );
+
+            // 2-D array with negative axis out of range.
+            let two_d = numeric_array(
+                py,
+                vec![vec![1_i64, 0, 3], vec![0, 5, 0]],
+                "int64",
+            );
+            let axis_neg_big: Py<PyAny> = (-3_i64).into_pyobject(py)?.unbind().into_any();
+            let ours_neg = count_nonzero(py, two_d.clone().unbind(), Some(axis_neg_big), false)
+                .expect_err("count_nonzero 2-D axis=-3 must error");
+            let theirs_neg = numpy
+                .call_method(
+                    "count_nonzero",
+                    (two_d.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", -3_i64)?;
+                        kw
+                    }),
+                )
+                .expect_err("numpy 2-D axis=-3 must error");
+            assert_eq!(
+                ours_neg.get_type(py).name()?.extract::<String>()?,
+                theirs_neg.get_type(py).name()?.extract::<String>()?,
+                "2-D negative-axis error type should match numpy"
+            );
+
+            // Tuple axis containing an out-of-range index.
+            let axis_tuple_bad: Py<PyAny> =
+                PyTuple::new(py, [0_i64, 7_i64])?.into_any().unbind();
+            let ours_tup = count_nonzero(py, two_d.clone().unbind(), Some(axis_tuple_bad), false)
+                .expect_err("count_nonzero 2-D axis=(0,7) must error");
+            let theirs_tup = numpy
+                .call_method(
+                    "count_nonzero",
+                    (two_d,),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", (0_i64, 7_i64))?;
+                        kw
+                    }),
+                )
+                .expect_err("numpy 2-D axis=(0,7) must error");
+            assert_eq!(
+                ours_tup.get_type(py).name()?.extract::<String>()?,
+                theirs_tup.get_type(py).name()?.extract::<String>()?,
+                "2-D tuple out-of-range axis error type should match numpy"
+            );
             Ok(())
         });
     }
@@ -37640,6 +37862,56 @@ mod tests {
             )?;
             let ok_2d_w: bool = allclose.call1((&ours_2d_w, &theirs_2d_w))?.extract()?;
             assert!(ok_2d_w, "average 2-D axis=1 with weights mismatch");
+
+            // returned=True on an axis reduction yields tuple(array, array).
+            let ours_axis1_returned = avg_fn.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 1_i64)?;
+                    kw.set_item("returned", true)?;
+                    kw
+                }),
+            )?;
+            let theirs_axis1_returned = numpy_avg.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 1_i64)?;
+                    kw.set_item("returned", true)?;
+                    kw
+                }),
+            )?;
+            assert_eq!(
+                repr_string(&ours_axis1_returned),
+                repr_string(&theirs_axis1_returned)
+            );
+
+            // Full-shape weights on axis=None stay on the Rust path.
+            let full_weights = numpy.getattr("array")?.call1((vec![
+                vec![1.0_f64, 2.0, 3.0],
+                vec![4.0, 5.0, 6.0],
+                vec![7.0, 8.0, 9.0],
+            ],))?;
+            let ours_full = avg_fn.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("weights", full_weights.clone())?;
+                    kw.set_item("returned", true)?;
+                    kw
+                }),
+            )?;
+            let theirs_full = numpy_avg.call(
+                (two_d.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("weights", full_weights.clone())?;
+                    kw.set_item("returned", true)?;
+                    kw
+                }),
+            )?;
+            assert_eq!(repr_string(&ours_full), repr_string(&theirs_full));
 
             Ok(())
         });
