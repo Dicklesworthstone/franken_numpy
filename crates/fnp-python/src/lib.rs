@@ -7572,12 +7572,11 @@ fn triu(py: Python<'_>, m: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (m, beta))]
 fn kaiser(py: Python<'_>, m: i64, beta: f64) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.kaiser. Kaiser window of M points with shape
-    // parameter beta. Matches numpy across M=0/M=1 edge cases, small
-    // even/odd M, and the full range of typical beta values (0 → rect,
-    // 5 → Hamming-like, 14 → high side-lobe suppression).
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("kaiser")?.call1((m, beta))?.unbind())
+    // Rust-owned port of np.kaiser. NumPy maps negative lengths to an
+    // empty float64 array, keeps M <= 1 special-cased, and otherwise
+    // emits the Kaiser window parameterized by beta.
+    let result = UFuncArray::kaiser(m.max(0) as usize, beta);
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -37415,7 +37414,7 @@ mod tests {
             let allclose = numpy.getattr("allclose")?;
 
             // Edge cases and small M with a mid-range beta.
-            for m in [0_i64, 1, 2, 3, 8, 16, 33] {
+            for m in [-3_i64, 0, 1, 2, 3, 8, 16, 33] {
                 let ours = k_fn.call1((m, 5.0_f64))?;
                 let theirs = numpy_k.call1((m, 5.0_f64))?;
                 assert_array_matches_numpy(&ours, &theirs)?;
