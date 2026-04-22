@@ -10697,10 +10697,6 @@ fn ma_average(
         Ok(avg_fn.call((a_for_fallback.bind(py),), Some(&kwargs))?.unbind())
     };
 
-    if weights.is_some() {
-        return fallback();
-    }
-
     let Some(masked) = extract_numeric_masked_array(py, a.bind(py), "ma_average(a)")? else {
         return fallback();
     };
@@ -10710,6 +10706,62 @@ fn ma_average(
         Ok(Some(_)) => return fallback(),
         Err(_) => return fallback(),
     };
+    if let Some(weights) = weights.as_ref() {
+        if axis.is_some() {
+            return fallback();
+        }
+        let Some(masked_weights) =
+            extract_numeric_masked_array(py, weights.bind(py), "ma_average(weights)")?
+        else {
+            return fallback();
+        };
+        if masked.shape() != masked_weights.shape() {
+            return fallback();
+        }
+
+        let combined_mask = ma_mask_or(masked.mask(), masked_weights.mask());
+        let mut numerator = 0.0;
+        let mut denominator = 0.0;
+        let mut any_valid = false;
+        for index in 0..masked.data().values().len() {
+            let is_masked = combined_mask
+                .as_ref()
+                .is_some_and(|mask| mask.values()[index] != 0.0);
+            if is_masked {
+                continue;
+            }
+            any_valid = true;
+            let weight = masked_weights.data().values()[index];
+            denominator += weight;
+            numerator += masked.data().values()[index] * weight;
+        }
+
+        let masked_scalar = numpy.getattr("ma")?.getattr("masked")?.unbind();
+        if !any_valid {
+            if returned {
+                return Ok(
+                    PyTuple::new(py, [masked_scalar.bind(py), masked_scalar.bind(py)])?
+                        .into_any()
+                        .unbind(),
+                );
+            }
+            return Ok(masked_scalar);
+        }
+
+        let average_output =
+            build_numpy_scalar_or_array(py, &UFuncArray::scalar(numerator / denominator, DType::F64))?;
+        if returned {
+            let sum_output =
+                build_numpy_scalar_or_array(py, &UFuncArray::scalar(denominator, DType::F64))?;
+            return Ok(
+                PyTuple::new(py, [average_output.bind(py), sum_output.bind(py)])?
+                    .into_any()
+                    .unbind(),
+            );
+        }
+        return Ok(average_output);
+    }
+
     let counts = match masked.count(axis) {
         Ok(counts) => counts,
         Err(_) => return fallback(),
@@ -15296,6 +15348,86 @@ mod tests {
                 repr_string(&true_expected)
             );
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn axis_out_of_bounds_error_surface_probe() {
+        // Probe for AxisError vs ValueError divergence across axis-taking
+        // functions. numpy raises AxisError (subclass of ValueError) on
+        // out-of-range axis. Our map_ufunc_error converts to ValueError.
+        // This test documents which functions currently diverge — XFAIL
+        // expectations may reveal work still to do.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let arr = numeric_array(py, vec![1_i64, 2, 3], "int64");
+
+            let probes: Vec<(&str, &str)> = vec![
+                ("sum", "sum"),
+                ("mean", "mean"),
+                ("flip", "flip"),
+                ("squeeze", "squeeze"),
+                ("expand_dims", "expand_dims"),
+            ];
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+
+            let mut divergences: Vec<String> = Vec::new();
+            for (our_name, np_name) in probes {
+                let axis_big: Py<PyAny> = 5_i64.into_pyobject(py)?.unbind().into_any();
+                let ours_err = module.getattr(our_name)?.call(
+                    (arr.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", axis_big.bind(py))?;
+                        kw
+                    }),
+                );
+                let theirs_err = numpy.getattr(np_name)?.call(
+                    (arr.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("axis", 5_i64)?;
+                        kw
+                    }),
+                );
+                match (ours_err, theirs_err) {
+                    (Err(our), Err(theirs)) => {
+                        let ours_type = our.get_type(py).name()?.extract::<String>()?;
+                        let theirs_type = theirs.get_type(py).name()?.extract::<String>()?;
+                        if ours_type != theirs_type {
+                            divergences.push(format!(
+                                "{our_name}: ours={ours_type}, theirs={theirs_type}"
+                            ));
+                        }
+                    }
+                    (Ok(_), _) => {
+                        divergences.push(format!("{our_name}: ours=OK, theirs raises"));
+                    }
+                    (Err(our), Ok(_)) => {
+                        let ours_type = our.get_type(py).name()?.extract::<String>()?;
+                        divergences.push(format!(
+                            "{our_name}: ours={ours_type}, theirs=OK"
+                        ));
+                    }
+                }
+            }
+
+            // Diagnostic print — visible with `cargo test -- --nocapture`.
+            if !divergences.is_empty() {
+                eprintln!("AxisError divergences detected:");
+                for d in &divergences {
+                    eprintln!("  - {d}");
+                }
+            }
+
+            // For now, document known divergences. If count_masked / count_nonzero
+            // parity is required elsewhere, apply the same fallback pattern.
             Ok(())
         });
     }
@@ -38063,6 +38195,69 @@ mod tests {
                 }),
             )?;
             assert_array_matches_numpy(&ours_weighted, &theirs_weighted)?;
+            assert_eq!(repr_string(&ours_weighted), repr_string(&theirs_weighted));
+
+            let masked_weights = ma.getattr("array")?.call(
+                (vec![1.0_f64, 2.0, 3.0],),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("mask", vec![true, false, false])?;
+                    kwargs
+                }),
+            )?;
+            let ours_weighted_returned = ma_average_fn.call(
+                (masked.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("weights", masked_weights.clone())?;
+                    kwargs.set_item("returned", true)?;
+                    kwargs
+                }),
+            )?;
+            let theirs_weighted_returned = numpy_ma_average.call(
+                (masked.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("weights", masked_weights.clone())?;
+                    kwargs.set_item("returned", true)?;
+                    kwargs
+                }),
+            )?;
+            assert_eq!(
+                repr_string(&ours_weighted_returned),
+                repr_string(&theirs_weighted_returned)
+            );
+
+            let all_masked_weights = ma.getattr("array")?.call(
+                (vec![1.0_f64, 2.0, 3.0],),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("mask", vec![true, true, true])?;
+                    kwargs
+                }),
+            )?;
+            let ours_all_masked_weights = ma_average_fn.call(
+                (masked.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("weights", all_masked_weights.clone())?;
+                    kwargs.set_item("returned", true)?;
+                    kwargs
+                }),
+            )?;
+            let theirs_all_masked_weights = numpy_ma_average.call(
+                (masked.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("weights", all_masked_weights.clone())?;
+                    kwargs.set_item("returned", true)?;
+                    kwargs
+                }),
+            )?;
+            assert_eq!(
+                repr_string(&ours_all_masked_weights),
+                repr_string(&theirs_all_masked_weights)
+            );
 
             let ours_returned = ma_average_fn.call(
                 (masked.clone(),),
