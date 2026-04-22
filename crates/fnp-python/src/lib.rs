@@ -4896,26 +4896,42 @@ fn diff(
     varargs: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.diff so repeated differencing, axis handling,
-    // and the `<no value>` omission semantics for prepend/append
-    // match numpy exactly, including explicit `None`.
     let numpy = py.import("numpy")?;
     let diff_fn = numpy.getattr("diff")?;
-    let mut positional: Vec<Py<PyAny>> = Vec::with_capacity(varargs.len() + 3);
-    positional.push(a);
-    positional.push(n.into_pyobject(py)?.into_any().unbind());
-    positional.push(axis.into_pyobject(py)?.into_any().unbind());
-    for arg in varargs.iter() {
-        positional.push(arg.unbind());
-    }
-    let args = PyTuple::new(py, positional.iter().map(|item| item.bind(py)))?;
-    let call_kwargs = PyDict::new(py);
-    if let Some(kwargs) = kwargs {
-        for (key, value) in kwargs.iter() {
-            call_kwargs.set_item(key, value)?;
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let mut positional: Vec<Py<PyAny>> = Vec::with_capacity(varargs.len() + 3);
+        positional.push(a.clone_ref(py));
+        positional.push(n.into_pyobject(py)?.into_any().unbind());
+        positional.push(axis.into_pyobject(py)?.into_any().unbind());
+        for arg in varargs.iter() {
+            positional.push(arg.unbind());
         }
+        let args = PyTuple::new(py, positional.iter().map(|item| item.bind(py)))?;
+        let call_kwargs = PyDict::new(py);
+        if let Some(kwargs) = kwargs {
+            for (key, value) in kwargs.iter() {
+                call_kwargs.set_item(key, value)?;
+            }
+        }
+        Ok(diff_fn.call(args, Some(&call_kwargs))?.unbind())
+    };
+
+    if varargs.len() > 0 || kwargs.is_some_and(|kwargs| !kwargs.is_empty()) {
+        return fallback();
     }
-    Ok(diff_fn.call(args, Some(&call_kwargs))?.unbind())
+
+    let Ok(n) = usize::try_from(n) else {
+        return fallback();
+    };
+    let a = match extract_numeric_array(py, a.bind(py), "diff(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let result = match a.diff(n, Some(axis as isize)) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
