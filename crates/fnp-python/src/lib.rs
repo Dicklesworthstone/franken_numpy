@@ -3,7 +3,7 @@ use fnp_iter::{Nditer, NditerOptions, NditerOrder};
 use fnp_linalg::{pinv_hermitian_nxn_with_tolerance_aliases, pinv_mxn_with_tolerance_aliases};
 use fnp_ndarray::{broadcast_shapes, element_count};
 use fnp_ufunc::{
-    FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
+    BinaryOp, FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
     FromPyFuncReduceOptions, GridSpec, MAError, MaskedArray, UFuncArray, UnaryOp,
     copysign as ufunc_copysign, frexp as ufunc_frexp, hypot as ufunc_hypot,
     isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, ldexp as ufunc_ldexp,
@@ -1126,6 +1126,61 @@ fn count_valid_elements(
             Ok((output_shape, counts))
         }
     }
+}
+
+fn masked_scalar_compare(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    value: Py<PyAny>,
+    copy: bool,
+    context: &str,
+    numpy_name: &str,
+    op: BinaryOp,
+) -> PyResult<Py<PyAny>> {
+    let x_for_fallback = x.clone_ref(py);
+    let value_for_fallback = value.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let masked_fn = numpy.getattr("ma")?.getattr(numpy_name)?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("copy", copy)?;
+        Ok(masked_fn
+            .call(
+                (x_for_fallback.bind(py), value_for_fallback.bind(py)),
+                Some(&kwargs),
+            )?
+            .unbind())
+    };
+
+    let Some(masked_x) = extract_numeric_masked_array(py, x.bind(py), context)? else {
+        return fallback();
+    };
+    let scalar = match extract_precise_numeric_array(py, value.bind(py), &format!("{context}: value"))
+    {
+        Ok(value) if value.shape().is_empty() => value,
+        _ => return fallback(),
+    };
+
+    let condition = match masked_x.data().elementwise_binary(&scalar, op) {
+        Ok(condition) => condition,
+        Err(_) => return fallback(),
+    };
+    let mut mask = ma_mask_or(masked_x.mask(), Some(&condition));
+    if mask
+        .as_ref()
+        .is_some_and(|mask| mask.values().iter().all(|&value| value == 0.0))
+    {
+        mask = None;
+    }
+
+    let fill_value = if numpy_name == "masked_equal" {
+        scalar.values()[0]
+    } else {
+        masked_x.fill_value()
+    };
+    let result = MaskedArray::new(masked_x.data().clone(), mask, Some(fill_value))
+        .map_err(|err| map_ma_error(context, err))?;
+    build_numpy_masked_array(py, &result)
 }
 
 fn extract_python_dtype(
@@ -5630,17 +5685,15 @@ fn masked_where(
 #[pyfunction]
 #[pyo3(signature = (x, value, copy=true))]
 fn masked_equal(py: Python<'_>, x: Py<PyAny>, value: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ma.masked_equal so equality-based masking semantics
-    // (including structured dtypes and NaN handling that follows np.ma
-    // conventions), copy flag forwarding, and the MaskedArray return type
-    // match numpy exactly.
-    let numpy = py.import("numpy")?;
-    let masked_equal_fn = numpy.getattr("ma")?.getattr("masked_equal")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("copy", copy)?;
-    Ok(masked_equal_fn
-        .call((x.bind(py), value.bind(py)), Some(&kwargs))?
-        .unbind())
+    masked_scalar_compare(
+        py,
+        x,
+        value,
+        copy,
+        "masked_equal",
+        "masked_equal",
+        BinaryOp::Equal,
+    )
 }
 
 #[pyfunction]
@@ -5651,16 +5704,15 @@ fn masked_not_equal(
     value: Py<PyAny>,
     copy: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ma.masked_not_equal so inverse-equality masking,
-    // copy flag forwarding, and the MaskedArray result type all match
-    // numpy exactly across integer, float, boolean, and n-D inputs.
-    let numpy = py.import("numpy")?;
-    let masked_not_equal_fn = numpy.getattr("ma")?.getattr("masked_not_equal")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("copy", copy)?;
-    Ok(masked_not_equal_fn
-        .call((x.bind(py), value.bind(py)), Some(&kwargs))?
-        .unbind())
+    masked_scalar_compare(
+        py,
+        x,
+        value,
+        copy,
+        "masked_not_equal",
+        "masked_not_equal",
+        BinaryOp::NotEqual,
+    )
 }
 
 #[pyfunction]
@@ -5706,15 +5758,15 @@ fn masked_greater_equal(
     value: Py<PyAny>,
     copy: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ma.masked_greater_equal: mask values >= threshold.
-    // copy flag and MaskedArray return type forwarded.
-    let numpy = py.import("numpy")?;
-    let masked_ge_fn = numpy.getattr("ma")?.getattr("masked_greater_equal")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("copy", copy)?;
-    Ok(masked_ge_fn
-        .call((x.bind(py), value.bind(py)), Some(&kwargs))?
-        .unbind())
+    masked_scalar_compare(
+        py,
+        x,
+        value,
+        copy,
+        "masked_greater_equal",
+        "masked_greater_equal",
+        BinaryOp::GreaterEqual,
+    )
 }
 
 #[pyfunction]
@@ -10684,15 +10736,15 @@ fn masked_less_equal(
     value: Py<PyAny>,
     copy: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ma.masked_less_equal: mask values <= threshold.
-    // copy flag and MaskedArray return type forwarded.
-    let numpy = py.import("numpy")?;
-    let masked_le_fn = numpy.getattr("ma")?.getattr("masked_less_equal")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("copy", copy)?;
-    Ok(masked_le_fn
-        .call((x.bind(py), value.bind(py)), Some(&kwargs))?
-        .unbind())
+    masked_scalar_compare(
+        py,
+        x,
+        value,
+        copy,
+        "masked_less_equal",
+        "masked_less_equal",
+        BinaryOp::LessEqual,
+    )
 }
 
 #[pyfunction]
@@ -10793,16 +10845,15 @@ fn outer(
 #[pyfunction]
 #[pyo3(signature = (x, value, copy=true))]
 fn masked_less(py: Python<'_>, x: Py<PyAny>, value: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ma.masked_less so the strict less-than masking
-    // semantics, copy flag forwarding, and MaskedArray return type match
-    // numpy exactly across integer / float / boolean / 2-D inputs.
-    let numpy = py.import("numpy")?;
-    let masked_less_fn = numpy.getattr("ma")?.getattr("masked_less")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("copy", copy)?;
-    Ok(masked_less_fn
-        .call((x.bind(py), value.bind(py)), Some(&kwargs))?
-        .unbind())
+    masked_scalar_compare(
+        py,
+        x,
+        value,
+        copy,
+        "masked_less",
+        "masked_less",
+        BinaryOp::Less,
+    )
 }
 
 #[pyfunction]
@@ -10813,16 +10864,15 @@ fn masked_greater(
     value: Py<PyAny>,
     copy: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ma.masked_greater so the strict greater-than masking
-    // semantics, copy flag forwarding, and MaskedArray return type match
-    // numpy exactly across integer / float / boolean / 2-D inputs.
-    let numpy = py.import("numpy")?;
-    let masked_greater_fn = numpy.getattr("ma")?.getattr("masked_greater")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("copy", copy)?;
-    Ok(masked_greater_fn
-        .call((x.bind(py), value.bind(py)), Some(&kwargs))?
-        .unbind())
+    masked_scalar_compare(
+        py,
+        x,
+        value,
+        copy,
+        "masked_greater",
+        "masked_greater",
+        BinaryOp::Greater,
+    )
 }
 
 #[pyfunction]
