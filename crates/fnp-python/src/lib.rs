@@ -7323,6 +7323,35 @@ fn svdvals(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (n, m=None, k=0, dtype=None, order="C"))]
+fn eye(
+    py: Python<'_>,
+    n: i64,
+    m: Option<i64>,
+    k: i64,
+    dtype: Option<Py<PyAny>>,
+    order: &str,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.eye. Returns a 2-D identity-like array of
+    // shape (N, M) with ones on the k-th diagonal. Matches numpy
+    // across square/rectangular, k offset (positive/zero/negative),
+    // explicit dtype, and C/F memory order.
+    let numpy = py.import("numpy")?;
+    let eye_fn = numpy.getattr("eye")?;
+    let kwargs = PyDict::new(py);
+    if let Some(m_val) = m {
+        kwargs.set_item("M", m_val)?;
+    }
+    kwargs.set_item("k", k)?;
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    kwargs.set_item("order", order)?;
+    Ok(eye_fn.call((n,), Some(&kwargs))?.unbind())
+}
+
+
+#[pyfunction]
 #[pyo3(signature = (a, axis=None, out=None, overwrite_input=false, keepdims=false))]
 fn nanmedian(
     py: Python<'_>,
@@ -8643,6 +8672,7 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(testing_assert_array_equal, m)?)?;
     m.add_function(wrap_pyfunction!(matrix_transpose, m)?)?;
     m.add_function(wrap_pyfunction!(svdvals, m)?)?;
+    m.add_function(wrap_pyfunction!(eye, m)?)?;
     m.add_function(wrap_pyfunction!(nanmedian, m)?)?;
     m.add_function(wrap_pyfunction!(ma_average, m)?)?;
     m.add_function(wrap_pyfunction!(size_count, m)?)?;
@@ -9019,6 +9049,7 @@ mod tests {
             assert!(module.getattr("testing_assert_array_equal").is_ok());
             assert!(module.getattr("matrix_transpose").is_ok());
             assert!(module.getattr("svdvals").is_ok());
+            assert!(module.getattr("eye").is_ok());
             assert!(module.getattr("nanmedian").is_ok());
             assert!(module.getattr("ma_average").is_ok());
             assert!(module.getattr("size_count").is_ok());
