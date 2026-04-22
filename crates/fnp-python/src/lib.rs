@@ -7525,6 +7525,27 @@ fn tril(py: Python<'_>, m: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (m, k=0))]
+fn triu(py: Python<'_>, m: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.triu so upper-triangular extraction matches
+    // numpy across square/rectangular matrices, k offset (positive,
+    // zero, negative), and N-D batch inputs.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("triu")?.call1((m.bind(py), k))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (m, beta))]
+fn kaiser(py: Python<'_>, m: i64, beta: f64) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.kaiser. Kaiser window of M points with shape
+    // parameter beta. Matches numpy across M=0/M=1 edge cases, small
+    // even/odd M, and the full range of typical beta values (0 → rect,
+    // 5 → Hamming-like, 14 → high side-lobe suppression).
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("kaiser")?.call1((m, beta))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x,))]
 fn i0(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.i0 (modified Bessel function of the first
@@ -9128,6 +9149,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(allclose, m)?)?;
     m.add_function(wrap_pyfunction!(fix, m)?)?;
     m.add_function(wrap_pyfunction!(tril, m)?)?;
+    m.add_function(wrap_pyfunction!(triu, m)?)?;
+    m.add_function(wrap_pyfunction!(kaiser, m)?)?;
     m.add_function(wrap_pyfunction!(i0, m)?)?;
     m.add_function(wrap_pyfunction!(asfortranarray, m)?)?;
     m.add_function(wrap_pyfunction!(isrealobj, m)?)?;
@@ -9536,6 +9559,8 @@ mod tests {
             assert!(module.getattr("allclose").is_ok());
             assert!(module.getattr("fix").is_ok());
             assert!(module.getattr("tril").is_ok());
+            assert!(module.getattr("triu").is_ok());
+            assert!(module.getattr("kaiser").is_ok());
             assert!(module.getattr("i0").is_ok());
             assert!(module.getattr("asfortranarray").is_ok());
             assert!(module.getattr("isrealobj").is_ok());
@@ -36155,6 +36180,140 @@ mod tests {
                 .extract()?;
             assert!(ok_zero, "fmod by zero must agree with numpy under equal_nan");
             errstate_ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn triu_matches_numpy_across_square_rect_offsets_and_nd_batch() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let triu_fn = module.getattr("triu")?;
+            let numpy = py.import("numpy")?;
+            let numpy_triu = numpy.getattr("triu")?;
+            let array_fn = numpy.getattr("array")?;
+
+            // Square matrix, default k=0.
+            let sq = array_fn.call1((vec![
+                vec![1_i64, 2, 3],
+                vec![4, 5, 6],
+                vec![7, 8, 9],
+            ],))?;
+            assert_array_matches_numpy(
+                &triu_fn.call1((sq.clone(),))?,
+                &numpy_triu.call1((sq.clone(),))?,
+            )?;
+
+            // k offsets (negative, zero, positive) on square matrix.
+            for k in [-2_i64, -1, 0, 1, 2, 5] {
+                let ours = triu_fn.call1((sq.clone(), k))?;
+                let theirs = numpy_triu.call1((sq.clone(), k))?;
+                assert_array_matches_numpy(&ours, &theirs)?;
+            }
+
+            // Rectangular (tall) matrix.
+            let tall = array_fn.call1((vec![
+                vec![1_i64, 2, 3],
+                vec![4, 5, 6],
+                vec![7, 8, 9],
+                vec![10, 11, 12],
+            ],))?;
+            assert_array_matches_numpy(
+                &triu_fn.call1((tall.clone(),))?,
+                &numpy_triu.call1((tall.clone(),))?,
+            )?;
+
+            // Rectangular (wide) matrix.
+            let wide = array_fn.call1((vec![
+                vec![1_i64, 2, 3, 4, 5],
+                vec![6, 7, 8, 9, 10],
+            ],))?;
+            assert_array_matches_numpy(
+                &triu_fn.call1((wide.clone(), -1_i64))?,
+                &numpy_triu.call1((wide.clone(), -1_i64))?,
+            )?;
+
+            // 3-D batch: stack of matrices, triu is applied to each.
+            let batch = array_fn.call1((vec![
+                vec![vec![1_i64, 2], vec![3, 4]],
+                vec![vec![5_i64, 6], vec![7, 8]],
+            ],))?;
+            assert_array_matches_numpy(
+                &triu_fn.call1((batch.clone(),))?,
+                &numpy_triu.call1((batch.clone(),))?,
+            )?;
+
+            // Float and complex dtype preservation.
+            let floats = array_fn.call1((vec![
+                vec![1.5_f64, 2.5, 3.5],
+                vec![4.5, 5.5, 6.5],
+                vec![7.5, 8.5, 9.5],
+            ],))?;
+            assert_array_matches_numpy(
+                &triu_fn.call1((floats.clone(),))?,
+                &numpy_triu.call1((floats.clone(),))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn kaiser_matches_numpy_across_m_edges_beta_range_and_shape_dtype() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let k_fn = module.getattr("kaiser")?;
+            let numpy = py.import("numpy")?;
+            let numpy_k = numpy.getattr("kaiser")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Edge cases and small M with a mid-range beta.
+            for m in [0_i64, 1, 2, 3, 8, 16, 33] {
+                let ours = k_fn.call1((m, 5.0_f64))?;
+                let theirs = numpy_k.call1((m, 5.0_f64))?;
+                assert_array_matches_numpy(&ours, &theirs)?;
+                assert_eq!(
+                    ours.getattr("dtype")?.str()?.to_string(),
+                    theirs.getattr("dtype")?.str()?.to_string()
+                );
+                let shape: Vec<usize> = ours.getattr("shape")?.extract()?;
+                assert_eq!(shape, vec![m.max(0) as usize]);
+            }
+
+            // Beta = 0 → rectangular window of all 1s on M=8.
+            let ours_rect = k_fn.call1((8_i64, 0.0_f64))?;
+            let theirs_rect = numpy_k.call1((8_i64, 0.0_f64))?;
+            assert_array_matches_numpy(&ours_rect, &theirs_rect)?;
+
+            // Beta = 14 → high side-lobe suppression; still must match.
+            let ours_hi = k_fn.call1((32_i64, 14.0_f64))?;
+            let theirs_hi = numpy_k.call1((32_i64, 14.0_f64))?;
+            let ok_hi: bool = allclose.call1((&ours_hi, &theirs_hi))?.extract()?;
+            assert!(ok_hi, "kaiser M=32 beta=14 mismatch");
+
+            // Symmetry: window values at positions i and M-1-i must be
+            // equal (within tolerance) for even M.
+            let win = k_fn.call1((32_i64, 8.0_f64))?;
+            let reversed = win.call_method1(
+                "__getitem__",
+                (py
+                    .import("builtins")?
+                    .getattr("slice")?
+                    .call1((py.None(), py.None(), -1_i64))?,),
+            )?;
+            let ok_sym: bool = allclose.call1((&win, &reversed))?.extract()?;
+            assert!(ok_sym, "kaiser window must be symmetric");
 
             Ok(())
         });
