@@ -10496,7 +10496,7 @@ fn ma_average(
         Ok(avg_fn.call((a_for_fallback.bind(py),), Some(&kwargs))?.unbind())
     };
 
-    if returned || weights.is_some() {
+    if weights.is_some() {
         return fallback();
     }
 
@@ -10513,9 +10513,16 @@ fn ma_average(
         Ok(counts) => counts,
         Err(_) => return fallback(),
     };
+    let counts_output = build_numpy_scalar_or_array(py, &counts)?;
 
     if axis.is_none() && counts.values().first().copied().unwrap_or(0.0) == 0.0 {
-        return Ok(numpy.getattr("ma")?.getattr("masked")?.unbind());
+        let masked_output = numpy.getattr("ma")?.getattr("masked")?.unbind();
+        if returned {
+            return Ok(PyTuple::new(py, [masked_output.bind(py), counts_output.bind(py)])?
+                .into_any()
+                .unbind());
+        }
+        return Ok(masked_output);
     }
 
     let mean = match masked.mean(axis, false) {
@@ -10524,7 +10531,13 @@ fn ma_average(
     };
 
     if axis.is_none() {
-        return build_numpy_scalar_or_array(py, mean.data());
+        let mean_output = build_numpy_scalar_or_array(py, mean.data())?;
+        if returned {
+            return Ok(PyTuple::new(py, [mean_output.bind(py), counts_output.bind(py)])?
+                .into_any()
+                .unbind());
+        }
+        return Ok(mean_output);
     }
 
     let mask = if counts.values().contains(&0.0) {
@@ -10546,6 +10559,11 @@ fn ma_average(
     py_result
         .bind(py)
         .call_method1("set_fill_value", (masked.fill_value(),))?;
+    if returned {
+        return Ok(PyTuple::new(py, [py_result.bind(py), counts_output.bind(py)])?
+            .into_any()
+            .unbind());
+    }
     Ok(py_result)
 }
 
@@ -37441,6 +37459,29 @@ mod tests {
             assert_array_matches_numpy(&ours_axis0, &theirs_axis0)?;
             assert_eq!(repr_string(&ours_axis0), repr_string(&theirs_axis0));
 
+            let ours_axis0_returned = ma_average_fn.call(
+                (masked_2d.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("axis", 0_i64)?;
+                    kwargs.set_item("returned", true)?;
+                    kwargs
+                }),
+            )?;
+            let theirs_axis0_returned = numpy_ma_average.call(
+                (masked_2d.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("axis", 0_i64)?;
+                    kwargs.set_item("returned", true)?;
+                    kwargs
+                }),
+            )?;
+            assert_eq!(
+                repr_string(&ours_axis0_returned),
+                repr_string(&theirs_axis0_returned)
+            );
+
             let plain_2d = numpy
                 .getattr("array")?
                 .call1((vec![vec![1.0_f64, 2.0], vec![3.0, 4.0]],))?;
@@ -37473,6 +37514,27 @@ mod tests {
             assert_eq!(
                 repr_string(&ours_all_masked),
                 repr_string(&theirs_all_masked)
+            );
+
+            let ours_all_masked_returned = ma_average_fn.call(
+                (all_masked.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("returned", true)?;
+                    kwargs
+                }),
+            )?;
+            let theirs_all_masked_returned = numpy_ma_average.call(
+                (all_masked.clone(),),
+                Some(&{
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("returned", true)?;
+                    kwargs
+                }),
+            )?;
+            assert_eq!(
+                repr_string(&ours_all_masked_returned),
+                repr_string(&theirs_all_masked_returned)
             );
 
             let weights = numpy
