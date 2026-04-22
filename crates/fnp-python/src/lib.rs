@@ -7673,6 +7673,157 @@ fn linalg_vecdot(
 }
 
 #[pyfunction]
+#[pyo3(signature = (fname, dtype=None, comments="#", delimiter=None, converters=None, skiprows=0_i64, usecols=None, unpack=false, ndmin=0_i64, encoding=None, max_rows=None, *, like=None))]
+#[allow(clippy::too_many_arguments)]
+fn loadtxt(
+    py: Python<'_>,
+    fname: Py<PyAny>,
+    dtype: Option<Py<PyAny>>,
+    comments: &str,
+    delimiter: Option<&str>,
+    converters: Option<Py<PyAny>>,
+    skiprows: i64,
+    usecols: Option<Py<PyAny>>,
+    unpack: bool,
+    ndmin: i64,
+    encoding: Option<&str>,
+    max_rows: Option<i64>,
+    like: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.loadtxt. Accepts file path, file-like, or
+    // iterable of strings. Matches numpy on delimiter parsing, comment
+    // stripping, skiprows, usecols column selection, dtype coercion,
+    // converter callables, and unpack/ndmin reshape kwargs.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    kwargs.set_item("comments", comments)?;
+    if let Some(delim) = delimiter {
+        kwargs.set_item("delimiter", delim)?;
+    }
+    if let Some(cv) = converters {
+        kwargs.set_item("converters", cv.bind(py))?;
+    }
+    kwargs.set_item("skiprows", skiprows)?;
+    if let Some(uc) = usecols {
+        kwargs.set_item("usecols", uc.bind(py))?;
+    }
+    kwargs.set_item("unpack", unpack)?;
+    kwargs.set_item("ndmin", ndmin)?;
+    if let Some(enc) = encoding {
+        kwargs.set_item("encoding", enc)?;
+    }
+    if let Some(mr) = max_rows {
+        kwargs.set_item("max_rows", mr)?;
+    }
+    if let Some(like_val) = like {
+        kwargs.set_item("like", like_val.bind(py))?;
+    }
+    Ok(numpy
+        .getattr("loadtxt")?
+        .call((fname.bind(py),), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (fname, dtype=None, comments="#", delimiter=None, skip_header=0_i64, skip_footer=0_i64, converters=None, missing_values=None, filling_values=None, usecols=None, names=None, excludelist=None, deletechars=None, replace_space="_", autostrip=false, case_sensitive=None, defaultfmt="f%i", unpack=None, usemask=false, loose=true, invalid_raise=true, max_rows=None, encoding=None, *, ndmin=0_i64, like=None))]
+#[allow(clippy::too_many_arguments)]
+fn genfromtxt(
+    py: Python<'_>,
+    fname: Py<PyAny>,
+    dtype: Option<Py<PyAny>>,
+    comments: &str,
+    delimiter: Option<&str>,
+    skip_header: i64,
+    skip_footer: i64,
+    converters: Option<Py<PyAny>>,
+    missing_values: Option<Py<PyAny>>,
+    filling_values: Option<Py<PyAny>>,
+    usecols: Option<Py<PyAny>>,
+    names: Option<Py<PyAny>>,
+    excludelist: Option<Py<PyAny>>,
+    deletechars: Option<&str>,
+    replace_space: &str,
+    autostrip: bool,
+    case_sensitive: Option<Py<PyAny>>,
+    defaultfmt: &str,
+    unpack: Option<bool>,
+    usemask: bool,
+    loose: bool,
+    invalid_raise: bool,
+    max_rows: Option<i64>,
+    encoding: Option<&str>,
+    ndmin: i64,
+    like: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.genfromtxt. More permissive text parser than
+    // loadtxt: supports missing-value substitution, automatic field-name
+    // detection, per-column converters, and masked-array output via
+    // usemask. Forward every documented kwarg so the full numpy surface
+    // is exposed.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    kwargs.set_item("comments", comments)?;
+    if let Some(d) = delimiter {
+        kwargs.set_item("delimiter", d)?;
+    }
+    kwargs.set_item("skip_header", skip_header)?;
+    kwargs.set_item("skip_footer", skip_footer)?;
+    if let Some(cv) = converters {
+        kwargs.set_item("converters", cv.bind(py))?;
+    }
+    if let Some(mv) = missing_values {
+        kwargs.set_item("missing_values", mv.bind(py))?;
+    }
+    if let Some(fv) = filling_values {
+        kwargs.set_item("filling_values", fv.bind(py))?;
+    }
+    if let Some(uc) = usecols {
+        kwargs.set_item("usecols", uc.bind(py))?;
+    }
+    if let Some(n) = names {
+        kwargs.set_item("names", n.bind(py))?;
+    }
+    if let Some(el) = excludelist {
+        kwargs.set_item("excludelist", el.bind(py))?;
+    }
+    if let Some(dc) = deletechars {
+        kwargs.set_item("deletechars", dc)?;
+    }
+    kwargs.set_item("replace_space", replace_space)?;
+    kwargs.set_item("autostrip", autostrip)?;
+    if let Some(cs) = case_sensitive {
+        kwargs.set_item("case_sensitive", cs.bind(py))?;
+    }
+    kwargs.set_item("defaultfmt", defaultfmt)?;
+    if let Some(up) = unpack {
+        kwargs.set_item("unpack", up)?;
+    }
+    kwargs.set_item("usemask", usemask)?;
+    kwargs.set_item("loose", loose)?;
+    kwargs.set_item("invalid_raise", invalid_raise)?;
+    if let Some(mr) = max_rows {
+        kwargs.set_item("max_rows", mr)?;
+    }
+    if let Some(enc) = encoding {
+        kwargs.set_item("encoding", enc)?;
+    }
+    kwargs.set_item("ndmin", ndmin)?;
+    if let Some(like_val) = like {
+        kwargs.set_item("like", like_val.bind(py))?;
+    }
+    Ok(numpy
+        .getattr("genfromtxt")?
+        .call((fname.bind(py),), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (base, drop_names, usemask=true, asrecarray=false))]
 fn recfunctions_drop_fields(
     py: Python<'_>,
@@ -9785,6 +9936,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pad, m)?)?;
     m.add_function(wrap_pyfunction!(ma_argmax, m)?)?;
     m.add_function(wrap_pyfunction!(ma_argmin, m)?)?;
+    m.add_function(wrap_pyfunction!(loadtxt, m)?)?;
+    m.add_function(wrap_pyfunction!(genfromtxt, m)?)?;
     m.add_function(wrap_pyfunction!(recfunctions_drop_fields, m)?)?;
     m.add_function(wrap_pyfunction!(recfunctions_rename_fields, m)?)?;
     m.add_function(wrap_pyfunction!(recfunctions_append_fields, m)?)?;
@@ -10220,6 +10373,8 @@ mod tests {
             assert!(module.getattr("pad").is_ok());
             assert!(module.getattr("ma_argmax").is_ok());
             assert!(module.getattr("ma_argmin").is_ok());
+            assert!(module.getattr("loadtxt").is_ok());
+            assert!(module.getattr("genfromtxt").is_ok());
             assert!(module.getattr("recfunctions_drop_fields").is_ok());
             assert!(module.getattr("recfunctions_rename_fields").is_ok());
             assert!(module.getattr("recfunctions_append_fields").is_ok());
@@ -38047,6 +38202,134 @@ mod tests {
             let ours_u2s = u2s_fn.call((unstructured.clone(),), Some(&dkw))?;
             let theirs_u2s = numpy_u2s.call((unstructured.clone(),), Some(&dkw))?;
             assert_array_matches_numpy(&ours_u2s, &theirs_u2s)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn loadtxt_genfromtxt_match_numpy_across_stringio_delimiters_dtype_skip_and_usecols() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let lt_fn = module.getattr("loadtxt")?;
+            let gt_fn = module.getattr("genfromtxt")?;
+            let numpy = py.import("numpy")?;
+            let numpy_lt = numpy.getattr("loadtxt")?;
+            let numpy_gt = numpy.getattr("genfromtxt")?;
+            let io = py.import("io")?;
+            let string_io = io.getattr("StringIO")?;
+
+            // Build a fresh StringIO per call: both implementations
+            // consume the stream, so we can't reuse one across calls.
+            let make_sio = |text: &str| -> PyResult<pyo3::Bound<'_, pyo3::types::PyAny>> {
+                string_io.call1((text,))
+            };
+
+            // loadtxt: whitespace-separated integers.
+            let kw = PyDict::new(py);
+            kw.set_item("dtype", numpy.getattr("int64")?)?;
+            assert_array_matches_numpy(
+                &lt_fn.call((make_sio("1 2 3\n4 5 6\n7 8 9")?,), Some(&kw))?,
+                &numpy_lt.call((make_sio("1 2 3\n4 5 6\n7 8 9")?,), Some(&kw))?,
+            )?;
+
+            // loadtxt: delimiter=',' with dtype coercion.
+            let comma_kw = PyDict::new(py);
+            comma_kw.set_item("delimiter", ",")?;
+            comma_kw.set_item("dtype", numpy.getattr("float64")?)?;
+            assert_array_matches_numpy(
+                &lt_fn.call(
+                    (make_sio("1.5,2.5,3.5\n4.5,5.5,6.5")?,),
+                    Some(&comma_kw),
+                )?,
+                &numpy_lt.call(
+                    (make_sio("1.5,2.5,3.5\n4.5,5.5,6.5")?,),
+                    Some(&comma_kw),
+                )?,
+            )?;
+
+            // loadtxt: skiprows + usecols.
+            let skip_kw = PyDict::new(py);
+            skip_kw.set_item("skiprows", 1_i64)?;
+            skip_kw.set_item("usecols", vec![0_i64, 2_i64])?;
+            skip_kw.set_item("dtype", numpy.getattr("int64")?)?;
+            assert_array_matches_numpy(
+                &lt_fn.call(
+                    (make_sio("# header\n1 2 3\n4 5 6\n7 8 9")?,),
+                    Some(&skip_kw),
+                )?,
+                &numpy_lt.call(
+                    (make_sio("# header\n1 2 3\n4 5 6\n7 8 9")?,),
+                    Some(&skip_kw),
+                )?,
+            )?;
+
+            // loadtxt: unpack=True returns transposed tuple of columns.
+            let unpack_kw = PyDict::new(py);
+            unpack_kw.set_item("delimiter", ",")?;
+            unpack_kw.set_item("dtype", numpy.getattr("int64")?)?;
+            unpack_kw.set_item("unpack", true)?;
+            assert_array_matches_numpy(
+                &lt_fn.call((make_sio("1,2,3\n4,5,6")?,), Some(&unpack_kw))?,
+                &numpy_lt.call((make_sio("1,2,3\n4,5,6")?,), Some(&unpack_kw))?,
+            )?;
+
+            // genfromtxt: names=True pulls header row.
+            let gt_kw = PyDict::new(py);
+            gt_kw.set_item("delimiter", ",")?;
+            gt_kw.set_item("names", true)?;
+            gt_kw.set_item("dtype", None::<Py<PyAny>>)?;
+            let ours_g = gt_fn.call(
+                (make_sio("a,b,c\n1,2,3\n4,5,6")?,),
+                Some(&gt_kw),
+            )?;
+            let theirs_g = numpy_gt.call(
+                (make_sio("a,b,c\n1,2,3\n4,5,6")?,),
+                Some(&gt_kw),
+            )?;
+            assert_eq!(
+                ours_g.getattr("dtype")?.getattr("names")?.extract::<Vec<String>>()?,
+                theirs_g.getattr("dtype")?.getattr("names")?.extract::<Vec<String>>()?
+            );
+
+            // genfromtxt: missing_values + filling_values.
+            let miss_kw = PyDict::new(py);
+            miss_kw.set_item("delimiter", ",")?;
+            miss_kw.set_item("missing_values", "NA")?;
+            miss_kw.set_item("filling_values", -1_i64)?;
+            miss_kw.set_item("dtype", numpy.getattr("int64")?)?;
+            assert_array_matches_numpy(
+                &gt_fn.call(
+                    (make_sio("1,NA,3\n4,5,NA")?,),
+                    Some(&miss_kw),
+                )?,
+                &numpy_gt.call(
+                    (make_sio("1,NA,3\n4,5,NA")?,),
+                    Some(&miss_kw),
+                )?,
+            )?;
+
+            // genfromtxt: skip_header + skip_footer.
+            let sf_kw = PyDict::new(py);
+            sf_kw.set_item("delimiter", ",")?;
+            sf_kw.set_item("skip_header", 1_i64)?;
+            sf_kw.set_item("skip_footer", 1_i64)?;
+            sf_kw.set_item("dtype", numpy.getattr("int64")?)?;
+            assert_array_matches_numpy(
+                &gt_fn.call(
+                    (make_sio("header\n1,2,3\n4,5,6\nfooter")?,),
+                    Some(&sf_kw),
+                )?,
+                &numpy_gt.call(
+                    (make_sio("header\n1,2,3\n4,5,6\nfooter")?,),
+                    Some(&sf_kw),
+                )?,
+            )?;
 
             Ok(())
         });
