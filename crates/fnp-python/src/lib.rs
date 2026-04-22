@@ -7708,6 +7708,109 @@ fn linalg_vecdot(
 }
 
 #[pyfunction]
+#[pyo3(name = "abs", signature = (x,))]
+fn py_abs(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.abs. Element-wise absolute value; supports real
+    // and complex input, integer dtype is preserved.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("abs")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
+fn absolute(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.absolute (alias of np.abs). Element-wise absolute
+    // value; supports real and complex input, integer dtype preserved.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("absolute")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x1, x2))]
+fn add(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.add. Element-wise addition with full numpy
+    // broadcasting and dtype-promotion rules.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("add")?
+        .call1((x1.bind(py), x2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x1, x2))]
+fn subtract(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.subtract. Element-wise x1-x2 with numpy's
+    // broadcasting and dtype-promotion rules.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("subtract")?
+        .call1((x1.bind(py), x2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x1, x2))]
+fn multiply(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.multiply. Element-wise x1*x2 with numpy's
+    // broadcasting and dtype-promotion rules.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("multiply")?
+        .call1((x1.bind(py), x2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
+fn sin(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.sin. Element-wise trigonometric sine. Integer
+    // input is promoted to float; complex input returns complex output.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("sin")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
+fn cos(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.cos. Element-wise trigonometric cosine. Integer
+    // input is promoted to float; complex input returns complex output.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("cos")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
+fn log(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.log. Element-wise natural logarithm. Matches
+    // numpy for log(0) (returns -inf with RuntimeWarning) and log of
+    // negative real (returns NaN with RuntimeWarning, complex otherwise).
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("log")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
+fn exp(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.exp. Element-wise exponential (e**x). Integer
+    // input promotes to float; complex input returns complex output.
+    // Matches numpy overflow behavior for large real x (returns inf).
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("exp")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x,))]
+fn sqrt(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.sqrt. Element-wise non-negative square root.
+    // Integer input promotes to float; negative real under the default
+    // real-only branch returns NaN with RuntimeWarning (matching numpy);
+    // complex input returns complex output.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("sqrt")?.call1((x.bind(py),))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, kth, axis=-1_i64, kind="introselect", order=None))]
 fn partition(
     py: Python<'_>,
@@ -10050,6 +10153,16 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(einsum_path, m)?)?;
     m.add_function(wrap_pyfunction!(linalg_vecdot, m)?)?;
     m.add_function(wrap_pyfunction!(linalg_matrix_norm, m)?)?;
+    m.add_function(wrap_pyfunction!(py_abs, m)?)?;
+    m.add_function(wrap_pyfunction!(absolute, m)?)?;
+    m.add_function(wrap_pyfunction!(add, m)?)?;
+    m.add_function(wrap_pyfunction!(subtract, m)?)?;
+    m.add_function(wrap_pyfunction!(multiply, m)?)?;
+    m.add_function(wrap_pyfunction!(sin, m)?)?;
+    m.add_function(wrap_pyfunction!(cos, m)?)?;
+    m.add_function(wrap_pyfunction!(log, m)?)?;
+    m.add_function(wrap_pyfunction!(exp, m)?)?;
+    m.add_function(wrap_pyfunction!(sqrt, m)?)?;
     m.add_function(wrap_pyfunction!(linalg_eig, m)?)?;
     m.add_function(wrap_pyfunction!(polyfit, m)?)?;
     m.add_function(wrap_pyfunction!(pad, m)?)?;
@@ -10490,6 +10603,16 @@ mod tests {
             assert!(module.getattr("einsum_path").is_ok());
             assert!(module.getattr("linalg_vecdot").is_ok());
             assert!(module.getattr("linalg_matrix_norm").is_ok());
+            assert!(module.getattr("abs").is_ok());
+            assert!(module.getattr("absolute").is_ok());
+            assert!(module.getattr("add").is_ok());
+            assert!(module.getattr("subtract").is_ok());
+            assert!(module.getattr("multiply").is_ok());
+            assert!(module.getattr("sin").is_ok());
+            assert!(module.getattr("cos").is_ok());
+            assert!(module.getattr("log").is_ok());
+            assert!(module.getattr("exp").is_ok());
+            assert!(module.getattr("sqrt").is_ok());
             assert!(module.getattr("linalg_eig").is_ok());
             assert!(module.getattr("polyfit").is_ok());
             assert!(module.getattr("pad").is_ok());
@@ -38696,6 +38819,128 @@ mod tests {
                 &numpy_ff.call((txt_path.clone(),), Some(&text_kw))?,
             )?;
             let _ = os.getattr("remove")?.call1((txt_path.clone(),))?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn core_ufunc_batch1_matches_numpy_across_scalar_array_int_complex_and_broadcasting() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let allclose = numpy.getattr("allclose")?;
+            let array_fn = numpy.getattr("array")?;
+
+            // Unary ufuncs exposed in this batch.
+            let unary_names = ["abs", "absolute", "sin", "cos", "log", "exp", "sqrt"];
+            // Domain: log/sqrt need positive input; sin/cos/abs/absolute/exp
+            // accept any real. Use a strictly-positive 1-D array for
+            // universal coverage, plus a negative-inclusive test for
+            // abs/absolute/sin/cos/exp.
+            let positive = array_fn.call1((vec![0.25_f64, 0.5, 1.0, 2.0, 4.0, 8.0],))?;
+            let mixed = array_fn.call1((vec![-2.0_f64, -0.5, 0.0, 0.5, 2.0],))?;
+            for name in unary_names {
+                let ours_fn = module.getattr(name)?;
+                let theirs_fn = numpy.getattr(name)?;
+                let ours = ours_fn.call1((positive.clone(),))?;
+                let theirs = theirs_fn.call1((positive.clone(),))?;
+                let ok: bool = allclose.call1((&ours, &theirs))?.extract()?;
+                assert!(ok, "{name} positive-array mismatch");
+
+                // Only run mixed-sign input on ops whose real-valued
+                // branch is defined for negative inputs.
+                if matches!(name, "abs" | "absolute" | "sin" | "cos" | "exp") {
+                    let ours_m = ours_fn.call1((mixed.clone(),))?;
+                    let theirs_m = theirs_fn.call1((mixed.clone(),))?;
+                    let ok_m: bool = allclose.call1((&ours_m, &theirs_m))?.extract()?;
+                    assert!(ok_m, "{name} mixed-sign mismatch");
+                }
+
+                // Integer input promotion parity (not applicable to abs
+                // which preserves int dtype, but exp/log/sin/etc. promote).
+                let ints = array_fn.call1((vec![1_i64, 2, 3],))?;
+                let ours_i = ours_fn.call1((ints.clone(),))?;
+                let theirs_i = theirs_fn.call1((ints.clone(),))?;
+                assert_eq!(
+                    ours_i.getattr("dtype")?.str()?.to_string(),
+                    theirs_i.getattr("dtype")?.str()?.to_string(),
+                    "{name} integer-input dtype parity"
+                );
+            }
+
+            // abs on complex returns real magnitude.
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+            let c1 = py_complex.call1((3.0_f64, 4.0_f64))?;
+            let abs_fn = module.getattr("abs")?;
+            let our_abs: f64 = abs_fn.call1((c1.clone(),))?.extract()?;
+            let their_abs: f64 = numpy.getattr("abs")?.call1((c1.clone(),))?.extract()?;
+            assert_eq!(our_abs, their_abs);
+            assert!((our_abs - 5.0).abs() < 1e-12);
+
+            // Binary ufuncs (add, subtract, multiply).
+            let binary_names = ["add", "subtract", "multiply"];
+            let lhs = array_fn.call1((vec![1.0_f64, 2.0, 3.0, 4.0],))?;
+            let rhs = array_fn.call1((vec![10.0_f64, 20.0, 30.0, 40.0],))?;
+            for name in binary_names {
+                let ours_fn = module.getattr(name)?;
+                let theirs_fn = numpy.getattr(name)?;
+                let ours = ours_fn.call1((lhs.clone(), rhs.clone()))?;
+                let theirs = theirs_fn.call1((lhs.clone(), rhs.clone()))?;
+                let ok: bool = allclose.call1((&ours, &theirs))?.extract()?;
+                assert!(ok, "{name} 1-D mismatch");
+            }
+
+            // Broadcasting parity: (3,1) + (1,4) -> (3,4).
+            let col = array_fn
+                .call1((vec![1.0_f64, 2.0, 3.0],))?
+                .call_method1("reshape", ((3_i64, 1_i64),))?;
+            let row = array_fn
+                .call1((vec![10.0_f64, 20.0, 30.0, 40.0],))?
+                .call_method1("reshape", ((1_i64, 4_i64),))?;
+            for name in binary_names {
+                let ours_fn = module.getattr(name)?;
+                let theirs_fn = numpy.getattr(name)?;
+                let ours = ours_fn.call1((col.clone(), row.clone()))?;
+                let theirs = theirs_fn.call1((col.clone(), row.clone()))?;
+                let ok: bool = allclose.call1((&ours, &theirs))?.extract()?;
+                assert!(ok, "{name} broadcasting (3,1)x(1,4) mismatch");
+                assert_eq!(
+                    ours.getattr("shape")?.extract::<Vec<usize>>()?,
+                    vec![3, 4]
+                );
+            }
+
+            // Integer dtype preservation for add/subtract/multiply on int
+            // inputs (unlike float ufuncs which promote).
+            let int_a = array_fn.call1((vec![1_i64, 2, 3],))?;
+            let int_b = array_fn.call1((vec![10_i64, 20, 30],))?;
+            for name in binary_names {
+                let ours_fn = module.getattr(name)?;
+                let theirs_fn = numpy.getattr(name)?;
+                let ours_i = ours_fn.call1((int_a.clone(), int_b.clone()))?;
+                let theirs_i = theirs_fn.call1((int_a.clone(), int_b.clone()))?;
+                assert_eq!(
+                    ours_i.getattr("dtype")?.str()?.to_string(),
+                    theirs_i.getattr("dtype")?.str()?.to_string(),
+                    "{name} integer dtype preservation"
+                );
+            }
+
+            // log/sqrt boundary: log(1) == 0, sqrt(0) == 0, sqrt(4) == 2.
+            let log_fn = module.getattr("log")?;
+            let log_1: f64 = log_fn.call1((1.0_f64,))?.extract()?;
+            assert!(log_1.abs() < 1e-15, "log(1) must be 0");
+            let sqrt_fn = module.getattr("sqrt")?;
+            let sqrt_0: f64 = sqrt_fn.call1((0.0_f64,))?.extract()?;
+            assert_eq!(sqrt_0, 0.0);
+            let sqrt_4: f64 = sqrt_fn.call1((4.0_f64,))?.extract()?;
+            assert_eq!(sqrt_4, 2.0);
 
             Ok(())
         });
