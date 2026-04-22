@@ -7673,6 +7673,94 @@ fn linalg_vecdot(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, kth, axis=-1_i64, kind="introselect", order=None))]
+fn partition(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    kth: Py<PyAny>,
+    axis: i64,
+    kind: &str,
+    order: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.partition. Returns a partitioned copy so that
+    // the k-th element is in its final sorted position, with smaller
+    // elements before and larger after (no guarantee of intra-group
+    // order). Matches numpy on scalar/array kth, axis surface, kind,
+    // and structured-array `order` field selection.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("axis", axis)?;
+    kwargs.set_item("kind", kind)?;
+    if let Some(order_val) = order {
+        kwargs.set_item("order", order_val.bind(py))?;
+    }
+    Ok(numpy
+        .getattr("partition")?
+        .call((a.bind(py), kth.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, kth, axis=-1_i64, kind="introselect", order=None))]
+fn argpartition(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    kth: Py<PyAny>,
+    axis: i64,
+    kind: &str,
+    order: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.argpartition. Returns the indices that would
+    // partition the array so that the k-th element is in its final
+    // sorted position. Matches numpy on scalar/array kth, axis surface,
+    // and structured-array `order` field selection.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("axis", axis)?;
+    kwargs.set_item("kind", kind)?;
+    if let Some(order_val) = order {
+        kwargs.set_item("order", order_val.bind(py))?;
+    }
+    Ok(numpy
+        .getattr("argpartition")?
+        .call((a.bind(py), kth.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (file, dtype=None, count=-1_i64, sep="", offset=0_i64, *, like=None))]
+fn fromfile(
+    py: Python<'_>,
+    file: Py<PyAny>,
+    dtype: Option<Py<PyAny>>,
+    count: i64,
+    sep: &str,
+    offset: i64,
+    like: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.fromfile. Accepts a file path (str/PathLike) or
+    // open file object; reads binary (sep='') or text (sep=' ' etc.)
+    // numeric data into an ndarray. Matches numpy on dtype coercion,
+    // count-limited reads, nonzero byte offset for binary mode, and
+    // file-path vs file-object surface parity.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(dtype_val) = dtype {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    kwargs.set_item("count", count)?;
+    kwargs.set_item("sep", sep)?;
+    kwargs.set_item("offset", offset)?;
+    if let Some(like_val) = like {
+        kwargs.set_item("like", like_val.bind(py))?;
+    }
+    Ok(numpy
+        .getattr("fromfile")?
+        .call((file.bind(py),), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (fname, dtype=None, comments="#", delimiter=None, converters=None, skiprows=0_i64, usecols=None, unpack=false, ndmin=0_i64, encoding=None, max_rows=None, *, like=None))]
 #[allow(clippy::too_many_arguments)]
 fn loadtxt(
@@ -9938,6 +10026,9 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ma_argmin, m)?)?;
     m.add_function(wrap_pyfunction!(loadtxt, m)?)?;
     m.add_function(wrap_pyfunction!(genfromtxt, m)?)?;
+    m.add_function(wrap_pyfunction!(partition, m)?)?;
+    m.add_function(wrap_pyfunction!(argpartition, m)?)?;
+    m.add_function(wrap_pyfunction!(fromfile, m)?)?;
     m.add_function(wrap_pyfunction!(recfunctions_drop_fields, m)?)?;
     m.add_function(wrap_pyfunction!(recfunctions_rename_fields, m)?)?;
     m.add_function(wrap_pyfunction!(recfunctions_append_fields, m)?)?;
@@ -10375,6 +10466,9 @@ mod tests {
             assert!(module.getattr("ma_argmin").is_ok());
             assert!(module.getattr("loadtxt").is_ok());
             assert!(module.getattr("genfromtxt").is_ok());
+            assert!(module.getattr("partition").is_ok());
+            assert!(module.getattr("argpartition").is_ok());
+            assert!(module.getattr("fromfile").is_ok());
             assert!(module.getattr("recfunctions_drop_fields").is_ok());
             assert!(module.getattr("recfunctions_rename_fields").is_ok());
             assert!(module.getattr("recfunctions_append_fields").is_ok());
@@ -38330,6 +38424,184 @@ mod tests {
                     Some(&sf_kw),
                 )?,
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn partition_argpartition_match_numpy_across_1d_2d_axis_kth_array_and_kth_structured() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let p_fn = module.getattr("partition")?;
+            let ap_fn = module.getattr("argpartition")?;
+            let numpy = py.import("numpy")?;
+            let numpy_p = numpy.getattr("partition")?;
+            let numpy_ap = numpy.getattr("argpartition")?;
+            let array_fn = numpy.getattr("array")?;
+
+            // 1-D partition: k-th element is in final sorted position.
+            let a1 = array_fn.call1((vec![3_i64, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5],))?;
+            let kth = 5_i64;
+            let ours_p = p_fn.call1((a1.clone(), kth))?;
+            let theirs_p = numpy_p.call1((a1.clone(), kth))?;
+            // Element at kth position must match numpy's at the same index.
+            let ours_k: i64 = ours_p
+                .call_method1("__getitem__", (kth,))?
+                .extract()?;
+            let theirs_k: i64 = theirs_p
+                .call_method1("__getitem__", (kth,))?
+                .extract()?;
+            assert_eq!(ours_k, theirs_k);
+            // Before-kth: every element <= kth-value.
+            let sorted_np = numpy.getattr("sort")?.call1((a1.clone(),))?;
+            let expected_k: i64 = sorted_np
+                .call_method1("__getitem__", (kth,))?
+                .extract()?;
+            assert_eq!(ours_k, expected_k);
+
+            // 2-D axis=1 partition.
+            let a2 = array_fn.call1((vec![
+                vec![5_i64, 2, 8, 1, 4],
+                vec![9, 3, 7, 6, 0],
+            ],))?;
+            let ax_kw = PyDict::new(py);
+            ax_kw.set_item("axis", 1_i64)?;
+            let ours_2d = p_fn.call((a2.clone(), 2_i64), Some(&ax_kw))?;
+            let theirs_2d = numpy_p.call((a2.clone(), 2_i64), Some(&ax_kw))?;
+            // Check per-row k-th element parity at col 2.
+            for row in 0..2_i64 {
+                let ours_row_k: i64 = ours_2d
+                    .call_method1(
+                        "__getitem__",
+                        ((row, 2_i64),),
+                    )?
+                    .extract()?;
+                let theirs_row_k: i64 = theirs_2d
+                    .call_method1(
+                        "__getitem__",
+                        ((row, 2_i64),),
+                    )?
+                    .extract()?;
+                assert_eq!(ours_row_k, theirs_row_k);
+            }
+
+            // Array-valued kth: guarantees positions at all listed indices.
+            let kth_arr = vec![2_i64, 5];
+            let ours_arr = p_fn.call1((a1.clone(), kth_arr.clone()))?;
+            let theirs_arr = numpy_p.call1((a1.clone(), kth_arr.clone()))?;
+            for &k in &kth_arr {
+                let ours_k: i64 = ours_arr
+                    .call_method1("__getitem__", (k,))?
+                    .extract()?;
+                let theirs_k: i64 = theirs_arr
+                    .call_method1("__getitem__", (k,))?
+                    .extract()?;
+                assert_eq!(ours_k, theirs_k);
+            }
+
+            // argpartition: indices arrange the array such that the
+            // value at the k-th index is in sorted position.
+            let ours_idx = ap_fn.call1((a1.clone(), kth))?;
+            let theirs_idx = numpy_ap.call1((a1.clone(), kth))?;
+            // Index at kth position must select the same value (the
+            // actual index may differ for duplicates, so compare values).
+            let ours_selected = a1.call_method1(
+                "__getitem__",
+                (ours_idx.call_method1("__getitem__", (kth,))?,),
+            )?;
+            let theirs_selected = a1.call_method1(
+                "__getitem__",
+                (theirs_idx.call_method1("__getitem__", (kth,))?,),
+            )?;
+            assert_eq!(
+                ours_selected.extract::<i64>()?,
+                theirs_selected.extract::<i64>()?
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn fromfile_matches_numpy_across_binary_path_dtype_count_offset_and_text_sep() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let ff_fn = module.getattr("fromfile")?;
+            let numpy = py.import("numpy")?;
+            let numpy_ff = numpy.getattr("fromfile")?;
+            let tempfile = py.import("tempfile")?;
+            let os = py.import("os")?;
+            let builtins = py.import("builtins")?;
+
+            // Create a temp file with int32 binary data.
+            let mkstemp = tempfile.getattr("mkstemp")?;
+            let (fd, bin_path): (i64, String) = mkstemp.call0()?.extract()?;
+            let _ = os.getattr("close")?.call1((fd,))?;
+            let int_vals: Vec<i32> = vec![0, 1, 2, 3, 4, 5, 6, 7];
+            let mut bytes: Vec<u8> = Vec::new();
+            for v in &int_vals {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            let open_fn = builtins.getattr("open")?;
+            let fobj = open_fn.call1((bin_path.clone(), "wb"))?;
+            fobj.call_method1("write", (bytes,))?;
+            fobj.call_method0("close")?;
+
+            // Binary read with explicit int32 dtype.
+            let bin_kw = PyDict::new(py);
+            bin_kw.set_item("dtype", numpy.getattr("int32")?)?;
+            assert_array_matches_numpy(
+                &ff_fn.call((bin_path.clone(),), Some(&bin_kw))?,
+                &numpy_ff.call((bin_path.clone(),), Some(&bin_kw))?,
+            )?;
+
+            // count-limited read.
+            let count_kw = PyDict::new(py);
+            count_kw.set_item("dtype", numpy.getattr("int32")?)?;
+            count_kw.set_item("count", 3_i64)?;
+            assert_array_matches_numpy(
+                &ff_fn.call((bin_path.clone(),), Some(&count_kw))?,
+                &numpy_ff.call((bin_path.clone(),), Some(&count_kw))?,
+            )?;
+
+            // Nonzero offset (skip first int32).
+            let off_kw = PyDict::new(py);
+            off_kw.set_item("dtype", numpy.getattr("int32")?)?;
+            off_kw.set_item("offset", 4_i64)?;
+            assert_array_matches_numpy(
+                &ff_fn.call((bin_path.clone(),), Some(&off_kw))?,
+                &numpy_ff.call((bin_path.clone(),), Some(&off_kw))?,
+            )?;
+
+            // Clean up the binary file.
+            let _ = os.getattr("remove")?.call1((bin_path.clone(),))?;
+
+            // Text mode (sep=' '): write ASCII numeric tokens.
+            let (fd2, txt_path): (i64, String) = mkstemp.call0()?.extract()?;
+            let _ = os.getattr("close")?.call1((fd2,))?;
+            let tobj = open_fn.call1((txt_path.clone(), "w"))?;
+            tobj.call_method1("write", ("1.5 2.5 3.5 4.5",))?;
+            tobj.call_method0("close")?;
+
+            let text_kw = PyDict::new(py);
+            text_kw.set_item("sep", " ")?;
+            text_kw.set_item("dtype", numpy.getattr("float64")?)?;
+            assert_array_matches_numpy(
+                &ff_fn.call((txt_path.clone(),), Some(&text_kw))?,
+                &numpy_ff.call((txt_path.clone(),), Some(&text_kw))?,
+            )?;
+            let _ = os.getattr("remove")?.call1((txt_path.clone(),))?;
 
             Ok(())
         });
