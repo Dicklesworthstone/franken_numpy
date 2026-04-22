@@ -8718,8 +8718,8 @@ mod tests {
     use pyo3::{Py, PyResult, Python};
 
     fn with_python(test: impl FnOnce(Python<'_>) -> PyResult<()>) {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             test(py).unwrap();
         });
     }
