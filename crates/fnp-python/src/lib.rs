@@ -2838,17 +2838,23 @@ fn build_numpy_scalar_or_array_from_object_values(
 fn normalize_reduce_out_argument(py: Python<'_>, out: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     let candidate = if let Ok(tuple) = out.cast::<PyTuple>() {
         if tuple.len() != 1 {
-            return Err(PyTypeError::new_err("output must be an array"));
+            return Err(PyTypeError::new_err(
+                "return arrays must be of ArrayType",
+            ));
         }
         tuple.get_item(0)?
     } else if out.cast::<PyList>().is_ok() {
-        return Err(PyTypeError::new_err("output must be an array"));
+        return Err(PyTypeError::new_err(
+            "return arrays must be of ArrayType",
+        ));
     } else {
         out.clone()
     };
 
     if require_numpy_ndarray(py, &candidate, "reduce(out)").is_err() {
-        return Err(PyTypeError::new_err("output must be an array"));
+        return Err(PyTypeError::new_err(
+            "return arrays must be of ArrayType",
+        ));
     }
     Ok(candidate.unbind())
 }
