@@ -42441,4 +42441,175 @@ mod tests {
             Ok(())
         });
     }
+
+    #[test]
+    fn ufunc_special_value_parity_matches_numpy() {
+        // IEEE 754 special-value stress test for unary + binary ufunc
+        // wrappers. Probes behavior on ±inf, NaN, signed zero,
+        // subnormals, and domain-boundary inputs (log(0), sqrt(-1),
+        // 0/0, 0**0). Numpy defines specific outputs for each (e.g.
+        // log(0) = -inf with RuntimeWarning). Per /testing-conformance-
+        // harnesses Pattern 3: we check result-value parity via
+        // numpy.array_equal with equal_nan=True (preserves NaN-at-NaN
+        // identity) plus explicit sign-bit checks for signed-zero.
+        //
+        // A divergence is considered [HIGH]: user numerical code
+        // depending on numpy's exact special-value semantics would
+        // silently miscompute.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_ufunc_special")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let array_fn = numpy.getattr("array")?;
+            let array_equal = numpy.getattr("array_equal")?;
+            let warnings = py.import("warnings")?;
+
+            // Silence RuntimeWarnings emitted by numpy on domain errors —
+            // both sides emit them, we compare values not stderr.
+            warnings.call_method1(
+                "filterwarnings",
+                ("ignore",),
+            )?;
+
+            // IEEE 754 special inputs — both sides produce the same output.
+            let special_f64 = array_fn.call1((vec![
+                0.0_f64,
+                -0.0_f64,
+                1.0,
+                -1.0,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::NAN,
+                f64::MIN_POSITIVE,       // smallest normal
+                5e-324,                  // smallest subnormal
+                f64::MAX,
+                -f64::MAX,
+            ],))?;
+
+            let mut divergences: Vec<String> = Vec::new();
+
+            // Unary ufuncs whose output on special inputs numpy pins down.
+            let unary_ops = [
+                "sin", "cos", "tan",
+                "arcsin", "arccos", "arctan",
+                "sinh", "cosh", "tanh",
+                "arcsinh", "arccosh", "arctanh",
+                "sqrt", "log", "log2", "log10",
+                "exp", "exp2", "expm1", "log1p",
+                "sign", "floor", "ceil", "trunc", "rint",
+                "absolute", "negative", "conjugate", "reciprocal",
+                "signbit", "isnan", "isinf", "isfinite",
+            ];
+
+            let kw_equal_nan = PyDict::new(py);
+            kw_equal_nan.set_item("equal_nan", true)?;
+
+            for name in unary_ops {
+                let Ok(numpy_fn) = numpy.getattr(name) else {
+                    continue;
+                };
+                let ours_fn = match module.getattr(name) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+                let o = ours_fn.call1((special_f64.clone(),))?;
+                let t = numpy_fn.call1((special_f64.clone(),))?;
+
+                let eq_vals: bool =
+                    array_equal.call((&o, &t), Some(&kw_equal_nan))?.extract()?;
+                if !eq_vals {
+                    // Surface the actual divergence for diagnostics.
+                    let o_list: String =
+                        o.call_method0("tolist")?.str()?.to_string();
+                    let t_list: String =
+                        t.call_method0("tolist")?.str()?.to_string();
+                    divergences.push(format!(
+                        "{name}(IEEE_special): ours={o_list} theirs={t_list}"
+                    ));
+                }
+
+                // Dtype must also match.
+                let o_dt: String = o.getattr("dtype")?.getattr("name")?.extract()?;
+                let t_dt: String = t.getattr("dtype")?.getattr("name")?.extract()?;
+                if o_dt != t_dt {
+                    divergences.push(format!(
+                        "{name}(IEEE_special): dtype ours={o_dt} theirs={t_dt}"
+                    ));
+                }
+            }
+
+            // Binary ufuncs on problematic pairs.
+            // (name, lhs, rhs) — special inputs that trigger numpy's domain behavior.
+            let binary_specials: Vec<(&str, Vec<f64>, Vec<f64>)> = vec![
+                // Division by zero
+                ("divide", vec![1.0, 0.0, -1.0, f64::INFINITY], vec![0.0, 0.0, 0.0, 0.0]),
+                ("true_divide", vec![1.0, 0.0, -1.0, f64::INFINITY], vec![0.0, 0.0, 0.0, 0.0]),
+                // Power edge cases: 0**0 = 1, 0**1 = 0, 1**inf = 1, 0**neg = inf, -inf**0 = 1
+                ("power", vec![0.0, 0.0, 1.0, 0.0, f64::NEG_INFINITY],
+                          vec![0.0, 1.0, f64::INFINITY, -1.0, 0.0]),
+                // fmod / remainder with zero divisor
+                ("fmod", vec![1.0, 0.0, -1.0], vec![0.0, 0.0, 0.0]),
+                // nextafter
+                ("nextafter", vec![1.0, 0.0, -0.0], vec![2.0, 1.0, -1.0]),
+            ];
+
+            for (name, lhs, rhs) in &binary_specials {
+                let Ok(numpy_fn) = numpy.getattr(*name) else {
+                    continue;
+                };
+                let ours_fn = match module.getattr(*name) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+                let l = array_fn.call1((lhs.clone(),))?;
+                let r = array_fn.call1((rhs.clone(),))?;
+                let o = ours_fn.call1((l.clone(), r.clone()))?;
+                let t = numpy_fn.call1((l.clone(), r.clone()))?;
+                let eq_vals: bool =
+                    array_equal.call((&o, &t), Some(&kw_equal_nan))?.extract()?;
+                if !eq_vals {
+                    let o_list: String =
+                        o.call_method0("tolist")?.str()?.to_string();
+                    let t_list: String =
+                        t.call_method0("tolist")?.str()?.to_string();
+                    divergences.push(format!(
+                        "{name}(special_binary): ours={o_list} theirs={t_list}"
+                    ));
+                }
+            }
+
+            // Signed-zero preservation: copysign(1.0, -0.0) must return -1.0.
+            // This is a common bug hiding in naive sign implementations.
+            if let (Ok(theirs_fn), Ok(ours_fn)) =
+                (numpy.getattr("copysign"), module.getattr("copysign"))
+            {
+                let a = array_fn.call1((vec![1.0_f64, 1.0_f64],))?;
+                let b = array_fn.call1((vec![-0.0_f64, 0.0_f64],))?;
+                let o = ours_fn.call1((a.clone(), b.clone()))?;
+                let t = theirs_fn.call1((a.clone(), b.clone()))?;
+                let eq: bool = array_equal.call((&o, &t), Some(&kw_equal_nan))?.extract()?;
+                if !eq {
+                    let o_list: String =
+                        o.call_method0("tolist")?.str()?.to_string();
+                    let t_list: String =
+                        t.call_method0("tolist")?.str()?.to_string();
+                    divergences.push(format!(
+                        "copysign(signed_zero): ours={o_list} theirs={t_list}"
+                    ));
+                }
+            }
+
+            assert!(
+                divergences.is_empty(),
+                "ufunc special-value divergences from numpy ({} total):\n  {}",
+                divergences.len(),
+                divergences.join("\n  ")
+            );
+
+            Ok(())
+        });
+    }
 }
