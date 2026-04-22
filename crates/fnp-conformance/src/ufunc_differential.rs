@@ -2292,24 +2292,35 @@ fn bootstrap_repo_numpy_venv(python_path: &Path, bootstrap_python: &str) -> Resu
         .and_then(Path::parent)
         .ok_or_else(|| format!("invalid oracle venv path {}", python_path.display()))?;
 
+    // Reuse the venv only if it is fully bootstrapped (python binary exists).
+    // A bare directory with no python3 inside means a prior bootstrap failed
+    // partway — in that case we pass --clear to force recreation. Skipping
+    // --clear would leave `uv venv` to fail with "venv already exists" and
+    // `uv pip install` to fail with "not a valid venv".
+    let venv_already_exists = python_path.is_file();
+    let venv_dir_partial = venv_dir.exists() && !venv_already_exists;
+
     if let Ok(uv_check) = Command::new("uv").arg("--version").output()
         && uv_check.status.success()
     {
-        let create = Command::new("uv")
-            .arg("venv")
-            .arg("--python")
-            .arg("3.14")
-            .arg(venv_dir)
-            .output()
-            .map_err(|err| format!("failed to bootstrap oracle venv via uv venv: {err}"))?;
-        if !create.status.success() {
-            let stderr = String::from_utf8_lossy(&create.stderr);
-            let stdout = String::from_utf8_lossy(&create.stdout);
-            return Err(format!(
-                "failed to bootstrap oracle venv via uv venv (stdout={} stderr={})",
-                stdout.trim(),
-                stderr.trim()
-            ));
+        if !venv_already_exists {
+            let mut cmd = Command::new("uv");
+            cmd.arg("venv").arg("--python").arg("3.14").arg(venv_dir);
+            if venv_dir_partial {
+                cmd.arg("--clear");
+            }
+            let create = cmd
+                .output()
+                .map_err(|err| format!("failed to bootstrap oracle venv via uv venv: {err}"))?;
+            if !create.status.success() {
+                let stderr = String::from_utf8_lossy(&create.stderr);
+                let stdout = String::from_utf8_lossy(&create.stdout);
+                return Err(format!(
+                    "failed to bootstrap oracle venv via uv venv (stdout={} stderr={})",
+                    stdout.trim(),
+                    stderr.trim()
+                ));
+            }
         }
 
         let install = Command::new("uv")
@@ -2333,25 +2344,27 @@ fn bootstrap_repo_numpy_venv(python_path: &Path, bootstrap_python: &str) -> Resu
         return Ok(python_path.display().to_string());
     }
 
-    let create = Command::new(bootstrap_python)
-        .arg("-m")
-        .arg("venv")
-        .arg(venv_dir)
-        .output()
-        .map_err(|err| {
-            format!("failed to bootstrap oracle venv via `{bootstrap_python} -m venv`: {err}")
-        })?;
-    if !create.status.success() {
-        let stderr = String::from_utf8_lossy(&create.stderr);
-        let stdout = String::from_utf8_lossy(&create.stdout);
-        return install_numpy_into_user_interpreter(bootstrap_python).map_err(|pip_err| {
-            format!(
-                "failed to bootstrap oracle venv via `{bootstrap_python} -m venv` (stdout={} stderr={}); fallback user-site install also failed: {}",
-                stdout.trim(),
-                stderr.trim(),
-                pip_err
-            )
-        });
+    if !venv_already_exists {
+        let create = Command::new(bootstrap_python)
+            .arg("-m")
+            .arg("venv")
+            .arg(venv_dir)
+            .output()
+            .map_err(|err| {
+                format!("failed to bootstrap oracle venv via `{bootstrap_python} -m venv`: {err}")
+            })?;
+        if !create.status.success() {
+            let stderr = String::from_utf8_lossy(&create.stderr);
+            let stdout = String::from_utf8_lossy(&create.stdout);
+            return install_numpy_into_user_interpreter(bootstrap_python).map_err(|pip_err| {
+                format!(
+                    "failed to bootstrap oracle venv via `{bootstrap_python} -m venv` (stdout={} stderr={}); fallback user-site install also failed: {}",
+                    stdout.trim(),
+                    stderr.trim(),
+                    pip_err
+                )
+            });
+        }
     }
 
     let install = Command::new(python_path)
