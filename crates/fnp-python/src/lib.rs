@@ -6276,31 +6276,31 @@ fn bartlett(py: Python<'_>, m: i64) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (m,))]
 fn hanning(py: Python<'_>, m: i64) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.hanning so the Hann (raised-cosine) window
-    // matches numpy across small/odd/even M, M=0/M=1 edge cases, and the
-    // float64 dtype convention.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("hanning")?.call1((m,))?.unbind())
+    // Rust-owned port of np.hanning. NumPy maps negative lengths to an
+    // empty float64 array, keeps M <= 1 special-cased, and otherwise
+    // emits the Hann window.
+    let result = UFuncArray::hanning(m.max(0) as usize);
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
 #[pyo3(signature = (m,))]
 fn hamming(py: Python<'_>, m: i64) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.hamming so the Hamming (cosine-bell with 0.54
-    // DC offset) window matches numpy across small/odd/even M, M=0/M=1
-    // edge cases, and the float64 dtype convention.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("hamming")?.call1((m,))?.unbind())
+    // Rust-owned port of np.hamming. NumPy maps negative lengths to an
+    // empty float64 array, keeps M <= 1 special-cased, and otherwise
+    // emits the Hamming window.
+    let result = UFuncArray::hamming(m.max(0) as usize);
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
 #[pyo3(signature = (m,))]
 fn blackman(py: Python<'_>, m: i64) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.blackman so the Blackman (three-cosine) window
-    // matches numpy across small/odd/even M, M=0/M=1 edge cases, and the
-    // float64 dtype convention.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("blackman")?.call1((m,))?.unbind())
+    // Rust-owned port of np.blackman. NumPy maps negative lengths to an
+    // empty float64 array, keeps M <= 1 special-cased, and otherwise
+    // emits the Blackman window.
+    let result = UFuncArray::blackman(m.max(0) as usize);
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -36903,9 +36903,9 @@ mod tests {
                 let ours_fn = module.getattr(name)?;
                 let numpy_fn = numpy.getattr(name)?;
 
-                // Edge cases: M=0 (empty window), M=1 (single sample of 1.0
-                // for hamming/blackman, 0.0 for hanning), and small M.
-                for m in [0_i64, 1, 2, 3, 8, 16, 33] {
+                // Edge cases: negative M and M=0 map to empty windows,
+                // M=1 is a single sample of 1.0, and then small/large sizes.
+                for m in [-3_i64, 0, 1, 2, 3, 8, 16, 33] {
                     let ours = ours_fn.call1((m,))?;
                     let theirs = numpy_fn.call1((m,))?;
                     assert_array_matches_numpy(&ours, &theirs)?;
