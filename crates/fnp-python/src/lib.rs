@@ -11541,22 +11541,46 @@ fn cross(
     axisc: i64,
     axis: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.cross so the cross-product result for 2-D and 3-D
-    // input vectors, axisa/axisb/axisc per-input axis selectors, the
-    // overriding `axis` shorthand, and broadcasting semantics all match
-    // numpy exactly across real and complex inputs.
     let numpy = py.import("numpy")?;
     let cross_fn = numpy.getattr("cross")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("axisa", axisa)?;
-    kwargs.set_item("axisb", axisb)?;
-    kwargs.set_item("axisc", axisc)?;
-    if let Some(value) = axis {
-        kwargs.set_item("axis", value.bind(py))?;
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("axisa", axisa)?;
+        kwargs.set_item("axisb", axisb)?;
+        kwargs.set_item("axisc", axisc)?;
+        if let Some(value) = axis.as_ref() {
+            kwargs.set_item("axis", value.bind(py))?;
+        }
+        Ok(cross_fn
+            .call((a.bind(py), b.bind(py)), Some(&kwargs))?
+            .unbind())
+    };
+
+    if axis.is_some() || axisa != -1 || axisb != -1 || axisc != -1 {
+        return fallback();
     }
-    Ok(cross_fn
-        .call((a.bind(py), b.bind(py)), Some(&kwargs))?
-        .unbind())
+
+    let a = match extract_precise_numeric_array(py, a.bind(py), "cross(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let b = match extract_precise_numeric_array(py, b.bind(py), "cross(b)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    if a.has_integer_sidecar()
+        || b.has_integer_sidecar()
+        || matches!(a.dtype(), DType::Complex64 | DType::Complex128)
+        || matches!(b.dtype(), DType::Complex64 | DType::Complex128)
+    {
+        return fallback();
+    }
+
+    let result = match a.cross(&b) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -12524,22 +12548,51 @@ fn take_along_axis(
     indices: Py<PyAny>,
     axis: Option<isize>,
 ) -> PyResult<Py<PyAny>> {
+    let arr_for_fallback = arr.clone_ref(py);
+    let indices_for_fallback = indices.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(
+            "axis",
+            match axis {
+                Some(axis) => axis.into_pyobject(py)?.into_any(),
+                None => py.None().into_bound(py),
+            },
+        )?;
+        Ok(numpy
+            .getattr("take_along_axis")?
+            .call(
+                (
+                    arr_for_fallback.bind(py),
+                    indices_for_fallback.bind(py),
+                ),
+                Some(&kwargs),
+            )?
+            .unbind())
+    };
     let arr = extract_numeric_array(py, arr.bind(py), "take_along_axis(arr)")?;
     let indices = extract_integer_array(py, indices.bind(py), "take_along_axis(indices)")?;
 
+    // numpy.take_along_axis raises IndexError (not ValueError) on
+    // out-of-bounds indices. Our ufunc layer returns Msg which
+    // map_ufunc_error flattens to PyValueError — fall back to numpy so
+    // the exception type, message, and traceback match verbatim.
     let result = match axis {
-        Some(axis) => arr
-            .take_along_axis(&indices, axis)
-            .map_err(map_ufunc_error)?,
+        Some(axis) => match arr.take_along_axis(&indices, axis) {
+            Ok(result) => result,
+            Err(_) => return fallback(),
+        },
         None => {
             if indices.shape().len() != 1 {
                 return Err(PyValueError::new_err(
                     "take_along_axis: when axis=None, indices must have a single dimension",
                 ));
             }
-            arr.flatten()
-                .take_along_axis(&indices, 0)
-                .map_err(map_ufunc_error)?
+            match arr.flatten().take_along_axis(&indices, 0) {
+                Ok(result) => result,
+                Err(_) => return fallback(),
+            }
         }
     };
 
@@ -15696,6 +15749,42 @@ mod tests {
                 ours.get_type(py).name()?.extract::<String>()?,
                 theirs.get_type(py).name()?.extract::<String>()?,
                 "take out-of-bounds error type diverges from numpy"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn take_along_axis_index_out_of_bounds_matches_numpy_indexerror() {
+        // numpy.take_along_axis raises IndexError (not ValueError) on
+        // out-of-bounds indices.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let take_along_axis_fn = module.getattr("take_along_axis")?;
+            let numpy_take_along_axis = numpy.getattr("take_along_axis")?;
+
+            let arr = numeric_array(
+                py,
+                vec![vec![1_i64, 2], vec![3, 4]],
+                "int64",
+            );
+            let indices = numeric_array(py, vec![vec![5_i64], vec![0]], "int64");
+
+            let ours = take_along_axis_fn
+                .call1((arr.clone(), indices.clone(), 0_i64))
+                .expect_err("take_along_axis(5) must error");
+            let theirs = numpy_take_along_axis
+                .call1((arr, indices, 0_i64))
+                .expect_err("numpy take_along_axis(5) must error");
+            assert_eq!(
+                ours.get_type(py).name()?.extract::<String>()?,
+                theirs.get_type(py).name()?.extract::<String>()?,
+                "take_along_axis out-of-bounds error type diverges from numpy"
             );
             Ok(())
         });
