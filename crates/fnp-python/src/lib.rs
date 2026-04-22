@@ -6239,6 +6239,36 @@ fn bartlett(py: Python<'_>, m: i64) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (m,))]
+fn hanning(py: Python<'_>, m: i64) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.hanning so the Hann (raised-cosine) window
+    // matches numpy across small/odd/even M, M=0/M=1 edge cases, and the
+    // float64 dtype convention.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("hanning")?.call1((m,))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (m,))]
+fn hamming(py: Python<'_>, m: i64) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.hamming so the Hamming (cosine-bell with 0.54
+    // DC offset) window matches numpy across small/odd/even M, M=0/M=1
+    // edge cases, and the float64 dtype convention.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("hamming")?.call1((m,))?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (m,))]
+fn blackman(py: Python<'_>, m: i64) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.blackman so the Blackman (three-cosine) window
+    // matches numpy across small/odd/even M, M=0/M=1 edge cases, and the
+    // float64 dtype convention.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("blackman")?.call1((m,))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x,))]
 fn iscomplex(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.iscomplex. Returns a bool array marking
@@ -8941,6 +8971,9 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(iscomplexobj, m)?)?;
     m.add_function(wrap_pyfunction!(angle, m)?)?;
     m.add_function(wrap_pyfunction!(bartlett, m)?)?;
+    m.add_function(wrap_pyfunction!(hanning, m)?)?;
+    m.add_function(wrap_pyfunction!(hamming, m)?)?;
+    m.add_function(wrap_pyfunction!(blackman, m)?)?;
     m.add_function(wrap_pyfunction!(iscomplex, m)?)?;
     m.add_function(wrap_pyfunction!(square, m)?)?;
     m.add_function(wrap_pyfunction!(cbrt, m)?)?;
@@ -9398,6 +9431,9 @@ mod tests {
             assert!(module.getattr("iscomplexobj").is_ok());
             assert!(module.getattr("angle").is_ok());
             assert!(module.getattr("bartlett").is_ok());
+            assert!(module.getattr("hanning").is_ok());
+            assert!(module.getattr("hamming").is_ok());
+            assert!(module.getattr("blackman").is_ok());
             assert!(module.getattr("iscomplex").is_ok());
             assert!(module.getattr("square").is_ok());
             assert!(module.getattr("cbrt").is_ok());
@@ -35604,6 +35640,61 @@ mod tests {
             let theirs_p = numpy_uw.call((deg.clone(),), Some(&period_kwargs))?;
             let ok_p: bool = allclose.call1((&ours_p, &theirs_p))?.extract()?;
             assert!(ok_p, "unwrap period=360 mismatch");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn hanning_hamming_blackman_match_numpy_across_small_odd_even_and_edge_m() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Each (name, our_fn, numpy_fn) triple is checked on the same
+            // set of window sizes.
+            for name in ["hanning", "hamming", "blackman"] {
+                let ours_fn = module.getattr(name)?;
+                let numpy_fn = numpy.getattr(name)?;
+
+                // Edge cases: M=0 (empty window), M=1 (single sample of 1.0
+                // for hamming/blackman, 0.0 for hanning), and small M.
+                for m in [0_i64, 1, 2, 3, 8, 16, 33] {
+                    let ours = ours_fn.call1((m,))?;
+                    let theirs = numpy_fn.call1((m,))?;
+                    assert_array_matches_numpy(&ours, &theirs)?;
+                    // Dtype must be float64 on both.
+                    let ours_dtype = ours.getattr("dtype")?.str()?.to_string();
+                    let theirs_dtype = theirs.getattr("dtype")?.str()?.to_string();
+                    assert_eq!(
+                        ours_dtype, theirs_dtype,
+                        "{name}(M={m}) dtype mismatch: ours={ours_dtype} theirs={theirs_dtype}"
+                    );
+                    // Shape must be (M,) when M > 0 (or (0,) when M == 0).
+                    let ours_shape: Vec<usize> = ours.getattr("shape")?.extract()?;
+                    assert_eq!(ours_shape, vec![m.max(0) as usize], "{name}(M={m}) shape");
+                }
+
+                // Symmetry: window values at positions i and M-1-i must be
+                // equal. Check for M=32 across each function.
+                let m = 32_i64;
+                let win = ours_fn.call1((m,))?;
+                let reversed_win = win.call_method1(
+                    "__getitem__",
+                    (py
+                        .import("builtins")?
+                        .getattr("slice")?
+                        .call1((py.None(), py.None(), -1_i64))?,),
+                )?;
+                let ok_sym: bool = allclose.call1((&win, &reversed_win))?.extract()?;
+                assert!(ok_sym, "{name}(M={m}) window must be symmetric");
+            }
 
             Ok(())
         });
