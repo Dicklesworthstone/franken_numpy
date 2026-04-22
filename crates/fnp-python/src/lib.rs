@@ -4346,20 +4346,71 @@ fn fix_invalid(
     copy: bool,
     fill_value: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ma.fix_invalid so invalid-value masking, mask=
-    // union semantics, copy=False aliasing, and fill_value forwarding
-    // match numpy exactly for scalar and n-D inputs.
+    let a_for_fallback = a.clone_ref(py);
+    let mask_for_fallback = mask.as_ref().map(|value| value.clone_ref(py));
+    let fill_value_for_fallback = fill_value.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let fix_invalid_fn = numpy.getattr("ma")?.getattr("fix_invalid")?;
+        let kwargs = PyDict::new(py);
+        if let Some(mask_val) = &mask_for_fallback {
+            kwargs.set_item("mask", mask_val.bind(py))?;
+        }
+        kwargs.set_item("copy", copy)?;
+        if let Some(fill_value_val) = &fill_value_for_fallback {
+            kwargs.set_item("fill_value", fill_value_val.bind(py))?;
+        }
+        Ok(fix_invalid_fn
+            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
+    if !copy {
+        return fallback();
+    }
+
     let numpy = py.import("numpy")?;
-    let fix_invalid_fn = numpy.getattr("ma")?.getattr("fix_invalid")?;
-    let kwargs = PyDict::new(py);
-    if let Some(mask_val) = mask {
-        kwargs.set_item("mask", mask_val.bind(py))?;
+    let builtins = py.import("builtins")?;
+    let asanyarray = numpy.call_method1("asanyarray", (a.bind(py),))?;
+    let masked_array_type = numpy.getattr("ma")?.getattr("MaskedArray")?;
+    let input_is_masked = builtins
+        .call_method1("isinstance", (&asanyarray, masked_array_type))?
+        .extract::<bool>()?;
+
+    let Some(masked) = extract_numeric_masked_array(py, a.bind(py), "fix_invalid(a)")? else {
+        return fallback();
+    };
+    let extra_mask = match mask.as_ref() {
+        Some(mask_val) => match extract_mask_operand(py, mask_val.bind(py), "fix_invalid(mask)") {
+            Ok(mask) => mask,
+            Err(_) => return fallback(),
+        },
+        None => None,
+    };
+    let resolved_fill_value = match fill_value.as_ref() {
+        Some(value) => match extract_precise_numeric_array(
+            py,
+            value.bind(py),
+            "fix_invalid(fill_value)",
+        ) {
+            Ok(fill_value) if fill_value.shape().is_empty() => fill_value.values()[0],
+            _ => return fallback(),
+        },
+        None => masked.fill_value(),
+    };
+
+    let merged_mask = ma_mask_or(masked.mask(), extra_mask.as_ref());
+    let mut fixed = MaskedArray::new(masked.data().clone(), merged_mask, Some(resolved_fill_value))
+        .map_err(|err| map_ma_error("fix_invalid", err))?;
+    fixed.fix_invalid();
+
+    let result = build_numpy_masked_array(py, &fixed)?;
+    if fill_value.is_some() || input_is_masked {
+        result
+            .bind(py)
+            .setattr("fill_value", resolved_fill_value)?;
     }
-    kwargs.set_item("copy", copy)?;
-    if let Some(fill_value_val) = fill_value {
-        kwargs.set_item("fill_value", fill_value_val.bind(py))?;
-    }
-    Ok(fix_invalid_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(result)
 }
 
 fn minimum_fill_value_for_supported_dtype(py: Python<'_>, dtype: DType) -> PyResult<Py<PyAny>> {
