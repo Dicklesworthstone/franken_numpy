@@ -7673,6 +7673,72 @@ fn linalg_vecdot(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, axis=None, fill_value=None, out=None, *, keepdims=false))]
+fn ma_argmax(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    fill_value: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
+    keepdims: bool,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to numpy.ma.argmax. Returns index of the maximum along
+    // an axis, respecting the MaskedArray mask so masked positions are
+    // ignored when possible. Matches numpy on masked/fully-masked input,
+    // axis=None flatten semantics, and keepdims shape parity.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis_val) = axis {
+        kwargs.set_item("axis", axis_val.bind(py))?;
+    }
+    if let Some(fv) = fill_value {
+        kwargs.set_item("fill_value", fv.bind(py))?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    kwargs.set_item("keepdims", keepdims)?;
+    Ok(numpy
+        .getattr("ma")?
+        .getattr("argmax")?
+        .call((a.bind(py),), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, axis=None, fill_value=None, out=None, *, keepdims=false))]
+fn ma_argmin(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    fill_value: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
+    keepdims: bool,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to numpy.ma.argmin. Returns index of the minimum along
+    // an axis, respecting the MaskedArray mask so masked positions are
+    // ignored when possible. Matches numpy on masked/fully-masked input,
+    // axis=None flatten semantics, and keepdims shape parity.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis_val) = axis {
+        kwargs.set_item("axis", axis_val.bind(py))?;
+    }
+    if let Some(fv) = fill_value {
+        kwargs.set_item("fill_value", fv.bind(py))?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    kwargs.set_item("keepdims", keepdims)?;
+    Ok(numpy
+        .getattr("ma")?
+        .getattr("argmin")?
+        .call((a.bind(py),), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (array, pad_width, mode="constant", **kwargs))]
 fn pad(
     py: Python<'_>,
@@ -9573,6 +9639,8 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(linalg_eig, m)?)?;
     m.add_function(wrap_pyfunction!(polyfit, m)?)?;
     m.add_function(wrap_pyfunction!(pad, m)?)?;
+    m.add_function(wrap_pyfunction!(ma_argmax, m)?)?;
+    m.add_function(wrap_pyfunction!(ma_argmin, m)?)?;
     m.add_function(wrap_pyfunction!(i0, m)?)?;
     m.add_function(wrap_pyfunction!(asfortranarray, m)?)?;
     m.add_function(wrap_pyfunction!(isrealobj, m)?)?;
@@ -10001,6 +10069,8 @@ mod tests {
             assert!(module.getattr("linalg_eig").is_ok());
             assert!(module.getattr("polyfit").is_ok());
             assert!(module.getattr("pad").is_ok());
+            assert!(module.getattr("ma_argmax").is_ok());
+            assert!(module.getattr("ma_argmin").is_ok());
             assert!(module.getattr("i0").is_ok());
             assert!(module.getattr("asfortranarray").is_ok());
             assert!(module.getattr("isrealobj").is_ok());
@@ -37657,6 +37727,78 @@ mod tests {
                     &numpy_pad.call((a1.clone(), 2_i64), Some(&stat_kwargs))?,
                 )?;
             }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ma_argmax_argmin_match_numpy_across_masked_axis_keepdims_and_flatten() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let amx_fn = module.getattr("ma_argmax")?;
+            let amn_fn = module.getattr("ma_argmin")?;
+            let numpy = py.import("numpy")?;
+            let numpy_amx = numpy.getattr("ma")?.getattr("argmax")?;
+            let numpy_amn = numpy.getattr("ma")?.getattr("argmin")?;
+            let ma_array = numpy.getattr("ma")?.getattr("array")?;
+
+            // Simple 1-D masked array: mask shadows a would-be max.
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("mask", vec![false, false, true, false, false])?;
+            let m1 = ma_array.call(
+                (vec![1_i64, 2, 99, 3, 4],),
+                Some(&kwargs),
+            )?;
+            let ours_mx: i64 = amx_fn.call1((m1.clone(),))?.extract()?;
+            let theirs_mx: i64 = numpy_amx.call1((m1.clone(),))?.extract()?;
+            assert_eq!(ours_mx, theirs_mx);
+            assert_eq!(ours_mx, 4); // max among unmasked is 4 at index 4
+
+            let ours_mn: i64 = amn_fn.call1((m1.clone(),))?.extract()?;
+            let theirs_mn: i64 = numpy_amn.call1((m1.clone(),))?.extract()?;
+            assert_eq!(ours_mn, theirs_mn);
+            assert_eq!(ours_mn, 0);
+
+            // Axis-specific on 2-D.
+            let m2_kwargs = PyDict::new(py);
+            m2_kwargs.set_item(
+                "mask",
+                vec![vec![false, true, false], vec![false, false, false]],
+            )?;
+            let m2 = ma_array.call(
+                (vec![vec![1_i64, 99, 3], vec![4, 5, 6]],),
+                Some(&m2_kwargs),
+            )?;
+            let ax_kw = PyDict::new(py);
+            ax_kw.set_item("axis", 0_i64)?;
+            let ours_ax_mx = amx_fn.call((m2.clone(),), Some(&ax_kw))?;
+            let theirs_ax_mx = numpy_amx.call((m2.clone(),), Some(&ax_kw))?;
+            assert_array_matches_numpy(&ours_ax_mx, &theirs_ax_mx)?;
+            let ours_ax_mn = amn_fn.call((m2.clone(),), Some(&ax_kw))?;
+            let theirs_ax_mn = numpy_amn.call((m2.clone(),), Some(&ax_kw))?;
+            assert_array_matches_numpy(&ours_ax_mn, &theirs_ax_mn)?;
+
+            // keepdims=True shape parity.
+            let kd_kw = PyDict::new(py);
+            kd_kw.set_item("axis", 1_i64)?;
+            kd_kw.set_item("keepdims", true)?;
+            let ours_kd = amx_fn.call((m2.clone(),), Some(&kd_kw))?;
+            let theirs_kd = numpy_amx.call((m2.clone(),), Some(&kd_kw))?;
+            assert_eq!(
+                ours_kd.getattr("shape")?.extract::<Vec<usize>>()?,
+                theirs_kd.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+
+            // axis=None flattens, matching numpy's default.
+            let ours_flat: i64 = amx_fn.call1((m2.clone(),))?.extract()?;
+            let theirs_flat: i64 = numpy_amx.call1((m2.clone(),))?.extract()?;
+            assert_eq!(ours_flat, theirs_flat);
 
             Ok(())
         });
