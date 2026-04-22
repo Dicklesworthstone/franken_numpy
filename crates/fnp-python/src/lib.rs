@@ -3238,6 +3238,26 @@ fn py_broadcast_shapes(py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, b, max_work=0_i64))]
+fn may_share_memory(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    b: Py<PyAny>,
+    max_work: i64,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.may_share_memory so the fast bounds-only heuristic,
+    // ravel-vs-flatten distinction, strided/reversed view behavior, disjoint
+    // arrays, and max_work kwarg surface all match numpy exactly.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("max_work", max_work)?;
+    Ok(numpy
+        .getattr("may_share_memory")?
+        .call((a.bind(py), b.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, a_min, a_max, out=None, **kwargs))]
 fn clip(
     py: Python<'_>,
@@ -7435,6 +7455,21 @@ fn sort(
 }
 
 #[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn argsort(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // Raw passthrough to np.argsort so omitted-vs-None axis behavior,
+    // stable sorting semantics, and structured dtype field ordering
+    // remain exactly aligned with numpy's current Python surface.
+    let numpy = py.import("numpy")?;
+    let argsort_fn = numpy.getattr("argsort")?;
+    Ok(argsort_fn.call(args, kwargs)?.unbind())
+}
+
+#[pyfunction]
 fn sort_complex(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.sort_complex so integer inputs upcast to complex,
     // complex lexicographic ordering, NaN placement, and copy semantics
@@ -8770,7 +8805,9 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(logspace, m)?)?;
     m.add_function(wrap_pyfunction!(copy, m)?)?;
     m.add_function(wrap_pyfunction!(sort, m)?)?;
+    m.add_function(wrap_pyfunction!(argsort, m)?)?;
     m.add_function(wrap_pyfunction!(py_broadcast_shapes, m)?)?;
+    m.add_function(wrap_pyfunction!(may_share_memory, m)?)?;
     m.add_function(wrap_pyfunction!(sort_complex, m)?)?;
     m.add_function(wrap_pyfunction!(nanmedian, m)?)?;
     m.add_function(wrap_pyfunction!(ma_average, m)?)?;
@@ -9154,7 +9191,9 @@ mod tests {
             assert!(module.getattr("logspace").is_ok());
             assert!(module.getattr("copy").is_ok());
             assert!(module.getattr("sort").is_ok());
+            assert!(module.getattr("argsort").is_ok());
             assert!(module.getattr("broadcast_shapes").is_ok());
+            assert!(module.getattr("may_share_memory").is_ok());
             assert!(module.getattr("sort_complex").is_ok());
             assert!(module.getattr("nanmedian").is_ok());
             assert!(module.getattr("ma_average").is_ok());
@@ -34044,6 +34083,97 @@ mod tests {
     }
 
     #[test]
+    fn argsort_matches_numpy_across_numeric_axes_stability_and_structured_order() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let argsort_fn = module.getattr("argsort")?;
+            let numpy = py.import("numpy")?;
+            let numpy_argsort = numpy.getattr("argsort")?;
+            let array_fn = numpy.getattr("array")?;
+            let dtype_fn = numpy.getattr("dtype")?;
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+
+            // 1-D integer input.
+            let ints = array_fn.call1((vec![3_i64, 1, 2, -5, 0],))?;
+            assert_array_matches_numpy(
+                &argsort_fn.call1((ints.clone(),))?,
+                &numpy_argsort.call1((ints.clone(),))?,
+            )?;
+
+            // axis=None flattening behavior.
+            let matrix = array_fn.call1((vec![vec![3_i64, 1], vec![2_i64, 4]],))?;
+            let flatten_kwargs = PyDict::new(py);
+            flatten_kwargs.set_item("axis", py.None())?;
+            assert_array_matches_numpy(
+                &argsort_fn.call((matrix.clone(),), Some(&flatten_kwargs))?,
+                &numpy_argsort.call((matrix.clone(),), Some(&flatten_kwargs))?,
+            )?;
+
+            // axis=0 / axis=1 on 2-D input.
+            let axis0_kwargs = PyDict::new(py);
+            axis0_kwargs.set_item("axis", 0_i64)?;
+            assert_array_matches_numpy(
+                &argsort_fn.call((matrix.clone(),), Some(&axis0_kwargs))?,
+                &numpy_argsort.call((matrix.clone(),), Some(&axis0_kwargs))?,
+            )?;
+            let axis1_kwargs = PyDict::new(py);
+            axis1_kwargs.set_item("axis", 1_i64)?;
+            assert_array_matches_numpy(
+                &argsort_fn.call((matrix.clone(),), Some(&axis1_kwargs))?,
+                &numpy_argsort.call((matrix.clone(),), Some(&axis1_kwargs))?,
+            )?;
+
+            // Structured dtype ordering via order=...
+            let dtype_spec = PyList::empty(py);
+            dtype_spec.append(PyTuple::new(py, ["x", "i4"])?)?;
+            dtype_spec.append(PyTuple::new(py, ["y", "i4"])?)?;
+            let structured_dtype = dtype_fn.call1((dtype_spec,))?;
+            let structured_rows = PyList::empty(py);
+            structured_rows.append(PyTuple::new(py, [2_i32, 8_i32])?)?;
+            structured_rows.append(PyTuple::new(py, [1_i32, 7_i32])?)?;
+            structured_rows.append(PyTuple::new(py, [2_i32, 3_i32])?)?;
+            structured_rows.append(PyTuple::new(py, [1_i32, 9_i32])?)?;
+            let structured_kwargs = PyDict::new(py);
+            structured_kwargs.set_item("dtype", structured_dtype)?;
+            let structured = array_fn.call((structured_rows,), Some(&structured_kwargs))?;
+            let order_kwargs = PyDict::new(py);
+            order_kwargs.set_item("order", "x")?;
+            assert_array_matches_numpy(
+                &argsort_fn.call((structured.clone(),), Some(&order_kwargs))?,
+                &numpy_argsort.call((structured.clone(),), Some(&order_kwargs))?,
+            )?;
+
+            // stable=True parity on tied values.
+            let tied = array_fn.call1((vec![2_i64, 1, 2, 1, 2, 1],))?;
+            let stable_kwargs = PyDict::new(py);
+            stable_kwargs.set_item("stable", true)?;
+            assert_array_matches_numpy(
+                &argsort_fn.call((tied.clone(),), Some(&stable_kwargs))?,
+                &numpy_argsort.call((tied.clone(),), Some(&stable_kwargs))?,
+            )?;
+
+            // NaN / complex ordering surface behavior.
+            let complex_items = PyList::empty(py);
+            complex_items.append(py_complex.call1((1.0_f64, 5.0_f64))?)?;
+            complex_items.append(py_complex.call1((f64::NAN, 1.0_f64))?)?;
+            complex_items.append(py_complex.call1((1.0_f64, -2.0_f64))?)?;
+            complex_items.append(py_complex.call1((0.0_f64, 0.0_f64))?)?;
+            let complex_input = array_fn.call1((complex_items,))?;
+            assert_array_matches_numpy(
+                &argsort_fn.call1((complex_input.clone(),))?,
+                &numpy_argsort.call1((complex_input.clone(),))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn broadcast_shapes_matches_numpy_across_pairwise_nary_scalar_rank_and_errors() {
         with_python(|py| {
             if !numpy_available(py) {
@@ -34120,6 +34250,124 @@ mod tests {
                 .call1(((3_i64, 4_i64), (2_i64, 4_i64)))
                 .expect_err("numpy must also error on incompatible shapes");
             assert_pyerr_matches_numpy(py, ours_err, theirs_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn may_share_memory_matches_numpy_across_self_view_disjoint_strided_and_max_work() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let msm_fn = module.getattr("may_share_memory")?;
+            let numpy = py.import("numpy")?;
+            let numpy_msm = numpy.getattr("may_share_memory")?;
+            let arange = numpy.getattr("arange")?;
+            let array_fn = numpy.getattr("array")?;
+
+            let a = arange.call1((12_i64,))?;
+
+            // Same array with itself: heuristic must return True, matching numpy.
+            let ours_self: bool = msm_fn.call1((a.clone(), a.clone()))?.extract()?;
+            let theirs_self: bool = numpy_msm.call1((a.clone(), a.clone()))?.extract()?;
+            assert_eq!(ours_self, theirs_self);
+            assert!(ours_self, "self-may_share_memory must be True");
+
+            // Ravel view shares memory with its source; flatten is a copy.
+            let ravel_view = a.call_method0("ravel")?;
+            let ours_ravel: bool = msm_fn.call1((a.clone(), ravel_view.clone()))?.extract()?;
+            let theirs_ravel: bool = numpy_msm.call1((a.clone(), ravel_view.clone()))?.extract()?;
+            assert_eq!(ours_ravel, theirs_ravel);
+
+            let flatten_copy = a.call_method0("flatten")?;
+            let ours_flat: bool = msm_fn.call1((a.clone(), flatten_copy.clone()))?.extract()?;
+            let theirs_flat: bool = numpy_msm
+                .call1((a.clone(), flatten_copy.clone()))?
+                .extract()?;
+            assert_eq!(ours_flat, theirs_flat);
+
+            // Overlapping slice views: heuristic reports potential overlap.
+            let slice_args = PyDict::new(py);
+            let builtins = py.import("builtins")?;
+            let s1 = builtins
+                .getattr("slice")?
+                .call1((0_i64, 8_i64))?;
+            let s2 = builtins
+                .getattr("slice")?
+                .call1((2_i64, 10_i64))?;
+            let _ = slice_args;
+            let overlap_a = a.call_method1("__getitem__", (s1.clone(),))?;
+            let overlap_b = a.call_method1("__getitem__", (s2.clone(),))?;
+            let ours_overlap: bool = msm_fn
+                .call1((overlap_a.clone(), overlap_b.clone()))?
+                .extract()?;
+            let theirs_overlap: bool = numpy_msm
+                .call1((overlap_a.clone(), overlap_b.clone()))?
+                .extract()?;
+            assert_eq!(ours_overlap, theirs_overlap);
+
+            // Clearly disjoint arrays: heuristic returns False on both.
+            let disjoint_a = arange.call1((8_i64,))?;
+            let disjoint_b = arange.call1((8_i64,))?;
+            let ours_disjoint: bool = msm_fn
+                .call1((disjoint_a.clone(), disjoint_b.clone()))?
+                .extract()?;
+            let theirs_disjoint: bool = numpy_msm
+                .call1((disjoint_a.clone(), disjoint_b.clone()))?
+                .extract()?;
+            assert_eq!(ours_disjoint, theirs_disjoint);
+            assert!(!ours_disjoint, "independent arange arrays must not share memory");
+
+            // Reversed / strided views still participate in the heuristic.
+            let reversed = a.call_method1(
+                "__getitem__",
+                (builtins
+                    .getattr("slice")?
+                    .call1((py.None(), py.None(), -1_i64))?,),
+            )?;
+            let ours_rev: bool = msm_fn.call1((a.clone(), reversed.clone()))?.extract()?;
+            let theirs_rev: bool = numpy_msm.call1((a.clone(), reversed.clone()))?.extract()?;
+            assert_eq!(ours_rev, theirs_rev);
+
+            // max_work kwarg surface parity. max_work=-1 forces an exact
+            // (possibly expensive) check; result must still match numpy.
+            let exact_kwargs = PyDict::new(py);
+            exact_kwargs.set_item("max_work", -1_i64)?;
+            let ours_exact: bool = msm_fn
+                .call((a.clone(), ravel_view.clone()), Some(&exact_kwargs))?
+                .extract()?;
+            let theirs_exact: bool = numpy_msm
+                .call((a.clone(), ravel_view.clone()), Some(&exact_kwargs))?
+                .extract()?;
+            assert_eq!(ours_exact, theirs_exact);
+
+            // 2-D C-contiguous source: axis-1 slice views must report
+            // overlap identically to numpy.
+            let matrix = array_fn.call1((vec![
+                vec![0_i64, 1, 2, 3],
+                vec![4, 5, 6, 7],
+                vec![8, 9, 10, 11],
+            ],))?;
+            let col_slice_0 = builtins
+                .getattr("slice")?
+                .call1((0_i64, 3_i64))?;
+            let col_slice_1 = builtins
+                .getattr("slice")?
+                .call1((1_i64, 4_i64))?;
+            let cols_a = matrix.call_method1("__getitem__", ((py.Ellipsis(), col_slice_0),))?;
+            let cols_b = matrix.call_method1("__getitem__", ((py.Ellipsis(), col_slice_1),))?;
+            let ours_cols: bool = msm_fn
+                .call1((cols_a.clone(), cols_b.clone()))?
+                .extract()?;
+            let theirs_cols: bool = numpy_msm
+                .call1((cols_a.clone(), cols_b.clone()))?
+                .extract()?;
+            assert_eq!(ours_cols, theirs_cols);
 
             Ok(())
         });
