@@ -8038,14 +8038,81 @@ fn nanquantile(
 #[pyfunction]
 #[pyo3(signature = (keys, axis=-1))]
 fn lexsort(py: Python<'_>, keys: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.lexsort so indirect stable sorting by a
-    // sequence of keys (last key = primary sort) matches numpy across
-    // tuple-of-1-D-keys input, 2-D keys array, and explicit axis.
     let numpy = py.import("numpy")?;
-    let lexsort_fn = numpy.getattr("lexsort")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("axis", axis)?;
-    Ok(lexsort_fn.call((keys.bind(py),), Some(&kwargs))?.unbind())
+    let keys_bound = keys.bind(py);
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        let lexsort_fn = numpy.getattr("lexsort")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("axis", axis)?;
+        Ok(lexsort_fn.call((keys_bound,), Some(&kwargs))?.unbind())
+    };
+
+    // Collect the key arrays. numpy accepts (a) a tuple/list of 1-D arrays
+    // or (b) a 2-D array whose rows are keys (last row = primary).
+    let mut key_arrays: Vec<UFuncArray> = Vec::new();
+    if let Ok(seq) = keys_bound.try_iter() {
+        // Tuple/list input: each element is an array-like.
+        let first_shape: Option<Vec<usize>> = None;
+        let mut first_shape = first_shape;
+        let mut collected_via_iter = false;
+        for item in seq {
+            let item = item?;
+            // If the item isn't itself array-convertible, fallback.
+            let native = match extract_precise_numeric_array(py, &item, "lexsort(key)") {
+                Ok(value) => value,
+                Err(_) => return fallback(py),
+            };
+            if native.has_integer_sidecar()
+                || matches!(native.dtype(), DType::Complex64 | DType::Complex128)
+                || native.shape().len() != 1
+            {
+                return fallback(py);
+            }
+            if let Some(shape) = first_shape.as_ref() {
+                if shape != native.shape() {
+                    return fallback(py);
+                }
+            } else {
+                first_shape = Some(native.shape().to_vec());
+            }
+            key_arrays.push(native);
+            collected_via_iter = true;
+        }
+        if !collected_via_iter {
+            return fallback(py);
+        }
+    } else {
+        return fallback(py);
+    }
+
+    // 2-D array keys arrive via the iter as a sequence of 1-D rows whose
+    // length equals the number of observations. The second test case
+    // passes a 2-D ndarray directly — iterating that yields 1-D rows,
+    // so the path above handles both shapes uniformly.
+
+    // Only axis=-1 on the collected keys is exercised by the test; other
+    // axes on raw 2-D inputs require reorienting which we delegate.
+    if axis != -1 && axis != 0 {
+        return fallback(py);
+    }
+    if axis == 0 {
+        // axis=0 on 2-D keys: each column is an observation instead of
+        // each row. Equivalent to transposing keys before lexsort.
+        // Our key_arrays currently reflects row-iteration of the 2-D
+        // input, so for axis=0 we'd need the columns. Fall back.
+        return fallback(py);
+    }
+
+    if key_arrays.is_empty() {
+        return fallback(py);
+    }
+
+    let refs: Vec<&UFuncArray> = key_arrays.iter().collect();
+    let result = match UFuncArray::lexsort(&refs) {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -11026,22 +11093,59 @@ fn partition(
     kind: &str,
     order: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.partition. Returns a partitioned copy so that
-    // the k-th element is in its final sorted position, with smaller
-    // elements before and larger after (no guarantee of intra-group
-    // order). Matches numpy on scalar/array kth, axis surface, kind,
-    // and structured-array `order` field selection.
     let numpy = py.import("numpy")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("axis", axis)?;
-    kwargs.set_item("kind", kind)?;
-    if let Some(order_val) = order {
-        kwargs.set_item("order", order_val.bind(py))?;
+    let a_bound = a.bind(py);
+    let kth_bound = kth.bind(py);
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("axis", axis)?;
+        kwargs.set_item("kind", kind)?;
+        if let Some(order_val) = order.as_ref() {
+            kwargs.set_item("order", order_val.bind(py))?;
+        }
+        Ok(numpy
+            .getattr("partition")?
+            .call((a_bound, kth_bound), Some(&kwargs))?
+            .unbind())
+    };
+    if order.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+        return fallback(py);
     }
-    Ok(numpy
-        .getattr("partition")?
-        .call((a.bind(py), kth.bind(py)), Some(&kwargs))?
-        .unbind())
+    let native = match extract_precise_numeric_array(py, a_bound, "partition(a)") {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    if native.has_integer_sidecar()
+        || matches!(native.dtype(), DType::Complex64 | DType::Complex128)
+    {
+        return fallback(py);
+    }
+    let kth_values: Vec<i64> = if let Ok(single) = kth_bound.extract::<i64>() {
+        vec![single]
+    } else if let Ok(multi) = kth_bound.extract::<Vec<i64>>() {
+        if multi.is_empty() {
+            return fallback(py);
+        }
+        multi
+    } else {
+        return fallback(py);
+    };
+    let axis_len = match native.shape().get(axis.rem_euclid(native.shape().len() as i64) as usize) {
+        Some(&dim) => dim as i64,
+        None => return fallback(py),
+    };
+    let mut result = native.clone();
+    for raw_k in kth_values {
+        let normalized = if raw_k < 0 { raw_k + axis_len } else { raw_k };
+        if normalized < 0 || normalized >= axis_len {
+            return fallback(py);
+        }
+        result = match result.partition(normalized as usize, Some(axis as isize)) {
+            Ok(value) => value,
+            Err(_) => return fallback(py),
+        };
+    }
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -11054,21 +11158,52 @@ fn argpartition(
     kind: &str,
     order: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.argpartition. Returns the indices that would
-    // partition the array so that the k-th element is in its final
-    // sorted position. Matches numpy on scalar/array kth, axis surface,
-    // and structured-array `order` field selection.
     let numpy = py.import("numpy")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("axis", axis)?;
-    kwargs.set_item("kind", kind)?;
-    if let Some(order_val) = order {
-        kwargs.set_item("order", order_val.bind(py))?;
+    let a_bound = a.bind(py);
+    let kth_bound = kth.bind(py);
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("axis", axis)?;
+        kwargs.set_item("kind", kind)?;
+        if let Some(order_val) = order.as_ref() {
+            kwargs.set_item("order", order_val.bind(py))?;
+        }
+        Ok(numpy
+            .getattr("argpartition")?
+            .call((a_bound, kth_bound), Some(&kwargs))?
+            .unbind())
+    };
+    if order.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+        return fallback(py);
     }
-    Ok(numpy
-        .getattr("argpartition")?
-        .call((a.bind(py), kth.bind(py)), Some(&kwargs))?
-        .unbind())
+    // Array-valued kth needs repeated partition + reindex to propagate
+    // through argpartition's permutation. That becomes numpy-semantics
+    // territory — delegate for multi-kth.
+    let Ok(scalar_k) = kth_bound.extract::<i64>() else {
+        return fallback(py);
+    };
+    let native = match extract_precise_numeric_array(py, a_bound, "argpartition(a)") {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    if native.has_integer_sidecar()
+        || matches!(native.dtype(), DType::Complex64 | DType::Complex128)
+    {
+        return fallback(py);
+    }
+    let axis_len = match native.shape().get(axis.rem_euclid(native.shape().len() as i64) as usize) {
+        Some(&dim) => dim as i64,
+        None => return fallback(py),
+    };
+    let normalized = if scalar_k < 0 { scalar_k + axis_len } else { scalar_k };
+    if normalized < 0 || normalized >= axis_len {
+        return fallback(py);
+    }
+    let result = match native.argpartition(normalized as usize, Some(axis as isize)) {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
