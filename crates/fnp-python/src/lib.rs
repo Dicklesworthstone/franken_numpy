@@ -8010,22 +8010,104 @@ fn arange(
     device: Option<Py<PyAny>>,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.arange so positional arity, negative-step
-    // traversal, dtype coercion, float-step rounding behavior, and
-    // empty-range handling all match numpy exactly.
     let numpy = py.import("numpy")?;
-    let arange_fn = numpy.getattr("arange")?;
-    let kwargs = PyDict::new(py);
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        let arange_fn = numpy.getattr("arange")?;
+        let kwargs = PyDict::new(py);
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        if let Some(device_val) = device.as_ref() {
+            kwargs.set_item("device", device_val.bind(py))?;
+        }
+        if let Some(like_val) = like.as_ref() {
+            kwargs.set_item("like", like_val.bind(py))?;
+        }
+        Ok(arange_fn.call(args, Some(&kwargs))?.unbind())
+    };
+    if device.as_ref().is_some_and(|value| !value.bind(py).is_none())
+        || like.as_ref().is_some_and(|value| !value.bind(py).is_none())
+    {
+        return fallback(py);
     }
-    if let Some(device_val) = device {
-        kwargs.set_item("device", device_val.bind(py))?;
+
+    let arity = args.len();
+    if !(1..=3).contains(&arity) {
+        return fallback(py);
     }
-    if let Some(like_val) = like {
-        kwargs.set_item("like", like_val.bind(py))?;
-    }
-    Ok(arange_fn.call(args, Some(&kwargs))?.unbind())
+    let get = |idx: usize| args.get_item(idx);
+    let mut all_integer = true;
+    let (start_f, stop_f, step_f) = match arity {
+        1 => {
+            let stop_item = get(0)?;
+            if stop_item.extract::<i64>().is_err() {
+                all_integer = false;
+            }
+            let Ok(stop) = stop_item.extract::<f64>() else {
+                return fallback(py);
+            };
+            (0.0_f64, stop, 1.0_f64)
+        }
+        2 => {
+            let start_item = get(0)?;
+            let stop_item = get(1)?;
+            if start_item.extract::<i64>().is_err() || stop_item.extract::<i64>().is_err() {
+                all_integer = false;
+            }
+            let Ok(start) = start_item.extract::<f64>() else {
+                return fallback(py);
+            };
+            let Ok(stop) = stop_item.extract::<f64>() else {
+                return fallback(py);
+            };
+            (start, stop, 1.0_f64)
+        }
+        _ => {
+            let start_item = get(0)?;
+            let stop_item = get(1)?;
+            let step_item = get(2)?;
+            if start_item.extract::<i64>().is_err()
+                || stop_item.extract::<i64>().is_err()
+                || step_item.extract::<i64>().is_err()
+            {
+                all_integer = false;
+            }
+            let Ok(start) = start_item.extract::<f64>() else {
+                return fallback(py);
+            };
+            let Ok(stop) = stop_item.extract::<f64>() else {
+                return fallback(py);
+            };
+            let Ok(step) = step_item.extract::<f64>() else {
+                return fallback(py);
+            };
+            (start, stop, step)
+        }
+    };
+
+    let resolved_dtype = match dtype.as_ref() {
+        Some(dtype_val) if !dtype_val.bind(py).is_none() => {
+            let parsed = numpy.getattr("dtype")?.call1((dtype_val.bind(py),))?;
+            let name = parsed.getattr("name")?.extract::<String>()?;
+            match DType::parse(&name) {
+                Some(value) if dtype_supported_by_numpy_export_bridge(value) => value,
+                _ => return fallback(py),
+            }
+        }
+        _ => {
+            if all_integer {
+                DType::I64
+            } else {
+                DType::F64
+            }
+        }
+    };
+
+    let result = match UFuncArray::arange(start_f, stop_f, step_f, resolved_dtype) {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -8042,25 +8124,77 @@ fn linspace(
     axis: isize,
     device: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.linspace so endpoint handling, retstep tuple
-    // shape, dtype coercion, integer/float endpoint promotion, and
-    // axis insertion on array endpoints all match numpy exactly.
     let numpy = py.import("numpy")?;
-    let linspace_fn = numpy.getattr("linspace")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("num", num)?;
-    kwargs.set_item("endpoint", endpoint)?;
-    kwargs.set_item("retstep", retstep)?;
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        let linspace_fn = numpy.getattr("linspace")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("num", num)?;
+        kwargs.set_item("endpoint", endpoint)?;
+        kwargs.set_item("retstep", retstep)?;
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        kwargs.set_item("axis", axis)?;
+        if let Some(device_val) = device.as_ref() {
+            kwargs.set_item("device", device_val.bind(py))?;
+        }
+        Ok(linspace_fn
+            .call((start.bind(py), stop.bind(py)), Some(&kwargs))?
+            .unbind())
+    };
+    if device.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+        return fallback(py);
     }
-    kwargs.set_item("axis", axis)?;
-    if let Some(device_val) = device {
-        kwargs.set_item("device", device_val.bind(py))?;
+    if num < 0 {
+        return fallback(py);
     }
-    Ok(linspace_fn
-        .call((start.bind(py), stop.bind(py)), Some(&kwargs))?
-        .unbind())
+    let Ok(start_f) = start.bind(py).extract::<f64>() else {
+        return fallback(py);
+    };
+    let Ok(stop_f) = stop.bind(py).extract::<f64>() else {
+        return fallback(py);
+    };
+    let resolved_dtype = match dtype.as_ref() {
+        Some(dtype_val) if !dtype_val.bind(py).is_none() => {
+            let parsed = numpy.getattr("dtype")?.call1((dtype_val.bind(py),))?;
+            let name = parsed.getattr("name")?.extract::<String>()?;
+            match DType::parse(&name) {
+                Some(value)
+                    if dtype_supported_by_numpy_export_bridge(value)
+                        && matches!(value, DType::F16 | DType::F32 | DType::F64) =>
+                {
+                    value
+                }
+                _ => return fallback(py),
+            }
+        }
+        _ => DType::F64,
+    };
+
+    let num_usize = num as usize;
+    if retstep {
+        let (array, step) =
+            match UFuncArray::linspace_retstep(start_f, stop_f, num_usize, endpoint, resolved_dtype) {
+                Ok(value) => value,
+                Err(_) => return fallback(py),
+            };
+        let array_py = build_numpy_array_from_ufunc(py, &array)?;
+        let step_py = numpy
+            .getattr(match resolved_dtype {
+                DType::F16 => "float16",
+                DType::F32 => "float32",
+                _ => "float64",
+            })?
+            .call1((step,))?;
+        let tuple = PyTuple::new(py, [array_py.bind(py), &step_py])?;
+        return Ok(tuple.into_any().unbind());
+    }
+
+    let result = match UFuncArray::linspace_endpoint(start_f, stop_f, num_usize, endpoint, resolved_dtype) {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -8074,9 +8208,11 @@ fn geomspace(
     dtype: Option<Py<PyAny>>,
     axis: isize,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.geomspace so logarithmic spacing, supported
-    // negative/complex endpoint handling, dtype coercion, and axis
-    // insertion on array endpoints all match numpy exactly.
+    // np.geomspace's exact ULP pattern (guaranteed endpoint reproduction
+    // plus negative/complex endpoint support) is not reproducible with a
+    // simple (stop/start)**(1/(num-1)) progression; bit-exact parity
+    // tests fail when we synthesize it ourselves. Keep this as a thin
+    // wrapper while preserving the kwarg surface.
     let numpy = py.import("numpy")?;
     let geomspace_fn = numpy.getattr("geomspace")?;
     let kwargs = PyDict::new(py);
@@ -8102,25 +8238,69 @@ fn full(
     device: Option<Py<PyAny>>,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.full so scalar/tuple shapes, dtype coercion,
-    // object fills, zero-sized dimensions, memory-order requests, and
-    // scalar-array fill behavior all match numpy exactly.
     let numpy = py.import("numpy")?;
-    let full_fn = numpy.getattr("full")?;
-    let kwargs = PyDict::new(py);
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        let full_fn = numpy.getattr("full")?;
+        let kwargs = PyDict::new(py);
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        kwargs.set_item("order", order)?;
+        if let Some(device_val) = device.as_ref() {
+            kwargs.set_item("device", device_val.bind(py))?;
+        }
+        if let Some(like_val) = like.as_ref() {
+            kwargs.set_item("like", like_val.bind(py))?;
+        }
+        Ok(full_fn
+            .call((shape.bind(py), fill_value.bind(py)), Some(&kwargs))?
+            .unbind())
+    };
+
+    if device.as_ref().is_some_and(|value| !value.bind(py).is_none())
+        || like.as_ref().is_some_and(|value| !value.bind(py).is_none())
+    {
+        return fallback(py);
     }
-    kwargs.set_item("order", order)?;
-    if let Some(device_val) = device {
-        kwargs.set_item("device", device_val.bind(py))?;
+    if !matches!(order, "C" | "K") {
+        return fallback(py);
     }
-    if let Some(like_val) = like {
-        kwargs.set_item("like", like_val.bind(py))?;
-    }
-    Ok(full_fn
-        .call((shape.bind(py), fill_value.bind(py)), Some(&kwargs))?
-        .unbind())
+
+    let target_shape = match parse_shape_override(shape.bind(py), "full(shape)") {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+
+    let fill_bound = fill_value.bind(py);
+    let fill_float = match fill_bound.extract::<f64>() {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+
+    let resolved_dtype = match dtype.as_ref() {
+        Some(dtype_val) if !dtype_val.bind(py).is_none() => {
+            let parsed = numpy.getattr("dtype")?.call1((dtype_val.bind(py),))?;
+            let name = parsed.getattr("name")?.extract::<String>()?;
+            match DType::parse(&name) {
+                Some(value) if dtype_supported_by_numpy_export_bridge(value) => value,
+                _ => return fallback(py),
+            }
+        }
+        _ => {
+            // numpy infers dtype from fill_value: integer → int, float → float64.
+            if fill_bound.extract::<i64>().is_ok() {
+                DType::I64
+            } else {
+                DType::F64
+            }
+        }
+    };
+
+    let result = match UFuncArray::full(target_shape, fill_float, resolved_dtype) {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 fn parse_shape_override(
@@ -8462,9 +8642,13 @@ fn asarray(
     device: Option<Py<PyAny>>,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.asarray so list/scalar normalization,
-    // dtype coercion, memory-order requests, copy= semantics, and
-    // object-dtype preservation stay exactly aligned with numpy.
+    // np.asarray has a critical identity contract: `copy=False` with a
+    // compatible ndarray must return the SAME object so `np.shares_memory`
+    // reports True, and `order='F'` must produce a real F-contiguous
+    // ndarray (our export bridge only materializes C-contiguous output).
+    // Reproducing both semantics natively would duplicate numpy's whole
+    // asarray dispatch for negligible benefit; delegate and let numpy
+    // own the aliasing/layout surface.
     let numpy = py.import("numpy")?;
     let asarray_fn = numpy.getattr("asarray")?;
     let kwargs = PyDict::new(py);
@@ -8497,9 +8681,11 @@ fn asanyarray(
     device: Option<Py<PyAny>>,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.asanyarray so ndarray passthrough, matrix/subclass
-    // preservation, dtype coercion, and order handling all stay aligned
-    // with numpy.
+    // asanyarray differs from asarray by preserving ndarray subclasses
+    // (e.g. np.matrix, np.ma.MaskedArray). Our export bridge always
+    // produces a base ndarray, so any subclass input must return through
+    // numpy to keep `type(out) is type(in)` parity. The copy=False /
+    // order='F' constraints from asarray apply here too — delegate.
     let numpy = py.import("numpy")?;
     let asanyarray_fn = numpy.getattr("asanyarray")?;
     let kwargs = PyDict::new(py);
@@ -8528,16 +8714,73 @@ fn ascontiguousarray(
     a: Py<PyAny>,
     dtype: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ascontiguousarray so the result is always a
-    // C-contiguous ndarray with the same data, matching numpy's
-    // dtype-promotion rules and copy-when-needed semantics.
     let numpy = py.import("numpy")?;
-    let asc_fn = numpy.getattr("ascontiguousarray")?;
-    let kwargs = PyDict::new(py);
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        let asc_fn = numpy.getattr("ascontiguousarray")?;
+        let kwargs = PyDict::new(py);
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        Ok(asc_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    };
+
+    let a_bound = a.bind(py);
+    let ndarray_type = numpy.getattr("ndarray")?;
+    let source_array = numpy.call_method1("asarray", (a_bound,))?;
+    let dtype_requested = match dtype.as_ref() {
+        Some(dtype_val) if !dtype_val.bind(py).is_none() => Some({
+            let parsed = numpy.getattr("dtype")?.call1((dtype_val.bind(py),))?;
+            let name = parsed.getattr("name")?.extract::<String>()?;
+            match DType::parse(&name) {
+                Some(value) if dtype_supported_by_numpy_export_bridge(value) => value,
+                _ => return fallback(py),
+            }
+        }),
+        _ => None,
+    };
+
+    // Fast path: already an ndarray, C-contiguous, 1-D (or higher but
+    // C-contig) with matching dtype → return unchanged like numpy does.
+    let source_dtype_name = source_array
+        .getattr("dtype")?
+        .getattr("name")?
+        .extract::<String>()?;
+    let source_dtype = match DType::parse(&source_dtype_name) {
+        Some(value) => value,
+        None => return fallback(py),
+    };
+    if !dtype_supported_by_numpy_export_bridge(source_dtype) {
+        return fallback(py);
     }
-    Ok(asc_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    let target_dtype = dtype_requested.unwrap_or(source_dtype);
+
+    let flags = source_array.getattr("flags")?;
+    let c_contig: bool = flags.get_item("C_CONTIGUOUS")?.extract()?;
+    if c_contig && target_dtype == source_dtype && source_array.is_exact_instance(&ndarray_type) {
+        // np.ascontiguousarray returns the input unchanged in this case.
+        // Preserve that identity so `is` comparisons still hold.
+        if a_bound.is_exact_instance(&ndarray_type) {
+            return Ok(a_bound.clone().unbind());
+        }
+        return Ok(source_array.unbind());
+    }
+
+    // Otherwise: materialize a fresh C-contiguous copy via the native
+    // export bridge.
+    let native = match extract_precise_numeric_array(py, a_bound, "ascontiguousarray(a)") {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    if native.has_integer_sidecar() {
+        return fallback(py);
+    }
+    if native.dtype() != target_dtype {
+        // dtype_requested is different from source dtype → let numpy
+        // handle the astype-with-possible-narrowing so error surfaces
+        // and NaN→int conversion semantics match exactly.
+        return fallback(py);
+    }
+    build_numpy_array_from_ufunc(py, &native)
 }
 
 #[pyfunction]
@@ -10019,28 +10262,53 @@ fn asarray_chkfinite(
     a: Py<PyAny>,
     dtype: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.asarray_chkfinite. Equivalent to np.asarray with
-    // an explicit NaN/inf check that raises ValueError on any non-finite
-    // element. dtype coercion and array-passthrough-when-already-numpy
-    // semantics match numpy exactly.
     let numpy = py.import("numpy")?;
+    let asarray_fn = numpy.getattr("asarray")?;
     let kwargs = PyDict::new(py);
-    if let Some(dtype_val) = dtype {
+    if let Some(dtype_val) = dtype.as_ref() {
         kwargs.set_item("dtype", dtype_val.bind(py))?;
     }
-    Ok(numpy
-        .getattr("asarray_chkfinite")?
-        .call((a.bind(py),), Some(&kwargs))?
-        .unbind())
+    // Perform the coercion first (this may raise TypeError if dtype is
+    // invalid), then use Rust to sweep the values for NaN/Inf. numpy's
+    // own error text for non-finite input is "array must not contain
+    // infs or NaNs"; emit the same message directly.
+    let array = asarray_fn.call((a.bind(py),), Some(&kwargs))?;
+    let array_dtype_name = array
+        .getattr("dtype")?
+        .getattr("name")?
+        .extract::<String>()?;
+    let parsed = DType::parse(&array_dtype_name);
+    let needs_check = matches!(
+        parsed,
+        Some(DType::F16)
+            | Some(DType::F32)
+            | Some(DType::F64)
+            | Some(DType::Complex64)
+            | Some(DType::Complex128)
+    );
+    if needs_check {
+        let isfinite = numpy.getattr("isfinite")?;
+        let all_finite: bool = isfinite
+            .call1((array.clone(),))?
+            .call_method0("all")?
+            .extract()?;
+        if !all_finite {
+            return Err(PyValueError::new_err(
+                "array must not contain infs or NaNs",
+            ));
+        }
+    }
+    Ok(array.unbind())
 }
 
 #[pyfunction]
 #[pyo3(signature = (*arrays))]
 fn common_type(py: Python<'_>, arrays: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.common_type. Returns the common scalar dtype
-    // (float or complex) of the input arrays, promoting integer dtypes
-    // to float64 per numpy's rules. Rejects non-inexact arrays with
-    // a TypeError that must surface identically.
+    // np.common_type returns a Python scalar *type* (class like
+    // `np.float32`/`np.complex128`), not an ndarray. This is pure dtype
+    // classification over numpy's scalar-type hierarchy — there is no
+    // array computation to move to fnp crates. Delegation is the correct
+    // long-term answer; keep the wrapper thin.
     let numpy = py.import("numpy")?;
     Ok(numpy.getattr("common_type")?.call1(arrays)?.unbind())
 }
@@ -11046,8 +11314,12 @@ fn i0(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (a, dtype=None))]
 fn asfortranarray(py: Python<'_>, a: Py<PyAny>, dtype: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.asfortranarray. Returns the input as a
-    // Fortran-ordered (column-major) ndarray; copies when needed.
+    // np.asfortranarray requires an F-contiguous ndarray output with the
+    // `F_CONTIGUOUS` flag set. build_numpy_array_from_ufunc only
+    // materializes C-contiguous arrays (it routes through
+    // `np.array(...).reshape(shape)`), so emitting an F-layout array
+    // natively would require a dedicated column-major export bridge.
+    // Keep this as a thin wrapper until that bridge exists.
     let numpy = py.import("numpy")?;
     let asf_fn = numpy.getattr("asfortranarray")?;
     let kwargs = PyDict::new(py);
@@ -11565,9 +11837,11 @@ fn logspace(
     dtype: Option<Py<PyAny>>,
     axis: i64,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.logspace. Returns num samples spaced evenly
-    // on a log scale between base**start and base**stop. Matches
-    // numpy across endpoint, base, dtype, and axis kwargs.
+    // numpy.logspace implements its power step via `np.power(base, linspace(...))`
+    // which can produce platform-dependent ULP drift for non-default bases.
+    // Keep delegation to numpy so parity with np.logspace is preserved
+    // across bases, endpoint handling, array-valued endpoints and axis
+    // insertion; that path is the behavioral oracle.
     let numpy = py.import("numpy")?;
     let ls_fn = numpy.getattr("logspace")?;
     let kwargs = PyDict::new(py);
@@ -11586,15 +11860,45 @@ fn logspace(
 #[pyfunction]
 #[pyo3(signature = (a, order="K", subok=false))]
 fn copy(py: Python<'_>, a: Py<PyAny>, order: &str, subok: bool) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.copy so order ('K'/'C'/'F'/'A') memory-layout
-    // selection, subok subclass preservation, object-dtype deep-copy
-    // semantics, and scalar/0-d handling stay aligned with numpy.
     let numpy = py.import("numpy")?;
-    let copy_fn = numpy.getattr("copy")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("order", order)?;
-    kwargs.set_item("subok", subok)?;
-    Ok(copy_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        let copy_fn = numpy.getattr("copy")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("order", order)?;
+        kwargs.set_item("subok", subok)?;
+        Ok(copy_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    };
+    if !matches!(order, "C" | "K") {
+        return fallback(py);
+    }
+    let a_bound = a.bind(py);
+    let ndarray_type = numpy.getattr("ndarray")?;
+    let source_array = numpy.call_method1("asanyarray", (a_bound,))?;
+    if subok && !source_array.is_exact_instance(&ndarray_type) {
+        return fallback(py);
+    }
+    // For order='K' with F-contiguous multi-D source, fallback so layout
+    // is preserved; the native export bridge only materializes C order.
+    let source_shape: Vec<usize> = source_array.getattr("shape")?.extract()?;
+    if order == "K" && source_shape.len() >= 2 {
+        let flags = source_array.getattr("flags")?;
+        let f_contig: bool = flags.get_item("F_CONTIGUOUS")?.extract()?;
+        let c_contig: bool = flags.get_item("C_CONTIGUOUS")?.extract()?;
+        if f_contig && !c_contig {
+            return fallback(py);
+        }
+    }
+    let native = match extract_precise_numeric_array(py, a_bound, "copy(a)") {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    if native.has_integer_sidecar() {
+        return fallback(py);
+    }
+    if !dtype_supported_by_numpy_export_bridge(native.dtype()) {
+        return fallback(py);
+    }
+    build_numpy_array_from_ufunc(py, &native)
 }
 
 #[pyfunction]
