@@ -11664,41 +11664,233 @@ fn loadtxt(
     max_rows: Option<i64>,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.loadtxt. Accepts file path, file-like, or
-    // iterable of strings. Matches numpy on delimiter parsing, comment
-    // stripping, skiprows, usecols column selection, dtype coercion,
-    // converter callables, and unpack/ndmin reshape kwargs.
     let numpy = py.import("numpy")?;
-    let kwargs = PyDict::new(py);
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        kwargs.set_item("comments", comments)?;
+        if let Some(delim) = delimiter {
+            kwargs.set_item("delimiter", delim)?;
+        }
+        if let Some(cv) = converters.as_ref() {
+            kwargs.set_item("converters", cv.bind(py))?;
+        }
+        kwargs.set_item("skiprows", skiprows)?;
+        if let Some(uc) = usecols.as_ref() {
+            kwargs.set_item("usecols", uc.bind(py))?;
+        }
+        kwargs.set_item("unpack", unpack)?;
+        kwargs.set_item("ndmin", ndmin)?;
+        if let Some(enc) = encoding {
+            kwargs.set_item("encoding", enc)?;
+        }
+        if let Some(mr) = max_rows {
+            kwargs.set_item("max_rows", mr)?;
+        }
+        if let Some(like_val) = like.as_ref() {
+            kwargs.set_item("like", like_val.bind(py))?;
+        }
+        Ok(numpy
+            .getattr("loadtxt")?
+            .call((fname.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
+    // Native path: support the common tutorial surface.
+    if converters.is_some()
+        || encoding.is_some()
+        || max_rows.is_some()
+        || like.is_some()
+        || ndmin != 0
+    {
+        return fallback(py);
     }
-    kwargs.set_item("comments", comments)?;
-    if let Some(delim) = delimiter {
-        kwargs.set_item("delimiter", delim)?;
+
+    // Resolve text content from fname. Accept StringIO, file-like with
+    // .read() method, or str path (via open).
+    let fname_bound = fname.bind(py);
+    let text: String = if let Ok(s) = fname_bound.extract::<String>() {
+        // Treat as file path.
+        match std::fs::read_to_string(&s) {
+            Ok(value) => value,
+            Err(_) => return fallback(py),
+        }
+    } else if let Ok(result) = fname_bound.call_method0("read") {
+        match result.extract::<String>() {
+            Ok(value) => value,
+            Err(_) => return fallback(py),
+        }
+    } else {
+        return fallback(py);
+    };
+
+    // Resolve target dtype (default float64).
+    let dtype_clone = dtype.as_ref().map(|v| v.clone_ref(py));
+    let parsed_dtype = match extract_python_dtype(py, dtype_clone, DType::F64, "loadtxt(dtype)") {
+        Ok(value) if dtype_supported_by_numpy_export_bridge(value) => value,
+        _ => return fallback(py),
+    };
+
+    // Resolve usecols. None → all columns. Int → single col. List<int>.
+    let use_columns: Option<Vec<i64>> = match usecols.as_ref() {
+        None => None,
+        Some(v) => {
+            let b = v.bind(py);
+            if b.is_none() {
+                None
+            } else if let Ok(cols) = b.extract::<Vec<i64>>() {
+                Some(cols)
+            } else if let Ok(col) = b.extract::<i64>() {
+                Some(vec![col])
+            } else {
+                return fallback(py);
+            }
+        }
+    };
+
+    // Parse rows of tokens.
+    let skip_count = skiprows.max(0) as usize;
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for (lineno, raw_line) in text.lines().enumerate() {
+        if lineno < skip_count {
+            continue;
+        }
+        // Strip comments.
+        let effective = match raw_line.split_once(comments) {
+            Some((lhs, _)) => lhs,
+            None => raw_line,
+        };
+        let trimmed = effective.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let tokens: Vec<String> = match delimiter {
+            None => trimmed.split_whitespace().map(|s| s.to_string()).collect(),
+            Some(sep) if sep.chars().all(char::is_whitespace) => {
+                trimmed.split_whitespace().map(|s| s.to_string()).collect()
+            }
+            Some(sep) => trimmed.split(sep).map(|s| s.trim().to_string()).collect(),
+        };
+        let selected: Vec<String> = if let Some(cols) = use_columns.as_ref() {
+            let mut out = Vec::with_capacity(cols.len());
+            for &col in cols {
+                let idx = if col < 0 {
+                    (tokens.len() as i64 + col) as usize
+                } else {
+                    col as usize
+                };
+                if idx >= tokens.len() {
+                    return fallback(py);
+                }
+                out.push(tokens[idx].clone());
+            }
+            out
+        } else {
+            tokens
+        };
+        if selected.is_empty() {
+            continue;
+        }
+        rows.push(selected);
     }
-    if let Some(cv) = converters {
-        kwargs.set_item("converters", cv.bind(py))?;
+
+    if rows.is_empty() {
+        return fallback(py);
     }
-    kwargs.set_item("skiprows", skiprows)?;
-    if let Some(uc) = usecols {
-        kwargs.set_item("usecols", uc.bind(py))?;
+    let ncols = rows[0].len();
+    for row in &rows {
+        if row.len() != ncols {
+            return fallback(py);
+        }
     }
-    kwargs.set_item("unpack", unpack)?;
-    kwargs.set_item("ndmin", ndmin)?;
-    if let Some(enc) = encoding {
-        kwargs.set_item("encoding", enc)?;
+    let nrows = rows.len();
+
+    // Parse all tokens into the target dtype's storage.
+    let flat_storage = match parsed_dtype {
+        DType::I8
+        | DType::I16
+        | DType::I32
+        | DType::I64
+        | DType::U8
+        | DType::U16
+        | DType::U32
+        | DType::U64 => {
+            let mut longs = Vec::with_capacity(nrows * ncols);
+            for row in &rows {
+                for tok in row {
+                    match tok.parse::<i64>() {
+                        Ok(v) => longs.push(v),
+                        Err(_) => match tok.parse::<f64>() {
+                            Ok(v) if v.fract() == 0.0 && v.is_finite() => longs.push(v as i64),
+                            _ => return fallback(py),
+                        },
+                    }
+                }
+            }
+            match parsed_dtype {
+                DType::I8 => ArrayStorage::I8(longs.into_iter().map(|v| v as i8).collect()),
+                DType::I16 => ArrayStorage::I16(longs.into_iter().map(|v| v as i16).collect()),
+                DType::I32 => ArrayStorage::I32(longs.into_iter().map(|v| v as i32).collect()),
+                DType::I64 => ArrayStorage::I64(longs),
+                DType::U8 => ArrayStorage::U8(longs.into_iter().map(|v| v as u8).collect()),
+                DType::U16 => ArrayStorage::U16(longs.into_iter().map(|v| v as u16).collect()),
+                DType::U32 => ArrayStorage::U32(longs.into_iter().map(|v| v as u32).collect()),
+                DType::U64 => ArrayStorage::U64(longs.into_iter().map(|v| v as u64).collect()),
+                _ => unreachable!(),
+            }
+        }
+        DType::F16 | DType::F32 | DType::F64 => {
+            let mut floats = Vec::with_capacity(nrows * ncols);
+            for row in &rows {
+                for tok in row {
+                    match tok.parse::<f64>() {
+                        Ok(v) => floats.push(v),
+                        Err(_) => return fallback(py),
+                    }
+                }
+            }
+            match parsed_dtype {
+                DType::F16 => ArrayStorage::F16(floats.into_iter().map(f16::from_f64).collect()),
+                DType::F32 => ArrayStorage::F32(floats.into_iter().map(|v| v as f32).collect()),
+                DType::F64 => ArrayStorage::F64(floats),
+                _ => unreachable!(),
+            }
+        }
+        DType::Bool => {
+            let mut values = Vec::with_capacity(nrows * ncols);
+            for row in &rows {
+                for tok in row {
+                    match tok.parse::<i64>() {
+                        Ok(v) => values.push(v != 0),
+                        Err(_) => return fallback(py),
+                    }
+                }
+            }
+            ArrayStorage::Bool(values)
+        }
+        _ => return fallback(py),
+    };
+
+    // Reshape: 1-D output if only one column (numpy squeezes); else 2-D.
+    let shape = if ncols == 1 {
+        vec![nrows]
+    } else {
+        vec![nrows, ncols]
+    };
+    let arr = build_numpy_array_from_storage(py, &shape, flat_storage)?;
+
+    if unpack {
+        // numpy.loadtxt(unpack=True) returns the transposed array
+        // (np.loadtxt actually returns `ret.T` itself, not a tuple,
+        // despite the docs).
+        let arr_bound = arr.bind(py);
+        let transposed = arr_bound.getattr("T")?;
+        Ok(transposed.unbind())
+    } else {
+        Ok(arr)
     }
-    if let Some(mr) = max_rows {
-        kwargs.set_item("max_rows", mr)?;
-    }
-    if let Some(like_val) = like {
-        kwargs.set_item("like", like_val.bind(py))?;
-    }
-    Ok(numpy
-        .getattr("loadtxt")?
-        .call((fname.bind(py),), Some(&kwargs))?
-        .unbind())
 }
 
 #[pyfunction]
