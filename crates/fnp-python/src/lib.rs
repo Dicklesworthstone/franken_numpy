@@ -16239,6 +16239,13 @@ mod tests {
             )
             .unbind();
 
+            // Case 4: empty (0, 3) matrix triggers matrix_rank reduction
+            // failure ("zero-size array to reduction operation maximum").
+            let empty_matrix: Py<PyAny> = numpy
+                .getattr("zeros")?
+                .call1((PyTuple::new(py, [0_i64, 3_i64])?,))?
+                .unbind();
+
             // (our_module_name, numpy_linalg_name, input)
             let probes: Vec<(&str, &str, &Py<PyAny>)> = vec![
                 ("inv", "inv", &singular),
@@ -16247,6 +16254,7 @@ mod tests {
                 ("qr", "qr", &one_d),
                 ("linalg_eig", "eig", &one_d),
                 ("slogdet", "slogdet", &non_square),
+                ("matrix_rank", "matrix_rank", &empty_matrix),
             ];
 
             let mut divergences: Vec<String> = Vec::new();
