@@ -6065,14 +6065,30 @@ fn squeeze(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py
 #[pyfunction]
 #[pyo3(signature = (m, k=1, axes=(0, 1)))]
 fn rot90(py: Python<'_>, m: Py<PyAny>, k: i64, axes: (i64, i64)) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.rot90 so repeated quarter-turns, custom plane
-    // selection, reversed axis order, and numpy's validation errors all
-    // stay exact.
+    // Native rot90 via UFuncArray::rot90_axes for real/complex numeric
+    // inputs. Axis validation errors, repeated-axes rejection, and
+    // non-numeric / 1-D inputs fall back to np.rot90 so numpy's error
+    // surface and dispatch stay exact.
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("rot90")?
-        .call1((m.bind(py), k, axes))?
-        .unbind())
+    let m_for_fallback = m.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(numpy
+            .getattr("rot90")?
+            .call1((m_for_fallback.bind(py), k, axes))?
+            .unbind())
+    };
+    let Ok(k_i32) = i32::try_from(k) else {
+        return fallback();
+    };
+    let array = match extract_precise_numeric_array(py, m.bind(py), "rot90(m)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let result = match array.rot90_axes(k_i32, (axes.0 as isize, axes.1 as isize)) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
