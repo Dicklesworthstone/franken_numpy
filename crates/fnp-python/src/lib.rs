@@ -4335,26 +4335,67 @@ fn clip(
     out: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Delegate to NumPy so one-sided None bounds, broadcast min/max
-    // arrays, explicit out buffers, dtype preservation, and NaN
-    // handling all match exactly.
+    // Native clip via UFuncArray::clip for real f64/f32/int scalar min &
+    // max on real numeric inputs. One-sided None bounds, broadcast min/max
+    // arrays, complex inputs, explicit `out` buffers, and any extra
+    // kwargs (casting, where, dtype, …) fall back to np.clip so numpy's
+    // full dispatch surface is preserved exactly.
     let numpy = py.import("numpy")?;
     let clip_fn = numpy.getattr("clip")?;
-    let call_kwargs = PyDict::new(py);
-    if let Some(out) = out {
-        call_kwargs.set_item("out", out.bind(py))?;
-    }
-    if let Some(kwargs) = kwargs {
-        for (key, value) in kwargs.iter() {
-            call_kwargs.set_item(key, value)?;
+    let a_for_fallback = a.clone_ref(py);
+    let a_min_for_fallback = a_min.clone_ref(py);
+    let a_max_for_fallback = a_max.clone_ref(py);
+    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
+    let kwargs_snapshot: Option<Py<PyDict>> = kwargs.map(|k| k.clone().unbind());
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let call_kwargs = PyDict::new(py);
+        if let Some(out) = out_for_fallback.as_ref() {
+            call_kwargs.set_item("out", out.bind(py))?;
         }
+        if let Some(k) = kwargs_snapshot.as_ref() {
+            for (key, value) in k.bind(py).iter() {
+                call_kwargs.set_item(key, value)?;
+            }
+        }
+        Ok(clip_fn
+            .call(
+                (
+                    a_for_fallback.bind(py),
+                    a_min_for_fallback.bind(py),
+                    a_max_for_fallback.bind(py),
+                ),
+                Some(&call_kwargs),
+            )?
+            .unbind())
+    };
+
+    // Bail to numpy on `out`, None bounds, or any extra kwargs — these
+    // exercise the broader clip surface.
+    if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        || a_min.bind(py).is_none()
+        || a_max.bind(py).is_none()
+        || kwargs.is_some_and(|k| !k.is_empty())
+    {
+        return fallback();
     }
-    Ok(clip_fn
-        .call(
-            (a.bind(py), a_min.bind(py), a_max.bind(py)),
-            Some(&call_kwargs),
-        )?
-        .unbind())
+
+    // Both bounds must be real scalars.
+    let Ok(min_val) = a_min.bind(py).extract::<f64>() else {
+        return fallback();
+    };
+    let Ok(max_val) = a_max.bind(py).extract::<f64>() else {
+        return fallback();
+    };
+
+    let array = match extract_precise_numeric_array(py, a.bind(py), "clip(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    if matches!(array.dtype(), DType::Complex64 | DType::Complex128) {
+        return fallback();
+    }
+    let result = array.clip(min_val, max_val);
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -5820,11 +5861,28 @@ fn histogram_bin_edges(
 #[pyfunction]
 #[pyo3(signature = (a, order="C"))]
 fn ravel(py: Python<'_>, a: Py<PyAny>, order: &str) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ravel so order-sensitive flattening, scalar
-    // behavior, object dtype handling, and result shape/dtype match
-    // numpy exactly.
+    // Native ravel via UFuncArray::ravel for real/complex numeric arrays
+    // with default C-order flattening. F-order, 'A', 'K' and non-numeric
+    // (object, string, structured) inputs fall back to np.ravel so
+    // numpy's order-sensitive behavior and dispatch surface are preserved
+    // exactly.
     let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("ravel")?.call1((a.bind(py), order))?.unbind())
+    let a_for_fallback = a.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(numpy
+            .getattr("ravel")?
+            .call1((a_for_fallback.bind(py), order))?
+            .unbind())
+    };
+    if order != "C" {
+        return fallback();
+    }
+    let array = match extract_precise_numeric_array(py, a.bind(py), "ravel(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let result = array.ravel();
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -8440,14 +8498,49 @@ fn polyint(py: Python<'_>, p: Py<PyAny>, m: i64, k: Option<Py<PyAny>>) -> PyResu
 #[pyfunction]
 #[pyo3(signature = (a, reps))]
 fn tile(py: Python<'_>, a: Py<PyAny>, reps: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.tile. `reps` may be a scalar or a tuple of
-    // ints; output dimensionality follows numpy's documented rules
-    // (max(arr.ndim, len(reps))).
+    // Native tile via UFuncArray::tile for real numeric arrays with
+    // non-negative integer reps. Complex / structured / object / negative
+    // reps / non-integer reps fall back to np.tile so numpy's broader
+    // dispatch surface (scalar reps, batched handling, object dtype) is
+    // preserved exactly.
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("tile")?
-        .call1((a.bind(py), reps.bind(py)))?
-        .unbind())
+    let a_for_fallback = a.clone_ref(py);
+    let reps_for_fallback = reps.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(numpy
+            .getattr("tile")?
+            .call1((a_for_fallback.bind(py), reps_for_fallback.bind(py)))?
+            .unbind())
+    };
+
+    // Normalize reps to Vec<usize>. Accept scalar int or 1-D iterable.
+    let reps_bound = reps.bind(py);
+    let reps_vec: Vec<usize> = if let Ok(scalar) = reps_bound.extract::<i64>() {
+        if scalar < 0 {
+            return fallback();
+        }
+        vec![scalar as usize]
+    } else if let Ok(list) = reps_bound.extract::<Vec<i64>>() {
+        if list.iter().any(|&v| v < 0) {
+            return fallback();
+        }
+        list.iter().map(|&v| v as usize).collect()
+    } else {
+        return fallback();
+    };
+
+    let array = match extract_precise_numeric_array(py, a.bind(py), "tile(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    if matches!(array.dtype(), DType::Complex64 | DType::Complex128) {
+        return fallback();
+    }
+    let result = match array.tile(&reps_vec) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
