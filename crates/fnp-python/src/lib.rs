@@ -13546,6 +13546,17 @@ fn matvec(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, P
     core_numpy_passthrough(py, "matvec", args, kwargs)
 }
 
+// linalg.cross passthrough — distinct from top-level np.cross because
+// numpy.linalg.cross rejects 2-D vectors (stricter signature). Delegates
+// at call time, not module-init time, so it works even when numpy is
+// lazy-imported.
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn linalg_cross(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    let np_linalg = py.import("numpy.linalg")?;
+    Ok(np_linalg.getattr("cross")?.call(args, kwargs)?.unbind())
+}
+
 // ---------------------------------------------------------------------------
 // Reality-check (k74v.2) — ~45 core numpy function passthrough wrappers.
 //
@@ -14466,7 +14477,10 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         linalg.add("eig", m.getattr("linalg_eig")?)?;
         linalg.add("matrix_norm", m.getattr("linalg_matrix_norm")?)?;
         linalg.add("vecdot", m.getattr("linalg_vecdot")?)?;
-        // Top-level linalg functions (also in numpy.linalg).
+        // Top-level linalg functions (also in numpy.linalg with matching
+        // semantics — cross is excluded here because numpy.linalg.cross
+        // rejects 2-D vectors while numpy.cross accepts them; route it
+        // directly to numpy.linalg.cross instead of our top-level wrapper).
         for (numpy_name, flat_name) in [
             ("svd", "svd"),
             ("svdvals", "svdvals"),
@@ -14490,7 +14504,6 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             ("eigh", "eigh"),
             ("eigvals", "eigvals"),
             ("eigvalsh", "eigvalsh"),
-            ("cross", "cross"),
             ("tensordot", "tensordot"),
             ("matmul", "matmul"),
         ] {
@@ -14498,6 +14511,16 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 linalg.add(numpy_name, value)?;
             }
         }
+        // linalg.cross is 3-D only (stricter than np.cross). Use the
+        // dedicated linalg_cross passthrough that delegates to
+        // numpy.linalg.cross at call time — numpy may not be loadable
+        // during module init if pyo3 launches its embedded interpreter
+        // before numpy is on sys.path.
+        linalg.add_function(wrap_pyfunction!(linalg_cross, &linalg)?)?;
+        // Expose it under the numpy-native name by re-setting the
+        // attribute with the short name.
+        linalg.setattr("cross", linalg.getattr("linalg_cross")?)?;
+        linalg.delattr("linalg_cross")?;
         m.add_submodule(&linalg)?;
         // Also expose as top-level attribute so `fnp_python.linalg` resolves
         // via attribute access regardless of import style.
@@ -15530,6 +15553,32 @@ mod tests {
                     our_svd.get_type().name()?.extract::<String>()?,
                     their_svd.get_type().name()?.extract::<String>()?,
                     "fnp_python.linalg.svd return type diverges from numpy.linalg.svd"
+                );
+
+                // linalg.cross must REJECT 2-D input (stricter than top-
+                // level np.cross which accepts both 2-D and 3-D). Our
+                // submodule wires linalg.cross directly to numpy.linalg.cross
+                // to preserve that contract — regressing to np.cross here
+                // would silently accept 2-D vectors and trip this assert.
+                let a2 = numpy
+                    .getattr("array")?
+                    .call1((PyList::new(py, [1.0_f64, 2.0])?,))?;
+                let b2 = numpy
+                    .getattr("array")?
+                    .call1((PyList::new(py, [3.0_f64, 4.0])?,))?;
+                let ours_cross_err = linalg
+                    .getattr("cross")?
+                    .call1((a2.clone(), b2.clone()))
+                    .expect_err("fnp_python.linalg.cross must reject 2-D vectors");
+                let theirs_cross_err = numpy
+                    .getattr("linalg")?
+                    .getattr("cross")?
+                    .call1((a2, b2))
+                    .expect_err("numpy.linalg.cross must reject 2-D vectors");
+                assert_eq!(
+                    ours_cross_err.get_type(py).name()?.extract::<String>()?,
+                    theirs_cross_err.get_type(py).name()?.extract::<String>()?,
+                    "linalg.cross error type diverges from numpy.linalg.cross"
                 );
             }
             Ok(())
