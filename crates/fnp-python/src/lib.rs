@@ -10582,15 +10582,21 @@ fn testing_assert_array_equal(
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn matrix_transpose(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.linalg.matrix_transpose. Transposes the last
-    // two axes of x; preserves all leading batch dimensions and dtype.
-    // Complex inputs get a transpose, NOT a conjugate-transpose.
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("linalg")?
-        .getattr("matrix_transpose")?
-        .call1((x.bind(py),))?
-        .unbind())
+    let matrix_transpose_fn = numpy.getattr("linalg")?.getattr("matrix_transpose")?;
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(matrix_transpose_fn.call1((x.bind(py),))?.unbind())
+    };
+
+    let x = match extract_numeric_array(py, x.bind(py), "matrix_transpose(x)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let result = match x.matrix_transpose() {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
