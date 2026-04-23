@@ -7907,20 +7907,51 @@ fn isin(
     invert: bool,
     kind: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.isin so numpy owns shape preservation,
-    // invert/assume_unique behavior, and the optional backend
-    // selection via kind=None/"sort"/"table".
+    // Native isin via UFuncArray::isin for matched-dtype real numeric
+    // inputs with assume_unique=false and kind=None. Falls back to numpy
+    // for complex / integer-sidecar / mixed-dtype inputs and for the
+    // tuned assume_unique / kind="table"/"sort" back-ends so their
+    // semantics match numpy exactly.
     let numpy = py.import("numpy")?;
     let isin_fn = numpy.getattr("isin")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("assume_unique", assume_unique)?;
-    kwargs.set_item("invert", invert)?;
-    if let Some(kind_val) = kind {
-        kwargs.set_item("kind", kind_val.bind(py))?;
+    let element_for_fallback = element.clone_ref(py);
+    let test_for_fallback = test_elements.clone_ref(py);
+    let kind_for_fallback = kind.as_ref().map(|v| v.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("assume_unique", assume_unique)?;
+        kwargs.set_item("invert", invert)?;
+        if let Some(kind_val) = kind_for_fallback.as_ref() {
+            kwargs.set_item("kind", kind_val.bind(py))?;
+        }
+        Ok(isin_fn
+            .call(
+                (element_for_fallback.bind(py), test_for_fallback.bind(py)),
+                Some(&kwargs),
+            )?
+            .unbind())
+    };
+    if assume_unique || kind.as_ref().is_some_and(|v| !v.bind(py).is_none()) {
+        return fallback();
     }
-    Ok(isin_fn
-        .call((element.bind(py), test_elements.bind(py)), Some(&kwargs))?
-        .unbind())
+    let ar1 = match extract_precise_numeric_array(py, element.bind(py), "isin(element)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let ar2 = match extract_precise_numeric_array(py, test_elements.bind(py), "isin(test_elements)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    if ar1.has_integer_sidecar()
+        || ar2.has_integer_sidecar()
+        || matches!(ar1.dtype(), DType::Complex64 | DType::Complex128)
+        || matches!(ar2.dtype(), DType::Complex64 | DType::Complex128)
+        || ar1.dtype() != ar2.dtype()
+    {
+        return fallback();
+    }
+    let result = ar1.isin(&ar2, invert);
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
