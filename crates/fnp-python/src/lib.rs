@@ -9628,21 +9628,47 @@ fn fix(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (m, k=0))]
 fn tril(py: Python<'_>, m: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.tril so lower-triangular extraction matches
-    // numpy across square/rectangular matrices, k offset (positive,
-    // zero, negative), and N-D batch inputs.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("tril")?.call1((m.bind(py), k))?.unbind())
+    // Native tril via UFuncArray::tril for real numeric inputs. Falls
+    // back to np.tril for complex, integer sidecar, structured, and
+    // object-array cases so numpy's dispatch surface stays exact.
+    triangular_impl(py, m, k, /*upper=*/ false, "tril")
 }
 
 #[pyfunction]
 #[pyo3(signature = (m, k=0))]
 fn triu(py: Python<'_>, m: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.triu so upper-triangular extraction matches
-    // numpy across square/rectangular matrices, k offset (positive,
-    // zero, negative), and N-D batch inputs.
+    // Native triu via UFuncArray::triu. Same fallback contract as tril.
+    triangular_impl(py, m, k, /*upper=*/ true, "triu")
+}
+
+fn triangular_impl(
+    py: Python<'_>,
+    m: Py<PyAny>,
+    k: i64,
+    upper: bool,
+    numpy_name: &'static str,
+) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("triu")?.call1((m.bind(py), k))?.unbind())
+    let numpy_fn = numpy.getattr(numpy_name)?;
+    let m_for_fallback = m.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(numpy_fn.call1((m_for_fallback.bind(py), k))?.unbind())
+    };
+    let array = match extract_precise_numeric_array(py, m.bind(py), numpy_name) {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    if array.has_integer_sidecar()
+        || matches!(array.dtype(), DType::Complex64 | DType::Complex128)
+    {
+        return fallback();
+    }
+    let result = if upper { array.triu(k) } else { array.tril(k) };
+    let result = match result {
+        Ok(value) => value,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
