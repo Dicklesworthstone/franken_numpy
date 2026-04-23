@@ -1307,6 +1307,25 @@ fn build_numpy_slogdet_result(py: Python<'_>, sign: f64, logabsdet: f64) -> PyRe
         .unbind())
 }
 
+fn build_numpy_eigh_result(
+    py: Python<'_>,
+    eigenvalues: &UFuncArray,
+    eigenvectors: &UFuncArray,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let eye = numpy.getattr("eye")?.call1((1,))?;
+    let eigh_result_type = numpy
+        .getattr("linalg")?
+        .getattr("eigh")?
+        .call1((eye,))?
+        .get_type();
+    let eigenvalues = build_numpy_array_from_ufunc(py, eigenvalues)?;
+    let eigenvectors = build_numpy_array_from_ufunc(py, eigenvectors)?;
+    Ok(eigh_result_type
+        .call1((eigenvalues.bind(py), eigenvectors.bind(py)))?
+        .unbind())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn masked_interval_compare(
     py: Python<'_>,
@@ -11831,15 +11850,41 @@ fn ifftn(
 #[pyo3(signature = (a, UPLO="L"))]
 #[allow(non_snake_case)]
 fn eigh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.linalg.eigh so the EighResult namedtuple
-    // (eigenvalues, eigenvectors), UPLO selector, complex-Hermitian
-    // eigenvalue realness guarantee, and batched (..., M, M) broadcasting
-    // semantics all match numpy exactly.
     let numpy = py.import("numpy")?;
     let eigh_fn = numpy.getattr("linalg")?.getattr("eigh")?;
+    let a_for_fallback = a.clone_ref(py);
     let kwargs = PyDict::new(py);
     kwargs.set_item("UPLO", UPLO)?;
-    Ok(eigh_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(eigh_fn
+            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
+    let array = match extract_precise_numeric_array(py, a.bind(py), "eigh(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let shape = array.shape();
+    if shape.len() != 2
+        || shape[0] != shape[1]
+        || !matches!(array.dtype(), DType::F64)
+        || array.has_integer_sidecar()
+        || array.values().iter().any(|value| !value.is_finite())
+        || !matches!(UPLO, "L" | "U")
+    {
+        return fallback();
+    }
+
+    let sym = match symmetric_matrix_from_selected_triangle(&array, UPLO) {
+        Ok(sym) => sym,
+        Err(_) => return fallback(),
+    };
+    let (eigenvalues, eigenvectors) = match sym.eigh() {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_eigh_result(py, &eigenvalues, &eigenvectors)
 }
 
 #[pyfunction]
@@ -28037,6 +28082,29 @@ mod tests {
                 &numpy_eigh.call((sym3.clone(),), Some(&kw_u_n))?,
             )?;
 
+            // Mismatched triangles must respect the selected UPLO only.
+            let mismatched = numeric_array(
+                py,
+                vec![
+                    vec![2.0_f64, 50.0_f64, 60.0_f64],
+                    vec![1.0_f64, 3.0_f64, 70.0_f64],
+                    vec![4.0_f64, 5.0_f64, 6.0_f64],
+                ],
+                "float64",
+            );
+            let kw_u_mismatch = PyDict::new(py);
+            kw_u_mismatch.set_item("UPLO", "U")?;
+            let kw_u_mismatch_n = PyDict::new(py);
+            kw_u_mismatch_n.set_item("UPLO", "U")?;
+            assert_eigh_close(
+                &eigh_fn.call1((mismatched.clone(),))?,
+                &numpy_eigh.call1((mismatched.clone(),))?,
+            )?;
+            assert_eigh_close(
+                &eigh_fn.call((mismatched.clone(),), Some(&kw_u_mismatch))?,
+                &numpy_eigh.call((mismatched.clone(),), Some(&kw_u_mismatch_n))?,
+            )?;
+
             // Identity — eigenvalues all 1, eigenvectors form the identity.
             let eye = numpy.getattr("eye")?.call1((4_i64,))?;
             assert_eigh_close(
@@ -28101,6 +28169,40 @@ mod tests {
                 &eigh_fn.call1((hermitian.clone(),))?,
                 &numpy_eigh.call1((hermitian.clone(),))?,
             )?;
+
+            // float32 stays on the NumPy path so dtype remains float32.
+            let spd_f32 = numeric_array(
+                py,
+                vec![vec![3.0_f32, 1.0_f32], vec![1.0_f32, 4.0_f32]],
+                "float32",
+            );
+            let actual_f32 = eigh_fn.call1((spd_f32.clone(),))?;
+            let expected_f32 = numpy_eigh.call1((spd_f32.clone(),))?;
+            assert_eigh_close(&actual_f32, &expected_f32)?;
+            assert_eq!(
+                actual_f32
+                    .getattr("eigenvalues")?
+                    .getattr("dtype")?
+                    .getattr("name")?
+                    .extract::<String>()?,
+                expected_f32
+                    .getattr("eigenvalues")?
+                    .getattr("dtype")?
+                    .getattr("name")?
+                    .extract::<String>()?
+            );
+            assert_eq!(
+                actual_f32
+                    .getattr("eigenvectors")?
+                    .getattr("dtype")?
+                    .getattr("name")?
+                    .extract::<String>()?,
+                expected_f32
+                    .getattr("eigenvectors")?
+                    .getattr("dtype")?
+                    .getattr("name")?
+                    .extract::<String>()?
+            );
 
             Ok(())
         });
