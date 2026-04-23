@@ -9555,18 +9555,46 @@ fn allclose(
     atol: f64,
     equal_nan: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.allclose so element-wise within-tolerance
-    // comparison matches numpy across rtol/atol scaling, equal_nan,
-    // broadcasting, and shape compatibility.
+    // Native allclose via UFuncArray::allclose_equal_nan. Delegates to
+    // numpy for complex/structured/string inputs, integer-sidecar mixed
+    // arrays, and shape-mismatch broadcast failures so numpy's full
+    // dispatch surface (including bytes/object coercion) stays exact.
     let numpy = py.import("numpy")?;
     let allclose_fn = numpy.getattr("allclose")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("rtol", rtol)?;
-    kwargs.set_item("atol", atol)?;
-    kwargs.set_item("equal_nan", equal_nan)?;
-    Ok(allclose_fn
-        .call((a.bind(py), b.bind(py)), Some(&kwargs))?
-        .unbind())
+    let a_for_fallback = a.clone_ref(py);
+    let b_for_fallback = b.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("rtol", rtol)?;
+        kwargs.set_item("atol", atol)?;
+        kwargs.set_item("equal_nan", equal_nan)?;
+        Ok(allclose_fn
+            .call((a_for_fallback.bind(py), b_for_fallback.bind(py)), Some(&kwargs))?
+            .unbind())
+    };
+
+    let array_a = match extract_precise_numeric_array(py, a.bind(py), "allclose(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let array_b = match extract_precise_numeric_array(py, b.bind(py), "allclose(b)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    if array_a.has_integer_sidecar()
+        || array_b.has_integer_sidecar()
+        || matches!(array_a.dtype(), DType::Complex64 | DType::Complex128)
+        || matches!(array_b.dtype(), DType::Complex64 | DType::Complex128)
+    {
+        return fallback();
+    }
+    let verdict = match array_a.allclose_equal_nan(&array_b, rtol, atol, equal_nan) {
+        Ok(value) => value,
+        Err(_) => return fallback(),
+    };
+    // numpy.allclose returns a numpy.bool_ scalar, not Python bool; route
+    // through np.bool_ so the return type matches the passthrough surface.
+    Ok(numpy.getattr("bool_")?.call1((verdict,))?.unbind())
 }
 
 #[pyfunction]
