@@ -9600,12 +9600,29 @@ fn allclose(
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn fix(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.fix. Round toward zero (truncate the
-    // fractional part); equivalent to ceil for negatives and floor
-    // for positives. Integer input passes through unchanged; NaN
-    // propagates.
+    // Native fix via UFuncArray::fix — round toward zero (truncate the
+    // fractional part); equivalent to ceil for negatives and floor for
+    // positives. Integer input passes through unchanged; NaN propagates.
+    // Falls back to np.fix for complex/object/structured inputs so
+    // numpy's coercion surface stays exact.
     let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("fix")?.call1((x.bind(py),))?.unbind())
+    let fix_fn = numpy.getattr("fix")?;
+    let x_for_fallback = x.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(fix_fn.call1((x_for_fallback.bind(py),))?.unbind())
+    };
+
+    let array = match extract_precise_numeric_array(py, x.bind(py), "fix(x)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    if array.has_integer_sidecar()
+        || matches!(array.dtype(), DType::Complex64 | DType::Complex128)
+    {
+        return fallback();
+    }
+    let result = array.fix();
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
