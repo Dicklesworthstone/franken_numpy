@@ -10602,16 +10602,19 @@ fn matrix_transpose(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn svdvals(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.linalg.svdvals. Returns just the singular
-    // values of x in descending order, equivalent to svd(x)[1] but
-    // avoiding the U/Vh allocation. Supports batched input via the
-    // standard numpy linalg conventions.
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("linalg")?
-        .getattr("svdvals")?
-        .call1((x.bind(py),))?
-        .unbind())
+    let svdvals_fn = numpy.getattr("linalg")?.getattr("svdvals")?;
+    let fallback = || -> PyResult<Py<PyAny>> { Ok(svdvals_fn.call1((x.bind(py),))?.unbind()) };
+
+    let x = match extract_numeric_array(py, x.bind(py), "svdvals(x)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let result = match x.svdvals() {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -39768,6 +39771,33 @@ mod tests {
             let theirs_b = numpy_sv.call1((batched.clone(),))?;
             let ok_b: bool = allclose.call1((&ours_b, &theirs_b))?.extract()?;
             assert!(ok_b, "svdvals batched 3-D mismatch");
+
+            // Complex input stays on the numpy fallback path but must still
+            // match exactly.
+            let py_complex = py.import("builtins")?.getattr("complex")?;
+            let complex_matrix = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(
+                        py,
+                        [
+                            py_complex.call1((1.0_f64, 1.0_f64))?,
+                            py_complex.call1((0.0_f64, -2.0_f64))?,
+                        ],
+                    )?,
+                    PyList::new(
+                        py,
+                        [
+                            py_complex.call1((3.0_f64, 0.5_f64))?,
+                            py_complex.call1((4.0_f64, -1.5_f64))?,
+                        ],
+                    )?,
+                ],
+            )?,))?;
+            let ours_c = sv_fn.call1((complex_matrix.clone(),))?;
+            let theirs_c = numpy_sv.call1((complex_matrix.clone(),))?;
+            let ok_c: bool = allclose.call1((&ours_c, &theirs_c))?.extract()?;
+            assert!(ok_c, "svdvals complex mismatch");
 
             Ok(())
         });
