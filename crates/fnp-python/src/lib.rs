@@ -6044,24 +6044,136 @@ fn histogram_bin_edges(
     range: Option<Py<PyAny>>,
     weights: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.histogram_bin_edges so estimator strings,
-    // explicit edge arrays, range clipping, and weighted paths all
-    // match numpy exactly.
     let numpy = py.import("numpy")?;
-    let histogram_bin_edges_fn = numpy.getattr("histogram_bin_edges")?;
-    let kwargs = PyDict::new(py);
-    if let Some(bins_val) = bins {
-        kwargs.set_item("bins", bins_val.bind(py))?;
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        let histogram_bin_edges_fn = numpy.getattr("histogram_bin_edges")?;
+        let kwargs = PyDict::new(py);
+        if let Some(bins_val) = bins.as_ref() {
+            kwargs.set_item("bins", bins_val.bind(py))?;
+        }
+        if let Some(range_val) = range.as_ref() {
+            kwargs.set_item("range", range_val.bind(py))?;
+        }
+        if let Some(weights_val) = weights.as_ref() {
+            kwargs.set_item("weights", weights_val.bind(py))?;
+        }
+        Ok(histogram_bin_edges_fn
+            .call((a.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
+    // Weights only affect estimator-driven bin-width choice; with explicit
+    // int bins + range they're ignored. Since our native path supports
+    // exactly that combo, pass through weights without using them.
+    // Delegate when a string estimator or non-int bins sequence lands that
+    // we don't reproduce.
+    let bins_bound = bins.as_ref().map(|v| v.bind(py));
+    let range_bound = range.as_ref().map(|v| v.bind(py));
+    let weights_bound = weights.as_ref().map(|v| v.bind(py));
+
+    // Case 1: explicit array-like bins → return the edges coerced through
+    // numpy.asarray. This preserves identity when bins is already an
+    // ndarray (matches numpy's behavior).
+    if let Some(bins_val) = bins_bound
+        && !bins_val.is_instance_of::<pyo3::types::PyInt>()
+        && !bins_val.is_instance_of::<pyo3::types::PyString>()
+        && !bins_val.is_none()
+    {
+        // Must be array-like. numpy.asarray to enforce dtype coercion.
+        // Weights are ignored with explicit edges (documented).
+        return Ok(numpy
+            .call_method1("asarray", (bins_val,))?
+            .unbind());
     }
-    if let Some(range_val) = range {
-        kwargs.set_item("range", range_val.bind(py))?;
+
+    // Case 2: int bins (default 10 when bins is None or missing) with
+    // no estimator. Range may or may not be present.
+    if bins_bound
+        .map(|v| v.is_none() || v.is_instance_of::<pyo3::types::PyInt>())
+        .unwrap_or(true)
+    {
+        if weights_bound.is_some_and(|w| !w.is_none()) {
+            // weights are ignored with int bins per numpy docs, but our
+            // extraction below doesn't use them — confirm they at least
+            // parse as numeric so we don't silently accept garbage.
+            if extract_precise_numeric_array(py, weights_bound.unwrap(), "histogram_bin_edges(weights)").is_err() {
+                return fallback(py);
+            }
+        }
+        let nbins: i64 = match bins_bound {
+            Some(v) if !v.is_none() => match v.extract::<i64>() {
+                Ok(n) if n > 0 => n,
+                _ => return fallback(py),
+            },
+            _ => 10,
+        };
+
+        let a_bound = a.bind(py);
+        let (amin, amax) = if let Some(range_val) = range_bound
+            && !range_val.is_none()
+        {
+            // range is a 2-tuple.
+            match range_val.extract::<(f64, f64)>() {
+                Ok((lo, hi)) if hi >= lo && lo.is_finite() && hi.is_finite() => (lo, hi),
+                _ => return fallback(py),
+            }
+        } else {
+            // Derive from input data via numpy.min / numpy.max to match
+            // exactly (including 0-element handling: numpy returns
+            // [0, 0.25, 0.5, 0.75, 1.0] for bins=4, which is linspace(0,1,5)).
+            let native = match extract_precise_numeric_array(py, a_bound, "histogram_bin_edges(a)") {
+                Ok(value) => value,
+                Err(_) => return fallback(py),
+            };
+            if native.has_integer_sidecar()
+                || matches!(native.dtype(), DType::Complex64 | DType::Complex128)
+            {
+                return fallback(py);
+            }
+            let values = native.values();
+            if values.is_empty() {
+                (0.0_f64, 1.0_f64)
+            } else {
+                let mut lo = f64::INFINITY;
+                let mut hi = f64::NEG_INFINITY;
+                for &v in values.iter() {
+                    if !v.is_finite() {
+                        // numpy raises on non-finite values when using
+                        // an estimator string; with int bins it's fine,
+                        // but we also see NaN propagation issues — keep
+                        // the fallback for non-finite input to stay safe.
+                        return fallback(py);
+                    }
+                    if v < lo {
+                        lo = v;
+                    }
+                    if v > hi {
+                        hi = v;
+                    }
+                }
+                if lo == hi {
+                    (lo - 0.5, hi + 0.5)
+                } else {
+                    (lo, hi)
+                }
+            }
+        };
+
+        let edges = match UFuncArray::linspace_endpoint(
+            amin,
+            amax,
+            (nbins + 1) as usize,
+            true,
+            DType::F64,
+        ) {
+            Ok(value) => value,
+            Err(_) => return fallback(py),
+        };
+        return build_numpy_array_from_ufunc(py, &edges);
     }
-    if let Some(weights_val) = weights {
-        kwargs.set_item("weights", weights_val.bind(py))?;
-    }
-    Ok(histogram_bin_edges_fn
-        .call((a.bind(py),), Some(&kwargs))?
-        .unbind())
+
+    // String estimators ('fd', 'auto', 'sturges', ...) need numpy.
+    fallback(py)
 }
 
 #[pyfunction]
