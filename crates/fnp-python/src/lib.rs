@@ -8123,6 +8123,147 @@ fn full(
         .unbind())
 }
 
+fn parse_shape_override(
+    shape: &Bound<'_, PyAny>,
+    context: &str,
+) -> PyResult<Vec<usize>> {
+    if let Ok(dims) = shape.extract::<Vec<i64>>() {
+        dims.into_iter()
+            .map(|dim| {
+                if dim < 0 {
+                    Err(PyValueError::new_err(format!(
+                        "{context}: negative dimensions are not allowed"
+                    )))
+                } else {
+                    Ok(dim as usize)
+                }
+            })
+            .collect()
+    } else if let Ok(dim) = shape.extract::<i64>() {
+        if dim < 0 {
+            Err(PyValueError::new_err(format!(
+                "{context}: negative dimensions are not allowed"
+            )))
+        } else {
+            Ok(vec![dim as usize])
+        }
+    } else {
+        Err(PyTypeError::new_err(format!(
+            "{context}: shape must be an int or tuple of ints"
+        )))
+    }
+}
+
+enum LikeFill<'py> {
+    Zeros,
+    Ones,
+    Empty,
+    Full(&'py Bound<'py, PyAny>),
+}
+
+// Native creation of *_like outputs for the common numeric dtypes. Returns
+// Ok(None) whenever a parameter combination (F-contiguous multi-D input with
+// default order='K', unsupported dtypes, subclass preservation via subok, or
+// explicit device targets) cannot be matched by the native UFuncArray path;
+// callers fall back to numpy in that case so the full numpy surface is still
+// exercised. Shape and dtype inheritance, dtype overrides, shape overrides,
+// and zero-sized inputs are handled natively.
+#[allow(clippy::too_many_arguments)]
+fn native_like_array(
+    py: Python<'_>,
+    source: &Bound<'_, PyAny>,
+    dtype: Option<&Bound<'_, PyAny>>,
+    order: &str,
+    subok: bool,
+    shape: Option<&Bound<'_, PyAny>>,
+    device: Option<&Bound<'_, PyAny>>,
+    fill: &LikeFill<'_>,
+    context: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    if device.is_some_and(|value| !value.is_none()) {
+        return Ok(None);
+    }
+    if !matches!(order, "K" | "C") {
+        return Ok(None);
+    }
+
+    let numpy = py.import("numpy")?;
+    let source_array = numpy.call_method1("asanyarray", (source,))?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if subok && !source_array.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let source_shape: Vec<usize> = source_array.getattr("shape")?.extract()?;
+
+    let target_dtype = match dtype {
+        Some(dtype_val) if !dtype_val.is_none() => {
+            let parsed = numpy.getattr("dtype")?.call1((dtype_val,))?;
+            let name = parsed.getattr("name")?.extract::<String>()?;
+            match DType::parse(&name) {
+                Some(value) if dtype_supported_by_numpy_export_bridge(value) => value,
+                _ => return Ok(None),
+            }
+        }
+        _ => {
+            let source_dtype_name = source_array
+                .getattr("dtype")?
+                .getattr("name")?
+                .extract::<String>()?;
+            match DType::parse(&source_dtype_name) {
+                Some(value) if dtype_supported_by_numpy_export_bridge(value) => value,
+                _ => return Ok(None),
+            }
+        }
+    };
+
+    let shape_overridden = shape.is_some_and(|value| !value.is_none());
+    let target_shape = if shape_overridden {
+        parse_shape_override(shape.expect("checked above"), context)?
+    } else {
+        source_shape.clone()
+    };
+
+    // With order='K' and no shape override, numpy preserves the input's
+    // memory layout. For multi-D F-contiguous inputs that means an
+    // F-contiguous output; our numeric export bridge only materializes
+    // C-contiguous arrays, so hand that case back to numpy to keep the
+    // F_CONTIGUOUS flag parity.
+    if order == "K" && !shape_overridden && source_shape.len() >= 2 {
+        let flags = source_array.getattr("flags")?;
+        let f_contig: bool = flags.get_item("F_CONTIGUOUS")?.extract()?;
+        let c_contig: bool = flags.get_item("C_CONTIGUOUS")?.extract()?;
+        if f_contig && !c_contig {
+            return Ok(None);
+        }
+    }
+
+    let result = match fill {
+        LikeFill::Zeros | LikeFill::Empty => {
+            match UFuncArray::zeros(target_shape, target_dtype) {
+                Ok(value) => value,
+                Err(_) => return Ok(None),
+            }
+        }
+        LikeFill::Ones => match UFuncArray::ones(target_shape, target_dtype) {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        },
+        LikeFill::Full(value) => {
+            let fill_scalar = match value.extract::<f64>() {
+                Ok(scalar) if scalar.is_finite() => scalar,
+                Ok(scalar) => scalar,
+                Err(_) => return Ok(None),
+            };
+            match UFuncArray::full(target_shape, fill_scalar, target_dtype) {
+                Ok(value) => value,
+                Err(_) => return Ok(None),
+            }
+        }
+    };
+
+    Ok(Some(build_numpy_array_from_ufunc(py, &result)?))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, fill_value, dtype=None, order="K", subok=true, shape=None, *, device=None))]
 #[allow(clippy::too_many_arguments)]
@@ -8136,25 +8277,40 @@ fn full_like(
     shape: Option<Py<PyAny>>,
     device: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.full_like so dtype/layout inheritance, shape
-    // overrides, subclass handling, object fills, and zero-sized input
-    // behavior all match numpy exactly.
+    let a_bound = a.bind(py);
+    let fill_bound = fill_value.bind(py);
+    let dtype_bound = dtype.as_ref().map(|value| value.bind(py));
+    let shape_bound = shape.as_ref().map(|value| value.bind(py));
+    let device_bound = device.as_ref().map(|value| value.bind(py));
+    if let Some(native) = native_like_array(
+        py,
+        a_bound,
+        dtype_bound,
+        order,
+        subok,
+        shape_bound,
+        device_bound,
+        &LikeFill::Full(fill_bound),
+        "full_like(shape)",
+    )? {
+        return Ok(native);
+    }
     let numpy = py.import("numpy")?;
     let full_like_fn = numpy.getattr("full_like")?;
     let kwargs = PyDict::new(py);
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    if let Some(dtype_val) = dtype_bound {
+        kwargs.set_item("dtype", dtype_val)?;
     }
     kwargs.set_item("order", order)?;
     kwargs.set_item("subok", subok)?;
-    if let Some(shape_val) = shape {
-        kwargs.set_item("shape", shape_val.bind(py))?;
+    if let Some(shape_val) = shape_bound {
+        kwargs.set_item("shape", shape_val)?;
     }
-    if let Some(device_val) = device {
-        kwargs.set_item("device", device_val.bind(py))?;
+    if let Some(device_val) = device_bound {
+        kwargs.set_item("device", device_val)?;
     }
     Ok(full_like_fn
-        .call((a.bind(py), fill_value.bind(py)), Some(&kwargs))?
+        .call((a_bound, fill_bound), Some(&kwargs))?
         .unbind())
 }
 
@@ -8169,24 +8325,38 @@ fn zeros_like(
     shape: Option<Py<PyAny>>,
     device: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.zeros_like so dtype/layout inheritance, shape
-    // overrides, subclass handling, object zero-fills, and zero-sized
-    // input behavior all match numpy exactly.
+    let a_bound = a.bind(py);
+    let dtype_bound = dtype.as_ref().map(|value| value.bind(py));
+    let shape_bound = shape.as_ref().map(|value| value.bind(py));
+    let device_bound = device.as_ref().map(|value| value.bind(py));
+    if let Some(native) = native_like_array(
+        py,
+        a_bound,
+        dtype_bound,
+        order,
+        subok,
+        shape_bound,
+        device_bound,
+        &LikeFill::Zeros,
+        "zeros_like(shape)",
+    )? {
+        return Ok(native);
+    }
     let numpy = py.import("numpy")?;
     let zeros_like_fn = numpy.getattr("zeros_like")?;
     let kwargs = PyDict::new(py);
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    if let Some(dtype_val) = dtype_bound {
+        kwargs.set_item("dtype", dtype_val)?;
     }
     kwargs.set_item("order", order)?;
     kwargs.set_item("subok", subok)?;
-    if let Some(shape_val) = shape {
-        kwargs.set_item("shape", shape_val.bind(py))?;
+    if let Some(shape_val) = shape_bound {
+        kwargs.set_item("shape", shape_val)?;
     }
-    if let Some(device_val) = device {
-        kwargs.set_item("device", device_val.bind(py))?;
+    if let Some(device_val) = device_bound {
+        kwargs.set_item("device", device_val)?;
     }
-    Ok(zeros_like_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(zeros_like_fn.call((a_bound,), Some(&kwargs))?.unbind())
 }
 
 #[pyfunction]
@@ -8200,24 +8370,38 @@ fn ones_like(
     shape: Option<Py<PyAny>>,
     device: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.ones_like so dtype/layout inheritance, shape
-    // overrides, subclass handling, object one-fills, and zero-sized
-    // input behavior all match numpy exactly.
+    let a_bound = a.bind(py);
+    let dtype_bound = dtype.as_ref().map(|value| value.bind(py));
+    let shape_bound = shape.as_ref().map(|value| value.bind(py));
+    let device_bound = device.as_ref().map(|value| value.bind(py));
+    if let Some(native) = native_like_array(
+        py,
+        a_bound,
+        dtype_bound,
+        order,
+        subok,
+        shape_bound,
+        device_bound,
+        &LikeFill::Ones,
+        "ones_like(shape)",
+    )? {
+        return Ok(native);
+    }
     let numpy = py.import("numpy")?;
     let ones_like_fn = numpy.getattr("ones_like")?;
     let kwargs = PyDict::new(py);
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    if let Some(dtype_val) = dtype_bound {
+        kwargs.set_item("dtype", dtype_val)?;
     }
     kwargs.set_item("order", order)?;
     kwargs.set_item("subok", subok)?;
-    if let Some(shape_val) = shape {
-        kwargs.set_item("shape", shape_val.bind(py))?;
+    if let Some(shape_val) = shape_bound {
+        kwargs.set_item("shape", shape_val)?;
     }
-    if let Some(device_val) = device {
-        kwargs.set_item("device", device_val.bind(py))?;
+    if let Some(device_val) = device_bound {
+        kwargs.set_item("device", device_val)?;
     }
-    Ok(ones_like_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(ones_like_fn.call((a_bound,), Some(&kwargs))?.unbind())
 }
 
 #[pyfunction]
@@ -8231,25 +8415,39 @@ fn empty_like(
     shape: Option<Py<PyAny>>,
     device: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.empty_like so dtype/layout inheritance, shape
-    // overrides, subclass handling, and zero-sized input behavior all
-    // match numpy exactly without normalizing uninitialized payloads.
+    let prototype_bound = prototype.bind(py);
+    let dtype_bound = dtype.as_ref().map(|value| value.bind(py));
+    let shape_bound = shape.as_ref().map(|value| value.bind(py));
+    let device_bound = device.as_ref().map(|value| value.bind(py));
+    if let Some(native) = native_like_array(
+        py,
+        prototype_bound,
+        dtype_bound,
+        order,
+        subok,
+        shape_bound,
+        device_bound,
+        &LikeFill::Empty,
+        "empty_like(shape)",
+    )? {
+        return Ok(native);
+    }
     let numpy = py.import("numpy")?;
     let empty_like_fn = numpy.getattr("empty_like")?;
     let kwargs = PyDict::new(py);
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    if let Some(dtype_val) = dtype_bound {
+        kwargs.set_item("dtype", dtype_val)?;
     }
     kwargs.set_item("order", order)?;
     kwargs.set_item("subok", subok)?;
-    if let Some(shape_val) = shape {
-        kwargs.set_item("shape", shape_val.bind(py))?;
+    if let Some(shape_val) = shape_bound {
+        kwargs.set_item("shape", shape_val)?;
     }
-    if let Some(device_val) = device {
-        kwargs.set_item("device", device_val.bind(py))?;
+    if let Some(device_val) = device_bound {
+        kwargs.set_item("device", device_val)?;
     }
     Ok(empty_like_fn
-        .call((prototype.bind(py),), Some(&kwargs))?
+        .call((prototype_bound,), Some(&kwargs))?
         .unbind())
 }
 
@@ -8738,15 +8936,39 @@ fn array_equal(
     a2: Py<PyAny>,
     equal_nan: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.array_equal so exact-shape semantics and
-    // optional equal_nan handling match numpy exactly.
+    // Native array_equal via UFuncArray::array_equal_nan. Falls back to
+    // numpy for complex / integer-sidecar / mixed-dtype / non-numeric
+    // inputs so numpy's dispatch surface (object arrays, strings, etc.)
+    // stays exact. The return is a builtin Python bool (not np.bool_),
+    // matching numpy's documented return type.
     let numpy = py.import("numpy")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("equal_nan", equal_nan)?;
-    Ok(numpy
-        .getattr("array_equal")?
-        .call((a1.bind(py), a2.bind(py)), Some(&kwargs))?
-        .unbind())
+    let array_equal_fn = numpy.getattr("array_equal")?;
+    let a1_for_fallback = a1.clone_ref(py);
+    let a2_for_fallback = a2.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("equal_nan", equal_nan)?;
+        Ok(array_equal_fn
+            .call((a1_for_fallback.bind(py), a2_for_fallback.bind(py)), Some(&kwargs))?
+            .unbind())
+    };
+    let array_a = match extract_precise_numeric_array(py, a1.bind(py), "array_equal(a1)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let array_b = match extract_precise_numeric_array(py, a2.bind(py), "array_equal(a2)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    if array_a.has_integer_sidecar()
+        || array_b.has_integer_sidecar()
+        || matches!(array_a.dtype(), DType::Complex64 | DType::Complex128)
+        || matches!(array_b.dtype(), DType::Complex64 | DType::Complex128)
+    {
+        return fallback();
+    }
+    let verdict = array_a.array_equal_nan(&array_b, equal_nan);
+    Ok(pyo3::types::PyBool::new(py, verdict).to_owned().into_any().unbind())
 }
 
 #[pyfunction]
