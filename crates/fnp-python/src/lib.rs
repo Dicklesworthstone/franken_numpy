@@ -5012,11 +5012,9 @@ fn cholesky(
         }
     }
 
-    // Passthrough to np.linalg.cholesky so the keyword-only upper selector,
-    // lower/upper triangle semantics, complex Hermitian handling, and batched
-    // (..., M, M) behavior match numpy exactly.
     let numpy = py.import("numpy")?;
     let cholesky_fn = numpy.getattr("linalg")?.getattr("cholesky")?;
+    let a = args.get_item(0)?.unbind();
     let call_kwargs = PyDict::new(py);
     let mut saw_upper = false;
     if let Some(kwargs) = kwargs {
@@ -5039,9 +5037,36 @@ fn cholesky(
         call_kwargs.set_item("upper", false)?;
     }
 
-    Ok(cholesky_fn
-        .call((args.get_item(0)?,), Some(&call_kwargs))?
-        .unbind())
+    let upper = call_kwargs
+        .get_item("upper")?
+        .expect("upper kwarg is always present")
+        .extract::<bool>()?;
+    let a_for_fallback = a.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(cholesky_fn
+            .call((a_for_fallback.bind(py),), Some(&call_kwargs))?
+            .unbind())
+    };
+
+    let array = match extract_precise_numeric_array(py, a.bind(py), "cholesky(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let shape = array.shape();
+    if shape.len() != 2
+        || shape[0] != shape[1]
+        || array.has_integer_sidecar()
+        || array.values().iter().any(|value| !value.is_finite())
+        || !matches!(array.dtype(), DType::F64)
+    {
+        return fallback();
+    }
+
+    let result = match array.cholesky_with_upper(upper) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -7237,6 +7262,12 @@ fn percentile(
         Ok(Some(_)) => return fallback(),
         Err(_) => return fallback(),
     };
+    // Empty input: numpy.percentile raises IndexError (internal kth lookup
+    // into 0-length array). Our in-Rust path returns Ok(NaN). Fall back to
+    // numpy so the exception type matches.
+    if a.values().is_empty() {
+        return fallback();
+    }
     let result = match a.percentile(q, axis) {
         Ok(result) => result,
         Err(_) => return fallback(),
@@ -11362,6 +11393,12 @@ fn quantile(
         Ok(Some(_)) => return fallback(),
         Err(_) => return fallback(),
     };
+    // Empty input: numpy.quantile raises IndexError (internal kth lookup
+    // into 0-length array). Our in-Rust path returns Ok(NaN). Fall back to
+    // numpy so the exception type matches.
+    if a.values().is_empty() {
+        return fallback();
+    }
     let result = match a.quantile(q, axis) {
         Ok(result) => result,
         Err(_) => return fallback(),
@@ -17143,6 +17180,15 @@ mod tests {
             let actual_upper = cholesky_fn.call((spd.clone(),), Some(&upper_kwargs))?;
             let expected_upper = numpy_cholesky.call((spd.clone(),), Some(&upper_kwargs))?;
             assert_array_matches_numpy(&actual_upper, &expected_upper)?;
+
+            let spd_f32 = numeric_array(
+                py,
+                vec![vec![4.0_f32, 1.0_f32], vec![1.0_f32, 3.0_f32]],
+                "float32",
+            );
+            let actual_f32 = cholesky_fn.call1((spd_f32.clone(),))?;
+            let expected_f32 = numpy_cholesky.call1((spd_f32.clone(),))?;
+            assert_array_matches_numpy(&actual_f32, &expected_f32)?;
 
             let batched = numeric_array(
                 py,
