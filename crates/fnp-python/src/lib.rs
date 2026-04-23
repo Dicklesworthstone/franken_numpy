@@ -14442,6 +14442,158 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         }
     }
 
+    // Nested-namespace shims (k74v.5 resolution — option A/B hybrid).
+    //
+    // fnp_python exposes numpy submodule functions both FLAT (for existing
+    // callers using linalg_eig / ma_count / testing_assert_allclose /
+    // recfunctions_drop_fields) AND via real nested submodules so that
+    //     import fnp_python as np
+    //     np.linalg.svd(np.eye(3))
+    //     np.ma.count(np.ma.array([1, 2]))
+    //     np.testing.assert_allclose(a, b)
+    //     np.lib.recfunctions.drop_fields(...)
+    // all work verbatim against the numpy-native spellings. This closes the
+    // 'drop-in numpy replacement' gap flagged by the k74v.5 namespace
+    // strategy question.
+    //
+    // Implementation: create one PyModule per submodule, populate by
+    // aliasing `m.getattr("<flat_name>")` onto the unprefixed member,
+    // then wire it up via m.add_submodule / m.add. Functions remain
+    // registered at the top level so nothing changes for existing callers.
+    {
+        let linalg = PyModule::new(py, "linalg")?;
+        // linalg_* prefixed (3).
+        linalg.add("eig", m.getattr("linalg_eig")?)?;
+        linalg.add("matrix_norm", m.getattr("linalg_matrix_norm")?)?;
+        linalg.add("vecdot", m.getattr("linalg_vecdot")?)?;
+        // Top-level linalg functions (also in numpy.linalg).
+        for (numpy_name, flat_name) in [
+            ("svd", "svd"),
+            ("svdvals", "svdvals"),
+            ("qr", "qr"),
+            ("lstsq", "lstsq"),
+            ("solve", "solve"),
+            ("inv", "inv"),
+            ("cholesky", "cholesky"),
+            ("slogdet", "slogdet"),
+            ("matrix_rank", "matrix_rank"),
+            ("matrix_power", "matrix_power"),
+            ("matrix_transpose", "matrix_transpose"),
+            ("pinv", "pinv"),
+            ("norm", "norm"),
+            ("cond", "cond"),
+            ("tensorinv", "tensorinv"),
+            ("tensorsolve", "tensorsolve"),
+            ("multi_dot", "multi_dot"),
+            ("det", "det"),
+            ("solve_triangular", "solve_triangular"),
+            ("eigh", "eigh"),
+            ("eigvals", "eigvals"),
+            ("eigvalsh", "eigvalsh"),
+            ("cross", "cross"),
+            ("tensordot", "tensordot"),
+            ("matmul", "matmul"),
+        ] {
+            if let Ok(value) = m.getattr(flat_name) {
+                linalg.add(numpy_name, value)?;
+            }
+        }
+        m.add_submodule(&linalg)?;
+        // Also expose as top-level attribute so `fnp_python.linalg` resolves
+        // via attribute access regardless of import style.
+        m.add("linalg", linalg)?;
+    }
+
+    {
+        let ma = PyModule::new(py, "ma")?;
+        // ma_* prefixed (5).
+        for (numpy_name, flat_name) in [
+            ("count", "ma_count"),
+            ("argmax", "ma_argmax"),
+            ("argmin", "ma_argmin"),
+            ("average", "ma_average"),
+            ("ediff1d", "ma_ediff1d"),
+        ] {
+            if let Ok(value) = m.getattr(flat_name) {
+                ma.add(numpy_name, value)?;
+            }
+        }
+        // Top-level ma functions (already exposed under numpy-native names).
+        for name in [
+            "masked_where",
+            "masked_equal",
+            "masked_not_equal",
+            "masked_less",
+            "masked_greater",
+            "masked_less_equal",
+            "masked_greater_equal",
+            "masked_inside",
+            "masked_outside",
+            "masked_values",
+            "masked_invalid",
+            "masked_all",
+            "compressed",
+            "getmask",
+            "getmaskarray",
+            "is_masked",
+            "mask_or",
+            "make_mask",
+            "allequal",
+            "count_masked",
+            "minimum_fill_value",
+            "maximum_fill_value",
+            "filled",
+            "fix_invalid",
+        ] {
+            if let Ok(value) = m.getattr(name) {
+                ma.add(name, value)?;
+            }
+        }
+        m.add_submodule(&ma)?;
+        m.add("ma", ma)?;
+    }
+
+    {
+        let testing = PyModule::new(py, "testing")?;
+        for (numpy_name, flat_name) in [
+            ("assert_allclose", "testing_assert_allclose"),
+            ("assert_equal", "testing_assert_equal"),
+            ("assert_almost_equal", "testing_assert_almost_equal"),
+            ("assert_array_almost_equal", "testing_assert_array_almost_equal"),
+            ("assert_array_less", "testing_assert_array_less"),
+            ("assert_approx_equal", "testing_assert_approx_equal"),
+            ("assert_string_equal", "testing_assert_string_equal"),
+            ("assert_array_equal", "testing_assert_array_equal"),
+        ] {
+            if let Ok(value) = m.getattr(flat_name) {
+                testing.add(numpy_name, value)?;
+            }
+        }
+        m.add_submodule(&testing)?;
+        m.add("testing", testing)?;
+    }
+
+    {
+        // numpy.lib.recfunctions — nested two levels deep.
+        let lib_module = PyModule::new(py, "lib")?;
+        let recfunctions = PyModule::new(py, "recfunctions")?;
+        for (numpy_name, flat_name) in [
+            ("drop_fields", "recfunctions_drop_fields"),
+            ("rename_fields", "recfunctions_rename_fields"),
+            ("append_fields", "recfunctions_append_fields"),
+            ("merge_arrays", "recfunctions_merge_arrays"),
+            ("unstructured_to_structured", "recfunctions_unstructured_to_structured"),
+        ] {
+            if let Ok(value) = m.getattr(flat_name) {
+                recfunctions.add(numpy_name, value)?;
+            }
+        }
+        lib_module.add_submodule(&recfunctions)?;
+        lib_module.add("recfunctions", recfunctions)?;
+        m.add_submodule(&lib_module)?;
+        m.add("lib", lib_module)?;
+    }
+
     Ok(())
 }
 
@@ -15292,6 +15444,94 @@ mod tests {
                 "format_float_positional diverged"
             );
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn k74v_5_nested_submodules_expose_numpy_native_names() {
+        // Verifies the k74v.5 namespace-strategy resolution: fnp_python
+        // exposes .linalg / .ma / .testing / .lib.recfunctions as real
+        // nested submodules so `import fnp_python as np; np.linalg.svd(...)`
+        // works verbatim against numpy-native spellings.
+        with_python(|py| {
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+
+            // linalg submodule.
+            let linalg = module.getattr("linalg")?;
+            for name in [
+                "eig", "matrix_norm", "vecdot",
+                "svd", "svdvals", "qr", "lstsq", "solve", "inv",
+                "cholesky", "slogdet", "matrix_rank", "matrix_power",
+                "matrix_transpose", "pinv", "norm", "cond", "tensorinv",
+                "tensorsolve", "multi_dot", "det", "solve_triangular",
+                "eigh", "eigvals", "eigvalsh", "cross", "tensordot", "matmul",
+            ] {
+                assert!(
+                    linalg.getattr(name).is_ok(),
+                    "fnp_python.linalg.{name} missing"
+                );
+            }
+
+            // ma submodule.
+            let ma = module.getattr("ma")?;
+            for name in [
+                "count", "argmax", "argmin", "average", "ediff1d",
+                "masked_where", "masked_equal", "masked_not_equal",
+                "masked_less", "masked_greater", "masked_less_equal",
+                "masked_greater_equal", "masked_inside", "masked_outside",
+                "masked_values", "masked_invalid", "masked_all",
+                "compressed", "getmask", "getmaskarray", "is_masked",
+                "mask_or", "make_mask", "allequal", "count_masked",
+                "minimum_fill_value", "maximum_fill_value", "filled", "fix_invalid",
+            ] {
+                assert!(
+                    ma.getattr(name).is_ok(),
+                    "fnp_python.ma.{name} missing"
+                );
+            }
+
+            // testing submodule.
+            let testing = module.getattr("testing")?;
+            for name in [
+                "assert_allclose", "assert_equal", "assert_almost_equal",
+                "assert_array_almost_equal", "assert_array_less",
+                "assert_approx_equal", "assert_string_equal", "assert_array_equal",
+            ] {
+                assert!(
+                    testing.getattr(name).is_ok(),
+                    "fnp_python.testing.{name} missing"
+                );
+            }
+
+            // lib.recfunctions submodule (two-level nesting).
+            let lib_mod = module.getattr("lib")?;
+            let recfunctions = lib_mod.getattr("recfunctions")?;
+            for name in [
+                "drop_fields", "rename_fields", "append_fields",
+                "merge_arrays", "unstructured_to_structured",
+            ] {
+                assert!(
+                    recfunctions.getattr(name).is_ok(),
+                    "fnp_python.lib.recfunctions.{name} missing"
+                );
+            }
+
+            // Sanity-check an actual call round-trips through the submodule.
+            if numpy_available(py) {
+                let numpy = py.import("numpy")?;
+                let eye3 = numpy.getattr("eye")?.call1((3_i64,))?;
+                let our_svd = linalg.getattr("svd")?.call1((eye3.clone(),))?;
+                let their_svd = numpy.getattr("linalg")?.getattr("svd")?.call1((eye3,))?;
+                // Both return SVDResult; compare their repr prefixes to
+                // avoid hash / pointer equality noise.
+                assert_eq!(
+                    our_svd.get_type().name()?.extract::<String>()?,
+                    their_svd.get_type().name()?.extract::<String>()?,
+                    "fnp_python.linalg.svd return type diverges from numpy.linalg.svd"
+                );
+            }
             Ok(())
         });
     }
