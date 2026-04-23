@@ -6810,6 +6810,124 @@ fn median(
     Ok(output)
 }
 
+// Compute the unweighted covariance matrix following numpy's own algorithm:
+// stack y onto m when present, transpose to rowvar=True orientation,
+// reshape 1-D inputs to (1, n_obs), subtract the per-row mean, then
+// return (X @ X.T) / (n_obs - ddof). Returns Err(fallback) for shapes
+// that numpy handles via special-cases this path doesn't reproduce.
+fn native_cov_unweighted(
+    py: Python<'_>,
+    m: &Bound<'_, PyAny>,
+    y: Option<&Bound<'_, PyAny>>,
+    rowvar: bool,
+    ddof: usize,
+) -> PyResult<Option<UFuncArray>> {
+    let m_arr = match extract_precise_numeric_array(py, m, "cov(m)") {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    if m_arr.has_integer_sidecar()
+        || matches!(m_arr.dtype(), DType::Complex64 | DType::Complex128)
+    {
+        return Ok(None);
+    }
+
+    let y_arr = match y {
+        Some(y_val) if !y_val.is_none() => {
+            match extract_precise_numeric_array(py, y_val, "cov(y)") {
+                Ok(value)
+                    if !value.has_integer_sidecar()
+                        && !matches!(value.dtype(), DType::Complex64 | DType::Complex128) =>
+                {
+                    Some(value)
+                }
+                _ => return Ok(None),
+            }
+        }
+        _ => None,
+    };
+
+    // Normalize m to 2-D: 1-D becomes a single row (rowvar=True orientation).
+    let to_2d = |arr: UFuncArray| -> Option<UFuncArray> {
+        match arr.shape().len() {
+            1 => {
+                let n = arr.shape()[0] as isize;
+                arr.reshape(&[1, n]).ok()
+            }
+            2 => Some(arr),
+            _ => None,
+        }
+    };
+    let Some(m_2d) = to_2d(m_arr) else {
+        return Ok(None);
+    };
+    let stacked = if let Some(y_arr) = y_arr {
+        let Some(y_2d) = to_2d(y_arr) else {
+            return Ok(None);
+        };
+        let cat_axis: isize = if rowvar { 0 } else { 1 };
+        match UFuncArray::concatenate(&[&m_2d, &y_2d], cat_axis) {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        }
+    } else {
+        m_2d
+    };
+
+    // After stacking: if rowvar=False and we have more than one row, transpose
+    // so rows are variables. Matches numpy's `if not rowvar and X.shape[0] != 1: X = X.T`.
+    let oriented = if !rowvar && stacked.shape()[0] != 1 {
+        match stacked.transpose(None) {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        }
+    } else {
+        stacked
+    };
+
+    let n_vars = oriented.shape()[0];
+    let n_obs = oriented.shape()[1];
+    if n_obs == 0 || n_vars == 0 {
+        return Ok(None);
+    }
+    if n_obs <= ddof {
+        return Ok(None);
+    }
+
+    // avg = mean(X, axis=1), reshape to (n_vars, 1) and subtract (broadcasts).
+    let avg = match oriented.reduce_mean(Some(1), true) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let centered = match oriented.elementwise_binary(&avg, BinaryOp::Sub) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+
+    // cov = X @ X.T / (n_obs - ddof)
+    let x_t = match centered.transpose(None) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let product = match centered.matmul(&x_t) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    // numpy multiplies by (1 / fact) rather than dividing by fact so that
+    // ULP rounding matches `c *= true_divide(1, fact)` from np.cov.
+    let fact = (n_obs - ddof) as f64;
+    let inv_fact = 1.0_f64 / fact;
+    let scale = match UFuncArray::full(product.shape().to_vec(), inv_fact, product.dtype()) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let result = match product.elementwise_binary(&scale, BinaryOp::Mul) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    Ok(Some(result))
+}
+
 #[pyfunction]
 #[pyo3(signature = (m, y=None, rowvar=true, bias=false, ddof=None, fweights=None, aweights=None))]
 #[allow(clippy::too_many_arguments)]
@@ -6823,27 +6941,64 @@ fn cov(
     fweights: Option<Py<PyAny>>,
     aweights: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.cov so row/column variable orientation, paired m/y
-    // inputs, ddof/bias interaction, frequency/analytic weights, and 1-D
-    // scalar return semantics match numpy exactly.
     let numpy = py.import("numpy")?;
-    let cov_fn = numpy.getattr("cov")?;
-    let kwargs = PyDict::new(py);
-    if let Some(y_val) = y {
-        kwargs.set_item("y", y_val.bind(py))?;
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        let cov_fn = numpy.getattr("cov")?;
+        let kwargs = PyDict::new(py);
+        if let Some(y_val) = y.as_ref() {
+            kwargs.set_item("y", y_val.bind(py))?;
+        }
+        kwargs.set_item("rowvar", rowvar)?;
+        kwargs.set_item("bias", bias)?;
+        if let Some(ddof_val) = ddof.as_ref() {
+            kwargs.set_item("ddof", ddof_val.bind(py))?;
+        }
+        if let Some(fweights_val) = fweights.as_ref() {
+            kwargs.set_item("fweights", fweights_val.bind(py))?;
+        }
+        if let Some(aweights_val) = aweights.as_ref() {
+            kwargs.set_item("aweights", aweights_val.bind(py))?;
+        }
+        Ok(cov_fn.call((m.bind(py),), Some(&kwargs))?.unbind())
+    };
+
+    if fweights.as_ref().is_some_and(|value| !value.bind(py).is_none())
+        || aweights.as_ref().is_some_and(|value| !value.bind(py).is_none())
+    {
+        return fallback(py);
     }
-    kwargs.set_item("rowvar", rowvar)?;
-    kwargs.set_item("bias", bias)?;
-    if let Some(ddof_val) = ddof {
-        kwargs.set_item("ddof", ddof_val.bind(py))?;
+
+    // Resolve ddof. numpy: ddof defaults to 0 when bias=True else 1; if
+    // caller passes ddof explicitly (non-None), it wins.
+    let resolved_ddof = match ddof.as_ref() {
+        Some(value) if !value.bind(py).is_none() => match value.bind(py).extract::<i64>() {
+            Ok(d) if d >= 0 => d as usize,
+            _ => return fallback(py),
+        },
+        _ => {
+            if bias {
+                0
+            } else {
+                1
+            }
+        }
+    };
+
+    let m_bound = m.bind(py);
+    let y_binding = y.as_ref().map(|value| value.bind(py));
+    let native = match native_cov_unweighted(py, m_bound, y_binding, rowvar, resolved_ddof) {
+        Ok(Some(value)) => value,
+        _ => return fallback(py),
+    };
+
+    // numpy returns c.squeeze() — 1-D input yields a 0-d scalar.
+    let shape = native.shape().to_vec();
+    let trivial_scalar = shape.iter().all(|&dim| dim == 1);
+    let output = build_numpy_array_from_ufunc(py, &native)?;
+    if trivial_scalar {
+        return Ok(output.bind(py).call_method0("squeeze")?.unbind());
     }
-    if let Some(fweights_val) = fweights {
-        kwargs.set_item("fweights", fweights_val.bind(py))?;
-    }
-    if let Some(aweights_val) = aweights {
-        kwargs.set_item("aweights", aweights_val.bind(py))?;
-    }
-    Ok(cov_fn.call((m.bind(py),), Some(&kwargs))?.unbind())
+    Ok(output)
 }
 
 #[pyfunction]
@@ -6857,26 +7012,93 @@ fn corrcoef(
     ddof: Option<Py<PyAny>>,
     dtype: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.corrcoef so row/column variable orientation, paired x/y
-    // inputs, deprecated bias/ddof keyword handling, and explicit output dtype
-    // match numpy exactly.
     let numpy = py.import("numpy")?;
-    let corrcoef_fn = numpy.getattr("corrcoef")?;
-    let kwargs = PyDict::new(py);
-    if let Some(y_val) = y {
-        kwargs.set_item("y", y_val.bind(py))?;
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        let corrcoef_fn = numpy.getattr("corrcoef")?;
+        let kwargs = PyDict::new(py);
+        if let Some(y_val) = y.as_ref() {
+            kwargs.set_item("y", y_val.bind(py))?;
+        }
+        kwargs.set_item("rowvar", rowvar)?;
+        if let Some(bias_val) = bias.as_ref() {
+            kwargs.set_item("bias", bias_val.bind(py))?;
+        }
+        if let Some(ddof_val) = ddof.as_ref() {
+            kwargs.set_item("ddof", ddof_val.bind(py))?;
+        }
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        Ok(corrcoef_fn.call((x.bind(py),), Some(&kwargs))?.unbind())
+    };
+
+    // dtype kwarg affects the cov computation path (cast before average);
+    // keep numpy in charge of that surface.
+    if dtype.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+        return fallback(py);
     }
-    kwargs.set_item("rowvar", rowvar)?;
-    if let Some(bias_val) = bias {
-        kwargs.set_item("bias", bias_val.bind(py))?;
+
+    // Compute the underlying covariance natively. numpy.corrcoef always
+    // uses the default ddof (1) / bias (False) for its internal cov call
+    // regardless of the (deprecated) bias/ddof args passed in.
+    let x_bound = x.bind(py);
+    let y_binding = y.as_ref().map(|value| value.bind(py));
+    let cov_array =
+        match native_cov_unweighted(py, x_bound, y_binding, rowvar, 1) {
+            Ok(Some(value)) => value,
+            _ => return fallback(py),
+        };
+
+    // Extract the diagonal (variances), compute 1/sqrt, and normalize the
+    // covariance matrix by the outer product of 1/stddev. numpy follows
+    // `c /= stddev[:, None]; c /= stddev[None, :]; clip c to [-1, 1]`.
+    let shape = cov_array.shape().to_vec();
+    if shape.len() != 2 || shape[0] != shape[1] {
+        return fallback(py);
     }
-    if let Some(ddof_val) = ddof {
-        kwargs.set_item("ddof", ddof_val.bind(py))?;
+    let n_vars = shape[0];
+    let diag: Vec<f64> = (0..n_vars)
+        .map(|i| cov_array.values()[i * n_vars + i])
+        .collect();
+    let mut stddev = Vec::with_capacity(n_vars);
+    for &value in &diag {
+        if !value.is_finite() || value < 0.0 {
+            return fallback(py);
+        }
+        stddev.push(value.sqrt());
     }
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+
+    let mut output = cov_array.values().to_vec();
+    for row in 0..n_vars {
+        let row_scale = stddev[row];
+        if row_scale == 0.0 {
+            return fallback(py);
+        }
+        for col in 0..n_vars {
+            let col_scale = stddev[col];
+            if col_scale == 0.0 {
+                return fallback(py);
+            }
+            let idx = row * n_vars + col;
+            // numpy performs the two divides sequentially so ULP drift
+            // matches `c /= stddev[:, None]` then `c /= stddev[None, :]`.
+            output[idx] /= row_scale;
+            output[idx] /= col_scale;
+            // Clip to [-1, 1] — numpy.corrcoef guards against small
+            // numerical drift that pushes values just past the limits.
+            if output[idx] > 1.0 {
+                output[idx] = 1.0;
+            } else if output[idx] < -1.0 {
+                output[idx] = -1.0;
+            }
+        }
     }
-    Ok(corrcoef_fn.call((x.bind(py),), Some(&kwargs))?.unbind())
+
+    let result = match UFuncArray::from_storage(shape, ArrayStorage::F64(output)) {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
