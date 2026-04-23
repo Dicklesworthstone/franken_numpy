@@ -10624,36 +10624,100 @@ fn eye(
     dtype: Option<Py<PyAny>>,
     order: &str,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.eye. Returns a 2-D identity-like array of
-    // shape (N, M) with ones on the k-th diagonal. Matches numpy
-    // across square/rectangular, k offset (positive/zero/negative),
-    // explicit dtype, and C/F memory order.
     let numpy = py.import("numpy")?;
     let eye_fn = numpy.getattr("eye")?;
-    let kwargs = PyDict::new(py);
-    if let Some(m_val) = m {
-        kwargs.set_item("M", m_val)?;
+    let dtype_for_parse = dtype.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(m_val) = m {
+            kwargs.set_item("M", m_val)?;
+        }
+        kwargs.set_item("k", k)?;
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        kwargs.set_item("order", order)?;
+        Ok(eye_fn.call((n,), Some(&kwargs))?.unbind())
+    };
+
+    if order != "C" || n < 0 || m.is_some_and(|value| value < 0) {
+        return fallback();
     }
-    kwargs.set_item("k", k)?;
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+
+    let dtype = match extract_python_dtype(py, dtype_for_parse, DType::F64, "eye(dtype)") {
+        Ok(dtype) => dtype,
+        Err(_) => return fallback(),
+    };
+    if !matches!(
+        dtype,
+        DType::Bool
+            | DType::I8
+            | DType::I16
+            | DType::I32
+            | DType::I64
+            | DType::U8
+            | DType::U16
+            | DType::U32
+            | DType::U64
+            | DType::F16
+            | DType::F32
+            | DType::F64
+    ) {
+        return fallback();
     }
-    kwargs.set_item("order", order)?;
-    Ok(eye_fn.call((n,), Some(&kwargs))?.unbind())
+
+    let result = match UFuncArray::eye(n as usize, m.map(|value| value as usize), k, dtype) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
 #[pyo3(signature = (n, dtype=None))]
 fn identity(py: Python<'_>, n: i64, dtype: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.identity. Returns the (n, n) identity matrix
-    // with the requested dtype (default float64).
     let numpy = py.import("numpy")?;
     let id_fn = numpy.getattr("identity")?;
-    let kwargs = PyDict::new(py);
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    let dtype_for_parse = dtype.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        Ok(id_fn.call((n,), Some(&kwargs))?.unbind())
+    };
+
+    if n < 0 {
+        return fallback();
     }
-    Ok(id_fn.call((n,), Some(&kwargs))?.unbind())
+
+    let dtype = match extract_python_dtype(py, dtype_for_parse, DType::F64, "identity(dtype)") {
+        Ok(dtype) => dtype,
+        Err(_) => return fallback(),
+    };
+    if !matches!(
+        dtype,
+        DType::Bool
+            | DType::I8
+            | DType::I16
+            | DType::I32
+            | DType::I64
+            | DType::U8
+            | DType::U16
+            | DType::U32
+            | DType::U64
+            | DType::F16
+            | DType::F32
+            | DType::F64
+    ) {
+        return fallback();
+    }
+
+    let result = match UFuncArray::identity(n as usize, dtype) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -15987,6 +16051,44 @@ mod tests {
                 ours_err.get_type(py).name()?.extract::<String>()?,
                 theirs_err.get_type(py).name()?.extract::<String>()?,
                 "put_along_axis out-of-bounds error type diverges from numpy"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn masked_where_shape_mismatch_matches_numpy_indexerror() {
+        // numpy.ma.masked_where raises IndexError (with text 'Inconsistent
+        // shape between the condition and the input') when condition and
+        // data arrays have different shapes. Our fallback-on-shape-mismatch
+        // path delegates to numpy so the error type matches.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let masked_where_fn = module.getattr("masked_where")?;
+            let numpy_masked_where = numpy.getattr("ma")?.getattr("masked_where")?;
+
+            let cond = numpy
+                .getattr("array")?
+                .call1((PyList::new(py, [true, false])?,))?;
+            let data = numpy
+                .getattr("array")?
+                .call1((PyList::new(py, [1_i64, 2, 3])?,))?;
+
+            let ours = masked_where_fn
+                .call1((cond.clone(), data.clone()))
+                .expect_err("masked_where shape mismatch must error");
+            let theirs = numpy_masked_where
+                .call1((cond, data))
+                .expect_err("numpy masked_where shape mismatch must error");
+            assert_eq!(
+                ours.get_type(py).name()?.extract::<String>()?,
+                theirs.get_type(py).name()?.extract::<String>()?,
+                "masked_where shape-mismatch error type diverges from numpy"
             );
             Ok(())
         });
@@ -39484,6 +39586,95 @@ mod tests {
                 ours_err.is_some(),
                 theirs_err.is_some(),
                 "matrix_transpose 1-D must raise iff numpy does",
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn eye_identity_match_numpy_across_dtype_order_and_errors() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let eye_fn = module.getattr("eye")?;
+            let identity_fn = module.getattr("identity")?;
+            let numpy = py.import("numpy")?;
+            let numpy_eye = numpy.getattr("eye")?;
+            let numpy_identity = numpy.getattr("identity")?;
+
+            let ours_identity = identity_fn.call1((3_i64,))?;
+            let theirs_identity = numpy_identity.call1((3_i64,))?;
+            assert_array_matches_numpy(&ours_identity, &theirs_identity)?;
+
+            let int_kwargs = PyDict::new(py);
+            int_kwargs.set_item("dtype", numpy.getattr("int32")?)?;
+            let ours_int = identity_fn.call((4_i64,), Some(&int_kwargs))?;
+            let theirs_int = numpy_identity.call((4_i64,), Some(&int_kwargs))?;
+            assert_array_matches_numpy(&ours_int, &theirs_int)?;
+
+            let complex_kwargs = PyDict::new(py);
+            complex_kwargs.set_item("dtype", numpy.getattr("complex128")?)?;
+            let ours_complex = identity_fn.call((2_i64,), Some(&complex_kwargs))?;
+            let theirs_complex = numpy_identity.call((2_i64,), Some(&complex_kwargs))?;
+            assert_array_matches_numpy(&ours_complex, &theirs_complex)?;
+
+            let ours_eye_kwargs = PyDict::new(py);
+            ours_eye_kwargs.set_item("m", 5_i64)?;
+            ours_eye_kwargs.set_item("k", -1_i64)?;
+            ours_eye_kwargs.set_item("dtype", numpy.getattr("uint16")?)?;
+            ours_eye_kwargs.set_item("order", "C")?;
+            let theirs_eye_kwargs = PyDict::new(py);
+            theirs_eye_kwargs.set_item("M", 5_i64)?;
+            theirs_eye_kwargs.set_item("k", -1_i64)?;
+            theirs_eye_kwargs.set_item("dtype", numpy.getattr("uint16")?)?;
+            theirs_eye_kwargs.set_item("order", "C")?;
+            let ours_eye = eye_fn.call((4_i64,), Some(&ours_eye_kwargs))?;
+            let theirs_eye = numpy_eye.call((4_i64,), Some(&theirs_eye_kwargs))?;
+            assert_array_matches_numpy(&ours_eye, &theirs_eye)?;
+
+            let ours_fortran_kwargs = PyDict::new(py);
+            ours_fortran_kwargs.set_item("order", "F")?;
+            let theirs_fortran_kwargs = PyDict::new(py);
+            theirs_fortran_kwargs.set_item("order", "F")?;
+            let ours_f = eye_fn.call((3_i64,), Some(&ours_fortran_kwargs))?;
+            let theirs_f = numpy_eye.call((3_i64,), Some(&theirs_fortran_kwargs))?;
+            assert_array_matches_numpy(&ours_f, &theirs_f)?;
+            let ours_f_flag: bool = ours_f
+                .getattr("flags")?
+                .get_item("F_CONTIGUOUS")?
+                .extract()?;
+            let theirs_f_flag: bool = theirs_f
+                .getattr("flags")?
+                .get_item("F_CONTIGUOUS")?
+                .extract()?;
+            assert_eq!(ours_f_flag, theirs_f_flag);
+            assert!(ours_f_flag, "eye(order='F') must preserve Fortran layout");
+
+            let ours_eye_err = eye_fn.call1((-1_i64,)).expect_err("eye(-1) must error");
+            let theirs_eye_err = numpy_eye
+                .call1((-1_i64,))
+                .expect_err("numpy eye(-1) must error");
+            assert_eq!(
+                ours_eye_err.get_type(py).name()?.extract::<String>()?,
+                theirs_eye_err.get_type(py).name()?.extract::<String>()?,
+                "eye(-1) error type diverged"
+            );
+
+            let ours_identity_err = identity_fn
+                .call1((-1_i64,))
+                .expect_err("identity(-1) must error");
+            let theirs_identity_err = numpy_identity
+                .call1((-1_i64,))
+                .expect_err("numpy identity(-1) must error");
+            assert_eq!(
+                ours_identity_err.get_type(py).name()?.extract::<String>()?,
+                theirs_identity_err.get_type(py).name()?.extract::<String>()?,
+                "identity(-1) error type diverged"
             );
 
             Ok(())
