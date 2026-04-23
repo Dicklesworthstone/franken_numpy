@@ -1231,6 +1231,24 @@ fn masked_scalar_compare(
     Ok(py_result)
 }
 
+fn matrix_rank_default_rcond(dtype: DType, max_dim: usize) -> Option<f64> {
+    let epsilon = match dtype {
+        DType::Bool
+        | DType::I8
+        | DType::I16
+        | DType::I32
+        | DType::I64
+        | DType::U8
+        | DType::U16
+        | DType::U32
+        | DType::U64
+        | DType::F64 => f64::EPSILON,
+        DType::F32 => f32::EPSILON as f64,
+        _ => return None,
+    };
+    Some((max_dim as f64) * epsilon)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn masked_interval_compare(
     py: Python<'_>,
@@ -4809,21 +4827,50 @@ fn matrix_rank(
     hermitian: bool,
     rtol: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.linalg.matrix_rank so the SVD-based rank calculation,
-    // tol/rtol precedence (rtol is keyword-only, mutually-exclusive with tol),
-    // hermitian fast path, and batched (..., M, N) broadcasting match numpy
-    // exactly across 1-D vectors, 2-D matrices, and stacked arrays.
     let numpy = py.import("numpy")?;
     let matrix_rank_fn = numpy.getattr("linalg")?.getattr("matrix_rank")?;
-    let kwargs = PyDict::new(py);
-    if let Some(value) = tol {
-        kwargs.set_item("tol", value.bind(py))?;
+    let a_for_fallback = a.clone_ref(py);
+    let tol_for_fallback = tol.as_ref().map(|value| value.clone_ref(py));
+    let rtol_for_fallback = rtol.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(value) = &tol_for_fallback {
+            kwargs.set_item("tol", value.bind(py))?;
+        }
+        kwargs.set_item("hermitian", hermitian)?;
+        if let Some(value) = &rtol_for_fallback {
+            kwargs.set_item("rtol", value.bind(py))?;
+        }
+        Ok(matrix_rank_fn
+            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
+    if hermitian || tol.is_some() || rtol.is_some() {
+        return fallback();
     }
-    kwargs.set_item("hermitian", hermitian)?;
-    if let Some(value) = rtol {
-        kwargs.set_item("rtol", value.bind(py))?;
+
+    let array = match extract_precise_numeric_array(py, a.bind(py), "matrix_rank(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let shape = array.shape();
+    if shape.len() != 2 || array.has_integer_sidecar() || array.values().iter().any(|value| !value.is_finite()) {
+        return fallback();
     }
-    Ok(matrix_rank_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+
+    let Some(rcond) = matrix_rank_default_rcond(array.dtype(), shape[0].max(shape[1])) else {
+        return fallback();
+    };
+    let rank = match array.matrix_rank(rcond) {
+        Ok(rank) => rank,
+        Err(_) => return fallback(),
+    };
+    let rank = i64::try_from(rank)
+        .map_err(|_| PyValueError::new_err("matrix_rank: rank result exceeds i64 range"))?;
+    let rank = UFuncArray::from_storage(vec![], ArrayStorage::I64(vec![rank]))
+        .map_err(map_ufunc_error)?;
+    build_numpy_scalar_or_array(py, &rank)
 }
 
 #[pyfunction]
@@ -16161,19 +16208,20 @@ mod tests {
             )
             .unbind();
 
-            let probes: Vec<(&str, &Py<PyAny>)> = vec![
-                ("inv", &singular),
-                ("svd", &one_d),
-                ("svdvals", &one_d),
-                ("qr", &one_d),
-                ("eig", &one_d),
-                ("slogdet", &non_square),
+            // (our_module_name, numpy_linalg_name, input)
+            let probes: Vec<(&str, &str, &Py<PyAny>)> = vec![
+                ("inv", "inv", &singular),
+                ("svd", "svd", &one_d),
+                ("svdvals", "svdvals", &one_d),
+                ("qr", "qr", &one_d),
+                ("linalg_eig", "eig", &one_d),
+                ("slogdet", "slogdet", &non_square),
             ];
 
             let mut divergences: Vec<String> = Vec::new();
-            for (name, input) in probes {
+            for (name, np_name, input) in probes {
                 let ours_err = module.getattr(name)?.call1((input.bind(py),));
-                let theirs_err = linalg.getattr(name)?.call1((input.bind(py),));
+                let theirs_err = linalg.getattr(np_name)?.call1((input.bind(py),));
                 match (ours_err, theirs_err) {
                     (Err(our), Err(theirs)) => {
                         let ours_type = our.get_type(py).name()?.extract::<String>()?;
@@ -17047,6 +17095,17 @@ mod tests {
             assert_scalar_eq(
                 &matrix_rank_fn.call1((defic.clone(),))?,
                 &numpy_matrix_rank.call1((defic.clone(),))?,
+            )?;
+
+            // float32 default tolerance uses float32 epsilon, not float64.
+            let near_cutoff_f32 = numeric_array(
+                py,
+                vec![vec![1.0_f32, 0.0_f32], vec![0.0_f32, 1.0e-8_f32]],
+                "float32",
+            );
+            assert_scalar_eq(
+                &matrix_rank_fn.call1((near_cutoff_f32.clone(),))?,
+                &numpy_matrix_rank.call1((near_cutoff_f32.clone(),))?,
             )?;
 
             // 1-D vector — nonzero yields rank 1.
