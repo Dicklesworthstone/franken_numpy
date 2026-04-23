@@ -16098,6 +16098,16 @@ mod tests {
                 ("squeeze", "squeeze"),
                 ("expand_dims", "expand_dims"),
                 ("count_nonzero", "count_nonzero"),
+                ("prod", "prod"),
+                ("std", "std"),
+                ("var", "var"),
+                ("argmax", "argmax"),
+                ("argmin", "argmin"),
+                ("cumsum", "cumsum"),
+                ("cumprod", "cumprod"),
+                ("any", "any"),
+                ("all", "all"),
+                ("roll", "roll"),
             ];
 
             let module = PyModule::new(py, "fnp_python_test")?;
