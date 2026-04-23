@@ -13821,6 +13821,34 @@ fn array_str(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_
     core_numpy_passthrough(py, "array_str", args, kwargs)
 }
 
+// Elementwise differences (1).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn ediff1d(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "ediff1d", args, kwargs)
+}
+
+// Print-options (3). printoptions is a context manager; passthrough
+// preserves __enter__/__exit__ semantics so `with fnp_python.printoptions(...)`
+// works verbatim.
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn set_printoptions(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "set_printoptions", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn printoptions(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "printoptions", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn setbufsize(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "setbufsize", args, kwargs)
+}
+
 #[pymodule]
 fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
@@ -14328,6 +14356,10 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(array2string, m)?)?;
     m.add_function(wrap_pyfunction!(array_repr, m)?)?;
     m.add_function(wrap_pyfunction!(array_str, m)?)?;
+    m.add_function(wrap_pyfunction!(ediff1d, m)?)?;
+    m.add_function(wrap_pyfunction!(set_printoptions, m)?)?;
+    m.add_function(wrap_pyfunction!(printoptions, m)?)?;
+    m.add_function(wrap_pyfunction!(setbufsize, m)?)?;
 
     // Module version (numpy parity: numpy.__version__). Sourced from the
     // fnp-python crate's Cargo.toml via env!() so a version bump in the
@@ -15023,6 +15055,7 @@ mod tests {
                 "format_float_positional", "format_float_scientific",
                 "binary_repr", "base_repr",
                 "array2string", "array_repr", "array_str",
+                "ediff1d", "set_printoptions", "printoptions", "setbufsize",
             ] {
                 assert!(
                     module.getattr(name).is_ok(),
