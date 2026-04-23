@@ -16443,6 +16443,33 @@ mod tests {
                 }
             }
 
+            // Two-arg linalg.solve probe — singular A must raise LinAlgError.
+            let solve_a_singular: Py<PyAny> =
+                numeric_array(py, vec![vec![1.0_f64, 2.0], vec![2.0, 4.0]], "float64").unbind();
+            let solve_b: Py<PyAny> = numeric_array(py, vec![1.0_f64, 2.0], "float64").unbind();
+            let ours_solve = module
+                .getattr("solve")?
+                .call1((solve_a_singular.bind(py), solve_b.bind(py)));
+            let theirs_solve = linalg
+                .getattr("solve")?
+                .call1((solve_a_singular.bind(py), solve_b.bind(py)));
+            match (ours_solve, theirs_solve) {
+                (Err(our), Err(theirs)) => {
+                    let ours_type = our.get_type(py).name()?.extract::<String>()?;
+                    let theirs_type = theirs.get_type(py).name()?.extract::<String>()?;
+                    if ours_type != theirs_type {
+                        divergences.push(format!(
+                            "solve(singular): ours={ours_type}, theirs={theirs_type}"
+                        ));
+                    }
+                }
+                (Ok(_), _) => divergences.push("solve(singular): ours=OK, theirs raises".into()),
+                (Err(our), Ok(_)) => {
+                    let ours_type = our.get_type(py).name()?.extract::<String>()?;
+                    divergences.push(format!("solve(singular): ours={ours_type}, theirs=OK"));
+                }
+            }
+
             assert!(
                 divergences.is_empty(),
                 "LinAlgError divergences detected:\n  {}",
