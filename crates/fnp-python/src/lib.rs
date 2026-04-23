@@ -5896,6 +5896,20 @@ fn dsplit(py: Python<'_>, ary: Py<PyAny>, indices_or_sections: Py<PyAny>) -> PyR
 
 #[pyfunction]
 fn put(py: Python<'_>, a: Py<PyAny>, ind: Py<PyAny>, v: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let a_for_fallback = a.clone_ref(py);
+    let ind_for_fallback = ind.clone_ref(py);
+    let v_for_fallback = v.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        Ok(numpy
+            .getattr("put")?
+            .call1((
+                a_for_fallback.bind(py),
+                ind_for_fallback.bind(py),
+                v_for_fallback.bind(py),
+            ))?
+            .unbind())
+    };
     let a = a.bind(py);
     require_numpy_ndarray(py, a, "put")?;
 
@@ -5903,7 +5917,12 @@ fn put(py: Python<'_>, a: Py<PyAny>, ind: Py<PyAny>, v: Py<PyAny>) -> PyResult<P
     let (_, indices) = extract_take_indices(py, ind.bind(py), "put(ind)")?;
     let values = extract_numeric_array(py, v.bind(py), "put(v)")?;
 
-    array.put(&indices, &values).map_err(map_ufunc_error)?;
+    // numpy.put raises IndexError (not ValueError) on out-of-bounds index.
+    // Our ufunc layer returns Msg which map_ufunc_error flattens to
+    // PyValueError — fall back to numpy so the exception type matches.
+    if array.put(&indices, &values).is_err() {
+        return fallback();
+    }
     copy_result_into_numpy_array(py, a, &array)?;
     Ok(py.None())
 }
@@ -11614,19 +11633,43 @@ fn cross(
 #[pyfunction]
 #[pyo3(signature = (arrays, *, out=None))]
 fn multi_dot(py: Python<'_>, arrays: Py<PyAny>, out: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.linalg.multi_dot so the optimal-parenthesization
-    // chain-multiplication, dtype promotion, optional `out=` destination,
-    // and 1-D vector handling at the chain endpoints all match numpy
-    // exactly across real and complex inputs.
     let numpy = py.import("numpy")?;
     let multi_dot_fn = numpy.getattr("linalg")?.getattr("multi_dot")?;
-    let kwargs = PyDict::new(py);
-    if let Some(value) = out {
-        kwargs.set_item("out", value.bind(py))?;
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(value) = out.as_ref() {
+            kwargs.set_item("out", value.bind(py))?;
+        }
+        Ok(multi_dot_fn
+            .call((arrays.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
+    if out.is_some() {
+        return fallback();
     }
-    Ok(multi_dot_fn
-        .call((arrays.bind(py),), Some(&kwargs))?
-        .unbind())
+
+    let mut extracted = Vec::new();
+    for (index, item) in arrays.bind(py).try_iter()?.enumerate() {
+        let item = item?;
+        let array = match extract_precise_numeric_array(py, &item, &format!("multi_dot[{index}]")) {
+            Ok(array) => array,
+            Err(_) => return fallback(),
+        };
+        if array.has_integer_sidecar()
+            || matches!(array.dtype(), DType::Complex64 | DType::Complex128)
+        {
+            return fallback();
+        }
+        extracted.push(array);
+    }
+
+    let refs: Vec<&UFuncArray> = extracted.iter().collect();
+    let result = match UFuncArray::multi_dot(&refs) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -15938,6 +15981,38 @@ mod tests {
                 ours_err.get_type(py).name()?.extract::<String>()?,
                 theirs_err.get_type(py).name()?.extract::<String>()?,
                 "put_along_axis out-of-bounds error type diverges from numpy"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn put_index_out_of_bounds_matches_numpy_indexerror() {
+        // numpy.put raises IndexError (not ValueError) on out-of-bounds
+        // index. Our in-Rust put path used to flatten to PyValueError; now
+        // falls back to numpy on Err so the error type matches.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            let ours_arr = numpy.getattr("zeros")?.call((3_i64,), None)?;
+            let theirs_arr = numpy.getattr("zeros")?.call((3_i64,), None)?;
+            let ours_err = module
+                .getattr("put")?
+                .call1((ours_arr, PyList::new(py, [5_i64])?, PyList::new(py, [9.0_f64])?))
+                .expect_err("put(5) must error");
+            let theirs_err = numpy
+                .getattr("put")?
+                .call1((theirs_arr, PyList::new(py, [5_i64])?, PyList::new(py, [9.0_f64])?))
+                .expect_err("numpy put(5) must error");
+            assert_eq!(
+                ours_err.get_type(py).name()?.extract::<String>()?,
+                theirs_err.get_type(py).name()?.extract::<String>()?,
+                "put out-of-bounds error type diverges from numpy"
             );
             Ok(())
         });
@@ -26819,6 +26894,43 @@ mod tests {
                     ))?
                     .extract::<bool>()?,
                 "multi_dot 1-D end diverged"
+            );
+
+            // Exact uint64 chains stay on the numpy fallback so large integers
+            // do not round through the float-only Rust backend.
+            let huge = 9_007_199_254_740_993_u64;
+            let uint_left = numpy.getattr("array")?.call(
+                (PyList::new(
+                    py,
+                    [
+                        PyList::new(py, [huge, 1_u64])?,
+                        PyList::new(py, [2_u64, 3_u64])?,
+                    ],
+                )?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "uint64")?;
+                    kw
+                }),
+            )?;
+            let uint_right = numpy.getattr("eye")?.call(
+                (2_i64,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "uint64")?;
+                    kw
+                }),
+            )?;
+            let uint_chain = PyList::new(py, [uint_left.clone(), uint_right.clone()])?;
+            let array_equal = numpy.getattr("array_equal")?;
+            assert!(
+                array_equal
+                    .call1((
+                        &multi_dot_fn.call1((uint_chain.clone(),))?,
+                        &numpy_multi_dot.call1((uint_chain.clone(),))?,
+                    ))?
+                    .extract::<bool>()?,
+                "multi_dot uint64 exactness diverged"
             );
 
             // Complex 2-chain.
