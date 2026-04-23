@@ -11515,19 +11515,47 @@ fn tensordot(
     b: Py<PyAny>,
     axes: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.tensordot. The `axes` argument accepts an int
-    // (sum-over-last-N-axes-of-a vs first-N-of-b) or a 2-tuple of axis
-    // sequences (explicit per-side contraction); both forms forward
-    // unchanged to numpy. Default axes=2 matches numpy's signature.
     let numpy = py.import("numpy")?;
     let tensordot_fn = numpy.getattr("tensordot")?;
-    let axes_arg = match axes {
-        Some(value) => value.bind(py).clone(),
-        None => 2_i64.into_pyobject(py)?.into_any(),
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let axes_arg = match axes.as_ref() {
+            Some(value) => value.bind(py).clone(),
+            None => 2_i64.into_pyobject(py)?.into_any(),
+        };
+        Ok(tensordot_fn
+            .call1((a.bind(py), b.bind(py), axes_arg))?
+            .unbind())
     };
-    Ok(tensordot_fn
-        .call1((a.bind(py), b.bind(py), axes_arg))?
-        .unbind())
+
+    let axes = match axes.as_ref() {
+        Some(value) => match value.bind(py).extract::<i64>() {
+            Ok(value) if value >= 0 => value as usize,
+            _ => return fallback(),
+        },
+        None => 2usize,
+    };
+
+    let a = match extract_precise_numeric_array(py, a.bind(py), "tensordot(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let b = match extract_precise_numeric_array(py, b.bind(py), "tensordot(b)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    if a.has_integer_sidecar()
+        || b.has_integer_sidecar()
+        || matches!(a.dtype(), DType::Complex64 | DType::Complex128)
+        || matches!(b.dtype(), DType::Complex64 | DType::Complex128)
+    {
+        return fallback();
+    }
+
+    let result = match a.tensordot(&b, axes) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -27035,6 +27063,22 @@ mod tests {
                     ))?
                     .extract::<bool>()?,
                 "tensordot axes=0 outer diverged"
+            );
+
+            // Negative integer axes follows numpy's odd legacy behavior, so
+            // keep that surface on the passthrough path.
+            let kw_neg = PyDict::new(py);
+            kw_neg.set_item("axes", -1_i64)?;
+            let kw_neg_n = PyDict::new(py);
+            kw_neg_n.set_item("axes", -1_i64)?;
+            assert!(
+                allclose
+                    .call1((
+                        &tensordot_fn.call((m1.clone(), m2.clone()), Some(&kw_neg))?,
+                        &numpy_tensordot.call((m1.clone(), m2.clone()), Some(&kw_neg_n))?,
+                    ))?
+                    .extract::<bool>()?,
+                "tensordot negative integer axes diverged"
             );
 
             // 2-tuple of axis sequences — explicit per-side contraction.
