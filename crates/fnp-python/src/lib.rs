@@ -506,6 +506,48 @@ fn extract_take_indices(
     Ok((shape, indices))
 }
 
+fn symmetric_matrix_from_selected_triangle(
+    array: &UFuncArray,
+    uplo: &str,
+) -> Result<UFuncArray, fnp_ufunc::UFuncError> {
+    let shape = array.shape();
+    if shape.len() != 2 || shape[0] != shape[1] {
+        return Err(fnp_ufunc::UFuncError::Msg(
+            "eigvalsh: input must be a square 2-D array".into(),
+        ));
+    }
+
+    let n = shape[0];
+    let mut values = vec![0.0; n * n];
+    match uplo {
+        "L" => {
+            for row in 0..n {
+                for col in 0..=row {
+                    let value = array.values()[row * n + col];
+                    values[row * n + col] = value;
+                    values[col * n + row] = value;
+                }
+            }
+        }
+        "U" => {
+            for row in 0..n {
+                for col in row..n {
+                    let value = array.values()[row * n + col];
+                    values[row * n + col] = value;
+                    values[col * n + row] = value;
+                }
+            }
+        }
+        _ => {
+            return Err(fnp_ufunc::UFuncError::Msg(format!(
+                "eigvalsh: unsupported UPLO selector {uplo}"
+            )));
+        }
+    }
+
+    UFuncArray::new(vec![n, n], values, DType::F64)
+}
+
 fn extract_condition_mask(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
@@ -5120,13 +5162,41 @@ fn solve(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyo3(signature = (a, UPLO="L"))]
 #[allow(non_snake_case)]
 fn eigvalsh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.linalg.eigvalsh so the UPLO selector, complex-Hermitian
-    // handling, and batched (..., M, M) broadcasting semantics match numpy exactly.
     let numpy = py.import("numpy")?;
     let eigvalsh_fn = numpy.getattr("linalg")?.getattr("eigvalsh")?;
+    let a_for_fallback = a.clone_ref(py);
     let kwargs = PyDict::new(py);
     kwargs.set_item("UPLO", UPLO)?;
-    Ok(eigvalsh_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(eigvalsh_fn
+            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
+    let array = match extract_precise_numeric_array(py, a.bind(py), "eigvalsh(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let shape = array.shape();
+    if shape.len() != 2
+        || shape[0] != shape[1]
+        || !matches!(array.dtype(), DType::F64)
+        || array.has_integer_sidecar()
+        || array.values().iter().any(|value| !value.is_finite())
+        || !matches!(UPLO, "L" | "U")
+    {
+        return fallback();
+    }
+
+    let sym = match symmetric_matrix_from_selected_triangle(&array, UPLO) {
+        Ok(sym) => sym,
+        Err(_) => return fallback(),
+    };
+    let result = match sym.eigvalsh() {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -17847,6 +17917,37 @@ mod tests {
                 "eigvalsh UPLO='U' diverged"
             );
 
+            // Mismatched triangles must respect the selected UPLO only.
+            let mismatched = numeric_array(
+                py,
+                vec![
+                    vec![2.0_f64, 50.0_f64, 60.0_f64],
+                    vec![1.0_f64, 3.0_f64, 70.0_f64],
+                    vec![4.0_f64, 5.0_f64, 6.0_f64],
+                ],
+                "float64",
+            );
+            let actual_l = eigvalsh_fn.call1((mismatched.clone(),))?;
+            let expected_l = numpy_eigvalsh.call1((mismatched.clone(),))?;
+            assert!(
+                allclose
+                    .call1((&actual_l, &expected_l))?
+                    .extract::<bool>()?,
+                "eigvalsh mismatched lower triangle diverged"
+            );
+            let kwargs_u_mismatch = PyDict::new(py);
+            kwargs_u_mismatch.set_item("UPLO", "U")?;
+            let actual_u_mismatch =
+                eigvalsh_fn.call((mismatched.clone(),), Some(&kwargs_u_mismatch))?;
+            let expected_u_mismatch =
+                numpy_eigvalsh.call((mismatched.clone(),), Some(&kwargs_u_mismatch))?;
+            assert!(
+                allclose
+                    .call1((&actual_u_mismatch, &expected_u_mismatch))?
+                    .extract::<bool>()?,
+                "eigvalsh mismatched upper triangle diverged"
+            );
+
             // Identity → eigenvalues all 1.
             let eye = numpy.getattr("eye")?.call1((4_i64,))?;
             let actual_eye = eigvalsh_fn.call1((eye.clone(),))?;
@@ -17922,6 +18023,31 @@ mod tests {
                     .call1((&actual_h, &expected_h))?
                     .extract::<bool>()?,
                 "eigvalsh Hermitian diverged"
+            );
+
+            // float32 stays on the NumPy path so dtype remains float32.
+            let spd_f32 = numeric_array(
+                py,
+                vec![vec![3.0_f32, 1.0_f32], vec![1.0_f32, 4.0_f32]],
+                "float32",
+            );
+            let actual_f32 = eigvalsh_fn.call1((spd_f32.clone(),))?;
+            let expected_f32 = numpy_eigvalsh.call1((spd_f32.clone(),))?;
+            assert!(
+                allclose
+                    .call1((&actual_f32, &expected_f32))?
+                    .extract::<bool>()?,
+                "eigvalsh float32 diverged"
+            );
+            assert_eq!(
+                actual_f32
+                    .getattr("dtype")?
+                    .getattr("name")?
+                    .extract::<String>()?,
+                expected_f32
+                    .getattr("dtype")?
+                    .getattr("name")?
+                    .extract::<String>()?
             );
 
             Ok(())
