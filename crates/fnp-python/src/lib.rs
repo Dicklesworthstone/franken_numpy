@@ -14949,6 +14949,15 @@ mod tests {
         });
     }
 
+    /// Process-wide mutex serializing every AttrGuard-based poisoning. The
+    /// guard installs sentinel/bomb lambdas onto shared Python globals
+    /// (numpy.frompyfunc, linalg.pinv, ma.minimum_fill_value, …); holding
+    /// this mutex for the lifetime of each guard prevents sibling cargo
+    /// test threads from observing the polluted state. Fixes
+    /// franken_numpy-4jlw where parallel runs intermittently saw numpy
+    /// state clobbered mid-test.
+    static POISON_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// RAII guard that restores a Python attribute to its original value on
     /// drop. Tests use it to swap numpy/ma/linalg attributes with sentinels
     /// ("bomb" / "poison" lambdas) to prove our code path does NOT delegate
@@ -14959,15 +14968,25 @@ mod tests {
         owner: Py<pyo3::types::PyAny>,
         name: &'static str,
         original: Py<pyo3::types::PyAny>,
+        _mutex: std::sync::MutexGuard<'static, ()>,
     }
 
     impl AttrGuard {
         fn new(owner: &pyo3::Bound<'_, pyo3::types::PyAny>, name: &'static str) -> PyResult<Self> {
+            // Acquire the process-wide poison mutex first so no sibling
+            // test thread can observe the clobbered state. PoisonError is
+            // recovered into_inner — a panicking poisoning test still
+            // leaves this env clean because AttrGuard::drop restores state
+            // unconditionally.
+            let mutex = POISON_MUTEX
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let original = owner.getattr(name)?.unbind();
             Ok(Self {
                 owner: owner.clone().unbind(),
                 name,
                 original,
+                _mutex: mutex,
             })
         }
     }
