@@ -12521,7 +12521,7 @@ fn copy(py: Python<'_>, a: Py<PyAny>, order: &str, subok: bool) -> PyResult<Py<P
         kwargs.set_item("subok", subok)?;
         Ok(copy_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
-    if !matches!(order, "C" | "K") {
+    if !matches!(order, "C" | "K" | "F") {
         return fallback(py);
     }
     let a_bound = a.bind(py);
@@ -12530,15 +12530,16 @@ fn copy(py: Python<'_>, a: Py<PyAny>, order: &str, subok: bool) -> PyResult<Py<P
     if subok && !source_array.is_exact_instance(&ndarray_type) {
         return fallback(py);
     }
-    // For order='K' with F-contiguous multi-D source, fallback so layout
-    // is preserved; the native export bridge only materializes C order.
+    // Resolve the actual output layout. 'C' / 'F' are explicit; 'K'
+    // inherits from source contiguity (F-contig multi-D → F output).
     let source_shape: Vec<usize> = source_array.getattr("shape")?.extract()?;
+    let mut emit_fortran = order == "F";
     if order == "K" && source_shape.len() >= 2 {
         let flags = source_array.getattr("flags")?;
         let f_contig: bool = flags.get_item("F_CONTIGUOUS")?.extract()?;
         let c_contig: bool = flags.get_item("C_CONTIGUOUS")?.extract()?;
         if f_contig && !c_contig {
-            return fallback(py);
+            emit_fortran = true;
         }
     }
     let native = match extract_precise_numeric_array(py, a_bound, "copy(a)") {
@@ -12551,7 +12552,11 @@ fn copy(py: Python<'_>, a: Py<PyAny>, order: &str, subok: bool) -> PyResult<Py<P
     if !dtype_supported_by_numpy_export_bridge(native.dtype()) {
         return fallback(py);
     }
-    build_numpy_array_from_ufunc(py, &native)
+    if emit_fortran {
+        build_numpy_array_from_ufunc_fortran(py, &native)
+    } else {
+        build_numpy_array_from_ufunc(py, &native)
+    }
 }
 
 #[pyfunction]
