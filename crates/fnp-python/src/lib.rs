@@ -13546,6 +13546,281 @@ fn matvec(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, P
     core_numpy_passthrough(py, "matvec", args, kwargs)
 }
 
+// ---------------------------------------------------------------------------
+// Reality-check (k74v.2) — ~45 core numpy function passthrough wrappers.
+//
+// All forward *args, **kwargs verbatim via core_numpy_passthrough. Closes a
+// large chunk of the remaining numpy.__all__ gap per the k74v
+// REALITY-CHECK-EPIC. Groups: casting/dtype predicates, array-API aliases
+// for existing ufuncs, atleast_Nd family, nan-cumulative variants, busday
+// calendar functions, string-format helpers, repr/str helpers.
+// ---------------------------------------------------------------------------
+
+// Casting / dtype predicates (6).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn astype(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "astype", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn can_cast(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "can_cast", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn promote_types(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "promote_types", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn result_type(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "result_type", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn issubdtype(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "issubdtype", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn isdtype(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "isdtype", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn isfortran(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "isfortran", args, kwargs)
+}
+
+// Rounding aliases (2).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn around(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "around", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn round(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "round", args, kwargs)
+}
+
+// Dimension-promotion (3).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn atleast_1d(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "atleast_1d", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn atleast_2d(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "atleast_2d", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn atleast_3d(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "atleast_3d", args, kwargs)
+}
+
+// Functional iteration helpers (2).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn apply_along_axis(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "apply_along_axis", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn apply_over_axes(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "apply_over_axes", args, kwargs)
+}
+
+// Block / Array-API aliases (5).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn block(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "block", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn cumulative_prod(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "cumulative_prod", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn cumulative_sum(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "cumulative_sum", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn unique_all(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "unique_all", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn unique_counts(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "unique_counts", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn unique_inverse(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "unique_inverse", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn unique_values(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "unique_values", args, kwargs)
+}
+
+// Convolution / correlation / isclose (3).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn convolve(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "convolve", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn correlate(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "correlate", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn isclose(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "isclose", args, kwargs)
+}
+
+// NaN-aware cumulative (2).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn nancumprod(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "nancumprod", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn nancumsum(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "nancumsum", args, kwargs)
+}
+
+// Piecewise + shape intro (2).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn piecewise(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "piecewise", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn shape(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "shape", args, kwargs)
+}
+
+// Histogram family (2).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn histogram2d(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "histogram2d", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn histogramdd(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "histogramdd", args, kwargs)
+}
+
+// Busday calendar functions (3).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn busday_count(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "busday_count", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn busday_offset(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "busday_offset", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn is_busday(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "is_busday", args, kwargs)
+}
+
+// Datetime helpers (2).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn datetime_as_string(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "datetime_as_string", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn datetime_data(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "datetime_data", args, kwargs)
+}
+
+// String-format helpers (4).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn format_float_positional(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "format_float_positional", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn format_float_scientific(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "format_float_scientific", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn binary_repr(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "binary_repr", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn base_repr(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "base_repr", args, kwargs)
+}
+
+// Array display helpers (3).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn array2string(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "array2string", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn array_repr(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "array_repr", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn array_str(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "array_str", args, kwargs)
+}
+
 #[pymodule]
 fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
@@ -14009,6 +14284,50 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ptp, m)?)?;
     m.add_function(wrap_pyfunction!(vecmat, m)?)?;
     m.add_function(wrap_pyfunction!(matvec, m)?)?;
+
+    // Reality-check (k74v.2) — 45 core numpy function passthrough wrappers.
+    m.add_function(wrap_pyfunction!(astype, m)?)?;
+    m.add_function(wrap_pyfunction!(can_cast, m)?)?;
+    m.add_function(wrap_pyfunction!(promote_types, m)?)?;
+    m.add_function(wrap_pyfunction!(result_type, m)?)?;
+    m.add_function(wrap_pyfunction!(issubdtype, m)?)?;
+    m.add_function(wrap_pyfunction!(isdtype, m)?)?;
+    m.add_function(wrap_pyfunction!(isfortran, m)?)?;
+    m.add_function(wrap_pyfunction!(around, m)?)?;
+    m.add_function(wrap_pyfunction!(round, m)?)?;
+    m.add_function(wrap_pyfunction!(atleast_1d, m)?)?;
+    m.add_function(wrap_pyfunction!(atleast_2d, m)?)?;
+    m.add_function(wrap_pyfunction!(atleast_3d, m)?)?;
+    m.add_function(wrap_pyfunction!(apply_along_axis, m)?)?;
+    m.add_function(wrap_pyfunction!(apply_over_axes, m)?)?;
+    m.add_function(wrap_pyfunction!(block, m)?)?;
+    m.add_function(wrap_pyfunction!(cumulative_prod, m)?)?;
+    m.add_function(wrap_pyfunction!(cumulative_sum, m)?)?;
+    m.add_function(wrap_pyfunction!(unique_all, m)?)?;
+    m.add_function(wrap_pyfunction!(unique_counts, m)?)?;
+    m.add_function(wrap_pyfunction!(unique_inverse, m)?)?;
+    m.add_function(wrap_pyfunction!(unique_values, m)?)?;
+    m.add_function(wrap_pyfunction!(convolve, m)?)?;
+    m.add_function(wrap_pyfunction!(correlate, m)?)?;
+    m.add_function(wrap_pyfunction!(isclose, m)?)?;
+    m.add_function(wrap_pyfunction!(nancumprod, m)?)?;
+    m.add_function(wrap_pyfunction!(nancumsum, m)?)?;
+    m.add_function(wrap_pyfunction!(piecewise, m)?)?;
+    m.add_function(wrap_pyfunction!(shape, m)?)?;
+    m.add_function(wrap_pyfunction!(histogram2d, m)?)?;
+    m.add_function(wrap_pyfunction!(histogramdd, m)?)?;
+    m.add_function(wrap_pyfunction!(busday_count, m)?)?;
+    m.add_function(wrap_pyfunction!(busday_offset, m)?)?;
+    m.add_function(wrap_pyfunction!(is_busday, m)?)?;
+    m.add_function(wrap_pyfunction!(datetime_as_string, m)?)?;
+    m.add_function(wrap_pyfunction!(datetime_data, m)?)?;
+    m.add_function(wrap_pyfunction!(format_float_positional, m)?)?;
+    m.add_function(wrap_pyfunction!(format_float_scientific, m)?)?;
+    m.add_function(wrap_pyfunction!(binary_repr, m)?)?;
+    m.add_function(wrap_pyfunction!(base_repr, m)?)?;
+    m.add_function(wrap_pyfunction!(array2string, m)?)?;
+    m.add_function(wrap_pyfunction!(array_repr, m)?)?;
+    m.add_function(wrap_pyfunction!(array_str, m)?)?;
 
     // Module version (numpy parity: numpy.__version__). Sourced from the
     // fnp-python crate's Cargo.toml via env!() so a version bump in the
@@ -14687,6 +15006,234 @@ mod tests {
                     "k74v.1 passthrough wrapper missing: {name}"
                 );
             }
+
+            // k74v.2 core-function passthrough wrappers (42).
+            for name in [
+                "astype", "can_cast", "promote_types", "result_type", "issubdtype",
+                "isdtype", "isfortran", "around", "round",
+                "atleast_1d", "atleast_2d", "atleast_3d",
+                "apply_along_axis", "apply_over_axes", "block",
+                "cumulative_prod", "cumulative_sum",
+                "unique_all", "unique_counts", "unique_inverse", "unique_values",
+                "convolve", "correlate", "isclose",
+                "nancumprod", "nancumsum", "piecewise", "shape",
+                "histogram2d", "histogramdd",
+                "busday_count", "busday_offset", "is_busday",
+                "datetime_as_string", "datetime_data",
+                "format_float_positional", "format_float_scientific",
+                "binary_repr", "base_repr",
+                "array2string", "array_repr", "array_str",
+            ] {
+                assert!(
+                    module.getattr(name).is_ok(),
+                    "k74v.2 passthrough wrapper missing: {name}"
+                );
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn k74v_2_function_passthroughs_match_numpy_family_oracles() {
+        // Family-level parity for the k74v.2 passthrough wrappers: one
+        // representative case per family (casting predicates, rounding
+        // aliases, atleast_Nd, array-API aliases, nan-aware cumulatives,
+        // busday, datetime-as-string, format helpers, repr helpers).
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let array_equal = numpy.getattr("array_equal")?;
+
+            // Casting predicates — compare scalar booleans via repr.
+            // can_cast takes (from, to) dtypes.
+            for (name, ok_args) in [
+                ("can_cast", ("int32", "float64")),
+                ("issubdtype", ("int32", "int32")),
+            ] {
+                let ours = module.getattr(name)?.call1(ok_args)?;
+                let theirs = numpy.getattr(name)?.call1(ok_args)?;
+                assert_eq!(
+                    ours.repr()?.extract::<String>()?,
+                    theirs.repr()?.extract::<String>()?,
+                    "{name} diverged"
+                );
+            }
+            // isdtype requires a numpy dtype object (not a string) for the
+            // first argument; pass numpy.int32 directly.
+            let int32_dtype = numpy.getattr("int32")?;
+            let ours_isdt = module
+                .getattr("isdtype")?
+                .call1((int32_dtype.clone(), "integral"))?;
+            let theirs_isdt = numpy
+                .getattr("isdtype")?
+                .call1((int32_dtype, "integral"))?;
+            assert_eq!(
+                ours_isdt.repr()?.extract::<String>()?,
+                theirs_isdt.repr()?.extract::<String>()?,
+                "isdtype diverged"
+            );
+            let ours_pt = module
+                .getattr("promote_types")?
+                .call1(("int32", "float64"))?;
+            let theirs_pt = numpy.getattr("promote_types")?.call1(("int32", "float64"))?;
+            assert_eq!(
+                ours_pt.repr()?.extract::<String>()?,
+                theirs_pt.repr()?.extract::<String>()?,
+                "promote_types diverged"
+            );
+            let ours_rt = module.getattr("result_type")?.call1(("int32", "float64"))?;
+            let theirs_rt = numpy.getattr("result_type")?.call1(("int32", "float64"))?;
+            assert_eq!(
+                ours_rt.repr()?.extract::<String>()?,
+                theirs_rt.repr()?.extract::<String>()?,
+                "result_type diverged"
+            );
+
+            // Rounding aliases on a float vector.
+            let x = numpy
+                .getattr("array")?
+                .call1((PyList::new(py, [1.4_f64, 2.6, -0.5, 3.5])?,))?;
+            for name in ["around", "round"] {
+                let ours = module.getattr(name)?.call1((x.clone(),))?;
+                let theirs = numpy.getattr(name)?.call1((x.clone(),))?;
+                let ok: bool = array_equal.call1((&ours, &theirs))?.extract()?;
+                assert!(ok, "{name} diverged");
+            }
+
+            // atleast_Nd family.
+            for name in ["atleast_1d", "atleast_2d", "atleast_3d"] {
+                let ours = module.getattr(name)?.call1((5.0_f64,))?;
+                let theirs = numpy.getattr(name)?.call1((5.0_f64,))?;
+                assert!(
+                    array_equal.call1((&ours, &theirs))?.extract::<bool>()?,
+                    "{name} diverged"
+                );
+            }
+
+            // Unique array-API aliases.
+            let u_in = numpy
+                .getattr("array")?
+                .call1((PyList::new(py, [3_i64, 1, 2, 1, 3])?,))?;
+            let ours_uv = module.getattr("unique_values")?.call1((u_in.clone(),))?;
+            let theirs_uv = numpy.getattr("unique_values")?.call1((u_in,))?;
+            assert!(
+                array_equal.call1((&ours_uv, &theirs_uv))?.extract::<bool>()?,
+                "unique_values diverged"
+            );
+
+            // Cumulative Array-API aliases on a small vector.
+            let c_in = numpy
+                .getattr("array")?
+                .call1((PyList::new(py, [1_i64, 2, 3, 4])?,))?;
+            for name in ["cumulative_sum", "cumulative_prod"] {
+                let ours = module.getattr(name)?.call1((c_in.clone(),))?;
+                let theirs = numpy.getattr(name)?.call1((c_in.clone(),))?;
+                assert!(
+                    array_equal.call1((&ours, &theirs))?.extract::<bool>()?,
+                    "{name} diverged"
+                );
+            }
+
+            // isclose on a float pair.
+            let l = numpy
+                .getattr("array")?
+                .call1((PyList::new(py, [1.0_f64, 2.0])?,))?;
+            let r = numpy
+                .getattr("array")?
+                .call1((PyList::new(py, [1.0_f64, 2.0000001])?,))?;
+            let ours_ic = module.getattr("isclose")?.call1((l.clone(), r.clone()))?;
+            let theirs_ic = numpy.getattr("isclose")?.call1((l, r))?;
+            assert!(
+                array_equal.call1((&ours_ic, &theirs_ic))?.extract::<bool>()?,
+                "isclose diverged"
+            );
+
+            // Convolve / correlate on small integer arrays.
+            let a = numpy
+                .getattr("array")?
+                .call1((PyList::new(py, [1_i64, 2, 3])?,))?;
+            let b = numpy
+                .getattr("array")?
+                .call1((PyList::new(py, [0_i64, 1, 0])?,))?;
+            for name in ["convolve", "correlate"] {
+                let ours = module.getattr(name)?.call1((a.clone(), b.clone()))?;
+                let theirs = numpy.getattr(name)?.call1((a.clone(), b.clone()))?;
+                assert!(
+                    array_equal.call1((&ours, &theirs))?.extract::<bool>()?,
+                    "{name} diverged"
+                );
+            }
+
+            // NaN cumulative variants on a small NaN-containing vector.
+            let nan_in = numpy.getattr("array")?.call1((
+                PyList::new(py, [1.0_f64, f64::NAN, 3.0, 4.0])?,
+            ))?;
+            for name in ["nancumsum", "nancumprod"] {
+                let ours = module.getattr(name)?.call1((nan_in.clone(),))?;
+                let theirs = numpy.getattr(name)?.call1((nan_in.clone(),))?;
+                assert!(
+                    array_equal.call1((&ours, &theirs))?.extract::<bool>()?,
+                    "{name} diverged"
+                );
+            }
+
+            // shape.
+            let s_in = numpy
+                .getattr("zeros")?
+                .call1((PyTuple::new(py, [2_i64, 3, 4])?,))?;
+            let ours_s = module.getattr("shape")?.call1((s_in.clone(),))?;
+            let theirs_s = numpy.getattr("shape")?.call1((s_in,))?;
+            assert_eq!(
+                ours_s.repr()?.extract::<String>()?,
+                theirs_s.repr()?.extract::<String>()?,
+                "shape diverged"
+            );
+
+            // Busday.
+            let d1 = numpy
+                .getattr("array")?
+                .call1((PyList::new(py, ["2024-01-01"])?,))?
+                .call_method1("astype", ("datetime64[D]",))?;
+            let d2 = numpy
+                .getattr("array")?
+                .call1((PyList::new(py, ["2024-01-08"])?,))?
+                .call_method1("astype", ("datetime64[D]",))?;
+            let ours_bc = module.getattr("busday_count")?.call1((d1.clone(), d2.clone()))?;
+            let theirs_bc = numpy.getattr("busday_count")?.call1((d1.clone(), d2.clone()))?;
+            assert!(
+                array_equal.call1((&ours_bc, &theirs_bc))?.extract::<bool>()?,
+                "busday_count diverged"
+            );
+
+            // binary_repr / base_repr.
+            let ours_br = module.getattr("binary_repr")?.call1((42_i64,))?;
+            let theirs_br = numpy.getattr("binary_repr")?.call1((42_i64,))?;
+            assert_eq!(
+                ours_br.repr()?.extract::<String>()?,
+                theirs_br.repr()?.extract::<String>()?,
+                "binary_repr diverged"
+            );
+            let ours_baser = module.getattr("base_repr")?.call1((42_i64, 5_i64))?;
+            let theirs_baser = numpy.getattr("base_repr")?.call1((42_i64, 5_i64))?;
+            assert_eq!(
+                ours_baser.repr()?.extract::<String>()?,
+                theirs_baser.repr()?.extract::<String>()?,
+                "base_repr diverged"
+            );
+
+            // format_float_positional.
+            let ours_ff = module.getattr("format_float_positional")?.call1((3.14_f64,))?;
+            let theirs_ff = numpy.getattr("format_float_positional")?.call1((3.14_f64,))?;
+            assert_eq!(
+                ours_ff.repr()?.extract::<String>()?,
+                theirs_ff.repr()?.extract::<String>()?,
+                "format_float_positional diverged"
+            );
+
             Ok(())
         });
     }
