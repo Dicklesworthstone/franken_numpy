@@ -11924,69 +11924,262 @@ fn genfromtxt(
     ndmin: i64,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.genfromtxt. More permissive text parser than
-    // loadtxt: supports missing-value substitution, automatic field-name
-    // detection, per-column converters, and masked-array output via
-    // usemask. Forward every documented kwarg so the full numpy surface
-    // is exposed.
     let numpy = py.import("numpy")?;
-    let kwargs = PyDict::new(py);
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        kwargs.set_item("comments", comments)?;
+        if let Some(d) = delimiter {
+            kwargs.set_item("delimiter", d)?;
+        }
+        kwargs.set_item("skip_header", skip_header)?;
+        kwargs.set_item("skip_footer", skip_footer)?;
+        if let Some(cv) = converters.as_ref() {
+            kwargs.set_item("converters", cv.bind(py))?;
+        }
+        if let Some(mv) = missing_values.as_ref() {
+            kwargs.set_item("missing_values", mv.bind(py))?;
+        }
+        if let Some(fv) = filling_values.as_ref() {
+            kwargs.set_item("filling_values", fv.bind(py))?;
+        }
+        if let Some(uc) = usecols.as_ref() {
+            kwargs.set_item("usecols", uc.bind(py))?;
+        }
+        if let Some(n) = names.as_ref() {
+            kwargs.set_item("names", n.bind(py))?;
+        }
+        if let Some(el) = excludelist.as_ref() {
+            kwargs.set_item("excludelist", el.bind(py))?;
+        }
+        if let Some(dc) = deletechars {
+            kwargs.set_item("deletechars", dc)?;
+        }
+        kwargs.set_item("replace_space", replace_space)?;
+        kwargs.set_item("autostrip", autostrip)?;
+        if let Some(cs) = case_sensitive.as_ref() {
+            kwargs.set_item("case_sensitive", cs.bind(py))?;
+        }
+        kwargs.set_item("defaultfmt", defaultfmt)?;
+        if let Some(up) = unpack {
+            kwargs.set_item("unpack", up)?;
+        }
+        kwargs.set_item("usemask", usemask)?;
+        kwargs.set_item("loose", loose)?;
+        kwargs.set_item("invalid_raise", invalid_raise)?;
+        if let Some(mr) = max_rows {
+            kwargs.set_item("max_rows", mr)?;
+        }
+        if let Some(enc) = encoding {
+            kwargs.set_item("encoding", enc)?;
+        }
+        kwargs.set_item("ndmin", ndmin)?;
+        if let Some(like_val) = like.as_ref() {
+            kwargs.set_item("like", like_val.bind(py))?;
+        }
+        Ok(numpy
+            .getattr("genfromtxt")?
+            .call((fname.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
+    // Native path handles a narrow but tutorial-relevant slice:
+    // numeric dtype, no structured names/missing/filling, no masked
+    // output, no converters/encoding/invalid_raise tweaks. Everything
+    // else defers to numpy's rich parser.
+    let dtype_is_none_or_missing = dtype.as_ref().map_or(true, |v| v.bind(py).is_none());
+    if dtype_is_none_or_missing
+        || converters.is_some()
+        || missing_values.is_some()
+        || filling_values.is_some()
+        || names.is_some()
+        || excludelist.is_some()
+        || deletechars.is_some()
+        || replace_space != "_"
+        || autostrip
+        || case_sensitive.is_some()
+        || defaultfmt != "f%i"
+        || usemask
+        || !loose
+        || !invalid_raise
+        || max_rows.is_some()
+        || encoding.is_some()
+        || ndmin != 0
+        || like.is_some()
+    {
+        return fallback(py);
     }
-    kwargs.set_item("comments", comments)?;
-    if let Some(d) = delimiter {
-        kwargs.set_item("delimiter", d)?;
+
+    // Extract text (StringIO, file-like, or file path).
+    let fname_bound = fname.bind(py);
+    let text: String = if let Ok(s) = fname_bound.extract::<String>() {
+        match std::fs::read_to_string(&s) {
+            Ok(value) => value,
+            Err(_) => return fallback(py),
+        }
+    } else if let Ok(result) = fname_bound.call_method0("read") {
+        match result.extract::<String>() {
+            Ok(value) => value,
+            Err(_) => return fallback(py),
+        }
+    } else {
+        return fallback(py);
+    };
+
+    // Resolve target dtype — must be numeric bridge-supported.
+    let dtype_clone = dtype.as_ref().map(|v| v.clone_ref(py));
+    let parsed_dtype = match extract_python_dtype(py, dtype_clone, DType::F64, "genfromtxt(dtype)") {
+        Ok(value) if dtype_supported_by_numpy_export_bridge(value) => value,
+        _ => return fallback(py),
+    };
+
+    // usecols parsing (same rules as loadtxt).
+    let use_columns: Option<Vec<i64>> = match usecols.as_ref() {
+        None => None,
+        Some(v) => {
+            let b = v.bind(py);
+            if b.is_none() {
+                None
+            } else if let Ok(cols) = b.extract::<Vec<i64>>() {
+                Some(cols)
+            } else if let Ok(col) = b.extract::<i64>() {
+                Some(vec![col])
+            } else {
+                return fallback(py);
+            }
+        }
+    };
+
+    // Tokenize with skip_header + skip_footer applied at the line level.
+    let skip_h = skip_header.max(0) as usize;
+    let skip_f = skip_footer.max(0) as usize;
+    let all_lines: Vec<&str> = text.lines().collect();
+    if skip_h + skip_f >= all_lines.len() {
+        return fallback(py);
     }
-    kwargs.set_item("skip_header", skip_header)?;
-    kwargs.set_item("skip_footer", skip_footer)?;
-    if let Some(cv) = converters {
-        kwargs.set_item("converters", cv.bind(py))?;
+    let usable_lines = &all_lines[skip_h..all_lines.len() - skip_f];
+
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for raw_line in usable_lines {
+        let effective = match raw_line.split_once(comments) {
+            Some((lhs, _)) => lhs,
+            None => raw_line,
+        };
+        let trimmed = effective.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let tokens: Vec<String> = match delimiter {
+            None => trimmed.split_whitespace().map(|s| s.to_string()).collect(),
+            Some(sep) if sep.chars().all(char::is_whitespace) => {
+                trimmed.split_whitespace().map(|s| s.to_string()).collect()
+            }
+            Some(sep) => trimmed.split(sep).map(|s| s.trim().to_string()).collect(),
+        };
+        let selected: Vec<String> = if let Some(cols) = use_columns.as_ref() {
+            let mut out = Vec::with_capacity(cols.len());
+            for &col in cols {
+                let idx = if col < 0 {
+                    (tokens.len() as i64 + col) as usize
+                } else {
+                    col as usize
+                };
+                if idx >= tokens.len() {
+                    return fallback(py);
+                }
+                out.push(tokens[idx].clone());
+            }
+            out
+        } else {
+            tokens
+        };
+        if selected.is_empty() {
+            continue;
+        }
+        rows.push(selected);
     }
-    if let Some(mv) = missing_values {
-        kwargs.set_item("missing_values", mv.bind(py))?;
+
+    if rows.is_empty() {
+        return fallback(py);
     }
-    if let Some(fv) = filling_values {
-        kwargs.set_item("filling_values", fv.bind(py))?;
+    let ncols = rows[0].len();
+    for row in &rows {
+        if row.len() != ncols {
+            return fallback(py);
+        }
     }
-    if let Some(uc) = usecols {
-        kwargs.set_item("usecols", uc.bind(py))?;
+    let nrows = rows.len();
+
+    // Parse tokens into storage (same scheme as loadtxt).
+    let flat_storage = match parsed_dtype {
+        DType::I8
+        | DType::I16
+        | DType::I32
+        | DType::I64
+        | DType::U8
+        | DType::U16
+        | DType::U32
+        | DType::U64 => {
+            let mut longs = Vec::with_capacity(nrows * ncols);
+            for row in &rows {
+                for tok in row {
+                    match tok.parse::<i64>() {
+                        Ok(v) => longs.push(v),
+                        Err(_) => match tok.parse::<f64>() {
+                            Ok(v) if v.fract() == 0.0 && v.is_finite() => longs.push(v as i64),
+                            _ => return fallback(py),
+                        },
+                    }
+                }
+            }
+            match parsed_dtype {
+                DType::I8 => ArrayStorage::I8(longs.into_iter().map(|v| v as i8).collect()),
+                DType::I16 => ArrayStorage::I16(longs.into_iter().map(|v| v as i16).collect()),
+                DType::I32 => ArrayStorage::I32(longs.into_iter().map(|v| v as i32).collect()),
+                DType::I64 => ArrayStorage::I64(longs),
+                DType::U8 => ArrayStorage::U8(longs.into_iter().map(|v| v as u8).collect()),
+                DType::U16 => ArrayStorage::U16(longs.into_iter().map(|v| v as u16).collect()),
+                DType::U32 => ArrayStorage::U32(longs.into_iter().map(|v| v as u32).collect()),
+                DType::U64 => ArrayStorage::U64(longs.into_iter().map(|v| v as u64).collect()),
+                _ => unreachable!(),
+            }
+        }
+        DType::F16 | DType::F32 | DType::F64 => {
+            let mut floats = Vec::with_capacity(nrows * ncols);
+            for row in &rows {
+                for tok in row {
+                    match tok.parse::<f64>() {
+                        Ok(v) => floats.push(v),
+                        Err(_) => return fallback(py),
+                    }
+                }
+            }
+            match parsed_dtype {
+                DType::F16 => ArrayStorage::F16(floats.into_iter().map(f16::from_f64).collect()),
+                DType::F32 => ArrayStorage::F32(floats.into_iter().map(|v| v as f32).collect()),
+                DType::F64 => ArrayStorage::F64(floats),
+                _ => unreachable!(),
+            }
+        }
+        _ => return fallback(py),
+    };
+
+    let shape = if ncols == 1 {
+        vec![nrows]
+    } else {
+        vec![nrows, ncols]
+    };
+    let arr = build_numpy_array_from_storage(py, &shape, flat_storage)?;
+
+    if unpack == Some(true) {
+        let arr_bound = arr.bind(py);
+        let transposed = arr_bound.getattr("T")?;
+        Ok(transposed.unbind())
+    } else {
+        Ok(arr)
     }
-    if let Some(n) = names {
-        kwargs.set_item("names", n.bind(py))?;
-    }
-    if let Some(el) = excludelist {
-        kwargs.set_item("excludelist", el.bind(py))?;
-    }
-    if let Some(dc) = deletechars {
-        kwargs.set_item("deletechars", dc)?;
-    }
-    kwargs.set_item("replace_space", replace_space)?;
-    kwargs.set_item("autostrip", autostrip)?;
-    if let Some(cs) = case_sensitive {
-        kwargs.set_item("case_sensitive", cs.bind(py))?;
-    }
-    kwargs.set_item("defaultfmt", defaultfmt)?;
-    if let Some(up) = unpack {
-        kwargs.set_item("unpack", up)?;
-    }
-    kwargs.set_item("usemask", usemask)?;
-    kwargs.set_item("loose", loose)?;
-    kwargs.set_item("invalid_raise", invalid_raise)?;
-    if let Some(mr) = max_rows {
-        kwargs.set_item("max_rows", mr)?;
-    }
-    if let Some(enc) = encoding {
-        kwargs.set_item("encoding", enc)?;
-    }
-    kwargs.set_item("ndmin", ndmin)?;
-    if let Some(like_val) = like {
-        kwargs.set_item("like", like_val.bind(py))?;
-    }
-    Ok(numpy
-        .getattr("genfromtxt")?
-        .call((fname.bind(py),), Some(&kwargs))?
-        .unbind())
 }
 
 #[pyfunction]
