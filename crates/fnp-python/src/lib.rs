@@ -7819,14 +7819,37 @@ fn intersect1d(
 #[pyfunction]
 #[pyo3(signature = (ar1, ar2))]
 fn union1d(py: Python<'_>, ar1: Py<PyAny>, ar2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.union1d so sorted-unique output and flattening
-    // semantics match numpy exactly across numeric, string, and NaN
-    // containing inputs.
+    // Native union1d via UFuncArray::union1d — returns the sorted-unique
+    // union of the two flattened inputs. Falls back to np.union1d for
+    // complex/structured/string inputs and for dtype mixes that would
+    // require numpy's coercion rules (e.g. int64 ∪ float64 → float64).
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("union1d")?
-        .call1((ar1.bind(py), ar2.bind(py)))?
-        .unbind())
+    let union1d_fn = numpy.getattr("union1d")?;
+    let ar1_for_fallback = ar1.clone_ref(py);
+    let ar2_for_fallback = ar2.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(union1d_fn
+            .call1((ar1_for_fallback.bind(py), ar2_for_fallback.bind(py)))?
+            .unbind())
+    };
+    let a = match extract_precise_numeric_array(py, ar1.bind(py), "union1d(ar1)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let b = match extract_precise_numeric_array(py, ar2.bind(py), "union1d(ar2)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    if a.has_integer_sidecar()
+        || b.has_integer_sidecar()
+        || matches!(a.dtype(), DType::Complex64 | DType::Complex128)
+        || matches!(b.dtype(), DType::Complex64 | DType::Complex128)
+        || a.dtype() != b.dtype()
+    {
+        return fallback();
+    }
+    let result = a.union1d(&b);
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
