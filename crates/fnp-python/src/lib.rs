@@ -13274,6 +13274,278 @@ fn exp2(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyD
     core_numpy_passthrough(py, "exp2", args, kwargs)
 }
 
+// ---------------------------------------------------------------------------
+// Reality-check (k74v.1) — 41 core numpy ufunc passthrough wrappers.
+//
+// All forward *args, **kwargs verbatim via core_numpy_passthrough so the full
+// ufunc signature surface (out=, where=, dtype=, casting=, subok=, ...) is
+// preserved without re-typing it. Array-API aliases (acos/asin/atan/...) are
+// provided alongside the numpy-native arc* names. Closes 41 of the remaining
+// numpy.__all__ gap per the k74v REALITY-CHECK-EPIC.
+// ---------------------------------------------------------------------------
+
+// Trig (Array-API aliases for arc*/inverse trig — numpy exposes both).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn acos(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "acos", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn acosh(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "acosh", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn asin(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "asin", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn asinh(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "asinh", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn atan(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "atan", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn atan2(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "atan2", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn atanh(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "atanh", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn tan(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "tan", args, kwargs)
+}
+
+// Bitwise (11) — Array-API names + numpy legacy names.
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn bitwise_and(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "bitwise_and", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn bitwise_count(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "bitwise_count", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn bitwise_invert(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "bitwise_invert", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn bitwise_left_shift(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "bitwise_left_shift", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn bitwise_not(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "bitwise_not", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn bitwise_or(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "bitwise_or", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn bitwise_right_shift(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "bitwise_right_shift", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn bitwise_xor(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "bitwise_xor", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn left_shift(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "left_shift", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn right_shift(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "right_shift", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn gcd(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "gcd", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn lcm(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "lcm", args, kwargs)
+}
+
+// Comparison (6) — ufunc-style element-wise comparisons.
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn equal(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "equal", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn not_equal(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "not_equal", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn greater(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "greater", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn greater_equal(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "greater_equal", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn less(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "less", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn less_equal(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "less_equal", args, kwargs)
+}
+
+// Logical (4).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn logical_and(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "logical_and", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn logical_not(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "logical_not", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn logical_or(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "logical_or", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn logical_xor(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "logical_xor", args, kwargs)
+}
+
+// Elementwise min/max and float-typed arithmetic (5).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn fmax(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "fmax", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn fmin(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "fmin", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn maximum(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "maximum", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn minimum(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "minimum", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn float_power(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "float_power", args, kwargs)
+}
+
+// Arithmetic: divmod + mod/remainder (3).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn divmod(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "divmod", args, kwargs)
+}
+
+// `mod` is a reserved word in Rust — use py_mod with name override.
+#[pyfunction]
+#[pyo3(name = "mod", signature = (*args, **kwargs))]
+fn py_mod(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "mod", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn remainder(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "remainder", args, kwargs)
+}
+
+// Datetime-aware ufunc (1).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn isnat(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "isnat", args, kwargs)
+}
+
+// Peak-to-peak reduction (1).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn ptp(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "ptp", args, kwargs)
+}
+
+// Matrix gufunc siblings of matmul (2).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn vecmat(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "vecmat", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn matvec(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "matvec", args, kwargs)
+}
+
 #[pymodule]
 fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
@@ -13693,6 +13965,50 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(log2, m)?)?;
     m.add_function(wrap_pyfunction!(log10, m)?)?;
     m.add_function(wrap_pyfunction!(exp2, m)?)?;
+
+    // Reality-check (k74v.1) — 41 ufunc passthrough wrappers.
+    m.add_function(wrap_pyfunction!(acos, m)?)?;
+    m.add_function(wrap_pyfunction!(acosh, m)?)?;
+    m.add_function(wrap_pyfunction!(asin, m)?)?;
+    m.add_function(wrap_pyfunction!(asinh, m)?)?;
+    m.add_function(wrap_pyfunction!(atan, m)?)?;
+    m.add_function(wrap_pyfunction!(atan2, m)?)?;
+    m.add_function(wrap_pyfunction!(atanh, m)?)?;
+    m.add_function(wrap_pyfunction!(tan, m)?)?;
+    m.add_function(wrap_pyfunction!(bitwise_and, m)?)?;
+    m.add_function(wrap_pyfunction!(bitwise_count, m)?)?;
+    m.add_function(wrap_pyfunction!(bitwise_invert, m)?)?;
+    m.add_function(wrap_pyfunction!(bitwise_left_shift, m)?)?;
+    m.add_function(wrap_pyfunction!(bitwise_not, m)?)?;
+    m.add_function(wrap_pyfunction!(bitwise_or, m)?)?;
+    m.add_function(wrap_pyfunction!(bitwise_right_shift, m)?)?;
+    m.add_function(wrap_pyfunction!(bitwise_xor, m)?)?;
+    m.add_function(wrap_pyfunction!(left_shift, m)?)?;
+    m.add_function(wrap_pyfunction!(right_shift, m)?)?;
+    m.add_function(wrap_pyfunction!(gcd, m)?)?;
+    m.add_function(wrap_pyfunction!(lcm, m)?)?;
+    m.add_function(wrap_pyfunction!(equal, m)?)?;
+    m.add_function(wrap_pyfunction!(not_equal, m)?)?;
+    m.add_function(wrap_pyfunction!(greater, m)?)?;
+    m.add_function(wrap_pyfunction!(greater_equal, m)?)?;
+    m.add_function(wrap_pyfunction!(less, m)?)?;
+    m.add_function(wrap_pyfunction!(less_equal, m)?)?;
+    m.add_function(wrap_pyfunction!(logical_and, m)?)?;
+    m.add_function(wrap_pyfunction!(logical_not, m)?)?;
+    m.add_function(wrap_pyfunction!(logical_or, m)?)?;
+    m.add_function(wrap_pyfunction!(logical_xor, m)?)?;
+    m.add_function(wrap_pyfunction!(fmax, m)?)?;
+    m.add_function(wrap_pyfunction!(fmin, m)?)?;
+    m.add_function(wrap_pyfunction!(maximum, m)?)?;
+    m.add_function(wrap_pyfunction!(minimum, m)?)?;
+    m.add_function(wrap_pyfunction!(float_power, m)?)?;
+    m.add_function(wrap_pyfunction!(divmod, m)?)?;
+    m.add_function(wrap_pyfunction!(py_mod, m)?)?;
+    m.add_function(wrap_pyfunction!(remainder, m)?)?;
+    m.add_function(wrap_pyfunction!(isnat, m)?)?;
+    m.add_function(wrap_pyfunction!(ptp, m)?)?;
+    m.add_function(wrap_pyfunction!(vecmat, m)?)?;
+    m.add_function(wrap_pyfunction!(matvec, m)?)?;
 
     // Module version (numpy parity: numpy.__version__). Sourced from the
     // fnp-python crate's Cargo.toml via env!() so a version bump in the
@@ -14354,6 +14670,186 @@ mod tests {
             assert!(module.getattr("put_along_axis").is_ok());
             assert!(module.getattr("take_along_axis").is_ok());
             assert!(module.getattr("Nditer").is_ok());
+
+            // k74v.1 ufunc passthrough wrappers (42 new + ptp).
+            for name in [
+                "acos", "acosh", "asin", "asinh", "atan", "atan2", "atanh", "tan",
+                "bitwise_and", "bitwise_count", "bitwise_invert", "bitwise_left_shift",
+                "bitwise_not", "bitwise_or", "bitwise_right_shift", "bitwise_xor",
+                "left_shift", "right_shift", "gcd", "lcm",
+                "equal", "not_equal", "greater", "greater_equal", "less", "less_equal",
+                "logical_and", "logical_not", "logical_or", "logical_xor",
+                "fmax", "fmin", "maximum", "minimum", "float_power",
+                "divmod", "mod", "remainder", "isnat", "ptp", "vecmat", "matvec",
+            ] {
+                assert!(
+                    module.getattr(name).is_ok(),
+                    "k74v.1 passthrough wrapper missing: {name}"
+                );
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn k74v_1_ufunc_passthroughs_match_numpy_family_oracles() {
+        // Family-level parity for the k74v.1 passthrough wrappers: one
+        // representative case per family (trig, bitwise, comparison, logical,
+        // elementwise min/max, modular arithmetic, datetime, matrix gufunc).
+        // Each case runs through BOTH our module's passthrough and numpy's
+        // canonical attribute, then compares with np.array_equal so any
+        // future drift (wrong attribute lookup, typo in passthrough name,
+        // etc.) trips the test.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let array_equal = numpy.getattr("array_equal")?;
+
+            let x = numpy
+                .getattr("array")?
+                .call1((PyList::new(py, [0.5_f64, -0.5, 1.0])?,))?;
+            let y = numpy
+                .getattr("array")?
+                .call1((PyList::new(py, [1.0_f64, 2.0, 3.0])?,))?;
+            let xi = numpy
+                .getattr("array")?
+                .call1((PyList::new(py, [6_i64, 10, 15])?,))?;
+            let yi = numpy
+                .getattr("array")?
+                .call1((PyList::new(py, [4_i64, 6, 10])?,))?;
+
+            // Array-API trig aliases: one from each family.
+            for (name, input) in [
+                ("acos", &x),
+                ("acosh", &y),
+                ("asin", &x),
+                ("asinh", &x),
+                ("atan", &x),
+                ("atanh", &x),
+                ("tan", &x),
+            ] {
+                let ours = module.getattr(name)?.call1((input.clone(),))?;
+                let theirs = numpy.getattr(name)?.call1((input.clone(),))?;
+                let ok: bool = array_equal.call1((&ours, &theirs))?.extract()?;
+                assert!(ok, "{name} passthrough diverged from numpy");
+            }
+
+            // Binary arithmetic / comparison families.
+            for name in [
+                "atan2",
+                "bitwise_and",
+                "bitwise_or",
+                "bitwise_xor",
+                "bitwise_left_shift",
+                "bitwise_right_shift",
+                "left_shift",
+                "right_shift",
+                "gcd",
+                "lcm",
+                "equal",
+                "not_equal",
+                "greater",
+                "greater_equal",
+                "less",
+                "less_equal",
+                "logical_and",
+                "logical_or",
+                "logical_xor",
+                "fmax",
+                "fmin",
+                "maximum",
+                "minimum",
+                "float_power",
+                "mod",
+                "remainder",
+            ] {
+                let ours = module.getattr(name)?.call1((xi.clone(), yi.clone()))?;
+                let theirs = numpy.getattr(name)?.call1((xi.clone(), yi.clone()))?;
+                let ok: bool = array_equal.call1((&ours, &theirs))?.extract()?;
+                assert!(ok, "{name} passthrough diverged from numpy");
+            }
+
+            // Unary: logical_not, bitwise_not, bitwise_invert, bitwise_count.
+            for name in [
+                "logical_not",
+                "bitwise_not",
+                "bitwise_invert",
+                "bitwise_count",
+            ] {
+                let ours = module.getattr(name)?.call1((xi.clone(),))?;
+                let theirs = numpy.getattr(name)?.call1((xi.clone(),))?;
+                let ok: bool = array_equal.call1((&ours, &theirs))?.extract()?;
+                assert!(ok, "{name} passthrough diverged from numpy");
+            }
+
+            // divmod returns a 2-tuple; compare each element.
+            let ours_dm = module.getattr("divmod")?.call1((xi.clone(), yi.clone()))?;
+            let theirs_dm = numpy.getattr("divmod")?.call1((xi.clone(), yi.clone()))?;
+            let ours_q = ours_dm.get_item(0)?;
+            let ours_r = ours_dm.get_item(1)?;
+            let theirs_q = theirs_dm.get_item(0)?;
+            let theirs_r = theirs_dm.get_item(1)?;
+            assert!(
+                array_equal.call1((&ours_q, &theirs_q))?.extract::<bool>()?,
+                "divmod quotient diverged"
+            );
+            assert!(
+                array_equal.call1((&ours_r, &theirs_r))?.extract::<bool>()?,
+                "divmod remainder diverged"
+            );
+
+            // isnat on a datetime64 input.
+            let dates = numpy.getattr("array")?.call(
+                (PyList::new(py, ["NaT", "2026-04-23"])?,),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "datetime64[D]")?;
+                    kw
+                }),
+            )?;
+            let ours_nat = module.getattr("isnat")?.call1((dates.clone(),))?;
+            let theirs_nat = numpy.getattr("isnat")?.call1((dates,))?;
+            assert!(
+                array_equal.call1((&ours_nat, &theirs_nat))?.extract::<bool>()?,
+                "isnat passthrough diverged"
+            );
+
+            // ptp reduction.
+            let pt_in = numpy.getattr("array")?.call1((PyList::new(py, [1_i64, 5, 3, 8, 2])?,))?;
+            let ours_ptp = module.getattr("ptp")?.call1((pt_in.clone(),))?;
+            let theirs_ptp = numpy.getattr("ptp")?.call1((pt_in,))?;
+            assert_eq!(
+                ours_ptp.repr()?.extract::<String>()?,
+                theirs_ptp.repr()?.extract::<String>()?,
+                "ptp passthrough diverged"
+            );
+
+            // Matrix gufunc siblings: vecmat (M,) @ (M, N) -> (N,),
+            // matvec (M, N) @ (N,) -> (M,).
+            let mat = numpy
+                .getattr("array")?
+                .call1((PyList::new(
+                    py,
+                    [PyList::new(py, [1.0_f64, 2.0])?, PyList::new(py, [3.0, 4.0])?],
+                )?,))?;
+            let vec = numpy.getattr("array")?.call1((PyList::new(py, [1.0_f64, 2.0])?,))?;
+            let ours_vm = module.getattr("vecmat")?.call1((vec.clone(), mat.clone()))?;
+            let theirs_vm = numpy.getattr("vecmat")?.call1((vec.clone(), mat.clone()))?;
+            assert!(
+                array_equal.call1((&ours_vm, &theirs_vm))?.extract::<bool>()?,
+                "vecmat passthrough diverged"
+            );
+            let ours_mv = module.getattr("matvec")?.call1((mat.clone(), vec.clone()))?;
+            let theirs_mv = numpy.getattr("matvec")?.call1((mat, vec))?;
+            assert!(
+                array_equal.call1((&ours_mv, &theirs_mv))?.extract::<bool>()?,
+                "matvec passthrough diverged"
+            );
+
             Ok(())
         });
     }
