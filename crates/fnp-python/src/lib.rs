@@ -4892,15 +4892,40 @@ fn matrix_rank(
 #[pyfunction]
 #[pyo3(signature = (a, n))]
 fn matrix_power(py: Python<'_>, a: Py<PyAny>, n: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.linalg.matrix_power so dtype preservation for
-    // nonnegative powers, inverse promotion for negative powers, and stacked
-    // (..., M, M) semantics match numpy exactly.
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("linalg")?
-        .getattr("matrix_power")?
-        .call1((a.bind(py), n.bind(py)))?
-        .unbind())
+    let matrix_power_fn = numpy.getattr("linalg")?.getattr("matrix_power")?;
+    let a_for_fallback = a.clone_ref(py);
+    let n_for_fallback = n.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(matrix_power_fn
+            .call1((a_for_fallback.bind(py), n_for_fallback.bind(py)))?
+            .unbind())
+    };
+
+    let power = match n.bind(py).extract::<i64>() {
+        Ok(power) if power >= 0 => power,
+        _ => return fallback(),
+    };
+
+    let array = match extract_precise_numeric_array(py, a.bind(py), "matrix_power(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let shape = array.shape();
+    if shape.len() != 2
+        || shape[0] != shape[1]
+        || array.has_integer_sidecar()
+        || array.values().iter().any(|value| !value.is_finite())
+        || !matches!(array.dtype(), DType::F64)
+    {
+        return fallback();
+    }
+
+    let result = match array.matrix_power(power) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -16208,6 +16233,45 @@ mod tests {
     }
 
     #[test]
+    fn percentile_quantile_empty_array_matches_numpy_indexerror() {
+        // numpy.percentile / numpy.quantile raise IndexError on empty input
+        // (because the internal kth-element lookup indexes into a 0-length
+        // array). Our fallback-on-error pattern must preserve that exception
+        // type.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            let empty: Py<PyAny> =
+                numpy.getattr("array")?.call1((PyList::empty(py),))?.unbind();
+
+            for (our_name, np_name, q_val) in [
+                ("percentile", "percentile", 50.0_f64),
+                ("quantile", "quantile", 0.5_f64),
+            ] {
+                let ours = module
+                    .getattr(our_name)?
+                    .call1((empty.bind(py), q_val))
+                    .expect_err(&format!("{our_name}(empty) must error"));
+                let theirs = numpy
+                    .getattr(np_name)?
+                    .call1((empty.bind(py), q_val))
+                    .expect_err(&format!("numpy {np_name}(empty) must error"));
+                assert_eq!(
+                    ours.get_type(py).name()?.extract::<String>()?,
+                    theirs.get_type(py).name()?.extract::<String>()?,
+                    "{our_name}(empty) error type diverges from numpy"
+                );
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
     fn linalg_error_surface_probe() {
         // Regression probe for LinAlgError parity across in-Rust and
         // passthrough linalg paths. numpy.linalg raises LinAlgError
@@ -17282,6 +17346,19 @@ mod tests {
             let actual_int = matrix_power_fn.call1((int_matrix.clone(), 3_i64))?;
             let expected_int = numpy_matrix_power.call1((int_matrix.clone(), 3_i64))?;
             assert_array_matches_numpy(&actual_int, &expected_int)?;
+
+            let float64_matrix = numeric_array(
+                py,
+                vec![vec![1.0_f64, 2.0_f64], vec![3.0_f64, 5.0_f64]],
+                "float64",
+            );
+            let actual_float64_sq = matrix_power_fn.call1((float64_matrix.clone(), 2_i64))?;
+            let expected_float64_sq = numpy_matrix_power.call1((float64_matrix.clone(), 2_i64))?;
+            assert_array_matches_numpy(&actual_float64_sq, &expected_float64_sq)?;
+
+            let actual_float64_zero = matrix_power_fn.call1((float64_matrix.clone(), 0_i64))?;
+            let expected_float64_zero = numpy_matrix_power.call1((float64_matrix.clone(), 0_i64))?;
+            assert_array_matches_numpy(&actual_float64_zero, &expected_float64_zero)?;
 
             let bool_matrix = numeric_array(py, vec![vec![true, false], vec![false, true]], "bool");
             let actual_zero = matrix_power_fn.call1((bool_matrix.clone(), 0_i64))?;
