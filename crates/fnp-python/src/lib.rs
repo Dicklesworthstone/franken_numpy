@@ -7860,16 +7860,41 @@ fn setdiff1d(
     ar2: Py<PyAny>,
     assume_unique: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.setdiff1d so sorted-unique output, flattened
-    // input handling, and the assume_unique fast path all match numpy
-    // exactly.
+    // Native setdiff1d via UFuncArray::setdiff1d. Falls back to numpy
+    // when assume_unique=true (subtly different semantics preserving
+    // order) or for complex / mixed-dtype / integer-sidecar inputs.
     let numpy = py.import("numpy")?;
     let setdiff1d_fn = numpy.getattr("setdiff1d")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("assume_unique", assume_unique)?;
-    Ok(setdiff1d_fn
-        .call((ar1.bind(py), ar2.bind(py)), Some(&kwargs))?
-        .unbind())
+    let ar1_for_fallback = ar1.clone_ref(py);
+    let ar2_for_fallback = ar2.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("assume_unique", assume_unique)?;
+        Ok(setdiff1d_fn
+            .call((ar1_for_fallback.bind(py), ar2_for_fallback.bind(py)), Some(&kwargs))?
+            .unbind())
+    };
+    if assume_unique {
+        return fallback();
+    }
+    let a = match extract_precise_numeric_array(py, ar1.bind(py), "setdiff1d(ar1)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let b = match extract_precise_numeric_array(py, ar2.bind(py), "setdiff1d(ar2)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    if a.has_integer_sidecar()
+        || b.has_integer_sidecar()
+        || matches!(a.dtype(), DType::Complex64 | DType::Complex128)
+        || matches!(b.dtype(), DType::Complex64 | DType::Complex128)
+        || a.dtype() != b.dtype()
+    {
+        return fallback();
+    }
+    let result = a.setdiff1d(&b);
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
