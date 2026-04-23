@@ -106,6 +106,19 @@
 
 ---
 
+## DISC-009: fnp-linalg svd/qr/norm bit-exact LAPACK parity
+
+- **Reference:** NumPy's `linalg.svd` / `linalg.qr` / `linalg.norm` / `linalg.cond` / `linalg.tensorsolve` / `linalg.lstsq` / `linalg.tensorinv` / `linalg.solve_triangular` call LAPACK (zgesdd / zgeqrf / dgeev / …) via OpenBLAS or MKL.
+- **Our impl:** `fnp_linalg::svd_mxn` (and siblings) produce results that diverge from LAPACK by ~2 ULPs on representative inputs (e.g. singular value 9.508032000695726 vs numpy 9.508032000695724).
+- **Impact:** Strict `tolist()` / `repr` equality oracles cannot tolerate the drift, so ports that replace the numpy passthrough with a Rust kernel break parity tests.
+- **Resolution:** ACCEPTED — keep narrow, proven-bit-exact fast paths (det_nxn, inv_nxn, eigvalsh for small matrices, matrix_transpose, matrix_power, vecdot, multi_dot) and leave `svd` / `qr` / `norm` / `cond` / `tensorsolve` / `lstsq` / `tensorinv` / `solve_triangular` as numpy passthroughs until a kernel with demonstrable bit-exact LAPACK parity lands.
+- **Reason:** Bit-exact LAPACK parity requires re-implementing Householder reflections with identical pivoting — a multi-quarter engineering investment. Relaxing the oracles to `allclose` would reduce test strictness across unrelated callers. Narrow-fast-paths is the pragmatic middle ground.
+- **Tests affected:** `svd_matches_numpy_namedtuple_array_and_error_paths`, `qr_matches_numpy_*`, `norm_matches_numpy_*` — all pass via numpy passthrough.
+- **Review date:** 2026-04-23
+- **Bead:** franken_numpy-qhjn (scope note on franken_numpy-hswf)
+
+---
+
 ## Adding New Divergences
 
 When documenting a new divergence:
