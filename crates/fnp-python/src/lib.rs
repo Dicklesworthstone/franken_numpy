@@ -5819,18 +5819,76 @@ fn roll(
     shift: Py<PyAny>,
     axis: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.roll so flat/default rolling, negative shifts,
-    // multi-axis tuple forms, scalar handling, and axis normalization
-    // match numpy exactly.
+    // Native roll via UFuncArray::roll / roll_multi for real/complex
+    // numeric inputs. Scalar shift with scalar-or-None axis routes
+    // through roll; tuple-of-shifts with tuple-of-axes routes through
+    // roll_multi; mismatched tuples, non-int shifts, non-numeric dtypes
+    // fall back to np.roll so numpy's dispatch surface stays exact.
     let numpy = py.import("numpy")?;
     let roll_fn = numpy.getattr("roll")?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis_val) = axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+    let a_for_fallback = a.clone_ref(py);
+    let shift_for_fallback = shift.clone_ref(py);
+    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(axis_val) = axis_for_fallback.as_ref() {
+            kwargs.set_item("axis", axis_val.bind(py))?;
+        }
+        Ok(roll_fn
+            .call(
+                (a_for_fallback.bind(py), shift_for_fallback.bind(py)),
+                Some(&kwargs),
+            )?
+            .unbind())
+    };
+
+    let array = match extract_precise_numeric_array(py, a.bind(py), "roll(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+
+    // Scalar shift path.
+    if let Ok(shift_scalar) = shift.bind(py).extract::<i64>() {
+        let axis_scalar: Option<isize> = match axis.as_ref() {
+            None => None,
+            Some(value) => {
+                let bound = value.bind(py);
+                if bound.is_none() {
+                    None
+                } else if let Ok(axis_int) = bound.extract::<i64>() {
+                    Some(axis_int as isize)
+                } else {
+                    return fallback();
+                }
+            }
+        };
+        let result = match array.roll(shift_scalar as isize, axis_scalar) {
+            Ok(result) => result,
+            Err(_) => return fallback(),
+        };
+        return build_numpy_array_from_ufunc(py, &result);
     }
-    Ok(roll_fn
-        .call((a.bind(py), shift.bind(py)), Some(&kwargs))?
-        .unbind())
+
+    // Tuple/list shift path — requires explicit axis tuple of matching length.
+    let Ok(shifts) = shift.bind(py).extract::<Vec<i64>>() else {
+        return fallback();
+    };
+    let Some(axis_obj) = axis.as_ref() else {
+        return fallback();
+    };
+    let Ok(axes) = axis_obj.bind(py).extract::<Vec<i64>>() else {
+        return fallback();
+    };
+    if axes.len() != shifts.len() {
+        return fallback();
+    }
+    let shifts_isize: Vec<isize> = shifts.iter().map(|&s| s as isize).collect();
+    let axes_isize: Vec<isize> = axes.iter().map(|&a| a as isize).collect();
+    let result = match array.roll_multi(&shifts_isize, &axes_isize) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -14651,10 +14709,23 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         linalg.delattr("linalg_vector_norm")?;
         // Re-export numpy.linalg.LinAlgError so users catching
         // fnp_python.linalg.LinAlgError still catch numpy's exception type.
+        // Eagerly pull the class in at init-time if numpy is importable;
+        // when the host Python has no numpy (e.g. stripped-down CI workers),
+        // install a lazy __getattr__ so `linalg.LinAlgError` still resolves
+        // the first time user code that *does* have numpy accesses it.
+        let mut linalg_error_cached = false;
         if let Ok(np_linalg) = py.import("numpy.linalg") {
             if let Ok(exc) = np_linalg.getattr("LinAlgError") {
-                linalg.add("LinAlgError", exc)?;
+                linalg.setattr("LinAlgError", exc)?;
+                linalg_error_cached = true;
             }
+        }
+        if !linalg_error_cached {
+            let getattr_src = pyo3::ffi::c_str!(
+                "def __getattr__(name):\n    if name == 'LinAlgError':\n        import numpy.linalg as _l\n        return _l.LinAlgError\n    raise AttributeError(name)\n"
+            );
+            let linalg_dict = linalg.dict();
+            py.run(getattr_src, Some(&linalg_dict), None)?;
         }
         m.add_submodule(&linalg)?;
         // Also expose as top-level attribute so `fnp_python.linalg` resolves
@@ -15618,15 +15689,22 @@ mod tests {
 
             // linalg submodule.
             let linalg = module.getattr("linalg")?;
-            for name in [
+            let mut linalg_names: Vec<&str> = vec![
                 "eig", "matrix_norm", "vecdot",
                 "svd", "svdvals", "qr", "lstsq", "solve", "inv",
                 "cholesky", "slogdet", "matrix_rank", "matrix_power",
                 "matrix_transpose", "pinv", "norm", "cond", "tensorinv",
                 "tensorsolve", "multi_dot", "det", "solve_triangular",
                 "eigh", "eigvals", "eigvalsh", "cross", "tensordot", "matmul",
-                "diagonal", "outer", "trace", "vector_norm", "LinAlgError",
-            ] {
+                "diagonal", "outer", "trace", "vector_norm",
+            ];
+            // LinAlgError is a numpy type re-export — only verify when numpy
+            // is actually importable on the host Python. On numpy-less CI
+            // workers the lazy __getattr__ fallback can't resolve it.
+            if numpy_available(py) {
+                linalg_names.push("LinAlgError");
+            }
+            for name in linalg_names {
                 assert!(
                     linalg.getattr(name).is_ok(),
                     "fnp_python.linalg.{name} missing"
