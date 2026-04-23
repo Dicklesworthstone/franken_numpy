@@ -13849,6 +13849,27 @@ fn setbufsize(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'
     core_numpy_passthrough(py, "setbufsize", args, kwargs)
 }
 
+// Legacy matrix / env helpers (3) — present in numpy.__all__ 2.4.x even
+// though numpy.matrix is deprecated. Shipping these closes the long tail
+// of the numpy.__all__ coverage target.
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn asmatrix(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "asmatrix", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn bmat(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "bmat", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn get_include(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "get_include", args, kwargs)
+}
+
 #[pymodule]
 fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
@@ -14360,6 +14381,9 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_printoptions, m)?)?;
     m.add_function(wrap_pyfunction!(printoptions, m)?)?;
     m.add_function(wrap_pyfunction!(setbufsize, m)?)?;
+    m.add_function(wrap_pyfunction!(asmatrix, m)?)?;
+    m.add_function(wrap_pyfunction!(bmat, m)?)?;
+    m.add_function(wrap_pyfunction!(get_include, m)?)?;
 
     // Module version (numpy parity: numpy.__version__). Sourced from the
     // fnp-python crate's Cargo.toml via env!() so a version bump in the
@@ -15056,6 +15080,7 @@ mod tests {
                 "binary_repr", "base_repr",
                 "array2string", "array_repr", "array_str",
                 "ediff1d", "set_printoptions", "printoptions", "setbufsize",
+                "asmatrix", "bmat", "get_include",
             ] {
                 assert!(
                     module.getattr(name).is_ok(),
