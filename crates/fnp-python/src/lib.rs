@@ -16233,6 +16233,37 @@ mod tests {
     }
 
     #[test]
+    fn bincount_negative_input_matches_numpy_valueerror() {
+        // numpy.bincount raises ValueError ("'list' argument must have no
+        // negative elements") when given negative values. Confirms our
+        // map_ufunc_error path stays compatible.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            let negatives = numeric_array(py, vec![-1_i64, 0, 1], "int64");
+            let ours = module
+                .getattr("bincount")?
+                .call1((negatives.clone(),))
+                .expect_err("bincount(-1) must error");
+            let theirs = numpy
+                .getattr("bincount")?
+                .call1((negatives,))
+                .expect_err("numpy bincount(-1) must error");
+            assert_eq!(
+                ours.get_type(py).name()?.extract::<String>()?,
+                theirs.get_type(py).name()?.extract::<String>()?,
+                "bincount negative-input error type diverges from numpy"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
     fn percentile_quantile_empty_array_matches_numpy_indexerror() {
         // numpy.percentile / numpy.quantile raise IndexError on empty input
         // (because the internal kth-element lookup indexes into a 0-length
