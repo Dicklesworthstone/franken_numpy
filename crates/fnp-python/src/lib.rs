@@ -16628,6 +16628,10 @@ mod tests {
                 ("any", "any"),
                 ("all", "all"),
                 ("roll", "roll"),
+                ("median", "median"),
+                ("ptp", "ptp"),
+                ("max", "max"),
+                ("min", "min"),
             ];
 
             let module = PyModule::new(py, "fnp_python_test")?;
