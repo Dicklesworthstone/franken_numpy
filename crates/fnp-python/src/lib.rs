@@ -4239,24 +4239,146 @@ fn fromstring(
     sep: &str,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.fromstring so separator-based text parsing,
-    // bytes-input acceptance, dtype coercion, count-limited reads,
-    // malformed-token ValueError surface, and numpy's own
-    // DeprecationWarning emission on empty sep all match exactly.
     let numpy = py.import("numpy")?;
-    let kwargs = PyDict::new(py);
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        kwargs.set_item("count", count)?;
+        kwargs.set_item("sep", sep)?;
+        if let Some(like_val) = like.as_ref() {
+            kwargs.set_item("like", like_val.bind(py))?;
+        }
+        Ok(numpy
+            .getattr("fromstring")?
+            .call((string.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
+    // Empty `sep` is the deprecated binary path; numpy emits a
+    // DeprecationWarning / ValueError we don't want to reproduce here.
+    if sep.is_empty() {
+        return fallback(py);
     }
-    kwargs.set_item("count", count)?;
-    kwargs.set_item("sep", sep)?;
-    if let Some(like_val) = like {
-        kwargs.set_item("like", like_val.bind(py))?;
+    if like.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+        return fallback(py);
     }
-    Ok(numpy
-        .getattr("fromstring")?
-        .call((string.bind(py),), Some(&kwargs))?
-        .unbind())
+
+    // Accept either str or bytes input (numpy decodes bytes as ASCII).
+    let string_bound = string.bind(py);
+    let text: String = if let Ok(value) = string_bound.extract::<String>() {
+        value
+    } else if let Ok(bytes) = string_bound.extract::<Vec<u8>>() {
+        match String::from_utf8(bytes) {
+            Ok(value) => value,
+            Err(_) => return fallback(py),
+        }
+    } else {
+        return fallback(py);
+    };
+
+    let dtype_cloned = dtype.as_ref().map(|value| value.clone_ref(py));
+    let parsed_dtype = extract_python_dtype(py, dtype_cloned, DType::F64, "fromstring(dtype)")?;
+    if !dtype_supported_by_numpy_export_bridge(parsed_dtype) {
+        return fallback(py);
+    }
+
+    // numpy splits by the exact sep character but trims whitespace from
+    // each emitted token. For whitespace-only sep, runs of whitespace
+    // collapse into a single delimiter.
+    let trimmed = text.trim();
+    let tokens: Vec<&str> = if sep.chars().all(char::is_whitespace) {
+        trimmed.split_whitespace().collect()
+    } else {
+        trimmed
+            .split(sep)
+            .map(|part| part.trim())
+            .filter(|part| !part.is_empty())
+            .collect()
+    };
+
+    let limit: Option<usize> = if count == -1 {
+        None
+    } else if count < 0 {
+        Some(0)
+    } else {
+        Some(count as usize)
+    };
+    let effective = match limit {
+        Some(n) => &tokens[..tokens.len().min(n)],
+        None => tokens.as_slice(),
+    };
+
+    let storage = match parsed_dtype {
+        DType::Bool => {
+            let mut values = Vec::with_capacity(effective.len());
+            for tok in effective {
+                match tok.parse::<i64>() {
+                    Ok(value) => values.push(value != 0),
+                    Err(_) => match tok.parse::<f64>() {
+                        Ok(value) => values.push(value != 0.0),
+                        Err(_) => return fallback(py),
+                    },
+                }
+            }
+            ArrayStorage::Bool(values)
+        }
+        DType::I8
+        | DType::I16
+        | DType::I32
+        | DType::I64
+        | DType::U8
+        | DType::U16
+        | DType::U32
+        | DType::U64 => {
+            let mut longs = Vec::with_capacity(effective.len());
+            for tok in effective {
+                // Accept "1.0" style integer-valued floats for int dtypes
+                // (matches numpy's accept-and-truncate behavior).
+                match tok.parse::<i64>() {
+                    Ok(value) => longs.push(value),
+                    Err(_) => match tok.parse::<f64>() {
+                        Ok(value) if value.fract() == 0.0 && value.is_finite() => {
+                            longs.push(value as i64);
+                        }
+                        _ => return fallback(py),
+                    },
+                }
+            }
+            // Cast longs into the requested integer dtype.
+            match parsed_dtype {
+                DType::I8 => ArrayStorage::I8(longs.into_iter().map(|v| v as i8).collect()),
+                DType::I16 => ArrayStorage::I16(longs.into_iter().map(|v| v as i16).collect()),
+                DType::I32 => ArrayStorage::I32(longs.into_iter().map(|v| v as i32).collect()),
+                DType::I64 => ArrayStorage::I64(longs),
+                DType::U8 => ArrayStorage::U8(longs.into_iter().map(|v| v as u8).collect()),
+                DType::U16 => ArrayStorage::U16(longs.into_iter().map(|v| v as u16).collect()),
+                DType::U32 => ArrayStorage::U32(longs.into_iter().map(|v| v as u32).collect()),
+                DType::U64 => ArrayStorage::U64(longs.into_iter().map(|v| v as u64).collect()),
+                _ => unreachable!(),
+            }
+        }
+        DType::F16 | DType::F32 | DType::F64 => {
+            let mut floats = Vec::with_capacity(effective.len());
+            for tok in effective {
+                match tok.parse::<f64>() {
+                    Ok(value) => floats.push(value),
+                    Err(_) => return fallback(py),
+                }
+            }
+            match parsed_dtype {
+                DType::F16 => ArrayStorage::F16(floats.into_iter().map(|v| f16::from_f64(v)).collect()),
+                DType::F32 => ArrayStorage::F32(floats.into_iter().map(|v| v as f32).collect()),
+                DType::F64 => ArrayStorage::F64(floats),
+                _ => unreachable!(),
+            }
+        }
+        _ => return fallback(py),
+    };
+
+    let shape = vec![effective.len()];
+    build_numpy_array_from_storage(py, &shape, storage)
 }
 
 #[pyfunction]
