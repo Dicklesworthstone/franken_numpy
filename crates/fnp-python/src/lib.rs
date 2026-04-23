@@ -9561,13 +9561,42 @@ fn array_equal(
 #[pyfunction]
 #[pyo3(signature = (a1, a2))]
 fn array_equiv(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.array_equiv so broadcastable-shape equivalence
-    // semantics match numpy exactly.
+    // Native array_equiv: broadcast a1 and a2, check all corresponding
+    // entries agree. Non-broadcastable shapes return False (matches numpy);
+    // non-numeric / complex / integer-sidecar inputs defer to numpy so the
+    // object-dtype / structured surfaces stay exact.
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("array_equiv")?
-        .call1((a1.bind(py), a2.bind(py)))?
-        .unbind())
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        Ok(numpy
+            .getattr("array_equiv")?
+            .call1((a1.bind(py), a2.bind(py)))?
+            .unbind())
+    };
+    let array_a = match extract_precise_numeric_array(py, a1.bind(py), "array_equiv(a1)") {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    let array_b = match extract_precise_numeric_array(py, a2.bind(py), "array_equiv(a2)") {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    if array_a.has_integer_sidecar()
+        || array_b.has_integer_sidecar()
+        || matches!(array_a.dtype(), DType::Complex64 | DType::Complex128)
+        || matches!(array_b.dtype(), DType::Complex64 | DType::Complex128)
+    {
+        return fallback(py);
+    }
+    // Shapes must be broadcast-compatible; any mismatch → False.
+    if broadcast_shapes(&[array_a.shape(), array_b.shape()]).is_err() {
+        return Ok(pyo3::types::PyBool::new(py, false).to_owned().into_any().unbind());
+    }
+    let comparison = match array_a.elementwise_binary(&array_b, BinaryOp::Equal) {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    let all_equal = comparison.values().iter().all(|&v| v != 0.0);
+    Ok(pyo3::types::PyBool::new(py, all_equal).to_owned().into_any().unbind())
 }
 
 #[pyfunction]
