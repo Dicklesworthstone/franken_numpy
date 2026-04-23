@@ -16535,6 +16535,8 @@ mod tests {
                 ("linalg_eig", "eig", &one_d),
                 ("slogdet", "slogdet", &non_square),
                 ("matrix_rank", "matrix_rank", &empty_matrix),
+                ("eigvalsh", "eigvalsh", &one_d),
+                ("eigh", "eigh", &one_d),
             ];
 
             let mut divergences: Vec<String> = Vec::new();
