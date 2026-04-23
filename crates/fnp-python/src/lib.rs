@@ -12212,16 +12212,57 @@ fn recfunctions_rename_fields(
     base: Py<PyAny>,
     namemapper: Py<PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to numpy.lib.recfunctions.rename_fields (imported as a
-    // submodule since numpy 2.x no longer exposes it as an attribute of
-    // numpy.lib). Given a dict mapping old-name -> new-name, returns a
-    // structured array with fields renamed. Matches numpy on nested-
-    // structure renames and no-op dicts.
-    Ok(py
-        .import("numpy.lib.recfunctions")?
-        .getattr("rename_fields")?
-        .call1((base.bind(py), namemapper.bind(py)))?
-        .unbind())
+    let base_bound = base.bind(py);
+    let namemapper_bound = namemapper.bind(py);
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        Ok(py
+            .import("numpy.lib.recfunctions")?
+            .getattr("rename_fields")?
+            .call1((base_bound, namemapper_bound))?
+            .unbind())
+    };
+
+    // Native path handles the common flat (non-nested) structured
+    // dtype case: iterate dtype.names, remap via the provided dict
+    // (using the Python-side view so non-str keys like numpy scalars
+    // are honored correctly), then `.view()` the source with the
+    // renamed dtype descriptor. Nested structured dtypes fall back to
+    // numpy.
+    let Ok(mapper) = namemapper_bound.downcast::<PyDict>() else {
+        return fallback(py);
+    };
+    let dtype_obj = base_bound.getattr("dtype")?;
+    let Ok(old_names) = dtype_obj.getattr("names")?.extract::<Vec<String>>() else {
+        return fallback(py);
+    };
+    if old_names.is_empty() {
+        return fallback(py);
+    }
+
+    // Build a list-of-tuples descriptor: (new_name, field_dtype).
+    let descr = PyList::empty(py);
+    for old_name in &old_names {
+        let field = dtype_obj.get_item(old_name.as_str())?;
+        // Nested structured fields carry their own .names; delegate.
+        if field
+            .getattr("names")
+            .ok()
+            .is_some_and(|names| !names.is_none())
+        {
+            return fallback(py);
+        }
+        let new_name: String = match mapper.get_item(old_name.as_str())? {
+            Some(v) => v.extract()?,
+            None => old_name.clone(),
+        };
+        descr.append(PyTuple::new(py, [
+            new_name.into_pyobject(py)?.into_any(),
+            field.clone().into_any(),
+        ])?)?;
+    }
+    let numpy = py.import("numpy")?;
+    let new_dtype = numpy.getattr("dtype")?.call1((descr,))?;
+    Ok(base_bound.call_method1("view", (new_dtype,))?.unbind())
 }
 
 #[pyfunction]
