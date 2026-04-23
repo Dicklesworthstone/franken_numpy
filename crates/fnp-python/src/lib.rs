@@ -5072,15 +5072,48 @@ fn cholesky(
 #[pyfunction]
 #[pyo3(signature = (a, b))]
 fn solve(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.linalg.solve so square real/complex, batched
-    // (..., M, M) / (..., M, K), and stacked broadcasting semantics all
-    // match numpy exactly.
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("linalg")?
-        .getattr("solve")?
-        .call1((a.bind(py), b.bind(py)))?
-        .unbind())
+    let solve_fn = numpy.getattr("linalg")?.getattr("solve")?;
+    let a_for_fallback = a.clone_ref(py);
+    let b_for_fallback = b.clone_ref(py);
+    let fallback =
+        || -> PyResult<Py<PyAny>> { Ok(solve_fn.call1((a_for_fallback.bind(py), b_for_fallback.bind(py)))?.unbind()) };
+
+    let a = match extract_precise_numeric_array(py, a.bind(py), "solve(a, b)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let b = match extract_precise_numeric_array(py, b.bind(py), "solve(a, b)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+
+    let a_shape = a.shape();
+    let b_shape = b.shape();
+    if a_shape.len() != 2
+        || a_shape[0] != a_shape[1]
+        || !matches!(a.dtype(), DType::F64)
+        || !matches!(b.dtype(), DType::F64)
+        || a.has_integer_sidecar()
+        || b.has_integer_sidecar()
+        || a.values().iter().any(|value| !value.is_finite())
+        || b.values().iter().any(|value| !value.is_finite())
+    {
+        return fallback();
+    }
+
+    let result = match b_shape.len() {
+        1 => match a.solve(&b) {
+            Ok(result) => result,
+            Err(_) => return fallback(),
+        },
+        2 => match a.solve_multi(&b) {
+            Ok(result) => result,
+            Err(_) => return fallback(),
+        },
+        _ => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -17684,6 +17717,52 @@ mod tests {
                     .call1((&actual_c, &expected_c))?
                     .extract::<bool>()?,
                 "solve complex diverged"
+            );
+
+            // float32 stays on the NumPy path so dtype remains float32.
+            let square_f32 = numeric_array(
+                py,
+                vec![vec![2.0_f32, 1.0_f32], vec![1.0_f32, 3.0_f32]],
+                "float32",
+            );
+            let b_f32 = numeric_array(py, vec![1.0_f32, 4.0_f32], "float32");
+            let actual_f32 = solve_fn.call1((square_f32.clone(), b_f32.clone()))?;
+            let expected_f32 = numpy_solve.call1((square_f32.clone(), b_f32.clone()))?;
+            assert!(
+                allclose
+                    .call1((&actual_f32, &expected_f32))?
+                    .extract::<bool>()?,
+                "solve float32 diverged"
+            );
+            assert_eq!(
+                actual_f32
+                    .getattr("dtype")?
+                    .getattr("name")?
+                    .extract::<String>()?,
+                expected_f32
+                    .getattr("dtype")?
+                    .getattr("name")?
+                    .extract::<String>()?
+            );
+
+            // Singular systems should preserve NumPy's LinAlgError surface.
+            let singular = numeric_array(
+                py,
+                vec![vec![1.0_f64, 2.0_f64], vec![2.0_f64, 4.0_f64]],
+                "float64",
+            );
+            let singular_rhs = numeric_array(py, vec![1.0_f64, 2.0_f64], "float64");
+            let actual_err = solve_fn
+                .call1((singular.clone(), singular_rhs.clone()))
+                .unwrap_err();
+            let expected_err = numpy_solve.call1((singular, singular_rhs)).unwrap_err();
+            assert_eq!(
+                actual_err.get_type(py).name()?.extract::<String>()?,
+                expected_err.get_type(py).name()?.extract::<String>()?
+            );
+            assert_eq!(
+                actual_err.value(py).str()?.extract::<String>()?,
+                expected_err.value(py).str()?.extract::<String>()?
             );
 
             Ok(())
