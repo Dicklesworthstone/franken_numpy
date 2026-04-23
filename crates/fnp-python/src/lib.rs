@@ -7803,17 +7803,46 @@ fn intersect1d(
     assume_unique: bool,
     return_indices: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.intersect1d so sorted-unique output, duplicate
-    // handling, flattened input semantics, and the optional
-    // `return_indices` tuple all match numpy exactly.
+    // Native intersect1d via UFuncArray::intersect1d for matched-dtype
+    // real numeric inputs with assume_unique=false and
+    // return_indices=false. Falls back to np.intersect1d when either
+    // kwarg is non-default (those paths have order-preserving and
+    // tuple-return semantics left to numpy) and for complex /
+    // integer-sidecar / mixed-dtype inputs so numpy's dispatch surface
+    // stays exact.
     let numpy = py.import("numpy")?;
     let intersect1d_fn = numpy.getattr("intersect1d")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("assume_unique", assume_unique)?;
-    kwargs.set_item("return_indices", return_indices)?;
-    Ok(intersect1d_fn
-        .call((ar1.bind(py), ar2.bind(py)), Some(&kwargs))?
-        .unbind())
+    let ar1_for_fallback = ar1.clone_ref(py);
+    let ar2_for_fallback = ar2.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("assume_unique", assume_unique)?;
+        kwargs.set_item("return_indices", return_indices)?;
+        Ok(intersect1d_fn
+            .call((ar1_for_fallback.bind(py), ar2_for_fallback.bind(py)), Some(&kwargs))?
+            .unbind())
+    };
+    if assume_unique || return_indices {
+        return fallback();
+    }
+    let a = match extract_precise_numeric_array(py, ar1.bind(py), "intersect1d(ar1)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let b = match extract_precise_numeric_array(py, ar2.bind(py), "intersect1d(ar2)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    if a.has_integer_sidecar()
+        || b.has_integer_sidecar()
+        || matches!(a.dtype(), DType::Complex64 | DType::Complex128)
+        || matches!(b.dtype(), DType::Complex64 | DType::Complex128)
+        || a.dtype() != b.dtype()
+    {
+        return fallback();
+    }
+    let result = a.intersect1d(&b);
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -7959,8 +7988,9 @@ fn isin(
 #[allow(non_snake_case)]
 fn vander(py: Python<'_>, x: Py<PyAny>, N: Option<usize>, increasing: bool) -> PyResult<Py<PyAny>> {
     // Passthrough to np.vander so width selection, increasing-order
-    // columns, dtype preservation, and 1-D input validation all match
-    // numpy exactly.
+    // columns, dtype preservation (numpy keeps int64 for int inputs,
+    // which UFuncArray::vander currently promotes to f64), and 1-D
+    // input validation all match numpy exactly.
     let numpy = py.import("numpy")?;
     let vander_fn = numpy.getattr("vander")?;
     let kwargs = PyDict::new(py);
