@@ -9068,6 +9068,163 @@ fn empty_like(
         .unbind())
 }
 
+// Shared native path for asarray / asanyarray. Returns Some(result) when
+// we can fully honor the identity + layout contract natively, else None
+// (caller delegates to numpy).
+//
+// Identity rule: when `copy` is not True and the source already matches
+// the requested dtype+order+subclass policy, return the source object
+// unchanged so `np.shares_memory(out, a) == True`.
+fn native_asarray_like(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    dtype: Option<&Bound<'_, PyAny>>,
+    order: Option<&Bound<'_, PyAny>>,
+    copy: Option<&Bound<'_, PyAny>>,
+    device: Option<&Bound<'_, PyAny>>,
+    like: Option<&Bound<'_, PyAny>>,
+    preserve_subclass: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    if device.is_some_and(|v| !v.is_none()) || like.is_some_and(|v| !v.is_none()) {
+        return Ok(None);
+    }
+
+    // Parse copy= semantics. numpy 2.0: None → copy only if needed;
+    // True → always copy; False → never copy, raise if needed.
+    enum CopyMode {
+        IfNeeded,
+        Always,
+        Never,
+    }
+    let copy_mode = match copy {
+        Some(v) if v.is_none() => CopyMode::IfNeeded,
+        Some(v) => match v.extract::<bool>() {
+            Ok(true) => CopyMode::Always,
+            Ok(false) => CopyMode::Never,
+            Err(_) => return Ok(None),
+        },
+        None => CopyMode::IfNeeded,
+    };
+
+    // Resolve requested order: None (no requirement), 'C', 'F', 'K', 'A'.
+    let requested_order: Option<&str> = match order {
+        Some(v) if v.is_none() => None,
+        Some(v) => match v.extract::<String>() {
+            Ok(s) if matches!(s.as_str(), "C" | "F" | "K" | "A") => {
+                // Store as 'static by mapping through a match below.
+                match s.as_str() {
+                    "C" => Some("C"),
+                    "F" => Some("F"),
+                    "K" => Some("K"),
+                    "A" => Some("A"),
+                    _ => return Ok(None),
+                }
+            }
+            _ => return Ok(None),
+        },
+        None => None,
+    };
+
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+
+    // Parse requested dtype (if any).
+    let requested_dtype = match dtype {
+        Some(v) if !v.is_none() => Some({
+            let parsed = numpy.getattr("dtype")?.call1((v,))?;
+            let name = parsed.getattr("name")?.extract::<String>()?;
+            match DType::parse(&name) {
+                Some(value) if dtype_supported_by_numpy_export_bridge(value) => value,
+                _ => return Ok(None),
+            }
+        }),
+        _ => None,
+    };
+
+    // Identity fast-path: input is an ndarray (or preserve_subclass &&
+    // subclass of ndarray) whose dtype and contiguity already match the
+    // request, and we're not asked to always copy.
+    let input_is_exact_ndarray = a.is_exact_instance(&ndarray_type);
+    let input_is_ndarray_family = a.is_instance(&ndarray_type)?;
+    let subclass_ok = if preserve_subclass {
+        input_is_ndarray_family
+    } else {
+        input_is_exact_ndarray
+    };
+    if subclass_ok && !matches!(copy_mode, CopyMode::Always) {
+        let source_dtype_name = a
+            .getattr("dtype")?
+            .getattr("name")?
+            .extract::<String>()?;
+        let source_dtype = DType::parse(&source_dtype_name);
+        let dtype_match = match requested_dtype {
+            None => true,
+            Some(want) => source_dtype == Some(want),
+        };
+        if dtype_match {
+            let flags = a.getattr("flags")?;
+            let c_contig: bool = flags.get_item("C_CONTIGUOUS")?.extract()?;
+            let f_contig: bool = flags.get_item("F_CONTIGUOUS")?.extract()?;
+            let layout_match = match requested_order {
+                None | Some("K") | Some("A") => true,
+                Some("C") => c_contig,
+                Some("F") => f_contig,
+                _ => false,
+            };
+            if layout_match {
+                return Ok(Some(a.clone().unbind()));
+            }
+        }
+    }
+
+    // No identity match: materialize a fresh ndarray. Only numeric /
+    // contiguous paths are safe natively; subclass preservation on
+    // non-exact-ndarray inputs must defer to numpy.
+    if preserve_subclass && !input_is_exact_ndarray && input_is_ndarray_family {
+        return Ok(None);
+    }
+    if matches!(copy_mode, CopyMode::Never) {
+        // np.asarray(..., copy=False) must raise ValueError when a copy
+        // would be required. Let numpy own that error-message surface.
+        return Ok(None);
+    }
+
+    let native = match extract_precise_numeric_array(py, a, "asarray(a)") {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    if native.has_integer_sidecar() {
+        return Ok(None);
+    }
+    let source_dtype = native.dtype();
+    let target_dtype = requested_dtype.unwrap_or(source_dtype);
+    if target_dtype != source_dtype {
+        // dtype coercion narrowing / NaN-to-int rules belong to numpy.
+        return Ok(None);
+    }
+
+    // Emit the requested layout. None / 'C' / 'K' / 'A' → C-contig
+    // (K/A without a multi-D F-contig source collapses to C here).
+    // 'F' → fortran bridge.
+    let emit_fortran = matches!(requested_order, Some("F"))
+        || (matches!(requested_order, Some("K") | Some("A"))
+            && native.shape().len() >= 2
+            && subclass_ok
+            && {
+                let flags = a.getattr("flags")?;
+                let f_contig: bool = flags.get_item("F_CONTIGUOUS")?.extract()?;
+                let c_contig: bool = flags.get_item("C_CONTIGUOUS")?.extract()?;
+                f_contig && !c_contig
+            });
+
+    let output = if emit_fortran {
+        build_numpy_array_from_ufunc_fortran(py, &native)?
+    } else {
+        build_numpy_array_from_ufunc(py, &native)?
+    };
+    Ok(Some(output))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, dtype=None, order=None, *, copy=None, device=None, like=None))]
 fn asarray(
@@ -9079,32 +9236,43 @@ fn asarray(
     device: Option<Py<PyAny>>,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // np.asarray has a critical identity contract: `copy=False` with a
-    // compatible ndarray must return the SAME object so `np.shares_memory`
-    // reports True, and `order='F'` must produce a real F-contiguous
-    // ndarray (our export bridge only materializes C-contiguous output).
-    // Reproducing both semantics natively would duplicate numpy's whole
-    // asarray dispatch for negligible benefit; delegate and let numpy
-    // own the aliasing/layout surface.
+    let a_bound = a.bind(py);
+    let dtype_bound = dtype.as_ref().map(|v| v.bind(py));
+    let order_bound = order.as_ref().map(|v| v.bind(py));
+    let copy_bound = copy.as_ref().map(|v| v.bind(py));
+    let device_bound = device.as_ref().map(|v| v.bind(py));
+    let like_bound = like.as_ref().map(|v| v.bind(py));
+    if let Some(native) = native_asarray_like(
+        py,
+        a_bound,
+        dtype_bound,
+        order_bound,
+        copy_bound,
+        device_bound,
+        like_bound,
+        false,
+    )? {
+        return Ok(native);
+    }
     let numpy = py.import("numpy")?;
     let asarray_fn = numpy.getattr("asarray")?;
     let kwargs = PyDict::new(py);
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    if let Some(v) = dtype_bound {
+        kwargs.set_item("dtype", v)?;
     }
-    if let Some(order_val) = order {
-        kwargs.set_item("order", order_val.bind(py))?;
+    if let Some(v) = order_bound {
+        kwargs.set_item("order", v)?;
     }
-    if let Some(copy_val) = copy {
-        kwargs.set_item("copy", copy_val.bind(py))?;
+    if let Some(v) = copy_bound {
+        kwargs.set_item("copy", v)?;
     }
-    if let Some(device_val) = device {
-        kwargs.set_item("device", device_val.bind(py))?;
+    if let Some(v) = device_bound {
+        kwargs.set_item("device", v)?;
     }
-    if let Some(like_val) = like {
-        kwargs.set_item("like", like_val.bind(py))?;
+    if let Some(v) = like_bound {
+        kwargs.set_item("like", v)?;
     }
-    Ok(asarray_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(asarray_fn.call((a_bound,), Some(&kwargs))?.unbind())
 }
 
 #[pyfunction]
@@ -9118,30 +9286,43 @@ fn asanyarray(
     device: Option<Py<PyAny>>,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // asanyarray differs from asarray by preserving ndarray subclasses
-    // (e.g. np.matrix, np.ma.MaskedArray). Our export bridge always
-    // produces a base ndarray, so any subclass input must return through
-    // numpy to keep `type(out) is type(in)` parity. The copy=False /
-    // order='F' constraints from asarray apply here too — delegate.
+    let a_bound = a.bind(py);
+    let dtype_bound = dtype.as_ref().map(|v| v.bind(py));
+    let order_bound = order.as_ref().map(|v| v.bind(py));
+    let copy_bound = copy.as_ref().map(|v| v.bind(py));
+    let device_bound = device.as_ref().map(|v| v.bind(py));
+    let like_bound = like.as_ref().map(|v| v.bind(py));
+    if let Some(native) = native_asarray_like(
+        py,
+        a_bound,
+        dtype_bound,
+        order_bound,
+        copy_bound,
+        device_bound,
+        like_bound,
+        true,
+    )? {
+        return Ok(native);
+    }
     let numpy = py.import("numpy")?;
     let asanyarray_fn = numpy.getattr("asanyarray")?;
     let kwargs = PyDict::new(py);
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    if let Some(v) = dtype_bound {
+        kwargs.set_item("dtype", v)?;
     }
-    if let Some(order_val) = order {
-        kwargs.set_item("order", order_val.bind(py))?;
+    if let Some(v) = order_bound {
+        kwargs.set_item("order", v)?;
     }
-    if let Some(copy_val) = copy {
-        kwargs.set_item("copy", copy_val.bind(py))?;
+    if let Some(v) = copy_bound {
+        kwargs.set_item("copy", v)?;
     }
-    if let Some(device_val) = device {
-        kwargs.set_item("device", device_val.bind(py))?;
+    if let Some(v) = device_bound {
+        kwargs.set_item("device", v)?;
     }
-    if let Some(like_val) = like {
-        kwargs.set_item("like", like_val.bind(py))?;
+    if let Some(v) = like_bound {
+        kwargs.set_item("like", v)?;
     }
-    Ok(asanyarray_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    Ok(asanyarray_fn.call((a_bound,), Some(&kwargs))?.unbind())
 }
 
 #[pyfunction]
