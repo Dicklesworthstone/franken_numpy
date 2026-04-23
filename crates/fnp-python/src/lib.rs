@@ -12281,12 +12281,79 @@ fn sort(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Raw passthrough to np.sort so omitted-vs-None axis behavior,
-    // stable sorting semantics, and structured dtype field ordering
-    // remain exactly aligned with numpy's current Python surface.
     let numpy = py.import("numpy")?;
-    let sort_fn = numpy.getattr("sort")?;
-    Ok(sort_fn.call(args, kwargs)?.unbind())
+    let fallback = |_py: Python<'_>| -> PyResult<Py<PyAny>> {
+        Ok(numpy.getattr("sort")?.call(args, kwargs)?.unbind())
+    };
+    // Native path handles the common case: a single positional array arg,
+    // optional axis (int or None), optional stable=True/False.
+    // order=<fields> (structured dtype) and kind='heapsort' etc. defer
+    // because their behavior is a numpy-internal selection.
+    if args.len() == 0 {
+        return fallback(py);
+    }
+    let a = args.get_item(0)?;
+    if let Some(kw) = kwargs {
+        for key in kw.keys() {
+            let name = key.extract::<String>()?;
+            if !matches!(name.as_str(), "axis" | "stable" | "kind") {
+                return fallback(py);
+            }
+        }
+    }
+    let axis_kwarg = kwargs.and_then(|kw| kw.get_item("axis").ok().flatten());
+    let axis_option: Option<isize> = match axis_kwarg {
+        None => Some(-1),
+        Some(value) if value.is_none() => None,
+        Some(value) => match value.extract::<isize>() {
+            Ok(ax) => Some(ax),
+            Err(_) => return fallback(py),
+        },
+    };
+
+    let stable_kwarg = kwargs.and_then(|kw| kw.get_item("stable").ok().flatten());
+    let kind_arg = kwargs.and_then(|kw| kw.get_item("kind").ok().flatten());
+    let mut kind: Option<&str> = None;
+    if let Some(k) = kind_arg.as_ref() {
+        if !k.is_none() {
+            // Only pass-through quicksort/stable/mergesort strings; numpy
+            // accepts various aliases but our UFuncArray::sort takes a
+            // subset, so keep a short allow-list.
+            let s: String = match k.extract() {
+                Ok(value) => value,
+                Err(_) => return fallback(py),
+            };
+            if !matches!(s.as_str(), "quicksort" | "mergesort" | "stable" | "heapsort") {
+                return fallback(py);
+            }
+            // Pass through `stable`/`mergesort` as stable sort flag.
+            kind = match s.as_str() {
+                "stable" | "mergesort" => Some("stable"),
+                _ => Some("quicksort"),
+            };
+        }
+    }
+    if stable_kwarg
+        .as_ref()
+        .is_some_and(|v| !v.is_none() && v.extract::<bool>().ok() == Some(true))
+    {
+        kind = Some("stable");
+    }
+
+    let native = match extract_precise_numeric_array(py, &a, "sort(a)") {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    if native.has_integer_sidecar()
+        || matches!(native.dtype(), DType::Complex64 | DType::Complex128)
+    {
+        return fallback(py);
+    }
+    let result = match native.sort(axis_option, kind) {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -12296,22 +12363,127 @@ fn argsort(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Raw passthrough to np.argsort so omitted-vs-None axis behavior,
-    // stable sorting semantics, and structured dtype field ordering
-    // remain exactly aligned with numpy's current Python surface.
     let numpy = py.import("numpy")?;
-    let argsort_fn = numpy.getattr("argsort")?;
-    Ok(argsort_fn.call(args, kwargs)?.unbind())
+    let fallback = |_py: Python<'_>| -> PyResult<Py<PyAny>> {
+        Ok(numpy.getattr("argsort")?.call(args, kwargs)?.unbind())
+    };
+    if args.len() == 0 {
+        return fallback(py);
+    }
+    let a = args.get_item(0)?;
+    if let Some(kw) = kwargs {
+        for key in kw.keys() {
+            let name = key.extract::<String>()?;
+            if !matches!(name.as_str(), "axis" | "stable" | "kind") {
+                return fallback(py);
+            }
+        }
+    }
+    let axis_kwarg = kwargs.and_then(|kw| kw.get_item("axis").ok().flatten());
+    let axis_option: Option<isize> = match axis_kwarg {
+        None => Some(-1),
+        Some(value) if value.is_none() => None,
+        Some(value) => match value.extract::<isize>() {
+            Ok(ax) => Some(ax),
+            Err(_) => return fallback(py),
+        },
+    };
+    let stable_kwarg = kwargs.and_then(|kw| kw.get_item("stable").ok().flatten());
+    let kind_arg = kwargs.and_then(|kw| kw.get_item("kind").ok().flatten());
+    let mut kind: Option<&str> = None;
+    if let Some(k) = kind_arg.as_ref() {
+        if !k.is_none() {
+            let s: String = match k.extract() {
+                Ok(value) => value,
+                Err(_) => return fallback(py),
+            };
+            if !matches!(s.as_str(), "quicksort" | "mergesort" | "stable" | "heapsort") {
+                return fallback(py);
+            }
+            kind = match s.as_str() {
+                "stable" | "mergesort" => Some("stable"),
+                _ => Some("quicksort"),
+            };
+        }
+    }
+    if stable_kwarg
+        .as_ref()
+        .is_some_and(|v| !v.is_none() && v.extract::<bool>().ok() == Some(true))
+    {
+        kind = Some("stable");
+    }
+
+    let native = match extract_precise_numeric_array(py, &a, "argsort(a)") {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    if native.has_integer_sidecar()
+        || matches!(native.dtype(), DType::Complex64 | DType::Complex128)
+    {
+        return fallback(py);
+    }
+    let result = match native.argsort(axis_option, kind) {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
 fn sort_complex(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.sort_complex so integer inputs upcast to complex,
-    // complex lexicographic ordering, NaN placement, and copy semantics
-    // remain aligned with numpy.
     let numpy = py.import("numpy")?;
-    let sort_complex_fn = numpy.getattr("sort_complex")?;
-    Ok(sort_complex_fn.call1((a.bind(py),))?.unbind())
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        Ok(numpy
+            .getattr("sort_complex")?
+            .call1((a.bind(py),))?
+            .unbind())
+    };
+    // Real-valued arrays are native: extract, sort via fnp_ufunc::sort_complex
+    // (which flattens to 1-D and compares by (real, imag) with NaN last),
+    // then materialize as a complex128 numpy array. Complex/structured/string
+    // inputs still defer to numpy — our export bridge doesn't round-trip
+    // complex via reshape.
+    let a_bound = a.bind(py);
+    let native = match extract_precise_numeric_array(py, a_bound, "sort_complex(a)") {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    if native.has_integer_sidecar()
+        || matches!(native.dtype(), DType::Complex64 | DType::Complex128)
+        || native.shape().is_empty()
+    {
+        return fallback(py);
+    }
+
+    // fnp_ufunc::sort_complex requires a 1-D input; matrix tests call
+    // numpy.sort_complex on a 2-D array, and numpy sorts along the last
+    // axis there — we don't reproduce that axis behavior natively, so
+    // hand 2-D+ inputs back to numpy.
+    if native.shape().len() != 1 {
+        return fallback(py);
+    }
+
+    let sorted = match fnp_ufunc::sort_complex(&native) {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    // sorted has shape [n, 2] with interleaved (re, im) f64 values.
+    let pairs = sorted.values();
+    let n = sorted.shape()[0];
+    let builtins = py.import("builtins")?;
+    let complex_ctor = builtins.getattr("complex")?;
+    let mut py_values: Vec<Py<PyAny>> = Vec::with_capacity(n);
+    for i in 0..n {
+        let re = pairs[i * 2];
+        let im = pairs[i * 2 + 1];
+        py_values.push(complex_ctor.call1((re, im))?.unbind());
+    }
+    let list = PyList::new(py, py_values.iter())?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "complex128")?;
+    Ok(numpy
+        .call_method("array", (list,), Some(&kwargs))?
+        .unbind())
 }
 
 #[pyfunction]
