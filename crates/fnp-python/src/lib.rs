@@ -5856,25 +5856,79 @@ fn histogram(
     density: Option<Py<PyAny>>,
     weights: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.histogram so bin edge selection, density
-    // normalization, weighted accumulation, and tuple return surface
-    // match numpy exactly.
     let numpy = py.import("numpy")?;
-    let histogram_fn = numpy.getattr("histogram")?;
-    let kwargs = PyDict::new(py);
-    if let Some(bins_val) = bins {
-        kwargs.set_item("bins", bins_val.bind(py))?;
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        let histogram_fn = numpy.getattr("histogram")?;
+        let kwargs = PyDict::new(py);
+        if let Some(bins_val) = bins.as_ref() {
+            kwargs.set_item("bins", bins_val.bind(py))?;
+        }
+        if let Some(range_val) = range.as_ref() {
+            kwargs.set_item("range", range_val.bind(py))?;
+        }
+        if let Some(density_val) = density.as_ref() {
+            kwargs.set_item("density", density_val.bind(py))?;
+        }
+        if let Some(weights_val) = weights.as_ref() {
+            kwargs.set_item("weights", weights_val.bind(py))?;
+        }
+        Ok(histogram_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    };
+
+    // Native path only handles int bins without range/weights/density —
+    // everything else lands on numpy.
+    if range.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        || density.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        || weights.as_ref().is_some_and(|v| !v.bind(py).is_none())
+    {
+        return fallback(py);
     }
-    if let Some(range_val) = range {
-        kwargs.set_item("range", range_val.bind(py))?;
+    let nbins: usize = match bins.as_ref() {
+        Some(v) => {
+            let b = v.bind(py);
+            if b.is_none() {
+                10
+            } else if let Ok(n) = b.extract::<i64>() {
+                if n <= 0 {
+                    return fallback(py);
+                }
+                n as usize
+            } else {
+                // Explicit edges array or estimator string: delegate.
+                return fallback(py);
+            }
+        }
+        None => 10,
+    };
+
+    let native = match extract_precise_numeric_array(py, a.bind(py), "histogram(a)") {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    if native.has_integer_sidecar()
+        || matches!(native.dtype(), DType::Complex64 | DType::Complex128)
+        || native.shape().len() != 1
+    {
+        return fallback(py);
     }
-    if let Some(density_val) = density {
-        kwargs.set_item("density", density_val.bind(py))?;
+    // Reject non-finite inputs so we match numpy's ValueError surface
+    // for autorange without inadvertently producing nonsense buckets.
+    if native.values().iter().any(|v| !v.is_finite()) {
+        return fallback(py);
     }
-    if let Some(weights_val) = weights {
-        kwargs.set_item("weights", weights_val.bind(py))?;
-    }
-    Ok(histogram_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+
+    let (counts, edges) = match native.histogram(nbins) {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    // UFuncArray::histogram returns counts with DType::I64 but stored as
+    // f64 values — build_numpy_array_from_ufunc emits an int64 ndarray.
+    // Bridge each component through the C-order export helpers.
+    let counts_py = build_numpy_array_from_ufunc(py, &counts)?;
+    let edges_py = build_numpy_array_from_ufunc(py, &edges)?;
+    Ok(PyTuple::new(py, [counts_py.bind(py), edges_py.bind(py)])?
+        .into_any()
+        .unbind())
 }
 
 #[pyfunction]
