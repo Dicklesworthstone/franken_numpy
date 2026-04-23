@@ -1249,6 +1249,22 @@ fn matrix_rank_default_rcond(dtype: DType, max_dim: usize) -> Option<f64> {
     Some((max_dim as f64) * epsilon)
 }
 
+fn build_numpy_slogdet_result(py: Python<'_>, sign: f64, logabsdet: f64) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let eye = numpy.getattr("eye")?.call1((1,))?;
+    let slogdet_result_type = numpy
+        .getattr("linalg")?
+        .getattr("slogdet")?
+        .call1((eye,))?
+        .get_type();
+    let float64 = numpy.getattr("float64")?;
+    let sign = float64.call1((sign,))?;
+    let logabsdet = float64.call1((logabsdet,))?;
+    Ok(slogdet_result_type
+        .call1((sign, logabsdet))?
+        .unbind())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn masked_interval_compare(
     py: Python<'_>,
@@ -4890,15 +4906,30 @@ fn matrix_power(py: Python<'_>, a: Py<PyAny>, n: Py<PyAny>) -> PyResult<Py<PyAny
 #[pyfunction]
 #[pyo3(signature = (a,))]
 fn slogdet(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.linalg.slogdet so the (sign, logabsdet) SlogdetResult
-    // namedtuple identity and batched (..., M, M) broadcasting semantics
-    // match numpy exactly across real and complex inputs.
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("linalg")?
-        .getattr("slogdet")?
-        .call1((a.bind(py),))?
-        .unbind())
+    let slogdet_fn = numpy.getattr("linalg")?.getattr("slogdet")?;
+    let a_for_fallback = a.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> { Ok(slogdet_fn.call1((a_for_fallback.bind(py),))?.unbind()) };
+
+    let array = match extract_precise_numeric_array(py, a.bind(py), "slogdet(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let shape = array.shape();
+    if shape.len() != 2
+        || shape[0] != shape[1]
+        || array.has_integer_sidecar()
+        || array.values().iter().any(|value| !value.is_finite())
+        || matches!(array.dtype(), DType::F16 | DType::F32 | DType::Complex64 | DType::Complex128)
+    {
+        return fallback();
+    }
+
+    let (sign, logabsdet) = match array.slogdet() {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_slogdet_result(py, sign, logabsdet)
 }
 
 #[pyfunction]
@@ -16457,6 +16488,42 @@ mod tests {
                     .call1((&actual_logabsdet, &expected_logabsdet))?
                     .extract::<bool>()?,
                 "slogdet logabsdet (pos) diverged"
+            );
+
+            // float32 inputs stay on the NumPy fallback so scalar dtypes
+            // remain float32 instead of widening through the f64 backend.
+            let a_pos_f32 = numeric_array(
+                py,
+                vec![vec![3.0_f32, 1.0_f32], vec![1.0_f32, 2.0_f32]],
+                "float32",
+            );
+            let actual_f32 = slogdet_fn.call1((a_pos_f32.clone(),))?;
+            let expected_f32 = numpy_slogdet.call1((a_pos_f32.clone(),))?;
+            assert_eq!(
+                actual_f32
+                    .getattr("sign")?
+                    .getattr("dtype")?
+                    .getattr("name")?
+                    .extract::<String>()?,
+                expected_f32
+                    .getattr("sign")?
+                    .getattr("dtype")?
+                    .getattr("name")?
+                    .extract::<String>()?,
+                "slogdet float32 sign dtype diverged"
+            );
+            assert_eq!(
+                actual_f32
+                    .getattr("logabsdet")?
+                    .getattr("dtype")?
+                    .getattr("name")?
+                    .extract::<String>()?,
+                expected_f32
+                    .getattr("logabsdet")?
+                    .getattr("dtype")?
+                    .getattr("name")?
+                    .extract::<String>()?,
+                "slogdet float32 logabsdet dtype diverged"
             );
 
             // Negative-determinant real 2x2 (sign = -1).
