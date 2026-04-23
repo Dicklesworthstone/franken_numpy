@@ -16131,11 +16131,12 @@ mod tests {
 
     #[test]
     fn linalg_error_surface_probe() {
-        // Regression probe for LinAlgError parity. numpy.linalg raises
-        // LinAlgError (subclass of ValueError) on singular / non-square
-        // inputs. Passthrough paths preserve it; in-Rust fast paths must
-        // raise LinAlgError (not plain ValueError) so downstream user code
-        // catching LinAlgError specifically continues to work.
+        // Regression probe for LinAlgError parity across in-Rust and
+        // passthrough linalg paths. numpy.linalg raises LinAlgError
+        // (subclass of ValueError) on singular / non-square / wrong-dim
+        // inputs. Each probed function MUST preserve that exception type
+        // so downstream user code catching LinAlgError specifically keeps
+        // working.
         with_python(|py| {
             if !numpy_available(py) {
                 return Ok(());
@@ -16146,29 +16147,47 @@ mod tests {
             let numpy = py.import("numpy")?;
             let linalg = numpy.getattr("linalg")?;
 
-            // Singular 2x2 real square matrix — hits our inv_nxn fast path.
+            // Case 1: singular 2x2 (hits in-Rust inv_nxn fast path).
             let singular: Py<PyAny> =
                 numeric_array(py, vec![vec![1.0_f64, 2.0], vec![2.0, 4.0]], "float64").unbind();
+            // Case 2: 1-D array (non-2d) for svd / svdvals / qr / eig.
+            let one_d: Py<PyAny> =
+                numeric_array(py, vec![1.0_f64, 2.0, 3.0], "float64").unbind();
+            // Case 3: non-square for slogdet.
+            let non_square: Py<PyAny> = numeric_array(
+                py,
+                vec![vec![1.0_f64, 2.0, 3.0], vec![4.0, 5.0, 6.0]],
+                "float64",
+            )
+            .unbind();
 
-            let ours_err = module.getattr("inv")?.call1((singular.bind(py),));
-            let theirs_err = linalg.getattr("inv")?.call1((singular.bind(py),));
+            let probes: Vec<(&str, &Py<PyAny>)> = vec![
+                ("inv", &singular),
+                ("svd", &one_d),
+                ("svdvals", &one_d),
+                ("qr", &one_d),
+                ("eig", &one_d),
+                ("slogdet", &non_square),
+            ];
 
             let mut divergences: Vec<String> = Vec::new();
-            match (ours_err, theirs_err) {
-                (Err(our), Err(theirs)) => {
-                    let ours_type = our.get_type(py).name()?.extract::<String>()?;
-                    let theirs_type = theirs.get_type(py).name()?.extract::<String>()?;
-                    if ours_type != theirs_type {
-                        divergences.push(format!(
-                            "inv(singular): ours={ours_type}, theirs={theirs_type}"
-                        ));
+            for (name, input) in probes {
+                let ours_err = module.getattr(name)?.call1((input.bind(py),));
+                let theirs_err = linalg.getattr(name)?.call1((input.bind(py),));
+                match (ours_err, theirs_err) {
+                    (Err(our), Err(theirs)) => {
+                        let ours_type = our.get_type(py).name()?.extract::<String>()?;
+                        let theirs_type = theirs.get_type(py).name()?.extract::<String>()?;
+                        if ours_type != theirs_type {
+                            divergences
+                                .push(format!("{name}: ours={ours_type}, theirs={theirs_type}"));
+                        }
                     }
-                }
-                (Ok(_), _) => divergences.push("inv(singular): ours=OK, theirs raises".into()),
-                (Err(our), Ok(_)) => {
-                    let ours_type = our.get_type(py).name()?.extract::<String>()?;
-                    divergences
-                        .push(format!("inv(singular): ours={ours_type}, theirs=OK"));
+                    (Ok(_), _) => divergences.push(format!("{name}: ours=OK, theirs raises")),
+                    (Err(our), Ok(_)) => {
+                        let ours_type = our.get_type(py).name()?.extract::<String>()?;
+                        divergences.push(format!("{name}: ours={ours_type}, theirs=OK"));
+                    }
                 }
             }
 
