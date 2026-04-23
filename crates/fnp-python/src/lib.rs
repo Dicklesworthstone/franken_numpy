@@ -12191,18 +12191,78 @@ fn recfunctions_drop_fields(
     usemask: bool,
     asrecarray: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to numpy.lib.recfunctions.drop_fields. Returns a copy
-    // of the structured array with the named fields removed. Matches
-    // numpy on string-or-list drop_names, nested field access via dot
-    // notation, usemask flag, and asrecarray flag.
+    let base_bound = base.bind(py);
+    let drop_names_bound = drop_names.bind(py);
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("usemask", usemask)?;
+        kwargs.set_item("asrecarray", asrecarray)?;
+        Ok(py
+            .import("numpy.lib.recfunctions")?
+            .getattr("drop_fields")?
+            .call((base_bound, drop_names_bound), Some(&kwargs))?
+            .unbind())
+    };
+    if asrecarray {
+        return fallback(py);
+    }
+
+    // Collect the names to drop (accept str or list/tuple of str).
+    let drops: Vec<String> = if let Ok(single) = drop_names_bound.extract::<String>() {
+        vec![single]
+    } else if let Ok(list) = drop_names_bound.extract::<Vec<String>>() {
+        list
+    } else {
+        return fallback(py);
+    };
+
+    let dtype_obj = base_bound.getattr("dtype")?;
+    let Ok(old_names) = dtype_obj.getattr("names")?.extract::<Vec<String>>() else {
+        return fallback(py);
+    };
+
+    // Build a descriptor restricted to the kept fields.
+    let descr = PyList::empty(py);
+    let mut keep_names = Vec::new();
+    for name in &old_names {
+        if drops.iter().any(|d| d == name) {
+            continue;
+        }
+        let field = dtype_obj.get_item(name.as_str())?;
+        // Nested structured fields → fallback so recfunctions' recursion
+        // handles dotted drop names correctly.
+        if field
+            .getattr("names")
+            .ok()
+            .is_some_and(|names| !names.is_none())
+        {
+            return fallback(py);
+        }
+        descr.append(PyTuple::new(py, [
+            name.clone().into_pyobject(py)?.into_any(),
+            field.clone().into_any(),
+        ])?)?;
+        keep_names.push(name.clone());
+    }
+    if keep_names.is_empty() {
+        // numpy returns the base untouched (or None in older versions)
+        // when every field is dropped — delegate to stay safe.
+        return fallback(py);
+    }
+    let numpy = py.import("numpy")?;
+    let new_dtype = numpy.getattr("dtype")?.call1((descr,))?;
+
+    // Allocate an empty structured array and copy each kept field.
+    let zeros_fn = numpy.getattr("zeros")?;
+    let shape_obj = base_bound.getattr("shape")?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("usemask", usemask)?;
-    kwargs.set_item("asrecarray", asrecarray)?;
-    Ok(py
-        .import("numpy.lib.recfunctions")?
-        .getattr("drop_fields")?
-        .call((base.bind(py), drop_names.bind(py)), Some(&kwargs))?
-        .unbind())
+    kwargs.set_item("dtype", new_dtype)?;
+    let out = zeros_fn.call((shape_obj,), Some(&kwargs))?;
+    for name in &keep_names {
+        let value = base_bound.get_item(name.as_str())?;
+        out.set_item(name.as_str(), value)?;
+    }
+    Ok(out.unbind())
 }
 
 #[pyfunction]
