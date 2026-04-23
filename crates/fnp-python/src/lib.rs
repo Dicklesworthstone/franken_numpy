@@ -5068,9 +5068,13 @@ fn svd(
     compute_uv: bool,
     hermitian: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.linalg.svd so the SVDResult namedtuple identity,
-    // compute_uv=False scalar-array path, hermitian fast path, and stacked
-    // (..., M, N) semantics match numpy exactly.
+    // Passthrough to np.linalg.svd — fnp_linalg::svd_mxn produces
+    // singular values that differ from numpy's LAPACK path by ~2 ULPs,
+    // which the strict tolist-repr parity test
+    // (svd_matches_numpy_namedtuple_array_and_error_paths) cannot
+    // tolerate. Keeping the passthrough until we either (a) land an
+    // SVD algorithm that bit-matches LAPACK or (b) relax the parity
+    // oracle to allclose-level tolerance.
     let numpy = py.import("numpy")?;
     let svd_fn = numpy.getattr("linalg")?.getattr("svd")?;
     let kwargs = PyDict::new(py);
