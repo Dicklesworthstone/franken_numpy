@@ -12486,6 +12486,31 @@ fn put_along_axis(
     values: Py<PyAny>,
     axis: Option<isize>,
 ) -> PyResult<Py<PyAny>> {
+    let arr_for_fallback = arr.clone_ref(py);
+    let indices_for_fallback = indices.clone_ref(py);
+    let values_for_fallback = values.clone_ref(py);
+    let invoke_fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(
+            "axis",
+            match axis {
+                Some(axis) => axis.into_pyobject(py)?.into_any(),
+                None => py.None().into_bound(py),
+            },
+        )?;
+        Ok(numpy
+            .getattr("put_along_axis")?
+            .call(
+                (
+                    arr_for_fallback.bind(py),
+                    indices_for_fallback.bind(py),
+                    values_for_fallback.bind(py),
+                ),
+                Some(&kwargs),
+            )?
+            .unbind())
+    };
     let arr = arr.bind(py);
     let _ = arr.getattr("ndim")?;
     let original_shape = arr.getattr("shape")?.extract::<Vec<usize>>()?;
@@ -12496,6 +12521,12 @@ fn put_along_axis(
     let indices = extract_integer_array(py, indices_obj, "put_along_axis(indices)")?;
     let values = extract_numeric_array(py, values.bind(py), "put_along_axis(values)")?;
 
+    // numpy.put_along_axis raises IndexError (not ValueError) on
+    // out-of-bounds indices. Our ufunc layer returns Msg which
+    // map_ufunc_error flattens to PyValueError — fall back to numpy so
+    // the exception type matches. The fallback re-runs the full op
+    // through numpy including the in-place write, which is a no-op
+    // when numpy also errors.
     match axis {
         Some(axis) => {
             let values = reshape_with_leading_singletons(
@@ -12503,9 +12534,9 @@ fn put_along_axis(
                 array.shape().len(),
                 "put_along_axis(values)",
             )?;
-            array
-                .put_along_axis(&indices, &values, axis)
-                .map_err(map_ufunc_error)?;
+            if array.put_along_axis(&indices, &values, axis).is_err() {
+                return invoke_fallback();
+            }
         }
         None => {
             if indices.shape().len() != 1 {
@@ -12516,9 +12547,9 @@ fn put_along_axis(
 
             let values = values.flatten();
             let mut flattened = array.flatten();
-            flattened
-                .put_along_axis(&indices, &values, 0)
-                .map_err(map_ufunc_error)?;
+            if flattened.put_along_axis(&indices, &values, 0).is_err() {
+                return invoke_fallback();
+            }
 
             let reshaped_shape = original_shape
                 .iter()
@@ -15785,6 +15816,52 @@ mod tests {
                 ours.get_type(py).name()?.extract::<String>()?,
                 theirs.get_type(py).name()?.extract::<String>()?,
                 "take_along_axis out-of-bounds error type diverges from numpy"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn put_along_axis_index_out_of_bounds_matches_numpy_indexerror() {
+        // numpy.put_along_axis raises IndexError (not ValueError) on
+        // out-of-bounds indices.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let put_along_axis_fn = module.getattr("put_along_axis")?;
+            let numpy_put_along_axis = numpy.getattr("put_along_axis")?;
+
+            let ours_arr = numpy.getattr("zeros")?.call(
+                ((2_i64, 2_i64),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "float64")?;
+                    kw
+                }),
+            )?;
+            let theirs_arr = numpy.getattr("zeros")?.call(
+                ((2_i64, 2_i64),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "float64")?;
+                    kw
+                }),
+            )?;
+            let indices = numeric_array(py, vec![vec![5_i64], vec![0]], "int64");
+            let ours_err = put_along_axis_fn
+                .call1((ours_arr, indices.clone(), 9.0_f64, 0_i64))
+                .expect_err("put_along_axis(5) must error");
+            let theirs_err = numpy_put_along_axis
+                .call1((theirs_arr, indices, 9.0_f64, 0_i64))
+                .expect_err("numpy put_along_axis(5) must error");
+            assert_eq!(
+                ours_err.get_type(py).name()?.extract::<String>()?,
+                theirs_err.get_type(py).name()?.extract::<String>()?,
+                "put_along_axis out-of-bounds error type diverges from numpy"
             );
             Ok(())
         });
