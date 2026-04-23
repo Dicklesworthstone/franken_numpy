@@ -8837,16 +8837,15 @@ fn native_like_array(
     };
 
     // With order='K' and no shape override, numpy preserves the input's
-    // memory layout. For multi-D F-contiguous inputs that means an
-    // F-contiguous output; our numeric export bridge only materializes
-    // C-contiguous arrays, so hand that case back to numpy to keep the
-    // F_CONTIGUOUS flag parity.
+    // memory layout. For multi-D F-contiguous inputs that means we need
+    // to emit an F-contiguous output via the fortran export bridge.
+    let mut emit_fortran = false;
     if order == "K" && !shape_overridden && source_shape.len() >= 2 {
         let flags = source_array.getattr("flags")?;
         let f_contig: bool = flags.get_item("F_CONTIGUOUS")?.extract()?;
         let c_contig: bool = flags.get_item("C_CONTIGUOUS")?.extract()?;
         if f_contig && !c_contig {
-            return Ok(None);
+            emit_fortran = true;
         }
     }
 
@@ -8874,7 +8873,12 @@ fn native_like_array(
         }
     };
 
-    Ok(Some(build_numpy_array_from_ufunc(py, &result)?))
+    let output = if emit_fortran {
+        build_numpy_array_from_ufunc_fortran(py, &result)?
+    } else {
+        build_numpy_array_from_ufunc(py, &result)?
+    };
+    Ok(Some(output))
 }
 
 #[pyfunction]
