@@ -2613,6 +2613,28 @@ fn build_numpy_array_from_ufunc(py: Python<'_>, array: &UFuncArray) -> PyResult<
     build_numpy_array_from_storage(py, array.shape(), storage)
 }
 
+// F-contiguous counterpart of build_numpy_array_from_ufunc. numpy's
+// `ascontiguousarray` / `asfortranarray` / `order='F'` paths all need
+// output whose `flags['F_CONTIGUOUS']` is True; our C-contig export
+// bridge never satisfies that. Strategy: build the array C-contiguously
+// (so logical element placement matches our row-major UFuncArray
+// values), then `.copy(order='F')` to get an F-contig buffer with the
+// same logical layout. For 1-D / 0-d arrays both flags are True and the
+// copy is skipped.
+fn build_numpy_array_from_ufunc_fortran(
+    py: Python<'_>,
+    array: &UFuncArray,
+) -> PyResult<Py<PyAny>> {
+    let c_contig = build_numpy_array_from_ufunc(py, array)?;
+    if array.shape().len() < 2 {
+        return Ok(c_contig);
+    }
+    let py_arr = c_contig.bind(py);
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("order", "F")?;
+    Ok(py_arr.call_method("copy", (), Some(&kwargs))?.unbind())
+}
+
 fn build_numpy_scalar_or_array(py: Python<'_>, array: &UFuncArray) -> PyResult<Py<PyAny>> {
     let output = build_numpy_array_from_ufunc(py, array)?;
     if array.shape().is_empty() {
@@ -11822,19 +11844,70 @@ fn i0(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (a, dtype=None))]
 fn asfortranarray(py: Python<'_>, a: Py<PyAny>, dtype: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    // np.asfortranarray requires an F-contiguous ndarray output with the
-    // `F_CONTIGUOUS` flag set. build_numpy_array_from_ufunc only
-    // materializes C-contiguous arrays (it routes through
-    // `np.array(...).reshape(shape)`), so emitting an F-layout array
-    // natively would require a dedicated column-major export bridge.
-    // Keep this as a thin wrapper until that bridge exists.
     let numpy = py.import("numpy")?;
-    let asf_fn = numpy.getattr("asfortranarray")?;
-    let kwargs = PyDict::new(py);
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        let asf_fn = numpy.getattr("asfortranarray")?;
+        let kwargs = PyDict::new(py);
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        Ok(asf_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    };
+
+    let a_bound = a.bind(py);
+    // Fast path: already an F-contig ndarray with the right dtype → numpy
+    // returns the same object. Preserve that identity contract.
+    let ndarray_type = numpy.getattr("ndarray")?;
+    let source_array = numpy.call_method1("asarray", (a_bound,))?;
+    let requested_dtype = match dtype.as_ref() {
+        Some(dtype_val) if !dtype_val.bind(py).is_none() => Some({
+            let parsed = numpy.getattr("dtype")?.call1((dtype_val.bind(py),))?;
+            let name = parsed.getattr("name")?.extract::<String>()?;
+            match DType::parse(&name) {
+                Some(value) if dtype_supported_by_numpy_export_bridge(value) => value,
+                _ => return fallback(py),
+            }
+        }),
+        _ => None,
+    };
+    let source_dtype_name = source_array
+        .getattr("dtype")?
+        .getattr("name")?
+        .extract::<String>()?;
+    let source_dtype = match DType::parse(&source_dtype_name) {
+        Some(value) => value,
+        None => return fallback(py),
+    };
+    if !dtype_supported_by_numpy_export_bridge(source_dtype) {
+        return fallback(py);
     }
-    Ok(asf_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    let target_dtype = requested_dtype.unwrap_or(source_dtype);
+
+    if target_dtype == source_dtype && source_array.is_exact_instance(&ndarray_type) {
+        let flags = source_array.getattr("flags")?;
+        let f_contig: bool = flags.get_item("F_CONTIGUOUS")?.extract()?;
+        if f_contig {
+            if a_bound.is_exact_instance(&ndarray_type) {
+                return Ok(a_bound.clone().unbind());
+            }
+            return Ok(source_array.unbind());
+        }
+    }
+
+    // Materialize a fresh F-contig copy via the new export bridge.
+    let native = match extract_precise_numeric_array(py, a_bound, "asfortranarray(a)") {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    if native.has_integer_sidecar() {
+        return fallback(py);
+    }
+    if native.dtype() != target_dtype {
+        // dtype coercion path: let numpy handle astype edge cases
+        // (narrowing, NaN→int, etc.).
+        return fallback(py);
+    }
+    build_numpy_array_from_ufunc_fortran(py, &native)
 }
 
 #[pyfunction]
