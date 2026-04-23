@@ -15814,6 +15814,54 @@ mod tests {
     }
 
     #[test]
+    fn swapaxes_moveaxis_axis_error_surface_probe() {
+        // numpy.swapaxes and numpy.moveaxis raise AxisError on out-of-bounds
+        // axes. Our in-Rust paths already fall back to numpy on error; this
+        // probe is a regression gate locking that behavior in place.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            let arr = numpy.getattr("ones")?.call1(((2_i64, 2_i64),))?;
+
+            // swapaxes out-of-bounds axis1
+            let ours_sw = module
+                .getattr("swapaxes")?
+                .call1((arr.clone(), 5_i64, 0_i64))
+                .expect_err("swapaxes(5,0) must error");
+            let theirs_sw = numpy
+                .getattr("swapaxes")?
+                .call1((arr.clone(), 5_i64, 0_i64))
+                .expect_err("numpy swapaxes(5,0) must error");
+            assert_eq!(
+                ours_sw.get_type(py).name()?.extract::<String>()?,
+                theirs_sw.get_type(py).name()?.extract::<String>()?,
+                "swapaxes out-of-bounds error type diverges from numpy"
+            );
+
+            // moveaxis out-of-bounds source
+            let ours_mv = module
+                .getattr("moveaxis")?
+                .call1((arr.clone(), 5_i64, 0_i64))
+                .expect_err("moveaxis(5,0) must error");
+            let theirs_mv = numpy
+                .getattr("moveaxis")?
+                .call1((arr, 5_i64, 0_i64))
+                .expect_err("numpy moveaxis(5,0) must error");
+            assert_eq!(
+                ours_mv.get_type(py).name()?.extract::<String>()?,
+                theirs_mv.get_type(py).name()?.extract::<String>()?,
+                "moveaxis out-of-bounds error type diverges from numpy"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
     fn take_along_axis_index_out_of_bounds_matches_numpy_indexerror() {
         // numpy.take_along_axis raises IndexError (not ValueError) on
         // out-of-bounds indices.
