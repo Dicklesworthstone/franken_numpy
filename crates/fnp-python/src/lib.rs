@@ -13557,6 +13557,15 @@ fn linalg_cross(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound
     Ok(np_linalg.getattr("cross")?.call(args, kwargs)?.unbind())
 }
 
+// linalg.vector_norm passthrough — Array-API spec name, only exists
+// under numpy.linalg (not at top level).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn linalg_vector_norm(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+    let np_linalg = py.import("numpy.linalg")?;
+    Ok(np_linalg.getattr("vector_norm")?.call(args, kwargs)?.unbind())
+}
+
 // ---------------------------------------------------------------------------
 // Reality-check (k74v.2) — ~45 core numpy function passthrough wrappers.
 //
@@ -14506,6 +14515,9 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             ("eigvalsh", "eigvalsh"),
             ("tensordot", "tensordot"),
             ("matmul", "matmul"),
+            ("diagonal", "diagonal"),
+            ("outer", "outer"),
+            ("trace", "trace"),
         ] {
             if let Ok(value) = m.getattr(flat_name) {
                 linalg.add(numpy_name, value)?;
@@ -14517,10 +14529,20 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // during module init if pyo3 launches its embedded interpreter
         // before numpy is on sys.path.
         linalg.add_function(wrap_pyfunction!(linalg_cross, &linalg)?)?;
-        // Expose it under the numpy-native name by re-setting the
-        // attribute with the short name.
         linalg.setattr("cross", linalg.getattr("linalg_cross")?)?;
         linalg.delattr("linalg_cross")?;
+        // linalg.vector_norm — Array-API spec name, only exists under
+        // numpy.linalg. Register via the same lazy-load pattern.
+        linalg.add_function(wrap_pyfunction!(linalg_vector_norm, &linalg)?)?;
+        linalg.setattr("vector_norm", linalg.getattr("linalg_vector_norm")?)?;
+        linalg.delattr("linalg_vector_norm")?;
+        // Re-export numpy.linalg.LinAlgError so users catching
+        // fnp_python.linalg.LinAlgError still catch numpy's exception type.
+        if let Ok(np_linalg) = py.import("numpy.linalg") {
+            if let Ok(exc) = np_linalg.getattr("LinAlgError") {
+                linalg.add("LinAlgError", exc)?;
+            }
+        }
         m.add_submodule(&linalg)?;
         // Also expose as top-level attribute so `fnp_python.linalg` resolves
         // via attribute access regardless of import style.
@@ -15490,6 +15512,7 @@ mod tests {
                 "matrix_transpose", "pinv", "norm", "cond", "tensorinv",
                 "tensorsolve", "multi_dot", "det", "solve_triangular",
                 "eigh", "eigvals", "eigvalsh", "cross", "tensordot", "matmul",
+                "diagonal", "outer", "trace", "vector_norm", "LinAlgError",
             ] {
                 assert!(
                     linalg.getattr(name).is_ok(),
