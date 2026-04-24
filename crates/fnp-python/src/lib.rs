@@ -21014,11 +21014,31 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // Install __getattr__ unconditionally so any class missing
         // from the eager path (including on numpy-less init) resolves
         // on first access via a live numpy.polynomial lookup.
+        // crid: extend the resolver so the 6 nested subpackage names
+        // (polynomial, chebyshev, legendre, hermite, hermite_e,
+        // laguerre) also resolve — to numpy's modules when available.
         let poly_getattr_src = pyo3::ffi::c_str!(
-            "_CLASS_NAMES = frozenset(('Polynomial','Chebyshev','Legendre','Hermite','HermiteE','Laguerre'))\ndef __getattr__(name):\n    if name in _CLASS_NAMES:\n        import numpy.polynomial as _p\n        return getattr(_p, name)\n    raise AttributeError(name)\n"
+            "_CLASS_NAMES = frozenset(('Polynomial','Chebyshev','Legendre','Hermite','HermiteE','Laguerre'))\n_SUB_NAMES = frozenset(('polynomial','chebyshev','legendre','hermite','hermite_e','laguerre'))\ndef __getattr__(name):\n    if name in _CLASS_NAMES:\n        import numpy.polynomial as _p\n        return getattr(_p, name)\n    if name in _SUB_NAMES:\n        import importlib\n        return importlib.import_module('numpy.polynomial.' + name)\n    raise AttributeError(name)\n"
         );
         let poly_dict = polynomial.dict();
         py.run(poly_getattr_src, Some(&poly_dict), None)?;
+        // crid: eager subpackage install when numpy.polynomial is
+        // importable. setattr each of the 6 subpackages so attribute
+        // access (not __getattr__) resolves and dir() enumerates them.
+        if let Ok(np_poly) = py.import("numpy.polynomial") {
+            for sub in [
+                "polynomial",
+                "chebyshev",
+                "legendre",
+                "hermite",
+                "hermite_e",
+                "laguerre",
+            ] {
+                if let Ok(submod) = np_poly.getattr(sub) {
+                    polynomial.setattr(sub, submod)?;
+                }
+            }
+        }
         m.add_submodule(&polynomial)?;
         m.add("polynomial", polynomial)?;
     }
@@ -22427,6 +22447,57 @@ mod tests {
             let ours_line = module.getattr("hermeline")?.call1((1.0_f64, 2.0_f64))?;
             let theirs_line = np_hermite_e.getattr("hermeline")?.call1((1.0_f64, 2.0_f64))?;
             assert_eq!(repr_string(&ours_line), repr_string(&theirs_line));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn polynomial_namespace_exposes_nested_subpackages() {
+        // crid: fnp_python.polynomial.{polynomial, chebyshev, legendre,
+        // hermite, hermite_e, laguerre} must resolve to numpy's real
+        // submodules so user code written against numpy's canonical
+        // import paths works verbatim.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_polynomial_nested")?;
+            fnp_python(&module)?;
+            let polynomial = module.getattr("polynomial")?;
+            let np_poly = py.import("numpy.polynomial")?;
+            for sub in [
+                "polynomial",
+                "chebyshev",
+                "legendre",
+                "hermite",
+                "hermite_e",
+                "laguerre",
+            ] {
+                let ours = polynomial.getattr(sub)?;
+                let theirs = np_poly.getattr(sub)?;
+                assert!(
+                    ours.is(&theirs),
+                    "fnp_python.polynomial.{sub} must BE numpy.polynomial.{sub}"
+                );
+            }
+            // Round-trip: numpy.polynomial.chebyshev.chebadd is reachable
+            // via fnp_python.polynomial.chebyshev.chebadd and returns
+            // matching output.
+            let ours_chebadd = polynomial
+                .getattr("chebyshev")?
+                .getattr("chebadd")?
+                .call1((
+                    PyTuple::new(py, [1.0_f64, 2.0_f64])?,
+                    PyTuple::new(py, [1.0_f64, 1.0_f64, 3.0_f64])?,
+                ))?;
+            let theirs_chebadd = np_poly
+                .getattr("chebyshev")?
+                .getattr("chebadd")?
+                .call1((
+                    PyTuple::new(py, [1.0_f64, 2.0_f64])?,
+                    PyTuple::new(py, [1.0_f64, 1.0_f64, 3.0_f64])?,
+                ))?;
+            assert_eq!(repr_string(&ours_chebadd), repr_string(&theirs_chebadd));
             Ok(())
         });
     }
