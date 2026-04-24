@@ -16,7 +16,9 @@ use fnp_ufunc::{
     ma_mask_or, modf as ufunc_modf, nextafter as ufunc_nextafter, reduce_frompyfunc_values,
     signbit as ufunc_signbit, spacing as ufunc_spacing, where_nonzero,
 };
-use pyo3::exceptions::{PyOSError, PyTypeError, PyValueError, PyZeroDivisionError};
+use pyo3::exceptions::{
+    PyDeprecationWarning, PyOSError, PyTypeError, PyValueError, PyZeroDivisionError,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBool, PyBytes, PyComplex, PyDict, PyList, PyModule, PyTuple};
 use pyo3::wrap_pyfunction;
@@ -1361,6 +1363,35 @@ impl PyRandomState {
         build_random_integer_parts(py, shape, values, scalar, dtype)
     }
 
+    #[pyo3(signature = (low, high=None, size=None))]
+    fn random_integers(
+        &mut self,
+        py: Python<'_>,
+        low: i64,
+        high: Option<i64>,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let (low, high) = match high {
+            Some(high) => (low, high),
+            None => (1, low),
+        };
+        warn_random_integers_deprecated(py, low, high)?;
+        if high < low {
+            return Err(PyValueError::new_err("low >= high"));
+        }
+        let size = random_size_from_py(py, size, "RandomState.random_integers(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let mut values = Vec::with_capacity(len);
+        for _ in 0..len {
+            values.push(random_state_integer_inclusive_sample(
+                &mut self.inner,
+                low,
+                high,
+            ));
+        }
+        build_random_integer_parts(py, shape, values, scalar, DType::I64)
+    }
+
     fn bytes(&mut self, py: Python<'_>, length: usize) -> PyResult<Py<PyAny>> {
         let mut out = Vec::with_capacity(length);
         while out.len() < length {
@@ -2588,6 +2619,31 @@ fn random_state_integer_offset(random_state: &mut CoreRandomState, span: u64) ->
     }
     let offset = random_state.random_interval(span - 1);
     i64::try_from(offset).map_err(|_| PyValueError::new_err("integer sample exceeds int64"))
+}
+
+fn random_state_integer_inclusive_sample(
+    random_state: &mut CoreRandomState,
+    low: i64,
+    high: i64,
+) -> i64 {
+    let high_bits = u64::from_ne_bytes(high.to_ne_bytes());
+    let low_bits = u64::from_ne_bytes(low.to_ne_bytes());
+    let interval = high_bits.wrapping_sub(low_bits);
+    let offset = random_state.random_interval(interval);
+    low.wrapping_add_unsigned(offset)
+}
+
+fn warn_random_integers_deprecated(py: Python<'_>, low: i64, high: i64) -> PyResult<()> {
+    let message = std::ffi::CString::new(format!(
+        "This function is deprecated. Please call randint({low}, {high} + 1) instead"
+    ))
+    .map_err(|_| PyValueError::new_err("warning message contains nul byte"))?;
+    PyErr::warn(
+        py,
+        &py.get_type::<PyDeprecationWarning>(),
+        message.as_c_str(),
+        1,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -21558,6 +21614,75 @@ mod tests {
                     Some(&uint64_kwargs),
                 )?,
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_state_random_integers_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_state_random_integers")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+            py.import("warnings")?.call_method1("simplefilter", ("ignore",))?;
+            let shape = PyTuple::new(py, [2_usize, 3_usize])?;
+
+            let size_kwargs = PyDict::new(py);
+            size_kwargs.set_item("size", shape.clone())?;
+            let ours_one_arg = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_one_arg = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_one_arg.call_method("random_integers", (5_i64,), Some(&size_kwargs))?,
+                &theirs_one_arg.call_method("random_integers", (5_i64,), Some(&size_kwargs))?,
+            )?;
+
+            let ours_two_arg = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_two_arg = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_two_arg.call_method1("random_integers", (2_i64, 5_i64, 6_usize))?,
+                &theirs_two_arg.call_method1("random_integers", (2_i64, 5_i64, 6_usize))?,
+            )?;
+
+            let singleton_shape = PyTuple::new(py, [2_usize])?;
+            let ours_singleton = random.getattr("RandomState")?.call1((7_u64,))?;
+            let theirs_singleton = numpy_random.getattr("RandomState")?.call1((7_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_singleton.call_method1(
+                    "random_integers",
+                    (0_i64, 0_i64, singleton_shape.clone()),
+                )?,
+                &theirs_singleton.call_method1(
+                    "random_integers",
+                    (0_i64, 0_i64, singleton_shape),
+                )?,
+            )?;
+
+            let ours_error = random.getattr("RandomState")?.call1((1_u64,))?;
+            let theirs_error = numpy_random.getattr("RandomState")?.call1((1_u64,))?;
+            let ours_error = match ours_error.call_method1("random_integers", (5_i64, 4_i64)) {
+                Ok(_) => {
+                    return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        "RandomState.random_integers(5, 4) unexpectedly succeeded",
+                    ));
+                }
+                Err(err) => err,
+            };
+            let theirs_error =
+                match theirs_error.call_method1("random_integers", (5_i64, 4_i64)) {
+                    Ok(_) => {
+                        return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                            "numpy RandomState.random_integers(5, 4) unexpectedly succeeded",
+                        ));
+                    }
+                    Err(err) => err,
+                };
+            assert_pyerr_matches_numpy(py, ours_error, theirs_error)?;
 
             Ok(())
         });
