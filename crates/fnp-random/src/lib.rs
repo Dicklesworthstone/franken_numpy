@@ -2572,6 +2572,19 @@ impl RandomState {
             .collect())
     }
 
+    pub fn standard_t(&mut self, df: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if df <= 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| {
+                let normal = self.legacy_gauss();
+                let chisquare = 2.0 * self.legacy_standard_gamma(df / 2.0);
+                normal / (chisquare / df).sqrt()
+            })
+            .collect())
+    }
+
     fn legacy_standard_exponential(&mut self) -> f64 {
         -(1.0 - self.next_f64()).ln()
     }
@@ -6191,6 +6204,61 @@ for child in rng.spawn(n_children):
         let mut empty = RandomState::new(SeedMaterial::U64(11)).expect("empty");
         assert!(empty.standard_cauchy(0).is_empty());
         let after: Vec<u64> = (0..5).map(|_| empty.random_interval(9)).collect();
+        assert_eq!(after, vec![9, 0, 1, 7, 1]);
+    }
+
+    #[test]
+    fn random_state_legacy_standard_t_matches_numpy_oracles() {
+        let mut standard = RandomState::new(SeedMaterial::U64(42)).expect("standard");
+        let values = standard.standard_t(5.0, 10).expect("standard_t");
+        let expected = [
+            0.559_633_537_900_822,
+            -1.075_741_218_527_432_7,
+            1.333_918_044_125_521_6,
+            -0.754_469_250_079_043_4,
+            0.609_200_646_483_462_1,
+            1.654_735_013_935_21,
+            -1.738_758_149_926_486_8,
+            -0.558_925_252_845_767,
+            -0.563_400_010_677_243_8,
+            -0.481_708_456_818_927_9,
+        ];
+        assert_f64_seq("random_state_standard_t", &values, &expected);
+        let after: Vec<u64> = (0..5).map(|_| standard.random_interval(9)).collect();
+        assert_eq!(after, vec![3, 6, 7, 2, 0]);
+
+        let mut cached = RandomState::new(SeedMaterial::U64(7)).expect("cached");
+        assert_f64_seq(
+            "random_state_standard_t_cached_normal_prefix",
+            &cached.standard_normal(1),
+            &[1.690_525_703_800_356],
+        );
+        let values = cached.standard_t(3.5, 3).expect("cached standard_t");
+        let expected = [
+            -0.510_801_736_851_950_2,
+            0.484_529_124_141_688_97,
+            -0.221_372_959_355_272_2,
+        ];
+        assert_f64_seq("random_state_standard_t_cached", &values, &expected);
+        let after: Vec<f64> = (0..3).map(|_| cached.next_f64()).collect();
+        let expected = [
+            0.065_936_346_905_905_11,
+            0.288_145_599_307_993_55,
+            0.909_593_527_719_613_7,
+        ];
+        assert_f64_seq("random_state_standard_t_cached_after", &after, &expected);
+
+        let mut empty = RandomState::new(SeedMaterial::U64(11)).expect("empty");
+        assert!(empty.standard_t(5.0, 0).expect("empty").is_empty());
+        let after: Vec<u64> = (0..5).map(|_| empty.random_interval(9)).collect();
+        assert_eq!(after, vec![9, 0, 1, 7, 1]);
+
+        let mut invalid = RandomState::new(SeedMaterial::U64(11)).expect("invalid");
+        assert_eq!(
+            invalid.standard_t(0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+        let after: Vec<u64> = (0..5).map(|_| invalid.random_interval(9)).collect();
         assert_eq!(after, vec![9, 0, 1, 7, 1]);
     }
 
