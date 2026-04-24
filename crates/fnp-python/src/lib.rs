@@ -847,7 +847,7 @@ impl PyRandomGenerator {
             .unbind())
     }
 
-    #[pyo3(signature = (a, size=None, replace=true, p=None))]
+    #[pyo3(signature = (a, size=None, replace=true, p=None, *, shuffle=true))]
     fn choice(
         &mut self,
         py: Python<'_>,
@@ -855,6 +855,7 @@ impl PyRandomGenerator {
         size: Option<Py<PyAny>>,
         replace: bool,
         p: Option<Py<PyAny>>,
+        shuffle: bool,
     ) -> PyResult<Py<PyAny>> {
         let size = random_size_from_py(py, size, "Generator.choice(size)")?;
         let weights = match p.as_ref() {
@@ -896,7 +897,7 @@ impl PyRandomGenerator {
                     .collect::<PyResult<Vec<_>>>()?
             } else {
                 self.inner
-                    .choice_indices(population_len, len, replace)
+                    .choice_indices_with_shuffle(population_len, len, replace, shuffle)
                     .map_err(map_random_error)?
                     .into_iter()
                     .map(|value| {
@@ -919,7 +920,7 @@ impl PyRandomGenerator {
         }
         let output = self
             .inner
-            .choice_shaped(&values, size.as_deref(), replace)
+            .choice_shaped_with_shuffle(&values, size.as_deref(), replace, shuffle)
             .map_err(map_random_error)?;
         build_random_f64_output(py, output)
     }
@@ -21316,6 +21317,22 @@ mod tests {
             assert_random_sample_matches_numpy(
                 &ours.call_method1("choice", (5_i64, 4_usize, false))?,
                 &theirs.call_method1("choice", (5_i64, 4_usize, false))?,
+            )?;
+
+            let shuffle_false_kwargs = PyDict::new(py);
+            shuffle_false_kwargs.set_item("shuffle", false)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 360)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method(
+                    "choice",
+                    (10_i64, 5_usize, false),
+                    Some(&shuffle_false_kwargs),
+                )?,
+                &theirs.call_method(
+                    "choice",
+                    (10_i64, 5_usize, false),
+                    Some(&shuffle_false_kwargs),
+                )?,
             )?;
 
             let (ours, theirs) = random_generator_pair(&random, &numpy_random, 263)?;

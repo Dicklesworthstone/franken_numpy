@@ -3369,7 +3369,19 @@ impl Generator {
         size: usize,
         replace: bool,
     ) -> Result<Vec<f64>, RandomError> {
-        let indices = self.choice_indices(a.len(), size, replace)?;
+        self.choice_with_shuffle(a, size, replace, true)
+    }
+
+    /// Randomly choose elements from a 1-D array, optionally preserving
+    /// NumPy's unshuffled no-replacement order.
+    pub fn choice_with_shuffle(
+        &mut self,
+        a: &[f64],
+        size: usize,
+        replace: bool,
+        shuffle: bool,
+    ) -> Result<Vec<f64>, RandomError> {
+        let indices = self.choice_indices_with_shuffle(a.len(), size, replace, shuffle)?;
         indices
             .into_iter()
             .map(|idx| {
@@ -3389,6 +3401,18 @@ impl Generator {
         size: usize,
         replace: bool,
     ) -> Result<Vec<u64>, RandomError> {
+        self.choice_indices_with_shuffle(pop_size, size, replace, true)
+    }
+
+    /// Choose integer indices from `[0, pop_size)` with NumPy's `shuffle`
+    /// keyword controlling the final no-replacement shuffle.
+    pub fn choice_indices_with_shuffle(
+        &mut self,
+        pop_size: usize,
+        size: usize,
+        replace: bool,
+        shuffle: bool,
+    ) -> Result<Vec<u64>, RandomError> {
         if pop_size == 0 && size > 0 {
             return Err(RandomError::InvalidUpperBound);
         }
@@ -3406,7 +3430,8 @@ impl Generator {
                 .collect());
         }
 
-        if pop_size > 10_000 && size > pop_size / 50 {
+        let cutoff = if shuffle { 50 } else { 20 };
+        if pop_size > 10_000 && size > pop_size / cutoff {
             let mut indices = (0..pop_size_u64).collect::<Vec<_>>();
             let first = (pop_size - size).max(1);
             self.shuffle_int_indices(&mut indices, first);
@@ -3437,7 +3462,9 @@ impl Generator {
                 indices.push(j_u64);
             }
         }
-        self.shuffle_int_indices(&mut indices, 1);
+        if shuffle {
+            self.shuffle_int_indices(&mut indices, 1);
+        }
         Ok(indices)
     }
 
@@ -3448,8 +3475,20 @@ impl Generator {
         size: Option<&[usize]>,
         replace: bool,
     ) -> Result<ShapedRandomOutput<f64>, RandomError> {
+        self.choice_shaped_with_shuffle(a, size, replace, true)
+    }
+
+    /// Choose random elements with NumPy `size` metadata and `shuffle`
+    /// semantics preserved.
+    pub fn choice_shaped_with_shuffle(
+        &mut self,
+        a: &[f64],
+        size: Option<&[usize]>,
+        replace: bool,
+        shuffle: bool,
+    ) -> Result<ShapedRandomOutput<f64>, RandomError> {
         let size = resolve_random_size(size)?;
-        let values = self.choice(a, size.len, replace)?;
+        let values = self.choice_with_shuffle(a, size.len, replace, shuffle)?;
         Ok(shaped_output(size, values))
     }
 
@@ -6892,6 +6931,18 @@ for child in rng.spawn(n_children):
                 expected
             );
         }
+    }
+
+    #[test]
+    fn choice_indices_shuffle_false_matches_numpy_oracle() {
+        let bit_generator = BitGenerator::new(BitGeneratorKind::Pcg64Dxsm, SeedMaterial::U64(360))
+            .expect("pcg64dxsm seed");
+        let mut rng = Generator::from_bit_generator(bit_generator);
+        assert_eq!(
+            rng.choice_indices_with_shuffle(10, 5, false, false)
+                .expect("choice indices"),
+            [4, 1, 0, 2, 9]
+        );
     }
 
     #[test]
