@@ -7,10 +7,9 @@ use fnp_ufunc::{
     FromPyFuncReduceOptions, GridSpec, MAError, MaskedArray, UFuncArray, UnaryOp,
     copysign as ufunc_copysign, frexp as ufunc_frexp, hypot as ufunc_hypot,
     isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, ldexp as ufunc_ldexp,
-    logaddexp as ufunc_logaddexp, logaddexp2 as ufunc_logaddexp2,
-    ma_is_masked, ma_make_mask, ma_mask_or, modf as ufunc_modf,
-    nextafter as ufunc_nextafter, reduce_frompyfunc_values, signbit as ufunc_signbit,
-    spacing as ufunc_spacing, where_nonzero,
+    logaddexp as ufunc_logaddexp, logaddexp2 as ufunc_logaddexp2, ma_is_masked, ma_make_mask,
+    ma_mask_or, modf as ufunc_modf, nextafter as ufunc_nextafter, reduce_frompyfunc_values,
+    signbit as ufunc_signbit, spacing as ufunc_spacing, where_nonzero,
 };
 use pyo3::exceptions::{PyOSError, PyTypeError, PyValueError, PyZeroDivisionError};
 use pyo3::prelude::*;
@@ -1005,8 +1004,8 @@ fn map_ma_error(context: &str, err: MAError) -> PyErr {
 }
 
 fn build_boolean_array(shape: &[usize], value: bool, context: &str) -> PyResult<UFuncArray> {
-    let len = element_count(shape)
-        .map_err(|err| PyValueError::new_err(format!("{context}: {err}")))?;
+    let len =
+        element_count(shape).map_err(|err| PyValueError::new_err(format!("{context}: {err}")))?;
     UFuncArray::from_storage(shape.to_vec(), ArrayStorage::Bool(vec![value; len]))
         .map_err(map_ufunc_error)
 }
@@ -1047,9 +1046,16 @@ fn extract_mask_metadata(
         return Ok((false, None, shape));
     }
 
-    let mask_object = numpy.getattr("ma")?.getattr("getmaskarray")?.call1((&asanyarray,))?;
+    let mask_object = numpy
+        .getattr("ma")?
+        .getattr("getmaskarray")?
+        .call1((&asanyarray,))?;
     let mask = extract_precise_numeric_array(py, &mask_object, &format!("{context}: mask"))?;
-    let mask = mask.values().iter().any(|&value| value != 0.0).then_some(mask);
+    let mask = mask
+        .values()
+        .iter()
+        .any(|&value| value != 0.0)
+        .then_some(mask);
     Ok((true, mask, shape))
 }
 
@@ -1067,13 +1073,19 @@ fn extract_numeric_masked_array(
         .extract::<bool>()?;
 
     let mask = if is_masked_array {
-        let mask_object = numpy.getattr("ma")?.getattr("getmaskarray")?.call1((&asanyarray,))?;
-        let mask = match extract_precise_numeric_array(py, &mask_object, &format!("{context}: mask"))
-        {
-            Ok(mask) => mask,
-            Err(_) => return Ok(None),
-        };
-        mask.values().iter().any(|&value| value != 0.0).then_some(mask)
+        let mask_object = numpy
+            .getattr("ma")?
+            .getattr("getmaskarray")?
+            .call1((&asanyarray,))?;
+        let mask =
+            match extract_precise_numeric_array(py, &mask_object, &format!("{context}: mask")) {
+                Ok(mask) => mask,
+                Err(_) => return Ok(None),
+            };
+        mask.values()
+            .iter()
+            .any(|&value| value != 0.0)
+            .then_some(mask)
     } else {
         None
     };
@@ -1127,9 +1139,9 @@ fn extract_filled_scalar_storage(
 ) -> PyResult<Option<FilledScalarStorage>> {
     let type_name = value.get_type().name()?.extract::<String>()?;
     match type_name.as_str() {
-        "bool" => Ok(Some(FilledScalarStorage::Storage(ArrayStorage::Bool(vec![
-            value.extract::<bool>()?,
-        ])))),
+        "bool" => Ok(Some(FilledScalarStorage::Storage(ArrayStorage::Bool(
+            vec![value.extract::<bool>()?],
+        )))),
         "int" => {
             if let Ok(value) = value.extract::<i64>() {
                 return Ok(Some(FilledScalarStorage::PythonInt(ArrayStorage::I64(
@@ -1173,7 +1185,11 @@ fn extract_mask_operand(
 
     let array = match extract_numeric_array(py, value, context) {
         Ok(array) => array,
-        Err(_) => return Err(PyTypeError::new_err(format!("{context}: unsupported mask input"))),
+        Err(_) => {
+            return Err(PyTypeError::new_err(format!(
+                "{context}: unsupported mask input"
+            )));
+        }
     };
     Ok(Some(ma_make_mask(&array)))
 }
@@ -1190,9 +1206,12 @@ fn count_valid_elements(
             .iter()
             .map(|&value| if value == 0.0 { 1.0 } else { 0.0 })
             .collect(),
-        None => vec![1.0; element_count(shape).map_err(|err| PyValueError::new_err(err.to_string()))?],
+        None => {
+            vec![1.0; element_count(shape).map_err(|err| PyValueError::new_err(err.to_string()))?]
+        }
     };
-    let valid = UFuncArray::new(shape.to_vec(), valid_values, DType::Bool).map_err(map_ufunc_error)?;
+    let valid =
+        UFuncArray::new(shape.to_vec(), valid_values, DType::Bool).map_err(map_ufunc_error)?;
 
     match axes {
         None => valid.count_nonzero(None, keepdims).map_err(map_ufunc_error),
@@ -1201,7 +1220,9 @@ fn count_valid_elements(
             .map_err(map_ufunc_error),
         Some(axes) => {
             let axes = axes.iter().map(|&axis| axis as isize).collect::<Vec<_>>();
-            valid.count_nonzero_axes(&axes, keepdims).map_err(map_ufunc_error)
+            valid
+                .count_nonzero_axes(&axes, keepdims)
+                .map_err(map_ufunc_error)
         }
     }
 }
@@ -1233,11 +1254,11 @@ fn masked_scalar_compare(
     let Some(masked_x) = extract_numeric_masked_array(py, x.bind(py), context)? else {
         return fallback();
     };
-    let scalar = match extract_precise_numeric_array(py, value.bind(py), &format!("{context}: value"))
-    {
-        Ok(value) if value.shape().is_empty() => value,
-        _ => return fallback(),
-    };
+    let scalar =
+        match extract_precise_numeric_array(py, value.bind(py), &format!("{context}: value")) {
+            Ok(value) if value.shape().is_empty() => value,
+            _ => return fallback(),
+        };
 
     let condition = match masked_x.data().elementwise_binary(&scalar, op) {
         Ok(condition) => condition,
@@ -1302,9 +1323,7 @@ fn build_numpy_slogdet_result(py: Python<'_>, sign: f64, logabsdet: f64) -> PyRe
     let float64 = numpy.getattr("float64")?;
     let sign = float64.call1((sign,))?;
     let logabsdet = float64.call1((logabsdet,))?;
-    Ok(slogdet_result_type
-        .call1((sign, logabsdet))?
-        .unbind())
+    Ok(slogdet_result_type.call1((sign, logabsdet))?.unbind())
 }
 
 fn build_numpy_eigh_result(
@@ -1393,7 +1412,10 @@ fn masked_interval_compare(
             Err(_) => return fallback(),
         }
     } else {
-        let ge_lo = match masked_x.data().elementwise_binary(&lo, BinaryOp::GreaterEqual) {
+        let ge_lo = match masked_x
+            .data()
+            .elementwise_binary(&lo, BinaryOp::GreaterEqual)
+        {
             Ok(value) => value,
             Err(_) => return fallback(),
         };
@@ -1590,8 +1612,7 @@ fn storage_from_bytes(bytes: &[u8], parsed_dtype: DType, count: i64) -> PyResult
             item_size,
             |chunk| {
                 i64::from_ne_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
-                    chunk[7],
+                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
                 ])
             },
         )?)),
@@ -1619,8 +1640,7 @@ fn storage_from_bytes(bytes: &[u8], parsed_dtype: DType, count: i64) -> PyResult
             item_size,
             |chunk| {
                 u64::from_ne_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
-                    chunk[7],
+                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
                 ])
             },
         )?)),
@@ -1642,8 +1662,7 @@ fn storage_from_bytes(bytes: &[u8], parsed_dtype: DType, count: i64) -> PyResult
             item_size,
             |chunk| {
                 f64::from_ne_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
-                    chunk[7],
+                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
                 ])
             },
         )?)),
@@ -1657,6 +1676,115 @@ fn storage_from_bytes(bytes: &[u8], parsed_dtype: DType, count: i64) -> PyResult
             parsed_dtype.name()
         ))),
     }
+}
+
+fn split_numeric_text_tokens<'a>(text: &'a str, sep: &str) -> Vec<&'a str> {
+    let trimmed = text.trim();
+    if sep.chars().all(char::is_whitespace) {
+        return trimmed.split_whitespace().collect();
+    }
+    trimmed
+        .split(sep)
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn numeric_text_count_limit(count: i64) -> Option<usize> {
+    if count == -1 {
+        None
+    } else if count < 0 {
+        Some(0)
+    } else {
+        Some(count as usize)
+    }
+}
+
+fn storage_from_numeric_text_tokens(
+    tokens: &[&str],
+    parsed_dtype: DType,
+) -> PyResult<ArrayStorage> {
+    let storage = match parsed_dtype {
+        DType::Bool => {
+            let mut values = Vec::with_capacity(tokens.len());
+            for tok in tokens {
+                match tok.parse::<i64>() {
+                    Ok(value) => values.push(value != 0),
+                    Err(_) => match tok.parse::<f64>() {
+                        Ok(value) => values.push(value != 0.0),
+                        Err(_) => {
+                            return Err(PyValueError::new_err(
+                                "fromfile: could not parse text as bool",
+                            ));
+                        }
+                    },
+                }
+            }
+            ArrayStorage::Bool(values)
+        }
+        DType::I8
+        | DType::I16
+        | DType::I32
+        | DType::I64
+        | DType::U8
+        | DType::U16
+        | DType::U32
+        | DType::U64 => {
+            let mut longs = Vec::with_capacity(tokens.len());
+            for tok in tokens {
+                match tok.parse::<i64>() {
+                    Ok(value) => longs.push(value),
+                    Err(_) => match tok.parse::<f64>() {
+                        Ok(value) if value.fract() == 0.0 && value.is_finite() => {
+                            longs.push(value as i64);
+                        }
+                        _ => {
+                            return Err(PyValueError::new_err(
+                                "fromfile: could not parse text as integer",
+                            ));
+                        }
+                    },
+                }
+            }
+            match parsed_dtype {
+                DType::I8 => ArrayStorage::I8(longs.into_iter().map(|v| v as i8).collect()),
+                DType::I16 => ArrayStorage::I16(longs.into_iter().map(|v| v as i16).collect()),
+                DType::I32 => ArrayStorage::I32(longs.into_iter().map(|v| v as i32).collect()),
+                DType::I64 => ArrayStorage::I64(longs),
+                DType::U8 => ArrayStorage::U8(longs.into_iter().map(|v| v as u8).collect()),
+                DType::U16 => ArrayStorage::U16(longs.into_iter().map(|v| v as u16).collect()),
+                DType::U32 => ArrayStorage::U32(longs.into_iter().map(|v| v as u32).collect()),
+                DType::U64 => ArrayStorage::U64(longs.into_iter().map(|v| v as u64).collect()),
+                _ => unreachable!(),
+            }
+        }
+        DType::F16 | DType::F32 | DType::F64 => {
+            let mut floats = Vec::with_capacity(tokens.len());
+            for tok in tokens {
+                match tok.parse::<f64>() {
+                    Ok(value) => floats.push(value),
+                    Err(_) => {
+                        return Err(PyValueError::new_err(
+                            "fromfile: could not parse text as float",
+                        ));
+                    }
+                }
+            }
+            match parsed_dtype {
+                DType::F16 => ArrayStorage::F16(floats.into_iter().map(f16::from_f64).collect()),
+                DType::F32 => ArrayStorage::F32(floats.into_iter().map(|v| v as f32).collect()),
+                DType::F64 => ArrayStorage::F64(floats),
+                _ => unreachable!(),
+            }
+        }
+        _ => {
+            return Err(PyTypeError::new_err(format!(
+                "fromfile: unsupported text dtype {}",
+                parsed_dtype.name()
+            )));
+        }
+    };
+    Ok(storage)
 }
 
 fn python_is_complex_obj(value: &Bound<'_, PyAny>) -> PyResult<bool> {
@@ -2621,10 +2749,7 @@ fn build_numpy_array_from_ufunc(py: Python<'_>, array: &UFuncArray) -> PyResult<
 // values), then `.copy(order='F')` to get an F-contig buffer with the
 // same logical layout. For 1-D / 0-d arrays both flags are True and the
 // copy is skipped.
-fn build_numpy_array_from_ufunc_fortran(
-    py: Python<'_>,
-    array: &UFuncArray,
-) -> PyResult<Py<PyAny>> {
+fn build_numpy_array_from_ufunc_fortran(py: Python<'_>, array: &UFuncArray) -> PyResult<Py<PyAny>> {
     let c_contig = build_numpy_array_from_ufunc(py, array)?;
     if array.shape().len() < 2 {
         return Ok(c_contig);
@@ -2991,23 +3116,17 @@ fn build_numpy_scalar_or_array_from_object_values(
 fn normalize_reduce_out_argument(py: Python<'_>, out: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     let candidate = if let Ok(tuple) = out.cast::<PyTuple>() {
         if tuple.len() != 1 {
-            return Err(PyTypeError::new_err(
-                "return arrays must be of ArrayType",
-            ));
+            return Err(PyTypeError::new_err("return arrays must be of ArrayType"));
         }
         tuple.get_item(0)?
     } else if out.cast::<PyList>().is_ok() {
-        return Err(PyTypeError::new_err(
-            "return arrays must be of ArrayType",
-        ));
+        return Err(PyTypeError::new_err("return arrays must be of ArrayType"));
     } else {
         out.clone()
     };
 
     if require_numpy_ndarray(py, &candidate, "reduce(out)").is_err() {
-        return Err(PyTypeError::new_err(
-            "return arrays must be of ArrayType",
-        ));
+        return Err(PyTypeError::new_err("return arrays must be of ArrayType"));
     }
     Ok(candidate.unbind())
 }
@@ -4213,11 +4332,12 @@ fn fromiter(
             count,
             |value| value.extract::<u64>(),
         )?),
-        DType::F16 => ArrayStorage::F16(
-            collect_fromiter_values(iter.bind(py), &scalar_type, count, |value| {
-                value.extract::<f32>().map(f16::from_f32)
-            })?,
-        ),
+        DType::F16 => ArrayStorage::F16(collect_fromiter_values(
+            iter.bind(py),
+            &scalar_type,
+            count,
+            |value| value.extract::<f32>().map(f16::from_f32),
+        )?),
         DType::F32 => ArrayStorage::F32(collect_fromiter_values(
             iter.bind(py),
             &scalar_type,
@@ -4390,7 +4510,7 @@ fn fromstring(
                 }
             }
             match parsed_dtype {
-                DType::F16 => ArrayStorage::F16(floats.into_iter().map(|v| f16::from_f64(v)).collect()),
+                DType::F16 => ArrayStorage::F16(floats.into_iter().map(f16::from_f64).collect()),
                 DType::F32 => ArrayStorage::F32(floats.into_iter().map(|v| v as f32).collect()),
                 DType::F64 => ArrayStorage::F64(floats),
                 _ => unreachable!(),
@@ -4450,12 +4570,7 @@ fn frombuffer(
 
 #[pyfunction]
 #[pyo3(signature = (a, b, max_work=-1_i64))]
-fn shares_memory(
-    py: Python<'_>,
-    a: Py<PyAny>,
-    b: Py<PyAny>,
-    max_work: i64,
-) -> PyResult<Py<PyAny>> {
+fn shares_memory(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, max_work: i64) -> PyResult<Py<PyAny>> {
     // Passthrough to np.shares_memory so the exact overlap solver (when
     // max_work permits it), view/copy behavior, stride-based disjointness,
     // and max_work kwarg surface all match numpy exactly. Unlike
@@ -4837,20 +4952,22 @@ fn fix_invalid(
         None => None,
     };
     let resolved_fill_value = match fill_value.as_ref() {
-        Some(value) => match extract_precise_numeric_array(
-            py,
-            value.bind(py),
-            "fix_invalid(fill_value)",
-        ) {
-            Ok(fill_value) if fill_value.shape().is_empty() => fill_value.values()[0],
-            _ => return fallback(),
-        },
+        Some(value) => {
+            match extract_precise_numeric_array(py, value.bind(py), "fix_invalid(fill_value)") {
+                Ok(fill_value) if fill_value.shape().is_empty() => fill_value.values()[0],
+                _ => return fallback(),
+            }
+        }
         None => masked.fill_value(),
     };
 
     let merged_mask = ma_mask_or(masked.mask(), extra_mask.as_ref());
-    let mut fixed = MaskedArray::new(masked.data().clone(), merged_mask, Some(resolved_fill_value))
-        .map_err(|err| map_ma_error("fix_invalid", err))?;
+    let mut fixed = MaskedArray::new(
+        masked.data().clone(),
+        merged_mask,
+        Some(resolved_fill_value),
+    )
+    .map_err(|err| map_ma_error("fix_invalid", err))?;
     fixed.fix_invalid();
 
     let result = build_numpy_masked_array(py, &fixed)?;
@@ -4861,9 +4978,7 @@ fn fix_invalid(
     // left at the dtype default. Only propagate when the input was
     // already masked so its fill_value survives the rust-port path.
     if input_is_masked {
-        result
-            .bind(py)
-            .setattr("fill_value", resolved_fill_value)?;
+        result.bind(py).setattr("fill_value", resolved_fill_value)?;
     }
     Ok(result)
 }
@@ -5117,7 +5232,10 @@ fn matrix_rank(
         Err(_) => return fallback(),
     };
     let shape = array.shape();
-    if shape.len() != 2 || array.has_integer_sidecar() || array.values().iter().any(|value| !value.is_finite()) {
+    if shape.len() != 2
+        || array.has_integer_sidecar()
+        || array.values().iter().any(|value| !value.is_finite())
+    {
         return fallback();
     }
 
@@ -5130,8 +5248,8 @@ fn matrix_rank(
     };
     let rank = i64::try_from(rank)
         .map_err(|_| PyValueError::new_err("matrix_rank: rank result exceeds i64 range"))?;
-    let rank = UFuncArray::from_storage(vec![], ArrayStorage::I64(vec![rank]))
-        .map_err(map_ufunc_error)?;
+    let rank =
+        UFuncArray::from_storage(vec![], ArrayStorage::I64(vec![rank])).map_err(map_ufunc_error)?;
     build_numpy_scalar_or_array(py, &rank)
 }
 
@@ -5180,7 +5298,8 @@ fn slogdet(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let slogdet_fn = numpy.getattr("linalg")?.getattr("slogdet")?;
     let a_for_fallback = a.clone_ref(py);
-    let fallback = || -> PyResult<Py<PyAny>> { Ok(slogdet_fn.call1((a_for_fallback.bind(py),))?.unbind()) };
+    let fallback =
+        || -> PyResult<Py<PyAny>> { Ok(slogdet_fn.call1((a_for_fallback.bind(py),))?.unbind()) };
 
     let array = match extract_precise_numeric_array(py, a.bind(py), "slogdet(a)") {
         Ok(array) => array,
@@ -5191,7 +5310,10 @@ fn slogdet(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
         || shape[0] != shape[1]
         || array.has_integer_sidecar()
         || array.values().iter().any(|value| !value.is_finite())
-        || matches!(array.dtype(), DType::F16 | DType::F32 | DType::Complex64 | DType::Complex128)
+        || matches!(
+            array.dtype(),
+            DType::F16 | DType::F32 | DType::Complex64 | DType::Complex128
+        )
     {
         return fallback();
     }
@@ -5326,8 +5448,11 @@ fn solve(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let solve_fn = numpy.getattr("linalg")?.getattr("solve")?;
     let a_for_fallback = a.clone_ref(py);
     let b_for_fallback = b.clone_ref(py);
-    let fallback =
-        || -> PyResult<Py<PyAny>> { Ok(solve_fn.call1((a_for_fallback.bind(py), b_for_fallback.bind(py)))?.unbind()) };
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(solve_fn
+            .call1((a_for_fallback.bind(py), b_for_fallback.bind(py)))?
+            .unbind())
+    };
 
     let a = match extract_precise_numeric_array(py, a.bind(py), "solve(a, b)") {
         Ok(array) => array,
@@ -6135,9 +6260,7 @@ fn histogram_bin_edges(
     {
         // Must be array-like. numpy.asarray to enforce dtype coercion.
         // Weights are ignored with explicit edges (documented).
-        return Ok(numpy
-            .call_method1("asarray", (bins_val,))?
-            .unbind());
+        return Ok(numpy.call_method1("asarray", (bins_val,))?.unbind());
     }
 
     // Case 2: int bins (default 10 when bins is None or missing) with
@@ -6150,7 +6273,13 @@ fn histogram_bin_edges(
             // weights are ignored with int bins per numpy docs, but our
             // extraction below doesn't use them — confirm they at least
             // parse as numeric so we don't silently accept garbage.
-            if extract_precise_numeric_array(py, weights_bound.unwrap(), "histogram_bin_edges(weights)").is_err() {
+            if extract_precise_numeric_array(
+                py,
+                weights_bound.unwrap(),
+                "histogram_bin_edges(weights)",
+            )
+            .is_err()
+            {
                 return fallback(py);
             }
         }
@@ -6175,7 +6304,8 @@ fn histogram_bin_edges(
             // Derive from input data via numpy.min / numpy.max to match
             // exactly (including 0-element handling: numpy returns
             // [0, 0.25, 0.5, 0.75, 1.0] for bins=4, which is linspace(0,1,5)).
-            let native = match extract_precise_numeric_array(py, a_bound, "histogram_bin_edges(a)") {
+            let native = match extract_precise_numeric_array(py, a_bound, "histogram_bin_edges(a)")
+            {
                 Ok(value) => value,
                 Err(_) => return fallback(py),
             };
@@ -6213,16 +6343,12 @@ fn histogram_bin_edges(
             }
         };
 
-        let edges = match UFuncArray::linspace_endpoint(
-            amin,
-            amax,
-            (nbins + 1) as usize,
-            true,
-            DType::F64,
-        ) {
-            Ok(value) => value,
-            Err(_) => return fallback(py),
-        };
+        let edges =
+            match UFuncArray::linspace_endpoint(amin, amax, (nbins + 1) as usize, true, DType::F64)
+            {
+                Ok(value) => value,
+                Err(_) => return fallback(py),
+            };
         return build_numpy_array_from_ufunc(py, &edges);
     }
 
@@ -6311,9 +6437,8 @@ fn transpose(py: Python<'_>, a: Py<PyAny>, axes: Option<Py<PyAny>>) -> PyResult<
 fn swapaxes(py: Python<'_>, a: Py<PyAny>, axis1: i64, axis2: i64) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let swapaxes_fn = numpy.getattr("swapaxes")?;
-    let fallback = || -> PyResult<Py<PyAny>> {
-        Ok(swapaxes_fn.call1((a.bind(py), axis1, axis2))?.unbind())
-    };
+    let fallback =
+        || -> PyResult<Py<PyAny>> { Ok(swapaxes_fn.call1((a.bind(py), axis1, axis2))?.unbind()) };
 
     let a = match extract_numeric_array(py, a.bind(py), "swapaxes(a)") {
         Ok(array) => array,
@@ -6348,22 +6473,19 @@ fn moveaxis(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let Some(source_axes) =
-        (match extract_axis_spec(py, Some(source_for_parse), "moveaxis(source)") {
+    let Some(source_axes) = (match extract_axis_spec(py, Some(source_for_parse), "moveaxis(source)")
+    {
+        Ok(axes) => axes,
+        Err(_) => return fallback(),
+    }) else {
+        return fallback();
+    };
+    let Some(destination_axes) =
+        (match extract_axis_spec(py, Some(destination_for_parse), "moveaxis(destination)") {
             Ok(axes) => axes,
             Err(_) => return fallback(),
         })
     else {
-        return fallback();
-    };
-    let Some(destination_axes) = (match extract_axis_spec(
-        py,
-        Some(destination_for_parse),
-        "moveaxis(destination)",
-    ) {
-        Ok(axes) => axes,
-        Err(_) => return fallback(),
-    }) else {
         return fallback();
     };
 
@@ -6384,9 +6506,8 @@ fn moveaxis(
 fn rollaxis(py: Python<'_>, a: Py<PyAny>, axis: i64, start: i64) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let rollaxis_fn = numpy.getattr("rollaxis")?;
-    let fallback = || -> PyResult<Py<PyAny>> {
-        Ok(rollaxis_fn.call1((a.bind(py), axis, start))?.unbind())
-    };
+    let fallback =
+        || -> PyResult<Py<PyAny>> { Ok(rollaxis_fn.call1((a.bind(py), axis, start))?.unbind()) };
 
     let a = match extract_numeric_array(py, a.bind(py), "rollaxis(a)") {
         Ok(array) => array,
@@ -6818,16 +6939,7 @@ fn masked_inside(
     v2: Py<PyAny>,
     copy: bool,
 ) -> PyResult<Py<PyAny>> {
-    masked_interval_compare(
-        py,
-        x,
-        v1,
-        v2,
-        copy,
-        "masked_inside",
-        "masked_inside",
-        false,
-    )
+    masked_interval_compare(py, x, v1, v2, copy, "masked_inside", "masked_inside", false)
 }
 
 #[pyfunction]
@@ -6897,10 +7009,12 @@ fn filled(py: Python<'_>, a: Py<PyAny>, fill_value: Option<Py<PyAny>>) -> PyResu
         return fallback();
     };
     let fill_value = match fill_value.as_ref() {
-        Some(value) => match extract_filled_scalar_storage(py, value.bind(py), "filled(fill_value)")? {
-            Some(fill_value) => fill_value,
-            None => return fallback(),
-        },
+        Some(value) => {
+            match extract_filled_scalar_storage(py, value.bind(py), "filled(fill_value)")? {
+                Some(fill_value) => fill_value,
+                None => return fallback(),
+            }
+        }
         None => FilledScalarStorage::Storage(ArrayStorage::F64(vec![masked.fill_value()])),
     };
 
@@ -6954,12 +7068,17 @@ fn is_masked(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     };
     let masked = if is_masked_array {
         let data = build_boolean_array(&shape, false, "is_masked")?;
-        let array = MaskedArray::new(data, mask, None).map_err(|err| map_ma_error("is_masked", err))?;
+        let array =
+            MaskedArray::new(data, mask, None).map_err(|err| map_ma_error("is_masked", err))?;
         ma_is_masked(&array)
     } else {
         false
     };
-    Ok(py.import("builtins")?.getattr("bool")?.call1((masked,))?.unbind())
+    Ok(py
+        .import("builtins")?
+        .getattr("bool")?
+        .call1((masked,))?
+        .unbind())
 }
 
 #[pyfunction]
@@ -6980,7 +7099,10 @@ fn mask_or(
         kwargs.set_item("copy", copy)?;
         kwargs.set_item("shrink", shrink)?;
         Ok(mask_or_fn
-            .call((m1_for_fallback.bind(py), m2_for_fallback.bind(py)), Some(&kwargs))?
+            .call(
+                (m1_for_fallback.bind(py), m2_for_fallback.bind(py)),
+                Some(&kwargs),
+            )?
             .unbind())
     };
 
@@ -6999,15 +7121,27 @@ fn mask_or(
     }
 
     let Some(result) = ma_mask_or(left.as_ref(), right.as_ref()) else {
-        return Ok(py.import("numpy")?.getattr("ma")?.getattr("nomask")?.unbind());
+        return Ok(py
+            .import("numpy")?
+            .getattr("ma")?
+            .getattr("nomask")?
+            .unbind());
     };
     if shrink && result.values().iter().all(|&value| value == 0.0) {
-        return Ok(py.import("numpy")?.getattr("ma")?.getattr("nomask")?.unbind());
+        return Ok(py
+            .import("numpy")?
+            .getattr("ma")?
+            .getattr("nomask")?
+            .unbind());
     }
 
     let output = build_numpy_array_from_ufunc(py, &result)?;
     if !copy && left.is_none() && right.is_none() {
-        return Ok(py.import("numpy")?.getattr("ma")?.getattr("nomask")?.unbind());
+        return Ok(py
+            .import("numpy")?
+            .getattr("ma")?
+            .getattr("nomask")?
+            .unbind());
     }
     Ok(output)
 }
@@ -7136,8 +7270,7 @@ fn native_cov_unweighted(
         Ok(value) => value,
         Err(_) => return Ok(None),
     };
-    if m_arr.has_integer_sidecar()
-        || matches!(m_arr.dtype(), DType::Complex64 | DType::Complex128)
+    if m_arr.has_integer_sidecar() || matches!(m_arr.dtype(), DType::Complex64 | DType::Complex128)
     {
         return Ok(None);
     }
@@ -7272,8 +7405,12 @@ fn cov(
         Ok(cov_fn.call((m.bind(py),), Some(&kwargs))?.unbind())
     };
 
-    if fweights.as_ref().is_some_and(|value| !value.bind(py).is_none())
-        || aweights.as_ref().is_some_and(|value| !value.bind(py).is_none())
+    if fweights
+        .as_ref()
+        .is_some_and(|value| !value.bind(py).is_none())
+        || aweights
+            .as_ref()
+            .is_some_and(|value| !value.bind(py).is_none())
     {
         return fallback(py);
     }
@@ -7344,7 +7481,10 @@ fn corrcoef(
 
     // dtype kwarg affects the cov computation path (cast before average);
     // keep numpy in charge of that surface.
-    if dtype.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+    if dtype
+        .as_ref()
+        .is_some_and(|value| !value.bind(py).is_none())
+    {
         return fallback(py);
     }
 
@@ -7353,11 +7493,10 @@ fn corrcoef(
     // regardless of the (deprecated) bias/ddof args passed in.
     let x_bound = x.bind(py);
     let y_binding = y.as_ref().map(|value| value.bind(py));
-    let cov_array =
-        match native_cov_unweighted(py, x_bound, y_binding, rowvar, 1) {
-            Ok(Some(value)) => value,
-            _ => return fallback(py),
-        };
+    let cov_array = match native_cov_unweighted(py, x_bound, y_binding, rowvar, 1) {
+        Ok(Some(value)) => value,
+        _ => return fallback(py),
+    };
 
     // Extract the diagonal (variances), compute 1/sqrt, and normalize the
     // covariance matrix by the outer product of 1/stddev. numpy follows
@@ -7384,8 +7523,7 @@ fn corrcoef(
         if row_scale == 0.0 {
             return fallback(py);
         }
-        for col in 0..n_vars {
-            let col_scale = stddev[col];
+        for (col, &col_scale) in stddev.iter().enumerate().take(n_vars) {
             if col_scale == 0.0 {
                 return fallback(py);
             }
@@ -7396,11 +7534,7 @@ fn corrcoef(
             output[idx] /= col_scale;
             // Clip to [-1, 1] — numpy.corrcoef guards against small
             // numerical drift that pushes values just past the limits.
-            if output[idx] > 1.0 {
-                output[idx] = 1.0;
-            } else if output[idx] < -1.0 {
-                output[idx] = -1.0;
-            }
+            output[idx] = output[idx].clamp(-1.0, 1.0);
         }
     }
 
@@ -7422,7 +7556,10 @@ fn allequal(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, fill_value: bool) -> PyR
         let kwargs = PyDict::new(py);
         kwargs.set_item("fill_value", fill_value)?;
         Ok(allequal_fn
-            .call((a_for_fallback.bind(py), b_for_fallback.bind(py)), Some(&kwargs))?
+            .call(
+                (a_for_fallback.bind(py), b_for_fallback.bind(py)),
+                Some(&kwargs),
+            )?
             .unbind())
     };
 
@@ -7489,7 +7626,9 @@ fn nanmean(
         Ok(nanmean_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
-    if dtype.as_ref().is_some_and(|value| !value.bind(py).is_none())
+    if dtype
+        .as_ref()
+        .is_some_and(|value| !value.bind(py).is_none())
         || out.as_ref().is_some_and(|value| !value.bind(py).is_none())
     {
         return fallback();
@@ -7540,7 +7679,9 @@ fn nansum(
         Ok(nansum_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
-    if dtype.as_ref().is_some_and(|value| !value.bind(py).is_none())
+    if dtype
+        .as_ref()
+        .is_some_and(|value| !value.bind(py).is_none())
         || out.as_ref().is_some_and(|value| !value.bind(py).is_none())
     {
         return fallback();
@@ -7602,10 +7743,16 @@ fn nanprod(
         Ok(nanprod_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
-    if dtype.as_ref().is_some_and(|value| !value.bind(py).is_none())
+    if dtype
+        .as_ref()
+        .is_some_and(|value| !value.bind(py).is_none())
         || out.as_ref().is_some_and(|value| !value.bind(py).is_none())
-        || initial.as_ref().is_some_and(|value| !value.bind(py).is_none())
-        || r#where.as_ref().is_some_and(|value| !value.bind(py).is_none())
+        || initial
+            .as_ref()
+            .is_some_and(|value| !value.bind(py).is_none())
+        || r#where
+            .as_ref()
+            .is_some_and(|value| !value.bind(py).is_none())
     {
         return fallback();
     }
@@ -8418,7 +8565,10 @@ fn intersect1d(
         kwargs.set_item("assume_unique", assume_unique)?;
         kwargs.set_item("return_indices", return_indices)?;
         Ok(intersect1d_fn
-            .call((ar1_for_fallback.bind(py), ar2_for_fallback.bind(py)), Some(&kwargs))?
+            .call(
+                (ar1_for_fallback.bind(py), ar2_for_fallback.bind(py)),
+                Some(&kwargs),
+            )?
             .unbind())
     };
     if assume_unique || return_indices {
@@ -8499,7 +8649,10 @@ fn setdiff1d(
         let kwargs = PyDict::new(py);
         kwargs.set_item("assume_unique", assume_unique)?;
         Ok(setdiff1d_fn
-            .call((ar1_for_fallback.bind(py), ar2_for_fallback.bind(py)), Some(&kwargs))?
+            .call(
+                (ar1_for_fallback.bind(py), ar2_for_fallback.bind(py)),
+                Some(&kwargs),
+            )?
             .unbind())
     };
     if assume_unique {
@@ -8566,7 +8719,8 @@ fn isin(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let ar2 = match extract_precise_numeric_array(py, test_elements.bind(py), "isin(test_elements)") {
+    let ar2 = match extract_precise_numeric_array(py, test_elements.bind(py), "isin(test_elements)")
+    {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
@@ -8624,7 +8778,9 @@ fn arange(
         }
         Ok(arange_fn.call(args, Some(&kwargs))?.unbind())
     };
-    if device.as_ref().is_some_and(|value| !value.bind(py).is_none())
+    if device
+        .as_ref()
+        .is_some_and(|value| !value.bind(py).is_none())
         || like.as_ref().is_some_and(|value| !value.bind(py).is_none())
     {
         return fallback(py);
@@ -8741,7 +8897,10 @@ fn linspace(
             .call((start.bind(py), stop.bind(py)), Some(&kwargs))?
             .unbind())
     };
-    if device.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+    if device
+        .as_ref()
+        .is_some_and(|value| !value.bind(py).is_none())
+    {
         return fallback(py);
     }
     if num < 0 {
@@ -8772,11 +8931,16 @@ fn linspace(
 
     let num_usize = num as usize;
     if retstep {
-        let (array, step) =
-            match UFuncArray::linspace_retstep(start_f, stop_f, num_usize, endpoint, resolved_dtype) {
-                Ok(value) => value,
-                Err(_) => return fallback(py),
-            };
+        let (array, step) = match UFuncArray::linspace_retstep(
+            start_f,
+            stop_f,
+            num_usize,
+            endpoint,
+            resolved_dtype,
+        ) {
+            Ok(value) => value,
+            Err(_) => return fallback(py),
+        };
         let array_py = build_numpy_array_from_ufunc(py, &array)?;
         let step_py = numpy
             .getattr(match resolved_dtype {
@@ -8789,10 +8953,11 @@ fn linspace(
         return Ok(tuple.into_any().unbind());
     }
 
-    let result = match UFuncArray::linspace_endpoint(start_f, stop_f, num_usize, endpoint, resolved_dtype) {
-        Ok(value) => value,
-        Err(_) => return fallback(py),
-    };
+    let result =
+        match UFuncArray::linspace_endpoint(start_f, stop_f, num_usize, endpoint, resolved_dtype) {
+            Ok(value) => value,
+            Err(_) => return fallback(py),
+        };
     build_numpy_array_from_ufunc(py, &result)
 }
 
@@ -8856,7 +9021,9 @@ fn full(
             .unbind())
     };
 
-    if device.as_ref().is_some_and(|value| !value.bind(py).is_none())
+    if device
+        .as_ref()
+        .is_some_and(|value| !value.bind(py).is_none())
         || like.as_ref().is_some_and(|value| !value.bind(py).is_none())
     {
         return fallback(py);
@@ -8902,10 +9069,7 @@ fn full(
     build_numpy_array_from_ufunc(py, &result)
 }
 
-fn parse_shape_override(
-    shape: &Bound<'_, PyAny>,
-    context: &str,
-) -> PyResult<Vec<usize>> {
+fn parse_shape_override(shape: &Bound<'_, PyAny>, context: &str) -> PyResult<Vec<usize>> {
     if let Ok(dims) = shape.extract::<Vec<i64>>() {
         dims.into_iter()
             .map(|dim| {
@@ -9016,12 +9180,10 @@ fn native_like_array(
     }
 
     let result = match fill {
-        LikeFill::Zeros | LikeFill::Empty => {
-            match UFuncArray::zeros(target_shape, target_dtype) {
-                Ok(value) => value,
-                Err(_) => return Ok(None),
-            }
-        }
+        LikeFill::Zeros | LikeFill::Empty => match UFuncArray::zeros(target_shape, target_dtype) {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        },
         LikeFill::Ones => match UFuncArray::ones(target_shape, target_dtype) {
             Ok(value) => value,
             Err(_) => return Ok(None),
@@ -9241,6 +9403,7 @@ fn empty_like(
 // Identity rule: when `copy` is not True and the source already matches
 // the requested dtype+order+subclass policy, return the source object
 // unchanged so `np.shares_memory(out, a) == True`.
+#[allow(clippy::too_many_arguments)]
 fn native_asarray_like(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -9318,10 +9481,7 @@ fn native_asarray_like(
         input_is_exact_ndarray
     };
     if subclass_ok && !matches!(copy_mode, CopyMode::Always) {
-        let source_dtype_name = a
-            .getattr("dtype")?
-            .getattr("name")?
-            .extract::<String>()?;
+        let source_dtype_name = a.getattr("dtype")?.getattr("name")?.extract::<String>()?;
         let source_dtype = DType::parse(&source_dtype_name);
         let dtype_match = match requested_dtype {
             None => true,
@@ -10002,7 +10162,10 @@ fn array_equal(
         let kwargs = PyDict::new(py);
         kwargs.set_item("equal_nan", equal_nan)?;
         Ok(array_equal_fn
-            .call((a1_for_fallback.bind(py), a2_for_fallback.bind(py)), Some(&kwargs))?
+            .call(
+                (a1_for_fallback.bind(py), a2_for_fallback.bind(py)),
+                Some(&kwargs),
+            )?
             .unbind())
     };
     let array_a = match extract_precise_numeric_array(py, a1.bind(py), "array_equal(a1)") {
@@ -10021,7 +10184,10 @@ fn array_equal(
         return fallback();
     }
     let verdict = array_a.array_equal_nan(&array_b, equal_nan);
-    Ok(pyo3::types::PyBool::new(py, verdict).to_owned().into_any().unbind())
+    Ok(pyo3::types::PyBool::new(py, verdict)
+        .to_owned()
+        .into_any()
+        .unbind())
 }
 
 #[pyfunction]
@@ -10055,14 +10221,20 @@ fn array_equiv(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAn
     }
     // Shapes must be broadcast-compatible; any mismatch → False.
     if broadcast_shapes(&[array_a.shape(), array_b.shape()]).is_err() {
-        return Ok(pyo3::types::PyBool::new(py, false).to_owned().into_any().unbind());
+        return Ok(pyo3::types::PyBool::new(py, false)
+            .to_owned()
+            .into_any()
+            .unbind());
     }
     let comparison = match array_a.elementwise_binary(&array_b, BinaryOp::Equal) {
         Ok(value) => value,
         Err(_) => return fallback(py),
     };
     let all_equal = comparison.values().iter().all(|&v| v != 0.0);
-    Ok(pyo3::types::PyBool::new(py, all_equal).to_owned().into_any().unbind())
+    Ok(pyo3::types::PyBool::new(py, all_equal)
+        .to_owned()
+        .into_any()
+        .unbind())
 }
 
 #[pyfunction]
@@ -10982,7 +11154,10 @@ fn allclose(
         kwargs.set_item("atol", atol)?;
         kwargs.set_item("equal_nan", equal_nan)?;
         Ok(allclose_fn
-            .call((a_for_fallback.bind(py), b_for_fallback.bind(py)), Some(&kwargs))?
+            .call(
+                (a_for_fallback.bind(py), b_for_fallback.bind(py)),
+                Some(&kwargs),
+            )?
             .unbind())
     };
 
@@ -11021,16 +11196,14 @@ fn fix(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let fix_fn = numpy.getattr("fix")?;
     let x_for_fallback = x.clone_ref(py);
-    let fallback = || -> PyResult<Py<PyAny>> {
-        Ok(fix_fn.call1((x_for_fallback.bind(py),))?.unbind())
-    };
+    let fallback =
+        || -> PyResult<Py<PyAny>> { Ok(fix_fn.call1((x_for_fallback.bind(py),))?.unbind()) };
 
     let array = match extract_precise_numeric_array(py, x.bind(py), "fix(x)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    if array.has_integer_sidecar()
-        || matches!(array.dtype(), DType::Complex64 | DType::Complex128)
+    if array.has_integer_sidecar() || matches!(array.dtype(), DType::Complex64 | DType::Complex128)
     {
         return fallback();
     }
@@ -11064,15 +11237,13 @@ fn triangular_impl(
     let numpy = py.import("numpy")?;
     let numpy_fn = numpy.getattr(numpy_name)?;
     let m_for_fallback = m.clone_ref(py);
-    let fallback = || -> PyResult<Py<PyAny>> {
-        Ok(numpy_fn.call1((m_for_fallback.bind(py), k))?.unbind())
-    };
+    let fallback =
+        || -> PyResult<Py<PyAny>> { Ok(numpy_fn.call1((m_for_fallback.bind(py), k))?.unbind()) };
     let array = match extract_precise_numeric_array(py, m.bind(py), numpy_name) {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    if array.has_integer_sidecar()
-        || matches!(array.dtype(), DType::Complex64 | DType::Complex128)
+    if array.has_integer_sidecar() || matches!(array.dtype(), DType::Complex64 | DType::Complex128)
     {
         return fallback();
     }
@@ -11132,9 +11303,7 @@ fn asarray_chkfinite(
             .call_method0("all")?
             .extract()?;
         if !all_finite {
-            return Err(PyValueError::new_err(
-                "array must not contain infs or NaNs",
-            ));
+            return Err(PyValueError::new_err("array must not contain infs or NaNs"));
         }
     }
     Ok(array.unbind())
@@ -11172,7 +11341,10 @@ fn poly(py: Python<'_>, seq_of_zeros: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // complex-root input, 2-D square matrix input, and error surface
     // for non-square 2-D or >2-D arrays.
     let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("poly")?.call1((seq_of_zeros.bind(py),))?.unbind())
+    Ok(numpy
+        .getattr("poly")?
+        .call1((seq_of_zeros.bind(py),))?
+        .unbind())
 }
 
 #[pyfunction]
@@ -11207,12 +11379,7 @@ fn require(
 
 #[pyfunction]
 #[pyo3(signature = (n, mask_func, k=0))]
-fn mask_indices(
-    py: Python<'_>,
-    n: i64,
-    mask_func: Py<PyAny>,
-    k: i64,
-) -> PyResult<Py<PyAny>> {
+fn mask_indices(py: Python<'_>, n: i64, mask_func: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
     let n = usize::try_from(n)
         .map_err(|_| PyValueError::new_err("negative dimensions are not allowed"))?;
 
@@ -11237,12 +11404,7 @@ fn mask_indices(
 
 #[pyfunction]
 #[pyo3(signature = (x1, x2, *, axis=-1_i64))]
-fn linalg_vecdot(
-    py: Python<'_>,
-    x1: Py<PyAny>,
-    x2: Py<PyAny>,
-    axis: i64,
-) -> PyResult<Py<PyAny>> {
+fn linalg_vecdot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let vecdot_fn = numpy.getattr("linalg")?.getattr("vecdot")?;
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -11507,7 +11669,10 @@ fn partition(
             .call((a_bound, kth_bound), Some(&kwargs))?
             .unbind())
     };
-    if order.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+    if order
+        .as_ref()
+        .is_some_and(|value| !value.bind(py).is_none())
+    {
         return fallback(py);
     }
     let native = match extract_precise_numeric_array(py, a_bound, "partition(a)") {
@@ -11529,7 +11694,10 @@ fn partition(
     } else {
         return fallback(py);
     };
-    let axis_len = match native.shape().get(axis.rem_euclid(native.shape().len() as i64) as usize) {
+    let axis_len = match native
+        .shape()
+        .get(axis.rem_euclid(native.shape().len() as i64) as usize)
+    {
         Some(&dim) => dim as i64,
         None => return fallback(py),
     };
@@ -11572,7 +11740,10 @@ fn argpartition(
             .call((a_bound, kth_bound), Some(&kwargs))?
             .unbind())
     };
-    if order.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+    if order
+        .as_ref()
+        .is_some_and(|value| !value.bind(py).is_none())
+    {
         return fallback(py);
     }
     // Array-valued kth needs repeated partition + reindex to propagate
@@ -11590,11 +11761,18 @@ fn argpartition(
     {
         return fallback(py);
     }
-    let axis_len = match native.shape().get(axis.rem_euclid(native.shape().len() as i64) as usize) {
+    let axis_len = match native
+        .shape()
+        .get(axis.rem_euclid(native.shape().len() as i64) as usize)
+    {
         Some(&dim) => dim as i64,
         None => return fallback(py),
     };
-    let normalized = if scalar_k < 0 { scalar_k + axis_len } else { scalar_k };
+    let normalized = if scalar_k < 0 {
+        scalar_k + axis_len
+    } else {
+        scalar_k
+    };
     if normalized < 0 || normalized >= axis_len {
         return fallback(py);
     }
@@ -11617,7 +11795,6 @@ fn fromfile(
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
-    let dtype_for_parse = dtype.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
@@ -11636,7 +11813,47 @@ fn fromfile(
     };
 
     if !sep.is_empty() {
-        return fallback();
+        if offset != 0
+            || like
+                .as_ref()
+                .is_some_and(|like_val| !like_val.bind(py).is_none())
+        {
+            return fallback();
+        }
+        let parsed_dtype = extract_python_dtype(
+            py,
+            dtype.as_ref().map(|value| value.clone_ref(py)),
+            DType::F64,
+            "fromfile(dtype)",
+        )?;
+        if !dtype_supported_by_numpy_export_bridge(parsed_dtype) {
+            return fallback();
+        }
+
+        let file_bound = file.bind(py);
+        let text = if let Ok(path_obj) = py.import("os")?.getattr("fspath")?.call1((file_bound,))
+            && let Ok(path) = path_obj.extract::<String>()
+        {
+            std::fs::read_to_string(&path).map_err(|err| PyOSError::new_err(err.to_string()))?
+        } else if let Ok(result) = file_bound.call_method0("read") {
+            match result.extract::<String>() {
+                Ok(value) => value,
+                Err(_) => return fallback(),
+            }
+        } else {
+            return fallback();
+        };
+
+        let tokens = split_numeric_text_tokens(&text, sep);
+        let effective: Vec<&str> = match numeric_text_count_limit(count) {
+            Some(limit) => tokens.into_iter().take(limit).collect(),
+            None => tokens,
+        };
+        let storage = match storage_from_numeric_text_tokens(&effective, parsed_dtype) {
+            Ok(storage) => storage,
+            Err(_) => return fallback(),
+        };
+        return build_numpy_array_from_storage(py, &[storage.len()], storage);
     }
     if let Some(like_val) = like.as_ref()
         && !like_val.bind(py).is_none()
@@ -11644,7 +11861,12 @@ fn fromfile(
         return fallback();
     }
 
-    let parsed_dtype = extract_python_dtype(py, dtype_for_parse, DType::F64, "fromfile(dtype)")?;
+    let parsed_dtype = extract_python_dtype(
+        py,
+        dtype.as_ref().map(|value| value.clone_ref(py)),
+        DType::F64,
+        "fromfile(dtype)",
+    )?;
     if dtype_item_size(parsed_dtype).is_none() {
         return fallback();
     }
@@ -11659,8 +11881,7 @@ fn fromfile(
         Err(_) => return fallback(),
     };
 
-    let bytes = std::fs::read(&path)
-        .map_err(|err| PyOSError::new_err(err.to_string()))?;
+    let bytes = std::fs::read(&path).map_err(|err| PyOSError::new_err(err.to_string()))?;
     if offset < 0 || offset as usize > bytes.len() {
         return Err(PyValueError::new_err(format!(
             "offset must be non-negative and no greater than buffer length ({})",
@@ -12015,7 +12236,7 @@ fn genfromtxt(
     // numeric dtype, no structured names/missing/filling, no masked
     // output, no converters/encoding/invalid_raise tweaks. Everything
     // else defers to numpy's rich parser.
-    let dtype_is_none_or_missing = dtype.as_ref().map_or(true, |v| v.bind(py).is_none());
+    let dtype_is_none_or_missing = dtype.as_ref().is_none_or(|v| v.bind(py).is_none());
     if dtype_is_none_or_missing
         || converters.is_some()
         || missing_values.is_some()
@@ -12056,7 +12277,8 @@ fn genfromtxt(
 
     // Resolve target dtype — must be numeric bridge-supported.
     let dtype_clone = dtype.as_ref().map(|v| v.clone_ref(py));
-    let parsed_dtype = match extract_python_dtype(py, dtype_clone, DType::F64, "genfromtxt(dtype)") {
+    let parsed_dtype = match extract_python_dtype(py, dtype_clone, DType::F64, "genfromtxt(dtype)")
+    {
         Ok(value) if dtype_supported_by_numpy_export_bridge(value) => value,
         _ => return fallback(py),
     };
@@ -12264,10 +12486,13 @@ fn recfunctions_drop_fields(
         {
             return fallback(py);
         }
-        descr.append(PyTuple::new(py, [
-            name.clone().into_pyobject(py)?.into_any(),
-            field.clone().into_any(),
-        ])?)?;
+        descr.append(PyTuple::new(
+            py,
+            [
+                name.clone().into_pyobject(py)?.into_any(),
+                field.clone().into_any(),
+            ],
+        )?)?;
         keep_names.push(name.clone());
     }
     if keep_names.is_empty() {
@@ -12314,7 +12539,7 @@ fn recfunctions_rename_fields(
     // are honored correctly), then `.view()` the source with the
     // renamed dtype descriptor. Nested structured dtypes fall back to
     // numpy.
-    let Ok(mapper) = namemapper_bound.downcast::<PyDict>() else {
+    let Ok(mapper) = namemapper_bound.cast::<PyDict>() else {
         return fallback(py);
     };
     let dtype_obj = base_bound.getattr("dtype")?;
@@ -12341,10 +12566,13 @@ fn recfunctions_rename_fields(
             Some(v) => v.extract()?,
             None => old_name.clone(),
         };
-        descr.append(PyTuple::new(py, [
-            new_name.into_pyobject(py)?.into_any(),
-            field.clone().into_any(),
-        ])?)?;
+        descr.append(PyTuple::new(
+            py,
+            [
+                new_name.into_pyobject(py)?.into_any(),
+                field.clone().into_any(),
+            ],
+        )?)?;
     }
     let numpy = py.import("numpy")?;
     let new_dtype = numpy.getattr("dtype")?.call1((descr,))?;
@@ -12378,10 +12606,7 @@ fn recfunctions_append_fields(
         Ok(py
             .import("numpy.lib.recfunctions")?
             .getattr("append_fields")?
-            .call(
-                (base_bound, names_bound, data_bound),
-                Some(&kwargs),
-            )?
+            .call((base_bound, names_bound, data_bound), Some(&kwargs))?
             .unbind())
     };
 
@@ -12425,15 +12650,21 @@ fn recfunctions_append_fields(
         {
             return fallback(py);
         }
-        descr.append(PyTuple::new(py, [
-            old_name.clone().into_pyobject(py)?.into_any(),
-            field.clone().into_any(),
-        ])?)?;
+        descr.append(PyTuple::new(
+            py,
+            [
+                old_name.clone().into_pyobject(py)?.into_any(),
+                field.clone().into_any(),
+            ],
+        )?)?;
     }
-    descr.append(PyTuple::new(py, [
-        single_name.clone().into_pyobject(py)?.into_any(),
-        data_array.getattr("dtype")?.into_any(),
-    ])?)?;
+    descr.append(PyTuple::new(
+        py,
+        [
+            single_name.clone().into_pyobject(py)?.into_any(),
+            data_array.getattr("dtype")?.into_any(),
+        ],
+    )?)?;
     let new_dtype = numpy.getattr("dtype")?.call1((descr,))?;
 
     let zeros_fn = numpy.getattr("zeros")?;
@@ -12515,10 +12746,13 @@ fn recfunctions_merge_arrays(
     let descr = PyList::empty(py);
     for (idx, arr) in arrays.iter().enumerate() {
         let field_name = format!("f{idx}");
-        descr.append(PyTuple::new(py, [
-            field_name.into_pyobject(py)?.into_any(),
-            arr.getattr("dtype")?.into_any(),
-        ])?)?;
+        descr.append(PyTuple::new(
+            py,
+            [
+                field_name.into_pyobject(py)?.into_any(),
+                arr.getattr("dtype")?.into_any(),
+            ],
+        )?)?;
     }
     let new_dtype = numpy.getattr("dtype")?.call1((descr,))?;
 
@@ -12584,7 +12818,7 @@ fn recfunctions_unstructured_to_structured(
 
     let numpy = py.import("numpy")?;
     let source_shape: Vec<usize> = arr_bound.getattr("shape")?.extract()?;
-    if source_shape.len() < 1 {
+    if source_shape.is_empty() {
         return fallback(py);
     }
     let trailing = source_shape.last().copied().unwrap_or(0);
@@ -12607,7 +12841,10 @@ fn recfunctions_unstructured_to_structured(
     let zeros_fn = numpy.getattr("zeros")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", dtype_val)?;
-    let out = zeros_fn.call((PyTuple::new(py, out_shape.iter().copied())?,), Some(&kwargs))?;
+    let out = zeros_fn.call(
+        (PyTuple::new(py, out_shape.iter().copied())?,),
+        Some(&kwargs),
+    )?;
 
     // Copy each slice [..., i] into field i of the output.
     let builtins = py.import("builtins")?;
@@ -12767,10 +13004,7 @@ fn pad(
     }
     Ok(numpy
         .getattr("pad")?
-        .call(
-            (array.bind(py), pad_width.bind(py)),
-            Some(&call_kwargs),
-        )?
+        .call((array.bind(py), pad_width.bind(py)), Some(&call_kwargs))?
         .unbind())
 }
 
@@ -12992,7 +13226,9 @@ fn average(
         }
         kwargs.set_item("returned", returned)?;
         kwargs.set_item("keepdims", keepdims)?;
-        Ok(avg_fn.call((a_for_fallback.bind(py),), Some(&kwargs))?.unbind())
+        Ok(avg_fn
+            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .unbind())
     };
 
     if keepdims {
@@ -13051,11 +13287,8 @@ fn average(
                         return fallback();
                     }
                     if returned {
-                        sum_of_weights = Some(
-                            weights
-                                .reduce_sum(None, false)
-                                .map_err(map_ufunc_error)?,
-                        );
+                        sum_of_weights =
+                            Some(weights.reduce_sum(None, false).map_err(map_ufunc_error)?);
                     }
                     match a.average(Some(&weights), None) {
                         Ok(average) => average,
@@ -13099,9 +13332,11 @@ fn average(
     if returned {
         let sum_of_weights = sum_of_weights.expect("sum_of_weights must be set when returned=true");
         let sum_output = build_numpy_scalar_or_array(py, &sum_of_weights)?;
-        return Ok(PyTuple::new(py, [average_output.bind(py), sum_output.bind(py)])?
-            .into_any()
-            .unbind());
+        return Ok(
+            PyTuple::new(py, [average_output.bind(py), sum_output.bind(py)])?
+                .into_any()
+                .unbind(),
+        );
     }
     Ok(average_output)
 }
@@ -13240,11 +13475,7 @@ fn testing_assert_approx_equal(
 
 #[pyfunction]
 #[pyo3(signature = (actual, desired))]
-fn testing_assert_string_equal(
-    py: Python<'_>,
-    actual: &str,
-    desired: &str,
-) -> PyResult<()> {
+fn testing_assert_string_equal(py: Python<'_>, actual: &str, desired: &str) -> PyResult<()> {
     // Passthrough to numpy.testing.assert_string_equal. Raises
     // AssertionError if the two strings differ; otherwise returns None.
     let numpy = py.import("numpy")?;
@@ -13283,14 +13514,16 @@ fn testing_assert_allclose(
     // Native path handles numeric (non-complex) inputs. Use our allclose
     // kernel with broadcasting to determine pass/fail. Delegate on complex
     // / object / integer-sidecar inputs so numpy owns the dispatch surface.
-    let array_a = match extract_precise_numeric_array(py, actual.bind(py), "assert_allclose(actual)") {
-        Ok(value) => value,
-        Err(_) => return fallback(py),
-    };
-    let array_b = match extract_precise_numeric_array(py, desired.bind(py), "assert_allclose(desired)") {
-        Ok(value) => value,
-        Err(_) => return fallback(py),
-    };
+    let array_a =
+        match extract_precise_numeric_array(py, actual.bind(py), "assert_allclose(actual)") {
+            Ok(value) => value,
+            Err(_) => return fallback(py),
+        };
+    let array_b =
+        match extract_precise_numeric_array(py, desired.bind(py), "assert_allclose(desired)") {
+            Ok(value) => value,
+            Err(_) => return fallback(py),
+        };
     if array_a.has_integer_sidecar()
         || array_b.has_integer_sidecar()
         || matches!(array_a.dtype(), DType::Complex64 | DType::Complex128)
@@ -13343,14 +13576,16 @@ fn testing_assert_array_equal(
         // so its dtype-name message surface stays exact.
         return fallback(py);
     }
-    let array_a = match extract_precise_numeric_array(py, actual.bind(py), "assert_array_equal(actual)") {
-        Ok(value) => value,
-        Err(_) => return fallback(py),
-    };
-    let array_b = match extract_precise_numeric_array(py, desired.bind(py), "assert_array_equal(desired)") {
-        Ok(value) => value,
-        Err(_) => return fallback(py),
-    };
+    let array_a =
+        match extract_precise_numeric_array(py, actual.bind(py), "assert_array_equal(actual)") {
+            Ok(value) => value,
+            Err(_) => return fallback(py),
+        };
+    let array_b =
+        match extract_precise_numeric_array(py, desired.bind(py), "assert_array_equal(desired)") {
+            Ok(value) => value,
+            Err(_) => return fallback(py),
+        };
     if array_a.has_integer_sidecar()
         || array_b.has_integer_sidecar()
         || matches!(array_a.dtype(), DType::Complex64 | DType::Complex128)
@@ -13381,9 +13616,8 @@ fn testing_assert_array_equal(
 fn matrix_transpose(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let matrix_transpose_fn = numpy.getattr("linalg")?.getattr("matrix_transpose")?;
-    let fallback = || -> PyResult<Py<PyAny>> {
-        Ok(matrix_transpose_fn.call1((x.bind(py),))?.unbind())
-    };
+    let fallback =
+        || -> PyResult<Py<PyAny>> { Ok(matrix_transpose_fn.call1((x.bind(py),))?.unbind()) };
 
     let x = match extract_numeric_array(py, x.bind(py), "matrix_transpose(x)") {
         Ok(array) => array,
@@ -13415,15 +13649,21 @@ fn svdvals(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (n, m=None, k=0, dtype=None, order="C"))]
+#[pyo3(signature = (N, M=None, k=0, dtype=None, order="C"))]
+#[allow(non_snake_case)]
 fn eye(
     py: Python<'_>,
-    n: i64,
-    m: Option<i64>,
+    N: i64,
+    M: Option<i64>,
     k: i64,
     dtype: Option<Py<PyAny>>,
     order: &str,
 ) -> PyResult<Py<PyAny>> {
+    // numpy.eye exposes capital `N` and `M` as kwarg names; the Rust
+    // params here match those exactly so that `fnp_python.eye(N=3, M=5)`
+    // and `fnp_python.eye(3, M=5)` both accept the numpy spelling.
+    let n = N;
+    let m = M;
     let numpy = py.import("numpy")?;
     let eye_fn = numpy.getattr("eye")?;
     let dtype_for_parse = dtype.as_ref().map(|value| value.clone_ref(py));
@@ -13642,24 +13882,27 @@ fn sort(
     let stable_kwarg = kwargs.and_then(|kw| kw.get_item("stable").ok().flatten());
     let kind_arg = kwargs.and_then(|kw| kw.get_item("kind").ok().flatten());
     let mut kind: Option<&str> = None;
-    if let Some(k) = kind_arg.as_ref() {
-        if !k.is_none() {
-            // Only pass-through quicksort/stable/mergesort strings; numpy
-            // accepts various aliases but our UFuncArray::sort takes a
-            // subset, so keep a short allow-list.
-            let s: String = match k.extract() {
-                Ok(value) => value,
-                Err(_) => return fallback(py),
-            };
-            if !matches!(s.as_str(), "quicksort" | "mergesort" | "stable" | "heapsort") {
-                return fallback(py);
-            }
-            // Pass through `stable`/`mergesort` as stable sort flag.
-            kind = match s.as_str() {
-                "stable" | "mergesort" => Some("stable"),
-                _ => Some("quicksort"),
-            };
+    if let Some(k) = kind_arg.as_ref()
+        && !k.is_none()
+    {
+        // Only pass-through quicksort/stable/mergesort strings; numpy
+        // accepts various aliases but our UFuncArray::sort takes a
+        // subset, so keep a short allow-list.
+        let s: String = match k.extract() {
+            Ok(value) => value,
+            Err(_) => return fallback(py),
+        };
+        if !matches!(
+            s.as_str(),
+            "quicksort" | "mergesort" | "stable" | "heapsort"
+        ) {
+            return fallback(py);
         }
+        // Pass through `stable`/`mergesort` as stable sort flag.
+        kind = match s.as_str() {
+            "stable" | "mergesort" => Some("stable"),
+            _ => Some("quicksort"),
+        };
     }
     if stable_kwarg
         .as_ref()
@@ -13719,20 +13962,23 @@ fn argsort(
     let stable_kwarg = kwargs.and_then(|kw| kw.get_item("stable").ok().flatten());
     let kind_arg = kwargs.and_then(|kw| kw.get_item("kind").ok().flatten());
     let mut kind: Option<&str> = None;
-    if let Some(k) = kind_arg.as_ref() {
-        if !k.is_none() {
-            let s: String = match k.extract() {
-                Ok(value) => value,
-                Err(_) => return fallback(py),
-            };
-            if !matches!(s.as_str(), "quicksort" | "mergesort" | "stable" | "heapsort") {
-                return fallback(py);
-            }
-            kind = match s.as_str() {
-                "stable" | "mergesort" => Some("stable"),
-                _ => Some("quicksort"),
-            };
+    if let Some(k) = kind_arg.as_ref()
+        && !k.is_none()
+    {
+        let s: String = match k.extract() {
+            Ok(value) => value,
+            Err(_) => return fallback(py),
+        };
+        if !matches!(
+            s.as_str(),
+            "quicksort" | "mergesort" | "stable" | "heapsort"
+        ) {
+            return fallback(py);
         }
+        kind = match s.as_str() {
+            "stable" | "mergesort" => Some("stable"),
+            _ => Some("quicksort"),
+        };
     }
     if stable_kwarg
         .as_ref()
@@ -13809,9 +14055,7 @@ fn sort_complex(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let list = PyList::new(py, py_values.iter())?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "complex128")?;
-    Ok(numpy
-        .call_method("array", (list,), Some(&kwargs))?
-        .unbind())
+    Ok(numpy.call_method("array", (list,), Some(&kwargs))?.unbind())
 }
 
 #[pyfunction]
@@ -13888,7 +14132,9 @@ fn ma_average(
             kwargs.set_item("weights", weights_val.bind(py))?;
         }
         kwargs.set_item("returned", returned)?;
-        Ok(avg_fn.call((a_for_fallback.bind(py),), Some(&kwargs))?.unbind())
+        Ok(avg_fn
+            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .unbind())
     };
 
     let input_is_masked_array = extract_mask_metadata(py, a.bind(py), "ma_average(a)")
@@ -13935,11 +14181,12 @@ fn ma_average(
 
                 if !any_valid {
                     if returned {
-                        return Ok(
-                            PyTuple::new(py, [masked_scalar.bind(py), masked_scalar.bind(py)])?
-                                .into_any()
-                                .unbind(),
-                        );
+                        return Ok(PyTuple::new(
+                            py,
+                            [masked_scalar.bind(py), masked_scalar.bind(py)],
+                        )?
+                        .into_any()
+                        .unbind());
                     }
                     return Ok(masked_scalar);
                 }
@@ -13995,9 +14242,8 @@ fn ma_average(
                         let mut any_valid = false;
                         for lane_idx in 0..axis_len {
                             let src = base + lane_idx * inner + inner_idx;
-                            let data_masked = masked
-                                .mask()
-                                .is_some_and(|mask| mask.values()[src] != 0.0);
+                            let data_masked =
+                                masked.mask().is_some_and(|mask| mask.values()[src] != 0.0);
                             let weight_masked = masked_weights
                                 .mask()
                                 .is_some_and(|mask| mask.values()[lane_idx] != 0.0);
@@ -14038,14 +14284,12 @@ fn ma_average(
                 if out_shape.is_empty() {
                     if !any_valid_values[0] {
                         if returned {
-                            return Ok(
-                                PyTuple::new(
-                                    py,
-                                    [masked_scalar.bind(py), masked_scalar.bind(py)],
-                                )?
-                                .into_any()
-                                .unbind(),
-                            );
+                            return Ok(PyTuple::new(
+                                py,
+                                [masked_scalar.bind(py), masked_scalar.bind(py)],
+                            )?
+                            .into_any()
+                            .unbind());
                         }
                         return Ok(masked_scalar);
                     }
@@ -14059,11 +14303,12 @@ fn ma_average(
                             py,
                             &UFuncArray::scalar(sum_values[0], DType::F64),
                         )?;
-                        return Ok(
-                            PyTuple::new(py, [average_output.bind(py), sum_output.bind(py)])?
-                                .into_any()
-                                .unbind(),
-                        );
+                        return Ok(PyTuple::new(
+                            py,
+                            [average_output.bind(py), sum_output.bind(py)],
+                        )?
+                        .into_any()
+                        .unbind());
                     }
                     return Ok(average_output);
                 }
@@ -14130,9 +14375,11 @@ fn ma_average(
     if axis.is_none() && counts.values().first().copied().unwrap_or(0.0) == 0.0 {
         let masked_output = numpy.getattr("ma")?.getattr("masked")?.unbind();
         if returned {
-            return Ok(PyTuple::new(py, [masked_output.bind(py), counts_output.bind(py)])?
-                .into_any()
-                .unbind());
+            return Ok(
+                PyTuple::new(py, [masked_output.bind(py), counts_output.bind(py)])?
+                    .into_any()
+                    .unbind(),
+            );
         }
         return Ok(masked_output);
     }
@@ -14145,9 +14392,11 @@ fn ma_average(
     if axis.is_none() {
         let mean_output = build_numpy_scalar_or_array(py, mean.data())?;
         if returned {
-            return Ok(PyTuple::new(py, [mean_output.bind(py), counts_output.bind(py)])?
-                .into_any()
-                .unbind());
+            return Ok(
+                PyTuple::new(py, [mean_output.bind(py), counts_output.bind(py)])?
+                    .into_any()
+                    .unbind(),
+            );
         }
         return Ok(mean_output);
     }
@@ -14172,9 +14421,11 @@ fn ma_average(
         .bind(py)
         .call_method1("set_fill_value", (masked.fill_value(),))?;
     if returned {
-        return Ok(PyTuple::new(py, [py_result.bind(py), counts_output.bind(py)])?
-            .into_any()
-            .unbind());
+        return Ok(
+            PyTuple::new(py, [py_result.bind(py), counts_output.bind(py)])?
+                .into_any()
+                .unbind(),
+        );
     }
     Ok(py_result)
 }
@@ -14373,7 +14624,13 @@ fn make_mask(
         let is_ndarray = builtins
             .call_method1("isinstance", (source, numpy.getattr("ndarray")?))?
             .extract::<bool>()?;
-        if is_ndarray && source.getattr("dtype")?.getattr("kind")?.extract::<String>()? == "b" {
+        if is_ndarray
+            && source
+                .getattr("dtype")?
+                .getattr("kind")?
+                .extract::<String>()?
+                == "b"
+        {
             return Ok(source.clone().unbind());
         }
     }
@@ -14820,8 +15077,10 @@ fn masked_values(
         _ => return fallback(),
     };
 
-    let condition = if matches!(masked_x.data().dtype(), DType::F16 | DType::F32 | DType::F64)
-        || matches!(scalar.dtype(), DType::F16 | DType::F32 | DType::F64)
+    let condition = if matches!(
+        masked_x.data().dtype(),
+        DType::F16 | DType::F32 | DType::F64
+    ) || matches!(scalar.dtype(), DType::F16 | DType::F32 | DType::F64)
     {
         match masked_x.data().isclose(&scalar, rtol, atol) {
             Ok(condition) => condition,
@@ -14935,30 +15194,30 @@ fn ma_ediff1d(
     };
 
     let begin = match to_begin {
-        Some(value) => match extract_numeric_masked_array(py, value.bind(py), "ma_ediff1d(to_begin)")?
-        {
-            Some(value) => Some(value.ravel()),
-            None => return fallback(),
-        },
+        Some(value) => {
+            match extract_numeric_masked_array(py, value.bind(py), "ma_ediff1d(to_begin)")? {
+                Some(value) => Some(value.ravel()),
+                None => return fallback(),
+            }
+        }
         None => None,
     };
     let end = match to_end {
-        Some(value) => match extract_numeric_masked_array(py, value.bind(py), "ma_ediff1d(to_end)")?
-        {
-            Some(value) => Some(value.ravel()),
-            None => return fallback(),
-        },
+        Some(value) => {
+            match extract_numeric_masked_array(py, value.bind(py), "ma_ediff1d(to_end)")? {
+                Some(value) => Some(value.ravel()),
+                None => return fallback(),
+            }
+        }
         None => None,
     };
 
     let result = match (begin.as_ref(), end.as_ref()) {
         (None, None) => diff,
-        (Some(begin), None) => {
-            MaskedArray::concatenate(&[begin, &diff], 0).map_err(|err| map_ma_error("ma_ediff1d", err))?
-        }
-        (None, Some(end)) => {
-            MaskedArray::concatenate(&[&diff, end], 0).map_err(|err| map_ma_error("ma_ediff1d", err))?
-        }
+        (Some(begin), None) => MaskedArray::concatenate(&[begin, &diff], 0)
+            .map_err(|err| map_ma_error("ma_ediff1d", err))?,
+        (None, Some(end)) => MaskedArray::concatenate(&[&diff, end], 0)
+            .map_err(|err| map_ma_error("ma_ediff1d", err))?,
         (Some(begin), Some(end)) => MaskedArray::concatenate(&[begin, &diff, end], 0)
             .map_err(|err| map_ma_error("ma_ediff1d", err))?,
     };
@@ -14984,9 +15243,7 @@ fn ma_ediff1d(
             let explicit_mask = numpy
                 .getattr("zeros")?
                 .call((shape,), Some(&zeros_kwargs))?;
-            py_result
-                .bind(py)
-                .setattr("mask", explicit_mask)?;
+            py_result.bind(py).setattr("mask", explicit_mask)?;
         }
     }
     Ok(py_result)
@@ -15090,7 +15347,8 @@ fn count_masked(py: Python<'_>, arr: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyRe
 fn kron(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let kron_fn = numpy.getattr("kron")?;
-    let fallback = || -> PyResult<Py<PyAny>> { Ok(kron_fn.call1((a.bind(py), b.bind(py)))?.unbind()) };
+    let fallback =
+        || -> PyResult<Py<PyAny>> { Ok(kron_fn.call1((a.bind(py), b.bind(py)))?.unbind()) };
 
     let a = match extract_precise_numeric_array(py, a.bind(py), "kron(a)") {
         Ok(array) => array,
@@ -15162,8 +15420,11 @@ fn outer(
     if let Some(ref value) = out {
         kwargs.set_item("out", value.bind(py))?;
     }
-    let fallback =
-        || -> PyResult<Py<PyAny>> { Ok(outer_fn.call((a.bind(py), b.bind(py)), Some(&kwargs))?.unbind()) };
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(outer_fn
+            .call((a.bind(py), b.bind(py)), Some(&kwargs))?
+            .unbind())
+    };
 
     if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
         return fallback();
@@ -15355,7 +15616,11 @@ fn fft_shift_impl(
             } else if let Ok(multi) = bound.extract::<Vec<i64>>() {
                 let mut shifts = Vec::with_capacity(multi.len());
                 for &ax in &multi {
-                    let normalized = if ax < 0 { ax as isize + ndim } else { ax as isize };
+                    let normalized = if ax < 0 {
+                        ax as isize + ndim
+                    } else {
+                        ax as isize
+                    };
                     if normalized < 0 || normalized >= ndim {
                         return fallback();
                     }
@@ -15870,10 +16135,7 @@ fn take_along_axis(
         Ok(numpy
             .getattr("take_along_axis")?
             .call(
-                (
-                    arr_for_fallback.bind(py),
-                    indices_for_fallback.bind(py),
-                ),
+                (arr_for_fallback.bind(py), indices_for_fallback.bind(py)),
                 Some(&kwargs),
             )?
             .unbind())
@@ -15929,192 +16191,316 @@ fn core_numpy_passthrough(
 // Array creators
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn zeros(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn zeros(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "zeros", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn ones(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn ones(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "ones", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn empty(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn empty(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "empty", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn array(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn array(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "array", args, kwargs)
 }
 
 // Reductions
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn sum(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn sum(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "sum", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn prod(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn prod(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "prod", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn mean(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn mean(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "mean", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(name = "std", signature = (*args, **kwargs))]
-fn py_std(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn py_std(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "std", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn var(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn var(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "var", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(name = "min", signature = (*args, **kwargs))]
-fn py_min(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn py_min(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "min", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(name = "max", signature = (*args, **kwargs))]
-fn py_max(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn py_max(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "max", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn amax(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn amax(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "amax", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn amin(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn amin(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "amin", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn all(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn all(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "all", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn any(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn any(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "any", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn cumsum(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn cumsum(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "cumsum", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn cumprod(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn cumprod(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "cumprod", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn trace(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn trace(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "trace", args, kwargs)
 }
 
 // Arg reductions
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn argmax(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn argmax(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "argmax", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn argmin(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn argmin(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "argmin", args, kwargs)
 }
 
 // Linalg shortcuts
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn matmul(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn matmul(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "matmul", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn dot(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn dot(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "dot", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn einsum(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn einsum(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "einsum", args, kwargs)
 }
 
 // Set / shortcut helpers
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn unique(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn unique(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "unique", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn concat(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn concat(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "concat", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn conj(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn conj(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "conj", args, kwargs)
 }
 
 // Arithmetic aliases / ufunc variants
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn divide(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn divide(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "divide", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn power(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn power(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "power", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn log2(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn log2(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "log2", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn log10(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn log10(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "log10", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn exp2(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn exp2(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "exp2", args, kwargs)
 }
 
@@ -16131,262 +16517,430 @@ fn exp2(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyD
 // Trig (Array-API aliases for arc*/inverse trig — numpy exposes both).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn acos(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn acos(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "acos", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn acosh(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn acosh(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "acosh", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn asin(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn asin(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "asin", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn asinh(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn asinh(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "asinh", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn atan(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn atan(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "atan", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn atan2(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn atan2(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "atan2", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn atanh(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn atanh(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "atanh", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn tan(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn tan(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "tan", args, kwargs)
 }
 
 // Bitwise (11) — Array-API names + numpy legacy names.
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn bitwise_and(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn bitwise_and(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "bitwise_and", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn bitwise_count(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn bitwise_count(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "bitwise_count", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn bitwise_invert(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn bitwise_invert(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "bitwise_invert", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn bitwise_left_shift(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn bitwise_left_shift(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "bitwise_left_shift", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn bitwise_not(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn bitwise_not(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "bitwise_not", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn bitwise_or(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn bitwise_or(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "bitwise_or", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn bitwise_right_shift(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn bitwise_right_shift(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "bitwise_right_shift", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn bitwise_xor(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn bitwise_xor(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "bitwise_xor", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn left_shift(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn left_shift(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "left_shift", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn right_shift(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn right_shift(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "right_shift", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn gcd(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn gcd(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "gcd", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn lcm(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn lcm(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "lcm", args, kwargs)
 }
 
 // Comparison (6) — ufunc-style element-wise comparisons.
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn equal(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn equal(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "equal", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn not_equal(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn not_equal(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "not_equal", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn greater(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn greater(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "greater", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn greater_equal(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn greater_equal(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "greater_equal", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn less(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn less(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "less", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn less_equal(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn less_equal(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "less_equal", args, kwargs)
 }
 
 // Logical (4).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn logical_and(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn logical_and(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "logical_and", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn logical_not(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn logical_not(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "logical_not", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn logical_or(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn logical_or(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "logical_or", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn logical_xor(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn logical_xor(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "logical_xor", args, kwargs)
 }
 
 // Elementwise min/max and float-typed arithmetic (5).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn fmax(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn fmax(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "fmax", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn fmin(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn fmin(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "fmin", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn maximum(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn maximum(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "maximum", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn minimum(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn minimum(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "minimum", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn float_power(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn float_power(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "float_power", args, kwargs)
 }
 
 // Arithmetic: divmod + mod/remainder (3).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn divmod(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn divmod(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "divmod", args, kwargs)
 }
 
 // `mod` is a reserved word in Rust — use py_mod with name override.
 #[pyfunction]
 #[pyo3(name = "mod", signature = (*args, **kwargs))]
-fn py_mod(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn py_mod(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "mod", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn remainder(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn remainder(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "remainder", args, kwargs)
 }
 
 // Datetime-aware ufunc (1).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn isnat(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn isnat(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "isnat", args, kwargs)
 }
 
 // Peak-to-peak reduction (1).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn ptp(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn ptp(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "ptp", args, kwargs)
 }
 
 // Matrix gufunc siblings of matmul (2).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn vecmat(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn vecmat(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "vecmat", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn matvec(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn matvec(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "matvec", args, kwargs)
 }
 
@@ -16396,7 +16950,11 @@ fn matvec(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, P
 // lazy-imported.
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn linalg_cross(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn linalg_cross(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     let np_linalg = py.import("numpy.linalg")?;
     Ok(np_linalg.getattr("cross")?.call(args, kwargs)?.unbind())
 }
@@ -16405,9 +16963,16 @@ fn linalg_cross(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound
 // under numpy.linalg (not at top level).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn linalg_vector_norm(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn linalg_vector_norm(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     let np_linalg = py.import("numpy.linalg")?;
-    Ok(np_linalg.getattr("vector_norm")?.call(args, kwargs)?.unbind())
+    Ok(np_linalg
+        .getattr("vector_norm")?
+        .call(args, kwargs)?
+        .unbind())
 }
 
 // ---------------------------------------------------------------------------
@@ -16423,272 +16988,444 @@ fn linalg_vector_norm(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<
 // Casting / dtype predicates (6).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn astype(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn astype(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "astype", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn can_cast(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn can_cast(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "can_cast", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn promote_types(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn promote_types(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "promote_types", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn result_type(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn result_type(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "result_type", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn issubdtype(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn issubdtype(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "issubdtype", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn isdtype(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn isdtype(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "isdtype", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn isfortran(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn isfortran(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "isfortran", args, kwargs)
 }
 
 // Rounding aliases (2).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn around(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn around(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "around", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn round(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn round(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "round", args, kwargs)
 }
 
 // Dimension-promotion (3).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn atleast_1d(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn atleast_1d(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "atleast_1d", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn atleast_2d(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn atleast_2d(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "atleast_2d", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn atleast_3d(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn atleast_3d(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "atleast_3d", args, kwargs)
 }
 
 // Functional iteration helpers (2).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn apply_along_axis(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn apply_along_axis(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "apply_along_axis", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn apply_over_axes(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn apply_over_axes(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "apply_over_axes", args, kwargs)
 }
 
 // Block / Array-API aliases (5).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn block(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn block(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "block", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn cumulative_prod(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn cumulative_prod(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "cumulative_prod", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn cumulative_sum(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn cumulative_sum(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "cumulative_sum", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn unique_all(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn unique_all(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "unique_all", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn unique_counts(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn unique_counts(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "unique_counts", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn unique_inverse(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn unique_inverse(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "unique_inverse", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn unique_values(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn unique_values(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "unique_values", args, kwargs)
 }
 
 // Convolution / correlation / isclose (3).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn convolve(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn convolve(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "convolve", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn correlate(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn correlate(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "correlate", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn isclose(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn isclose(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "isclose", args, kwargs)
 }
 
 // NaN-aware cumulative (2).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn nancumprod(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn nancumprod(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "nancumprod", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn nancumsum(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn nancumsum(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "nancumsum", args, kwargs)
 }
 
 // Piecewise + shape intro (2).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn piecewise(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn piecewise(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "piecewise", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn shape(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn shape(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "shape", args, kwargs)
 }
 
 // Histogram family (2).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn histogram2d(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn histogram2d(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "histogram2d", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn histogramdd(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn histogramdd(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "histogramdd", args, kwargs)
 }
 
 // Busday calendar functions (3).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn busday_count(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn busday_count(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "busday_count", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn busday_offset(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn busday_offset(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "busday_offset", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn is_busday(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn is_busday(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "is_busday", args, kwargs)
 }
 
 // Datetime helpers (2).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn datetime_as_string(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn datetime_as_string(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "datetime_as_string", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn datetime_data(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn datetime_data(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "datetime_data", args, kwargs)
 }
 
 // String-format helpers (4).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn format_float_positional(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn format_float_positional(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "format_float_positional", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn format_float_scientific(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn format_float_scientific(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "format_float_scientific", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn binary_repr(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn binary_repr(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "binary_repr", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn base_repr(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn base_repr(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "base_repr", args, kwargs)
 }
 
 // Array display helpers (3).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn array2string(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn array2string(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "array2string", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn array_repr(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn array_repr(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "array_repr", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn array_str(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn array_str(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "array_str", args, kwargs)
 }
 
 // Elementwise differences (1).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn ediff1d(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn ediff1d(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "ediff1d", args, kwargs)
 }
 
@@ -16697,19 +17434,31 @@ fn ediff1d(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, 
 // works verbatim.
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn set_printoptions(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn set_printoptions(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "set_printoptions", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn printoptions(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn printoptions(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "printoptions", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn setbufsize(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn setbufsize(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "setbufsize", args, kwargs)
 }
 
@@ -16718,24 +17467,36 @@ fn setbufsize(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'
 // of the numpy.__all__ coverage target.
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn asmatrix(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn asmatrix(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "asmatrix", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn bmat(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn bmat(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "bmat", args, kwargs)
 }
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
-fn get_include(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
+fn get_include(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "get_include", args, kwargs)
 }
 
 #[pymodule]
-fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
     m.add_class::<PyNditerStep>()?;
     m.add_class::<PyNditer>()?;
@@ -17039,7 +17800,10 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(recfunctions_rename_fields, m)?)?;
     m.add_function(wrap_pyfunction!(recfunctions_append_fields, m)?)?;
     m.add_function(wrap_pyfunction!(recfunctions_merge_arrays, m)?)?;
-    m.add_function(wrap_pyfunction!(recfunctions_unstructured_to_structured, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        recfunctions_unstructured_to_structured,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(i0, m)?)?;
     m.add_function(wrap_pyfunction!(asfortranarray, m)?)?;
     m.add_function(wrap_pyfunction!(isrealobj, m)?)?;
@@ -17270,15 +18034,58 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // complex256) are skipped gracefully on systems that lack them.
     if let Ok(numpy) = py.import("numpy") {
         const NUMPY_DTYPE_SCALARS: &[&str] = &[
-            "bool", "bool_", "byte", "bytes_", "cdouble", "character",
-            "clongdouble", "complex128", "complex256", "complex64",
-            "complexfloating", "csingle", "datetime64", "double", "flexible",
-            "float128", "float16", "float32", "float64", "floating", "generic",
-            "half", "inexact", "int16", "int32", "int64", "int8", "intc",
-            "integer", "intp", "longdouble", "longlong", "number", "object_",
-            "short", "signedinteger", "single", "str_", "timedelta64", "ubyte",
-            "uint", "uint16", "uint32", "uint64", "uint8", "uintc", "uintp",
-            "ulong", "ulonglong", "ushort", "unsignedinteger", "void",
+            "bool",
+            "bool_",
+            "byte",
+            "bytes_",
+            "cdouble",
+            "character",
+            "clongdouble",
+            "complex128",
+            "complex256",
+            "complex64",
+            "complexfloating",
+            "csingle",
+            "datetime64",
+            "double",
+            "flexible",
+            "float128",
+            "float16",
+            "float32",
+            "float64",
+            "floating",
+            "generic",
+            "half",
+            "inexact",
+            "int16",
+            "int32",
+            "int64",
+            "int8",
+            "intc",
+            "integer",
+            "intp",
+            "longdouble",
+            "longlong",
+            "number",
+            "object_",
+            "short",
+            "signedinteger",
+            "single",
+            "str_",
+            "timedelta64",
+            "ubyte",
+            "uint",
+            "uint16",
+            "uint32",
+            "uint64",
+            "uint8",
+            "uintc",
+            "uintp",
+            "ulong",
+            "ulonglong",
+            "ushort",
+            "unsignedinteger",
+            "void",
         ];
         for name in NUMPY_DTYPE_SCALARS {
             if let Ok(value) = numpy.getattr(*name) {
@@ -17294,9 +18101,24 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // For the parity-oracle mode we re-export numpy's class object so
         // that `fnp_python.errstate() == numpy.errstate()` behaviourally.
         const NUMPY_CLASS_NAMES: &[&str] = &[
-            "broadcast", "busdaycalendar", "dtype", "errstate", "finfo",
-            "flatiter", "iinfo", "int_", "long", "matrix", "memmap", "ndarray",
-            "ndenumerate", "ndindex", "nditer", "poly1d", "recarray", "record",
+            "broadcast",
+            "busdaycalendar",
+            "dtype",
+            "errstate",
+            "finfo",
+            "flatiter",
+            "iinfo",
+            "int_",
+            "long",
+            "matrix",
+            "memmap",
+            "ndarray",
+            "ndenumerate",
+            "ndindex",
+            "nditer",
+            "poly1d",
+            "recarray",
+            "record",
             "ufunc",
         ];
         for name in NUMPY_CLASS_NAMES {
@@ -17387,11 +18209,11 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // install a lazy __getattr__ so `linalg.LinAlgError` still resolves
         // the first time user code that *does* have numpy accesses it.
         let mut linalg_error_cached = false;
-        if let Ok(np_linalg) = py.import("numpy.linalg") {
-            if let Ok(exc) = np_linalg.getattr("LinAlgError") {
-                linalg.setattr("LinAlgError", exc)?;
-                linalg_error_cached = true;
-            }
+        if let Ok(np_linalg) = py.import("numpy.linalg")
+            && let Ok(exc) = np_linalg.getattr("LinAlgError")
+        {
+            linalg.setattr("LinAlgError", exc)?;
+            linalg_error_cached = true;
         }
         if !linalg_error_cached {
             let getattr_src = pyo3::ffi::c_str!(
@@ -17461,7 +18283,10 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             ("assert_allclose", "testing_assert_allclose"),
             ("assert_equal", "testing_assert_equal"),
             ("assert_almost_equal", "testing_assert_almost_equal"),
-            ("assert_array_almost_equal", "testing_assert_array_almost_equal"),
+            (
+                "assert_array_almost_equal",
+                "testing_assert_array_almost_equal",
+            ),
             ("assert_array_less", "testing_assert_array_less"),
             ("assert_approx_equal", "testing_assert_approx_equal"),
             ("assert_string_equal", "testing_assert_string_equal"),
@@ -17484,7 +18309,10 @@ fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             ("rename_fields", "recfunctions_rename_fields"),
             ("append_fields", "recfunctions_append_fields"),
             ("merge_arrays", "recfunctions_merge_arrays"),
-            ("unstructured_to_structured", "recfunctions_unstructured_to_structured"),
+            (
+                "unstructured_to_structured",
+                "recfunctions_unstructured_to_structured",
+            ),
         ] {
             if let Ok(value) = m.getattr(flat_name) {
                 recfunctions.add(numpy_name, value)?;
@@ -17573,7 +18401,10 @@ mod tests {
     impl Drop for AttrGuard {
         fn drop(&mut self) {
             Python::attach(|py| {
-                let _ = self.owner.bind(py).setattr(self.name, self.original.bind(py));
+                let _ = self
+                    .owner
+                    .bind(py)
+                    .setattr(self.name, self.original.bind(py));
             });
         }
     }
@@ -17976,7 +18807,11 @@ mod tests {
             assert!(module.getattr("recfunctions_rename_fields").is_ok());
             assert!(module.getattr("recfunctions_append_fields").is_ok());
             assert!(module.getattr("recfunctions_merge_arrays").is_ok());
-            assert!(module.getattr("recfunctions_unstructured_to_structured").is_ok());
+            assert!(
+                module
+                    .getattr("recfunctions_unstructured_to_structured")
+                    .is_ok()
+            );
             assert!(module.getattr("i0").is_ok());
             assert!(module.getattr("asfortranarray").is_ok());
             assert!(module.getattr("isrealobj").is_ok());
@@ -18121,14 +18956,48 @@ mod tests {
 
             // k74v.1 ufunc passthrough wrappers (42 new + ptp).
             for name in [
-                "acos", "acosh", "asin", "asinh", "atan", "atan2", "atanh", "tan",
-                "bitwise_and", "bitwise_count", "bitwise_invert", "bitwise_left_shift",
-                "bitwise_not", "bitwise_or", "bitwise_right_shift", "bitwise_xor",
-                "left_shift", "right_shift", "gcd", "lcm",
-                "equal", "not_equal", "greater", "greater_equal", "less", "less_equal",
-                "logical_and", "logical_not", "logical_or", "logical_xor",
-                "fmax", "fmin", "maximum", "minimum", "float_power",
-                "divmod", "mod", "remainder", "isnat", "ptp", "vecmat", "matvec",
+                "acos",
+                "acosh",
+                "asin",
+                "asinh",
+                "atan",
+                "atan2",
+                "atanh",
+                "tan",
+                "bitwise_and",
+                "bitwise_count",
+                "bitwise_invert",
+                "bitwise_left_shift",
+                "bitwise_not",
+                "bitwise_or",
+                "bitwise_right_shift",
+                "bitwise_xor",
+                "left_shift",
+                "right_shift",
+                "gcd",
+                "lcm",
+                "equal",
+                "not_equal",
+                "greater",
+                "greater_equal",
+                "less",
+                "less_equal",
+                "logical_and",
+                "logical_not",
+                "logical_or",
+                "logical_xor",
+                "fmax",
+                "fmin",
+                "maximum",
+                "minimum",
+                "float_power",
+                "divmod",
+                "mod",
+                "remainder",
+                "isnat",
+                "ptp",
+                "vecmat",
+                "matvec",
             ] {
                 assert!(
                     module.getattr(name).is_ok(),
@@ -18138,22 +19007,55 @@ mod tests {
 
             // k74v.2 core-function passthrough wrappers (42).
             for name in [
-                "astype", "can_cast", "promote_types", "result_type", "issubdtype",
-                "isdtype", "isfortran", "around", "round",
-                "atleast_1d", "atleast_2d", "atleast_3d",
-                "apply_along_axis", "apply_over_axes", "block",
-                "cumulative_prod", "cumulative_sum",
-                "unique_all", "unique_counts", "unique_inverse", "unique_values",
-                "convolve", "correlate", "isclose",
-                "nancumprod", "nancumsum", "piecewise", "shape",
-                "histogram2d", "histogramdd",
-                "busday_count", "busday_offset", "is_busday",
-                "datetime_as_string", "datetime_data",
-                "format_float_positional", "format_float_scientific",
-                "binary_repr", "base_repr",
-                "array2string", "array_repr", "array_str",
-                "ediff1d", "set_printoptions", "printoptions", "setbufsize",
-                "asmatrix", "bmat", "get_include",
+                "astype",
+                "can_cast",
+                "promote_types",
+                "result_type",
+                "issubdtype",
+                "isdtype",
+                "isfortran",
+                "around",
+                "round",
+                "atleast_1d",
+                "atleast_2d",
+                "atleast_3d",
+                "apply_along_axis",
+                "apply_over_axes",
+                "block",
+                "cumulative_prod",
+                "cumulative_sum",
+                "unique_all",
+                "unique_counts",
+                "unique_inverse",
+                "unique_values",
+                "convolve",
+                "correlate",
+                "isclose",
+                "nancumprod",
+                "nancumsum",
+                "piecewise",
+                "shape",
+                "histogram2d",
+                "histogramdd",
+                "busday_count",
+                "busday_offset",
+                "is_busday",
+                "datetime_as_string",
+                "datetime_data",
+                "format_float_positional",
+                "format_float_scientific",
+                "binary_repr",
+                "base_repr",
+                "array2string",
+                "array_repr",
+                "array_str",
+                "ediff1d",
+                "set_printoptions",
+                "printoptions",
+                "setbufsize",
+                "asmatrix",
+                "bmat",
+                "get_include",
             ] {
                 assert!(
                     module.getattr(name).is_ok(),
@@ -18199,9 +19101,7 @@ mod tests {
             let ours_isdt = module
                 .getattr("isdtype")?
                 .call1((int32_dtype.clone(), "integral"))?;
-            let theirs_isdt = numpy
-                .getattr("isdtype")?
-                .call1((int32_dtype, "integral"))?;
+            let theirs_isdt = numpy.getattr("isdtype")?.call1((int32_dtype, "integral"))?;
             assert_eq!(
                 ours_isdt.repr()?.extract::<String>()?,
                 theirs_isdt.repr()?.extract::<String>()?,
@@ -18210,7 +19110,9 @@ mod tests {
             let ours_pt = module
                 .getattr("promote_types")?
                 .call1(("int32", "float64"))?;
-            let theirs_pt = numpy.getattr("promote_types")?.call1(("int32", "float64"))?;
+            let theirs_pt = numpy
+                .getattr("promote_types")?
+                .call1(("int32", "float64"))?;
             assert_eq!(
                 ours_pt.repr()?.extract::<String>()?,
                 theirs_pt.repr()?.extract::<String>()?,
@@ -18252,7 +19154,9 @@ mod tests {
             let ours_uv = module.getattr("unique_values")?.call1((u_in.clone(),))?;
             let theirs_uv = numpy.getattr("unique_values")?.call1((u_in,))?;
             assert!(
-                array_equal.call1((&ours_uv, &theirs_uv))?.extract::<bool>()?,
+                array_equal
+                    .call1((&ours_uv, &theirs_uv))?
+                    .extract::<bool>()?,
                 "unique_values diverged"
             );
 
@@ -18279,7 +19183,9 @@ mod tests {
             let ours_ic = module.getattr("isclose")?.call1((l.clone(), r.clone()))?;
             let theirs_ic = numpy.getattr("isclose")?.call1((l, r))?;
             assert!(
-                array_equal.call1((&ours_ic, &theirs_ic))?.extract::<bool>()?,
+                array_equal
+                    .call1((&ours_ic, &theirs_ic))?
+                    .extract::<bool>()?,
                 "isclose diverged"
             );
 
@@ -18300,9 +19206,9 @@ mod tests {
             }
 
             // NaN cumulative variants on a small NaN-containing vector.
-            let nan_in = numpy.getattr("array")?.call1((
-                PyList::new(py, [1.0_f64, f64::NAN, 3.0, 4.0])?,
-            ))?;
+            let nan_in = numpy
+                .getattr("array")?
+                .call1((PyList::new(py, [1.0_f64, f64::NAN, 3.0, 4.0])?,))?;
             for name in ["nancumsum", "nancumprod"] {
                 let ours = module.getattr(name)?.call1((nan_in.clone(),))?;
                 let theirs = numpy.getattr(name)?.call1((nan_in.clone(),))?;
@@ -18333,10 +19239,16 @@ mod tests {
                 .getattr("array")?
                 .call1((PyList::new(py, ["2024-01-08"])?,))?
                 .call_method1("astype", ("datetime64[D]",))?;
-            let ours_bc = module.getattr("busday_count")?.call1((d1.clone(), d2.clone()))?;
-            let theirs_bc = numpy.getattr("busday_count")?.call1((d1.clone(), d2.clone()))?;
+            let ours_bc = module
+                .getattr("busday_count")?
+                .call1((d1.clone(), d2.clone()))?;
+            let theirs_bc = numpy
+                .getattr("busday_count")?
+                .call1((d1.clone(), d2.clone()))?;
             assert!(
-                array_equal.call1((&ours_bc, &theirs_bc))?.extract::<bool>()?,
+                array_equal
+                    .call1((&ours_bc, &theirs_bc))?
+                    .extract::<bool>()?,
                 "busday_count diverged"
             );
 
@@ -18357,8 +19269,12 @@ mod tests {
             );
 
             // format_float_positional.
-            let ours_ff = module.getattr("format_float_positional")?.call1((3.14_f64,))?;
-            let theirs_ff = numpy.getattr("format_float_positional")?.call1((3.14_f64,))?;
+            let ours_ff = module
+                .getattr("format_float_positional")?
+                .call1((std::f64::consts::PI,))?;
+            let theirs_ff = numpy
+                .getattr("format_float_positional")?
+                .call1((std::f64::consts::PI,))?;
             assert_eq!(
                 ours_ff.repr()?.extract::<String>()?,
                 theirs_ff.repr()?.extract::<String>()?,
@@ -18382,13 +19298,38 @@ mod tests {
             // linalg submodule.
             let linalg = module.getattr("linalg")?;
             let mut linalg_names: Vec<&str> = vec![
-                "eig", "matrix_norm", "vecdot",
-                "svd", "svdvals", "qr", "lstsq", "solve", "inv",
-                "cholesky", "slogdet", "matrix_rank", "matrix_power",
-                "matrix_transpose", "pinv", "norm", "cond", "tensorinv",
-                "tensorsolve", "multi_dot", "det", "solve_triangular",
-                "eigh", "eigvals", "eigvalsh", "cross", "tensordot", "matmul",
-                "diagonal", "outer", "trace", "vector_norm",
+                "eig",
+                "matrix_norm",
+                "vecdot",
+                "svd",
+                "svdvals",
+                "qr",
+                "lstsq",
+                "solve",
+                "inv",
+                "cholesky",
+                "slogdet",
+                "matrix_rank",
+                "matrix_power",
+                "matrix_transpose",
+                "pinv",
+                "norm",
+                "cond",
+                "tensorinv",
+                "tensorsolve",
+                "multi_dot",
+                "det",
+                "solve_triangular",
+                "eigh",
+                "eigvals",
+                "eigvalsh",
+                "cross",
+                "tensordot",
+                "matmul",
+                "diagonal",
+                "outer",
+                "trace",
+                "vector_norm",
             ];
             // LinAlgError is a numpy type re-export — only verify when numpy
             // is actually importable on the host Python. On numpy-less CI
@@ -18406,27 +19347,50 @@ mod tests {
             // ma submodule.
             let ma = module.getattr("ma")?;
             for name in [
-                "count", "argmax", "argmin", "average", "ediff1d",
-                "masked_where", "masked_equal", "masked_not_equal",
-                "masked_less", "masked_greater", "masked_less_equal",
-                "masked_greater_equal", "masked_inside", "masked_outside",
-                "masked_values", "masked_invalid", "masked_all",
-                "compressed", "getmask", "getmaskarray", "is_masked",
-                "mask_or", "make_mask", "allequal", "count_masked",
-                "minimum_fill_value", "maximum_fill_value", "filled", "fix_invalid",
+                "count",
+                "argmax",
+                "argmin",
+                "average",
+                "ediff1d",
+                "masked_where",
+                "masked_equal",
+                "masked_not_equal",
+                "masked_less",
+                "masked_greater",
+                "masked_less_equal",
+                "masked_greater_equal",
+                "masked_inside",
+                "masked_outside",
+                "masked_values",
+                "masked_invalid",
+                "masked_all",
+                "compressed",
+                "getmask",
+                "getmaskarray",
+                "is_masked",
+                "mask_or",
+                "make_mask",
+                "allequal",
+                "count_masked",
+                "minimum_fill_value",
+                "maximum_fill_value",
+                "filled",
+                "fix_invalid",
             ] {
-                assert!(
-                    ma.getattr(name).is_ok(),
-                    "fnp_python.ma.{name} missing"
-                );
+                assert!(ma.getattr(name).is_ok(), "fnp_python.ma.{name} missing");
             }
 
             // testing submodule.
             let testing = module.getattr("testing")?;
             for name in [
-                "assert_allclose", "assert_equal", "assert_almost_equal",
-                "assert_array_almost_equal", "assert_array_less",
-                "assert_approx_equal", "assert_string_equal", "assert_array_equal",
+                "assert_allclose",
+                "assert_equal",
+                "assert_almost_equal",
+                "assert_array_almost_equal",
+                "assert_array_less",
+                "assert_approx_equal",
+                "assert_string_equal",
+                "assert_array_equal",
             ] {
                 assert!(
                     testing.getattr(name).is_ok(),
@@ -18438,8 +19402,11 @@ mod tests {
             let lib_mod = module.getattr("lib")?;
             let recfunctions = lib_mod.getattr("recfunctions")?;
             for name in [
-                "drop_fields", "rename_fields", "append_fields",
-                "merge_arrays", "unstructured_to_structured",
+                "drop_fields",
+                "rename_fields",
+                "append_fields",
+                "merge_arrays",
+                "unstructured_to_structured",
             ] {
                 assert!(
                     recfunctions.getattr(name).is_ok(),
@@ -18614,12 +19581,16 @@ mod tests {
             let ours_nat = module.getattr("isnat")?.call1((dates.clone(),))?;
             let theirs_nat = numpy.getattr("isnat")?.call1((dates,))?;
             assert!(
-                array_equal.call1((&ours_nat, &theirs_nat))?.extract::<bool>()?,
+                array_equal
+                    .call1((&ours_nat, &theirs_nat))?
+                    .extract::<bool>()?,
                 "isnat passthrough diverged"
             );
 
             // ptp reduction.
-            let pt_in = numpy.getattr("array")?.call1((PyList::new(py, [1_i64, 5, 3, 8, 2])?,))?;
+            let pt_in = numpy
+                .getattr("array")?
+                .call1((PyList::new(py, [1_i64, 5, 3, 8, 2])?,))?;
             let ours_ptp = module.getattr("ptp")?.call1((pt_in.clone(),))?;
             let theirs_ptp = numpy.getattr("ptp")?.call1((pt_in,))?;
             assert_eq!(
@@ -18630,23 +19601,34 @@ mod tests {
 
             // Matrix gufunc siblings: vecmat (M,) @ (M, N) -> (N,),
             // matvec (M, N) @ (N,) -> (M,).
-            let mat = numpy
+            let mat = numpy.getattr("array")?.call1((PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 2.0])?,
+                    PyList::new(py, [3.0, 4.0])?,
+                ],
+            )?,))?;
+            let vec = numpy
                 .getattr("array")?
-                .call1((PyList::new(
-                    py,
-                    [PyList::new(py, [1.0_f64, 2.0])?, PyList::new(py, [3.0, 4.0])?],
-                )?,))?;
-            let vec = numpy.getattr("array")?.call1((PyList::new(py, [1.0_f64, 2.0])?,))?;
-            let ours_vm = module.getattr("vecmat")?.call1((vec.clone(), mat.clone()))?;
+                .call1((PyList::new(py, [1.0_f64, 2.0])?,))?;
+            let ours_vm = module
+                .getattr("vecmat")?
+                .call1((vec.clone(), mat.clone()))?;
             let theirs_vm = numpy.getattr("vecmat")?.call1((vec.clone(), mat.clone()))?;
             assert!(
-                array_equal.call1((&ours_vm, &theirs_vm))?.extract::<bool>()?,
+                array_equal
+                    .call1((&ours_vm, &theirs_vm))?
+                    .extract::<bool>()?,
                 "vecmat passthrough diverged"
             );
-            let ours_mv = module.getattr("matvec")?.call1((mat.clone(), vec.clone()))?;
+            let ours_mv = module
+                .getattr("matvec")?
+                .call1((mat.clone(), vec.clone()))?;
             let theirs_mv = numpy.getattr("matvec")?.call1((mat, vec))?;
             assert!(
-                array_equal.call1((&ours_mv, &theirs_mv))?.extract::<bool>()?,
+                array_equal
+                    .call1((&ours_mv, &theirs_mv))?
+                    .extract::<bool>()?,
                 "matvec passthrough diverged"
             );
 
@@ -19136,10 +20118,9 @@ mod tests {
 
             let _guard = AttrGuard::new(&numpy, "frompyfunc")?;
             numpy.setattr("frompyfunc", poison.getattr("fail")?)?;
-            let ufunc =
-                module
-                    .getattr("frompyfunc")?
-                    .call1((operator.getattr("mul")?, 2, 1))?;
+            let ufunc = module
+                .getattr("frompyfunc")?
+                .call1((operator.getattr("mul")?, 2, 1))?;
 
             assert_eq!(repr_string(&ufunc.getattr("identity")?), "None");
             assert_eq!(
@@ -20500,7 +21481,9 @@ mod tests {
             let numpy_take = numpy.getattr("take")?;
 
             let arr = numeric_array(py, vec![1_i64, 2, 3], "int64");
-            let ours = take_fn.call1((arr.clone(), 10_i64)).expect_err("take(10) must error");
+            let ours = take_fn
+                .call1((arr.clone(), 10_i64))
+                .expect_err("take(10) must error");
             let theirs = numpy_take
                 .call1((arr, 10_i64))
                 .expect_err("numpy take(10) must error");
@@ -20575,11 +21558,7 @@ mod tests {
             let take_along_axis_fn = module.getattr("take_along_axis")?;
             let numpy_take_along_axis = numpy.getattr("take_along_axis")?;
 
-            let arr = numeric_array(
-                py,
-                vec![vec![1_i64, 2], vec![3, 4]],
-                "int64",
-            );
+            let arr = numeric_array(py, vec![vec![1_i64, 2], vec![3, 4]], "int64");
             let indices = numeric_array(py, vec![vec![5_i64], vec![0]], "int64");
 
             let ours = take_along_axis_fn
@@ -20698,11 +21677,19 @@ mod tests {
             let theirs_arr = numpy.getattr("zeros")?.call((3_i64,), None)?;
             let ours_err = module
                 .getattr("put")?
-                .call1((ours_arr, PyList::new(py, [5_i64])?, PyList::new(py, [9.0_f64])?))
+                .call1((
+                    ours_arr,
+                    PyList::new(py, [5_i64])?,
+                    PyList::new(py, [9.0_f64])?,
+                ))
                 .expect_err("put(5) must error");
             let theirs_err = numpy
                 .getattr("put")?
-                .call1((theirs_arr, PyList::new(py, [5_i64])?, PyList::new(py, [9.0_f64])?))
+                .call1((
+                    theirs_arr,
+                    PyList::new(py, [5_i64])?,
+                    PyList::new(py, [9.0_f64])?,
+                ))
                 .expect_err("numpy put(5) must error");
             assert_eq!(
                 ours_err.get_type(py).name()?.extract::<String>()?,
@@ -20758,8 +21745,10 @@ mod tests {
             fnp_python(&module)?;
             let numpy = py.import("numpy")?;
 
-            let empty: Py<PyAny> =
-                numpy.getattr("array")?.call1((PyList::empty(py),))?.unbind();
+            let empty: Py<PyAny> = numpy
+                .getattr("array")?
+                .call1((PyList::empty(py),))?
+                .unbind();
 
             for (our_name, np_name, q_val) in [
                 ("percentile", "percentile", 50.0_f64),
@@ -20805,8 +21794,7 @@ mod tests {
             let singular: Py<PyAny> =
                 numeric_array(py, vec![vec![1.0_f64, 2.0], vec![2.0, 4.0]], "float64").unbind();
             // Case 2: 1-D array (non-2d) for svd / svdvals / qr / eig.
-            let one_d: Py<PyAny> =
-                numeric_array(py, vec![1.0_f64, 2.0, 3.0], "float64").unbind();
+            let one_d: Py<PyAny> = numeric_array(py, vec![1.0_f64, 2.0, 3.0], "float64").unbind();
             // Case 3: non-square for slogdet.
             let non_square: Py<PyAny> = numeric_array(
                 py,
@@ -20967,9 +21955,7 @@ mod tests {
                     }
                     (Err(our), Ok(_)) => {
                         let ours_type = our.get_type(py).name()?.extract::<String>()?;
-                        divergences.push(format!(
-                            "{our_name}: ours={ours_type}, theirs=OK"
-                        ));
+                        divergences.push(format!("{our_name}: ours={ours_type}, theirs=OK"));
                     }
                 }
             }
@@ -21015,11 +22001,7 @@ mod tests {
             );
 
             // 2-D array with negative axis out of range.
-            let two_d = numeric_array(
-                py,
-                vec![vec![1_i64, 0, 3], vec![0, 5, 0]],
-                "int64",
-            );
+            let two_d = numeric_array(py, vec![vec![1_i64, 0, 3], vec![0, 5, 0]], "int64");
             let axis_neg_big: Py<PyAny> = (-3_i64).into_pyobject(py)?.unbind().into_any();
             let ours_neg = count_nonzero(py, two_d.clone().unbind(), Some(axis_neg_big), false)
                 .expect_err("count_nonzero 2-D axis=-3 must error");
@@ -21041,8 +22023,7 @@ mod tests {
             );
 
             // Tuple axis containing an out-of-range index.
-            let axis_tuple_bad: Py<PyAny> =
-                PyTuple::new(py, [0_i64, 7_i64])?.into_any().unbind();
+            let axis_tuple_bad: Py<PyAny> = PyTuple::new(py, [0_i64, 7_i64])?.into_any().unbind();
             let ours_tup = count_nonzero(py, two_d.clone().unbind(), Some(axis_tuple_bad), false)
                 .expect_err("count_nonzero 2-D axis=(0,7) must error");
             let theirs_tup = numpy
@@ -21911,7 +22892,8 @@ mod tests {
             assert_array_matches_numpy(&actual_float64_sq, &expected_float64_sq)?;
 
             let actual_float64_zero = matrix_power_fn.call1((float64_matrix.clone(), 0_i64))?;
-            let expected_float64_zero = numpy_matrix_power.call1((float64_matrix.clone(), 0_i64))?;
+            let expected_float64_zero =
+                numpy_matrix_power.call1((float64_matrix.clone(), 0_i64))?;
             assert_array_matches_numpy(&actual_float64_zero, &expected_float64_zero)?;
 
             let bool_matrix = numeric_array(py, vec![vec![true, false], vec![false, true]], "bool");
@@ -44007,9 +44989,7 @@ mod tests {
                 repr_string(&theirs_all_masked_returned)
             );
 
-            let weights = numpy
-                .getattr("array")?
-                .call1((vec![1.0_f64, 2.0, 3.0],))?;
+            let weights = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
             let ours_weighted = ma_average_fn.call(
                 (masked.clone(),),
                 Some(&{
@@ -44619,7 +45599,10 @@ mod tests {
                 .expect_err("numpy identity(-1) must error");
             assert_eq!(
                 ours_identity_err.get_type(py).name()?.extract::<String>()?,
-                theirs_identity_err.get_type(py).name()?.extract::<String>()?,
+                theirs_identity_err
+                    .get_type(py)
+                    .name()?
+                    .extract::<String>()?,
                 "identity(-1) error type diverged"
             );
 
@@ -45245,7 +46228,9 @@ mod tests {
             // Ravel view shares memory with its source; flatten is a copy.
             let ravel_view = a.call_method0("ravel")?;
             let ours_ravel: bool = msm_fn.call1((a.clone(), ravel_view.clone()))?.extract()?;
-            let theirs_ravel: bool = numpy_msm.call1((a.clone(), ravel_view.clone()))?.extract()?;
+            let theirs_ravel: bool = numpy_msm
+                .call1((a.clone(), ravel_view.clone()))?
+                .extract()?;
             assert_eq!(ours_ravel, theirs_ravel);
 
             let flatten_copy = a.call_method0("flatten")?;
@@ -45258,12 +46243,8 @@ mod tests {
             // Overlapping slice views: heuristic reports potential overlap.
             let slice_args = PyDict::new(py);
             let builtins = py.import("builtins")?;
-            let s1 = builtins
-                .getattr("slice")?
-                .call1((0_i64, 8_i64))?;
-            let s2 = builtins
-                .getattr("slice")?
-                .call1((2_i64, 10_i64))?;
+            let s1 = builtins.getattr("slice")?.call1((0_i64, 8_i64))?;
+            let s2 = builtins.getattr("slice")?.call1((2_i64, 10_i64))?;
             let _ = slice_args;
             let overlap_a = a.call_method1("__getitem__", (s1.clone(),))?;
             let overlap_b = a.call_method1("__getitem__", (s2.clone(),))?;
@@ -45285,7 +46266,10 @@ mod tests {
                 .call1((disjoint_a.clone(), disjoint_b.clone()))?
                 .extract()?;
             assert_eq!(ours_disjoint, theirs_disjoint);
-            assert!(!ours_disjoint, "independent arange arrays must not share memory");
+            assert!(
+                !ours_disjoint,
+                "independent arange arrays must not share memory"
+            );
 
             // Reversed / strided views still participate in the heuristic.
             let reversed = a.call_method1(
@@ -45317,17 +46301,11 @@ mod tests {
                 vec![4, 5, 6, 7],
                 vec![8, 9, 10, 11],
             ],))?;
-            let col_slice_0 = builtins
-                .getattr("slice")?
-                .call1((0_i64, 3_i64))?;
-            let col_slice_1 = builtins
-                .getattr("slice")?
-                .call1((1_i64, 4_i64))?;
+            let col_slice_0 = builtins.getattr("slice")?.call1((0_i64, 3_i64))?;
+            let col_slice_1 = builtins.getattr("slice")?.call1((1_i64, 4_i64))?;
             let cols_a = matrix.call_method1("__getitem__", ((py.Ellipsis(), col_slice_0),))?;
             let cols_b = matrix.call_method1("__getitem__", ((py.Ellipsis(), col_slice_1),))?;
-            let ours_cols: bool = msm_fn
-                .call1((cols_a.clone(), cols_b.clone()))?
-                .extract()?;
+            let ours_cols: bool = msm_fn.call1((cols_a.clone(), cols_b.clone()))?.extract()?;
             let theirs_cols: bool = numpy_msm
                 .call1((cols_a.clone(), cols_b.clone()))?
                 .extract()?;
@@ -45361,12 +46339,8 @@ mod tests {
             assert!(ours_self, "shares_memory(a,a) must be True");
 
             // Overlapping slice views: exact solver must confirm overlap.
-            let s1 = builtins
-                .getattr("slice")?
-                .call1((0_i64, 12_i64))?;
-            let s2 = builtins
-                .getattr("slice")?
-                .call1((6_i64, 18_i64))?;
+            let s1 = builtins.getattr("slice")?.call1((0_i64, 12_i64))?;
+            let s2 = builtins.getattr("slice")?.call1((6_i64, 18_i64))?;
             let ov_a = a.call_method1("__getitem__", (s1,))?;
             let ov_b = a.call_method1("__getitem__", (s2,))?;
             let ours_ov: bool = sm_fn.call1((ov_a.clone(), ov_b.clone()))?.extract()?;
@@ -45397,14 +46371,20 @@ mod tests {
             let ours_copy: bool = sm_fn.call1((a.clone(), copy.clone()))?.extract()?;
             let theirs_copy: bool = numpy_sm.call1((a.clone(), copy.clone()))?.extract()?;
             assert_eq!(ours_copy, theirs_copy);
-            assert!(!ours_copy, "flatten() copy must not share memory with source");
+            assert!(
+                !ours_copy,
+                "flatten() copy must not share memory with source"
+            );
 
             // Independent arrays: clearly False on both.
             let b = arange.call1((20_i64,))?;
             let ours_disjoint: bool = sm_fn.call1((a.clone(), b.clone()))?.extract()?;
             let theirs_disjoint: bool = numpy_sm.call1((a.clone(), b.clone()))?.extract()?;
             assert_eq!(ours_disjoint, theirs_disjoint);
-            assert!(!ours_disjoint, "independent arange arrays must not share memory");
+            assert!(
+                !ours_disjoint,
+                "independent arange arrays must not share memory"
+            );
 
             // max_work=0 surface parity: numpy raises MayShareMemoryError for
             // ambiguous cases where the heuristic is forced instead of the
@@ -45454,10 +46434,7 @@ mod tests {
 
             // Build a known bytes buffer of 8 int32 values as little-endian.
             let int_vals: Vec<i32> = vec![0, 1, 2, 3, 4, 5, 6, 7];
-            let int_bytes_vec: Vec<u8> = int_vals
-                .iter()
-                .flat_map(|v| v.to_le_bytes())
-                .collect();
+            let int_bytes_vec: Vec<u8> = int_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
             let int_buf = py
                 .import("builtins")?
                 .getattr("bytes")?
@@ -45684,26 +46661,19 @@ mod tests {
             // Short iterator with count > len must raise matching error.
             let short_kwargs = PyDict::new(py);
             short_kwargs.set_item("count", 10_i64)?;
-            let ours_short = fi_fn.call(
-                (vec![1_i64, 2, 3], int32.clone()),
-                Some(&short_kwargs),
-            );
-            let theirs_short = numpy_fi.call(
-                (vec![1_i64, 2, 3], int32.clone()),
-                Some(&short_kwargs),
-            );
+            let ours_short = fi_fn.call((vec![1_i64, 2, 3], int32.clone()), Some(&short_kwargs));
+            let theirs_short =
+                numpy_fi.call((vec![1_i64, 2, 3], int32.clone()), Some(&short_kwargs));
             match (ours_short, theirs_short) {
                 (Ok(a), Ok(b)) => assert_array_matches_numpy(&a, &b)?,
                 (Err(ours), Err(theirs)) => assert_pyerr_matches_numpy(py, ours, theirs)?,
-                _ => panic!(
-                    "fromiter short-iterator success/error surface must match numpy"
-                ),
+                _ => panic!("fromiter short-iterator success/error surface must match numpy"),
             }
 
             // Non-iterable input: TypeError parity.
-            let ours_err = fi_fn.call1((42_i64, int32.clone())).expect_err(
-                "non-iterable must error",
-            );
+            let ours_err = fi_fn
+                .call1((42_i64, int32.clone()))
+                .expect_err("non-iterable must error");
             let theirs_err = numpy_fi
                 .call1((42_i64, int32.clone()))
                 .expect_err("numpy must error too");
@@ -45803,7 +46773,10 @@ mod tests {
             let theirs_neg1 = numpy_log1p.call1((-1.0_f64,))?;
             let val_neg1: f64 = ours_neg1.extract()?;
             let val_neg1_theirs: f64 = theirs_neg1.extract()?;
-            assert!(val_neg1.is_infinite() && val_neg1 < 0.0, "log1p(-1) must be -inf");
+            assert!(
+                val_neg1.is_infinite() && val_neg1 < 0.0,
+                "log1p(-1) must be -inf"
+            );
             assert_eq!(val_neg1.is_infinite(), val_neg1_theirs.is_infinite());
             assert_eq!(val_neg1 < 0.0, val_neg1_theirs < 0.0);
 
@@ -45914,7 +46887,9 @@ mod tests {
             // radians(x) should agree with deg2rad(x) on both implementations.
             let radians_ours = radians_fn.call1((arr.clone(),))?;
             let radians_theirs = d2r_fn.call1((arr.clone(),))?;
-            let ok_alias: bool = allclose.call1((&radians_ours, &radians_theirs))?.extract()?;
+            let ok_alias: bool = allclose
+                .call1((&radians_ours, &radians_theirs))?
+                .extract()?;
             assert!(ok_alias, "deg2rad must equal radians on numeric input");
             assert_eq!(
                 radians_ours.getattr("dtype")?.str()?.to_string(),
@@ -45955,7 +46930,10 @@ mod tests {
             let ours_nz: f64 = fabs_fn.call1((neg_zero,))?.extract()?;
             let theirs_nz: f64 = numpy_fabs.call1((neg_zero,))?.extract()?;
             assert_eq!(ours_nz, theirs_nz);
-            assert!(ours_nz == 0.0 && !ours_nz.is_sign_negative(), "fabs(-0.0) must be +0.0");
+            assert!(
+                ours_nz == 0.0 && !ours_nz.is_sign_negative(),
+                "fabs(-0.0) must be +0.0"
+            );
 
             // 1-D mixed-sign array.
             let arr = array_fn.call1((vec![-2.5_f64, -1.0, 0.0, 1.0, 2.5, -100.0],))?;
@@ -46214,9 +47192,7 @@ mod tests {
             let errstate_kw = PyDict::new(py);
             errstate_kw.set_item("divide", "ignore")?;
             errstate_kw.set_item("invalid", "ignore")?;
-            let errstate_ctx = numpy
-                .getattr("errstate")?
-                .call((), Some(&errstate_kw))?;
+            let errstate_ctx = numpy.getattr("errstate")?.call((), Some(&errstate_kw))?;
             errstate_ctx.call_method0("__enter__")?;
             let nums = array_fn.call1((vec![1.0_f64, -1.0, 0.0],))?;
             let zeros = array_fn.call1((vec![0.0_f64, 0.0, 0.0],))?;
@@ -46232,14 +47208,15 @@ mod tests {
             let ok_div0: bool = allclose
                 .call((&ours_div0, &theirs_div0), Some(&nan_equiv_kw))?
                 .extract()?;
-            assert!(ok_div0, "floor_divide by zero (float) surface must match numpy");
+            assert!(
+                ok_div0,
+                "floor_divide by zero (float) surface must match numpy"
+            );
             errstate_ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
 
             // 2-D broadcast: (2,1) divisors and (1,3) numerators.
-            let lhs = array_fn
-                .call1((vec![vec![6_i64, 12, 18]],))?;
-            let rhs = array_fn
-                .call1((vec![vec![2_i64], vec![3_i64]],))?;
+            let lhs = array_fn.call1((vec![vec![6_i64, 12, 18]],))?;
+            let rhs = array_fn.call1((vec![vec![2_i64], vec![3_i64]],))?;
             let ours_bc = fd_fn.call1((lhs.clone(), rhs.clone()))?;
             let theirs_bc = numpy_fd.call1((lhs.clone(), rhs.clone()))?;
             assert_array_matches_numpy(&ours_bc, &theirs_bc)?;
@@ -46321,10 +47298,13 @@ mod tests {
             let pi = std::f64::consts::PI;
 
             // Default unwrap across a 2*pi jump.
-            let jumpy = array_fn.call1((vec![0.0_f64, pi / 2.0, pi, -pi + 0.1, -pi / 2.0, 0.0],))?;
+            let jumpy =
+                array_fn.call1((vec![0.0_f64, pi / 2.0, pi, -pi + 0.1, -pi / 2.0, 0.0],))?;
             let ours_default = uw_fn.call1((jumpy.clone(),))?;
             let theirs_default = numpy_uw.call1((jumpy.clone(),))?;
-            let ok_default: bool = allclose.call1((&ours_default, &theirs_default))?.extract()?;
+            let ok_default: bool = allclose
+                .call1((&ours_default, &theirs_default))?
+                .extract()?;
             assert!(ok_default, "unwrap default-param mismatch");
 
             // 2-D input with explicit axis.
@@ -46387,8 +47367,7 @@ mod tests {
                     // rust-port produces ULP-level differences from numpy's
                     // C implementation that are functionally identical but
                     // str() repr differs (see bead franken_numpy-kuh8 / C).
-                    let ok_values: bool =
-                        allclose.call1((&ours, &theirs))?.extract()?;
+                    let ok_values: bool = allclose.call1((&ours, &theirs))?.extract()?;
                     assert!(
                         ok_values,
                         "{name}(M={m}) value parity failed (numpy.allclose false)"
@@ -46411,10 +47390,11 @@ mod tests {
                 let win = ours_fn.call1((m,))?;
                 let reversed_win = win.call_method1(
                     "__getitem__",
-                    (py
-                        .import("builtins")?
-                        .getattr("slice")?
-                        .call1((py.None(), py.None(), -1_i64))?,),
+                    (py.import("builtins")?.getattr("slice")?.call1((
+                        py.None(),
+                        py.None(),
+                        -1_i64,
+                    ))?,),
                 )?;
                 let ok_sym: bool = allclose.call1((&win, &reversed_win))?.extract()?;
                 assert!(ok_sym, "{name}(M={m}) window must be symmetric");
@@ -46567,7 +47547,8 @@ mod tests {
             );
 
             // Round-trip: rad2deg(deg2rad(x)) ≈ x on a degree grid.
-            let degrees = array_fn.call1((vec![-180.0_f64, -90.0, 0.0, 45.0, 90.0, 180.0, 360.0],))?;
+            let degrees =
+                array_fn.call1((vec![-180.0_f64, -90.0, 0.0, 45.0, 90.0, 180.0, 360.0],))?;
             let rt = r2d_fn.call1((d2r_fn.call1((degrees.clone(),))?,))?;
             let ok_rt: bool = allclose.call1((&rt, &degrees))?.extract()?;
             assert!(ok_rt, "rad2deg(deg2rad(x)) must roundtrip");
@@ -46836,7 +47817,10 @@ mod tests {
             let ok_zero: bool = allclose
                 .call((&ours_zero, &theirs_zero), Some(&nan_equiv))?
                 .extract()?;
-            assert!(ok_zero, "fmod by zero must agree with numpy under equal_nan");
+            assert!(
+                ok_zero,
+                "fmod by zero must agree with numpy under equal_nan"
+            );
             errstate_ctx.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
 
             Ok(())
@@ -46858,11 +47842,7 @@ mod tests {
             let array_fn = numpy.getattr("array")?;
 
             // Square matrix, default k=0.
-            let sq = array_fn.call1((vec![
-                vec![1_i64, 2, 3],
-                vec![4, 5, 6],
-                vec![7, 8, 9],
-            ],))?;
+            let sq = array_fn.call1((vec![vec![1_i64, 2, 3], vec![4, 5, 6], vec![7, 8, 9]],))?;
             assert_array_matches_numpy(
                 &triu_fn.call1((sq.clone(),))?,
                 &numpy_triu.call1((sq.clone(),))?,
@@ -46888,10 +47868,7 @@ mod tests {
             )?;
 
             // Rectangular (wide) matrix.
-            let wide = array_fn.call1((vec![
-                vec![1_i64, 2, 3, 4, 5],
-                vec![6, 7, 8, 9, 10],
-            ],))?;
+            let wide = array_fn.call1((vec![vec![1_i64, 2, 3, 4, 5], vec![6, 7, 8, 9, 10]],))?;
             assert_array_matches_numpy(
                 &triu_fn.call1((wide.clone(), -1_i64))?,
                 &numpy_triu.call1((wide.clone(), -1_i64))?,
@@ -46942,10 +47919,7 @@ mod tests {
                 let theirs = numpy_k.call1((m, 5.0_f64))?;
                 // Values: allclose for ULP-level tolerance (see kuh8 / C).
                 let ok_values: bool = allclose.call1((&ours, &theirs))?.extract()?;
-                assert!(
-                    ok_values,
-                    "kaiser(M={m}, beta=5.0) value parity failed"
-                );
+                assert!(ok_values, "kaiser(M={m}, beta=5.0) value parity failed");
                 assert_eq!(
                     ours.getattr("dtype")?.str()?.to_string(),
                     theirs.getattr("dtype")?.str()?.to_string()
@@ -46971,8 +47945,7 @@ mod tests {
             let win = k_fn.call1((32_i64, 8.0_f64))?;
             let reversed = win.call_method1(
                 "__getitem__",
-                (py
-                    .import("builtins")?
+                (py.import("builtins")?
                     .getattr("slice")?
                     .call1((py.None(), py.None(), -1_i64))?,),
             )?;
@@ -47174,9 +48147,7 @@ mod tests {
             );
             // Both imaginary parts must sum to ~0 (conjugate pair) and
             // be of magnitude 1.
-            let ours_abs = numpy
-                .getattr("abs")?
-                .call1((ours_i.clone(),))?;
+            let ours_abs = numpy.getattr("abs")?.call1((ours_i.clone(),))?;
             let expected_abs = array_fn.call1((vec![1.0_f64, 1.0],))?;
             let ok_abs: bool = allclose.call1((&ours_abs, &expected_abs))?.extract()?;
             assert!(ok_abs, "roots of x^2+1 must have magnitude 1");
@@ -47351,8 +48322,7 @@ mod tests {
 
             // Default optimize (True → 'greedy').
             let ours_def = ep_fn.call1(("ijk,jkl,kl->il", a.clone(), b.clone(), c.clone()))?;
-            let theirs_def =
-                numpy_ep.call1(("ijk,jkl,kl->il", a.clone(), b.clone(), c.clone()))?;
+            let theirs_def = numpy_ep.call1(("ijk,jkl,kl->il", a.clone(), b.clone(), c.clone()))?;
             // Tuple length must match; second item is a human-readable
             // string — compare for exact equality.
             let ours_tuple = ours_def.cast::<PyTuple>()?;
@@ -47375,10 +48345,7 @@ mod tests {
                 Some(&greedy_kwargs),
             )?;
             assert_eq!(
-                ours_g
-                    .cast::<PyTuple>()?
-                    .get_item(1)?
-                    .extract::<String>()?,
+                ours_g.cast::<PyTuple>()?.get_item(1)?.extract::<String>()?,
                 theirs_g
                     .cast::<PyTuple>()?
                     .get_item(1)?
@@ -47388,14 +48355,9 @@ mod tests {
             // optimize=False: no-optimization path.
             let no_opt_kwargs = PyDict::new(py);
             no_opt_kwargs.set_item("optimize", false)?;
-            let ours_no = ep_fn.call(
-                ("ij,jk->ik", a.clone(), b.clone()),
-                Some(&no_opt_kwargs),
-            );
-            let theirs_no = numpy_ep.call(
-                ("ij,jk->ik", a.clone(), b.clone()),
-                Some(&no_opt_kwargs),
-            );
+            let ours_no = ep_fn.call(("ij,jk->ik", a.clone(), b.clone()), Some(&no_opt_kwargs));
+            let theirs_no =
+                numpy_ep.call(("ij,jk->ik", a.clone(), b.clone()), Some(&no_opt_kwargs));
             match (ours_no, theirs_no) {
                 (Ok(our_t), Ok(their_t)) => {
                     let ours_t = our_t.cast::<PyTuple>()?;
@@ -47403,9 +48365,7 @@ mod tests {
                     assert_eq!(ours_t.len()?, theirs_t.len()?);
                 }
                 (Err(ours), Err(theirs)) => assert_pyerr_matches_numpy(py, ours, theirs)?,
-                _ => panic!(
-                    "einsum_path optimize=False success/error surface must match numpy"
-                ),
+                _ => panic!("einsum_path optimize=False success/error surface must match numpy"),
             }
 
             Ok(())
@@ -47429,9 +48389,7 @@ mod tests {
             let ae_numpy = numpy.getattr("testing")?.getattr("assert_equal")?;
             ae_fn.call1((1_i64, 1_i64))?; // pass
             ae_numpy.call1((1_i64, 1_i64))?;
-            let ours_err = ae_fn
-                .call1((1_i64, 2_i64))
-                .expect_err("1 != 2 must fail");
+            let ours_err = ae_fn.call1((1_i64, 2_i64)).expect_err("1 != 2 must fail");
             let theirs_err = ae_numpy
                 .call1((1_i64, 2_i64))
                 .expect_err("numpy: 1 != 2 must fail");
@@ -47489,9 +48447,7 @@ mod tests {
             // the pair must agree to within ~0.01. 1.234567e5 and
             // 1.2345671e5 differ by 0.01 → within tolerance.
             let aprx_fn = module.getattr("testing_assert_approx_equal")?;
-            let aprx_numpy = numpy
-                .getattr("testing")?
-                .getattr("assert_approx_equal")?;
+            let aprx_numpy = numpy.getattr("testing")?.getattr("assert_approx_equal")?;
             aprx_fn.call1((1.234567e5_f64, 1.2345671e5_f64))?;
             aprx_numpy.call1((1.234567e5_f64, 1.2345671e5_f64))?;
             let ours_aprx_err = aprx_fn
@@ -47504,9 +48460,7 @@ mod tests {
 
             // assert_string_equal: string pass/fail.
             let as_fn = module.getattr("testing_assert_string_equal")?;
-            let as_numpy = numpy
-                .getattr("testing")?
-                .getattr("assert_string_equal")?;
+            let as_numpy = numpy.getattr("testing")?.getattr("assert_string_equal")?;
             as_fn.call1(("hello", "hello"))?;
             as_numpy.call1(("hello", "hello"))?;
             let ours_as_err = as_fn
@@ -47669,18 +48623,10 @@ mod tests {
             let sym = array_fn.call1((vec![vec![2.0_f64, 1.0], vec![1.0, 2.0]],))?;
             let ours_s = eig_fn.call1((sym.clone(),))?;
             let theirs_s = numpy_eig.call1((sym.clone(),))?;
-            let ours_sv = sort.call1((
-                ours_s
-                    .cast::<PyTuple>()?
-                    .get_item(0)?
-                    .getattr("real")?,
-            ))?;
-            let theirs_sv = sort.call1((
-                theirs_s
-                    .cast::<PyTuple>()?
-                    .get_item(0)?
-                    .getattr("real")?,
-            ))?;
+            let ours_sv =
+                sort.call1((ours_s.cast::<PyTuple>()?.get_item(0)?.getattr("real")?,))?;
+            let theirs_sv =
+                sort.call1((theirs_s.cast::<PyTuple>()?.get_item(0)?.getattr("real")?,))?;
             let ok_s: bool = allclose.call1((&ours_sv, &theirs_sv))?.extract()?;
             assert!(ok_s, "eig symmetric eigenvalue mismatch");
 
@@ -47710,7 +48656,9 @@ mod tests {
             let vals = result.cast::<PyTuple>()?.get_item(0)?;
             let vecs = result.cast::<PyTuple>()?.get_item(1)?;
             let av = numpy.getattr("matmul")?.call1((a.clone(), vecs.clone()))?;
-            let lv = numpy.getattr("multiply")?.call1((vals.clone(), vecs.clone()))?;
+            let lv = numpy
+                .getattr("multiply")?
+                .call1((vals.clone(), vecs.clone()))?;
             let ok_inv: bool = allclose.call1((&av, &lv))?.extract()?;
             assert!(ok_inv, "A @ v must equal lambda * v for each eigenpair");
 
@@ -47911,10 +48859,7 @@ mod tests {
             // Simple 1-D masked array: mask shadows a would-be max.
             let kwargs = PyDict::new(py);
             kwargs.set_item("mask", vec![false, false, true, false, false])?;
-            let m1 = ma_array.call(
-                (vec![1_i64, 2, 99, 3, 4],),
-                Some(&kwargs),
-            )?;
+            let m1 = ma_array.call((vec![1_i64, 2, 99, 3, 4],), Some(&kwargs))?;
             let ours_mx: i64 = amx_fn.call1((m1.clone(),))?.extract()?;
             let theirs_mx: i64 = numpy_amx.call1((m1.clone(),))?.extract()?;
             assert_eq!(ours_mx, theirs_mx);
@@ -47931,10 +48876,7 @@ mod tests {
                 "mask",
                 vec![vec![false, true, false], vec![false, false, false]],
             )?;
-            let m2 = ma_array.call(
-                (vec![vec![1_i64, 99, 3], vec![4, 5, 6]],),
-                Some(&m2_kwargs),
-            )?;
+            let m2 = ma_array.call((vec![vec![1_i64, 99, 3], vec![4, 5, 6]],), Some(&m2_kwargs))?;
             let ax_kw = PyDict::new(py);
             ax_kw.set_item("axis", 0_i64)?;
             let ours_ax_mx = amx_fn.call((m2.clone(),), Some(&ax_kw))?;
@@ -48005,8 +48947,14 @@ mod tests {
             let theirs_d = numpy_drop.call1((src.clone(), "b"))?;
             assert_array_matches_numpy(&ours_d, &theirs_d)?;
             assert_eq!(
-                ours_d.getattr("dtype")?.getattr("names")?.extract::<Vec<String>>()?,
-                theirs_d.getattr("dtype")?.getattr("names")?.extract::<Vec<String>>()?
+                ours_d
+                    .getattr("dtype")?
+                    .getattr("names")?
+                    .extract::<Vec<String>>()?,
+                theirs_d
+                    .getattr("dtype")?
+                    .getattr("names")?
+                    .extract::<Vec<String>>()?
             );
 
             // drop_fields: remove multiple via list.
@@ -48021,8 +48969,14 @@ mod tests {
             let ours_r = rename_fn.call1((src.clone(), rename_map.clone()))?;
             let theirs_r = numpy_rename.call1((src.clone(), rename_map.clone()))?;
             assert_eq!(
-                ours_r.getattr("dtype")?.getattr("names")?.extract::<Vec<String>>()?,
-                theirs_r.getattr("dtype")?.getattr("names")?.extract::<Vec<String>>()?
+                ours_r
+                    .getattr("dtype")?
+                    .getattr("names")?
+                    .extract::<Vec<String>>()?,
+                theirs_r
+                    .getattr("dtype")?
+                    .getattr("names")?
+                    .extract::<Vec<String>>()?
             );
 
             // append_fields: add a new 'd' field of length 3.
@@ -48030,8 +48984,14 @@ mod tests {
             let theirs_a = numpy_append.call1((src.clone(), "d", vec![7_i64, 8, 9]))?;
             assert_array_matches_numpy(&ours_a, &theirs_a)?;
             assert_eq!(
-                ours_a.getattr("dtype")?.getattr("names")?.extract::<Vec<String>>()?,
-                theirs_a.getattr("dtype")?.getattr("names")?.extract::<Vec<String>>()?
+                ours_a
+                    .getattr("dtype")?
+                    .getattr("names")?
+                    .extract::<Vec<String>>()?,
+                theirs_a
+                    .getattr("dtype")?
+                    .getattr("names")?
+                    .extract::<Vec<String>>()?
             );
 
             // merge_arrays: combine two structured arrays side-by-side.
@@ -48044,12 +49004,8 @@ mod tests {
 
             // unstructured_to_structured: convert a 3×3 float array to
             // a 1-D structured array with 3 fields.
-            let unstructured = eval_with_globals(
-                "np.arange(9, dtype='f4').reshape(3, 3)",
-            )?;
-            let dtype_spec = eval_with_globals(
-                "np.dtype([('x','f4'),('y','f4'),('z','f4')])",
-            )?;
+            let unstructured = eval_with_globals("np.arange(9, dtype='f4').reshape(3, 3)")?;
+            let dtype_spec = eval_with_globals("np.dtype([('x','f4'),('y','f4'),('z','f4')])")?;
             let dkw = PyDict::new(py);
             dkw.set_item("dtype", dtype_spec.clone())?;
             let ours_u2s = u2s_fn.call((unstructured.clone(),), Some(&dkw))?;
@@ -48096,14 +49052,8 @@ mod tests {
             comma_kw.set_item("delimiter", ",")?;
             comma_kw.set_item("dtype", numpy.getattr("float64")?)?;
             assert_array_matches_numpy(
-                &lt_fn.call(
-                    (make_sio("1.5,2.5,3.5\n4.5,5.5,6.5")?,),
-                    Some(&comma_kw),
-                )?,
-                &numpy_lt.call(
-                    (make_sio("1.5,2.5,3.5\n4.5,5.5,6.5")?,),
-                    Some(&comma_kw),
-                )?,
+                &lt_fn.call((make_sio("1.5,2.5,3.5\n4.5,5.5,6.5")?,), Some(&comma_kw))?,
+                &numpy_lt.call((make_sio("1.5,2.5,3.5\n4.5,5.5,6.5")?,), Some(&comma_kw))?,
             )?;
 
             // loadtxt: skiprows + usecols.
@@ -48137,17 +49087,17 @@ mod tests {
             gt_kw.set_item("delimiter", ",")?;
             gt_kw.set_item("names", true)?;
             gt_kw.set_item("dtype", None::<Py<PyAny>>)?;
-            let ours_g = gt_fn.call(
-                (make_sio("a,b,c\n1,2,3\n4,5,6")?,),
-                Some(&gt_kw),
-            )?;
-            let theirs_g = numpy_gt.call(
-                (make_sio("a,b,c\n1,2,3\n4,5,6")?,),
-                Some(&gt_kw),
-            )?;
+            let ours_g = gt_fn.call((make_sio("a,b,c\n1,2,3\n4,5,6")?,), Some(&gt_kw))?;
+            let theirs_g = numpy_gt.call((make_sio("a,b,c\n1,2,3\n4,5,6")?,), Some(&gt_kw))?;
             assert_eq!(
-                ours_g.getattr("dtype")?.getattr("names")?.extract::<Vec<String>>()?,
-                theirs_g.getattr("dtype")?.getattr("names")?.extract::<Vec<String>>()?
+                ours_g
+                    .getattr("dtype")?
+                    .getattr("names")?
+                    .extract::<Vec<String>>()?,
+                theirs_g
+                    .getattr("dtype")?
+                    .getattr("names")?
+                    .extract::<Vec<String>>()?
             );
 
             // genfromtxt: missing_values + filling_values.
@@ -48157,14 +49107,8 @@ mod tests {
             miss_kw.set_item("filling_values", -1_i64)?;
             miss_kw.set_item("dtype", numpy.getattr("int64")?)?;
             assert_array_matches_numpy(
-                &gt_fn.call(
-                    (make_sio("1,NA,3\n4,5,NA")?,),
-                    Some(&miss_kw),
-                )?,
-                &numpy_gt.call(
-                    (make_sio("1,NA,3\n4,5,NA")?,),
-                    Some(&miss_kw),
-                )?,
+                &gt_fn.call((make_sio("1,NA,3\n4,5,NA")?,), Some(&miss_kw))?,
+                &numpy_gt.call((make_sio("1,NA,3\n4,5,NA")?,), Some(&miss_kw))?,
             )?;
 
             // genfromtxt: skip_header + skip_footer.
@@ -48174,14 +49118,8 @@ mod tests {
             sf_kw.set_item("skip_footer", 1_i64)?;
             sf_kw.set_item("dtype", numpy.getattr("int64")?)?;
             assert_array_matches_numpy(
-                &gt_fn.call(
-                    (make_sio("header\n1,2,3\n4,5,6\nfooter")?,),
-                    Some(&sf_kw),
-                )?,
-                &numpy_gt.call(
-                    (make_sio("header\n1,2,3\n4,5,6\nfooter")?,),
-                    Some(&sf_kw),
-                )?,
+                &gt_fn.call((make_sio("header\n1,2,3\n4,5,6\nfooter")?,), Some(&sf_kw))?,
+                &numpy_gt.call((make_sio("header\n1,2,3\n4,5,6\nfooter")?,), Some(&sf_kw))?,
             )?;
 
             Ok(())
@@ -48210,25 +49148,16 @@ mod tests {
             let ours_p = p_fn.call1((a1.clone(), kth))?;
             let theirs_p = numpy_p.call1((a1.clone(), kth))?;
             // Element at kth position must match numpy's at the same index.
-            let ours_k: i64 = ours_p
-                .call_method1("__getitem__", (kth,))?
-                .extract()?;
-            let theirs_k: i64 = theirs_p
-                .call_method1("__getitem__", (kth,))?
-                .extract()?;
+            let ours_k: i64 = ours_p.call_method1("__getitem__", (kth,))?.extract()?;
+            let theirs_k: i64 = theirs_p.call_method1("__getitem__", (kth,))?.extract()?;
             assert_eq!(ours_k, theirs_k);
             // Before-kth: every element <= kth-value.
             let sorted_np = numpy.getattr("sort")?.call1((a1.clone(),))?;
-            let expected_k: i64 = sorted_np
-                .call_method1("__getitem__", (kth,))?
-                .extract()?;
+            let expected_k: i64 = sorted_np.call_method1("__getitem__", (kth,))?.extract()?;
             assert_eq!(ours_k, expected_k);
 
             // 2-D axis=1 partition.
-            let a2 = array_fn.call1((vec![
-                vec![5_i64, 2, 8, 1, 4],
-                vec![9, 3, 7, 6, 0],
-            ],))?;
+            let a2 = array_fn.call1((vec![vec![5_i64, 2, 8, 1, 4], vec![9, 3, 7, 6, 0]],))?;
             let ax_kw = PyDict::new(py);
             ax_kw.set_item("axis", 1_i64)?;
             let ours_2d = p_fn.call((a2.clone(), 2_i64), Some(&ax_kw))?;
@@ -48236,16 +49165,10 @@ mod tests {
             // Check per-row k-th element parity at col 2.
             for row in 0..2_i64 {
                 let ours_row_k: i64 = ours_2d
-                    .call_method1(
-                        "__getitem__",
-                        ((row, 2_i64),),
-                    )?
+                    .call_method1("__getitem__", ((row, 2_i64),))?
                     .extract()?;
                 let theirs_row_k: i64 = theirs_2d
-                    .call_method1(
-                        "__getitem__",
-                        ((row, 2_i64),),
-                    )?
+                    .call_method1("__getitem__", ((row, 2_i64),))?
                     .extract()?;
                 assert_eq!(ours_row_k, theirs_row_k);
             }
@@ -48255,12 +49178,8 @@ mod tests {
             let ours_arr = p_fn.call1((a1.clone(), kth_arr.clone()))?;
             let theirs_arr = numpy_p.call1((a1.clone(), kth_arr.clone()))?;
             for &k in &kth_arr {
-                let ours_k: i64 = ours_arr
-                    .call_method1("__getitem__", (k,))?
-                    .extract()?;
-                let theirs_k: i64 = theirs_arr
-                    .call_method1("__getitem__", (k,))?
-                    .extract()?;
+                let ours_k: i64 = ours_arr.call_method1("__getitem__", (k,))?.extract()?;
+                let theirs_k: i64 = theirs_arr.call_method1("__getitem__", (k,))?.extract()?;
                 assert_eq!(ours_k, theirs_k);
             }
 
@@ -48356,10 +49275,21 @@ mod tests {
             let text_kw = PyDict::new(py);
             text_kw.set_item("sep", " ")?;
             text_kw.set_item("dtype", numpy.getattr("float64")?)?;
-            assert_array_matches_numpy(
-                &ff_fn.call((txt_path.clone(),), Some(&text_kw))?,
-                &numpy_ff.call((txt_path.clone(),), Some(&text_kw))?,
+            let expected_text = numpy
+                .getattr("array")?
+                .call1((vec![1.5_f64, 2.5, 3.5, 4.5],))?;
+            let poison = PyModule::from_code(
+                py,
+                pyo3::ffi::c_str!(
+                    "def fail(*args, **kwargs):\n    raise RuntimeError('numpy.fromfile passthrough called')\n"
+                ),
+                pyo3::ffi::c_str!("poison_fromfile.py"),
+                pyo3::ffi::c_str!("poison_fromfile"),
             )?;
+            let _guard = AttrGuard::new(&numpy, "fromfile")?;
+            numpy.setattr("fromfile", poison.getattr("fail")?)?;
+            let ours_text = ff_fn.call((txt_path.clone(),), Some(&text_kw))?;
+            assert_array_matches_numpy(&ours_text, &expected_text)?;
             let _ = os.getattr("remove")?.call1((txt_path.clone(),))?;
 
             Ok(())
@@ -48452,10 +49382,7 @@ mod tests {
                 let theirs = theirs_fn.call1((col.clone(), row.clone()))?;
                 let ok: bool = allclose.call1((&ours, &theirs))?.extract()?;
                 assert!(ok, "{name} broadcasting (3,1)x(1,4) mismatch");
-                assert_eq!(
-                    ours.getattr("shape")?.extract::<Vec<usize>>()?,
-                    vec![3, 4]
-                );
+                assert_eq!(ours.getattr("shape")?.extract::<Vec<usize>>()?, vec![3, 4]);
             }
 
             // Integer dtype preservation for add/subtract/multiply on int
@@ -48561,33 +49488,31 @@ mod tests {
             //   tan(arctan(x)) == x for x in real line  (numpy.tan, not yet wrapped)
             //   sinh(arcsinh(x)) == x for x in real line
             //   tanh(arctanh(x)) == x for x in (-1, 1)
-            let sin_of_arcsin = module.getattr("sin")?.call1((
-                module.getattr("arcsin")?.call1((in_unit_interval.clone(),))?,
-            ))?;
+            let sin_of_arcsin = module.getattr("sin")?.call1((module
+                .getattr("arcsin")?
+                .call1((in_unit_interval.clone(),))?,))?;
             let ok_rt1: bool = allclose
                 .call1((&sin_of_arcsin, &in_unit_interval))?
                 .extract()?;
             assert!(ok_rt1, "sin(arcsin(x)) round-trip");
 
-            let tan_of_arctan = numpy.getattr("tan")?.call1((
-                module.getattr("arctan")?.call1((real_line.clone(),))?,
-            ))?;
-            let ok_rt2: bool = allclose
-                .call1((&tan_of_arctan, &real_line))?
-                .extract()?;
+            let tan_of_arctan = numpy
+                .getattr("tan")?
+                .call1((module.getattr("arctan")?.call1((real_line.clone(),))?,))?;
+            let ok_rt2: bool = allclose.call1((&tan_of_arctan, &real_line))?.extract()?;
             assert!(ok_rt2, "tan(arctan(x)) round-trip");
 
-            let sinh_of_arcsinh = module.getattr("sinh")?.call1((
-                module.getattr("arcsinh")?.call1((arcsinh_input.clone(),))?,
-            ))?;
+            let sinh_of_arcsinh = module
+                .getattr("sinh")?
+                .call1((module.getattr("arcsinh")?.call1((arcsinh_input.clone(),))?,))?;
             let ok_rt3: bool = allclose
                 .call1((&sinh_of_arcsinh, &arcsinh_input))?
                 .extract()?;
             assert!(ok_rt3, "sinh(arcsinh(x)) round-trip");
 
-            let tanh_of_arctanh = module.getattr("tanh")?.call1((
-                module.getattr("arctanh")?.call1((arctanh_input.clone(),))?,
-            ))?;
+            let tanh_of_arctanh = module
+                .getattr("tanh")?
+                .call1((module.getattr("arctanh")?.call1((arctanh_input.clone(),))?,))?;
             let ok_rt4: bool = allclose
                 .call1((&tanh_of_arctanh, &arctanh_input))?
                 .extract()?;
@@ -48732,28 +49657,71 @@ mod tests {
             // universal types (cross-platform) are a required subset so
             // the test fails if the re-export list regresses.
             let universal_required = [
-                "bool_", "byte", "bytes_", "cdouble", "character",
-                "clongdouble", "complex128", "complex64", "complexfloating",
-                "csingle", "datetime64", "double", "flexible", "float16",
-                "float32", "float64", "floating", "generic", "half", "inexact",
-                "int16", "int32", "int64", "int8", "intc", "integer", "intp",
-                "longdouble", "longlong", "number", "object_", "short",
-                "signedinteger", "single", "str_", "timedelta64", "ubyte",
-                "uint", "uint16", "uint32", "uint64", "uint8", "uintc",
-                "uintp", "ulong", "ulonglong", "ushort", "unsignedinteger",
+                "bool_",
+                "byte",
+                "bytes_",
+                "cdouble",
+                "character",
+                "clongdouble",
+                "complex128",
+                "complex64",
+                "complexfloating",
+                "csingle",
+                "datetime64",
+                "double",
+                "flexible",
+                "float16",
+                "float32",
+                "float64",
+                "floating",
+                "generic",
+                "half",
+                "inexact",
+                "int16",
+                "int32",
+                "int64",
+                "int8",
+                "intc",
+                "integer",
+                "intp",
+                "longdouble",
+                "longlong",
+                "number",
+                "object_",
+                "short",
+                "signedinteger",
+                "single",
+                "str_",
+                "timedelta64",
+                "ubyte",
+                "uint",
+                "uint16",
+                "uint32",
+                "uint64",
+                "uint8",
+                "uintc",
+                "uintp",
+                "ulong",
+                "ulonglong",
+                "ushort",
+                "unsignedinteger",
                 "void",
             ];
             let platform_optional = ["complex256", "float128", "bool"];
 
             for name in universal_required {
                 let theirs = numpy.getattr(name).unwrap_or_else(|_| {
-                    panic!("numpy.{name} must exist on this build — if this \
+                    panic!(
+                        "numpy.{name} must exist on this build — if this \
                            panics, the universal_required list in this test \
-                           needs pruning")
+                           needs pruning"
+                    )
                 });
                 let ours = module.getattr(name).unwrap_or_else(|_| {
-                    panic!("fnp_python.{name} missing: required dtype scalar \
-                           re-export dropped?")
+                    panic!(
+                        "fnp_python.{name} missing: required dtype scalar \
+                           re-export dropped?"
+                    )
                 });
                 assert!(
                     ours.is(&theirs),
@@ -48768,8 +49736,10 @@ mod tests {
                 match numpy.getattr(name) {
                     Ok(theirs) => {
                         let ours = module.getattr(name).unwrap_or_else(|_| {
-                            panic!("numpy.{name} exists on this platform but \
-                                   fnp_python.{name} was not re-exported")
+                            panic!(
+                                "numpy.{name} exists on this platform but \
+                                   fnp_python.{name} was not re-exported"
+                            )
                         });
                         assert!(
                             ours.is(&theirs),
@@ -48811,21 +49781,38 @@ mod tests {
             // flatiter). The int_ / long aliases changed between NumPy
             // 1.x and 2.x so we treat them as platform-optional.
             let universal_required = [
-                "broadcast", "busdaycalendar", "dtype", "errstate", "finfo",
-                "flatiter", "iinfo", "matrix", "memmap", "ndarray",
-                "ndenumerate", "ndindex", "nditer", "poly1d", "recarray",
-                "record", "ufunc",
+                "broadcast",
+                "busdaycalendar",
+                "dtype",
+                "errstate",
+                "finfo",
+                "flatiter",
+                "iinfo",
+                "matrix",
+                "memmap",
+                "ndarray",
+                "ndenumerate",
+                "ndindex",
+                "nditer",
+                "poly1d",
+                "recarray",
+                "record",
+                "ufunc",
             ];
             let version_optional = ["int_", "long"];
 
             for name in universal_required {
                 let theirs = numpy.getattr(name).unwrap_or_else(|_| {
-                    panic!("numpy.{name} must exist on this numpy build — \
-                           if this panics, update universal_required")
+                    panic!(
+                        "numpy.{name} must exist on this numpy build — \
+                           if this panics, update universal_required"
+                    )
                 });
                 let ours = module.getattr(name).unwrap_or_else(|_| {
-                    panic!("fnp_python.{name} missing: required class \
-                           re-export dropped?")
+                    panic!(
+                        "fnp_python.{name} missing: required class \
+                           re-export dropped?"
+                    )
                 });
                 assert!(
                     ours.is(&theirs),
@@ -48837,8 +49824,10 @@ mod tests {
                 match numpy.getattr(name) {
                     Ok(theirs) => {
                         let ours = module.getattr(name).unwrap_or_else(|_| {
-                            panic!("numpy.{name} exists on this numpy build \
-                                   but fnp_python.{name} was not re-exported")
+                            panic!(
+                                "numpy.{name} exists on this numpy build \
+                                   but fnp_python.{name} was not re-exported"
+                            )
                         });
                         assert!(
                             ours.is(&theirs),
@@ -48874,16 +49863,11 @@ mod tests {
             // --- hfft ---
             // 1-D Hermitian-symmetric signal: first element real, last
             // element real (for even length), remaining conjugate-paired.
-            let hin = numpy.call_method(
-                "array",
-                ([1.0_f64, 2.0, 3.0, 2.0, 1.0].to_vec(),),
-                None,
-            )?;
+            let hin =
+                numpy.call_method("array", ([1.0_f64, 2.0, 3.0, 2.0, 1.0].to_vec(),), None)?;
             let ours_h = module.getattr("hfft")?.call1((hin.clone(),))?;
             let theirs_h = np_fft.getattr("hfft")?.call1((hin.clone(),))?;
-            let eq_h: bool = allclose
-                .call1((&ours_h, &theirs_h))?
-                .extract()?;
+            let eq_h: bool = allclose.call1((&ours_h, &theirs_h))?.extract()?;
             assert!(eq_h, "hfft default 1-D parity");
 
             let hdtype: String = ours_h.getattr("dtype")?.getattr("name")?.extract()?;
@@ -48911,9 +49895,7 @@ mod tests {
                 numpy.call_method("array", ([1.0_f64, 2.0, 3.0, 4.0].to_vec(),), None)?;
             let ihfft_of_x = np_fft.getattr("ihfft")?.call1((real_signal.clone(),))?;
             let hfft_of_ihfft = module.getattr("hfft")?.call1((ihfft_of_x.clone(),))?;
-            let rt_h: bool = allclose
-                .call1((&hfft_of_ihfft, &real_signal))?
-                .extract()?;
+            let rt_h: bool = allclose.call1((&hfft_of_ihfft, &real_signal))?.extract()?;
             assert!(rt_h, "hfft(ihfft(x)) ≈ x round-trip");
 
             // --- rfft2 ---
@@ -48927,8 +49909,7 @@ mod tests {
             let eq_r: bool = allclose.call1((&ours_r, &theirs_r))?.extract()?;
             assert!(eq_r, "rfft2 default 4x4 parity");
 
-            let shape_r: Vec<i64> =
-                ours_r.getattr("shape")?.extract()?;
+            let shape_r: Vec<i64> = ours_r.getattr("shape")?.extract()?;
             assert_eq!(
                 shape_r,
                 vec![4, 3],
@@ -49008,31 +49989,25 @@ mod tests {
             let y_1d = numpy
                 .getattr("array")?
                 .call1((vec![2.0_f64, 2.0, 2.0, 2.0],))?;
-            let x_2d = numpy.getattr("array")?.call1((vec![
-                vec![1.0_f64, 2.0],
-                vec![3.0, 4.0],
-            ],))?;
-            let unique_in = numpy
+            let x_2d = numpy
                 .getattr("array")?
-                .call1((vec![3_i64, 1, 2, 3, 1],))?;
+                .call1((vec![vec![1.0_f64, 2.0], vec![3.0, 4.0]],))?;
+            let unique_in = numpy.getattr("array")?.call1((vec![3_i64, 1, 2, 3, 1],))?;
 
-            let check_allclose = |name: &str,
-                                  ours: &Bound<'_, PyAny>,
-                                  theirs: &Bound<'_, PyAny>|
-             -> PyResult<()> {
-                let equal: bool = allclose.call1((ours, theirs))?.extract()?;
-                assert!(
-                    equal,
-                    "{name}: fnp_python passthrough result differs from numpy"
-                );
-                Ok(())
-            };
+            let check_allclose =
+                |name: &str, ours: &Bound<'_, PyAny>, theirs: &Bound<'_, PyAny>| -> PyResult<()> {
+                    let equal: bool = allclose.call1((ours, theirs))?.extract()?;
+                    assert!(
+                        equal,
+                        "{name}: fnp_python passthrough result differs from numpy"
+                    );
+                    Ok(())
+                };
 
             // 1-arg cases that compare values (skip empty; it's nondeterministic).
             for name in [
-                "sum", "prod", "mean", "std", "var", "min", "max", "amax", "amin",
-                "all", "any", "cumsum", "cumprod", "argmax", "argmin", "conj",
-                "log2", "log10", "exp2",
+                "sum", "prod", "mean", "std", "var", "min", "max", "amax", "amin", "all", "any",
+                "cumsum", "cumprod", "argmax", "argmin", "conj", "log2", "log10", "exp2",
             ] {
                 let Ok(numpy_fn) = numpy.getattr(name) else {
                     continue;
@@ -49166,15 +50141,14 @@ mod tests {
             fnp_python(&module)?;
             let numpy = py.import("numpy")?;
 
-            let empty_arr = numpy
+            let empty_arr = numpy.getattr("array")?.call1((Vec::<f64>::new(),))?;
+            let arr_2d = numpy
                 .getattr("array")?
-                .call1((Vec::<f64>::new(),))?;
-            let arr_2d = numpy.getattr("array")?.call1((vec![
-                vec![1.0_f64, 2.0],
-                vec![3.0, 4.0],
-            ],))?;
+                .call1((vec![vec![1.0_f64, 2.0], vec![3.0, 4.0]],))?;
             let arr_3 = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
-            let arr_4 = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0, 4.0],))?;
+            let arr_4 = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 2.0, 3.0, 4.0],))?;
 
             let err_type_name = |err: &pyo3::PyErr| -> String {
                 Python::attach(|py| -> PyResult<String> {
@@ -49215,7 +50189,10 @@ mod tests {
                     name: "einsum",
                     args: PyTuple::new(
                         py,
-                        ["abc".into_pyobject(py)?.unbind().into_any(), arr_3.clone().unbind().into_any()],
+                        [
+                            "abc".into_pyobject(py)?.unbind().into_any(),
+                            arr_3.clone().unbind().into_any(),
+                        ],
                     )?,
                 },
                 // trace on 1-D (needs >= 2-D) → ValueError
@@ -49254,8 +50231,8 @@ mod tests {
             // calling with axis=5 on a 2-D array must raise AxisError
             // (ValueError subclass in numpy 2.x) on both sides.
             for name in [
-                "sum", "prod", "mean", "std", "var", "min", "max", "amax", "amin",
-                "all", "any", "cumsum", "cumprod", "argmax", "argmin",
+                "sum", "prod", "mean", "std", "var", "min", "max", "amax", "amin", "all", "any",
+                "cumsum", "cumprod", "argmax", "argmin",
             ] {
                 let kwargs = PyDict::new(py);
                 kwargs.set_item("axis", 5_i64)?;
@@ -49308,9 +50285,7 @@ mod tests {
                                 .and_then(|s| s.extract::<String>())
                                 .unwrap_or_default()
                         });
-                        panic!(
-                            "{name} axis=5 OOB: ours succeeded but numpy raised {n}"
-                        );
+                        panic!("{name} axis=5 OOB: ours succeeded but numpy raised {n}");
                     }
                     (Err(e), Ok(_)) => {
                         let n = Python::attach(|py| {
@@ -49319,9 +50294,7 @@ mod tests {
                                 .and_then(|s| s.extract::<String>())
                                 .unwrap_or_default()
                         });
-                        panic!(
-                            "{name} axis=5 OOB: ours raised {n} but numpy succeeded"
-                        );
+                        panic!("{name} axis=5 OOB: ours raised {n} but numpy succeeded");
                     }
                 }
             }
@@ -49490,7 +50463,10 @@ mod tests {
                 .call1((1_i64.into_pyobject(py)?, py.None()))?;
             let x_tail = x_1d.call_method1("__getitem__", (slice_expr,))?;
             let eq_diff: bool = allclose.call1((&diff_of_cs, &x_tail))?.extract()?;
-            assert!(eq_diff, "diff(cumsum(x)) != x[1:] — off-by-one / sign error");
+            assert!(
+                eq_diff,
+                "diff(cumsum(x)) != x[1:] — off-by-one / sign error"
+            );
 
             // Invariant 8: sort + flip gives descending sort.
             let sort_fn = module.getattr("sort")?;
@@ -49500,9 +50476,7 @@ mod tests {
             let desc_via_flip = flip_fn.call((asc,), Some(&kw_a0))?;
             // Compare against numpy's own "-x sorted, then negated" trick.
             let numpy_sorted = numpy.getattr("sort")?.call1((x_1d.clone(),))?;
-            let numpy_desc = numpy
-                .getattr("flip")?
-                .call((numpy_sorted,), Some(&kw_a0))?;
+            let numpy_desc = numpy.getattr("flip")?.call((numpy_sorted,), Some(&kw_a0))?;
             let eq_desc: bool = allclose.call1((&desc_via_flip, &numpy_desc))?.extract()?;
             assert!(
                 eq_desc,
@@ -49517,8 +50491,7 @@ mod tests {
             let take = numpy.getattr("take")?;
             let sorted_x = sort_fn.call1((x_1d.clone(),))?;
             let roundtripped = take.call1((sorted_x, idx2))?;
-            let eq_roundtrip: bool =
-                allclose.call1((&roundtripped, &x_1d))?.extract()?;
+            let eq_roundtrip: bool = allclose.call1((&roundtripped, &x_1d))?.extract()?;
             assert!(
                 eq_roundtrip,
                 "argsort(argsort(x)) permutation does not round-trip sort(x) back to x"
@@ -49610,9 +50583,9 @@ mod tests {
                 let Ok(numpy_fn) = numpy.getattr(name) else {
                     continue;
                 };
-                let ours_fn = module.getattr(name).unwrap_or_else(|_| {
-                    panic!("fnp_python.{name} missing for dtype-parity probe")
-                });
+                let ours_fn = module
+                    .getattr(name)
+                    .unwrap_or_else(|_| panic!("fnp_python.{name} missing for dtype-parity probe"));
                 for xs in inputs {
                     let o = ours_fn.call1((xs.clone(),))?;
                     let t = numpy_fn.call1((xs.clone(),))?;
@@ -49709,11 +50682,13 @@ mod tests {
             // Ops that support axis + keepdims in numpy (reductions only).
             // sort/argsort are not reductions — they don't change rank.
             let reduction_ops = [
-                "sum", "prod", "mean", "std", "var", "amax", "amin", "max", "min",
-                "all", "any", "argmax", "argmin",
+                "sum", "prod", "mean", "std", "var", "amax", "amin", "max", "min", "all", "any",
+                "argmax", "argmin",
             ];
 
-            let check = |ours: &Bound<'_, PyAny>, theirs: &Bound<'_, PyAny>, label: &str|
+            let check = |ours: &Bound<'_, PyAny>,
+                         theirs: &Bound<'_, PyAny>,
+                         label: &str|
              -> PyResult<Option<String>> {
                 // Shape parity first.
                 let os: Vec<usize> = ours.getattr("shape")?.extract()?;
@@ -49738,9 +50713,9 @@ mod tests {
                 let Ok(numpy_fn) = numpy.getattr(name) else {
                     continue;
                 };
-                let ours_fn = module.getattr(name).unwrap_or_else(|_| {
-                    panic!("fnp_python.{name} missing for shape-axis probe")
-                });
+                let ours_fn = module
+                    .getattr(name)
+                    .unwrap_or_else(|_| panic!("fnp_python.{name} missing for shape-axis probe"));
 
                 // --- Case 1: axis=-1 (negative wrap-around on last axis) ---
                 let kw = PyDict::new(py);
@@ -49758,17 +50733,14 @@ mod tests {
                 let t_res = numpy_fn.call((arr_3d.clone(),), Some(&kw));
                 match (&o_res, &t_res) {
                     (Ok(o), Ok(t)) => {
-                        if let Some(msg) =
-                            check(o, t, &format!("{name} axis=(0,)"))?
-                        {
+                        if let Some(msg) = check(o, t, &format!("{name} axis=(0,)"))? {
                             divergences.push(msg);
                         }
                     }
-                    (Err(_), Err(_)) => { /* both reject — e.g. argmax only takes int axis in older numpy */ }
+                    (Err(_), Err(_)) => { /* both reject — e.g. argmax only takes int axis in older numpy */
+                    }
                     (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
-                        divergences.push(format!(
-                            "{name} axis=(0,): success-surface divergence"
-                        ));
+                        divergences.push(format!("{name} axis=(0,): success-surface divergence"));
                     }
                 }
 
@@ -49779,17 +50751,13 @@ mod tests {
                 let t_res = numpy_fn.call((arr_3d.clone(),), Some(&kw));
                 match (&o_res, &t_res) {
                     (Ok(o), Ok(t)) => {
-                        if let Some(msg) =
-                            check(o, t, &format!("{name} axis=(0,2)"))?
-                        {
+                        if let Some(msg) = check(o, t, &format!("{name} axis=(0,2)"))? {
                             divergences.push(msg);
                         }
                     }
                     (Err(_), Err(_)) => { /* argmax/argmin don't accept tuple axis */ }
                     (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
-                        divergences.push(format!(
-                            "{name} axis=(0,2): success-surface divergence"
-                        ));
+                        divergences.push(format!("{name} axis=(0,2): success-surface divergence"));
                     }
                 }
 
@@ -49801,9 +50769,7 @@ mod tests {
                 let t_res = numpy_fn.call((arr_3d.clone(),), Some(&kw));
                 match (&o_res, &t_res) {
                     (Ok(o), Ok(t)) => {
-                        if let Some(msg) = check(
-                            o, t, &format!("{name} axis=0, keepdims=True"),
-                        )? {
+                        if let Some(msg) = check(o, t, &format!("{name} axis=0, keepdims=True"))? {
                             divergences.push(msg);
                         }
                     }
@@ -49823,11 +50789,8 @@ mod tests {
                 let t_res = numpy_fn.call((arr_3d.clone(),), Some(&kw));
                 match (&o_res, &t_res) {
                     (Ok(o), Ok(t)) => {
-                        if let Some(msg) = check(
-                            o,
-                            t,
-                            &format!("{name} axis=None, keepdims=True"),
-                        )? {
+                        if let Some(msg) = check(o, t, &format!("{name} axis=None, keepdims=True"))?
+                        {
                             divergences.push(msg);
                         }
                     }
@@ -49878,10 +50841,7 @@ mod tests {
 
             // Silence RuntimeWarnings emitted by numpy on domain errors —
             // both sides emit them, we compare values not stderr.
-            warnings.call_method1(
-                "filterwarnings",
-                ("ignore",),
-            )?;
+            warnings.call_method1("filterwarnings", ("ignore",))?;
 
             // IEEE 754 special inputs — both sides produce the same output.
             let special_f64 = array_fn.call1((vec![
@@ -49892,8 +50852,8 @@ mod tests {
                 f64::INFINITY,
                 f64::NEG_INFINITY,
                 f64::NAN,
-                f64::MIN_POSITIVE,       // smallest normal
-                5e-324,                  // smallest subnormal
+                f64::MIN_POSITIVE, // smallest normal
+                5e-324,            // smallest subnormal
                 f64::MAX,
                 -f64::MAX,
             ],))?;
@@ -49902,15 +50862,39 @@ mod tests {
 
             // Unary ufuncs whose output on special inputs numpy pins down.
             let unary_ops = [
-                "sin", "cos", "tan",
-                "arcsin", "arccos", "arctan",
-                "sinh", "cosh", "tanh",
-                "arcsinh", "arccosh", "arctanh",
-                "sqrt", "log", "log2", "log10",
-                "exp", "exp2", "expm1", "log1p",
-                "sign", "floor", "ceil", "trunc", "rint",
-                "absolute", "negative", "conjugate", "reciprocal",
-                "signbit", "isnan", "isinf", "isfinite",
+                "sin",
+                "cos",
+                "tan",
+                "arcsin",
+                "arccos",
+                "arctan",
+                "sinh",
+                "cosh",
+                "tanh",
+                "arcsinh",
+                "arccosh",
+                "arctanh",
+                "sqrt",
+                "log",
+                "log2",
+                "log10",
+                "exp",
+                "exp2",
+                "expm1",
+                "log1p",
+                "sign",
+                "floor",
+                "ceil",
+                "trunc",
+                "rint",
+                "absolute",
+                "negative",
+                "conjugate",
+                "reciprocal",
+                "signbit",
+                "isnan",
+                "isinf",
+                "isfinite",
             ];
 
             let kw_equal_nan = PyDict::new(py);
@@ -49927,14 +50911,11 @@ mod tests {
                 let o = ours_fn.call1((special_f64.clone(),))?;
                 let t = numpy_fn.call1((special_f64.clone(),))?;
 
-                let eq_vals: bool =
-                    array_equal.call((&o, &t), Some(&kw_equal_nan))?.extract()?;
+                let eq_vals: bool = array_equal.call((&o, &t), Some(&kw_equal_nan))?.extract()?;
                 if !eq_vals {
                     // Surface the actual divergence for diagnostics.
-                    let o_list: String =
-                        o.call_method0("tolist")?.str()?.to_string();
-                    let t_list: String =
-                        t.call_method0("tolist")?.str()?.to_string();
+                    let o_list: String = o.call_method0("tolist")?.str()?.to_string();
+                    let t_list: String = t.call_method0("tolist")?.str()?.to_string();
                     divergences.push(format!(
                         "{name}(IEEE_special): ours={o_list} theirs={t_list}"
                     ));
@@ -49954,11 +50935,22 @@ mod tests {
             // (name, lhs, rhs) — special inputs that trigger numpy's domain behavior.
             let binary_specials: Vec<(&str, Vec<f64>, Vec<f64>)> = vec![
                 // Division by zero
-                ("divide", vec![1.0, 0.0, -1.0, f64::INFINITY], vec![0.0, 0.0, 0.0, 0.0]),
-                ("true_divide", vec![1.0, 0.0, -1.0, f64::INFINITY], vec![0.0, 0.0, 0.0, 0.0]),
+                (
+                    "divide",
+                    vec![1.0, 0.0, -1.0, f64::INFINITY],
+                    vec![0.0, 0.0, 0.0, 0.0],
+                ),
+                (
+                    "true_divide",
+                    vec![1.0, 0.0, -1.0, f64::INFINITY],
+                    vec![0.0, 0.0, 0.0, 0.0],
+                ),
                 // Power edge cases: 0**0 = 1, 0**1 = 0, 1**inf = 1, 0**neg = inf, -inf**0 = 1
-                ("power", vec![0.0, 0.0, 1.0, 0.0, f64::NEG_INFINITY],
-                          vec![0.0, 1.0, f64::INFINITY, -1.0, 0.0]),
+                (
+                    "power",
+                    vec![0.0, 0.0, 1.0, 0.0, f64::NEG_INFINITY],
+                    vec![0.0, 1.0, f64::INFINITY, -1.0, 0.0],
+                ),
                 // fmod / remainder with zero divisor
                 ("fmod", vec![1.0, 0.0, -1.0], vec![0.0, 0.0, 0.0]),
                 // nextafter
@@ -49977,13 +50969,10 @@ mod tests {
                 let r = array_fn.call1((rhs.clone(),))?;
                 let o = ours_fn.call1((l.clone(), r.clone()))?;
                 let t = numpy_fn.call1((l.clone(), r.clone()))?;
-                let eq_vals: bool =
-                    array_equal.call((&o, &t), Some(&kw_equal_nan))?.extract()?;
+                let eq_vals: bool = array_equal.call((&o, &t), Some(&kw_equal_nan))?.extract()?;
                 if !eq_vals {
-                    let o_list: String =
-                        o.call_method0("tolist")?.str()?.to_string();
-                    let t_list: String =
-                        t.call_method0("tolist")?.str()?.to_string();
+                    let o_list: String = o.call_method0("tolist")?.str()?.to_string();
+                    let t_list: String = t.call_method0("tolist")?.str()?.to_string();
                     divergences.push(format!(
                         "{name}(special_binary): ours={o_list} theirs={t_list}"
                     ));
@@ -50001,10 +50990,8 @@ mod tests {
                 let t = theirs_fn.call1((a.clone(), b.clone()))?;
                 let eq: bool = array_equal.call((&o, &t), Some(&kw_equal_nan))?.extract()?;
                 if !eq {
-                    let o_list: String =
-                        o.call_method0("tolist")?.str()?.to_string();
-                    let t_list: String =
-                        t.call_method0("tolist")?.str()?.to_string();
+                    let o_list: String = o.call_method0("tolist")?.str()?.to_string();
+                    let t_list: String = t.call_method0("tolist")?.str()?.to_string();
                     divergences.push(format!(
                         "copysign(signed_zero): ours={o_list} theirs={t_list}"
                     ));
