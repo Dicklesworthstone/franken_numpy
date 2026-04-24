@@ -254,21 +254,36 @@ impl PyRandomGenerator {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
-    #[pyo3(signature = (size=None, *, method="zig"))]
+    #[pyo3(signature = (size=None, *, method="zig", out=None))]
     fn standard_exponential(
         &mut self,
         py: Python<'_>,
         size: Option<Py<PyAny>>,
         method: &str,
+        out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let size = random_size_from_py(py, size, "Generator.standard_exponential(size)")?;
+        let requested_size = random_size_from_py(py, size, "Generator.standard_exponential(size)")?;
+        let (size, out) = resolve_random_out(
+            py,
+            requested_size,
+            DType::F64,
+            out,
+            "Generator.standard_exponential(out)",
+        )?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = if method == "zig" {
             self.inner.standard_exponential(len)
         } else {
             self.inner.standard_exponential_inv(len)
         };
-        build_random_f64_parts(py, shape, values, scalar)
+        let generated = build_random_f64_parts(py, shape, values, scalar)?;
+        if let Some(out) = out {
+            py.import("numpy")?
+                .call_method1("copyto", (out.bind(py), generated.bind(py)))?;
+            Ok(out)
+        } else {
+            Ok(generated)
+        }
     }
 
     #[pyo3(signature = (shape, size=None))]
@@ -20579,6 +20594,101 @@ mod tests {
                 call_outcome(
                     py,
                     &theirs.getattr("standard_normal")?,
+                    &PyTuple::empty(py),
+                    Some(&dtype_mismatch_kwargs),
+                )?
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_generator_standard_exponential_out_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_standard_exponential_out")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy = py.import("numpy")?;
+            let numpy_random = numpy.getattr("random")?;
+            let empty = numpy.getattr("empty")?;
+            let shape = PyTuple::new(py, [2_usize, 2_usize])?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 342)?;
+            let ours_out = empty.call1((shape.clone(),))?;
+            let theirs_out = empty.call1((shape.clone(),))?;
+            let ours_kwargs = PyDict::new(py);
+            ours_kwargs.set_item("out", &ours_out)?;
+            let theirs_kwargs = PyDict::new(py);
+            theirs_kwargs.set_item("out", &theirs_out)?;
+            let actual = ours.call_method("standard_exponential", (), Some(&ours_kwargs))?;
+            let expected = theirs.call_method("standard_exponential", (), Some(&theirs_kwargs))?;
+            assert!(actual.is(&ours_out));
+            assert!(expected.is(&theirs_out));
+            assert_random_sample_matches_numpy(&ours_out, &theirs_out)?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 343)?;
+            let ours_inv_out = empty.call1((shape.clone(),))?;
+            let theirs_inv_out = empty.call1((shape.clone(),))?;
+            let ours_inv_kwargs = PyDict::new(py);
+            ours_inv_kwargs.set_item("method", "inv")?;
+            ours_inv_kwargs.set_item("out", &ours_inv_out)?;
+            let theirs_inv_kwargs = PyDict::new(py);
+            theirs_inv_kwargs.set_item("method", "inv")?;
+            theirs_inv_kwargs.set_item("out", &theirs_inv_out)?;
+            let actual = ours.call_method(
+                "standard_exponential",
+                (shape.clone(),),
+                Some(&ours_inv_kwargs),
+            )?;
+            let expected = theirs.call_method(
+                "standard_exponential",
+                (shape.clone(),),
+                Some(&theirs_inv_kwargs),
+            )?;
+            assert!(actual.is(&ours_inv_out));
+            assert!(expected.is(&theirs_inv_out));
+            assert_random_sample_matches_numpy(&ours_inv_out, &theirs_inv_out)?;
+
+            let mismatch_out = empty.call1((PyTuple::new(py, [3_usize])?,))?;
+            let mismatch_kwargs = PyDict::new(py);
+            mismatch_kwargs.set_item("out", &mismatch_out)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 344)?;
+            assert_eq!(
+                call_outcome(
+                    py,
+                    &ours.getattr("standard_exponential")?,
+                    &PyTuple::new(py, [shape.clone()])?,
+                    Some(&mismatch_kwargs),
+                )?,
+                call_outcome(
+                    py,
+                    &theirs.getattr("standard_exponential")?,
+                    &PyTuple::new(py, [shape.clone()])?,
+                    Some(&mismatch_kwargs),
+                )?
+            );
+
+            let f32_empty_kwargs = PyDict::new(py);
+            f32_empty_kwargs.set_item("dtype", numpy.getattr("float32")?)?;
+            let dtype_mismatch_out = empty.call((shape,), Some(&f32_empty_kwargs))?;
+            let dtype_mismatch_kwargs = PyDict::new(py);
+            dtype_mismatch_kwargs.set_item("out", &dtype_mismatch_out)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 345)?;
+            assert_eq!(
+                call_outcome(
+                    py,
+                    &ours.getattr("standard_exponential")?,
+                    &PyTuple::empty(py),
+                    Some(&dtype_mismatch_kwargs),
+                )?,
+                call_outcome(
+                    py,
+                    &theirs.getattr("standard_exponential")?,
                     &PyTuple::empty(py),
                     Some(&dtype_mismatch_kwargs),
                 )?
