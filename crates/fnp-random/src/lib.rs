@@ -365,6 +365,97 @@ impl std::fmt::Display for RandomError {
 
 impl std::error::Error for RandomError {}
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShapedRandomOutput<T> {
+    shape: Vec<usize>,
+    values: Vec<T>,
+    scalar: bool,
+}
+
+impl<T> ShapedRandomOutput<T> {
+    fn new(shape: Vec<usize>, values: Vec<T>, scalar: bool) -> Self {
+        Self {
+            shape,
+            values,
+            scalar,
+        }
+    }
+
+    #[must_use]
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    #[must_use]
+    pub fn values(&self) -> &[T] {
+        &self.values
+    }
+
+    #[must_use]
+    pub fn into_values(self) -> Vec<T> {
+        self.values
+    }
+
+    #[must_use]
+    pub fn into_parts(self) -> (Vec<usize>, Vec<T>, bool) {
+        (self.shape, self.values, self.scalar)
+    }
+
+    #[must_use]
+    pub const fn is_scalar(&self) -> bool {
+        self.scalar
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    #[must_use]
+    pub fn scalar_value(&self) -> Option<&T> {
+        if self.scalar && self.values.len() == 1 {
+            self.values.first()
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedRandomSize {
+    shape: Vec<usize>,
+    len: usize,
+    scalar: bool,
+}
+
+fn resolve_random_size(size: Option<&[usize]>) -> Result<ResolvedRandomSize, RandomError> {
+    match size {
+        Some(shape) => {
+            let len =
+                fnp_ndarray::element_count(shape).map_err(|_| RandomError::InvalidParameter)?;
+            Ok(ResolvedRandomSize {
+                shape: shape.to_vec(),
+                len,
+                scalar: false,
+            })
+        }
+        None => Ok(ResolvedRandomSize {
+            shape: Vec::new(),
+            len: 1,
+            scalar: true,
+        }),
+    }
+}
+
+fn shaped_output<T>(size: ResolvedRandomSize, values: Vec<T>) -> ShapedRandomOutput<T> {
+    ShapedRandomOutput::new(size.shape, values, size.scalar)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RandomPolicyError {
     UnknownMetadata,
@@ -2710,6 +2801,19 @@ impl Generator {
         (0..size).map(|_| self.next_f64()).collect()
     }
 
+    /// Generate uniform random floats with NumPy `size` metadata preserved.
+    ///
+    /// `None` represents NumPy's scalar-returning `size=None`; `Some(&[])`
+    /// represents a zero-dimensional ndarray-shaped result.
+    pub fn random_shaped(
+        &mut self,
+        size: Option<&[usize]>,
+    ) -> Result<ShapedRandomOutput<f64>, RandomError> {
+        let size = resolve_random_size(size)?;
+        let values = self.random(size.len);
+        Ok(shaped_output(size, values))
+    }
+
     /// Generate uniform random floats in `[low, high)`.
     ///
     /// Mimics `rng.uniform(low, high, size)`.
@@ -2724,6 +2828,18 @@ impl Generator {
         }
         let range = high - low;
         Ok((0..size).map(|_| low + self.next_f64() * range).collect())
+    }
+
+    /// Generate uniform random floats with NumPy `size` metadata preserved.
+    pub fn uniform_shaped(
+        &mut self,
+        low: f64,
+        high: f64,
+        size: Option<&[usize]>,
+    ) -> Result<ShapedRandomOutput<f64>, RandomError> {
+        let size = resolve_random_size(size)?;
+        let values = self.uniform(low, high, size.len)?;
+        Ok(shaped_output(size, values))
     }
 
     /// Generate random integers in `[low, high)`.
@@ -2747,6 +2863,18 @@ impl Generator {
             result.push(val);
         }
         Ok(result)
+    }
+
+    /// Generate random integers with NumPy `size` metadata preserved.
+    pub fn integers_shaped(
+        &mut self,
+        low: i64,
+        high: i64,
+        size: Option<&[usize]>,
+    ) -> Result<ShapedRandomOutput<i64>, RandomError> {
+        let size = resolve_random_size(size)?;
+        let values = self.integers(low, high, size.len)?;
+        Ok(shaped_output(size, values))
     }
 
     /// Generate integers in `[low, high]` (inclusive on both ends).
@@ -2782,6 +2910,18 @@ impl Generator {
         Ok(result)
     }
 
+    /// Generate endpoint-inclusive random integers with NumPy `size` metadata preserved.
+    pub fn integers_endpoint_shaped(
+        &mut self,
+        low: i64,
+        high: i64,
+        size: Option<&[usize]>,
+    ) -> Result<ShapedRandomOutput<i64>, RandomError> {
+        let size = resolve_random_size(size)?;
+        let values = self.integers_endpoint(low, high, size.len)?;
+        Ok(shaped_output(size, values))
+    }
+
     /// Generate standard normal (Gaussian, mean=0, std=1) samples using
     /// the Ziggurat method (matching NumPy's Generator.standard_normal).
     ///
@@ -2789,6 +2929,16 @@ impl Generator {
     #[must_use]
     pub fn standard_normal(&mut self, size: usize) -> Vec<f64> {
         (0..size).map(|_| self.sample_ziggurat_normal()).collect()
+    }
+
+    /// Generate standard normal samples with NumPy `size` metadata preserved.
+    pub fn standard_normal_shaped(
+        &mut self,
+        size: Option<&[usize]>,
+    ) -> Result<ShapedRandomOutput<f64>, RandomError> {
+        let size = resolve_random_size(size)?;
+        let values = self.standard_normal(size.len);
+        Ok(shaped_output(size, values))
     }
 
     /// Generate normal (Gaussian) samples with given mean and standard deviation.
@@ -2805,6 +2955,18 @@ impl Generator {
             .into_iter()
             .map(|z| loc + scale * z)
             .collect())
+    }
+
+    /// Generate normal samples with NumPy `size` metadata preserved.
+    pub fn normal_shaped(
+        &mut self,
+        loc: f64,
+        scale: f64,
+        size: Option<&[usize]>,
+    ) -> Result<ShapedRandomOutput<f64>, RandomError> {
+        let size = resolve_random_size(size)?;
+        let values = self.normal(loc, scale, size.len)?;
+        Ok(shaped_output(size, values))
     }
 
     /// Generate exponentially distributed samples.
@@ -2864,6 +3026,12 @@ impl Generator {
             remaining -= take;
         }
         result
+    }
+
+    /// Generate random bytes and preserve byte-vector shape metadata for bindings.
+    #[must_use]
+    pub fn bytes_shaped(&mut self, length: usize) -> ShapedRandomOutput<u8> {
+        ShapedRandomOutput::new(vec![length], self.bytes(length), false)
     }
 
     /// Generate Poisson-distributed samples.
@@ -3185,6 +3353,18 @@ impl Generator {
         }
     }
 
+    /// Choose random elements with NumPy `size` metadata preserved.
+    pub fn choice_shaped(
+        &mut self,
+        a: &[f64],
+        size: Option<&[usize]>,
+        replace: bool,
+    ) -> Result<ShapedRandomOutput<f64>, RandomError> {
+        let size = resolve_random_size(size)?;
+        let values = self.choice(a, size.len, replace)?;
+        Ok(shaped_output(size, values))
+    }
+
     /// Choose random elements from an array with probability weights.
     ///
     /// Mimics `rng.choice(a, size, replace, p=weights)`. The `p` array
@@ -3284,6 +3464,15 @@ impl Generator {
         Ok(result)
     }
 
+    /// Return a 1-D shuffled copy with shape metadata preserved.
+    pub fn permutation_shaped(
+        &mut self,
+        x: &[f64],
+    ) -> Result<ShapedRandomOutput<f64>, RandomError> {
+        let values = self.permutation(x)?;
+        Ok(ShapedRandomOutput::new(vec![x.len()], values, false))
+    }
+
     /// Generate a random permutation of integers `[0, n)`.
     ///
     /// Mimics `rng.permutation(n)`.
@@ -3295,6 +3484,15 @@ impl Generator {
             result.swap(i, j);
         }
         Ok(result)
+    }
+
+    /// Generate a random permutation of integers `[0, n)` with shape metadata.
+    pub fn permutation_range_shaped(
+        &mut self,
+        n: usize,
+    ) -> Result<ShapedRandomOutput<u64>, RandomError> {
+        let values = self.permutation_range(n)?;
+        Ok(ShapedRandomOutput::new(vec![n], values, false))
     }
 
     // ── additional distributions ────────
@@ -3861,6 +4059,17 @@ impl Generator {
         }
 
         Ok(result)
+    }
+
+    /// Randomly permute a flat row-major array and preserve its shape metadata.
+    pub fn permuted_shaped(
+        &mut self,
+        x: &[f64],
+        shape: &[usize],
+        axis: Option<usize>,
+    ) -> Result<ShapedRandomOutput<f64>, RandomError> {
+        let values = self.permuted(x, shape, axis)?;
+        Ok(ShapedRandomOutput::new(shape.to_vec(), values, false))
     }
 
     /// Student's t-distribution with `df` degrees of freedom.
@@ -6279,6 +6488,50 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn shaped_random_distinguishes_size_none_from_zero_dimensional_size() {
+        let mut scalar_rng = test_generator();
+        let scalar = scalar_rng.random_shaped(None).unwrap();
+        assert!(scalar.is_scalar());
+        assert_eq!(scalar.shape(), &[]);
+        assert_eq!(scalar.len(), 1);
+        assert!(scalar.scalar_value().is_some());
+
+        let mut zero_dim_rng = test_generator();
+        let zero_dim = zero_dim_rng.random_shaped(Some(&[])).unwrap();
+        assert!(!zero_dim.is_scalar());
+        assert_eq!(zero_dim.shape(), &[]);
+        assert_eq!(zero_dim.len(), 1);
+        assert_eq!(scalar.values(), zero_dim.values());
+    }
+
+    #[test]
+    fn shaped_random_tuple_and_zero_axis_preserve_shape_and_stream() {
+        let mut flat_rng = test_generator();
+        let expected = flat_rng.standard_normal(6);
+
+        let mut shaped_rng = test_generator();
+        let shaped = shaped_rng.standard_normal_shaped(Some(&[2, 3])).unwrap();
+        assert!(!shaped.is_scalar());
+        assert_eq!(shaped.shape(), &[2, 3]);
+        assert_eq!(shaped.values(), expected.as_slice());
+
+        let mut zero_axis_rng = test_generator();
+        let zero_axis = zero_axis_rng.random_shaped(Some(&[2, 0, 3])).unwrap();
+        assert_eq!(zero_axis.shape(), &[2, 0, 3]);
+        assert!(zero_axis.is_empty());
+        assert_eq!(zero_axis_rng.random(1), test_generator().random(1));
+    }
+
+    #[test]
+    fn shaped_size_overflow_is_rejected() {
+        let mut rng = test_generator();
+        assert_eq!(
+            rng.random_shaped(Some(&[usize::MAX, 2])),
+            Err(RandomError::InvalidParameter)
+        );
+    }
+
+    #[test]
     fn uniform_in_range() {
         let mut rng = test_generator();
         let vals = rng.uniform(2.0, 5.0, 100).unwrap();
@@ -6287,11 +6540,50 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn shaped_uniform_and_normal_match_flat_streams() {
+        let mut flat_uniform = test_generator();
+        let expected_uniform = flat_uniform.uniform(-1.0, 2.0, 4).unwrap();
+        let mut shaped_uniform = test_generator();
+        let uniform = shaped_uniform
+            .uniform_shaped(-1.0, 2.0, Some(&[2, 2]))
+            .unwrap();
+        assert_eq!(uniform.shape(), &[2, 2]);
+        assert_eq!(uniform.values(), expected_uniform.as_slice());
+
+        let mut flat_normal = test_generator();
+        let expected_normal = flat_normal.normal(5.0, 2.0, 4).unwrap();
+        let mut shaped_normal = test_generator();
+        let normal = shaped_normal.normal_shaped(5.0, 2.0, Some(&[4])).unwrap();
+        assert_eq!(normal.shape(), &[4]);
+        assert_eq!(normal.values(), expected_normal.as_slice());
+    }
+
+    #[test]
     fn integers_in_range() {
         let mut rng = test_generator();
         let vals = rng.integers(0, 10, 100).unwrap();
         assert_eq!(vals.len(), 100);
         assert!(vals.iter().all(|&v| (0..10).contains(&v)));
+    }
+
+    #[test]
+    fn shaped_integers_match_flat_streams() {
+        let mut flat_rng = test_generator();
+        let expected = flat_rng.integers(10, 20, 6).unwrap();
+
+        let mut shaped_rng = test_generator();
+        let shaped = shaped_rng.integers_shaped(10, 20, Some(&[2, 3])).unwrap();
+        assert_eq!(shaped.shape(), &[2, 3]);
+        assert_eq!(shaped.values(), expected.as_slice());
+
+        let mut endpoint_flat = test_generator();
+        let expected_endpoint = endpoint_flat.integers_endpoint(-2, 2, 4).unwrap();
+        let mut endpoint_shaped = test_generator();
+        let shaped_endpoint = endpoint_shaped
+            .integers_endpoint_shaped(-2, 2, Some(&[2, 2]))
+            .unwrap();
+        assert_eq!(shaped_endpoint.shape(), &[2, 2]);
+        assert_eq!(shaped_endpoint.values(), expected_endpoint.as_slice());
     }
 
     #[test]
@@ -6457,6 +6749,36 @@ for child in rng.spawn(n_children):
         let perm = rng.permutation_range(5).unwrap();
         assert_eq!(perm.len(), 5);
         let mut sorted = perm;
+        sorted.sort();
+        assert_eq!(sorted, [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn shaped_choice_and_permutation_preserve_output_shapes() {
+        let mut rng = test_generator();
+        let choice = rng
+            .choice_shaped(&[10.0, 20.0, 30.0], Some(&[2, 2]), true)
+            .unwrap();
+        assert_eq!(choice.shape(), &[2, 2]);
+        assert_eq!(choice.len(), 4);
+        assert!(
+            choice
+                .values()
+                .iter()
+                .all(|value| [10.0, 20.0, 30.0].contains(value))
+        );
+
+        let mut rng = test_generator();
+        let perm = rng.permutation_shaped(&[1.0, 2.0, 3.0, 4.0]).unwrap();
+        assert_eq!(perm.shape(), &[4]);
+        let mut sorted = perm.values().to_vec();
+        sorted.sort_by(f64::total_cmp);
+        assert_eq!(sorted, [1.0, 2.0, 3.0, 4.0]);
+
+        let mut rng = test_generator();
+        let range = rng.permutation_range_shaped(5).unwrap();
+        assert_eq!(range.shape(), &[5]);
+        let mut sorted = range.values().to_vec();
         sorted.sort();
         assert_eq!(sorted, [0, 1, 2, 3, 4]);
     }
@@ -6980,6 +7302,15 @@ for child in rng.spawn(n_children):
         // At least some variance (not all zeros)
         let distinct: std::collections::HashSet<u8> = data.iter().copied().collect();
         assert!(distinct.len() > 1, "expected diverse byte values");
+    }
+
+    #[test]
+    fn bytes_shaped_preserves_byte_vector_shape() {
+        let mut rng = test_generator();
+        let output = rng.bytes_shaped(7);
+        assert_eq!(output.shape(), &[7]);
+        assert_eq!(output.len(), 7);
+        assert!(!output.is_scalar());
     }
 
     #[test]
@@ -9155,6 +9486,18 @@ for child in rng.spawn(n_children):
         let mut sorted1 = col1.clone();
         sorted1.sort_by(|a, b| a.total_cmp(b));
         assert_eq!(sorted1, vec![2.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn permuted_shaped_preserves_input_shape_metadata() {
+        let mut rng = Generator::from_pcg64_dxsm(42).unwrap();
+        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let result = rng.permuted_shaped(&data, &[3, 2], Some(1)).unwrap();
+        assert_eq!(result.shape(), &[3, 2]);
+        assert_eq!(result.len(), data.len());
+        let mut sorted = result.values().to_vec();
+        sorted.sort_by(f64::total_cmp);
+        assert_eq!(sorted, data);
     }
 
     #[test]
