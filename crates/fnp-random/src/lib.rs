@@ -2651,6 +2651,24 @@ impl RandomState {
         Ok((0..size).map(|_| self.next_f64().powf(1.0 / a)).collect())
     }
 
+    pub fn laplace(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| {
+                loop {
+                    let u = self.next_f64();
+                    if u >= 0.5 {
+                        return loc - scale * (2.0 - u - u).ln();
+                    } else if u > 0.0 {
+                        return loc + scale * (u + u).ln();
+                    }
+                }
+            })
+            .collect())
+    }
+
     pub fn logistic(
         &mut self,
         loc: f64,
@@ -6761,6 +6779,80 @@ for child in rng.spawn(n_children):
 
         let mut invalid = RandomState::new(SeedMaterial::U64(42)).expect("invalid");
         assert_eq!(invalid.power(0.0, 1), Err(RandomError::InvalidParameter));
+        let after: Vec<u64> = (0..3).map(|_| invalid.random_interval(9)).collect();
+        assert_eq!(after, vec![6, 3, 7]);
+    }
+
+    #[test]
+    fn random_state_legacy_laplace_matches_numpy_oracles() {
+        let mut shaped = RandomState::new(SeedMaterial::U64(42)).expect("shaped");
+        let values = shaped.laplace(2.0, 3.0, 10).expect("laplace");
+        let expected = [
+            1.133_272_475_676_981_9,
+            8.950_922_751_072_728,
+            3.870_795_538_956_511_6,
+            2.659_386_119_648_023_5,
+            -1.493_897_824_886_198,
+            -1.494_361_653_518_716_1,
+            -4.458_173_610_582_739,
+            5.954_251_051_759_980_5,
+            2.677_804_919_201_957_3,
+            3.614_308_643_433_935,
+        ];
+        assert_f64_seq("random_state_laplace_shaped", &values, &expected);
+        let after: Vec<u64> = (0..5).map(|_| shaped.random_interval(9)).collect();
+        assert_eq!(after, vec![5, 4, 1, 7, 5]);
+
+        let mut cached = RandomState::new(SeedMaterial::U64(7)).expect("cached");
+        assert_f64_seq(
+            "random_state_laplace_cached_normal_prefix",
+            &cached.standard_normal(1),
+            &[1.690_525_703_800_356],
+        );
+        let values = cached.laplace(2.0, 3.0, 3).expect("cached laplace");
+        let expected = [
+            11.369_267_093_705_426,
+            2.240_351_288_988_730_7,
+            2.006_730_325_864_842_3,
+        ];
+        assert_f64_seq("random_state_laplace_cached", &values, &expected);
+        let after: Vec<f64> = (0..3).map(|_| cached.next_f64()).collect();
+        let expected = [
+            0.072_051_133_359_761_54,
+            0.268_438_980_101_871_17,
+            0.499_882_500_825_559_96,
+        ];
+        assert_f64_seq("random_state_laplace_cached_after", &after, &expected);
+
+        let mut zero = RandomState::new(SeedMaterial::U64(42)).expect("zero");
+        assert_eq!(zero.laplace(2.0, 0.0, 3).expect("zero"), vec![2.0; 3]);
+        let after: Vec<u64> = (0..5).map(|_| zero.random_interval(9)).collect();
+        assert_eq!(after, vec![4, 6, 9, 2, 6]);
+
+        let mut nan = RandomState::new(SeedMaterial::U64(42)).expect("nan");
+        let values = nan.laplace(2.0, f64::NAN, 3).expect("nan");
+        assert!(values.iter().all(|value| value.is_nan()));
+        let after: Vec<u64> = (0..5).map(|_| nan.random_interval(9)).collect();
+        assert_eq!(after, vec![4, 6, 9, 2, 6]);
+
+        let mut infinite = RandomState::new(SeedMaterial::U64(42)).expect("infinite");
+        let values = infinite.laplace(2.0, f64::INFINITY, 3).expect("infinite");
+        assert!(values[0].is_infinite() && values[0].is_sign_negative());
+        assert!(values[1].is_infinite() && values[1].is_sign_positive());
+        assert!(values[2].is_infinite() && values[2].is_sign_positive());
+        let after: Vec<u64> = (0..5).map(|_| infinite.random_interval(9)).collect();
+        assert_eq!(after, vec![4, 6, 9, 2, 6]);
+
+        let mut empty = RandomState::new(SeedMaterial::U64(11)).expect("empty");
+        assert!(empty.laplace(2.0, 3.0, 0).expect("empty").is_empty());
+        let after: Vec<u64> = (0..5).map(|_| empty.random_interval(9)).collect();
+        assert_eq!(after, vec![9, 0, 1, 7, 1]);
+
+        let mut invalid = RandomState::new(SeedMaterial::U64(42)).expect("invalid");
+        assert_eq!(
+            invalid.laplace(2.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
         let after: Vec<u64> = (0..3).map(|_| invalid.random_interval(9)).collect();
         assert_eq!(after, vec![6, 3, 7]);
     }
