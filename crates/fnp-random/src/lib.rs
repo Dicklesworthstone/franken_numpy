@@ -2651,6 +2651,23 @@ impl RandomState {
         Ok((0..size).map(|_| self.next_f64().powf(1.0 / a)).collect())
     }
 
+    pub fn logistic(
+        &mut self,
+        loc: f64,
+        scale: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, RandomError> {
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| {
+                let u = self.next_f64();
+                loc + scale * (u / (1.0 - u)).ln()
+            })
+            .collect())
+    }
+
     fn legacy_standard_exponential(&mut self) -> f64 {
         -(1.0 - self.next_f64()).ln()
     }
@@ -6728,6 +6745,82 @@ for child in rng.spawn(n_children):
 
         let mut invalid = RandomState::new(SeedMaterial::U64(42)).expect("invalid");
         assert_eq!(invalid.power(0.0, 1), Err(RandomError::InvalidParameter));
+        let after: Vec<u64> = (0..3).map(|_| invalid.random_interval(9)).collect();
+        assert_eq!(after, vec![6, 3, 7]);
+    }
+
+    #[test]
+    fn random_state_legacy_logistic_matches_numpy_oracles() {
+        let mut shaped = RandomState::new(SeedMaterial::U64(42)).expect("shaped");
+        let values = shaped.logistic(2.0, 3.0, 10).expect("logistic");
+        let expected = [
+            0.461_635_203_927_723_17,
+            10.878_739_266_433_367,
+            5.014_287_956_829_345,
+            3.199_635_701_216_372,
+            -3.064_464_755_178_996,
+            -3.065_014_319_454_736,
+            -6.358_098_846_436_535,
+            7.602_691_624_893_873,
+            3.230_339_474_495_429,
+            4.658_124_146_520_926,
+        ];
+        assert_f64_seq("random_state_logistic_shaped", &values, &expected);
+        let after: Vec<u64> = (0..5).map(|_| shaped.random_interval(9)).collect();
+        assert_eq!(after, vec![5, 4, 1, 7, 5]);
+
+        let mut cached = RandomState::new(SeedMaterial::U64(7)).expect("cached");
+        assert_f64_seq(
+            "random_state_logistic_cached_normal_prefix",
+            &cached.standard_normal(1),
+            &[1.690_525_703_800_356],
+        );
+        let values = cached.logistic(2.0, 3.0, 3).expect("cached logistic");
+        let expected = [
+            13.381_939_636_581_235,
+            2.462_866_477_353_264_5,
+            2.013_445_586_426_099_6,
+        ];
+        assert_f64_seq("random_state_logistic_cached", &values, &expected);
+        let after: Vec<f64> = (0..3).map(|_| cached.next_f64()).collect();
+        let expected = [
+            0.072_051_133_359_761_54,
+            0.268_438_980_101_871_17,
+            0.499_882_500_825_559_96,
+        ];
+        assert_f64_seq("random_state_logistic_cached_after", &after, &expected);
+
+        let mut zero = RandomState::new(SeedMaterial::U64(42)).expect("zero");
+        assert_eq!(zero.logistic(2.0, 0.0, 3).expect("zero"), vec![2.0; 3]);
+        let after: Vec<u64> = (0..5).map(|_| zero.random_interval(9)).collect();
+        assert_eq!(after, vec![4, 6, 9, 2, 6]);
+
+        let mut nan = RandomState::new(SeedMaterial::U64(42)).expect("nan");
+        let values = nan.logistic(2.0, f64::NAN, 3).expect("nan");
+        assert!(values.iter().all(|value| value.is_nan()));
+        let after: Vec<u64> = (0..5).map(|_| nan.random_interval(9)).collect();
+        assert_eq!(after, vec![4, 6, 9, 2, 6]);
+
+        let mut infinite = RandomState::new(SeedMaterial::U64(42)).expect("infinite");
+        let values = infinite
+            .logistic(2.0, f64::INFINITY, 3)
+            .expect("infinite");
+        assert!(values[0].is_infinite() && values[0].is_sign_negative());
+        assert!(values[1].is_infinite() && values[1].is_sign_positive());
+        assert!(values[2].is_infinite() && values[2].is_sign_positive());
+        let after: Vec<u64> = (0..5).map(|_| infinite.random_interval(9)).collect();
+        assert_eq!(after, vec![4, 6, 9, 2, 6]);
+
+        let mut empty = RandomState::new(SeedMaterial::U64(11)).expect("empty");
+        assert!(empty.logistic(2.0, 3.0, 0).expect("empty").is_empty());
+        let after: Vec<u64> = (0..5).map(|_| empty.random_interval(9)).collect();
+        assert_eq!(after, vec![9, 0, 1, 7, 1]);
+
+        let mut invalid = RandomState::new(SeedMaterial::U64(42)).expect("invalid");
+        assert_eq!(
+            invalid.logistic(2.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
         let after: Vec<u64> = (0..3).map(|_| invalid.random_interval(9)).collect();
         assert_eq!(after, vec![6, 3, 7]);
     }
