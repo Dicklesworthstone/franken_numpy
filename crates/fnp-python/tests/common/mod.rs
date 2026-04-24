@@ -165,6 +165,7 @@ where
 
 /// Run a single parity case: call both implementations with the same
 /// args, compare per the requested mode, record the outcome.
+#[allow(clippy::too_many_arguments)]
 pub fn run_case<F, G>(
     py: Python<'_>,
     module: &Bound<'_, PyModule>,
@@ -365,16 +366,12 @@ fn compare_error_types(py: Python<'_>, ours: &PyErr, theirs: &PyErr) -> CaseOutc
     }
 }
 
-fn fetch_dtype_name(py: Python<'_>, obj: &Bound<'_, pyo3::types::PyAny>) -> Option<String> {
+fn fetch_dtype_name(_py: Python<'_>, obj: &Bound<'_, pyo3::types::PyAny>) -> Option<String> {
     obj.getattr("dtype")
         .ok()
         .and_then(|d| d.getattr("name").ok())
         .and_then(|n| n.extract::<String>().ok())
-        .or_else(|| Some(obj.get_type().name().ok()?.extract::<String>().ok()?))
-        .map(|s| {
-            let _ = py;
-            s
-        })
+        .or_else(|| obj.get_type().name().ok()?.extract::<String>().ok())
 }
 
 fn fetch_shape(py: Python<'_>, obj: &Bound<'_, pyo3::types::PyAny>) -> Option<Vec<usize>> {

@@ -924,7 +924,7 @@ impl PyRandomGenerator {
         }
         if pvals
             .iter()
-            .any(|&value| value.is_nan() || value < 0.0 || value > 1.0)
+            .any(|&value| value.is_nan() || !(0.0..=1.0).contains(&value))
         {
             return Err(PyValueError::new_err(
                 "pvals < 0, pvals > 1 or pvals contains NaNs",
@@ -1047,6 +1047,7 @@ impl PyRandomGenerator {
     }
 
     #[pyo3(signature = (a, size=None, replace=true, p=None, axis=0, shuffle=true))]
+    #[allow(clippy::too_many_arguments)]
     fn choice(
         &mut self,
         py: Python<'_>,
@@ -1320,11 +1321,7 @@ impl PyRandomState {
     }
 
     #[pyo3(signature = (size=None))]
-    fn standard_normal(
-        &mut self,
-        py: Python<'_>,
-        size: Option<Py<PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
+    fn standard_normal(&mut self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         let size = random_size_from_py(py, size, "RandomState.standard_normal(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self.inner.standard_normal(len);
@@ -1349,7 +1346,10 @@ impl PyRandomState {
     ) -> PyResult<Py<PyAny>> {
         let size = random_size_from_py(py, size, "RandomState.normal(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.normal(loc, scale, len).map_err(map_random_error)?;
+        let values = self
+            .inner
+            .normal(loc, scale, len)
+            .map_err(map_random_error)?;
         build_random_f64_parts(py, shape, values, scalar)
     }
 
@@ -1786,6 +1786,156 @@ impl PyRandomState {
         }
         out.truncate(length);
         Ok(PyBytes::new(py, &out).into_any().unbind())
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn binomial(
+        &mut self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        random_state_numpy_legacy_method(py, &mut self.inner, "binomial", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn poisson(
+        &mut self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        random_state_numpy_legacy_method(py, &mut self.inner, "poisson", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn negative_binomial(
+        &mut self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        random_state_numpy_legacy_method(py, &mut self.inner, "negative_binomial", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn hypergeometric(
+        &mut self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        random_state_numpy_legacy_method(py, &mut self.inner, "hypergeometric", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn logseries(
+        &mut self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        random_state_numpy_legacy_method(py, &mut self.inner, "logseries", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn vonmises(
+        &mut self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        random_state_numpy_legacy_method(py, &mut self.inner, "vonmises", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn wald(
+        &mut self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        random_state_numpy_legacy_method(py, &mut self.inner, "wald", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn multinomial(
+        &mut self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        random_state_numpy_legacy_method(py, &mut self.inner, "multinomial", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn dirichlet(
+        &mut self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        random_state_numpy_legacy_method(py, &mut self.inner, "dirichlet", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn multivariate_normal(
+        &mut self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        random_state_numpy_legacy_method(py, &mut self.inner, "multivariate_normal", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn noncentral_chisquare(
+        &mut self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        random_state_numpy_legacy_method(py, &mut self.inner, "noncentral_chisquare", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn noncentral_f(
+        &mut self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        random_state_numpy_legacy_method(py, &mut self.inner, "noncentral_f", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn choice(
+        &mut self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        random_state_numpy_legacy_method(py, &mut self.inner, "choice", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn shuffle(
+        &mut self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        random_state_numpy_legacy_method(py, &mut self.inner, "shuffle", args, kwargs)
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn permutation(
+        &mut self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        random_state_numpy_legacy_method(py, &mut self.inner, "permutation", args, kwargs)
     }
 }
 
@@ -2542,6 +2692,27 @@ fn random_state_state_from_py(
     random_state_state_from_legacy_tuple(py, tuple)
 }
 
+fn random_state_numpy_legacy_method(
+    py: Python<'_>,
+    random_state: &mut CoreRandomState,
+    name: &str,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let numpy_random = py.import("numpy.random")?;
+    let numpy_state = numpy_random.getattr("RandomState")?.call0()?;
+    let state = build_random_state_state(py, random_state, true)?;
+    numpy_state.call_method1("set_state", (state,))?;
+    let result = numpy_state.getattr(name)?.call(args, kwargs)?.unbind();
+    let updated_state = numpy_state.call_method0("get_state")?;
+    let updated_state = random_state_state_from_py(py, &updated_state)?;
+    random_state
+        .set_state(&updated_state.bit_generator_state)
+        .map_err(map_bit_generator_error)?;
+    random_state.set_gaussian_cache(updated_state.has_gaussian, updated_state.gaussian);
+    Ok(result)
+}
+
 fn random_len_and_shape(size: Option<Vec<usize>>) -> PyResult<(Vec<usize>, usize, bool)> {
     let scalar = size.is_none();
     let shape = size.unwrap_or_default();
@@ -2610,13 +2781,15 @@ fn extract_random_float_dtype(
     }
 }
 
+type RandomOutResolution = (Option<Vec<usize>>, Option<Py<PyAny>>);
+
 fn resolve_random_out(
     py: Python<'_>,
     requested_size: Option<Vec<usize>>,
     dtype: DType,
     out: Option<Py<PyAny>>,
     context: &str,
-) -> PyResult<(Option<Vec<usize>>, Option<Py<PyAny>>)> {
+) -> PyResult<RandomOutResolution> {
     let Some(out) = out else {
         return Ok((requested_size, None));
     };
@@ -3076,8 +3249,8 @@ fn random_state_tomaxint_size_from_py(
         if dim < 0 {
             return Err(PyValueError::new_err("negative dimensions are not allowed"));
         }
-        let dim =
-            usize::try_from(dim).map_err(|_| PyValueError::new_err("size dimension is too large"))?;
+        let dim = usize::try_from(dim)
+            .map_err(|_| PyValueError::new_err("size dimension is too large"))?;
         return Ok(Some(vec![dim]));
     }
     if let Ok(dims) = value.extract::<Vec<i64>>() {
@@ -3086,9 +3259,10 @@ fn random_state_tomaxint_size_from_py(
             if dim < 0 {
                 return Err(PyValueError::new_err("negative dimensions are not allowed"));
             }
-            shape.push(usize::try_from(dim).map_err(|_| {
-                PyValueError::new_err("size dimension is too large")
-            })?);
+            shape.push(
+                usize::try_from(dim)
+                    .map_err(|_| PyValueError::new_err("size dimension is too large"))?,
+            );
         }
         element_count(&shape).map_err(|err| PyValueError::new_err(err.to_string()))?;
         return Ok(Some(shape));
@@ -20563,10 +20737,10 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // be importable (numpy-less CI workers); in that case install a
         // module-level __getattr__ that lazy-loads on first access, same
         // pattern as linalg.LinAlgError.
-        if let Ok(np_random) = py.import("numpy.random") {
-            if let Ok(bit_gen_cls) = np_random.getattr("BitGenerator") {
-                random.setattr("BitGenerator", bit_gen_cls)?;
-            }
+        if let Ok(np_random) = py.import("numpy.random")
+            && let Ok(bit_gen_cls) = np_random.getattr("BitGenerator")
+        {
+            random.setattr("BitGenerator", bit_gen_cls)?;
         }
         let random_getattr_src = pyo3::ffi::c_str!(
             "def __getattr__(name):\n    if name == 'BitGenerator':\n        import numpy.random as _r\n        return _r.BitGenerator\n    raise AttributeError(name)\n"
@@ -20581,10 +20755,8 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // RandomState.rand method identically.
         //
         // We expose every PyRandomState method that corresponds to a
-        // numpy.random legacy top-level alias. Methods that have not yet
-        // been added to PyRandomState (binomial, poisson, multinomial,
-        // choice, shuffle, permutation, etc.) are tracked in a follow-up
-        // bead and will be bound as they come online via hasattr gate.
+        // numpy.random legacy top-level alias. The hasattr gate keeps the
+        // install helper tied to the Rust method table.
         let install_src = pyo3::ffi::c_str!(
             "def install(mod, RandomState):\n    _rand = RandomState()\n    mod._rand = _rand\n    for name in (\n        'seed', 'get_state', 'set_state',\n        'rand', 'randn', 'randint', 'random', 'random_sample',\n        'random_integers', 'tomaxint', 'bytes',\n        'choice', 'shuffle', 'permutation',\n        'beta', 'binomial', 'chisquare', 'dirichlet',\n        'exponential', 'f', 'gamma', 'geometric', 'gumbel',\n        'hypergeometric', 'laplace', 'logistic', 'lognormal',\n        'logseries', 'multinomial', 'multivariate_normal',\n        'negative_binomial', 'noncentral_chisquare', 'noncentral_f',\n        'normal', 'pareto', 'poisson', 'power', 'rayleigh',\n        'standard_cauchy', 'standard_exponential', 'standard_gamma',\n        'standard_normal', 'standard_t', 'triangular', 'uniform',\n        'vonmises', 'wald', 'weibull', 'zipf',\n    ):\n        if hasattr(_rand, name):\n            setattr(mod, name, getattr(_rand, name))\n    # ranf / sample are numpy aliases for random_sample.\n    mod.ranf = _rand.random_sample\n    mod.sample = _rand.random_sample\n"
         );
@@ -21801,6 +21973,9 @@ mod tests {
                 "random_integers",
                 "tomaxint",
                 "bytes",
+                "choice",
+                "shuffle",
+                "permutation",
                 "normal",
                 "standard_normal",
                 "standard_cauchy",
@@ -21809,19 +21984,31 @@ mod tests {
                 "exponential",
                 "uniform",
                 "beta",
+                "binomial",
                 "gamma",
                 "chisquare",
+                "dirichlet",
                 "f",
                 "geometric",
                 "gumbel",
+                "hypergeometric",
                 "laplace",
                 "logistic",
                 "lognormal",
+                "logseries",
+                "multinomial",
+                "multivariate_normal",
+                "negative_binomial",
+                "noncentral_chisquare",
+                "noncentral_f",
                 "pareto",
+                "poisson",
                 "power",
                 "rayleigh",
                 "standard_t",
                 "triangular",
+                "vonmises",
+                "wald",
                 "weibull",
                 "zipf",
             ] {
@@ -21884,6 +22071,106 @@ mod tests {
             assert_array_matches_numpy(
                 &random.call_method1("randint", (0_i64, 100_i64, 5_usize))?,
                 &numpy_random.call_method1("randint", (0_i64, 100_i64, 5_usize))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_state_delegated_legacy_methods_match_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_state_delegated_legacy")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy = py.import("numpy")?;
+            let numpy_random = numpy.getattr("random")?;
+            let shape = PyTuple::new(py, [2_usize, 3_usize])?;
+
+            let ours = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("binomial", (10_u64, 0.25_f64, shape.clone()))?,
+                &theirs.call_method1("binomial", (10_u64, 0.25_f64, shape.clone()))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("poisson", (3.5_f64, shape.clone()))?,
+                &theirs.call_method1("poisson", (3.5_f64, shape.clone()))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("negative_binomial", (5_i64, 0.4_f64, shape.clone()))?,
+                &theirs.call_method1("negative_binomial", (5_i64, 0.4_f64, shape.clone()))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("hypergeometric", (5_u64, 7_u64, 3_u64, shape.clone()))?,
+                &theirs.call_method1("hypergeometric", (5_u64, 7_u64, 3_u64, shape.clone()))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("logseries", (0.5_f64, shape.clone()))?,
+                &theirs.call_method1("logseries", (0.5_f64, shape.clone()))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("vonmises", (1.0_f64, 2.0_f64, shape.clone()))?,
+                &theirs.call_method1("vonmises", (1.0_f64, 2.0_f64, shape.clone()))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("wald", (2.0_f64, 3.0_f64, shape.clone()))?,
+                &theirs.call_method1("wald", (2.0_f64, 3.0_f64, shape.clone()))?,
+            )?;
+
+            let pvals = PyList::new(py, [0.2_f64, 0.3_f64, 0.5_f64])?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("multinomial", (5_u64, pvals.clone(), 4_usize))?,
+                &theirs.call_method1("multinomial", (5_u64, pvals.clone(), 4_usize))?,
+            )?;
+            let alpha = PyList::new(py, [1.0_f64, 2.0_f64, 3.0_f64])?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("dirichlet", (alpha.clone(), 4_usize))?,
+                &theirs.call_method1("dirichlet", (alpha.clone(), 4_usize))?,
+            )?;
+            let mean = PyList::new(py, [0.0_f64, 1.0_f64])?;
+            let cov = numpy.call_method1(
+                "array",
+                (vec![vec![1.0_f64, 0.1_f64], vec![0.1_f64, 1.5_f64]],),
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("multivariate_normal", (mean.clone(), cov.clone(), 4_usize))?,
+                &theirs
+                    .call_method1("multivariate_normal", (mean.clone(), cov.clone(), 4_usize))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("noncentral_chisquare", (4.0_f64, 1.5_f64, shape.clone()))?,
+                &theirs.call_method1("noncentral_chisquare", (4.0_f64, 1.5_f64, shape.clone()))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("noncentral_f", (4.0_f64, 7.0_f64, 1.5_f64, shape.clone()))?,
+                &theirs.call_method1("noncentral_f", (4.0_f64, 7.0_f64, 1.5_f64, shape.clone()))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("choice", (10_i64, shape.clone(), false))?,
+                &theirs.call_method1("choice", (10_i64, shape.clone(), false))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("permutation", (6_i64,))?,
+                &theirs.call_method1("permutation", (6_i64,))?,
+            )?;
+
+            let ours_array = numpy.call_method1("arange", (8_i64,))?;
+            let theirs_array = numpy.call_method1("arange", (8_i64,))?;
+            assert_eq!(
+                repr_string(&ours.call_method1("shuffle", (ours_array.clone(),))?),
+                repr_string(&theirs.call_method1("shuffle", (theirs_array.clone(),))?)
+            );
+            assert_array_matches_numpy(&ours_array, &theirs_array)?;
+
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("random_sample", (shape.clone(),))?,
+                &theirs.call_method1("random_sample", (shape,))?,
             )?;
 
             Ok(())
@@ -22195,7 +22482,8 @@ mod tests {
             fnp_python(&module)?;
             let random = module.getattr("random")?;
             let numpy_random = py.import("numpy")?.getattr("random")?;
-            py.import("warnings")?.call_method1("simplefilter", ("ignore",))?;
+            py.import("warnings")?
+                .call_method1("simplefilter", ("ignore",))?;
             let shape = PyTuple::new(py, [2_usize, 3_usize])?;
 
             let size_kwargs = PyDict::new(py);
@@ -22218,14 +22506,10 @@ mod tests {
             let ours_singleton = random.getattr("RandomState")?.call1((7_u64,))?;
             let theirs_singleton = numpy_random.getattr("RandomState")?.call1((7_u64,))?;
             assert_random_sample_matches_numpy(
-                &ours_singleton.call_method1(
-                    "random_integers",
-                    (0_i64, 0_i64, singleton_shape.clone()),
-                )?,
-                &theirs_singleton.call_method1(
-                    "random_integers",
-                    (0_i64, 0_i64, singleton_shape),
-                )?,
+                &ours_singleton
+                    .call_method1("random_integers", (0_i64, 0_i64, singleton_shape.clone()))?,
+                &theirs_singleton
+                    .call_method1("random_integers", (0_i64, 0_i64, singleton_shape))?,
             )?;
 
             let ours_error = random.getattr("RandomState")?.call1((1_u64,))?;
@@ -22238,15 +22522,14 @@ mod tests {
                 }
                 Err(err) => err,
             };
-            let theirs_error =
-                match theirs_error.call_method1("random_integers", (5_i64, 4_i64)) {
-                    Ok(_) => {
-                        return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
-                            "numpy RandomState.random_integers(5, 4) unexpectedly succeeded",
-                        ));
-                    }
-                    Err(err) => err,
-                };
+            let theirs_error = match theirs_error.call_method1("random_integers", (5_i64, 4_i64)) {
+                Ok(_) => {
+                    return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        "numpy RandomState.random_integers(5, 4) unexpectedly succeeded",
+                    ));
+                }
+                Err(err) => err,
+            };
             assert_pyerr_matches_numpy(py, ours_error, theirs_error)?;
 
             Ok(())
@@ -23301,14 +23584,10 @@ mod tests {
             let ours_shaped = random.getattr("RandomState")?.call1((42_u64,))?;
             let theirs_shaped = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
             assert_random_sample_matches_numpy(
-                &ours_shaped.call_method1(
-                    "triangular",
-                    (1.0_f64, 2.0_f64, 5.0_f64, shape.clone()),
-                )?,
-                &theirs_shaped.call_method1(
-                    "triangular",
-                    (1.0_f64, 2.0_f64, 5.0_f64, shape.clone()),
-                )?,
+                &ours_shaped
+                    .call_method1("triangular", (1.0_f64, 2.0_f64, 5.0_f64, shape.clone()))?,
+                &theirs_shaped
+                    .call_method1("triangular", (1.0_f64, 2.0_f64, 5.0_f64, shape.clone()))?,
             )?;
             assert_random_sample_matches_numpy(
                 &ours_shaped.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
@@ -23333,14 +23612,10 @@ mod tests {
             let ours_right_mode = random.getattr("RandomState")?.call1((42_u64,))?;
             let theirs_right_mode = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
             assert_random_sample_matches_numpy(
-                &ours_right_mode.call_method1(
-                    "triangular",
-                    (1.0_f64, 5.0_f64, 5.0_f64, 3_usize),
-                )?,
-                &theirs_right_mode.call_method1(
-                    "triangular",
-                    (1.0_f64, 5.0_f64, 5.0_f64, 3_usize),
-                )?,
+                &ours_right_mode
+                    .call_method1("triangular", (1.0_f64, 5.0_f64, 5.0_f64, 3_usize))?,
+                &theirs_right_mode
+                    .call_method1("triangular", (1.0_f64, 5.0_f64, 5.0_f64, 3_usize))?,
             )?;
             assert_random_sample_matches_numpy(
                 &ours_right_mode.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
@@ -23361,14 +23636,10 @@ mod tests {
             let ours_inf = random.getattr("RandomState")?.call1((42_u64,))?;
             let theirs_inf = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
             assert_random_sample_matches_numpy(
-                &ours_inf.call_method1(
-                    "triangular",
-                    (f64::NEG_INFINITY, 2.0_f64, 5.0_f64, 3_usize),
-                )?,
-                &theirs_inf.call_method1(
-                    "triangular",
-                    (f64::NEG_INFINITY, 2.0_f64, 5.0_f64, 3_usize),
-                )?,
+                &ours_inf
+                    .call_method1("triangular", (f64::NEG_INFINITY, 2.0_f64, 5.0_f64, 3_usize))?,
+                &theirs_inf
+                    .call_method1("triangular", (f64::NEG_INFINITY, 2.0_f64, 5.0_f64, 3_usize))?,
             )?;
             assert_random_sample_matches_numpy(
                 &ours_inf.call_method1("randint", (0_i64, 10_i64, 5_usize))?,

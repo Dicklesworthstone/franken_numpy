@@ -17890,9 +17890,9 @@ impl UFuncArray {
                         )));
                     }
                     let n_bcast = op.shape.len() - explicit_count;
-                    let (prefix, _) = sub
-                        .split_once("...")
-                        .expect("einsum: '...' ellipsis presence guarded by contains-check upstream");
+                    let (prefix, _) = sub.split_once("...").expect(
+                        "einsum: '...' ellipsis presence guarded by contains-check upstream",
+                    );
                     let prefix_len = prefix.chars().count();
                     let dims: Vec<usize> = op.shape[prefix_len..prefix_len + n_bcast].to_vec();
                     match &bcast_dims {
@@ -26615,9 +26615,9 @@ impl MaskedArray {
             Some(mask) => {
                 ensure_bridge_dtype_supported(fill_value.dtype(), "filled")?;
                 ensure_storage_cast_target_supported(&fill_value, self.data.dtype(), "filled")?;
-                let fill_value = fill_value
-                    .cast_to(self.data.dtype())
-                    .map_err(|err| UFuncError::Msg(format!("filled: storage cast failed: {err}")))?;
+                let fill_value = fill_value.cast_to(self.data.dtype()).map_err(|err| {
+                    UFuncError::Msg(format!("filled: storage cast failed: {err}"))
+                })?;
                 let mut output = self.data.to_storage()?;
                 Self::write_masked_fill_storage(&mut output, mask, &fill_value)?;
                 UFuncArray::from_storage(self.data.shape().to_vec(), output)
@@ -32356,7 +32356,11 @@ mod tests {
             Some(arr) => match arr.dtype() {
                 DType::Bool => format!(
                     "bool:{}",
-                    if arr.values()[0] != 0.0 { "True" } else { "False" }
+                    if arr.values()[0] != 0.0 {
+                        "True"
+                    } else {
+                        "False"
+                    }
                 ),
                 DType::I8 => format!("int:{}", arr.values()[0] as i8),
                 DType::I16 => format!("int:{}", arr.values()[0] as i16),

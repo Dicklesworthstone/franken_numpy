@@ -401,7 +401,7 @@ fn conformance_array_creation_matrix() {
                     py,
                     [
                         (2_usize, 2_usize).into_pyobject(py)?.into_any(),
-                        3.14_f64.into_pyobject(py)?.into_any(),
+                        (314_f64 / 100_f64).into_pyobject(py)?.into_any(),
                     ],
                 )
             },
