@@ -9711,23 +9711,53 @@ fn iscomplex(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     Ok(numpy.getattr("iscomplex")?.call1((x.bind(py),))?.unbind())
 }
 
+// Shared native fast-path for simple unary ufuncs that map 1:1 onto a
+// UFuncArray::elementwise_unary kernel. numeric_unary_fallback closes over
+// the numpy attribute name to delegate to on complex / object / sidecar
+// inputs so the dispatch surface stays exact.
+fn native_unary_elementwise(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    op: UnaryOp,
+    numpy_name: &str,
+    context: &str,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let fallback = |_py: Python<'_>| -> PyResult<Py<PyAny>> {
+        Ok(numpy.getattr(numpy_name)?.call1((x,))?.unbind())
+    };
+    let Ok(native) = extract_precise_numeric_array(py, x, context) else {
+        return fallback(py);
+    };
+    if native.has_integer_sidecar()
+        || matches!(native.dtype(), DType::Complex64 | DType::Complex128)
+    {
+        return fallback(py);
+    }
+    let result = native.elementwise_unary(op);
+    if !dtype_supported_by_numpy_export_bridge(result.dtype()) {
+        return fallback(py);
+    }
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if native.shape().is_empty() {
+        // Preserve numpy's 0-d scalar return type for scalar inputs.
+        return Ok(output.bind(py).get_item(())?.unbind());
+    }
+    Ok(output)
+}
+
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn square(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.square (element-wise x*x). Preserves dtype
-    // (int stays int, float stays float, complex stays complex) and
-    // matches numpy's overflow behavior for narrow integer types.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("square")?.call1((x.bind(py),))?.unbind())
+    native_unary_elementwise(py, x.bind(py), UnaryOp::Square, "square", "square(x)")
 }
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn cbrt(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.cbrt (real cube root, defined for negative
-    // inputs unlike sqrt). Integer input promotes to float; complex
-    // input is not supported by numpy's cbrt and surfaces the same
-    // TypeError to callers.
+    // numpy.cbrt promotes integer input to float64; our
+    // elementwise_unary preserves dtype. Routing through np.cbrt keeps
+    // the promotion rules exact.
     let numpy = py.import("numpy")?;
     Ok(numpy.getattr("cbrt")?.call1((x.bind(py),))?.unbind())
 }
@@ -9799,11 +9829,7 @@ fn fabs(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn negative(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.negative (element-wise unary minus). Preserves
-    // dtype: int stays int, float stays float, complex stays complex.
-    // Matches numpy wrap-around behavior for signed narrow integers.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("negative")?.call1((x.bind(py),))?.unbind())
+    native_unary_elementwise(py, x.bind(py), UnaryOp::Negative, "negative", "negative(x)")
 }
 
 #[pyfunction]
