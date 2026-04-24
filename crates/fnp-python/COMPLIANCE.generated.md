@@ -1,8 +1,8 @@
 # fnp-python Compliance Matrix (auto-generated)
 
-> Source: `scripts/fnp_python_compliance_matrix.py`  
+> Source: `scripts/fnp_python_compliance_matrix.py`
 
-> Total parity tests scanned: **324**  
+> Total parity tests scanned: **367**
 
 > Do not edit by hand — regenerate via `python3 scripts/fnp_python_compliance_matrix.py`.
 
@@ -12,10 +12,10 @@
 
 | Level | Count | Share |
 |-------|------:|------:|
-| MUST | 199 | 61.4% |
-| SHOULD | 114 | 35.2% |
-| MAY | 11 | 3.4% |
-| **Total** | **324** | 100.0% |
+| MUST | 242 | 65.9% |
+| SHOULD | 114 | 31.1% |
+| MAY | 11 | 3.0% |
+| **Total** | **367** | 100.0% |
 
 ## Per-domain breakdown
 
@@ -30,6 +30,7 @@
 | `masked` | SHOULD | 21 | Masked arrays |
 | `math_special` | MUST | 19 | Special-function math (bessel, gamma, beta…) |
 | `misc` | SHOULD | 38 | Uncategorized numpy surface |
+| `random` | MUST | 43 | RNG distributions and bit streams |
 | `reducer` | MUST | 31 | Axis reducers (sum, mean, var, nan*, quantile…) |
 | `reshape_transpose` | SHOULD | 16 | Shape / transpose / broadcasting surfaces |
 | `runtime_policy` | MAY | 11 | frompyfunc / delegation observability probes |
@@ -276,6 +277,49 @@
 | `quantile_matches_numpy_across_q_axis_method_and_dtype` | `reducer` | MUST |
 | `rad2deg_matches_numpy_across_canonical_array_int_and_roundtrip` | `ufunc_numeric` | MUST |
 | `radians_matches_numpy_integer_multidimensional_input` | `ufunc_numeric` | MUST |
+| `random_bit_generator_state_setter_matches_numpy_oracles` | `random` | MUST |
+| `random_generator_choice_axis_matches_numpy_oracles` | `random` | MUST |
+| `random_generator_choice_integer_domain_matches_numpy_oracles` | `random` | MUST |
+| `random_generator_choice_weighted_matches_numpy_oracles` | `random` | MUST |
+| `random_generator_integers_dtype_matches_numpy_oracles` | `random` | MUST |
+| `random_generator_permutation_axis_matches_numpy_oracles` | `random` | MUST |
+| `random_generator_permuted_matches_numpy_oracles` | `random` | MUST |
+| `random_generator_random_dtype_matches_numpy_oracles` | `random` | MUST |
+| `random_generator_random_out_matches_numpy_oracles` | `random` | MUST |
+| `random_generator_shuffle_matches_numpy_oracles` | `random` | MUST |
+| `random_generator_standard_exponential_out_matches_numpy_oracles` | `random` | MUST |
+| `random_generator_standard_gamma_out_matches_numpy_oracles` | `random` | MUST |
+| `random_generator_standard_normal_out_matches_numpy_oracles` | `random` | MUST |
+| `random_namespace_matches_numpy_bit_generator_oracles` | `random` | MUST |
+| `random_seed_sequence_matches_numpy_oracles` | `random` | MUST |
+| `random_spawn_matches_numpy_oracles` | `random` | MUST |
+| `random_state_bytes_matches_numpy_oracles` | `random` | MUST |
+| `random_state_get_set_state_matches_numpy_oracles` | `random` | MUST |
+| `random_state_legacy_beta_matches_numpy_oracles` | `random` | MUST |
+| `random_state_legacy_chisquare_matches_numpy_oracles` | `random` | MUST |
+| `random_state_legacy_exponential_matches_numpy_oracles` | `random` | MUST |
+| `random_state_legacy_f_matches_numpy_oracles` | `random` | MUST |
+| `random_state_legacy_gamma_matches_numpy_oracles` | `random` | MUST |
+| `random_state_legacy_geometric_matches_numpy_oracles` | `random` | MUST |
+| `random_state_legacy_gumbel_matches_numpy_oracles` | `random` | MUST |
+| `random_state_legacy_laplace_matches_numpy_oracles` | `random` | MUST |
+| `random_state_legacy_logistic_matches_numpy_oracles` | `random` | MUST |
+| `random_state_legacy_lognormal_matches_numpy_oracles` | `random` | MUST |
+| `random_state_legacy_normal_matches_numpy_oracles` | `random` | MUST |
+| `random_state_legacy_pareto_matches_numpy_oracles` | `random` | MUST |
+| `random_state_legacy_power_matches_numpy_oracles` | `random` | MUST |
+| `random_state_legacy_rayleigh_matches_numpy_oracles` | `random` | MUST |
+| `random_state_legacy_standard_cauchy_matches_numpy_oracles` | `random` | MUST |
+| `random_state_legacy_standard_t_matches_numpy_oracles` | `random` | MUST |
+| `random_state_legacy_triangular_matches_numpy_oracles` | `random` | MUST |
+| `random_state_legacy_weibull_matches_numpy_oracles` | `random` | MUST |
+| `random_state_legacy_zipf_matches_numpy_oracles` | `random` | MUST |
+| `random_state_rand_matches_numpy_oracles` | `random` | MUST |
+| `random_state_randint_dtype_matches_numpy_oracles` | `random` | MUST |
+| `random_state_random_integers_matches_numpy_oracles` | `random` | MUST |
+| `random_state_seed_matches_numpy_oracles` | `random` | MUST |
+| `random_state_tomaxint_matches_numpy_oracles` | `random` | MUST |
+| `random_state_uniform_matches_numpy_oracles` | `random` | MUST |
 | `ravel_matches_numpy_across_order_ndim_scalar_and_object` | `reshape_transpose` | SHOULD |
 | `real_if_close_matches_numpy_across_real_complex_and_tol` | `ufunc_numeric` | MUST |
 | `recfunctions_family_matches_numpy_across_drop_rename_append_merge_and_u2s` | `structured` | SHOULD |

@@ -151,8 +151,8 @@ def main() -> int:
 
     lines: list[str] = []
     lines.append("# fnp-python Compliance Matrix (auto-generated)\n")
-    lines.append("> Source: `scripts/fnp_python_compliance_matrix.py`  \n")
-    lines.append(f"> Total parity tests scanned: **{total}**  \n")
+    lines.append("> Source: `scripts/fnp_python_compliance_matrix.py`\n")
+    lines.append(f"> Total parity tests scanned: **{total}**\n")
     lines.append("> Do not edit by hand — regenerate via `python3 scripts/fnp_python_compliance_matrix.py`.\n")
     lines.append("\n## Summary by RequirementLevel\n")
     lines.append("")
@@ -182,7 +182,7 @@ def main() -> int:
     OUT_FILE.parent.mkdir(parents=True, exist_ok=True)
     OUT_FILE.write_text("\n".join(lines), encoding="utf-8")
     print(f"wrote {OUT_FILE}")
-    print(f"domains:")
+    print("domains:")
     for domain in sorted(by_domain):
         level = DOMAIN_LEVELS.get(domain, ("SHOULD", ""))[0]
         print(f"  {domain:<22} level={level:<6} tests={len(by_domain[domain])}")
