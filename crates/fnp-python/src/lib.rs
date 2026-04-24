@@ -1353,6 +1353,37 @@ impl PyRandomState {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
+    #[pyo3(signature = (size=None))]
+    fn standard_exponential(
+        &mut self,
+        py: Python<'_>,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "RandomState.standard_exponential(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self.inner.standard_exponential(len);
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (scale=1.0, size=None))]
+    fn exponential(
+        &mut self,
+        py: Python<'_>,
+        scale: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        if scale < 0.0 {
+            return Err(PyValueError::new_err("scale < 0"));
+        }
+        let size = random_size_from_py(py, size, "RandomState.exponential(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self
+            .inner
+            .exponential(scale, len)
+            .map_err(map_random_error)?;
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
     #[pyo3(signature = (low=0.0, high=1.0, size=None))]
     fn uniform(
         &mut self,
@@ -22039,6 +22070,86 @@ mod tests {
                 &ours_restore.call_method1("random_sample", (shape.clone(),))?,
                 &theirs_restore.call_method1("random_sample", (shape,))?,
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_state_legacy_exponential_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_state_legacy_exponential")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+            let shape = PyTuple::new(py, [2_usize, 3_usize])?;
+
+            let ours_scalar = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_scalar = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_scalar.call_method0("standard_exponential")?,
+                &theirs_scalar.call_method0("standard_exponential")?,
+            )?;
+
+            let ours_shaped = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_shaped = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_shaped.call_method1("standard_exponential", (shape.clone(),))?,
+                &theirs_shaped.call_method1("standard_exponential", (shape.clone(),))?,
+            )?;
+
+            let ours_scaled = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_scaled = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_scaled.call_method1("exponential", (2.5_f64, shape.clone()))?,
+                &theirs_scaled.call_method1("exponential", (2.5_f64, shape.clone()))?,
+            )?;
+
+            let ours_zero = random.getattr("RandomState")?.call1((11_u64,))?;
+            let theirs_zero = numpy_random.getattr("RandomState")?.call1((11_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_zero.call_method1("exponential", (0.0_f64, 4_usize))?,
+                &theirs_zero.call_method1("exponential", (0.0_f64, 4_usize))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_zero.call_method1("random_sample", (3_usize,))?,
+                &theirs_zero.call_method1("random_sample", (3_usize,))?,
+            )?;
+
+            let ours_continuation = random.getattr("RandomState")?.call1((7_u64,))?;
+            let theirs_continuation = numpy_random.getattr("RandomState")?.call1((7_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_continuation.call_method1("standard_exponential", (5_usize,))?,
+                &theirs_continuation.call_method1("standard_exponential", (5_usize,))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_continuation.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+                &theirs_continuation.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
+
+            let ours_negative = random.getattr("RandomState")?.call1((1_u64,))?;
+            let theirs_negative = numpy_random.getattr("RandomState")?.call1((1_u64,))?;
+            let ours_negative = match ours_negative.call_method1("exponential", (-1.0_f64,)) {
+                Ok(_) => {
+                    return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        "RandomState.exponential(-1.0) unexpectedly succeeded",
+                    ));
+                }
+                Err(err) => err,
+            };
+            let theirs_negative = match theirs_negative.call_method1("exponential", (-1.0_f64,)) {
+                Ok(_) => {
+                    return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        "numpy RandomState.exponential(-1.0) unexpectedly succeeded",
+                    ));
+                }
+                Err(err) => err,
+            };
+            assert_pyerr_matches_numpy(py, ours_negative, theirs_negative)?;
 
             Ok(())
         });

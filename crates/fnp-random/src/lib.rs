@@ -2507,6 +2507,24 @@ impl RandomState {
     }
 
     #[must_use]
+    pub fn standard_exponential(&mut self, size: usize) -> Vec<f64> {
+        (0..size)
+            .map(|_| -(1.0 - self.next_f64()).ln())
+            .collect()
+    }
+
+    pub fn exponential(&mut self, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if scale < 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok(self
+            .standard_exponential(size)
+            .into_iter()
+            .map(|value| scale * value)
+            .collect())
+    }
+
+    #[must_use]
     pub fn state(&self) -> BitGeneratorState {
         self.bit_generator.state()
     }
