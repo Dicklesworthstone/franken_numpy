@@ -2563,6 +2563,19 @@ impl RandomState {
             .collect())
     }
 
+    pub fn beta(&mut self, a: f64, b: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if a <= 0.0 || b <= 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| {
+                let ga = self.legacy_standard_gamma(a);
+                let gb = self.legacy_standard_gamma(b);
+                ga / (ga + gb)
+            })
+            .collect())
+    }
+
     pub fn chisquare(&mut self, df: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if df <= 0.0 {
             return Err(RandomError::InvalidParameter);
@@ -6260,6 +6273,71 @@ for child in rng.spawn(n_children):
         );
         let after: Vec<u64> = (0..5).map(|_| invalid.random_interval(9)).collect();
         assert_eq!(after, vec![9, 0, 1, 7, 1]);
+    }
+
+    #[test]
+    fn random_state_legacy_beta_matches_numpy_oracles() {
+        let mut standard = RandomState::new(SeedMaterial::U64(42)).expect("standard");
+        let values = standard.beta(2.0, 5.0, 10).expect("beta");
+        let expected = [
+            0.353_676_657_233_565_84,
+            0.248_558_066_078_239_3,
+            0.415_959_087_338_171_4,
+            0.159_967_575_809_991_96,
+            0.550_283_078_061_632_2,
+            0.110_945_287_593_398_01,
+            0.509_896_641_792_057_1,
+            0.177_270_379_472_744_54,
+            0.198_290_471_913_344_42,
+            0.376_236_788_213_549_94,
+        ];
+        assert_f64_seq("random_state_beta", &values, &expected);
+        let after: Vec<u64> = (0..5).map(|_| standard.random_interval(9)).collect();
+        assert_eq!(after, vec![3, 1, 7, 3, 1]);
+
+        let mut cached = RandomState::new(SeedMaterial::U64(7)).expect("cached");
+        assert_f64_seq(
+            "random_state_beta_cached_normal_prefix",
+            &cached.standard_normal(1),
+            &[1.690_525_703_800_356],
+        );
+        let values = cached.beta(0.5, 2.5, 3).expect("cached beta");
+        let expected = [
+            0.044_406_999_434_884_374,
+            0.326_034_460_820_291_6,
+            0.025_922_538_245_962_242,
+        ];
+        assert_f64_seq("random_state_beta_cached", &values, &expected);
+        let after: Vec<f64> = (0..3).map(|_| cached.next_f64()).collect();
+        let expected = [
+            0.024_899_227_550_348_013,
+            0.600_548_917_464_122_5,
+            0.950_129_500_413_645_6,
+        ];
+        assert_f64_seq("random_state_beta_cached_after", &after, &expected);
+
+        let mut empty = RandomState::new(SeedMaterial::U64(11)).expect("empty");
+        assert!(empty.beta(2.0, 5.0, 0).expect("empty").is_empty());
+        let after: Vec<u64> = (0..5).map(|_| empty.random_interval(9)).collect();
+        assert_eq!(after, vec![9, 0, 1, 7, 1]);
+
+        let mut invalid = RandomState::new(SeedMaterial::U64(42)).expect("invalid");
+        assert_eq!(
+            invalid.beta(0.0, 1.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+        let after: Vec<u64> = (0..3).map(|_| invalid.random_interval(9)).collect();
+        assert_eq!(after, vec![6, 3, 7]);
+
+        let mut nan_a = RandomState::new(SeedMaterial::U64(42)).expect("nan_a");
+        assert!(nan_a.beta(f64::NAN, 1.0, 1).expect("nan_a")[0].is_nan());
+        let after: Vec<u64> = (0..3).map(|_| nan_a.random_interval(9)).collect();
+        assert_eq!(after, vec![6, 9, 2]);
+
+        let mut nan_b = RandomState::new(SeedMaterial::U64(42)).expect("nan_b");
+        assert!(nan_b.beta(1.0, f64::NAN, 1).expect("nan_b")[0].is_nan());
+        let after: Vec<u64> = (0..3).map(|_| nan_b.random_interval(9)).collect();
+        assert_eq!(after, vec![7, 4, 3]);
     }
 
     #[test]
