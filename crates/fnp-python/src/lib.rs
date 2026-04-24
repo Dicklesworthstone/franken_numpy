@@ -814,7 +814,8 @@ impl PyRandomGenerator {
         build_random_f64_output(py, output)
     }
 
-    fn permutation(&mut self, py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (x, axis=0))]
+    fn permutation(&mut self, py: Python<'_>, x: Py<PyAny>, axis: isize) -> PyResult<Py<PyAny>> {
         let bound = x.bind(py);
         if let Ok(n) = bound.extract::<i64>() {
             if n < 0 {
@@ -837,12 +838,19 @@ impl PyRandomGenerator {
             return build_numpy_array_from_storage(py, &[n], ArrayStorage::I64(values));
         }
 
-        let values = extract_random_f64_population(py, bound, "Generator.permutation(x)")?;
-        let output = self
+        let (shape, values) = extract_random_f64_array(py, bound, "Generator.permutation(x)")?;
+        let axis = try_normalize_axis(axis, shape.len()).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "axis {axis} is out of bounds for array of dimension {}",
+                shape.len()
+            ))
+        })?;
+        let order = self
             .inner
-            .permutation_shaped(&values)
+            .permutation_range(shape[axis])
             .map_err(map_random_error)?;
-        build_random_f64_output(py, output)
+        let values = permute_random_f64_axis(&values, &shape, axis, &order)?;
+        build_random_f64_parts(py, shape, values, false)
     }
 
     #[pyo3(signature = (x, *, axis=None))]
@@ -1340,6 +1348,45 @@ fn extract_random_f64_array(
         .call_method0("tolist")?
         .extract::<Vec<f64>>()?;
     Ok((shape, values))
+}
+
+fn permute_random_f64_axis(
+    values: &[f64],
+    shape: &[usize],
+    axis: usize,
+    order: &[u64],
+) -> PyResult<Vec<f64>> {
+    if axis >= shape.len() || order.len() != shape[axis] {
+        return Err(PyValueError::new_err("permutation axis metadata mismatch"));
+    }
+    let total = element_count(shape).map_err(|err| PyValueError::new_err(err.to_string()))?;
+    if values.len() != total {
+        return Err(PyValueError::new_err(
+            "permutation values do not match shape",
+        ));
+    }
+    if shape[axis] <= 1 {
+        return Ok(values.to_vec());
+    }
+
+    let mut strides = vec![1usize; shape.len()];
+    for dim in (0..shape.len() - 1).rev() {
+        strides[dim] = strides[dim + 1]
+            .checked_mul(shape[dim + 1])
+            .ok_or_else(|| PyValueError::new_err("permutation shape is too large"))?;
+    }
+
+    let axis_stride = strides[axis];
+    let mut output = Vec::with_capacity(values.len());
+    for linear in 0..values.len() {
+        let axis_index = (linear / axis_stride) % shape[axis];
+        let source_axis = usize::try_from(order[axis_index])
+            .map_err(|_| PyValueError::new_err("permutation index is too large"))?;
+        let base = linear - axis_index * axis_stride;
+        let source = base + source_axis * axis_stride;
+        output.push(values[source]);
+    }
+    Ok(output)
 }
 
 fn extract_random_f64_vector(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Vec<f64>> {
@@ -20405,6 +20452,47 @@ mod tests {
                     (vec![1.0_f64, 2.0, 3.0], shape, true),
                     Some(&kwargs),
                 )?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_generator_permutation_axis_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_permutation_axis")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+            let matrix = vec![
+                vec![0.0_f64, 1.0, 2.0, 3.0],
+                vec![4.0_f64, 5.0, 6.0, 7.0],
+                vec![8.0_f64, 9.0, 10.0, 11.0],
+            ];
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 1)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("permutation", (matrix.clone(),))?,
+                &theirs.call_method1("permutation", (matrix.clone(),))?,
+            )?;
+
+            let axis_last_kwargs = PyDict::new(py);
+            axis_last_kwargs.set_item("axis", -1_i64)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 2)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method("permutation", (matrix.clone(),), Some(&axis_last_kwargs))?,
+                &theirs.call_method("permutation", (matrix,), Some(&axis_last_kwargs))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 3)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("permutation", (5_i64,))?,
+                &theirs.call_method1("permutation", (5_i64,))?,
             )?;
 
             Ok(())
