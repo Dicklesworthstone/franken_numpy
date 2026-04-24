@@ -149,34 +149,46 @@ impl PyRandomGenerator {
         build_bit_generator_state_dict(py, self.inner.bit_generator())
     }
 
-    #[pyo3(signature = (size=None, dtype=None))]
+    #[pyo3(signature = (size=None, dtype=None, out=None))]
     fn random(
         &mut self,
         py: Python<'_>,
         size: Option<Py<PyAny>>,
         dtype: Option<Py<PyAny>>,
+        out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let dtype = extract_random_float_dtype(py, dtype, "Generator.random(dtype)")?;
-        let size = random_size_from_py(py, size, "Generator.random(size)")?;
-        match dtype {
+        let requested_size = random_size_from_py(py, size, "Generator.random(size)")?;
+        let (size, out) = resolve_random_out(py, requested_size, dtype, out)?;
+        let generated = match dtype {
             DType::F32 => {
                 let output = self
                     .inner
                     .random_f32_shaped(size.as_deref())
                     .map_err(map_random_error)?;
-                build_random_f32_output(py, output)
+                build_random_f32_output(py, output)?
             }
             DType::F64 => {
                 let output = self
                     .inner
                     .random_shaped(size.as_deref())
                     .map_err(map_random_error)?;
-                build_random_f64_output(py, output)
+                build_random_f64_output(py, output)?
             }
-            _ => Err(PyTypeError::new_err(format!(
-                "Unsupported dtype dtype('{}') for random",
-                dtype.name()
-            ))),
+            _ => {
+                return Err(PyTypeError::new_err(format!(
+                    "Unsupported dtype dtype('{}') for random",
+                    dtype.name()
+                )));
+            }
+        };
+
+        if let Some(out) = out {
+            py.import("numpy")?
+                .call_method1("copyto", (out.bind(py), generated.bind(py)))?;
+            Ok(out)
+        } else {
+            Ok(generated)
         }
     }
 
@@ -1293,6 +1305,57 @@ fn extract_random_float_dtype(
             "Unsupported dtype dtype('{name}') for {}",
             context.trim_end_matches("(dtype)")
         ))),
+    }
+}
+
+fn resolve_random_out(
+    py: Python<'_>,
+    requested_size: Option<Vec<usize>>,
+    dtype: DType,
+    out: Option<Py<PyAny>>,
+) -> PyResult<(Option<Vec<usize>>, Option<Py<PyAny>>)> {
+    let Some(out) = out else {
+        return Ok((requested_size, None));
+    };
+    let bound = out.bind(py);
+    if bound.is_none() {
+        return Ok((requested_size, None));
+    }
+
+    require_numpy_ndarray(py, bound, "Generator.random(out)")?;
+    let out_shape = bound.getattr("shape")?.extract::<Vec<usize>>()?;
+    if let Some(size) = requested_size {
+        if size != out_shape {
+            return Err(PyValueError::new_err(
+                "size must match out.shape when used together",
+            ));
+        }
+        validate_random_out_dtype(bound, dtype)?;
+        Ok((Some(size), Some(out)))
+    } else {
+        validate_random_out_dtype(bound, dtype)?;
+        Ok((Some(out_shape), Some(out)))
+    }
+}
+
+fn validate_random_out_dtype(out: &Bound<'_, PyAny>, dtype: DType) -> PyResult<()> {
+    let out_dtype = out.getattr("dtype")?.getattr("name")?.extract::<String>()?;
+    let expected_dtype = random_float_numpy_dtype_name(dtype);
+    if out_dtype == expected_dtype {
+        Ok(())
+    } else {
+        Err(PyTypeError::new_err(format!(
+            "Supplied output array has the wrong type. Expected {}, got {}",
+            expected_dtype, out_dtype
+        )))
+    }
+}
+
+fn random_float_numpy_dtype_name(dtype: DType) -> &'static str {
+    match dtype {
+        DType::F32 => "float32",
+        DType::F64 => "float64",
+        _ => dtype.name(),
     }
 }
 
@@ -20334,6 +20397,94 @@ mod tests {
                 &ours.call_method("random", (3_usize,), Some(&f32_kwargs))?,
                 &theirs.call_method("random", (3_usize,), Some(&f32_kwargs))?,
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_generator_random_out_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_out")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy = py.import("numpy")?;
+            let numpy_random = numpy.getattr("random")?;
+            let empty = numpy.getattr("empty")?;
+            let shape = PyTuple::new(py, [2_usize, 2_usize])?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 333)?;
+            let ours_out = empty.call1((shape.clone(),))?;
+            let theirs_out = empty.call1((shape.clone(),))?;
+            let ours_kwargs = PyDict::new(py);
+            ours_kwargs.set_item("out", &ours_out)?;
+            let theirs_kwargs = PyDict::new(py);
+            theirs_kwargs.set_item("out", &theirs_out)?;
+            let actual = ours.call_method("random", (), Some(&ours_kwargs))?;
+            let expected = theirs.call_method("random", (), Some(&theirs_kwargs))?;
+            assert!(actual.is(&ours_out));
+            assert!(expected.is(&theirs_out));
+            assert_random_sample_matches_numpy(&ours_out, &theirs_out)?;
+
+            let f32_empty_kwargs = PyDict::new(py);
+            f32_empty_kwargs.set_item("dtype", numpy.getattr("float32")?)?;
+            let ours_out_f32 = empty.call((shape.clone(),), Some(&f32_empty_kwargs))?;
+            let theirs_out_f32 = empty.call((shape.clone(),), Some(&f32_empty_kwargs))?;
+            let ours_f32_kwargs = PyDict::new(py);
+            ours_f32_kwargs.set_item("dtype", numpy.getattr("float32")?)?;
+            ours_f32_kwargs.set_item("out", &ours_out_f32)?;
+            let theirs_f32_kwargs = PyDict::new(py);
+            theirs_f32_kwargs.set_item("dtype", numpy.getattr("float32")?)?;
+            theirs_f32_kwargs.set_item("out", &theirs_out_f32)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 334)?;
+            let actual = ours.call_method("random", (shape.clone(),), Some(&ours_f32_kwargs))?;
+            let expected =
+                theirs.call_method("random", (shape.clone(),), Some(&theirs_f32_kwargs))?;
+            assert!(actual.is(&ours_out_f32));
+            assert!(expected.is(&theirs_out_f32));
+            assert_random_sample_matches_numpy(&ours_out_f32, &theirs_out_f32)?;
+
+            let mismatch_out = empty.call1((PyTuple::new(py, [3_usize])?,))?;
+            let mismatch_kwargs = PyDict::new(py);
+            mismatch_kwargs.set_item("out", &mismatch_out)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 335)?;
+            assert_eq!(
+                call_outcome(
+                    py,
+                    &ours.getattr("random")?,
+                    &PyTuple::new(py, [shape.clone()])?,
+                    Some(&mismatch_kwargs),
+                )?,
+                call_outcome(
+                    py,
+                    &theirs.getattr("random")?,
+                    &PyTuple::new(py, [shape.clone()])?,
+                    Some(&mismatch_kwargs),
+                )?
+            );
+
+            let dtype_mismatch_out = empty.call((shape.clone(),), Some(&f32_empty_kwargs))?;
+            let dtype_mismatch_kwargs = PyDict::new(py);
+            dtype_mismatch_kwargs.set_item("out", &dtype_mismatch_out)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 336)?;
+            assert_eq!(
+                call_outcome(
+                    py,
+                    &ours.getattr("random")?,
+                    &PyTuple::empty(py),
+                    Some(&dtype_mismatch_kwargs),
+                )?,
+                call_outcome(
+                    py,
+                    &theirs.getattr("random")?,
+                    &PyTuple::empty(py),
+                    Some(&dtype_mismatch_kwargs),
+                )?
+            );
 
             Ok(())
         });
