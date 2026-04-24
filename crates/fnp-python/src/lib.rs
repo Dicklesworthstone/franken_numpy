@@ -20769,6 +20769,39 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_submodule(&random)?;
         m.add("random", random)?;
     }
+    {
+        // d7a1 — re-export the 6 numpy.polynomial class objects so
+        // `fnp_python.polynomial.Polynomial` IS numpy's real class.
+        // Eager setattr if numpy.polynomial is importable at init;
+        // PEP-562 __getattr__ fallback otherwise so numpy-less CI
+        // workers still satisfy attribute-existence probes and
+        // resolve to the real class on first access.
+        let polynomial = PyModule::new(py, "polynomial")?;
+        if let Ok(np_poly) = py.import("numpy.polynomial") {
+            for name in [
+                "Polynomial",
+                "Chebyshev",
+                "Legendre",
+                "Hermite",
+                "HermiteE",
+                "Laguerre",
+            ] {
+                if let Ok(cls) = np_poly.getattr(name) {
+                    polynomial.setattr(name, cls)?;
+                }
+            }
+        }
+        // Install __getattr__ unconditionally so any class missing
+        // from the eager path (including on numpy-less init) resolves
+        // on first access via a live numpy.polynomial lookup.
+        let poly_getattr_src = pyo3::ffi::c_str!(
+            "_CLASS_NAMES = frozenset(('Polynomial','Chebyshev','Legendre','Hermite','HermiteE','Laguerre'))\ndef __getattr__(name):\n    if name in _CLASS_NAMES:\n        import numpy.polynomial as _p\n        return getattr(_p, name)\n    raise AttributeError(name)\n"
+        );
+        let poly_dict = polynomial.dict();
+        py.run(poly_getattr_src, Some(&poly_dict), None)?;
+        m.add_submodule(&polynomial)?;
+        m.add("polynomial", polynomial)?;
+    }
     m.add_function(wrap_pyfunction!(frompyfunc, m)?)?;
     m.add_function(wrap_pyfunction!(vectorize, m)?)?;
     m.add_function(wrap_pyfunction!(digitize, m)?)?;
@@ -22073,6 +22106,44 @@ mod tests {
                 &numpy_random.call_method1("randint", (0_i64, 100_i64, 5_usize))?,
             )?;
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn polynomial_namespace_exposes_numpy_classes() {
+        // d7a1: fnp_python.polynomial.{Polynomial, Chebyshev, Legendre,
+        // Hermite, HermiteE, Laguerre} must resolve to numpy's real
+        // class objects so isinstance checks + direct construction work.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_polynomial")?;
+            fnp_python(&module)?;
+            let polynomial = module.getattr("polynomial")?;
+            let np_poly = py.import("numpy.polynomial")?;
+            for name in [
+                "Polynomial",
+                "Chebyshev",
+                "Legendre",
+                "Hermite",
+                "HermiteE",
+                "Laguerre",
+            ] {
+                let ours = polynomial.getattr(name)?;
+                let theirs = np_poly.getattr(name)?;
+                assert!(
+                    ours.is(&theirs),
+                    "fnp_python.polynomial.{name} must BE numpy.polynomial.{name} (identity, not just equality)"
+                );
+            }
+            // Round-trip: constructing a Polynomial via fnp_python yields
+            // the same coefficients numpy would produce.
+            let cls = polynomial.getattr("Polynomial")?;
+            let poly = cls.call1(((1.0_f64, 2.0_f64, 3.0_f64),))?;
+            let coef: Vec<f64> = poly.getattr("coef")?.extract()?;
+            assert_eq!(coef, vec![1.0, 2.0, 3.0]);
             Ok(())
         });
     }
