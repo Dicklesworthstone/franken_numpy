@@ -159,7 +159,8 @@ impl PyRandomGenerator {
     ) -> PyResult<Py<PyAny>> {
         let dtype = extract_random_float_dtype(py, dtype, "Generator.random(dtype)")?;
         let requested_size = random_size_from_py(py, size, "Generator.random(size)")?;
-        let (size, out) = resolve_random_out(py, requested_size, dtype, out)?;
+        let (size, out) =
+            resolve_random_out(py, requested_size, dtype, out, "Generator.random(out)")?;
         let generated = match dtype {
             DType::F32 => {
                 let output = self
@@ -192,14 +193,33 @@ impl PyRandomGenerator {
         }
     }
 
-    #[pyo3(signature = (size=None))]
-    fn standard_normal(&mut self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-        let size = random_size_from_py(py, size, "Generator.standard_normal(size)")?;
+    #[pyo3(signature = (size=None, out=None))]
+    fn standard_normal(
+        &mut self,
+        py: Python<'_>,
+        size: Option<Py<PyAny>>,
+        out: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let requested_size = random_size_from_py(py, size, "Generator.standard_normal(size)")?;
+        let (size, out) = resolve_random_out(
+            py,
+            requested_size,
+            DType::F64,
+            out,
+            "Generator.standard_normal(out)",
+        )?;
         let output = self
             .inner
             .standard_normal_shaped(size.as_deref())
             .map_err(map_random_error)?;
-        build_random_f64_output(py, output)
+        let generated = build_random_f64_output(py, output)?;
+        if let Some(out) = out {
+            py.import("numpy")?
+                .call_method1("copyto", (out.bind(py), generated.bind(py)))?;
+            Ok(out)
+        } else {
+            Ok(generated)
+        }
     }
 
     #[pyo3(signature = (loc=0.0, scale=1.0, size=None))]
@@ -1313,6 +1333,7 @@ fn resolve_random_out(
     requested_size: Option<Vec<usize>>,
     dtype: DType,
     out: Option<Py<PyAny>>,
+    context: &str,
 ) -> PyResult<(Option<Vec<usize>>, Option<Py<PyAny>>)> {
     let Some(out) = out else {
         return Ok((requested_size, None));
@@ -1322,7 +1343,7 @@ fn resolve_random_out(
         return Ok((requested_size, None));
     }
 
-    require_numpy_ndarray(py, bound, "Generator.random(out)")?;
+    require_numpy_ndarray(py, bound, context)?;
     let out_shape = bound.getattr("shape")?.extract::<Vec<usize>>()?;
     if let Some(size) = requested_size {
         if size != out_shape {
@@ -20481,6 +20502,78 @@ mod tests {
                 call_outcome(
                     py,
                     &theirs.getattr("random")?,
+                    &PyTuple::empty(py),
+                    Some(&dtype_mismatch_kwargs),
+                )?
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_generator_standard_normal_out_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_standard_normal_out")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy = py.import("numpy")?;
+            let numpy_random = numpy.getattr("random")?;
+            let empty = numpy.getattr("empty")?;
+            let shape = PyTuple::new(py, [2_usize, 2_usize])?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 337)?;
+            let ours_out = empty.call1((shape.clone(),))?;
+            let theirs_out = empty.call1((shape.clone(),))?;
+            let ours_kwargs = PyDict::new(py);
+            ours_kwargs.set_item("out", &ours_out)?;
+            let theirs_kwargs = PyDict::new(py);
+            theirs_kwargs.set_item("out", &theirs_out)?;
+            let actual = ours.call_method("standard_normal", (), Some(&ours_kwargs))?;
+            let expected = theirs.call_method("standard_normal", (), Some(&theirs_kwargs))?;
+            assert!(actual.is(&ours_out));
+            assert!(expected.is(&theirs_out));
+            assert_random_sample_matches_numpy(&ours_out, &theirs_out)?;
+
+            let mismatch_out = empty.call1((PyTuple::new(py, [3_usize])?,))?;
+            let mismatch_kwargs = PyDict::new(py);
+            mismatch_kwargs.set_item("out", &mismatch_out)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 338)?;
+            assert_eq!(
+                call_outcome(
+                    py,
+                    &ours.getattr("standard_normal")?,
+                    &PyTuple::new(py, [shape.clone()])?,
+                    Some(&mismatch_kwargs),
+                )?,
+                call_outcome(
+                    py,
+                    &theirs.getattr("standard_normal")?,
+                    &PyTuple::new(py, [shape.clone()])?,
+                    Some(&mismatch_kwargs),
+                )?
+            );
+
+            let f32_empty_kwargs = PyDict::new(py);
+            f32_empty_kwargs.set_item("dtype", numpy.getattr("float32")?)?;
+            let dtype_mismatch_out = empty.call((shape,), Some(&f32_empty_kwargs))?;
+            let dtype_mismatch_kwargs = PyDict::new(py);
+            dtype_mismatch_kwargs.set_item("out", &dtype_mismatch_out)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 339)?;
+            assert_eq!(
+                call_outcome(
+                    py,
+                    &ours.getattr("standard_normal")?,
+                    &PyTuple::empty(py),
+                    Some(&dtype_mismatch_kwargs),
+                )?,
+                call_outcome(
+                    py,
+                    &theirs.getattr("standard_normal")?,
                     &PyTuple::empty(py),
                     Some(&dtype_mismatch_kwargs),
                 )?
