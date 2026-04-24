@@ -2387,12 +2387,46 @@ impl RandomState {
     }
 
     #[must_use]
+    pub fn next_u32(&mut self) -> u32 {
+        match &mut self.bit_generator.rng {
+            RngBackend::Mt19937(rng) => rng.next_u32(),
+            _ => (self.bit_generator.next_u64() >> 32) as u32,
+        }
+    }
+
+    #[must_use]
     pub fn next_f64(&mut self) -> f64 {
         self.bit_generator.next_f64()
     }
 
     pub fn bounded_u64(&mut self, upper_bound: u64) -> Result<u64, RandomError> {
         self.bit_generator.bounded_u64(upper_bound)
+    }
+
+    #[must_use]
+    pub fn random_interval(&mut self, max: u64) -> u64 {
+        if max == 0 {
+            return 0;
+        }
+
+        let mask = random_mask(max);
+        if max <= 0xFFFF_FFFF {
+            #[expect(clippy::cast_possible_truncation)]
+            let mask32 = mask as u32;
+            loop {
+                let value = u64::from(self.next_u32() & mask32);
+                if value <= max {
+                    return value;
+                }
+            }
+        }
+
+        loop {
+            let value = self.next_u64() & mask;
+            if value <= max {
+                return value;
+            }
+        }
     }
 
     #[must_use]

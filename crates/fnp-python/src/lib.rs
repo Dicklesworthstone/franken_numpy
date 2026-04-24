@@ -1327,18 +1327,21 @@ impl PyRandomState {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
-    #[pyo3(signature = (low, high=None, size=None))]
+    #[pyo3(signature = (low, high=None, size=None, dtype=None))]
     fn randint(
         &mut self,
         py: Python<'_>,
         low: i64,
         high: Option<i64>,
         size: Option<Py<PyAny>>,
+        dtype: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let (low, high) = match high {
             Some(high) => (low, high),
             None => (0, low),
         };
+        let dtype = extract_python_dtype(py, dtype, DType::I64, "RandomState.randint(dtype)")?;
+        validate_random_integer_dtype_bounds(low, high, dtype, false)?;
         if high <= low {
             return Err(PyValueError::new_err("high <= low"));
         }
@@ -1349,15 +1352,13 @@ impl PyRandomState {
             u64::try_from(span).map_err(|_| PyValueError::new_err("integer range is too large"))?;
         let mut values = Vec::with_capacity(len);
         for _ in 0..len {
-            let offset = self.inner.bounded_u64(span).map_err(map_random_error)?;
-            let offset = i64::try_from(offset)
-                .map_err(|_| PyValueError::new_err("integer sample exceeds int64"))?;
+            let offset = random_state_integer_offset(&mut self.inner, span)?;
             values.push(
                 low.checked_add(offset)
                     .ok_or_else(|| PyValueError::new_err("integer sample exceeds int64"))?,
             );
         }
-        build_random_i64_parts(py, shape, values, scalar)
+        build_random_integer_parts(py, shape, values, scalar, dtype)
     }
 
     fn bytes(&mut self, py: Python<'_>, length: usize) -> PyResult<Py<PyAny>> {
@@ -2579,6 +2580,14 @@ fn random_state_uniform_parts(
         .map(|_| low + random_state.next_f64() * range)
         .collect();
     Ok((shape, values, scalar))
+}
+
+fn random_state_integer_offset(random_state: &mut CoreRandomState, span: u64) -> PyResult<i64> {
+    if span == 0 {
+        return Err(PyValueError::new_err("high <= low"));
+    }
+    let offset = random_state.random_interval(span - 1);
+    i64::try_from(offset).map_err(|_| PyValueError::new_err("integer sample exceeds int64"))
 }
 
 #[derive(Clone, Copy)]
@@ -21480,6 +21489,75 @@ mod tests {
                 Err(err) => err,
             };
             assert_pyerr_matches_numpy(py, ours_large_err, theirs_large_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_state_randint_dtype_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_state_randint_dtype")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy = py.import("numpy")?;
+            let numpy_random = numpy.getattr("random")?;
+            let shape = PyTuple::new(py, [2_usize, 3_usize])?;
+
+            let ours_default = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_default = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_default.call_method1("randint", (0_i64, 10_i64, shape.clone()))?,
+                &theirs_default.call_method1("randint", (0_i64, 10_i64, shape.clone()))?,
+            )?;
+
+            let int32_kwargs = PyDict::new(py);
+            int32_kwargs.set_item("dtype", numpy.getattr("int32")?)?;
+            let ours_scalar = random.getattr("RandomState")?.call1((43_u64,))?;
+            let theirs_scalar = numpy_random.getattr("RandomState")?.call1((43_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_scalar.call_method("randint", (0_i64, 10_i64), Some(&int32_kwargs))?,
+                &theirs_scalar.call_method("randint", (0_i64, 10_i64), Some(&int32_kwargs))?,
+            )?;
+
+            let uint32_kwargs = PyDict::new(py);
+            uint32_kwargs.set_item("dtype", numpy.getattr("uint32")?)?;
+            let uint32_high = i64::from(u32::MAX) + 1;
+            let ours_uint32 = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_uint32 = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_uint32.call_method(
+                    "randint",
+                    (0_i64, uint32_high, shape.clone()),
+                    Some(&uint32_kwargs),
+                )?,
+                &theirs_uint32.call_method(
+                    "randint",
+                    (0_i64, uint32_high, shape.clone()),
+                    Some(&uint32_kwargs),
+                )?,
+            )?;
+
+            let uint64_kwargs = PyDict::new(py);
+            uint64_kwargs.set_item("dtype", numpy.getattr("uint64")?)?;
+            let ours_uint64 = random.getattr("RandomState")?.call1((44_u64,))?;
+            let theirs_uint64 = numpy_random.getattr("RandomState")?.call1((44_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_uint64.call_method(
+                    "randint",
+                    (0_i64, 1_000_000_i64, shape.clone()),
+                    Some(&uint64_kwargs),
+                )?,
+                &theirs_uint64.call_method(
+                    "randint",
+                    (0_i64, 1_000_000_i64, shape),
+                    Some(&uint64_kwargs),
+                )?,
+            )?;
 
             Ok(())
         });
