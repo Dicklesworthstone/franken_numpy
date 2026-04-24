@@ -20557,6 +20557,23 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         random.add_class::<PyPhilox>()?;
         random.add_class::<PySfc64>()?;
         random.add_function(wrap_pyfunction!(default_rng, &random)?)?;
+        // g1ji: re-export numpy.random.BitGenerator so user code can do
+        // isinstance(fnp_python.random.PCG64(), fnp_python.random.BitGenerator)
+        // against the same class numpy uses. At module init numpy may not
+        // be importable (numpy-less CI workers); in that case install a
+        // module-level __getattr__ that lazy-loads on first access, same
+        // pattern as linalg.LinAlgError.
+        if let Ok(np_random) = py.import("numpy.random") {
+            if let Ok(bit_gen_cls) = np_random.getattr("BitGenerator") {
+                random.setattr("BitGenerator", bit_gen_cls)?;
+            }
+        }
+        let random_getattr_src = pyo3::ffi::c_str!(
+            "def __getattr__(name):\n    if name == 'BitGenerator':\n        import numpy.random as _r\n        return _r.BitGenerator\n    raise AttributeError(name)\n"
+        );
+        let random_dict = random.dict();
+        py.run(random_getattr_src, Some(&random_dict), None)?;
+
         // numpy.random installs a singleton `_rand = RandomState()` at
         // module import and binds every distribution method onto the
         // module namespace as `numpy.random.<name> = _rand.<name>`. Mirror
@@ -21766,6 +21783,8 @@ mod tests {
                 "Philox",
                 "SFC64",
                 "default_rng",
+                // g1ji: BitGenerator abstract base class re-export.
+                "BitGenerator",
                 // t44q: module-level legacy aliases bound to the shared
                 // numpy.random._rand RandomState singleton.
                 "_rand",
