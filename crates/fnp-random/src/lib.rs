@@ -2601,6 +2601,19 @@ impl RandomState {
             .collect())
     }
 
+    pub fn f(&mut self, dfnum: f64, dfden: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if dfnum <= 0.0 || dfden <= 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| {
+                let numerator = 2.0 * self.legacy_standard_gamma(dfnum / 2.0) / dfnum;
+                let denominator = 2.0 * self.legacy_standard_gamma(dfden / 2.0) / dfden;
+                numerator / denominator
+            })
+            .collect())
+    }
+
     pub fn standard_t(&mut self, df: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if df <= 0.0 {
             return Err(RandomError::InvalidParameter);
@@ -7181,6 +7194,87 @@ for child in rng.spawn(n_children):
                 .chisquare(0.0, 1)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn random_state_legacy_f_matches_numpy_oracles() {
+        let mut scalar = RandomState::new(SeedMaterial::U64(42)).expect("scalar");
+        let values = scalar.f(3.0, 5.0, 1).expect("scalar f");
+        assert_f64_seq("random_state_f_scalar", &values, &[1.514_484_152_984_413_3]);
+        let after: Vec<u64> = (0..5).map(|_| scalar.random_interval(9)).collect();
+        assert_eq!(after, vec![6, 9, 2, 6, 7]);
+
+        let mut shaped = RandomState::new(SeedMaterial::U64(42)).expect("shaped");
+        let values = shaped.f(3.0, 5.0, 10).expect("shaped f");
+        let expected = [
+            1.514_484_152_984_413_3,
+            0.843_840_197_389_928_9,
+            1.825_900_019_829_617_4,
+            0.396_366_327_910_848_25,
+            6.119_384_474_137_962,
+            0.237_207_749_963_638_75,
+            3.217_792_377_834_966,
+            0.479_789_011_390_968_13,
+            0.595_574_098_783_235_1,
+            2.015_158_614_006_199,
+        ];
+        assert_f64_seq("random_state_f_shaped", &values, &expected);
+        let after: Vec<u64> = (0..5).map(|_| shaped.random_interval(9)).collect();
+        assert_eq!(after, vec![3, 1, 7, 3, 1]);
+
+        let mut cached = RandomState::new(SeedMaterial::U64(7)).expect("cached");
+        assert_f64_seq(
+            "random_state_f_cached_normal_prefix",
+            &cached.standard_normal(1),
+            &[1.690_525_703_800_356],
+        );
+        let values = cached.f(3.0, 5.0, 3).expect("cached f");
+        let expected = [
+            0.529_102_702_425_298_8,
+            2.270_895_736_552_413_6,
+            1.003_488_055_530_105_3,
+        ];
+        assert_f64_seq("random_state_f_cached", &values, &expected);
+        let after: Vec<f64> = (0..3).map(|_| cached.next_f64()).collect();
+        let expected = [
+            0.213_385_353_579_915_5,
+            0.452_123_961_817_683_1,
+            0.931_206_019_689_021_7,
+        ];
+        assert_f64_seq("random_state_f_cached_after", &after, &expected);
+
+        let mut nan_num = RandomState::new(SeedMaterial::U64(42)).expect("nan numerator");
+        let values = nan_num.f(f64::NAN, 5.0, 3).expect("nan numerator");
+        assert!(values.iter().all(|value| value.is_nan()));
+        let after: Vec<u64> = (0..5).map(|_| nan_num.random_interval(9)).collect();
+        assert_eq!(after, vec![5, 1, 4, 0, 9]);
+
+        let mut inf_den = RandomState::new(SeedMaterial::U64(42)).expect("inf denominator");
+        let values = inf_den.f(3.0, f64::INFINITY, 3).expect("inf denominator");
+        assert!(values.iter().all(|value| value.is_nan()));
+        let after: Vec<u64> = (0..5).map(|_| inf_den.random_interval(9)).collect();
+        assert_eq!(after, vec![5, 1, 4, 0, 9]);
+
+        let mut empty = RandomState::new(SeedMaterial::U64(11)).expect("empty");
+        assert!(empty.f(3.0, 5.0, 0).expect("empty").is_empty());
+        let after: Vec<u64> = (0..5).map(|_| empty.random_interval(9)).collect();
+        assert_eq!(after, vec![9, 0, 1, 7, 1]);
+
+        let mut invalid_num = RandomState::new(SeedMaterial::U64(42)).expect("invalid num");
+        assert_eq!(
+            invalid_num.f(0.0, 5.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+        let after: Vec<u64> = (0..3).map(|_| invalid_num.random_interval(9)).collect();
+        assert_eq!(after, vec![6, 3, 7]);
+
+        let mut invalid_den = RandomState::new(SeedMaterial::U64(42)).expect("invalid den");
+        assert_eq!(
+            invalid_den.f(3.0, 0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+        let after: Vec<u64> = (0..3).map(|_| invalid_den.random_interval(9)).collect();
+        assert_eq!(after, vec![6, 3, 7]);
     }
 
     #[test]
