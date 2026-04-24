@@ -254,15 +254,20 @@ impl PyRandomGenerator {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
-    #[pyo3(signature = (size=None))]
+    #[pyo3(signature = (size=None, *, method="zig"))]
     fn standard_exponential(
         &mut self,
         py: Python<'_>,
         size: Option<Py<PyAny>>,
+        method: &str,
     ) -> PyResult<Py<PyAny>> {
         let size = random_size_from_py(py, size, "Generator.standard_exponential(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.standard_exponential(len);
+        let values = if method == "zig" {
+            self.inner.standard_exponential(len)
+        } else {
+            self.inner.standard_exponential_inv(len)
+        };
         build_random_f64_parts(py, shape, values, scalar)
     }
 
@@ -20675,6 +20680,30 @@ mod tests {
             assert_array_matches_numpy(
                 &ours.call_method1("standard_exponential", (shape.clone(),))?,
                 &theirs.call_method1("standard_exponential", (shape.clone(),))?,
+            )?;
+
+            let inv_kwargs = PyDict::new(py);
+            inv_kwargs.set_item("method", "inv")?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 340)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method("standard_exponential", (shape.clone(),), Some(&inv_kwargs))?,
+                &theirs.call_method("standard_exponential", (shape.clone(),), Some(&inv_kwargs))?,
+            )?;
+
+            let non_zig_kwargs = PyDict::new(py);
+            non_zig_kwargs.set_item("method", "not-zig")?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 341)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method(
+                    "standard_exponential",
+                    (shape.clone(),),
+                    Some(&non_zig_kwargs),
+                )?,
+                &theirs.call_method(
+                    "standard_exponential",
+                    (shape.clone(),),
+                    Some(&non_zig_kwargs),
+                )?,
             )?;
 
             let (ours, theirs) = random_generator_pair(&random, &numpy_random, 201)?;

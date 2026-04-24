@@ -3028,6 +3028,14 @@ impl Generator {
             .collect()
     }
 
+    /// Generate standard exponential samples using inverse CDF sampling.
+    ///
+    /// Mimics `rng.standard_exponential(size, method="inv")`.
+    #[must_use]
+    pub fn standard_exponential_inv(&mut self, size: usize) -> Vec<f64> {
+        (0..size).map(|_| -(-self.next_f64()).ln_1p()).collect()
+    }
+
     /// Generate standard gamma samples (scale=1).
     ///
     /// Mimics `rng.standard_gamma(shape, size)`.
@@ -8446,6 +8454,25 @@ for child in rng.spawn(n_children):
             0.27740364655423955,
         ];
         assert_f64_seq("standard_exponential", &vals, &expected);
+    }
+
+    #[test]
+    fn oracle_standard_exponential_inv() {
+        let mut g = oracle_gen();
+        let vals = g.standard_exponential_inv(10);
+        let expected = [
+            2.689449624212704,
+            0.4117431756747474,
+            0.24459955668557373,
+            0.43495506860866967,
+            0.7987412837510214,
+            2.147013183078321,
+            2.1922716392003796,
+            0.36142800091389377,
+            0.579877346245094,
+            0.3993713769910491,
+        ];
+        assert_f64_seq("standard_exponential_inv", &vals, &expected);
     }
 
     #[test]
