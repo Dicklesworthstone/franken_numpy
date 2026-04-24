@@ -2576,6 +2576,22 @@ impl RandomState {
             .collect())
     }
 
+    pub fn geometric(&mut self, p: f64, size: usize) -> Result<Vec<u64>, RandomError> {
+        if p <= 0.0 || p > 1.0 || p.is_nan() {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| {
+                let u = self.next_f64();
+                if p == 1.0 {
+                    1
+                } else {
+                    ((1.0 - u).ln() / (-p).ln_1p()).ceil() as u64
+                }
+            })
+            .collect())
+    }
+
     pub fn chisquare(&mut self, df: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if df <= 0.0 {
             return Err(RandomError::InvalidParameter);
@@ -6338,6 +6354,55 @@ for child in rng.spawn(n_children):
         assert!(nan_b.beta(1.0, f64::NAN, 1).expect("nan_b")[0].is_nan());
         let after: Vec<u64> = (0..3).map(|_| nan_b.random_interval(9)).collect();
         assert_eq!(after, vec![7, 4, 3]);
+    }
+
+    #[test]
+    fn random_state_legacy_geometric_matches_numpy_oracles() {
+        let mut search = RandomState::new(SeedMaterial::U64(42)).expect("search");
+        let values = search.geometric(0.5, 10).expect("geometric");
+        assert_eq!(values, vec![1, 5, 2, 2, 1, 1, 1, 3, 2, 2]);
+        let after: Vec<u64> = (0..5).map(|_| search.random_interval(9)).collect();
+        assert_eq!(after, vec![5, 4, 1, 7, 5]);
+
+        let mut inversion = RandomState::new(SeedMaterial::U64(42)).expect("inversion");
+        let values = inversion.geometric(0.25, 10).expect("geometric");
+        assert_eq!(values, vec![2, 11, 5, 4, 1, 1, 1, 7, 4, 5]);
+        let after: Vec<u64> = (0..5).map(|_| inversion.random_interval(9)).collect();
+        assert_eq!(after, vec![5, 4, 1, 7, 5]);
+
+        let mut certain = RandomState::new(SeedMaterial::U64(42)).expect("certain");
+        assert_eq!(certain.geometric(1.0, 10).expect("certain"), vec![1; 10]);
+        let after: Vec<u64> = (0..5).map(|_| certain.random_interval(9)).collect();
+        assert_eq!(after, vec![5, 4, 1, 7, 5]);
+
+        let mut cached = RandomState::new(SeedMaterial::U64(7)).expect("cached");
+        assert_f64_seq(
+            "random_state_geometric_cached_normal_prefix",
+            &cached.standard_normal(1),
+            &[1.690_525_703_800_356],
+        );
+        let values = cached.geometric(0.25, 3).expect("cached geometric");
+        assert_eq!(values, vec![14, 3, 3]);
+        let after: Vec<f64> = (0..3).map(|_| cached.next_f64()).collect();
+        let expected = [
+            0.072_051_133_359_761_54,
+            0.268_438_980_101_871_17,
+            0.499_882_500_825_559_96,
+        ];
+        assert_f64_seq("random_state_geometric_cached_after", &after, &expected);
+
+        let mut empty = RandomState::new(SeedMaterial::U64(11)).expect("empty");
+        assert!(empty.geometric(0.25, 0).expect("empty").is_empty());
+        let after: Vec<u64> = (0..5).map(|_| empty.random_interval(9)).collect();
+        assert_eq!(after, vec![9, 0, 1, 7, 1]);
+
+        let mut invalid = RandomState::new(SeedMaterial::U64(42)).expect("invalid");
+        assert_eq!(
+            invalid.geometric(0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+        let after: Vec<u64> = (0..3).map(|_| invalid.random_interval(9)).collect();
+        assert_eq!(after, vec![6, 3, 7]);
     }
 
     #[test]

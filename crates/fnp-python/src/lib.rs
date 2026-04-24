@@ -1490,6 +1490,22 @@ impl PyRandomState {
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
+    #[pyo3(signature = (p, size=None))]
+    fn geometric(
+        &mut self,
+        py: Python<'_>,
+        p: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        if p <= 0.0 || p > 1.0 || p.is_nan() {
+            return Err(PyValueError::new_err("p <= 0, p > 1 or p contains NaNs"));
+        }
+        let size = random_size_from_py(py, size, "RandomState.geometric(size)")?;
+        let (out_shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self.inner.geometric(p, len).map_err(map_random_error)?;
+        build_random_u64_as_i64_parts(py, out_shape, values, scalar)
+    }
+
     #[pyo3(signature = (df, size=None))]
     fn standard_t(
         &mut self,
@@ -22391,6 +22407,84 @@ mod tests {
                 &ours_scalar.call_method1("beta", (f64::NAN, 1.0_f64, 1_usize))?,
                 &theirs_scalar.call_method1("beta", (f64::NAN, 1.0_f64, 1_usize))?,
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_state_legacy_geometric_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_state_legacy_geometric")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+            let shape = PyTuple::new(py, [2_usize, 3_usize])?;
+
+            let ours_scalar = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_scalar = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_scalar.call_method1("geometric", (0.5_f64,))?,
+                &theirs_scalar.call_method1("geometric", (0.5_f64,))?,
+            )?;
+
+            let ours_shaped = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_shaped = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_shaped.call_method1("geometric", (0.25_f64, shape.clone()))?,
+                &theirs_shaped.call_method1("geometric", (0.25_f64, shape.clone()))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_shaped.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+                &theirs_shaped.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
+
+            let ours_certain = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_certain = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_certain.call_method1("geometric", (1.0_f64, 10_usize))?,
+                &theirs_certain.call_method1("geometric", (1.0_f64, 10_usize))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_certain.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+                &theirs_certain.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
+
+            let ours_cached = random.getattr("RandomState")?.call1((7_u64,))?;
+            let theirs_cached = numpy_random.getattr("RandomState")?.call1((7_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_cached.call_method1("standard_normal", (1_usize,))?,
+                &theirs_cached.call_method1("standard_normal", (1_usize,))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_cached.call_method1("geometric", (0.25_f64, 3_usize))?,
+                &theirs_cached.call_method1("geometric", (0.25_f64, 3_usize))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_cached.call_method1("random_sample", (3_usize,))?,
+                &theirs_cached.call_method1("random_sample", (3_usize,))?,
+            )?;
+
+            let ours_empty = random.getattr("RandomState")?.call1((11_u64,))?;
+            let theirs_empty = numpy_random.getattr("RandomState")?.call1((11_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_empty.call_method1("geometric", (0.25_f64, 0_usize))?,
+                &theirs_empty.call_method1("geometric", (0.25_f64, 0_usize))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_empty.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+                &theirs_empty.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
+
+            assert!(
+                ours_scalar
+                    .call_method1("geometric", (0.0_f64, 1_usize))
+                    .is_err()
+            );
 
             Ok(())
         });
