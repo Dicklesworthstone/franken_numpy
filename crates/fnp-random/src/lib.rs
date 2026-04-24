@@ -2542,6 +2542,15 @@ impl RandomState {
             .collect())
     }
 
+    pub fn chisquare(&mut self, df: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if df <= 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| 2.0 * self.legacy_standard_gamma(df / 2.0))
+            .collect())
+    }
+
     fn legacy_standard_exponential(&mut self) -> f64 {
         -(1.0 - self.next_f64()).ln()
     }
@@ -6055,6 +6064,60 @@ for child in rng.spawn(n_children):
         );
         assert!(zero_shape.standard_gamma(-1.0, 1).is_err());
         assert!(zero_shape.gamma(1.0, -1.0, 1).is_err());
+    }
+
+    #[test]
+    fn random_state_legacy_chisquare_matches_numpy_oracles() {
+        let mut standard = RandomState::new(SeedMaterial::U64(42)).expect("standard");
+        let values = standard.chisquare(5.0, 10).expect("chisquare");
+        let expected = [
+            5.966_270_730_849_626,
+            3.938_905_914_964_025,
+            3.679_910_273_491_157,
+            3.679_953_616_472_755,
+            10.843_213_481_753_267,
+            7.007_982_828_113_363,
+            3.092_968_410_011_246,
+            6.134_871_817_478_534,
+            5.085_394_342_220_522,
+            0.788_759_493_360_929_9,
+        ];
+        assert_f64_seq("random_state_chisquare", &values, &expected);
+
+        let mut fractional = RandomState::new(SeedMaterial::U64(42)).expect("fractional");
+        let values = fractional.chisquare(0.5, 10).expect("fractional");
+        let expected = [
+            0.039_357_125_487_552_09,
+            0.574_195_708_892_601_9,
+            0.001_185_048_028_470_606_5,
+            0.000_022_763_784_382_687_446,
+            0.261_132_117_794_436_57,
+            0.000_000_359_079_658_811_900_97,
+            1.044_178_547_482_488_3,
+            0.002_185_969_345_073_050_7,
+            0.017_135_944_712_908_184,
+            0.069_621_580_055_018_05,
+        ];
+        assert_f64_seq("random_state_chisquare_fractional", &values, &expected);
+
+        let mut non_finite = RandomState::new(SeedMaterial::U64(1)).expect("non-finite");
+        let values = non_finite.chisquare(f64::NAN, 3).expect("nan");
+        assert!(values.iter().all(|value| value.is_nan()));
+        let values = non_finite.chisquare(f64::INFINITY, 3).expect("infinity");
+        assert!(values.iter().all(|value| value.is_infinite()));
+
+        assert!(
+            RandomState::new(SeedMaterial::U64(1))
+                .expect("negative")
+                .chisquare(-1.0, 1)
+                .is_err()
+        );
+        assert!(
+            RandomState::new(SeedMaterial::U64(1))
+                .expect("zero")
+                .chisquare(0.0, 1)
+                .is_err()
+        );
     }
 
     #[test]

@@ -1426,6 +1426,22 @@ impl PyRandomState {
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
+    #[pyo3(signature = (df, size=None))]
+    fn chisquare(
+        &mut self,
+        py: Python<'_>,
+        df: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        if df <= 0.0 {
+            return Err(PyValueError::new_err("df <= 0"));
+        }
+        let size = random_size_from_py(py, size, "RandomState.chisquare(size)")?;
+        let (out_shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self.inner.chisquare(df, len).map_err(map_random_error)?;
+        build_random_f64_parts(py, out_shape, values, scalar)
+    }
+
     #[pyo3(signature = (low=0.0, high=1.0, size=None))]
     fn uniform(
         &mut self,
@@ -22307,6 +22323,110 @@ mod tests {
                     Err(err) => err,
                 };
             assert_pyerr_matches_numpy(py, ours_negative_scale, theirs_negative_scale)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_state_legacy_chisquare_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_state_legacy_chisquare")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+            let shape = PyTuple::new(py, [2_usize, 3_usize])?;
+
+            let ours_scalar = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_scalar = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_scalar.call_method1("chisquare", (5.0_f64,))?,
+                &theirs_scalar.call_method1("chisquare", (5.0_f64,))?,
+            )?;
+
+            let ours_fractional = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_fractional = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_fractional.call_method1("chisquare", (0.5_f64, shape.clone()))?,
+                &theirs_fractional.call_method1("chisquare", (0.5_f64, shape.clone()))?,
+            )?;
+
+            let ours_continuation = random.getattr("RandomState")?.call1((7_u64,))?;
+            let theirs_continuation = numpy_random.getattr("RandomState")?.call1((7_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_continuation.call_method1("chisquare", (5.0_f64, 5_usize))?,
+                &theirs_continuation.call_method1("chisquare", (5.0_f64, 5_usize))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_continuation.call_method1("random_sample", (5_usize,))?,
+                &theirs_continuation.call_method1("random_sample", (5_usize,))?,
+            )?;
+
+            let ours_nan = random.getattr("RandomState")?.call1((1_u64,))?;
+            let theirs_nan = numpy_random.getattr("RandomState")?.call1((1_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_nan.call_method1("chisquare", (f64::NAN, 3_usize))?,
+                &theirs_nan.call_method1("chisquare", (f64::NAN, 3_usize))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_nan.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+                &theirs_nan.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
+
+            let ours_inf = random.getattr("RandomState")?.call1((1_u64,))?;
+            let theirs_inf = numpy_random.getattr("RandomState")?.call1((1_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_inf.call_method1("chisquare", (f64::INFINITY, 3_usize))?,
+                &theirs_inf.call_method1("chisquare", (f64::INFINITY, 3_usize))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_inf.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+                &theirs_inf.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
+
+            let ours_zero = random.getattr("RandomState")?.call1((1_u64,))?;
+            let theirs_zero = numpy_random.getattr("RandomState")?.call1((1_u64,))?;
+            let ours_zero = match ours_zero.call_method1("chisquare", (0.0_f64,)) {
+                Ok(_) => {
+                    return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        "RandomState.chisquare(0.0) unexpectedly succeeded",
+                    ));
+                }
+                Err(err) => err,
+            };
+            let theirs_zero = match theirs_zero.call_method1("chisquare", (0.0_f64,)) {
+                Ok(_) => {
+                    return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        "numpy RandomState.chisquare(0.0) unexpectedly succeeded",
+                    ));
+                }
+                Err(err) => err,
+            };
+            assert_pyerr_matches_numpy(py, ours_zero, theirs_zero)?;
+
+            let ours_negative = random.getattr("RandomState")?.call1((1_u64,))?;
+            let theirs_negative = numpy_random.getattr("RandomState")?.call1((1_u64,))?;
+            let ours_negative = match ours_negative.call_method1("chisquare", (-1.0_f64,)) {
+                Ok(_) => {
+                    return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        "RandomState.chisquare(-1.0) unexpectedly succeeded",
+                    ));
+                }
+                Err(err) => err,
+            };
+            let theirs_negative = match theirs_negative.call_method1("chisquare", (-1.0_f64,)) {
+                Ok(_) => {
+                    return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        "numpy RandomState.chisquare(-1.0) unexpectedly succeeded",
+                    ));
+                }
+                Err(err) => err,
+            };
+            assert_pyerr_matches_numpy(py, ours_negative, theirs_negative)?;
 
             Ok(())
         });
