@@ -97,12 +97,12 @@
 ## DISC-008: PCG64 seeding via SeedSequence
 
 - **Reference:** NumPy's `Generator(PCG64(seed))` uses `SeedSequence` entropy mixing to derive 256-bit initial state
-- **Our impl:** `Generator::from_pcg64_dxsm(seed)` uses direct state initialization
-- **Impact:** Bit-exact sequence parity impossible without SeedSequence implementation
-- **Resolution:** ACCEPTED (for now)
-- **Reason:** SeedSequence is a complex entropy-mixing algorithm. Distribution statistical properties match; only bit-exact sequence differs.
-- **Tests affected:** rng_distribution_differential_cases.json (XFAIL)
-- **Review date:** 2026-04-18
+- **Our impl:** `Generator::from_pcg64(seed)` now uses a distinct PCG64 XSL-RR backend initialized from NumPy-compatible `SeedSequence` state, while `Generator::from_pcg64_dxsm(seed)` remains the PCG64DXSM backend
+- **Impact:** Previously, `BitGeneratorKind::Pcg64` routed through PCG64DXSM and could not match PCG64 bit-exact distribution fixtures
+- **Resolution:** RESOLVED
+- **Reason:** PCG64 and PCG64DXSM are now separate streams with oracle-backed raw-output tests and the RNG distribution differential suite runs as a normal green test.
+- **Tests affected:** rng_distribution_differential_cases.json
+- **Review date:** 2026-04-24
 
 ---
 

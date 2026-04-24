@@ -72,10 +72,26 @@ fn run() -> Result<(), String> {
     let git_ref = probe_git_head();
 
     println!("Environment:");
-    println!("  numpy.__version__    = {}", numpy_version.as_deref().unwrap_or("<unknown>"));
-    println!("  python version       = {}", python_version.as_deref().unwrap_or("<unknown>"));
-    println!("  git HEAD             = {}", git_ref.as_deref().unwrap_or("<unknown>"));
-    println!("  mode                 = {}", if apply { "apply (WRITE fixtures)" } else { "dry-run (report only)" });
+    println!(
+        "  numpy.__version__    = {}",
+        numpy_version.as_deref().unwrap_or("<unknown>")
+    );
+    println!(
+        "  python version       = {}",
+        python_version.as_deref().unwrap_or("<unknown>")
+    );
+    println!(
+        "  git HEAD             = {}",
+        git_ref.as_deref().unwrap_or("<unknown>")
+    );
+    println!(
+        "  mode                 = {}",
+        if apply {
+            "apply (WRITE fixtures)"
+        } else {
+            "dry-run (report only)"
+        }
+    );
     println!();
 
     // Currently only ufunc_input_cases has a live oracle capture binary.
@@ -121,7 +137,8 @@ fn run() -> Result<(), String> {
     );
 
     let report_path = fixtures_dir.join("REGENERATION_REPORT.md");
-    fs::write(&report_path, &report).map_err(|err| format!("write {}: {err}", report_path.display()))?;
+    fs::write(&report_path, &report)
+        .map_err(|err| format!("write {}: {err}", report_path.display()))?;
     println!();
     println!("Wrote {}", report_path.display());
     Ok(())
@@ -137,7 +154,10 @@ fn walk_fixtures(
         let entry = entry.map_err(|err| format!("read_dir entry: {err}"))?;
         let path = entry.path();
         if path.is_dir() {
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
             if name == "oracle_outputs" {
                 continue;
             }
@@ -147,7 +167,10 @@ fn walk_fixtures(
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if !name.ends_with(".json") || name.ends_with("_report.json") || name.ends_with("_output.json") {
+        if !name.ends_with(".json")
+            || name.ends_with("_report.json")
+            || name.ends_with("_output.json")
+        {
             continue;
         }
         let rel = path
@@ -178,8 +201,7 @@ fn count_cases(path: &Path) -> usize {
 
 fn classify_provenance(filename: &str) -> Provenance {
     let stem = filename.strip_suffix(".json").unwrap_or(filename);
-    // *_differential_cases => oracle captured (except rng_distribution which
-    // is XFAIL but still oracle-generated).
+    // *_differential_cases => oracle captured.
     if stem.ends_with("_differential_cases") {
         return Provenance::OracleCaptured;
     }
@@ -190,8 +212,12 @@ fn classify_provenance(filename: &str) -> Provenance {
     }
     match stem {
         "dtype_promotion_cases" => Provenance::Derived,
-        "shape_stride_cases" | "runtime_policy_cases" | "override_audit_cases"
-        | "rng_statistical_cases" | "workflow_scenario_corpus" | "smoke_case" => Provenance::Manual,
+        "shape_stride_cases"
+        | "runtime_policy_cases"
+        | "override_audit_cases"
+        | "rng_statistical_cases"
+        | "workflow_scenario_corpus"
+        | "smoke_case" => Provenance::Manual,
         "ufunc_input_cases" => Provenance::Manual, // inputs; oracle output in fixtures/oracle_outputs/
         _ => Provenance::Manual,
     }
@@ -223,9 +249,7 @@ fn render_report(
         Some(n) => out.push_str(&format!(
             "ufunc_input_cases.json: {n} cases (oracle capture runs under `--apply`).\n\n"
         )),
-        None => out.push_str(
-            "ufunc_input_cases.json: — not available in this run\n\n",
-        ),
+        None => out.push_str("ufunc_input_cases.json: — not available in this run\n\n"),
     }
 
     out.push_str("## Fixtures by regeneration class\n\n");
@@ -252,7 +276,9 @@ fn render_report(
     out.push_str("\n## Upgrade workflow (when numpy version bumps)\n\n");
     out.push_str("1. Pin the new numpy version via `FNP_ORACLE_PYTHON=/path/to/python3.x`.\n");
     out.push_str("2. Run `cargo run --bin regenerate_all_fixtures -p fnp-conformance`.\n");
-    out.push_str("3. Diff-review each `captured` fixture: `git diff fixtures/*_differential_cases.json`.\n");
+    out.push_str(
+        "3. Diff-review each `captured` fixture: `git diff fixtures/*_differential_cases.json`.\n",
+    );
     out.push_str("4. For each unexpected divergence, either (a) accept — bump numpy version in `fixtures/PROVENANCE.md`, or (b) file a DISC-NNN in `DISCREPANCIES.md` and XFAIL the affected test.\n");
     out.push_str("5. Manual fixtures: visually inspect on numpy releases that ship breaking ufunc/ma semantics changes.\n");
     out.push_str("6. Update `fixtures/PROVENANCE.md` `Reference NumPy` line and each captured fixture's `Last regen` column.\n");
@@ -269,7 +295,9 @@ fn probe_python_version() -> Option<String> {
 }
 
 fn probe_python_eval(code: &str) -> Option<String> {
-    let python = python_candidates().into_iter().find(|cand| Path::new(cand).exists() || cand_on_path(cand))?;
+    let python = python_candidates()
+        .into_iter()
+        .find(|cand| Path::new(cand).exists() || cand_on_path(cand))?;
     let output = Command::new(&python).arg("-c").arg(code).output().ok()?;
     if !output.status.success() {
         return None;

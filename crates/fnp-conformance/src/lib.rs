@@ -7423,7 +7423,11 @@ pub fn run_linalg_metamorphic_suite(config: &HarnessConfig) -> Result<SuiteRepor
                 let mut product = [[0.0_f64; 2]; 2];
                 for i in 0..2 {
                     for j in 0..2 {
-                        let sum: f64 = l_mat[i].iter().zip(l_mat[j].iter()).map(|(a, b)| a * b).sum();
+                        let sum: f64 = l_mat[i]
+                            .iter()
+                            .zip(l_mat[j].iter())
+                            .map(|(a, b)| a * b)
+                            .sum();
                         product[i][j] = sum;
                     }
                 }
@@ -20173,7 +20177,7 @@ fn execute_rng_differential_operation(case: &RngDifferentialCase) -> Result<(), 
 fn execute_rng_distribution_differential_operation(
     case: &RngDistributionDifferentialCase,
 ) -> Result<(), RngSuiteError> {
-    let mut rng = Generator::from_pcg64_dxsm(case.seed)
+    let mut rng = Generator::from_pcg64(case.seed)
         .map_err(|e| RngSuiteError::new("rng_bitgenerator_init_failed", e.to_string()))?;
 
     match case.operation.as_str() {
@@ -20617,6 +20621,7 @@ fn parse_bitgenerator_kind(s: &str) -> BitGeneratorKind {
     match s {
         "mt19937" => BitGeneratorKind::Mt19937,
         "pcg64" => BitGeneratorKind::Pcg64,
+        "pcg64dxsm" => BitGeneratorKind::Pcg64Dxsm,
         "philox" => BitGeneratorKind::Philox,
         "sfc64" => BitGeneratorKind::Sfc64,
         _ => BitGeneratorKind::Pcg64,
@@ -22167,7 +22172,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "XFAIL: fnp-random PCG64 seeding differs from NumPy SeedSequence entropy mixing"]
     fn rng_distribution_differential_suite_is_green() {
         let cfg = HarnessConfig::default_paths();
         let suite = run_rng_distribution_differential_suite(&cfg)

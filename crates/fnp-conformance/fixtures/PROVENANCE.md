@@ -42,7 +42,7 @@
 | `iter_metamorphic_cases.json` | manual | — | hand-written invariants | 2026-04-18 | repeatability/idempotence/count laws |
 | `iter_adversarial_cases.json` | manual | — | hand-written hostile payloads | 2026-04-18 | stable reason-code failures |
 | `rng_differential_cases.json` | capture_numpy_oracle | 2.4.3 | packet FNP-P2C-007 witness capture | 2026-04-20 | PCG64 witness corpus |
-| `rng_distribution_differential_cases.json` | capture_numpy_oracle | 2.4.3 | distribution-draw capture | 2026-04-18 | currently XFAIL — seeding mismatch with NumPy PCG64 SeedSequence |
+| `rng_distribution_differential_cases.json` | capture_numpy_oracle | 2.4.3 | distribution-draw capture | 2026-04-18 | PCG64-seeded Generator distribution corpus |
 | `rng_metamorphic_cases.json` | manual | — | hand-written invariants | 2026-04-20 | jump additivity, fill/iter equivalence, bounded repeatability |
 | `rng_adversarial_cases.json` | manual | — | hand-written hostile payloads | 2026-04-18 | bounded fail-closed outcomes |
 | `rng_statistical_cases.json` | manual | — | hand-written distribution property tests | 2026-03-03 | mean/variance bounds |

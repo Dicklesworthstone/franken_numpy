@@ -50,7 +50,7 @@ This folder stores normalized oracle-vs-target fixtures for `fnp-conformance`.
 - `shape_stride_adversarial_cases.json`: shape/stride edge cases (incompatible broadcast, negative-infer reshape).
 - `runtime_policy_metamorphic_cases.json`: runtime policy metamorphic invariants (threshold monotonicity, mode subsumption).
 - `rng_statistical_cases.json`: RNG statistical distribution property tests.
-- `rng_distribution_differential_cases.json`: RNG distribution bit-exact parity tests (XFAIL pending seeding alignment with NumPy PCG64 SeedSequence).
+- `rng_distribution_differential_cases.json`: RNG distribution bit-exact parity tests for NumPy PCG64-seeded Generator draws.
 - `workflow_scenario_corpus.json`: user workflow golden journeys linking differential fixtures, e2e scripts, and prioritized gap beads (including packet `FNP-P2C-004` iterator replay scenarios).
 - `oracle_outputs/ufunc_oracle_output.json`: captured NumPy oracle outputs.
 - `oracle_outputs/ufunc_differential_report.json`: comparator report against current Rust implementation.
