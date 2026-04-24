@@ -613,6 +613,84 @@ impl PyRandomGenerator {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
+    #[pyo3(signature = (n, pvals, size=None))]
+    fn multinomial(
+        &mut self,
+        py: Python<'_>,
+        n: u64,
+        pvals: Py<PyAny>,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let pvals = extract_random_f64_vector(py, pvals.bind(py))?;
+        if pvals.is_empty() {
+            return Err(PyValueError::new_err(
+                "pvals must have at least 1 dimension and the last dimension of pvals must be greater than 0.",
+            ));
+        }
+        if pvals
+            .iter()
+            .any(|&value| value.is_nan() || value < 0.0 || value > 1.0)
+        {
+            return Err(PyValueError::new_err(
+                "pvals < 0, pvals > 1 or pvals contains NaNs",
+            ));
+        }
+        if pvals
+            .iter()
+            .take(pvals.len().saturating_sub(1))
+            .sum::<f64>()
+            > 1.0 + 1e-12
+        {
+            return Err(PyValueError::new_err("sum(pvals[:-1]) > 1.0"));
+        }
+        let size = random_size_from_py(py, size, "Generator.multinomial(size)")?;
+        let (shape, len, _) = random_len_and_shape(size)?;
+        let width = pvals.len();
+        let values = self.inner.multinomial(n, &pvals, len);
+        build_random_u64_matrix_as_i64_parts(py, shape, values, width)
+    }
+
+    #[pyo3(signature = (alpha, size=None))]
+    fn dirichlet(
+        &mut self,
+        py: Python<'_>,
+        alpha: Py<PyAny>,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let alpha = extract_random_f64_vector(py, alpha.bind(py))?;
+        let size = random_size_from_py(py, size, "Generator.dirichlet(size)")?;
+        let (shape, len, _) = random_len_and_shape(size)?;
+        let width = alpha.len();
+        let values = self
+            .inner
+            .dirichlet(&alpha, len)
+            .map_err(map_random_error)?;
+        build_random_f64_matrix_parts(py, shape, values, width)
+    }
+
+    #[pyo3(signature = (colors, nsample, size=None))]
+    fn multivariate_hypergeometric(
+        &mut self,
+        py: Python<'_>,
+        colors: Py<PyAny>,
+        nsample: u64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let colors = extract_random_u64_population(
+            py,
+            colors.bind(py),
+            "Generator.multivariate_hypergeometric(colors)",
+        )?;
+        let size = random_size_from_py(py, size, "Generator.multivariate_hypergeometric(size)")?;
+        let (shape, len, _) = random_len_and_shape(size)?;
+        let width = colors.len();
+        let values = self
+            .inner
+            .multivariate_hypergeometric(&colors, nsample, len)
+            .map_err(map_random_error)?;
+        build_random_u64_matrix_as_i64_parts(py, shape, values, width)
+    }
+
     #[pyo3(signature = (low=0.0, high=1.0, size=None))]
     fn uniform(
         &mut self,
@@ -1063,6 +1141,53 @@ fn build_random_u64_as_i64_parts(
     build_random_i64_parts(py, shape, values, scalar)
 }
 
+fn build_random_f64_matrix_parts(
+    py: Python<'_>,
+    mut shape: Vec<usize>,
+    rows: Vec<Vec<f64>>,
+    width: usize,
+) -> PyResult<Py<PyAny>> {
+    let mut values = Vec::with_capacity(
+        rows.len()
+            .checked_mul(width)
+            .ok_or_else(|| PyValueError::new_err("random matrix output is too large"))?,
+    );
+    for row in rows {
+        if row.len() != width {
+            return Err(PyValueError::new_err("random matrix row width mismatch"));
+        }
+        values.extend(row);
+    }
+    shape.push(width);
+    build_numpy_array_from_storage(py, &shape, ArrayStorage::F64(values))
+}
+
+fn build_random_u64_matrix_as_i64_parts(
+    py: Python<'_>,
+    mut shape: Vec<usize>,
+    rows: Vec<Vec<u64>>,
+    width: usize,
+) -> PyResult<Py<PyAny>> {
+    let mut values = Vec::with_capacity(
+        rows.len()
+            .checked_mul(width)
+            .ok_or_else(|| PyValueError::new_err("random matrix output is too large"))?,
+    );
+    for row in rows {
+        if row.len() != width {
+            return Err(PyValueError::new_err("random matrix row width mismatch"));
+        }
+        for value in row {
+            values.push(
+                i64::try_from(value)
+                    .map_err(|_| PyValueError::new_err("random integer sample exceeds int64"))?,
+            );
+        }
+    }
+    shape.push(width);
+    build_numpy_array_from_storage(py, &shape, ArrayStorage::I64(values))
+}
+
 fn build_random_f64_output(py: Python<'_>, output: ShapedRandomOutput<f64>) -> PyResult<Py<PyAny>> {
     let (shape, values, scalar) = output.into_parts();
     build_random_f64_parts(py, shape, values, scalar)
@@ -1095,19 +1220,44 @@ fn extract_random_f64_population(
     value: &Bound<'_, PyAny>,
     context: &str,
 ) -> PyResult<Vec<f64>> {
-    let numpy = py.import("numpy")?;
-    let array = numpy.call_method1("asarray", (value,))?;
-    let flat = array.call_method1("reshape", (-1,))?;
-    let values = flat
-        .call_method1("astype", ("float64",))?
-        .call_method0("tolist")?
-        .extract::<Vec<f64>>()?;
+    let values = extract_random_f64_vector(py, value)?;
     if values.is_empty() {
         return Err(PyValueError::new_err(format!(
             "{context}: a cannot be empty unless no samples are taken",
         )));
     }
     Ok(values)
+}
+
+fn extract_random_f64_vector(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Vec<f64>> {
+    let numpy = py.import("numpy")?;
+    let array = numpy.call_method1("asarray", (value,))?;
+    let flat = array.call_method1("reshape", (-1,))?;
+    flat.call_method1("astype", ("float64",))?
+        .call_method0("tolist")?
+        .extract::<Vec<f64>>()
+}
+
+fn extract_random_u64_population(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    context: &str,
+) -> PyResult<Vec<u64>> {
+    let numpy = py.import("numpy")?;
+    let array = numpy.call_method1("asarray", (value,))?;
+    let flat = array.call_method1("reshape", (-1,))?;
+    let values = flat
+        .call_method1("astype", ("int64",))?
+        .call_method0("tolist")?
+        .extract::<Vec<i64>>()?;
+    values
+        .into_iter()
+        .map(|value| {
+            u64::try_from(value).map_err(|_| {
+                PyValueError::new_err(format!("{context}: values must be non-negative"))
+            })
+        })
+        .collect()
 }
 
 fn random_state_f64_parts(
@@ -20015,6 +20165,47 @@ mod tests {
             assert_random_sample_matches_numpy(
                 &ours.call_method1("noncentral_f", (5.0_f64, 7.0_f64, 1.25_f64, shape.clone()))?,
                 &theirs.call_method1("noncentral_f", (5.0_f64, 7.0_f64, 1.25_f64, shape))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_generator_multivariate_distribution_methods_match_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_multivariate_distributions")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+            let shape = PyTuple::new(py, [2_usize, 2_usize])?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 250)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("multinomial", (20_u64, vec![0.3_f64, 0.5, 0.2], 3_usize))?,
+                &theirs.call_method1("multinomial", (20_u64, vec![0.3_f64, 0.5, 0.2], 3_usize))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 251)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("dirichlet", (vec![1.0_f64, 2.0, 3.0], shape.clone()))?,
+                &theirs.call_method1("dirichlet", (vec![1.0_f64, 2.0, 3.0], shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 252)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1(
+                    "multivariate_hypergeometric",
+                    (vec![10_u64, 20, 30], 5_u64, shape.clone()),
+                )?,
+                &theirs.call_method1(
+                    "multivariate_hypergeometric",
+                    (vec![10_u64, 20, 30], 5_u64, shape),
+                )?,
             )?;
 
             Ok(())
