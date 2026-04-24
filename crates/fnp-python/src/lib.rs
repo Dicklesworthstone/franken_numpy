@@ -847,7 +847,7 @@ impl PyRandomGenerator {
             .unbind())
     }
 
-    #[pyo3(signature = (a, size=None, replace=true, p=None, *, shuffle=true))]
+    #[pyo3(signature = (a, size=None, replace=true, p=None, axis=0, shuffle=true))]
     fn choice(
         &mut self,
         py: Python<'_>,
@@ -855,6 +855,7 @@ impl PyRandomGenerator {
         size: Option<Py<PyAny>>,
         replace: bool,
         p: Option<Py<PyAny>>,
+        axis: isize,
         shuffle: bool,
     ) -> PyResult<Py<PyAny>> {
         let size = random_size_from_py(py, size, "Generator.choice(size)")?;
@@ -909,20 +910,48 @@ impl PyRandomGenerator {
             return build_random_i64_parts(py, shape, values, scalar);
         }
 
-        let values = extract_random_f64_population(py, a.bind(py), "Generator.choice(a)")?;
-        if let Some(weights) = weights.as_deref() {
-            let (shape, len, scalar) = random_len_and_shape(size)?;
-            let values = self
-                .inner
-                .choice_weighted(&values, len, replace, weights)
-                .map_err(map_random_error)?;
-            return build_random_f64_parts(py, shape, values, scalar);
+        let (population_shape, values) =
+            extract_random_f64_array(py, a.bind(py), "Generator.choice(a)")?;
+        let axis = try_normalize_axis(axis, population_shape.len()).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "axis {axis} is out of bounds for array of dimension {}",
+                population_shape.len()
+            ))
+        })?;
+        let (sample_shape, sample_len, scalar) = random_len_and_shape(size)?;
+        let axis_len = population_shape[axis];
+        let sample_indices = if let Some(weights) = weights.as_deref() {
+            if weights.len() != axis_len {
+                return Err(PyValueError::new_err("a and p must have same size"));
+            }
+            let axis_population = (0..axis_len).map(|value| value as f64).collect::<Vec<_>>();
+            self.inner
+                .choice_weighted(&axis_population, sample_len, replace, weights)
+                .map_err(map_random_error)?
+                .into_iter()
+                .map(|value| {
+                    if !value.is_finite() || value < 0.0 || value > usize::MAX as f64 {
+                        return Err(PyValueError::new_err("choice sample index is invalid"));
+                    }
+                    Ok(value as u64)
+                })
+                .collect::<PyResult<Vec<_>>>()?
+        } else {
+            self.inner
+                .choice_indices_with_shuffle(axis_len, sample_len, replace, shuffle)
+                .map_err(map_random_error)?
+        };
+        let (output_shape, values) = choose_random_f64_axis(
+            &values,
+            &population_shape,
+            axis,
+            &sample_indices,
+            &sample_shape,
+        )?;
+        if output_shape.is_empty() {
+            return build_random_f64_parts(py, output_shape, values, scalar);
         }
-        let output = self
-            .inner
-            .choice_shaped_with_shuffle(&values, size.as_deref(), replace, shuffle)
-            .map_err(map_random_error)?;
-        build_random_f64_output(py, output)
+        build_random_f64_parts(py, output_shape, values, false)
     }
 
     #[pyo3(signature = (x, axis=0))]
@@ -1659,20 +1688,6 @@ fn bit_generator_random_raw(
     build_numpy_array_from_storage(py, &shape, ArrayStorage::U64(bit_generator.fill_u64(len)))
 }
 
-fn extract_random_f64_population(
-    py: Python<'_>,
-    value: &Bound<'_, PyAny>,
-    context: &str,
-) -> PyResult<Vec<f64>> {
-    let values = extract_random_f64_vector(py, value)?;
-    if values.is_empty() {
-        return Err(PyValueError::new_err(format!(
-            "{context}: a cannot be empty unless no samples are taken",
-        )));
-    }
-    Ok(values)
-}
-
 fn extract_random_f64_array(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
@@ -1731,6 +1746,61 @@ fn permute_random_f64_axis(
         output.push(values[source]);
     }
     Ok(output)
+}
+
+fn choose_random_f64_axis(
+    values: &[f64],
+    shape: &[usize],
+    axis: usize,
+    sample_indices: &[u64],
+    sample_shape: &[usize],
+) -> PyResult<(Vec<usize>, Vec<f64>)> {
+    if axis >= shape.len() {
+        return Err(PyValueError::new_err("choice axis metadata mismatch"));
+    }
+    let total = element_count(shape).map_err(|err| PyValueError::new_err(err.to_string()))?;
+    if values.len() != total {
+        return Err(PyValueError::new_err("choice values do not match shape"));
+    }
+
+    let axis_len = shape[axis];
+    let before =
+        element_count(&shape[..axis]).map_err(|err| PyValueError::new_err(err.to_string()))?;
+    let after =
+        element_count(&shape[axis + 1..]).map_err(|err| PyValueError::new_err(err.to_string()))?;
+
+    let mut output_shape = Vec::with_capacity(shape.len() - 1 + sample_shape.len());
+    output_shape.extend_from_slice(&shape[..axis]);
+    output_shape.extend_from_slice(sample_shape);
+    output_shape.extend_from_slice(&shape[axis + 1..]);
+
+    let output_len = before
+        .checked_mul(sample_indices.len())
+        .and_then(|len| len.checked_mul(after))
+        .ok_or_else(|| PyValueError::new_err("choice output shape is too large"))?;
+    let mut output = Vec::with_capacity(output_len);
+    for outer in 0..before {
+        let block = outer
+            .checked_mul(axis_len)
+            .and_then(|offset| offset.checked_mul(after))
+            .ok_or_else(|| PyValueError::new_err("choice input shape is too large"))?;
+        for &sample in sample_indices {
+            let sample = usize::try_from(sample)
+                .map_err(|_| PyValueError::new_err("choice sample index is too large"))?;
+            if sample >= axis_len {
+                return Err(PyValueError::new_err("choice sample index out of bounds"));
+            }
+            let start = block
+                .checked_add(
+                    sample
+                        .checked_mul(after)
+                        .ok_or_else(|| PyValueError::new_err("choice input shape is too large"))?,
+                )
+                .ok_or_else(|| PyValueError::new_err("choice input shape is too large"))?;
+            output.extend_from_slice(&values[start..start + after]);
+        }
+    }
+    Ok((output_shape, output))
 }
 
 fn extract_random_f64_vector(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Vec<f64>> {
@@ -21384,6 +21454,65 @@ mod tests {
                     (vec![1.0_f64, 2.0, 3.0], shape, true),
                     Some(&kwargs),
                 )?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_generator_choice_axis_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_choice_axis")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+            let matrix = vec![
+                vec![0.0_f64, 1.0, 2.0, 3.0],
+                vec![4.0_f64, 5.0, 6.0, 7.0],
+                vec![8.0_f64, 9.0, 10.0, 11.0],
+            ];
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 361)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("choice", (matrix.clone(),))?,
+                &theirs.call_method1("choice", (matrix.clone(),))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 362)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("choice", (matrix.clone(), 2_usize))?,
+                &theirs.call_method1("choice", (matrix.clone(), 2_usize))?,
+            )?;
+
+            let size_shape = PyTuple::new(py, [2_usize, 2_usize])?;
+            let axis_last_kwargs = PyDict::new(py);
+            axis_last_kwargs.set_item("axis", -1_i64)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 363)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method(
+                    "choice",
+                    (matrix.clone(), size_shape.clone()),
+                    Some(&axis_last_kwargs),
+                )?,
+                &theirs.call_method(
+                    "choice",
+                    (matrix.clone(), size_shape),
+                    Some(&axis_last_kwargs),
+                )?,
+            )?;
+
+            let weighted_kwargs = PyDict::new(py);
+            weighted_kwargs.set_item("axis", 0_i64)?;
+            weighted_kwargs.set_item("p", vec![0.2_f64, 0.3, 0.5])?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 364)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method("choice", (matrix.clone(), 2_usize), Some(&weighted_kwargs))?,
+                &theirs.call_method("choice", (matrix, 2_usize), Some(&weighted_kwargs))?,
             )?;
 
             Ok(())
