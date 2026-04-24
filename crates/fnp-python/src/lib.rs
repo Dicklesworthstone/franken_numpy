@@ -20557,6 +20557,26 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         random.add_class::<PyPhilox>()?;
         random.add_class::<PySfc64>()?;
         random.add_function(wrap_pyfunction!(default_rng, &random)?)?;
+        // numpy.random installs a singleton `_rand = RandomState()` at
+        // module import and binds every distribution method onto the
+        // module namespace as `numpy.random.<name> = _rand.<name>`. Mirror
+        // that so `fnp_python.random.rand(3)` routes to the singleton's
+        // RandomState.rand method identically.
+        //
+        // We expose every PyRandomState method that corresponds to a
+        // numpy.random legacy top-level alias. Methods that have not yet
+        // been added to PyRandomState (binomial, poisson, multinomial,
+        // choice, shuffle, permutation, etc.) are tracked in a follow-up
+        // bead and will be bound as they come online via hasattr gate.
+        let install_src = pyo3::ffi::c_str!(
+            "def install(mod, RandomState):\n    _rand = RandomState()\n    mod._rand = _rand\n    for name in (\n        'seed', 'get_state', 'set_state',\n        'rand', 'randn', 'randint', 'random', 'random_sample',\n        'random_integers', 'tomaxint', 'bytes',\n        'choice', 'shuffle', 'permutation',\n        'beta', 'binomial', 'chisquare', 'dirichlet',\n        'exponential', 'f', 'gamma', 'geometric', 'gumbel',\n        'hypergeometric', 'laplace', 'logistic', 'lognormal',\n        'logseries', 'multinomial', 'multivariate_normal',\n        'negative_binomial', 'noncentral_chisquare', 'noncentral_f',\n        'normal', 'pareto', 'poisson', 'power', 'rayleigh',\n        'standard_cauchy', 'standard_exponential', 'standard_gamma',\n        'standard_normal', 'standard_t', 'triangular', 'uniform',\n        'vonmises', 'wald', 'weibull', 'zipf',\n    ):\n        if hasattr(_rand, name):\n            setattr(mod, name, getattr(_rand, name))\n    # ranf / sample are numpy aliases for random_sample.\n    mod.ranf = _rand.random_sample\n    mod.sample = _rand.random_sample\n"
+        );
+        let ns = PyDict::new(py);
+        py.run(install_src, Some(&ns), None)?;
+        if let Some(install_fn) = ns.get_item("install")? {
+            let rs_cls = random.getattr("RandomState")?;
+            install_fn.call1((&random, rs_cls))?;
+        }
         m.add_submodule(&random)?;
         m.add("random", random)?;
     }
@@ -21746,6 +21766,45 @@ mod tests {
                 "Philox",
                 "SFC64",
                 "default_rng",
+                // t44q: module-level legacy aliases bound to the shared
+                // numpy.random._rand RandomState singleton.
+                "_rand",
+                "seed",
+                "get_state",
+                "set_state",
+                "rand",
+                "randn",
+                "randint",
+                "random",
+                "random_sample",
+                "ranf",
+                "sample",
+                "random_integers",
+                "tomaxint",
+                "bytes",
+                "normal",
+                "standard_normal",
+                "standard_cauchy",
+                "standard_exponential",
+                "standard_gamma",
+                "exponential",
+                "uniform",
+                "beta",
+                "gamma",
+                "chisquare",
+                "f",
+                "geometric",
+                "gumbel",
+                "laplace",
+                "logistic",
+                "lognormal",
+                "pareto",
+                "power",
+                "rayleigh",
+                "standard_t",
+                "triangular",
+                "weibull",
+                "zipf",
             ] {
                 assert!(random.getattr(name).is_ok(), "missing random.{name}");
             }
@@ -21785,6 +21844,27 @@ mod tests {
             assert_array_matches_numpy(
                 &ours_state.call_method1("random_sample", (shape.clone(),))?,
                 &theirs_state.call_method1("random_sample", (shape,))?,
+            )?;
+
+            // t44q bit-exact parity: the module-level alias `random.rand`
+            // must route through the singleton `_rand` RandomState. After
+            // calling random.seed(7), random.rand(3) should match
+            // numpy.random.rand(3) after numpy.random.seed(7).
+            random.call_method1("seed", (7_u64,))?;
+            numpy_random.call_method1("seed", (7_u64,))?;
+            assert_array_matches_numpy(
+                &random.call_method1("rand", (3_usize,))?,
+                &numpy_random.call_method1("rand", (3_usize,))?,
+            )?;
+            // Back-to-back calls on the same singleton also advance the
+            // same underlying RNG state in lockstep with numpy's.
+            assert_array_matches_numpy(
+                &random.call_method1("standard_normal", (4_usize,))?,
+                &numpy_random.call_method1("standard_normal", (4_usize,))?,
+            )?;
+            assert_array_matches_numpy(
+                &random.call_method1("randint", (0_i64, 100_i64, 5_usize))?,
+                &numpy_random.call_method1("randint", (0_i64, 100_i64, 5_usize))?,
             )?;
 
             Ok(())
