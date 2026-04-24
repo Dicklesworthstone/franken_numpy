@@ -1283,6 +1283,18 @@ impl PyRandomState {
         Ok(())
     }
 
+    #[pyo3(signature = (legacy=true))]
+    fn get_state(&self, py: Python<'_>, legacy: bool) -> PyResult<Py<PyAny>> {
+        build_random_state_state(py, &self.inner.state(), legacy)
+    }
+
+    fn set_state(&mut self, py: Python<'_>, state: Py<PyAny>) -> PyResult<()> {
+        let state = random_state_state_from_py(py, state.bind(py))?;
+        self.inner
+            .set_state(&state)
+            .map_err(map_bit_generator_error)
+    }
+
     #[pyo3(signature = (size=None))]
     fn random_sample(&mut self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         let size = random_size_from_py(py, size, "RandomState.random_sample(size)")?;
@@ -1914,6 +1926,166 @@ fn random_state_seed_material_from_py(
     Err(PyTypeError::new_err(
         "Cannot cast scalar to dtype('int64') according to the rule 'safe'",
     ))
+}
+
+const RANDOM_STATE_MT19937_STATE_LEN: usize = 624;
+
+fn random_state_mt19937_parts(state: &BitGeneratorState) -> PyResult<(Vec<u32>, usize)> {
+    if state.kind != BitGeneratorKind::Mt19937 {
+        return Err(PyValueError::new_err("RandomState state must use MT19937"));
+    }
+
+    let mut keys = vec![0_u32; RANDOM_STATE_MT19937_STATE_LEN];
+    let mut seen = vec![false; RANDOM_STATE_MT19937_STATE_LEN];
+    let mut pos = None;
+    for (key, value) in &state.schema_entries {
+        if key == "mt19937_pos" {
+            pos = Some(
+                usize::try_from(*value)
+                    .map_err(|_| PyValueError::new_err("MT19937 position is too large"))?,
+            );
+            continue;
+        }
+        let Some(suffix) = key.strip_prefix("mt19937_s") else {
+            continue;
+        };
+        let Ok(index) = suffix.parse::<usize>() else {
+            continue;
+        };
+        if index >= RANDOM_STATE_MT19937_STATE_LEN {
+            continue;
+        }
+        keys[index] =
+            u32::try_from(*value).map_err(|_| PyValueError::new_err("MT19937 key is too large"))?;
+        seen[index] = true;
+    }
+
+    if seen.iter().any(|present| !present) {
+        return Err(PyValueError::new_err("MT19937 state vector is incomplete"));
+    }
+    let pos = pos.ok_or_else(|| PyValueError::new_err("MT19937 position is missing"))?;
+    if pos > RANDOM_STATE_MT19937_STATE_LEN {
+        return Err(PyValueError::new_err("MT19937 position is out of range"));
+    }
+    Ok((keys, pos))
+}
+
+fn build_random_state_state(
+    py: Python<'_>,
+    state: &BitGeneratorState,
+    legacy: bool,
+) -> PyResult<Py<PyAny>> {
+    let (keys, pos) = random_state_mt19937_parts(state)?;
+    let key_array = build_numpy_array_from_storage(
+        py,
+        &[RANDOM_STATE_MT19937_STATE_LEN],
+        ArrayStorage::U32(keys),
+    )?;
+    if legacy {
+        let items = vec![
+            "MT19937".into_pyobject(py)?.into_any().unbind(),
+            key_array,
+            pos.into_pyobject(py)?.into_any().unbind(),
+            0_i64.into_pyobject(py)?.into_any().unbind(),
+            0.0_f64.into_pyobject(py)?.into_any().unbind(),
+        ];
+        return Ok(PyTuple::new(py, items)?.into_any().unbind());
+    }
+
+    let state_dict = PyDict::new(py);
+    state_dict.set_item("key", key_array)?;
+    state_dict.set_item("pos", pos)?;
+
+    let dict = PyDict::new(py);
+    dict.set_item("bit_generator", "MT19937")?;
+    dict.set_item("state", state_dict)?;
+    dict.set_item("has_gauss", 0_i64)?;
+    dict.set_item("gauss", 0.0_f64)?;
+    Ok(dict.into_any().unbind())
+}
+
+fn random_state_state_keys_from_py(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
+    let numpy = py.import("numpy")?;
+    let array = numpy.call_method1("asarray", (value,))?;
+    let flat = array.call_method1("reshape", (-1,))?;
+    flat.call_method1("astype", ("uint32",))?
+        .call_method0("tolist")?
+        .extract::<Vec<u32>>()
+}
+
+fn random_state_state_from_parts(keys: Vec<u32>, pos: usize) -> PyResult<BitGeneratorState> {
+    if keys.len() != RANDOM_STATE_MT19937_STATE_LEN {
+        return Err(PyValueError::new_err(
+            "state vector must be 624-dimensional",
+        ));
+    }
+    if pos > RANDOM_STATE_MT19937_STATE_LEN {
+        return Err(PyValueError::new_err("position is out of range"));
+    }
+
+    let mut state = CoreRandomState::new(SeedMaterial::U64(0))
+        .map_err(map_bit_generator_error)?
+        .state();
+    state
+        .schema_entries
+        .retain(|(key, _)| key != "mt19937_pos" && !key.starts_with("mt19937_s"));
+    state
+        .schema_entries
+        .push(("mt19937_pos".to_string(), pos as u64));
+    for (index, value) in keys.into_iter().enumerate() {
+        state
+            .schema_entries
+            .push((format!("mt19937_s{index}"), u64::from(value)));
+    }
+    Ok(state)
+}
+
+fn random_state_state_from_legacy_tuple(
+    py: Python<'_>,
+    tuple: &Bound<'_, PyTuple>,
+) -> PyResult<BitGeneratorState> {
+    if tuple.len() != 5 {
+        return Err(PyValueError::new_err(
+            "state tuple must have length 5 for RandomState",
+        ));
+    }
+    let algorithm = tuple.get_item(0)?.extract::<String>()?;
+    if algorithm != "MT19937" {
+        return Err(PyValueError::new_err(
+            "set_state can only be used with legacy MT19937 state",
+        ));
+    }
+    let keys = random_state_state_keys_from_py(py, &tuple.get_item(1)?)?;
+    let pos = tuple.get_item(2)?.extract::<usize>()?;
+    random_state_state_from_parts(keys, pos)
+}
+
+fn random_state_state_from_dict(
+    py: Python<'_>,
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<BitGeneratorState> {
+    let algorithm = required_dict_item(dict, "bit_generator")?.extract::<String>()?;
+    if algorithm != "MT19937" {
+        return Err(PyValueError::new_err(
+            "set_state can only be used with legacy MT19937 state",
+        ));
+    }
+    let state = required_dict_item(dict, "state")?;
+    let state = state.cast::<PyDict>()?;
+    let keys = random_state_state_keys_from_py(py, &required_dict_item(state, "key")?)?;
+    let pos = required_dict_item(state, "pos")?.extract::<usize>()?;
+    random_state_state_from_parts(keys, pos)
+}
+
+fn random_state_state_from_py(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<BitGeneratorState> {
+    if let Ok(dict) = value.cast::<PyDict>() {
+        return random_state_state_from_dict(py, dict);
+    }
+    let tuple = value.cast::<PyTuple>()?;
+    random_state_state_from_legacy_tuple(py, tuple)
 }
 
 fn random_len_and_shape(size: Option<Vec<usize>>) -> PyResult<(Vec<usize>, usize, bool)> {
@@ -20686,9 +20858,9 @@ mod tests {
         digitize, extract, fill_diagonal, flatnonzero, floor, fnp_python, frexp, hypot, indices,
         interp, isfinite, isinf, isnan, isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2,
         meshgrid, modf, nan_to_num, nextafter, place, put, put_along_axis, putmask, radians,
-        ravel_multi_index, rfftfreq, rint, searchsorted, select, sign, signbit, sinc,
-        solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid, trapz,
-        tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc,
+        ravel_multi_index, required_dict_item, rfftfreq, rint, searchsorted, select, sign, signbit,
+        sinc, solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid,
+        trapz, tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc,
         unravel_index, where_py,
     };
     use pyo3::Bound;
@@ -21308,6 +21480,107 @@ mod tests {
                 Err(err) => err,
             };
             assert_pyerr_matches_numpy(py, ours_large_err, theirs_large_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_state_get_set_state_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_state_state")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+            let shape = PyTuple::new(py, [2_usize, 3_usize])?;
+
+            let ours = random.getattr("RandomState")?.call1((7_u64,))?;
+            let theirs = numpy_random.getattr("RandomState")?.call1((7_u64,))?;
+            let ours_state = ours.call_method0("get_state")?;
+            let theirs_state = theirs.call_method0("get_state")?;
+            let ours_tuple = ours_state.cast::<PyTuple>()?;
+            let theirs_tuple = theirs_state.cast::<PyTuple>()?;
+            assert_eq!(ours_tuple.len()?, 5);
+            assert_eq!(
+                ours_tuple.get_item(0)?.extract::<String>()?,
+                theirs_tuple.get_item(0)?.extract::<String>()?
+            );
+            assert_random_sample_matches_numpy(
+                &ours_tuple.get_item(1)?,
+                &theirs_tuple.get_item(1)?,
+            )?;
+            assert_eq!(
+                ours_tuple.get_item(2)?.extract::<usize>()?,
+                theirs_tuple.get_item(2)?.extract::<usize>()?
+            );
+            assert_eq!(
+                ours_tuple.get_item(3)?.extract::<i64>()?,
+                theirs_tuple.get_item(3)?.extract::<i64>()?
+            );
+            assert_eq!(
+                ours_tuple.get_item(4)?.extract::<f64>()?,
+                theirs_tuple.get_item(4)?.extract::<f64>()?
+            );
+
+            let ours_dict = ours.call_method1("get_state", (false,))?;
+            let theirs_dict = theirs.call_method1("get_state", (false,))?;
+            let ours_dict = ours_dict.cast::<PyDict>()?;
+            let theirs_dict = theirs_dict.cast::<PyDict>()?;
+            assert_eq!(
+                required_dict_item(ours_dict, "bit_generator")?.extract::<String>()?,
+                required_dict_item(theirs_dict, "bit_generator")?.extract::<String>()?
+            );
+            let ours_nested = required_dict_item(ours_dict, "state")?;
+            let theirs_nested = required_dict_item(theirs_dict, "state")?;
+            let ours_nested = ours_nested.cast::<PyDict>()?;
+            let theirs_nested = theirs_nested.cast::<PyDict>()?;
+            assert_random_sample_matches_numpy(
+                &required_dict_item(ours_nested, "key")?,
+                &required_dict_item(theirs_nested, "key")?,
+            )?;
+            assert_eq!(
+                required_dict_item(ours_nested, "pos")?.extract::<usize>()?,
+                required_dict_item(theirs_nested, "pos")?.extract::<usize>()?
+            );
+
+            let ours_restore = random.getattr("RandomState")?.call1((99_u64,))?;
+            let theirs_restore = numpy_random.getattr("RandomState")?.call1((99_u64,))?;
+            ours_restore.call_method1("random_sample", (4_usize,))?;
+            theirs_restore.call_method1("random_sample", (4_usize,))?;
+            let ours_saved = ours_restore.call_method0("get_state")?;
+            let theirs_saved = theirs_restore.call_method0("get_state")?;
+            ours_restore.call_method1("random_sample", (3_usize,))?;
+            theirs_restore.call_method1("random_sample", (3_usize,))?;
+            ours_restore.call_method1("set_state", (ours_saved,))?;
+            theirs_restore.call_method1("set_state", (theirs_saved,))?;
+            assert_random_sample_matches_numpy(
+                &ours_restore.call_method1("random_sample", (shape.clone(),))?,
+                &theirs_restore.call_method1("random_sample", (shape.clone(),))?,
+            )?;
+
+            let ours_tuple_import = random.getattr("RandomState")?.call1((1_u64,))?;
+            let theirs_tuple_import = numpy_random.getattr("RandomState")?.call1((123_u64,))?;
+            theirs_tuple_import.call_method1("random_sample", (5_usize,))?;
+            let imported_tuple = theirs_tuple_import.call_method0("get_state")?;
+            ours_tuple_import.call_method1("set_state", (imported_tuple,))?;
+            assert_random_sample_matches_numpy(
+                &ours_tuple_import.call_method1("random_sample", (shape.clone(),))?,
+                &theirs_tuple_import.call_method1("random_sample", (shape.clone(),))?,
+            )?;
+
+            let ours_dict_import = random.getattr("RandomState")?.call1((1_u64,))?;
+            let theirs_dict_import = numpy_random.getattr("RandomState")?.call1((321_u64,))?;
+            theirs_dict_import.call_method1("random_sample", (5_usize,))?;
+            let imported_dict = theirs_dict_import.call_method1("get_state", (false,))?;
+            ours_dict_import.call_method1("set_state", (imported_dict,))?;
+            assert_random_sample_matches_numpy(
+                &ours_dict_import.call_method1("random_sample", (shape.clone(),))?,
+                &theirs_dict_import.call_method1("random_sample", (shape,))?,
+            )?;
 
             Ok(())
         });
