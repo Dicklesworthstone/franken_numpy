@@ -2562,6 +2562,11 @@ impl Generator {
         self.bit_generator.next_f64()
     }
 
+    #[must_use]
+    pub fn next_f32(&mut self) -> f32 {
+        ((self.next_uint32() >> 8) as f32) * (1.0_f32 / 16_777_216.0_f32)
+    }
+
     pub fn bounded_u64(&mut self, upper_bound: u64) -> Result<u64, RandomError> {
         self.bit_generator.bounded_u64(upper_bound)
     }
@@ -2813,6 +2818,14 @@ impl Generator {
         (0..size).map(|_| self.next_f64()).collect()
     }
 
+    /// Generate an array of uniform random `float32` values in `[0.0, 1.0)`.
+    ///
+    /// Mimics `rng.random(size, dtype=np.float32)`.
+    #[must_use]
+    pub fn random_f32(&mut self, size: usize) -> Vec<f32> {
+        (0..size).map(|_| self.next_f32()).collect()
+    }
+
     /// Generate uniform random floats with NumPy `size` metadata preserved.
     ///
     /// `None` represents NumPy's scalar-returning `size=None`; `Some(&[])`
@@ -2823,6 +2836,16 @@ impl Generator {
     ) -> Result<ShapedRandomOutput<f64>, RandomError> {
         let size = resolve_random_size(size)?;
         let values = self.random(size.len);
+        Ok(shaped_output(size, values))
+    }
+
+    /// Generate uniform `float32` values with NumPy `size` metadata preserved.
+    pub fn random_f32_shaped(
+        &mut self,
+        size: Option<&[usize]>,
+    ) -> Result<ShapedRandomOutput<f32>, RandomError> {
+        let size = resolve_random_size(size)?;
+        let values = self.random_f32(size.len);
         Ok(shaped_output(size, values))
     }
 

@@ -149,14 +149,35 @@ impl PyRandomGenerator {
         build_bit_generator_state_dict(py, self.inner.bit_generator())
     }
 
-    #[pyo3(signature = (size=None))]
-    fn random(&mut self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (size=None, dtype=None))]
+    fn random(
+        &mut self,
+        py: Python<'_>,
+        size: Option<Py<PyAny>>,
+        dtype: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let dtype = extract_random_float_dtype(py, dtype, "Generator.random(dtype)")?;
         let size = random_size_from_py(py, size, "Generator.random(size)")?;
-        let output = self
-            .inner
-            .random_shaped(size.as_deref())
-            .map_err(map_random_error)?;
-        build_random_f64_output(py, output)
+        match dtype {
+            DType::F32 => {
+                let output = self
+                    .inner
+                    .random_f32_shaped(size.as_deref())
+                    .map_err(map_random_error)?;
+                build_random_f32_output(py, output)
+            }
+            DType::F64 => {
+                let output = self
+                    .inner
+                    .random_shaped(size.as_deref())
+                    .map_err(map_random_error)?;
+                build_random_f64_output(py, output)
+            }
+            _ => Err(PyTypeError::new_err(format!(
+                "Unsupported dtype dtype('{}') for random",
+                dtype.name()
+            ))),
+        }
     }
 
     #[pyo3(signature = (size=None))]
@@ -1234,6 +1255,47 @@ fn build_random_f64_parts(
     build_numpy_array_from_storage(py, &shape, ArrayStorage::F64(values))
 }
 
+fn build_random_f32_parts(
+    py: Python<'_>,
+    shape: Vec<usize>,
+    values: Vec<f32>,
+    scalar: bool,
+) -> PyResult<Py<PyAny>> {
+    if scalar {
+        let value = values
+            .first()
+            .copied()
+            .ok_or_else(|| PyValueError::new_err("random scalar output was empty"))?;
+        return Ok(value.into_pyobject(py)?.into_any().unbind());
+    }
+    build_numpy_array_from_storage(py, &shape, ArrayStorage::F32(values))
+}
+
+fn extract_random_float_dtype(
+    py: Python<'_>,
+    dtype: Option<Py<PyAny>>,
+    context: &str,
+) -> PyResult<DType> {
+    let Some(dtype) = dtype else {
+        return Ok(DType::F64);
+    };
+    let dtype = dtype.bind(py);
+    if dtype.is_none() {
+        return Ok(DType::F64);
+    }
+
+    let numpy = py.import("numpy")?;
+    let parsed = numpy.getattr("dtype")?.call1((dtype,))?;
+    let name = parsed.getattr("name")?.extract::<String>()?;
+    match DType::parse(&name) {
+        Some(dtype @ (DType::F32 | DType::F64)) => Ok(dtype),
+        _ => Err(PyTypeError::new_err(format!(
+            "Unsupported dtype dtype('{name}') for {}",
+            context.trim_end_matches("(dtype)")
+        ))),
+    }
+}
+
 fn build_random_i64_parts(
     py: Python<'_>,
     shape: Vec<usize>,
@@ -1414,6 +1476,11 @@ fn build_random_u64_matrix_as_i64_parts(
 fn build_random_f64_output(py: Python<'_>, output: ShapedRandomOutput<f64>) -> PyResult<Py<PyAny>> {
     let (shape, values, scalar) = output.into_parts();
     build_random_f64_parts(py, shape, values, scalar)
+}
+
+fn build_random_f32_output(py: Python<'_>, output: ShapedRandomOutput<f32>) -> PyResult<Py<PyAny>> {
+    let (shape, values, scalar) = output.into_parts();
+    build_random_f32_parts(py, shape, values, scalar)
 }
 
 fn bit_generator_random_raw(
@@ -20218,6 +20285,54 @@ mod tests {
             assert_array_matches_numpy(
                 &ours_state.call_method1("random_sample", (shape.clone(),))?,
                 &theirs_state.call_method1("random_sample", (shape,))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_generator_random_dtype_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_dtype")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy = py.import("numpy")?;
+            let numpy_random = numpy.getattr("random")?;
+            let shape = PyTuple::new(py, [2_usize, 2_usize])?;
+
+            let f32_kwargs = PyDict::new(py);
+            f32_kwargs.set_item("dtype", numpy.getattr("float32")?)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 330)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method("random", (shape.clone(),), Some(&f32_kwargs))?,
+                &theirs.call_method("random", (shape.clone(),), Some(&f32_kwargs))?,
+            )?;
+
+            let f64_kwargs = PyDict::new(py);
+            f64_kwargs.set_item("dtype", "float64")?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 331)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method("random", (shape,), Some(&f64_kwargs))?,
+                &theirs.call_method(
+                    "random",
+                    (PyTuple::new(py, [2_usize, 2_usize])?,),
+                    Some(&f64_kwargs),
+                )?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 332)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method("random", (), Some(&f32_kwargs))?,
+                &theirs.call_method("random", (), Some(&f32_kwargs))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method("random", (3_usize,), Some(&f32_kwargs))?,
+                &theirs.call_method("random", (3_usize,), Some(&f32_kwargs))?,
             )?;
 
             Ok(())
