@@ -13390,6 +13390,19 @@ fn polysub(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAny>> 
 }
 
 #[pyfunction]
+#[pyo3(signature = (u, v))]
+fn polydiv(py: Python<'_>, u: Py<PyAny>, v: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.polydiv. Returns (quotient, remainder) where
+    // both are 1-D arrays in decreasing-power coefficient order —
+    // same convention as polyadd/polysub/polymul.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polydiv")?
+        .call1((u.bind(py), v.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a1, a2))]
 fn polymul(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.polymul. Returns the product polynomial with
@@ -21197,6 +21210,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(polyadd, m)?)?;
     m.add_function(wrap_pyfunction!(polysub, m)?)?;
     m.add_function(wrap_pyfunction!(polymul, m)?)?;
+    m.add_function(wrap_pyfunction!(polydiv, m)?)?;
     m.add_function(wrap_pyfunction!(sliding_window_view, m)?)?;
     m.add_function(wrap_pyfunction!(as_strided, m)?)?;
     m.add_function(wrap_pyfunction!(chebadd, m)?)?;
