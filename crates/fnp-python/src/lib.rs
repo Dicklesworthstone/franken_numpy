@@ -737,15 +737,22 @@ impl PyRandomGenerator {
             .unbind())
     }
 
-    #[pyo3(signature = (a, size=None, replace=true))]
+    #[pyo3(signature = (a, size=None, replace=true, p=None))]
     fn choice(
         &mut self,
         py: Python<'_>,
         a: Py<PyAny>,
         size: Option<Py<PyAny>>,
         replace: bool,
+        p: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let size = random_size_from_py(py, size, "Generator.choice(size)")?;
+        let weights = match p.as_ref() {
+            Some(value) if !value.bind(py).is_none() => {
+                Some(extract_random_f64_vector(py, value.bind(py))?)
+            }
+            _ => None,
+        };
         if let Ok(n) = a.bind(py).extract::<i64>() {
             let (shape, len, scalar) = random_len_and_shape(size)?;
             if n <= 0 && len > 0 {
@@ -759,20 +766,47 @@ impl PyRandomGenerator {
                 usize::try_from(n)
                     .map_err(|_| PyValueError::new_err("a is too large for choice"))?
             };
-            let values = self
-                .inner
-                .choice_indices(population_len, len, replace)
-                .map_err(map_random_error)?
-                .into_iter()
-                .map(|value| {
-                    i64::try_from(value)
-                        .map_err(|_| PyValueError::new_err("choice sample exceeds int64"))
-                })
-                .collect::<PyResult<Vec<_>>>()?;
+            let values = if let Some(weights) = weights.as_deref() {
+                if weights.len() != population_len {
+                    return Err(PyValueError::new_err("a and p must have same size"));
+                }
+                let population = (0..population_len)
+                    .map(|value| value as f64)
+                    .collect::<Vec<_>>();
+                self.inner
+                    .choice_weighted(&population, len, replace, weights)
+                    .map_err(map_random_error)?
+                    .into_iter()
+                    .map(|value| {
+                        if !value.is_finite() || value < 0.0 || value > i64::MAX as f64 {
+                            return Err(PyValueError::new_err("choice sample exceeds int64"));
+                        }
+                        Ok(value as i64)
+                    })
+                    .collect::<PyResult<Vec<_>>>()?
+            } else {
+                self.inner
+                    .choice_indices(population_len, len, replace)
+                    .map_err(map_random_error)?
+                    .into_iter()
+                    .map(|value| {
+                        i64::try_from(value)
+                            .map_err(|_| PyValueError::new_err("choice sample exceeds int64"))
+                    })
+                    .collect::<PyResult<Vec<_>>>()?
+            };
             return build_random_i64_parts(py, shape, values, scalar);
         }
 
         let values = extract_random_f64_population(py, a.bind(py), "Generator.choice(a)")?;
+        if let Some(weights) = weights.as_deref() {
+            let (shape, len, scalar) = random_len_and_shape(size)?;
+            let values = self
+                .inner
+                .choice_weighted(&values, len, replace, weights)
+                .map_err(map_random_error)?;
+            return build_random_f64_parts(py, shape, values, scalar);
+        }
         let output = self
             .inner
             .choice_shaped(&values, size.as_deref(), replace)
@@ -20273,6 +20307,51 @@ mod tests {
             assert_random_sample_matches_numpy(
                 &ours.call_method1("choice", (0_i64, 0_usize))?,
                 &theirs.call_method1("choice", (0_i64, 0_usize))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_generator_choice_weighted_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_choice_weighted")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+            let shape = PyTuple::new(py, [2_usize, 2_usize])?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 300)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1(
+                    "choice",
+                    (5_i64, 3_usize, true, vec![0.1_f64, 0.2, 0.3, 0.1, 0.3]),
+                )?,
+                &theirs.call_method1(
+                    "choice",
+                    (5_i64, 3_usize, true, vec![0.1_f64, 0.2, 0.3, 0.1, 0.3]),
+                )?,
+            )?;
+
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("p", vec![0.2_f64, 0.3, 0.5])?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 301)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method(
+                    "choice",
+                    (vec![1.0_f64, 2.0, 3.0], shape.clone(), true),
+                    Some(&kwargs),
+                )?,
+                &theirs.call_method(
+                    "choice",
+                    (vec![1.0_f64, 2.0, 3.0], shape, true),
+                    Some(&kwargs),
+                )?,
             )?;
 
             Ok(())
