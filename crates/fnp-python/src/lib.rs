@@ -1287,14 +1287,17 @@ impl PyRandomState {
 
     #[pyo3(signature = (legacy=true))]
     fn get_state(&self, py: Python<'_>, legacy: bool) -> PyResult<Py<PyAny>> {
-        build_random_state_state(py, &self.inner.state(), legacy)
+        build_random_state_state(py, &self.inner, legacy)
     }
 
     fn set_state(&mut self, py: Python<'_>, state: Py<PyAny>) -> PyResult<()> {
         let state = random_state_state_from_py(py, state.bind(py))?;
         self.inner
-            .set_state(&state)
-            .map_err(map_bit_generator_error)
+            .set_state(&state.bit_generator_state)
+            .map_err(map_bit_generator_error)?;
+        self.inner
+            .set_gaussian_cache(state.has_gaussian, state.gaussian);
+        Ok(())
     }
 
     #[pyo3(signature = (size=None))]
@@ -1313,6 +1316,40 @@ impl PyRandomState {
     fn rand(&mut self, py: Python<'_>, dims: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         let size = random_state_rand_size_from_dims(dims)?;
         let (shape, values, scalar) = random_state_f64_parts(&mut self.inner, size)?;
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (size=None))]
+    fn standard_normal(
+        &mut self,
+        py: Python<'_>,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "RandomState.standard_normal(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self.inner.standard_normal(len);
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (*dims))]
+    fn randn(&mut self, py: Python<'_>, dims: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+        let size = random_state_rand_size_from_dims(dims)?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self.inner.standard_normal(len);
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (loc=0.0, scale=1.0, size=None))]
+    fn normal(
+        &mut self,
+        py: Python<'_>,
+        loc: f64,
+        scale: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "RandomState.normal(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self.inner.normal(loc, scale, len).map_err(map_random_error)?;
         build_random_f64_parts(py, shape, values, scalar)
     }
 
@@ -1976,6 +2013,12 @@ fn random_state_seed_material_from_py(
 
 const RANDOM_STATE_MT19937_STATE_LEN: usize = 624;
 
+struct RandomStateState {
+    bit_generator_state: BitGeneratorState,
+    has_gaussian: bool,
+    gaussian: f64,
+}
+
 fn random_state_mt19937_parts(state: &BitGeneratorState) -> PyResult<(Vec<u32>, usize)> {
     if state.kind != BitGeneratorKind::Mt19937 {
         return Err(PyValueError::new_err("RandomState state must use MT19937"));
@@ -2018,22 +2061,25 @@ fn random_state_mt19937_parts(state: &BitGeneratorState) -> PyResult<(Vec<u32>, 
 
 fn build_random_state_state(
     py: Python<'_>,
-    state: &BitGeneratorState,
+    random_state: &CoreRandomState,
     legacy: bool,
 ) -> PyResult<Py<PyAny>> {
-    let (keys, pos) = random_state_mt19937_parts(state)?;
+    let state = random_state.state();
+    let (keys, pos) = random_state_mt19937_parts(&state)?;
     let key_array = build_numpy_array_from_storage(
         py,
         &[RANDOM_STATE_MT19937_STATE_LEN],
         ArrayStorage::U32(keys),
     )?;
+    let (has_gaussian, gaussian) = random_state.gaussian_cache();
+    let has_gaussian_value = if has_gaussian { 1_i64 } else { 0_i64 };
     if legacy {
         let items = vec![
             "MT19937".into_pyobject(py)?.into_any().unbind(),
             key_array,
             pos.into_pyobject(py)?.into_any().unbind(),
-            0_i64.into_pyobject(py)?.into_any().unbind(),
-            0.0_f64.into_pyobject(py)?.into_any().unbind(),
+            has_gaussian_value.into_pyobject(py)?.into_any().unbind(),
+            gaussian.into_pyobject(py)?.into_any().unbind(),
         ];
         return Ok(PyTuple::new(py, items)?.into_any().unbind());
     }
@@ -2045,8 +2091,8 @@ fn build_random_state_state(
     let dict = PyDict::new(py);
     dict.set_item("bit_generator", "MT19937")?;
     dict.set_item("state", state_dict)?;
-    dict.set_item("has_gauss", 0_i64)?;
-    dict.set_item("gauss", 0.0_f64)?;
+    dict.set_item("has_gauss", has_gaussian_value)?;
+    dict.set_item("gauss", gaussian)?;
     Ok(dict.into_any().unbind())
 }
 
@@ -2089,10 +2135,10 @@ fn random_state_state_from_parts(keys: Vec<u32>, pos: usize) -> PyResult<BitGene
 fn random_state_state_from_legacy_tuple(
     py: Python<'_>,
     tuple: &Bound<'_, PyTuple>,
-) -> PyResult<BitGeneratorState> {
-    if tuple.len() != 5 {
+) -> PyResult<RandomStateState> {
+    if tuple.len() != 3 && tuple.len() != 5 {
         return Err(PyValueError::new_err(
-            "state tuple must have length 5 for RandomState",
+            "state tuple must have length 3 or 5 for RandomState",
         ));
     }
     let algorithm = tuple.get_item(0)?.extract::<String>()?;
@@ -2103,13 +2149,27 @@ fn random_state_state_from_legacy_tuple(
     }
     let keys = random_state_state_keys_from_py(py, &tuple.get_item(1)?)?;
     let pos = tuple.get_item(2)?.extract::<usize>()?;
-    random_state_state_from_parts(keys, pos)
+    let has_gaussian = if tuple.len() == 5 {
+        tuple.get_item(3)?.extract::<i64>()? != 0
+    } else {
+        false
+    };
+    let gaussian = if tuple.len() == 5 {
+        tuple.get_item(4)?.extract::<f64>()?
+    } else {
+        0.0
+    };
+    Ok(RandomStateState {
+        bit_generator_state: random_state_state_from_parts(keys, pos)?,
+        has_gaussian,
+        gaussian,
+    })
 }
 
 fn random_state_state_from_dict(
     py: Python<'_>,
     dict: &Bound<'_, PyDict>,
-) -> PyResult<BitGeneratorState> {
+) -> PyResult<RandomStateState> {
     let algorithm = required_dict_item(dict, "bit_generator")?.extract::<String>()?;
     if algorithm != "MT19937" {
         return Err(PyValueError::new_err(
@@ -2120,13 +2180,25 @@ fn random_state_state_from_dict(
     let state = state.cast::<PyDict>()?;
     let keys = random_state_state_keys_from_py(py, &required_dict_item(state, "key")?)?;
     let pos = required_dict_item(state, "pos")?.extract::<usize>()?;
-    random_state_state_from_parts(keys, pos)
+    let has_gaussian = match dict.get_item("has_gauss")? {
+        Some(value) => value.extract::<i64>()? != 0,
+        None => false,
+    };
+    let gaussian = match dict.get_item("gauss")? {
+        Some(value) => value.extract::<f64>()?,
+        None => 0.0,
+    };
+    Ok(RandomStateState {
+        bit_generator_state: random_state_state_from_parts(keys, pos)?,
+        has_gaussian,
+        gaussian,
+    })
 }
 
 fn random_state_state_from_py(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
-) -> PyResult<BitGeneratorState> {
+) -> PyResult<RandomStateState> {
     if let Ok(dict) = value.cast::<PyDict>() {
         return random_state_state_from_dict(py, dict);
     }
@@ -21880,6 +21952,92 @@ mod tests {
             assert_random_sample_matches_numpy(
                 &ours_after_eight.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
                 &theirs_after_eight.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_state_legacy_normal_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_state_legacy_normal")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+            let shape = PyTuple::new(py, [2_usize, 3_usize])?;
+
+            let ours_scalar = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_scalar = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_scalar.call_method0("standard_normal")?,
+                &theirs_scalar.call_method0("standard_normal")?,
+            )?;
+
+            let ours_shaped = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_shaped = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_shaped.call_method1("standard_normal", (shape.clone(),))?,
+                &theirs_shaped.call_method1("standard_normal", (shape.clone(),))?,
+            )?;
+
+            let ours_randn = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_randn = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_randn.call_method1("randn", (2_usize, 3_usize))?,
+                &theirs_randn.call_method1("randn", (2_usize, 3_usize))?,
+            )?;
+
+            let ours_normal = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_normal = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_normal.call_method1("normal", (5.0_f64, 2.0_f64, shape.clone()))?,
+                &theirs_normal.call_method1("normal", (5.0_f64, 2.0_f64, shape.clone()))?,
+            )?;
+
+            let ours_cache = random.getattr("RandomState")?.call1((7_u64,))?;
+            let theirs_cache = numpy_random.getattr("RandomState")?.call1((7_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_cache.call_method1("standard_normal", (1_usize,))?,
+                &theirs_cache.call_method1("standard_normal", (1_usize,))?,
+            )?;
+            let ours_state = ours_cache.call_method0("get_state")?;
+            let theirs_state = theirs_cache.call_method0("get_state")?;
+            let ours_tuple = ours_state.cast::<PyTuple>()?;
+            let theirs_tuple = theirs_state.cast::<PyTuple>()?;
+            assert_eq!(
+                ours_tuple.get_item(3)?.extract::<i64>()?,
+                theirs_tuple.get_item(3)?.extract::<i64>()?
+            );
+            assert_eq!(
+                ours_tuple.get_item(4)?.extract::<f64>()?.to_bits(),
+                theirs_tuple.get_item(4)?.extract::<f64>()?.to_bits()
+            );
+            assert_random_sample_matches_numpy(
+                &ours_cache.call_method1("standard_normal", (3_usize,))?,
+                &theirs_cache.call_method1("standard_normal", (3_usize,))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_cache.call_method1("random_sample", (3_usize,))?,
+                &theirs_cache.call_method1("random_sample", (3_usize,))?,
+            )?;
+
+            let ours_restore = random.getattr("RandomState")?.call1((1_u64,))?;
+            let theirs_restore = numpy_random.getattr("RandomState")?.call1((123_u64,))?;
+            theirs_restore.call_method1("standard_normal", (1_usize,))?;
+            let imported_state = theirs_restore.call_method0("get_state")?;
+            ours_restore.call_method1("set_state", (imported_state,))?;
+            assert_random_sample_matches_numpy(
+                &ours_restore.call_method0("standard_normal")?,
+                &theirs_restore.call_method0("standard_normal")?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_restore.call_method1("random_sample", (shape.clone(),))?,
+                &theirs_restore.call_method1("random_sample", (shape,))?,
             )?;
 
             Ok(())

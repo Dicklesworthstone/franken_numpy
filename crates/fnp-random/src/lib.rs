@@ -2363,17 +2363,27 @@ define_algorithm_adapter!(Sfc64, BitGeneratorKind::Sfc64);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RandomState {
     bit_generator: BitGenerator,
+    has_gaussian: bool,
+    gaussian_bits: u64,
 }
 
 impl RandomState {
     pub fn new(seed: SeedMaterial) -> Result<Self, BitGeneratorError> {
         let bit_generator = BitGenerator::new(BitGeneratorKind::Mt19937, seed)?;
-        Ok(Self { bit_generator })
+        Ok(Self {
+            bit_generator,
+            has_gaussian: false,
+            gaussian_bits: 0.0_f64.to_bits(),
+        })
     }
 
     #[must_use]
     pub fn from_bit_generator(bit_generator: BitGenerator) -> Self {
-        Self { bit_generator }
+        Self {
+            bit_generator,
+            has_gaussian: false,
+            gaussian_bits: 0.0_f64.to_bits(),
+        }
     }
 
     #[must_use]
@@ -2441,7 +2451,59 @@ impl RandomState {
     pub fn jumped(&self, jumps: u64) -> Result<Self, BitGeneratorError> {
         Ok(Self {
             bit_generator: self.bit_generator.jumped(jumps)?,
+            has_gaussian: self.has_gaussian,
+            gaussian_bits: self.gaussian_bits,
         })
+    }
+
+    #[must_use]
+    pub fn gaussian_cache(&self) -> (bool, f64) {
+        (self.has_gaussian, f64::from_bits(self.gaussian_bits))
+    }
+
+    pub fn set_gaussian_cache(&mut self, has_gaussian: bool, gaussian: f64) {
+        self.has_gaussian = has_gaussian;
+        self.gaussian_bits = gaussian.to_bits();
+    }
+
+    #[must_use]
+    pub fn legacy_gauss(&mut self) -> f64 {
+        if self.has_gaussian {
+            let value = f64::from_bits(self.gaussian_bits);
+            self.has_gaussian = false;
+            self.gaussian_bits = 0.0_f64.to_bits();
+            return value;
+        }
+
+        loop {
+            let x1 = 2.0 * self.next_f64() - 1.0;
+            let x2 = 2.0 * self.next_f64() - 1.0;
+            let r2 = x1 * x1 + x2 * x2;
+            if r2 >= 1.0 || r2 == 0.0 {
+                continue;
+            }
+
+            let factor = (-2.0 * r2.ln() / r2).sqrt();
+            self.has_gaussian = true;
+            self.gaussian_bits = (factor * x1).to_bits();
+            return factor * x2;
+        }
+    }
+
+    #[must_use]
+    pub fn standard_normal(&mut self, size: usize) -> Vec<f64> {
+        (0..size).map(|_| self.legacy_gauss()).collect()
+    }
+
+    pub fn normal(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if scale < 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok(self
+            .standard_normal(size)
+            .into_iter()
+            .map(|value| loc + scale * value)
+            .collect())
     }
 
     #[must_use]
