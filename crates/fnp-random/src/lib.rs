@@ -2742,6 +2742,40 @@ impl RandomState {
             .collect())
     }
 
+    pub fn zipf(&mut self, a: f64, size: usize) -> Result<Vec<u64>, RandomError> {
+        if a.is_nan() || a <= 1.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| self.legacy_zipf_single(a) as u64)
+            .collect())
+    }
+
+    fn legacy_zipf_single(&mut self, a: f64) -> i64 {
+        if a >= 1025.0 {
+            return 1;
+        }
+        let am1 = a - 1.0;
+        let b = 2.0_f64.powf(am1);
+        let umin = (i64::MAX as f64).powf(-am1);
+
+        loop {
+            let u01 = self.next_f64();
+            let u = u01 * umin + (1.0 - u01);
+            let v = self.next_f64();
+            let x = u.powf(-1.0 / am1).floor();
+
+            if x > (i64::MAX as f64) || x < 1.0 {
+                continue;
+            }
+
+            let t = (1.0 + 1.0 / x).powf(am1);
+            if v * x * (t - 1.0) / (b - 1.0) <= t / b {
+                return x as i64;
+            }
+        }
+    }
+
     fn legacy_standard_exponential(&mut self) -> f64 {
         -(1.0 - self.next_f64()).ln()
     }
@@ -7275,6 +7309,52 @@ for child in rng.spawn(n_children):
         );
         let after: Vec<u64> = (0..3).map(|_| invalid_den.random_interval(9)).collect();
         assert_eq!(after, vec![6, 3, 7]);
+    }
+
+    #[test]
+    fn random_state_legacy_zipf_matches_numpy_oracles() {
+        let mut scalar = RandomState::new(SeedMaterial::U64(42)).expect("scalar");
+        assert_eq!(scalar.zipf(2.5, 1).expect("scalar zipf"), vec![1]);
+        let after: Vec<u64> = (0..5).map(|_| scalar.random_interval(9)).collect();
+        assert_eq!(after, vec![7, 4, 6, 9, 2]);
+
+        let mut shaped = RandomState::new(SeedMaterial::U64(42)).expect("shaped");
+        let values = shaped.zipf(2.5, 10).expect("shaped zipf");
+        assert_eq!(values, vec![1, 2, 1, 1, 1, 1, 3, 1, 1, 1]);
+        let after: Vec<u64> = (0..5).map(|_| shaped.random_interval(9)).collect();
+        assert_eq!(after, vec![9, 2, 6, 3, 8]);
+
+        let mut cached = RandomState::new(SeedMaterial::U64(7)).expect("cached");
+        assert_f64_seq(
+            "random_state_zipf_cached_normal_prefix",
+            &cached.standard_normal(1),
+            &[1.690_525_703_800_356],
+        );
+        assert_eq!(cached.zipf(2.5, 3).expect("cached zipf"), vec![1, 1, 1]);
+        let after: Vec<f64> = (0..3).map(|_| cached.next_f64()).collect();
+        let expected = [
+            0.288_145_599_307_993_55,
+            0.909_593_527_719_613_7,
+            0.213_385_353_579_915_5,
+        ];
+        assert_f64_seq("random_state_zipf_cached_after", &after, &expected);
+
+        let mut large = RandomState::new(SeedMaterial::U64(42)).expect("large");
+        assert_eq!(large.zipf(100.0, 3).expect("large zipf"), vec![1, 1, 1]);
+        let after: Vec<u64> = (0..5).map(|_| large.random_interval(9)).collect();
+        assert_eq!(after, vec![7, 4, 3, 7, 7]);
+
+        let mut empty = RandomState::new(SeedMaterial::U64(11)).expect("empty");
+        assert!(empty.zipf(2.5, 0).expect("empty").is_empty());
+        let after: Vec<u64> = (0..5).map(|_| empty.random_interval(9)).collect();
+        assert_eq!(after, vec![9, 0, 1, 7, 1]);
+
+        for invalid in [1.0, 0.0, -1.0, f64::NAN] {
+            let mut rng = RandomState::new(SeedMaterial::U64(42)).expect("invalid");
+            assert_eq!(rng.zipf(invalid, 1), Err(RandomError::InvalidParameter));
+            let after: Vec<u64> = (0..3).map(|_| rng.random_interval(9)).collect();
+            assert_eq!(after, vec![6, 3, 7]);
+        }
     }
 
     #[test]
