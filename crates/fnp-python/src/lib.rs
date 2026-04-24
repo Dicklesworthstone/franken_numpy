@@ -1295,6 +1295,19 @@ impl PyRandomState {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
+    #[pyo3(signature = (low=0.0, high=1.0, size=None))]
+    fn uniform(
+        &mut self,
+        py: Python<'_>,
+        low: f64,
+        high: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "RandomState.uniform(size)")?;
+        let (shape, values, scalar) = random_state_uniform_parts(&mut self.inner, low, high, size)?;
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
     #[pyo3(signature = (low, high=None, size=None))]
     fn randint(
         &mut self,
@@ -2343,6 +2356,20 @@ fn random_state_f64_parts(
 ) -> PyResult<(Vec<usize>, Vec<f64>, bool)> {
     let (shape, len, scalar) = random_len_and_shape(size)?;
     let values = (0..len).map(|_| random_state.next_f64()).collect();
+    Ok((shape, values, scalar))
+}
+
+fn random_state_uniform_parts(
+    random_state: &mut CoreRandomState,
+    low: f64,
+    high: f64,
+    size: Option<Vec<usize>>,
+) -> PyResult<(Vec<usize>, Vec<f64>, bool)> {
+    let (shape, len, scalar) = random_len_and_shape(size)?;
+    let range = high - low;
+    let values = (0..len)
+        .map(|_| low + random_state.next_f64() * range)
+        .collect();
     Ok((shape, values, scalar))
 }
 
@@ -21091,6 +21118,58 @@ mod tests {
                 Err(err) => err,
             };
             assert_pyerr_matches_numpy(py, ours_bool_err, theirs_bool_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_state_uniform_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_state_uniform")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+
+            let ours_default = random.getattr("RandomState")?.call1((7_u64,))?;
+            let theirs_default = numpy_random.getattr("RandomState")?.call1((7_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_default.call_method0("uniform")?,
+                &theirs_default.call_method0("uniform")?,
+            )?;
+
+            let ours_scalar = random.getattr("RandomState")?.call1((7_u64,))?;
+            let theirs_scalar = numpy_random.getattr("RandomState")?.call1((7_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_scalar.call_method1("uniform", (2.0_f64, 5.0_f64))?,
+                &theirs_scalar.call_method1("uniform", (2.0_f64, 5.0_f64))?,
+            )?;
+
+            let shape = PyTuple::new(py, [2_usize, 3_usize])?;
+            let ours_shaped = random.getattr("RandomState")?.call1((7_u64,))?;
+            let theirs_shaped = numpy_random.getattr("RandomState")?.call1((7_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_shaped.call_method1("uniform", (2.0_f64, 5.0_f64, shape.clone()))?,
+                &theirs_shaped.call_method1("uniform", (2.0_f64, 5.0_f64, shape.clone()))?,
+            )?;
+
+            let ours_empty = random.getattr("RandomState")?.call1((7_u64,))?;
+            let theirs_empty = numpy_random.getattr("RandomState")?.call1((7_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_empty.call_method1("uniform", (2.0_f64, 5.0_f64, 0_usize))?,
+                &theirs_empty.call_method1("uniform", (2.0_f64, 5.0_f64, 0_usize))?,
+            )?;
+
+            let ours_reversed = random.getattr("RandomState")?.call1((7_u64,))?;
+            let theirs_reversed = numpy_random.getattr("RandomState")?.call1((7_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_reversed.call_method1("uniform", (5.0_f64, 2.0_f64, 2_usize))?,
+                &theirs_reversed.call_method1("uniform", (5.0_f64, 2.0_f64, 2_usize))?,
+            )?;
 
             Ok(())
         });
