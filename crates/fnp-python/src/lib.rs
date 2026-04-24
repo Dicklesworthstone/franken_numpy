@@ -745,8 +745,34 @@ impl PyRandomGenerator {
         size: Option<Py<PyAny>>,
         replace: bool,
     ) -> PyResult<Py<PyAny>> {
-        let values = extract_random_f64_population(py, a.bind(py), "Generator.choice(a)")?;
         let size = random_size_from_py(py, size, "Generator.choice(size)")?;
+        if let Ok(n) = a.bind(py).extract::<i64>() {
+            let (shape, len, scalar) = random_len_and_shape(size)?;
+            if n <= 0 && len > 0 {
+                return Err(PyValueError::new_err(
+                    "a must be a positive integer unless no samples are taken",
+                ));
+            }
+            let population_len = if n <= 0 {
+                0
+            } else {
+                usize::try_from(n)
+                    .map_err(|_| PyValueError::new_err("a is too large for choice"))?
+            };
+            let values = self
+                .inner
+                .choice_indices(population_len, len, replace)
+                .map_err(map_random_error)?
+                .into_iter()
+                .map(|value| {
+                    i64::try_from(value)
+                        .map_err(|_| PyValueError::new_err("choice sample exceeds int64"))
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            return build_random_i64_parts(py, shape, values, scalar);
+        }
+
+        let values = extract_random_f64_population(py, a.bind(py), "Generator.choice(a)")?;
         let output = self
             .inner
             .choice_shaped(&values, size.as_deref(), replace)
@@ -20206,6 +20232,47 @@ mod tests {
                     "multivariate_hypergeometric",
                     (vec![10_u64, 20, 30], 5_u64, shape),
                 )?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_generator_choice_integer_domain_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_choice_integer_domain")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+            let shape = PyTuple::new(py, [2_usize, 2_usize])?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 260)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("choice", (5_i64, 3_usize))?,
+                &theirs.call_method1("choice", (5_i64, 3_usize))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 261)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("choice", (5_i64, shape.clone()))?,
+                &theirs.call_method1("choice", (5_i64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 262)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("choice", (5_i64, 4_usize, false))?,
+                &theirs.call_method1("choice", (5_i64, 4_usize, false))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 263)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("choice", (0_i64, 0_usize))?,
+                &theirs.call_method1("choice", (0_i64, 0_usize))?,
             )?;
 
             Ok(())

@@ -1826,6 +1826,17 @@ fn default_state_schema_entries(
     entries
 }
 
+fn random_mask(max: u64) -> u64 {
+    let mut mask = max;
+    mask |= mask >> 1;
+    mask |= mask >> 2;
+    mask |= mask >> 4;
+    mask |= mask >> 8;
+    mask |= mask >> 16;
+    mask |= mask >> 32;
+    mask
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratorPicklePayload {
     pub bit_generator_state: BitGeneratorState,
@@ -2764,13 +2775,7 @@ impl Generator {
             return 0;
         }
 
-        let mut mask = max;
-        mask |= mask >> 1;
-        mask |= mask >> 2;
-        mask |= mask >> 4;
-        mask |= mask >> 8;
-        mask |= mask >> 16;
-        mask |= mask >> 32;
+        let mask = random_mask(max);
 
         if max <= 0xFFFF_FFFF {
             #[expect(clippy::cast_possible_truncation)]
@@ -2788,6 +2793,13 @@ impl Generator {
                     return value;
                 }
             }
+        }
+    }
+
+    fn shuffle_int_indices(&mut self, values: &mut [u64], first: usize) {
+        for i in (first..values.len()).rev() {
+            let j = self.numpy_bounded_uint64(i as u64) as usize;
+            values.swap(i, j);
         }
     }
 
@@ -3326,31 +3338,76 @@ impl Generator {
         size: usize,
         replace: bool,
     ) -> Result<Vec<f64>, RandomError> {
-        let n = a.len();
-        if n == 0 && size > 0 {
+        let indices = self.choice_indices(a.len(), size, replace)?;
+        indices
+            .into_iter()
+            .map(|idx| {
+                let idx = usize::try_from(idx).map_err(|_| RandomError::InvalidUpperBound)?;
+                a.get(idx).copied().ok_or(RandomError::InvalidUpperBound)
+            })
+            .collect()
+    }
+
+    /// Choose integer indices from `[0, pop_size)` using NumPy `Generator.choice`.
+    ///
+    /// For `replace=false`, NumPy uses Floyd's algorithm for small samples and
+    /// then shuffles the selected set with bounded integer draws.
+    pub fn choice_indices(
+        &mut self,
+        pop_size: usize,
+        size: usize,
+        replace: bool,
+    ) -> Result<Vec<u64>, RandomError> {
+        if pop_size == 0 && size > 0 {
             return Err(RandomError::InvalidUpperBound);
         }
-        if !replace && size > n {
+        if !replace && size > pop_size {
             return Err(RandomError::InvalidUpperBound);
         }
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        let pop_size_u64 = u64::try_from(pop_size).map_err(|_| RandomError::InvalidUpperBound)?;
         if replace {
-            let mut result = Vec::with_capacity(size);
-            for _ in 0..size {
-                // NumPy choice(replace=True) calls integers(0, n) → Lemire
-                let idx = self.numpy_bounded_uint64(n as u64 - 1) as usize;
-                result.push(a[idx]);
-            }
-            Ok(result)
-        } else {
-            // Fisher-Yates shuffle on a copy, then take first `size` elements.
-            // NumPy shuffles an int64 index array via _shuffle_int → Lemire.
-            let mut pool = a.to_vec();
-            for i in (1..n).rev() {
-                let j = self.numpy_bounded_uint64(i as u64) as usize;
-                pool.swap(i, j);
-            }
-            Ok(pool[..size].to_vec())
+            return Ok((0..size)
+                .map(|_| self.numpy_bounded_uint64(pop_size_u64 - 1))
+                .collect());
         }
+
+        if pop_size > 10_000 && size > pop_size / 50 {
+            let mut indices = (0..pop_size_u64).collect::<Vec<_>>();
+            let first = (pop_size - size).max(1);
+            self.shuffle_int_indices(&mut indices, first);
+            return Ok(indices[(pop_size - size)..].to_vec());
+        }
+
+        let mask = random_mask((1.2 * size as f64) as u64);
+        let mut hash_set = vec![None; (mask + 1) as usize];
+        let mut indices = Vec::with_capacity(size);
+        for j in (pop_size - size)..pop_size {
+            let j_u64 = u64::try_from(j).map_err(|_| RandomError::InvalidUpperBound)?;
+            let val = self.numpy_bounded_uint64(j_u64);
+            let mut loc = (val & mask) as usize;
+            while let Some(stored) = hash_set[loc]
+                && stored != val
+            {
+                loc = (loc + 1) & mask as usize;
+            }
+            if hash_set[loc].is_none() {
+                hash_set[loc] = Some(val);
+                indices.push(val);
+            } else {
+                let mut loc = (j_u64 & mask) as usize;
+                while hash_set[loc].is_some() {
+                    loc = (loc + 1) & mask as usize;
+                }
+                hash_set[loc] = Some(j_u64);
+                indices.push(j_u64);
+            }
+        }
+        self.shuffle_int_indices(&mut indices, 1);
+        Ok(indices)
     }
 
     /// Choose random elements with NumPy `size` metadata preserved.
@@ -6726,6 +6783,27 @@ for child in rng.spawn(n_children):
         sorted.sort_by(f64::total_cmp);
         sorted.dedup();
         assert_eq!(sorted.len(), 3);
+    }
+
+    #[test]
+    fn choice_indices_match_numpy_integer_domain_oracles() {
+        let cases = [
+            (260_u64, 5_usize, 3_usize, true, &[1_u64, 2, 0][..]),
+            (262_u64, 5_usize, 4_usize, false, &[0_u64, 3, 2, 1][..]),
+            (263_u64, 0_usize, 0_usize, true, &[][..]),
+        ];
+
+        for (seed, pop_size, size, replace, expected) in cases {
+            let bit_generator =
+                BitGenerator::new(BitGeneratorKind::Pcg64Dxsm, SeedMaterial::U64(seed))
+                    .expect("pcg64dxsm seed");
+            let mut rng = Generator::from_bit_generator(bit_generator);
+            assert_eq!(
+                rng.choice_indices(pop_size, size, replace)
+                    .expect("choice indices"),
+                expected
+            );
+        }
     }
 
     #[test]
