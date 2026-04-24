@@ -2626,6 +2626,15 @@ impl RandomState {
             .collect())
     }
 
+    pub fn rayleigh(&mut self, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| scale * (2.0 * self.legacy_standard_exponential()).sqrt())
+            .collect())
+    }
+
     fn legacy_standard_exponential(&mut self) -> f64 {
         -(1.0 - self.next_f64()).ln()
     }
@@ -6502,6 +6511,75 @@ for child in rng.spawn(n_children):
 
         let mut invalid = RandomState::new(SeedMaterial::U64(42)).expect("invalid");
         assert_eq!(invalid.weibull(-0.0, 1), Err(RandomError::InvalidParameter));
+        let after: Vec<u64> = (0..3).map(|_| invalid.random_interval(9)).collect();
+        assert_eq!(after, vec![6, 3, 7]);
+    }
+
+    #[test]
+    fn random_state_legacy_rayleigh_matches_numpy_oracles() {
+        let mut shaped = RandomState::new(SeedMaterial::U64(42)).expect("shaped");
+        let values = shaped.rayleigh(2.5, 10).expect("rayleigh");
+        let expected = [
+            2.421_951_924_525_08,
+            6.134_045_800_812_79,
+            4.057_008_894_409_54,
+            3.378_132_904_756_622_4,
+            1.456_128_730_840_556,
+            1.456_006_060_747_195,
+            0.864_861_033_697_615_8,
+            5.014_018_927_566_912,
+            3.389_472_956_130_614_7,
+            3.923_088_804_922_389,
+        ];
+        assert_f64_seq("random_state_rayleigh_shaped", &values, &expected);
+        let after: Vec<u64> = (0..5).map(|_| shaped.random_interval(9)).collect();
+        assert_eq!(after, vec![5, 4, 1, 7, 5]);
+
+        let mut cached = RandomState::new(SeedMaterial::U64(7)).expect("cached");
+        assert_f64_seq(
+            "random_state_rayleigh_cached_normal_prefix",
+            &cached.standard_normal(1),
+            &[1.690_525_703_800_356],
+        );
+        let values = cached.rayleigh(2.5, 3).expect("cached rayleigh");
+        let expected = [
+            6.906_732_414_639_979,
+            3.108_987_529_907_288_7,
+            2.948_284_718_516_202,
+        ];
+        assert_f64_seq("random_state_rayleigh_cached", &values, &expected);
+        let after: Vec<f64> = (0..3).map(|_| cached.next_f64()).collect();
+        let expected = [
+            0.072_051_133_359_761_54,
+            0.268_438_980_101_871_17,
+            0.499_882_500_825_559_96,
+        ];
+        assert_f64_seq("random_state_rayleigh_cached_after", &after, &expected);
+
+        let mut zero = RandomState::new(SeedMaterial::U64(42)).expect("zero");
+        assert_eq!(zero.rayleigh(0.0, 3).expect("zero"), vec![0.0; 3]);
+        let after: Vec<u64> = (0..5).map(|_| zero.random_interval(9)).collect();
+        assert_eq!(after, vec![4, 6, 9, 2, 6]);
+
+        let mut nan = RandomState::new(SeedMaterial::U64(42)).expect("nan");
+        let values = nan.rayleigh(f64::NAN, 3).expect("nan");
+        assert!(values.iter().all(|value| value.is_nan()));
+        let after: Vec<u64> = (0..5).map(|_| nan.random_interval(9)).collect();
+        assert_eq!(after, vec![4, 6, 9, 2, 6]);
+
+        let mut infinite = RandomState::new(SeedMaterial::U64(42)).expect("infinite");
+        let values = infinite.rayleigh(f64::INFINITY, 3).expect("infinite");
+        assert!(values.iter().all(|value| value.is_infinite() && value.is_sign_positive()));
+        let after: Vec<u64> = (0..5).map(|_| infinite.random_interval(9)).collect();
+        assert_eq!(after, vec![4, 6, 9, 2, 6]);
+
+        let mut empty = RandomState::new(SeedMaterial::U64(11)).expect("empty");
+        assert!(empty.rayleigh(2.5, 0).expect("empty").is_empty());
+        let after: Vec<u64> = (0..5).map(|_| empty.random_interval(9)).collect();
+        assert_eq!(after, vec![9, 0, 1, 7, 1]);
+
+        let mut invalid = RandomState::new(SeedMaterial::U64(42)).expect("invalid");
+        assert_eq!(invalid.rayleigh(-0.0, 1), Err(RandomError::InvalidParameter));
         let after: Vec<u64> = (0..3).map(|_| invalid.random_interval(9)).collect();
         assert_eq!(after, vec![6, 3, 7]);
     }
