@@ -1549,6 +1549,17 @@ impl PyRandomState {
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
+    #[pyo3(signature = (a, size=None))]
+    fn pareto(&mut self, py: Python<'_>, a: f64, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        if a <= 0.0 {
+            return Err(PyValueError::new_err("a <= 0"));
+        }
+        let size = random_size_from_py(py, size, "RandomState.pareto(size)")?;
+        let (out_shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self.inner.pareto(a, len).map_err(map_random_error)?;
+        build_random_f64_parts(py, out_shape, values, scalar)
+    }
+
     #[pyo3(signature = (low=0.0, high=1.0, size=None))]
     fn uniform(
         &mut self,
@@ -22717,6 +22728,106 @@ mod tests {
             assert!(
                 theirs_invalid
                     .call_method1("rayleigh", (-0.0_f64, 1_usize))
+                    .is_err()
+            );
+            assert_random_sample_matches_numpy(
+                &ours_invalid.call_method1("randint", (0_i64, 10_i64, 3_usize))?,
+                &theirs_invalid.call_method1("randint", (0_i64, 10_i64, 3_usize))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_state_legacy_pareto_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_state_legacy_pareto")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+            let shape = PyTuple::new(py, [2_usize, 3_usize])?;
+
+            let ours_scalar = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_scalar = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_scalar.call_method1("pareto", (2.5_f64,))?,
+                &theirs_scalar.call_method1("pareto", (2.5_f64,))?,
+            )?;
+
+            let ours_shaped = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_shaped = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_shaped.call_method1("pareto", (2.5_f64, shape.clone()))?,
+                &theirs_shaped.call_method1("pareto", (2.5_f64, shape.clone()))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_shaped.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+                &theirs_shaped.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
+
+            let ours_cached = random.getattr("RandomState")?.call1((7_u64,))?;
+            let theirs_cached = numpy_random.getattr("RandomState")?.call1((7_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_cached.call_method1("standard_normal", (1_usize,))?,
+                &theirs_cached.call_method1("standard_normal", (1_usize,))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_cached.call_method1("pareto", (2.5_f64, 3_usize))?,
+                &theirs_cached.call_method1("pareto", (2.5_f64, 3_usize))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_cached.call_method1("random_sample", (3_usize,))?,
+                &theirs_cached.call_method1("random_sample", (3_usize,))?,
+            )?;
+
+            let ours_nan = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_nan = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_nan.call_method1("pareto", (f64::NAN, 3_usize))?,
+                &theirs_nan.call_method1("pareto", (f64::NAN, 3_usize))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_nan.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+                &theirs_nan.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
+
+            let ours_inf = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_inf = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_inf.call_method1("pareto", (f64::INFINITY, 3_usize))?,
+                &theirs_inf.call_method1("pareto", (f64::INFINITY, 3_usize))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_inf.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+                &theirs_inf.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
+
+            let ours_empty = random.getattr("RandomState")?.call1((11_u64,))?;
+            let theirs_empty = numpy_random.getattr("RandomState")?.call1((11_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_empty.call_method1("pareto", (2.5_f64, 0_usize))?,
+                &theirs_empty.call_method1("pareto", (2.5_f64, 0_usize))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_empty.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+                &theirs_empty.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
+
+            let ours_invalid = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_invalid = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert!(
+                ours_invalid
+                    .call_method1("pareto", (0.0_f64, 1_usize))
+                    .is_err()
+            );
+            assert!(
+                theirs_invalid
+                    .call_method1("pareto", (0.0_f64, 1_usize))
                     .is_err()
             );
             assert_random_sample_matches_numpy(
