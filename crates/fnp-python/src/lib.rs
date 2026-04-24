@@ -844,6 +844,38 @@ impl PyRandomGenerator {
             .map_err(map_random_error)?;
         build_random_f64_output(py, output)
     }
+
+    #[pyo3(signature = (x, *, axis=None))]
+    fn permuted(
+        &mut self,
+        py: Python<'_>,
+        x: Py<PyAny>,
+        axis: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let (shape, values) = extract_random_f64_array(py, x.bind(py), "Generator.permuted(x)")?;
+        let axis = match extract_axis_spec(py, axis, "Generator.permuted(axis)")? {
+            None => None,
+            Some(axes) if axes.len() == 1 => {
+                let axis = axes[0];
+                Some(try_normalize_axis(axis, shape.len()).ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "axis {axis} is out of bounds for array of dimension {}",
+                        shape.len()
+                    ))
+                })?)
+            }
+            Some(_) => {
+                return Err(PyTypeError::new_err(
+                    "Generator.permuted(axis): axis must be an integer or None",
+                ));
+            }
+        };
+        let output = self
+            .inner
+            .permuted_shaped(&values, &shape, axis)
+            .map_err(map_random_error)?;
+        build_random_f64_output(py, output)
+    }
 }
 
 #[pymethods]
@@ -1287,6 +1319,27 @@ fn extract_random_f64_population(
         )));
     }
     Ok(values)
+}
+
+fn extract_random_f64_array(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    context: &str,
+) -> PyResult<(Vec<usize>, Vec<f64>)> {
+    let numpy = py.import("numpy")?;
+    let array = numpy.call_method1("asarray", (value,))?;
+    let shape = array.getattr("shape")?.extract::<Vec<usize>>()?;
+    if shape.is_empty() {
+        return Err(PyTypeError::new_err(format!(
+            "{context}: len() of unsized object",
+        )));
+    }
+    let flat = array.call_method1("reshape", (-1,))?;
+    let values = flat
+        .call_method1("astype", ("float64",))?
+        .call_method0("tolist")?
+        .extract::<Vec<f64>>()?;
+    Ok((shape, values))
 }
 
 fn extract_random_f64_vector(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Vec<f64>> {
@@ -20352,6 +20405,49 @@ mod tests {
                     (vec![1.0_f64, 2.0, 3.0], shape, true),
                     Some(&kwargs),
                 )?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_generator_permuted_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_permuted")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+            let matrix = vec![
+                vec![1.0_f64, 2.0, 3.0],
+                vec![4.0_f64, 5.0, 6.0],
+                vec![7.0_f64, 8.0, 9.0],
+            ];
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 310)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("permuted", (matrix.clone(),))?,
+                &theirs.call_method1("permuted", (matrix.clone(),))?,
+            )?;
+
+            let axis0_kwargs = PyDict::new(py);
+            axis0_kwargs.set_item("axis", 0_i64)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 311)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method("permuted", (matrix.clone(),), Some(&axis0_kwargs))?,
+                &theirs.call_method("permuted", (matrix.clone(),), Some(&axis0_kwargs))?,
+            )?;
+
+            let axis_last_kwargs = PyDict::new(py);
+            axis_last_kwargs.set_item("axis", -1_i64)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 312)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method("permuted", (matrix.clone(),), Some(&axis_last_kwargs))?,
+                &theirs.call_method("permuted", (matrix,), Some(&axis_last_kwargs))?,
             )?;
 
             Ok(())
