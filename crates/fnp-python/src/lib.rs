@@ -286,20 +286,43 @@ impl PyRandomGenerator {
         }
     }
 
-    #[pyo3(signature = (shape, size=None))]
+    #[pyo3(signature = (shape, size=None, dtype=None, out=None))]
     fn standard_gamma(
         &mut self,
         py: Python<'_>,
         shape: f64,
         size: Option<Py<PyAny>>,
+        dtype: Option<Py<PyAny>>,
+        out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let size = random_size_from_py(py, size, "Generator.standard_gamma(size)")?;
+        let dtype = extract_random_float_dtype(py, dtype, "Generator.standard_gamma(dtype)")?;
+        if dtype != DType::F64 {
+            return Err(PyTypeError::new_err(format!(
+                "Unsupported dtype dtype('{}') for standard_gamma",
+                dtype.name()
+            )));
+        }
+        let requested_size = random_size_from_py(py, size, "Generator.standard_gamma(size)")?;
+        let (size, out) = resolve_random_out(
+            py,
+            requested_size,
+            DType::F64,
+            out,
+            "Generator.standard_gamma(out)",
+        )?;
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
             .standard_gamma(shape, len)
             .map_err(map_random_error)?;
-        build_random_f64_parts(py, out_shape, values, scalar)
+        let generated = build_random_f64_parts(py, out_shape, values, scalar)?;
+        if let Some(out) = out {
+            py.import("numpy")?
+                .call_method1("copyto", (out.bind(py), generated.bind(py)))?;
+            Ok(out)
+        } else {
+            Ok(generated)
+        }
     }
 
     #[pyo3(signature = (shape, scale=1.0, size=None))]
@@ -20690,6 +20713,114 @@ mod tests {
                     py,
                     &theirs.getattr("standard_exponential")?,
                     &PyTuple::empty(py),
+                    Some(&dtype_mismatch_kwargs),
+                )?
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_generator_standard_gamma_out_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_standard_gamma_out")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy = py.import("numpy")?;
+            let numpy_random = numpy.getattr("random")?;
+            let empty = numpy.getattr("empty")?;
+            let shape = PyTuple::new(py, [2_usize, 2_usize])?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 346)?;
+            let ours_out = empty.call1((shape.clone(),))?;
+            let theirs_out = empty.call1((shape.clone(),))?;
+            let ours_kwargs = PyDict::new(py);
+            ours_kwargs.set_item("out", &ours_out)?;
+            let theirs_kwargs = PyDict::new(py);
+            theirs_kwargs.set_item("out", &theirs_out)?;
+            let actual = ours.call_method("standard_gamma", (2.5_f64,), Some(&ours_kwargs))?;
+            let expected =
+                theirs.call_method("standard_gamma", (2.5_f64,), Some(&theirs_kwargs))?;
+            assert!(actual.is(&ours_out));
+            assert!(expected.is(&theirs_out));
+            assert_random_sample_matches_numpy(&ours_out, &theirs_out)?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 347)?;
+            let ours_dtype_out = empty.call1((shape.clone(),))?;
+            let theirs_dtype_out = empty.call1((shape.clone(),))?;
+            let ours_dtype_kwargs = PyDict::new(py);
+            ours_dtype_kwargs.set_item("dtype", numpy.getattr("float64")?)?;
+            ours_dtype_kwargs.set_item("out", &ours_dtype_out)?;
+            let theirs_dtype_kwargs = PyDict::new(py);
+            theirs_dtype_kwargs.set_item("dtype", numpy.getattr("float64")?)?;
+            theirs_dtype_kwargs.set_item("out", &theirs_dtype_out)?;
+            let actual = ours.call_method(
+                "standard_gamma",
+                (2.5_f64, shape.clone()),
+                Some(&ours_dtype_kwargs),
+            )?;
+            let expected = theirs.call_method(
+                "standard_gamma",
+                (2.5_f64, shape.clone()),
+                Some(&theirs_dtype_kwargs),
+            )?;
+            assert!(actual.is(&ours_dtype_out));
+            assert!(expected.is(&theirs_dtype_out));
+            assert_random_sample_matches_numpy(&ours_dtype_out, &theirs_dtype_out)?;
+
+            let mismatch_out = empty.call1((PyTuple::new(py, [3_usize])?,))?;
+            let mismatch_kwargs = PyDict::new(py);
+            mismatch_kwargs.set_item("out", &mismatch_out)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 348)?;
+            assert_eq!(
+                call_outcome(
+                    py,
+                    &ours.getattr("standard_gamma")?,
+                    &PyTuple::new(
+                        py,
+                        [
+                            2.5_f64.into_pyobject(py)?.into_any(),
+                            shape.clone().into_any(),
+                        ],
+                    )?,
+                    Some(&mismatch_kwargs),
+                )?,
+                call_outcome(
+                    py,
+                    &theirs.getattr("standard_gamma")?,
+                    &PyTuple::new(
+                        py,
+                        [
+                            2.5_f64.into_pyobject(py)?.into_any(),
+                            shape.clone().into_any(),
+                        ],
+                    )?,
+                    Some(&mismatch_kwargs),
+                )?
+            );
+
+            let f32_empty_kwargs = PyDict::new(py);
+            f32_empty_kwargs.set_item("dtype", numpy.getattr("float32")?)?;
+            let dtype_mismatch_out = empty.call((shape,), Some(&f32_empty_kwargs))?;
+            let dtype_mismatch_kwargs = PyDict::new(py);
+            dtype_mismatch_kwargs.set_item("out", &dtype_mismatch_out)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 349)?;
+            assert_eq!(
+                call_outcome(
+                    py,
+                    &ours.getattr("standard_gamma")?,
+                    &PyTuple::new(py, [2.5_f64.into_pyobject(py)?.into_any()])?,
+                    Some(&dtype_mismatch_kwargs),
+                )?,
+                call_outcome(
+                    py,
+                    &theirs.getattr("standard_gamma")?,
+                    &PyTuple::new(py, [2.5_f64.into_pyobject(py)?.into_any()])?,
                     Some(&dtype_mismatch_kwargs),
                 )?
             );
