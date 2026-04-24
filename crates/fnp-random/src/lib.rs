@@ -2521,6 +2521,13 @@ impl RandomState {
     }
 
     #[must_use]
+    pub fn standard_cauchy(&mut self, size: usize) -> Vec<f64> {
+        (0..size)
+            .map(|_| self.legacy_gauss() / self.legacy_gauss())
+            .collect()
+    }
+
+    #[must_use]
     pub fn standard_exponential(&mut self, size: usize) -> Vec<f64> {
         (0..size)
             .map(|_| self.legacy_standard_exponential())
@@ -6134,6 +6141,57 @@ for child in rng.spawn(n_children):
                 .lognormal(0.0, -1.0, 1)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn random_state_legacy_standard_cauchy_matches_numpy_oracles() {
+        let mut standard = RandomState::new(SeedMaterial::U64(42)).expect("standard");
+        let values = standard.standard_cauchy(10);
+        let expected = [
+            -3.592_497_476_237_573_7,
+            0.425_263_191_903_688,
+            1.000_070_120_387_526,
+            2.057_781_275_093_609_5,
+            -0.865_294_802_824_099_4,
+            0.995_035_617_243_539_8,
+            -0.126_464_626_518_584_37,
+            3.067_679_332_745_446_4,
+            -3.223_038_082_677_607,
+            0.642_938_253_764_187_5,
+        ];
+        assert_f64_seq("random_state_standard_cauchy", &values, &expected);
+        let after: Vec<u64> = (0..5).map(|_| standard.random_interval(9)).collect();
+        assert_eq!(after, vec![2, 6, 3, 8, 2]);
+
+        let mut cached = RandomState::new(SeedMaterial::U64(7)).expect("cached");
+        assert_f64_seq(
+            "random_state_standard_cauchy_cached_normal_prefix",
+            &cached.standard_normal(1),
+            &[1.690_525_703_800_356],
+        );
+        let values = cached.standard_cauchy(3);
+        let expected = [
+            -14.196_680_281_788_575,
+            -0.516_547_582_222_792_1,
+            -2.319_862_661_281_575_4,
+        ];
+        assert_f64_seq("random_state_standard_cauchy_cached", &values, &expected);
+        let after: Vec<f64> = (0..3).map(|_| cached.next_f64()).collect();
+        let expected = [
+            0.679_229_996_120_940_5,
+            0.803_739_036_104_375_5,
+            0.380_941_133_148_538_4,
+        ];
+        assert_f64_seq(
+            "random_state_standard_cauchy_cached_after",
+            &after,
+            &expected,
+        );
+
+        let mut empty = RandomState::new(SeedMaterial::U64(11)).expect("empty");
+        assert!(empty.standard_cauchy(0).is_empty());
+        let after: Vec<u64> = (0..5).map(|_| empty.random_interval(9)).collect();
+        assert_eq!(after, vec![9, 0, 1, 7, 1]);
     }
 
     #[test]
