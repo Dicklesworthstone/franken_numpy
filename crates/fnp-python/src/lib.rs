@@ -1409,7 +1409,7 @@ impl PyRandomState {
     fn bytes(&mut self, py: Python<'_>, length: usize) -> PyResult<Py<PyAny>> {
         let mut out = Vec::with_capacity(length);
         while out.len() < length {
-            out.extend_from_slice(&self.inner.next_u64().to_le_bytes());
+            out.extend_from_slice(&self.inner.next_u32().to_le_bytes());
         }
         out.truncate(length);
         Ok(PyBytes::new(py, &out).into_any().unbind())
@@ -21827,6 +21827,60 @@ mod tests {
                 Err(err) => err,
             };
             assert_pyerr_matches_numpy(py, ours_bool, theirs_bool)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_state_bytes_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_state_bytes")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+
+            let ours_one_shot = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_one_shot = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_eq!(
+                repr_string(&ours_one_shot.call_method1("bytes", (12_usize,))?),
+                repr_string(&theirs_one_shot.call_method1("bytes", (12_usize,))?)
+            );
+
+            let ours_split = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_split = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            for length in [1_usize, 1_usize, 6_usize] {
+                assert_eq!(
+                    repr_string(&ours_split.call_method1("bytes", (length,))?),
+                    repr_string(&theirs_split.call_method1("bytes", (length,))?)
+                );
+            }
+
+            let ours_after_one = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_after_one = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_eq!(
+                repr_string(&ours_after_one.call_method1("bytes", (1_usize,))?),
+                repr_string(&theirs_after_one.call_method1("bytes", (1_usize,))?)
+            );
+            assert_random_sample_matches_numpy(
+                &ours_after_one.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+                &theirs_after_one.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
+
+            let ours_after_eight = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_after_eight = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_eq!(
+                repr_string(&ours_after_eight.call_method1("bytes", (8_usize,))?),
+                repr_string(&theirs_after_eight.call_method1("bytes", (8_usize,))?)
+            );
+            assert_random_sample_matches_numpy(
+                &ours_after_eight.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+                &theirs_after_eight.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
 
             Ok(())
         });
