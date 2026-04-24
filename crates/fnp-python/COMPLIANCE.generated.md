@@ -1,0 +1,369 @@
+# fnp-python Compliance Matrix (auto-generated)
+
+> Source: `scripts/fnp_python_compliance_matrix.py`  
+
+> Total parity tests scanned: **324**  
+
+> Do not edit by hand — regenerate via `python3 scripts/fnp_python_compliance_matrix.py`.
+
+
+## Summary by RequirementLevel
+
+
+| Level | Count | Share |
+|-------|------:|------:|
+| MUST | 199 | 61.4% |
+| SHOULD | 114 | 35.2% |
+| MAY | 11 | 3.4% |
+| **Total** | **324** | 100.0% |
+
+## Per-domain breakdown
+
+| Domain | Level | Tests | Description |
+|--------|:-----:|------:|-------------|
+| `concat_split` | SHOULD | 6 | Concatenate / split / stack families |
+| `constructor` | MUST | 41 | Array constructors (zeros/ones/arange/linspace…) |
+| `dtype_policy` | SHOULD | 1 | dtype promotion / casting / can_cast |
+| `fft` | MUST | 11 | FFT family (fft/ifft/rfft/fftshift…) |
+| `index_select` | SHOULD | 26 | Advanced indexing / take / put / where / choose |
+| `linalg` | MUST | 26 | Linear algebra kernels (passthrough / native) |
+| `masked` | SHOULD | 21 | Masked arrays |
+| `math_special` | MUST | 19 | Special-function math (bessel, gamma, beta…) |
+| `misc` | SHOULD | 38 | Uncategorized numpy surface |
+| `reducer` | MUST | 31 | Axis reducers (sum, mean, var, nan*, quantile…) |
+| `reshape_transpose` | SHOULD | 16 | Shape / transpose / broadcasting surfaces |
+| `runtime_policy` | MAY | 11 | frompyfunc / delegation observability probes |
+| `search_sort` | MUST | 13 | Sort / partition / searchsorted / argsort |
+| `set_op` | MUST | 5 | Set ops (union1d / intersect1d / isin / unique) |
+| `structured` | SHOULD | 3 | Structured-dtype and record surfaces |
+| `testing` | SHOULD | 3 | numpy.testing.assert_* helpers |
+| `ufunc_numeric` | MUST | 53 | Elementwise numerical ufunc parity |
+
+## Per-test classification
+
+| Test | Domain | Level |
+|------|--------|:-----:|
+| `allclose_matches_numpy_across_tolerance_and_nan_paths` | `reducer` | MUST |
+| `allequal_matches_numpy_across_masked_and_fill_value_paths` | `reducer` | MUST |
+| `angle_matches_numpy_across_complex_real_and_deg` | `ufunc_numeric` | MUST |
+| `append_matches_numpy_across_flattened_axis_scalar_object_empty_and_errors` | `misc` | SHOULD |
+| `arange_matches_numpy_across_stop_start_step_dtype_and_empty_ranges` | `constructor` | MUST |
+| `argsort_matches_numpy_across_numeric_axes_stability_and_structured_order` | `search_sort` | MUST |
+| `argwhere_matches_numpy_multidimensional_input` | `search_sort` | MUST |
+| `argwhere_matches_numpy_scalar_nonzero_shape` | `search_sort` | MUST |
+| `argwhere_matches_numpy_zero_scalar_and_empty_input` | `search_sort` | MUST |
+| `array_equal_matches_numpy_across_shapes_equal_nan_and_objects` | `constructor` | MUST |
+| `array_equiv_matches_numpy_across_broadcast_scalar_object_and_mismatch` | `constructor` | MUST |
+| `as_strided_matches_numpy` | `misc` | SHOULD |
+| `asanyarray_matches_numpy_ndarray_matrix_dtype_order_scalar_and_object` | `constructor` | MUST |
+| `asarray_chkfinite_matches_numpy_across_list_array_dtype_nan_and_inf` | `constructor` | MUST |
+| `asarray_matches_numpy_across_list_dtype_order_scalar_object_and_copy_false` | `constructor` | MUST |
+| `ascontiguousarray_matches_numpy_across_dtype_and_layouts` | `constructor` | MUST |
+| `asfortranarray_matches_numpy_across_layouts_and_dtype` | `constructor` | MUST |
+| `average_matches_numpy_across_axis_weights_and_returned` | `reducer` | MUST |
+| `bartlett_matches_numpy_across_m_sizes_and_dtype` | `math_special` | MUST |
+| `bincount_matches_numpy_defaults_weights_and_minlength` | `math_special` | MUST |
+| `bincount_negative_input_matches_numpy_valueerror` | `math_special` | MUST |
+| `broadcast_arrays_matches_numpy_across_shapes_lengths_and_errors` | `reshape_transpose` | SHOULD |
+| `broadcast_shapes_matches_numpy_across_pairwise_nary_scalar_rank_and_errors` | `reshape_transpose` | SHOULD |
+| `broadcast_to_matches_numpy_shapes_views_and_error_surface` | `reshape_transpose` | SHOULD |
+| `cbrt_matches_numpy_across_signs_dtypes_and_shapes` | `ufunc_numeric` | MUST |
+| `ceil_matches_numpy_signed_zero_and_integer_input` | `ufunc_numeric` | MUST |
+| `cholesky_matches_numpy_lower_upper_complex_and_error_surface` | `linalg` | MUST |
+| `choose_matches_numpy_clip_mode` | `index_select` | SHOULD |
+| `choose_matches_numpy_raise_mode` | `index_select` | SHOULD |
+| `choose_matches_numpy_wrap_mode` | `index_select` | SHOULD |
+| `clip_matches_numpy_across_bounds_broadcast_out_and_nan_paths` | `ufunc_numeric` | MUST |
+| `common_type_matches_numpy_across_single_mixed_int_float_complex_and_error` | `dtype_policy` | SHOULD |
+| `compress_matches_numpy_with_short_axis_condition` | `index_select` | SHOULD |
+| `compress_matches_numpy_with_short_flat_condition` | `index_select` | SHOULD |
+| `compressed_matches_numpy_flattening_masks_scalars_and_dtypes` | `masked` | SHOULD |
+| `concatenate_matches_numpy_across_axes_flatten_out_dtype_casting_and_errors` | `concat_split` | SHOULD |
+| `cond_matches_numpy_across_p_values_and_complex` | `misc` | SHOULD |
+| `conjugate_matches_numpy_across_real_complex_array_scalar_and_dtype` | `ufunc_numeric` | MUST |
+| `copy_matches_numpy_across_order_scalar_object_and_subok` | `constructor` | MUST |
+| `copysign_matches_numpy_basic` | `constructor` | MUST |
+| `copysign_matches_numpy_signed_zero_and_broadcasting` | `constructor` | MUST |
+| `copyto_matches_numpy_across_plain_broadcast_where_casting_and_errors` | `constructor` | MUST |
+| `core_ufunc_batch1_matches_numpy_across_scalar_array_int_complex_and_broadcasting` | `misc` | SHOULD |
+| `corrcoef_matches_numpy_across_orientation_dtype_and_nan_paths` | `reducer` | MUST |
+| `count_masked_matches_numpy_scalars_axes_and_error_surface` | `misc` | SHOULD |
+| `count_nonzero_matches_numpy_axis_and_keepdims` | `reducer` | MUST |
+| `count_nonzero_matches_numpy_axis_none` | `reducer` | MUST |
+| `count_nonzero_matches_numpy_axis_tuple_and_empty_tuple` | `reducer` | MUST |
+| `count_nonzero_matches_numpy_empty_array_keepdims_extra_variants` | `reducer` | MUST |
+| `count_nonzero_matches_numpy_empty_array_keepdims_variants` | `reducer` | MUST |
+| `count_nonzero_matches_numpy_error_surface_out_of_bounds_axis` | `reducer` | MUST |
+| `count_nonzero_matches_numpy_keepdims_none_and_scalar_inputs` | `reducer` | MUST |
+| `cov_matches_numpy_across_orientation_weights_and_scalar_return` | `reducer` | MUST |
+| `cross_matches_numpy_across_dimensions_axes_and_complex` | `misc` | SHOULD |
+| `deg2rad_matches_numpy_across_scalar_array_int_canonical_and_negative` | `ufunc_numeric` | MUST |
+| `degrees_matches_numpy_basic` | `ufunc_numeric` | MUST |
+| `delete_matches_numpy_across_scalar_slice_multi_axis_and_errors` | `misc` | SHOULD |
+| `diag_indices_from_matches_numpy_for_object_arrays` | `constructor` | MUST |
+| `diag_indices_matches_numpy_default_and_ndim` | `constructor` | MUST |
+| `diag_matches_numpy_for_vector_matrix_and_large_uint64_inputs` | `constructor` | MUST |
+| `diagflat_matches_numpy_and_preserves_large_uint64_values` | `constructor` | MUST |
+| `diagonal_matches_numpy_for_offsets_axes_and_errors` | `constructor` | MUST |
+| `diff_matches_numpy_across_n_axis_prepend_append_and_dtype_behavior` | `misc` | SHOULD |
+| `digitize_matches_numpy_increasing_bins` | `math_special` | MUST |
+| `digitize_matches_numpy_right_true_for_decreasing_bins` | `math_special` | MUST |
+| `eigh_matches_numpy_namedtuple_across_uplo_batched_and_complex` | `linalg` | MUST |
+| `eigvals_matches_numpy_for_real_and_complex_spectra` | `linalg` | MUST |
+| `eigvalsh_matches_numpy_across_uplo_batched_and_complex` | `linalg` | MUST |
+| `einsum_path_matches_numpy_across_subscripts_optimize_default_and_greedy` | `misc` | SHOULD |
+| `empty_like_matches_numpy_across_surface_dtype_shape_scalar_and_zero` | `constructor` | MUST |
+| `expand_dims_matches_numpy_list_axes_and_repeated_axis_error` | `reshape_transpose` | SHOULD |
+| `expm1_matches_numpy_across_signs_dtypes_and_precision` | `ufunc_numeric` | MUST |
+| `extract_matches_numpy_boolean_mask` | `index_select` | SHOULD |
+| `fabs_matches_numpy_across_scalar_array_int_signed_zero_and_complex_error` | `misc` | SHOULD |
+| `fft2_matches_numpy_across_shape_axes_norm_out_and_errors` | `fft` | MUST |
+| `fft_matches_numpy_across_shapes_norms_out_and_complex` | `fft` | MUST |
+| `fftfreq_matches_numpy_across_n_d_and_device_variants` | `fft` | MUST |
+| `fftn_matches_numpy_across_nd_shape_axes_and_norm` | `fft` | MUST |
+| `fill_diagonal_matches_numpy_for_wrap_nd_and_sequence_values` | `index_select` | SHOULD |
+| `filled_matches_numpy_across_explicit_and_intrinsic_fill_values` | `misc` | SHOULD |
+| `fix_invalid_matches_numpy_across_mask_copy_fill_and_shapes` | `ufunc_numeric` | MUST |
+| `fix_matches_numpy_across_signs_dtypes_and_special_values` | `ufunc_numeric` | MUST |
+| `flatnonzero_matches_numpy_multidimensional_input` | `search_sort` | MUST |
+| `flatnonzero_matches_numpy_scalar_input` | `search_sort` | MUST |
+| `flatnonzero_matches_numpy_zero_scalar_and_empty_input` | `search_sort` | MUST |
+| `flip_matches_numpy_across_axis_dims_and_dtype` | `reshape_transpose` | SHOULD |
+| `fliplr_matches_numpy_across_2d_3d_dtype_and_error` | `reshape_transpose` | SHOULD |
+| `flipud_matches_numpy_across_1d_2d_3d_and_dtype` | `reshape_transpose` | SHOULD |
+| `floor_divide_matches_numpy_across_int_float_broadcast_negatives_and_zero` | `ufunc_numeric` | MUST |
+| `floor_matches_numpy_float_and_special_values` | `ufunc_numeric` | MUST |
+| `fmod_matches_numpy_across_sign_follows_dividend_float_broadcast_and_zero` | `misc` | SHOULD |
+| `frexp_matches_numpy_basic` | `ufunc_numeric` | MUST |
+| `frexp_matches_numpy_special_values_and_shape` | `ufunc_numeric` | MUST |
+| `frombuffer_matches_numpy_across_bytes_bytearray_dtype_count_offset_and_errors` | `constructor` | MUST |
+| `fromfile_matches_numpy_across_binary_path_dtype_count_offset_and_text_sep` | `constructor` | MUST |
+| `fromiter_matches_numpy_across_list_gen_dtype_count_empty_and_errors` | `constructor` | MUST |
+| `frompyfunc_live_callable_matches_numpy_identity_and_reduce` | `runtime_policy` | MAY |
+| `frompyfunc_live_callable_matches_numpy_multi_output` | `runtime_policy` | MAY |
+| `frompyfunc_live_callable_matches_numpy_reduce_kwargs_and_out` | `runtime_policy` | MAY |
+| `frompyfunc_live_callable_matches_numpy_reduce_negative_axis` | `runtime_policy` | MAY |
+| `frompyfunc_live_callable_matches_numpy_reduce_scalar_where_and_direct_out` | `runtime_policy` | MAY |
+| `frompyfunc_live_callable_matches_numpy_single_output` | `runtime_policy` | MAY |
+| `frompyfunc_live_callable_matches_numpy_zero_output_side_effects` | `runtime_policy` | MAY |
+| `frompyfunc_reduce_does_not_delegate_to_numpy_frompyfunc` | `runtime_policy` | MAY |
+| `fromstring_matches_numpy_across_sep_whitespace_dtype_count_and_errors` | `constructor` | MUST |
+| `full_like_matches_numpy_across_layout_dtype_shape_subok_object_and_zero` | `constructor` | MUST |
+| `full_matches_numpy_across_shapes_dtype_object_order_zero_and_scalar_fill` | `constructor` | MUST |
+| `geomspace_matches_numpy_across_scalar_negative_complex_dtype_and_axis` | `constructor` | MUST |
+| `getmask_matches_numpy_for_masked_and_plain_inputs` | `masked` | SHOULD |
+| `getmaskarray_matches_numpy_across_masked_and_plain_inputs` | `masked` | SHOULD |
+| `gradient_matches_numpy_across_spacing_axes_and_edge_order` | `misc` | SHOULD |
+| `heaviside_matches_numpy_across_sign_regions_x2_broadcast_nan_and_dtype` | `misc` | SHOULD |
+| `histogram_bin_edges_matches_numpy_across_bins_range_weights_and_errors` | `math_special` | MUST |
+| `histogram_matches_numpy_across_bins_range_density_weights_and_empty` | `math_special` | MUST |
+| `hypot_matches_numpy_basic` | `ufunc_numeric` | MUST |
+| `hypot_matches_numpy_broadcasting` | `ufunc_numeric` | MUST |
+| `i0_matches_numpy_across_scalars_arrays_and_dtype` | `math_special` | MUST |
+| `ifft2_matches_numpy_across_shape_axes_and_norm` | `fft` | MUST |
+| `ifft_matches_numpy_across_shapes_norms_and_complex` | `fft` | MUST |
+| `ifftn_matches_numpy_across_nd_shape_axes_and_norm` | `fft` | MUST |
+| `indices_matches_numpy_default_and_explicit_dtype` | `constructor` | MUST |
+| `inner_matches_numpy_across_scalars_nd_uint64_and_error_surface` | `misc` | SHOULD |
+| `insert_matches_numpy_across_indices_axes_broadcast_and_errors` | `misc` | SHOULD |
+| `interp_matches_numpy_with_custom_left_and_right` | `math_special` | MUST |
+| `interp_matches_numpy_with_multidimensional_x` | `math_special` | MUST |
+| `intersect1d_matches_numpy_across_duplicates_indices_strings_and_flattening` | `set_op` | MUST |
+| `invert_matches_numpy_across_int_bool_arrays_and_float_error` | `linalg` | MUST |
+| `irfft_matches_numpy_norm_variants` | `fft` | MUST |
+| `is_masked_matches_numpy_across_masked_and_plain_inputs` | `misc` | SHOULD |
+| `iscomplex_matches_numpy_across_arrays_and_collections` | `misc` | SHOULD |
+| `iscomplexobj_matches_numpy_across_dtypes_and_collections` | `misc` | SHOULD |
+| `isfinite_matches_numpy` | `ufunc_numeric` | MUST |
+| `isin_matches_numpy_across_shapes_invert_kind_and_empty_tests` | `set_op` | MUST |
+| `isinf_matches_numpy_multidimensional_input` | `set_op` | MUST |
+| `isnan_matches_numpy` | `ufunc_numeric` | MUST |
+| `isneginf_matches_numpy_multidimensional_input` | `ufunc_numeric` | MUST |
+| `isposinf_matches_numpy` | `ufunc_numeric` | MUST |
+| `isreal_matches_numpy_and_complements_iscomplex` | `misc` | SHOULD |
+| `isrealobj_matches_numpy_and_complements_iscomplexobj` | `misc` | SHOULD |
+| `isscalar_matches_numpy_across_python_and_numpy_objects` | `misc` | SHOULD |
+| `ix_matches_numpy_for_multiple_arrays_bool_and_empty_inputs` | `index_select` | SHOULD |
+| `kaiser_matches_numpy_across_m_edges_beta_range_and_shape_dtype` | `math_special` | MUST |
+| `kron_matches_numpy_across_shapes_and_dtypes` | `linalg` | MUST |
+| `ldexp_matches_numpy_basic` | `ufunc_numeric` | MUST |
+| `ldexp_matches_numpy_broadcasting_and_zero_sign` | `ufunc_numeric` | MUST |
+| `lexsort_matches_numpy_across_keys_axis_and_ties` | `search_sort` | MUST |
+| `linalg_eig_matches_numpy_across_real_complex_diagonal_and_batched` | `linalg` | MUST |
+| `linspace_matches_numpy_across_endpoint_retstep_dtype_and_axis` | `constructor` | MUST |
+| `log1p_matches_numpy_across_scalar_array_int_complex_and_boundary` | `ufunc_numeric` | MUST |
+| `logaddexp2_matches_numpy_basic` | `ufunc_numeric` | MUST |
+| `logaddexp2_matches_numpy_broadcasting_and_infinities` | `ufunc_numeric` | MUST |
+| `logaddexp_matches_numpy_basic` | `ufunc_numeric` | MUST |
+| `logaddexp_matches_numpy_broadcasting_and_infinities` | `ufunc_numeric` | MUST |
+| `lstsq_matches_numpy_tuple_return_across_shapes_and_rcond` | `linalg` | MUST |
+| `ma_average_matches_numpy_unweighted_axis_and_fallback_cases` | `masked` | SHOULD |
+| `ma_count_matches_numpy_across_axis_and_keepdims` | `masked` | SHOULD |
+| `ma_ediff1d_matches_numpy_masked_flattened_and_boundary_values` | `masked` | SHOULD |
+| `make_mask_matches_numpy_nomask_cast_copy_shrink_and_structured_dtype` | `masked` | SHOULD |
+| `mask_indices_matches_numpy_across_triu_tril_mask_funcs_and_k_offsets` | `misc` | SHOULD |
+| `mask_or_matches_numpy_across_nomask_shrink_and_copy_paths` | `masked` | SHOULD |
+| `masked_all_matches_numpy_shapes_dtypes_and_mask_preservation` | `masked` | SHOULD |
+| `masked_equal_matches_numpy_across_dtypes_and_copy` | `masked` | SHOULD |
+| `masked_greater_equal_matches_numpy_across_dtypes_and_thresholds` | `masked` | SHOULD |
+| `masked_greater_matches_numpy_across_dtypes_and_copy` | `masked` | SHOULD |
+| `masked_inside_matches_numpy_across_intervals_and_orderings` | `masked` | SHOULD |
+| `masked_invalid_matches_numpy_basic_cases_and_copy_semantics` | `masked` | SHOULD |
+| `masked_less_equal_matches_numpy_across_dtypes_and_thresholds` | `masked` | SHOULD |
+| `masked_less_matches_numpy_across_dtypes_and_thresholds` | `masked` | SHOULD |
+| `masked_not_equal_matches_numpy_across_dtypes_and_copy` | `masked` | SHOULD |
+| `masked_outside_matches_numpy_across_intervals_and_orderings` | `masked` | SHOULD |
+| `masked_values_matches_numpy_across_tolerances_and_dtypes` | `masked` | SHOULD |
+| `masked_where_matches_numpy_across_conditions_and_copy_semantics` | `masked` | SHOULD |
+| `masked_where_shape_mismatch_matches_numpy_indexerror` | `masked` | SHOULD |
+| `matrix_power_error_surface_matches_numpy` | `linalg` | MUST |
+| `matrix_power_matches_numpy_across_dtypes_negative_and_stacked_inputs` | `linalg` | MUST |
+| `matrix_rank_matches_numpy_across_tol_rtol_hermitian_and_batched` | `linalg` | MUST |
+| `matrix_transpose_matches_numpy_across_dims_and_dtype` | `linalg` | MUST |
+| `maximum_fill_value_matches_numpy_across_dtypes` | `reducer` | MUST |
+| `may_share_memory_matches_numpy_across_self_view_disjoint_strided_and_max_work` | `misc` | SHOULD |
+| `median_matches_numpy_across_axis_keepdims_and_nan` | `reducer` | MUST |
+| `meshgrid_matches_numpy_for_copy_false_writeback_and_object_sparse` | `constructor` | MUST |
+| `meshgrid_matches_numpy_for_dense_default_and_ij_indexing` | `constructor` | MUST |
+| `meshgrid_matches_numpy_for_empty_scalar_flattened_and_sparse_inputs` | `constructor` | MUST |
+| `minimum_fill_value_matches_numpy_across_dtypes` | `reducer` | MUST |
+| `minimum_fill_value_matches_numpy_supported_and_fallback_cases` | `reducer` | MUST |
+| `modf_matches_numpy_basic` | `ufunc_numeric` | MUST |
+| `modf_matches_numpy_special_values_and_shape` | `ufunc_numeric` | MUST |
+| `module_k74v_8_adversarial_error_surface_matches_numpy` | `ufunc_numeric` | MUST |
+| `moveaxis_matches_numpy_across_tuple_negative_axes_and_errors` | `reshape_transpose` | SHOULD |
+| `multi_dot_matches_numpy_across_chain_lengths_shapes_and_complex` | `linalg` | MUST |
+| `nan_to_num_matches_numpy_custom_replacements_and_int_passthrough` | `ufunc_numeric` | MUST |
+| `nan_to_num_matches_numpy_defaults` | `ufunc_numeric` | MUST |
+| `nanargmax_matches_numpy_across_axes_keepdims_and_all_nan_errors` | `reducer` | MUST |
+| `nanargmin_matches_numpy_across_axes_keepdims_and_all_nan_errors` | `reducer` | MUST |
+| `nanmax_matches_numpy_across_axis_keepdims_and_all_nan` | `reducer` | MUST |
+| `nanmean_matches_numpy_across_axis_dtype_and_keepdims` | `reducer` | MUST |
+| `nanmedian_matches_numpy_across_axis_keepdims_and_all_nan` | `reducer` | MUST |
+| `nanmin_matches_numpy_across_axis_keepdims_and_all_nan` | `reducer` | MUST |
+| `nanpercentile_matches_numpy_across_q_axis_method_keepdims_and_all_nan` | `reducer` | MUST |
+| `nanprod_matches_numpy_across_axis_dtype_keepdims_and_all_nan_slice` | `reducer` | MUST |
+| `nanquantile_matches_numpy_across_q_axis_method_keepdims_and_all_nan` | `reducer` | MUST |
+| `nanstd_matches_numpy_across_axis_ddof_keepdims_and_dtype` | `reducer` | MUST |
+| `nansum_matches_numpy_across_axis_dtype_and_all_nan_slice` | `reducer` | MUST |
+| `nanvar_matches_numpy_across_axis_ddof_keepdims_and_dtype` | `reducer` | MUST |
+| `negative_matches_numpy_across_scalar_array_int_complex_and_dtype_preservation` | `ufunc_numeric` | MUST |
+| `nextafter_matches_numpy_basic` | `ufunc_numeric` | MUST |
+| `nextafter_matches_numpy_signed_zero_and_broadcasting` | `ufunc_numeric` | MUST |
+| `nonzero_matches_numpy_bool_2d_scalar_empty_and_object_inputs` | `search_sort` | MUST |
+| `norm_matches_numpy_across_ord_axis_keepdims_and_batched` | `misc` | SHOULD |
+| `ones_like_matches_numpy_across_layout_dtype_shape_object_scalar_and_zero` | `constructor` | MUST |
+| `outer_matches_numpy_across_shapes_dtypes_and_out_kwarg` | `misc` | SHOULD |
+| `pad_matches_numpy_across_modes_scalar_tuple_widths_and_nd_input` | `concat_split` | SHOULD |
+| `percentile_matches_numpy_across_q_axis_method_and_dtype` | `reducer` | MUST |
+| `percentile_quantile_empty_array_matches_numpy_indexerror` | `reducer` | MUST |
+| `pinv_matches_numpy_across_shapes_rcond_and_hermitian` | `linalg` | MUST |
+| `pinv_matches_numpy_rtol_keyword_only_and_error_surface` | `linalg` | MUST |
+| `place_matches_numpy_in_place_and_returns_none` | `index_select` | SHOULD |
+| `polyder_matches_numpy_across_orders_and_dtypes` | `misc` | SHOULD |
+| `polyfit_matches_numpy_across_linear_quadratic_full_tuple_weights_and_cov` | `misc` | SHOULD |
+| `polyint_matches_numpy_across_orders_and_constants` | `misc` | SHOULD |
+| `polyval_matches_numpy_across_scalar_array_and_dtype` | `misc` | SHOULD |
+| `positive_matches_numpy_across_scalar_array_int_complex_and_dtype` | `ufunc_numeric` | MUST |
+| `put_along_axis_axis_none_matches_numpy_in_place` | `index_select` | SHOULD |
+| `put_along_axis_index_out_of_bounds_matches_numpy_indexerror` | `index_select` | SHOULD |
+| `put_along_axis_matches_numpy_scalar_values_in_place` | `index_select` | SHOULD |
+| `put_index_out_of_bounds_matches_numpy_indexerror` | `index_select` | SHOULD |
+| `put_matches_numpy_in_place_and_returns_none` | `index_select` | SHOULD |
+| `putmask_matches_numpy_in_place_and_cycles_values` | `index_select` | SHOULD |
+| `putmask_matches_numpy_with_overlapping_view_inputs` | `index_select` | SHOULD |
+| `qr_matches_numpy_modes_and_error_surface` | `linalg` | MUST |
+| `quantile_matches_numpy_across_q_axis_method_and_dtype` | `reducer` | MUST |
+| `rad2deg_matches_numpy_across_canonical_array_int_and_roundtrip` | `ufunc_numeric` | MUST |
+| `radians_matches_numpy_integer_multidimensional_input` | `ufunc_numeric` | MUST |
+| `ravel_matches_numpy_across_order_ndim_scalar_and_object` | `reshape_transpose` | SHOULD |
+| `real_if_close_matches_numpy_across_real_complex_and_tol` | `ufunc_numeric` | MUST |
+| `recfunctions_family_matches_numpy_across_drop_rename_append_merge_and_u2s` | `structured` | SHOULD |
+| `reciprocal_matches_numpy_across_scalar_float_complex_2d_and_int_dtype` | `ufunc_numeric` | MUST |
+| `repeat_matches_numpy_across_scalar_repeat_vector_axes_zero_segments_and_scalar_input` | `concat_split` | SHOULD |
+| `require_matches_numpy_across_contiguity_dtype_writeable_and_noop` | `misc` | SHOULD |
+| `reshape_matches_numpy_across_inferred_order_scalar_object_and_errors` | `reshape_transpose` | SHOULD |
+| `resize_matches_numpy_across_growth_shrink_scalar_zero_and_dtype` | `misc` | SHOULD |
+| `rfft_matches_numpy_norm_variants` | `fft` | MUST |
+| `rfftfreq_matches_numpy_device_and_zero_division` | `fft` | MUST |
+| `rfftn_matches_numpy_across_nd_shape_axes_and_norm` | `fft` | MUST |
+| `rint_matches_numpy_bool_input` | `ufunc_numeric` | MUST |
+| `rint_matches_numpy_float_and_special_values` | `ufunc_numeric` | MUST |
+| `rint_matches_numpy_integer_input` | `ufunc_numeric` | MUST |
+| `roll_matches_numpy_across_axis_none_negative_tuple_and_scalar` | `reshape_transpose` | SHOULD |
+| `rollaxis_matches_numpy_across_axis_start_object_and_errors` | `reshape_transpose` | SHOULD |
+| `roots_poly_matches_numpy_across_real_complex_matrix_trim_and_roundtrip` | `misc` | SHOULD |
+| `rot90_matches_numpy_across_k_axes_and_error_surface` | `reshape_transpose` | SHOULD |
+| `row_stack_matches_numpy_across_rank_promotion_object_and_width_errors` | `concat_split` | SHOULD |
+| `searchsorted_matches_numpy_left_side_with_duplicates` | `search_sort` | MUST |
+| `searchsorted_matches_numpy_right_side_with_probe_shape` | `search_sort` | MUST |
+| `select_matches_numpy_first_match_with_python_int_default` | `index_select` | SHOULD |
+| `setdiff1d_matches_numpy_across_overlap_empty_string_and_flattened_inputs` | `set_op` | MUST |
+| `shares_memory_matches_numpy_across_self_view_copy_strided_max_work_and_errors` | `misc` | SHOULD |
+| `sign_matches_numpy_multidimensional_integer_input` | `ufunc_numeric` | MUST |
+| `sign_matches_numpy_signed_zero_and_nan` | `ufunc_numeric` | MUST |
+| `signbit_matches_numpy_multidimensional_input` | `ufunc_numeric` | MUST |
+| `signbit_matches_numpy_with_signed_zero_and_nan` | `ufunc_numeric` | MUST |
+| `sinc_matches_numpy_basic` | `math_special` | MUST |
+| `sinc_matches_numpy_multidimensional_integer_input` | `math_special` | MUST |
+| `sliding_window_view_matches_numpy` | `misc` | SHOULD |
+| `slogdet_matches_numpy_namedtuple_across_real_complex_and_batched` | `linalg` | MUST |
+| `solve_matches_numpy_across_square_batched_multi_rhs_and_complex` | `linalg` | MUST |
+| `solve_triangular_matches_numpy_unit_diagonal_variants` | `linalg` | MUST |
+| `sort_complex_matches_numpy_across_integer_complex_nan_matrix_and_scalar_inputs` | `search_sort` | MUST |
+| `sort_matches_numpy_across_numeric_axes_stability_and_structured_order` | `search_sort` | MUST |
+| `spacing_matches_numpy_basic` | `ufunc_numeric` | MUST |
+| `spacing_matches_numpy_nan_and_inf_behavior` | `ufunc_numeric` | MUST |
+| `square_matches_numpy_across_dtypes_and_shapes` | `ufunc_numeric` | MUST |
+| `squeeze_matches_numpy_across_axes_scalar_and_error_surface` | `reshape_transpose` | SHOULD |
+| `stack_matches_numpy_across_default_negative_axis_out_dtype_casting_and_errors` | `concat_split` | SHOULD |
+| `structured_to_unstructured_matches_numpy_mixed_dtype_and_dtype_kwarg` | `structured` | SHOULD |
+| `structured_to_unstructured_matches_numpy_subarray_fields` | `structured` | SHOULD |
+| `svd_matches_numpy_namedtuple_array_and_error_paths` | `linalg` | MUST |
+| `svdvals_matches_numpy_across_shapes_and_batched_input` | `linalg` | MUST |
+| `swapaxes_matches_numpy_across_dims_negative_axes_and_error_surface` | `reshape_transpose` | SHOULD |
+| `take_along_axis_axis_none_matches_numpy` | `index_select` | SHOULD |
+| `take_along_axis_index_out_of_bounds_matches_numpy_indexerror` | `index_select` | SHOULD |
+| `take_along_axis_matches_numpy_along_axis` | `index_select` | SHOULD |
+| `take_index_out_of_bounds_matches_numpy_indexerror` | `index_select` | SHOULD |
+| `take_matches_numpy_axis_multidimensional_indices` | `index_select` | SHOULD |
+| `take_matches_numpy_axis_scalar_index` | `index_select` | SHOULD |
+| `take_matches_numpy_flat_multidimensional_indices` | `index_select` | SHOULD |
+| `tensordot_matches_numpy_across_axes_specs_and_complex` | `misc` | SHOULD |
+| `tensorinv_matches_numpy_default_and_ind_kwarg` | `linalg` | MUST |
+| `tensorsolve_axes_error_surface_matches_numpy` | `linalg` | MUST |
+| `tensorsolve_matches_numpy_axes_kwarg` | `linalg` | MUST |
+| `tensorsolve_matches_numpy_for_tensor_output_shape` | `linalg` | MUST |
+| `testing_assert_allclose_matches_numpy_pass_and_fail_paths` | `testing` | SHOULD |
+| `testing_assert_array_equal_matches_numpy_pass_and_fail_paths` | `testing` | SHOULD |
+| `testing_assert_family_matches_numpy_across_pass_fail_and_surface` | `testing` | SHOULD |
+| `tile_matches_numpy_across_reps_shapes_and_dtype` | `concat_split` | SHOULD |
+| `transpose_matches_numpy_across_axes_scalar_object_and_error_surface` | `reshape_transpose` | SHOULD |
+| `trapezoid_matches_numpy_dx_and_axis` | `math_special` | MUST |
+| `trapezoid_matches_numpy_scalar_result` | `math_special` | MUST |
+| `trapezoid_matches_numpy_with_broadcast_x_spacing` | `math_special` | MUST |
+| `trapezoid_matches_numpy_with_same_shape_x_spacing` | `math_special` | MUST |
+| `trapezoid_matches_numpy_with_x_spacing` | `math_special` | MUST |
+| `trapz_alias_matches_numpy_trapezoid` | `math_special` | MUST |
+| `tri_matches_numpy_offsets_and_dtype` | `constructor` | MUST |
+| `tril_indices_from_matches_numpy_and_rejects_non_2d` | `constructor` | MUST |
+| `tril_indices_matches_numpy_with_offsets` | `constructor` | MUST |
+| `tril_matches_numpy_across_offsets_shapes_and_dtype` | `constructor` | MUST |
+| `trim_zeros_matches_numpy_front_and_back_modes` | `constructor` | MUST |
+| `triu_indices_from_matches_numpy_and_rejects_non_2d` | `constructor` | MUST |
+| `triu_indices_matches_numpy_with_offsets` | `constructor` | MUST |
+| `triu_matches_numpy_across_square_rect_offsets_and_nd_batch` | `constructor` | MUST |
+| `true_divide_matches_numpy_across_dtypes_and_zero_division` | `ufunc_numeric` | MUST |
+| `trunc_matches_numpy_float_and_special_values` | `ufunc_numeric` | MUST |
+| `trunc_matches_numpy_integer_input` | `ufunc_numeric` | MUST |
+| `ufunc_special_value_parity_matches_numpy` | `misc` | SHOULD |
+| `union1d_matches_numpy_across_disjoint_overlap_empty_string_and_flattened_inputs` | `set_op` | MUST |
+| `unwrap_matches_numpy_across_default_axis_discont_and_period` | `misc` | SHOULD |
+| `vander_matches_numpy_across_width_order_dtype_empty_and_error_surface` | `constructor` | MUST |
+| `vdot_matches_numpy_across_real_complex_and_nd_inputs` | `linalg` | MUST |
+| `vectorize_excluded_argument_matches_numpy` | `runtime_policy` | MAY |
+| `vectorize_live_callable_matches_numpy_multi_output` | `runtime_policy` | MAY |
+| `vectorize_live_callable_matches_numpy_single_output` | `runtime_policy` | MAY |
+| `where_single_argument_matches_numpy_nonzero_indices` | `index_select` | SHOULD |
+| `where_three_arg_matches_numpy_broadcasting` | `index_select` | SHOULD |
+| `zeros_like_matches_numpy_across_layout_dtype_shape_object_scalar_and_zero` | `constructor` | MUST |
