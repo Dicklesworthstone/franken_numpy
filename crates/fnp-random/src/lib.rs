@@ -2509,7 +2509,7 @@ impl RandomState {
     #[must_use]
     pub fn standard_exponential(&mut self, size: usize) -> Vec<f64> {
         (0..size)
-            .map(|_| -(1.0 - self.next_f64()).ln())
+            .map(|_| self.legacy_standard_exponential())
             .collect()
     }
 
@@ -2522,6 +2522,82 @@ impl RandomState {
             .into_iter()
             .map(|value| scale * value)
             .collect())
+    }
+
+    pub fn standard_gamma(&mut self, shape: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if shape < 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| self.legacy_standard_gamma(shape))
+            .collect())
+    }
+
+    pub fn gamma(&mut self, shape: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if shape < 0.0 || scale < 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| scale * self.legacy_standard_gamma(shape))
+            .collect())
+    }
+
+    fn legacy_standard_exponential(&mut self) -> f64 {
+        -(1.0 - self.next_f64()).ln()
+    }
+
+    fn legacy_standard_gamma(&mut self, shape: f64) -> f64 {
+        if shape == 1.0 {
+            return self.legacy_standard_exponential();
+        }
+        if shape == 0.0 {
+            return 0.0;
+        }
+        if !shape.is_finite() {
+            let _ = self.legacy_gauss();
+            let _ = self.next_f64();
+            return shape;
+        }
+        if shape < 1.0 {
+            loop {
+                let u = self.next_f64();
+                let v = self.legacy_standard_exponential();
+                if u <= 1.0 - shape {
+                    let x = u.powf(1.0 / shape);
+                    if x <= v {
+                        return x;
+                    }
+                } else {
+                    let y = -((1.0 - u) / shape).ln();
+                    let x = (1.0 - shape + shape * y).powf(1.0 / shape);
+                    if x <= v + y {
+                        return x;
+                    }
+                }
+            }
+        }
+
+        let b = shape - 1.0 / 3.0;
+        let c = 1.0 / (9.0 * b).sqrt();
+        loop {
+            let mut x;
+            let mut v;
+            loop {
+                x = self.legacy_gauss();
+                v = 1.0 + c * x;
+                if v > 0.0 {
+                    break;
+                }
+            }
+            v *= v * v;
+            let u = self.next_f64();
+            if u < 1.0 - 0.0331 * x * x * x * x {
+                return b * v;
+            }
+            if u.ln() < 0.5 * x * x + b * (1.0 - v + v.ln()) {
+                return b * v;
+            }
+        }
     }
 
     #[must_use]
@@ -5918,6 +5994,67 @@ for child in rng.spawn(n_children):
             .bounded_u64(0)
             .expect_err("zero upper-bound must fail");
         assert_eq!(err.reason_code(), "random_upper_bound_rejected");
+    }
+
+    #[test]
+    fn random_state_legacy_gamma_matches_numpy_oracles() {
+        let mut standard = RandomState::new(SeedMaterial::U64(42)).expect("standard");
+        let values = standard.standard_gamma(3.0, 10).expect("standard gamma");
+        let expected = [
+            3.562_818_662_554_702_7,
+            2.447_194_398_302_254_4,
+            2.302_280_566_853_262,
+            2.302_304_875_447_745,
+            6.166_139_937_186_394,
+            4.126_452_255_001_466,
+            1.971_140_075_653_078_6,
+            3.654_409_698_749_651_3,
+            3.081_625_936_754_331_7,
+            0.603_656_724_463_859_8,
+        ];
+        assert_f64_seq("random_state_standard_gamma", &values, &expected);
+
+        let mut fractional = RandomState::new(SeedMaterial::U64(42)).expect("fractional");
+        let values = fractional
+            .standard_gamma(0.5, 10)
+            .expect("fractional standard gamma");
+        let expected = [
+            0.140_280_300_626_196_42,
+            0.659_018_032_842_185_1,
+            0.024_341_816_165_506_288,
+            0.003_373_706_002_505_808_7,
+            0.375_729_139_547_392_2,
+            0.000_423_721_405_413_923_47,
+            1.095_457_762_596_871_6,
+            0.033_060_318_699_863_214,
+            0.092_563_342_401_050_38,
+            0.186_576_499_129_737_73,
+        ];
+        assert_f64_seq("random_state_standard_gamma_fractional", &values, &expected);
+
+        let mut scaled = RandomState::new(SeedMaterial::U64(42)).expect("scaled");
+        let values = scaled.gamma(2.0, 3.0, 10).expect("gamma");
+        let expected = [
+            7.181_038_169_607_71,
+            4.483_394_190_646_763,
+            4.146_850_753_112_861,
+            4.146_906_882_995_402,
+            13.949_143_236_691_953,
+            8.600_118_692_892_666,
+            3.393_234_005_222_697,
+            7.409_443_420_293_639_4,
+            5.996_880_792_193_941,
+            0.647_744_830_471_756_2,
+        ];
+        assert_f64_seq("random_state_gamma", &values, &expected);
+
+        let mut zero_shape = RandomState::new(SeedMaterial::U64(42)).expect("zero shape");
+        assert_eq!(
+            zero_shape.standard_gamma(0.0, 5).expect("zero shape"),
+            vec![0.0; 5]
+        );
+        assert!(zero_shape.standard_gamma(-1.0, 1).is_err());
+        assert!(zero_shape.gamma(1.0, -1.0, 1).is_err());
     }
 
     #[test]

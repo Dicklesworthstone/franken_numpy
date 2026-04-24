@@ -1384,6 +1384,48 @@ impl PyRandomState {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
+    #[pyo3(signature = (shape, size=None))]
+    fn standard_gamma(
+        &mut self,
+        py: Python<'_>,
+        shape: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        if shape < 0.0 {
+            return Err(PyValueError::new_err("shape < 0"));
+        }
+        let size = random_size_from_py(py, size, "RandomState.standard_gamma(size)")?;
+        let (out_shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self
+            .inner
+            .standard_gamma(shape, len)
+            .map_err(map_random_error)?;
+        build_random_f64_parts(py, out_shape, values, scalar)
+    }
+
+    #[pyo3(signature = (shape, scale=1.0, size=None))]
+    fn gamma(
+        &mut self,
+        py: Python<'_>,
+        shape: f64,
+        scale: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        if shape < 0.0 {
+            return Err(PyValueError::new_err("shape < 0"));
+        }
+        if scale < 0.0 {
+            return Err(PyValueError::new_err("scale < 0"));
+        }
+        let size = random_size_from_py(py, size, "RandomState.gamma(size)")?;
+        let (out_shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self
+            .inner
+            .gamma(shape, scale, len)
+            .map_err(map_random_error)?;
+        build_random_f64_parts(py, out_shape, values, scalar)
+    }
+
     #[pyo3(signature = (low=0.0, high=1.0, size=None))]
     fn uniform(
         &mut self,
@@ -22150,6 +22192,121 @@ mod tests {
                 Err(err) => err,
             };
             assert_pyerr_matches_numpy(py, ours_negative, theirs_negative)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_state_legacy_gamma_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_state_legacy_gamma")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+            let shape = PyTuple::new(py, [2_usize, 3_usize])?;
+
+            let ours_scalar = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_scalar = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_scalar.call_method1("standard_gamma", (3.0_f64,))?,
+                &theirs_scalar.call_method1("standard_gamma", (3.0_f64,))?,
+            )?;
+
+            let ours_fractional = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_fractional = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_fractional.call_method1("standard_gamma", (0.5_f64, shape.clone()))?,
+                &theirs_fractional.call_method1("standard_gamma", (0.5_f64, shape.clone()))?,
+            )?;
+
+            let ours_scaled = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_scaled = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_scaled.call_method1("gamma", (2.0_f64, 3.0_f64, shape.clone()))?,
+                &theirs_scaled.call_method1("gamma", (2.0_f64, 3.0_f64, shape.clone()))?,
+            )?;
+
+            let ours_zero_shape = random.getattr("RandomState")?.call1((11_u64,))?;
+            let theirs_zero_shape = numpy_random.getattr("RandomState")?.call1((11_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_zero_shape.call_method1("standard_gamma", (0.0_f64, 4_usize))?,
+                &theirs_zero_shape.call_method1("standard_gamma", (0.0_f64, 4_usize))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_zero_shape.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+                &theirs_zero_shape.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
+
+            let ours_zero_scale = random.getattr("RandomState")?.call1((11_u64,))?;
+            let theirs_zero_scale = numpy_random.getattr("RandomState")?.call1((11_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_zero_scale.call_method1("gamma", (2.0_f64, 0.0_f64, 4_usize))?,
+                &theirs_zero_scale.call_method1("gamma", (2.0_f64, 0.0_f64, 4_usize))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_zero_scale.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+                &theirs_zero_scale.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
+
+            let ours_continuation = random.getattr("RandomState")?.call1((7_u64,))?;
+            let theirs_continuation = numpy_random.getattr("RandomState")?.call1((7_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_continuation.call_method1("standard_gamma", (3.0_f64, 5_usize))?,
+                &theirs_continuation.call_method1("standard_gamma", (3.0_f64, 5_usize))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_continuation.call_method1("random_sample", (5_usize,))?,
+                &theirs_continuation.call_method1("random_sample", (5_usize,))?,
+            )?;
+
+            let ours_negative_shape = random.getattr("RandomState")?.call1((1_u64,))?;
+            let theirs_negative_shape = numpy_random.getattr("RandomState")?.call1((1_u64,))?;
+            let ours_negative_shape =
+                match ours_negative_shape.call_method1("standard_gamma", (-1.0_f64,)) {
+                    Ok(_) => {
+                        return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                            "RandomState.standard_gamma(-1.0) unexpectedly succeeded",
+                        ));
+                    }
+                    Err(err) => err,
+                };
+            let theirs_negative_shape =
+                match theirs_negative_shape.call_method1("standard_gamma", (-1.0_f64,)) {
+                    Ok(_) => {
+                        return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                            "numpy RandomState.standard_gamma(-1.0) unexpectedly succeeded",
+                        ));
+                    }
+                    Err(err) => err,
+                };
+            assert_pyerr_matches_numpy(py, ours_negative_shape, theirs_negative_shape)?;
+
+            let ours_negative_scale = random.getattr("RandomState")?.call1((1_u64,))?;
+            let theirs_negative_scale = numpy_random.getattr("RandomState")?.call1((1_u64,))?;
+            let ours_negative_scale =
+                match ours_negative_scale.call_method1("gamma", (1.0_f64, -1.0_f64)) {
+                    Ok(_) => {
+                        return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                            "RandomState.gamma(1.0, -1.0) unexpectedly succeeded",
+                        ));
+                    }
+                    Err(err) => err,
+                };
+            let theirs_negative_scale =
+                match theirs_negative_scale.call_method1("gamma", (1.0_f64, -1.0_f64)) {
+                    Ok(_) => {
+                        return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                            "numpy RandomState.gamma(1.0, -1.0) unexpectedly succeeded",
+                        ));
+                    }
+                    Err(err) => err,
+                };
+            assert_pyerr_matches_numpy(py, ours_negative_scale, theirs_negative_scale)?;
 
             Ok(())
         });
