@@ -2,6 +2,10 @@ use fnp_dtype::{ArrayStorage, DType, f16, promote};
 use fnp_iter::{Nditer, NditerOptions, NditerOrder};
 use fnp_linalg::{pinv_hermitian_nxn_with_tolerance_aliases, pinv_mxn_with_tolerance_aliases};
 use fnp_ndarray::{broadcast_shapes, element_count};
+use fnp_random::{
+    BitGenerator, BitGeneratorError, BitGeneratorKind, Generator as RandomGenerator, RandomError,
+    RandomState as CoreRandomState, SeedMaterial, ShapedRandomOutput,
+};
 use fnp_ufunc::{
     BinaryOp, FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
     FromPyFuncReduceOptions, GridSpec, MAError, MaskedArray, UFuncArray, UnaryOp,
@@ -13,7 +17,7 @@ use fnp_ufunc::{
 };
 use pyo3::exceptions::{PyOSError, PyTypeError, PyValueError, PyZeroDivisionError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBool, PyComplex, PyDict, PyList, PyModule, PyTuple};
+use pyo3::types::{PyAny, PyBool, PyBytes, PyComplex, PyDict, PyList, PyModule, PyTuple};
 use pyo3::wrap_pyfunction;
 use pyo3::{Bound, IntoPyObject};
 
@@ -62,6 +66,296 @@ pub struct PyRClass;
 
 #[pyclass(name = "CClass", unsendable)]
 pub struct PyCClass;
+
+#[pyclass(name = "Generator", unsendable)]
+pub struct PyRandomGenerator {
+    inner: RandomGenerator,
+}
+
+#[pyclass(name = "RandomState", unsendable)]
+pub struct PyRandomState {
+    inner: CoreRandomState,
+}
+
+macro_rules! define_py_bit_generator {
+    ($type_name:ident, $py_name:literal, $kind:expr) => {
+        #[pyclass(name = $py_name, unsendable, skip_from_py_object)]
+        #[derive(Clone)]
+        pub struct $type_name {
+            inner: BitGenerator,
+        }
+
+        #[pymethods]
+        impl $type_name {
+            #[new]
+            #[pyo3(signature = (seed=None))]
+            fn new(seed: Option<u64>) -> PyResult<Self> {
+                Ok(Self {
+                    inner: construct_bit_generator($kind, seed)?,
+                })
+            }
+
+            #[getter]
+            fn state(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+                build_bit_generator_state_dict(py, &self.inner)
+            }
+
+            #[pyo3(signature = (size=None))]
+            fn random_raw(
+                &mut self,
+                py: Python<'_>,
+                size: Option<Py<PyAny>>,
+            ) -> PyResult<Py<PyAny>> {
+                bit_generator_random_raw(py, &mut self.inner, size)
+            }
+
+            #[pyo3(signature = (jumps=1))]
+            fn jumped(&self, jumps: u64) -> PyResult<Self> {
+                Ok(Self {
+                    inner: self.inner.jumped(jumps).map_err(map_bit_generator_error)?,
+                })
+            }
+
+            fn __repr__(&self) -> String {
+                format!("{}()", $py_name)
+            }
+        }
+    };
+}
+
+define_py_bit_generator!(PyMt19937, "MT19937", BitGeneratorKind::Mt19937);
+define_py_bit_generator!(PyPcg64, "PCG64", BitGeneratorKind::Pcg64);
+define_py_bit_generator!(PyPcg64Dxsm, "PCG64DXSM", BitGeneratorKind::Pcg64Dxsm);
+define_py_bit_generator!(PyPhilox, "Philox", BitGeneratorKind::Philox);
+define_py_bit_generator!(PySfc64, "SFC64", BitGeneratorKind::Sfc64);
+
+#[pymethods]
+impl PyRandomGenerator {
+    #[new]
+    fn new(bit_generator: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let bit_generator = extract_bit_generator(bit_generator)?;
+        Ok(Self {
+            inner: RandomGenerator::from_bit_generator(bit_generator),
+        })
+    }
+
+    #[getter]
+    fn bit_generator(&self) -> String {
+        self.inner.bit_generator().kind().as_str().to_string()
+    }
+
+    #[getter]
+    fn state(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        build_bit_generator_state_dict(py, self.inner.bit_generator())
+    }
+
+    #[pyo3(signature = (size=None))]
+    fn random(&mut self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.random(size)")?;
+        let output = self
+            .inner
+            .random_shaped(size.as_deref())
+            .map_err(map_random_error)?;
+        build_random_f64_output(py, output)
+    }
+
+    #[pyo3(signature = (size=None))]
+    fn standard_normal(&mut self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.standard_normal(size)")?;
+        let output = self
+            .inner
+            .standard_normal_shaped(size.as_deref())
+            .map_err(map_random_error)?;
+        build_random_f64_output(py, output)
+    }
+
+    #[pyo3(signature = (loc=0.0, scale=1.0, size=None))]
+    fn normal(
+        &mut self,
+        py: Python<'_>,
+        loc: f64,
+        scale: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.normal(size)")?;
+        let output = self
+            .inner
+            .normal_shaped(loc, scale, size.as_deref())
+            .map_err(map_random_error)?;
+        build_random_f64_output(py, output)
+    }
+
+    #[pyo3(signature = (low=0.0, high=1.0, size=None))]
+    fn uniform(
+        &mut self,
+        py: Python<'_>,
+        low: f64,
+        high: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.uniform(size)")?;
+        let output = self
+            .inner
+            .uniform_shaped(low, high, size.as_deref())
+            .map_err(map_random_error)?;
+        build_random_f64_output(py, output)
+    }
+
+    #[pyo3(signature = (low, high=None, size=None, endpoint=false))]
+    fn integers(
+        &mut self,
+        py: Python<'_>,
+        low: i64,
+        high: Option<i64>,
+        size: Option<Py<PyAny>>,
+        endpoint: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let (low, high) = match high {
+            Some(high) => (low, high),
+            None => (0, low),
+        };
+        let size = random_size_from_py(py, size, "Generator.integers(size)")?;
+        let output = if endpoint {
+            self.inner
+                .integers_endpoint_shaped(low, high, size.as_deref())
+        } else {
+            self.inner.integers_shaped(low, high, size.as_deref())
+        }
+        .map_err(map_random_error)?;
+        build_random_i64_output(py, output)
+    }
+
+    fn bytes(&mut self, py: Python<'_>, length: usize) -> PyResult<Py<PyAny>> {
+        Ok(PyBytes::new(py, &self.inner.bytes(length))
+            .into_any()
+            .unbind())
+    }
+
+    #[pyo3(signature = (a, size=None, replace=true))]
+    fn choice(
+        &mut self,
+        py: Python<'_>,
+        a: Py<PyAny>,
+        size: Option<Py<PyAny>>,
+        replace: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let values = extract_random_f64_population(py, a.bind(py), "Generator.choice(a)")?;
+        let size = random_size_from_py(py, size, "Generator.choice(size)")?;
+        let output = self
+            .inner
+            .choice_shaped(&values, size.as_deref(), replace)
+            .map_err(map_random_error)?;
+        build_random_f64_output(py, output)
+    }
+
+    fn permutation(&mut self, py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        let bound = x.bind(py);
+        if let Ok(n) = bound.extract::<i64>() {
+            if n < 0 {
+                return Err(PyValueError::new_err(
+                    "permutation length must be non-negative",
+                ));
+            }
+            let n = usize::try_from(n)
+                .map_err(|_| PyValueError::new_err("permutation length is too large"))?;
+            let values = self
+                .inner
+                .permutation_range(n)
+                .map_err(map_random_error)?
+                .into_iter()
+                .map(|value| {
+                    i64::try_from(value)
+                        .map_err(|_| PyValueError::new_err("permutation value exceeds int64"))
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            return build_numpy_array_from_storage(py, &[n], ArrayStorage::I64(values));
+        }
+
+        let values = extract_random_f64_population(py, bound, "Generator.permutation(x)")?;
+        let output = self
+            .inner
+            .permutation_shaped(&values)
+            .map_err(map_random_error)?;
+        build_random_f64_output(py, output)
+    }
+}
+
+#[pymethods]
+impl PyRandomState {
+    #[new]
+    #[pyo3(signature = (seed=None))]
+    fn new(seed: Option<u64>) -> PyResult<Self> {
+        let seed = seed.map_or(SeedMaterial::None, SeedMaterial::U64);
+        Ok(Self {
+            inner: CoreRandomState::new(seed).map_err(map_bit_generator_error)?,
+        })
+    }
+
+    #[pyo3(signature = (size=None))]
+    fn random_sample(&mut self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "RandomState.random_sample(size)")?;
+        let (shape, values, scalar) = random_state_f64_parts(&mut self.inner, size)?;
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (size=None))]
+    fn random(&mut self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        self.random_sample(py, size)
+    }
+
+    #[pyo3(signature = (low, high=None, size=None))]
+    fn randint(
+        &mut self,
+        py: Python<'_>,
+        low: i64,
+        high: Option<i64>,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let (low, high) = match high {
+            Some(high) => (low, high),
+            None => (0, low),
+        };
+        if high <= low {
+            return Err(PyValueError::new_err("high <= low"));
+        }
+        let size = random_size_from_py(py, size, "RandomState.randint(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let span = i128::from(high) - i128::from(low);
+        let span =
+            u64::try_from(span).map_err(|_| PyValueError::new_err("integer range is too large"))?;
+        let mut values = Vec::with_capacity(len);
+        for _ in 0..len {
+            let offset = self.inner.bounded_u64(span).map_err(map_random_error)?;
+            let offset = i64::try_from(offset)
+                .map_err(|_| PyValueError::new_err("integer sample exceeds int64"))?;
+            values.push(
+                low.checked_add(offset)
+                    .ok_or_else(|| PyValueError::new_err("integer sample exceeds int64"))?,
+            );
+        }
+        build_random_i64_parts(py, shape, values, scalar)
+    }
+
+    fn bytes(&mut self, py: Python<'_>, length: usize) -> PyResult<Py<PyAny>> {
+        let mut out = Vec::with_capacity(length);
+        while out.len() < length {
+            out.extend_from_slice(&self.inner.next_u64().to_le_bytes());
+        }
+        out.truncate(length);
+        Ok(PyBytes::new(py, &out).into_any().unbind())
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (seed=None))]
+fn default_rng(seed: Option<u64>) -> PyResult<PyRandomGenerator> {
+    Ok(PyRandomGenerator {
+        inner: RandomGenerator::from_bit_generator(construct_bit_generator(
+            BitGeneratorKind::Pcg64,
+            seed,
+        )?),
+    })
+}
 
 #[derive(Clone, Copy)]
 enum AxisConcatenatorKind {
@@ -158,6 +452,227 @@ struct ParsedGridAxis {
 
 fn map_ufunc_error(err: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(err.to_string())
+}
+
+fn map_bit_generator_error(error: BitGeneratorError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+fn map_random_error(error: RandomError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+fn construct_bit_generator(kind: BitGeneratorKind, seed: Option<u64>) -> PyResult<BitGenerator> {
+    let seed = seed.map_or(SeedMaterial::None, SeedMaterial::U64);
+    BitGenerator::new(kind, seed).map_err(map_bit_generator_error)
+}
+
+fn bit_generator_numpy_name(kind: BitGeneratorKind) -> &'static str {
+    match kind {
+        BitGeneratorKind::Mt19937 => "MT19937",
+        BitGeneratorKind::Pcg64 => "PCG64",
+        BitGeneratorKind::Pcg64Dxsm => "PCG64DXSM",
+        BitGeneratorKind::Philox => "Philox",
+        BitGeneratorKind::Sfc64 => "SFC64",
+    }
+}
+
+fn py_int_from_u128<'py>(py: Python<'py>, value: u128) -> PyResult<Bound<'py, PyAny>> {
+    py.import("builtins")?
+        .getattr("int")?
+        .call1((value.to_string(),))
+}
+
+fn build_bit_generator_state_dict(
+    py: Python<'_>,
+    bit_generator: &BitGenerator,
+) -> PyResult<Py<PyAny>> {
+    let state = bit_generator.state();
+    let state_dict = PyDict::new(py);
+    state_dict.set_item("state", py_int_from_u128(py, state.seed)?)?;
+    state_dict.set_item("inc", py_int_from_u128(py, state.counter)?)?;
+
+    let schema_entries = PyList::empty(py);
+    for (key, value) in &state.schema_entries {
+        schema_entries.append(PyTuple::new(py, [key.clone(), value.to_string()])?)?;
+    }
+
+    let dict = PyDict::new(py);
+    dict.set_item("bit_generator", bit_generator_numpy_name(state.kind))?;
+    dict.set_item("state", state_dict)?;
+    dict.set_item("schema_version", state.schema_version)?;
+    dict.set_item("schema_entries", schema_entries)?;
+    dict.set_item("has_uint32", 0)?;
+    dict.set_item("uinteger", 0)?;
+    Ok(dict.into_any().unbind())
+}
+
+fn extract_bit_generator(value: &Bound<'_, PyAny>) -> PyResult<BitGenerator> {
+    if let Ok(bit_generator) = value.extract::<PyRef<'_, PyMt19937>>() {
+        return Ok(bit_generator.inner.clone());
+    }
+    if let Ok(bit_generator) = value.extract::<PyRef<'_, PyPcg64>>() {
+        return Ok(bit_generator.inner.clone());
+    }
+    if let Ok(bit_generator) = value.extract::<PyRef<'_, PyPcg64Dxsm>>() {
+        return Ok(bit_generator.inner.clone());
+    }
+    if let Ok(bit_generator) = value.extract::<PyRef<'_, PyPhilox>>() {
+        return Ok(bit_generator.inner.clone());
+    }
+    if let Ok(bit_generator) = value.extract::<PyRef<'_, PySfc64>>() {
+        return Ok(bit_generator.inner.clone());
+    }
+    Err(PyTypeError::new_err(
+        "Generator expects an fnp_python.random bit generator",
+    ))
+}
+
+fn random_size_from_py(
+    py: Python<'_>,
+    size: Option<Py<PyAny>>,
+    context: &str,
+) -> PyResult<Option<Vec<usize>>> {
+    let Some(size) = size else {
+        return Ok(None);
+    };
+    let value = size.bind(py);
+    if value.is_none() {
+        return Ok(None);
+    }
+    if value.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(format!(
+            "{context}: size must be None, int, or tuple/list of ints",
+        )));
+    }
+    if let Ok(dim) = value.extract::<i64>() {
+        if dim < 0 {
+            return Err(PyValueError::new_err(format!(
+                "{context}: negative dimensions are not allowed",
+            )));
+        }
+        let dim = usize::try_from(dim).map_err(|_| {
+            PyValueError::new_err(format!("{context}: size dimension is too large"))
+        })?;
+        return Ok(Some(vec![dim]));
+    }
+    if let Ok(dims) = value.extract::<Vec<i64>>() {
+        let mut shape = Vec::with_capacity(dims.len());
+        for dim in dims {
+            if dim < 0 {
+                return Err(PyValueError::new_err(format!(
+                    "{context}: negative dimensions are not allowed",
+                )));
+            }
+            shape.push(usize::try_from(dim).map_err(|_| {
+                PyValueError::new_err(format!("{context}: size dimension is too large"))
+            })?);
+        }
+        element_count(&shape).map_err(|err| PyValueError::new_err(err.to_string()))?;
+        return Ok(Some(shape));
+    }
+    Err(PyTypeError::new_err(format!(
+        "{context}: size must be None, int, or tuple/list of ints",
+    )))
+}
+
+fn random_len_and_shape(size: Option<Vec<usize>>) -> PyResult<(Vec<usize>, usize, bool)> {
+    let scalar = size.is_none();
+    let shape = size.unwrap_or_default();
+    let len = if scalar {
+        1
+    } else {
+        element_count(&shape).map_err(|err| PyValueError::new_err(err.to_string()))?
+    };
+    Ok((shape, len, scalar))
+}
+
+fn build_random_f64_parts(
+    py: Python<'_>,
+    shape: Vec<usize>,
+    values: Vec<f64>,
+    scalar: bool,
+) -> PyResult<Py<PyAny>> {
+    if scalar {
+        let value = values
+            .first()
+            .copied()
+            .ok_or_else(|| PyValueError::new_err("random scalar output was empty"))?;
+        return Ok(value.into_pyobject(py)?.into_any().unbind());
+    }
+    build_numpy_array_from_storage(py, &shape, ArrayStorage::F64(values))
+}
+
+fn build_random_i64_parts(
+    py: Python<'_>,
+    shape: Vec<usize>,
+    values: Vec<i64>,
+    scalar: bool,
+) -> PyResult<Py<PyAny>> {
+    if scalar {
+        let value = values
+            .first()
+            .copied()
+            .ok_or_else(|| PyValueError::new_err("random scalar output was empty"))?;
+        return Ok(value.into_pyobject(py)?.into_any().unbind());
+    }
+    build_numpy_array_from_storage(py, &shape, ArrayStorage::I64(values))
+}
+
+fn build_random_f64_output(py: Python<'_>, output: ShapedRandomOutput<f64>) -> PyResult<Py<PyAny>> {
+    let (shape, values, scalar) = output.into_parts();
+    build_random_f64_parts(py, shape, values, scalar)
+}
+
+fn build_random_i64_output(py: Python<'_>, output: ShapedRandomOutput<i64>) -> PyResult<Py<PyAny>> {
+    let (shape, values, scalar) = output.into_parts();
+    build_random_i64_parts(py, shape, values, scalar)
+}
+
+fn bit_generator_random_raw(
+    py: Python<'_>,
+    bit_generator: &mut BitGenerator,
+    size: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let size = random_size_from_py(py, size, "BitGenerator.random_raw(size)")?;
+    let (shape, len, scalar) = random_len_and_shape(size)?;
+    if scalar {
+        return Ok(bit_generator
+            .next_u64()
+            .into_pyobject(py)?
+            .into_any()
+            .unbind());
+    }
+    build_numpy_array_from_storage(py, &shape, ArrayStorage::U64(bit_generator.fill_u64(len)))
+}
+
+fn extract_random_f64_population(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    context: &str,
+) -> PyResult<Vec<f64>> {
+    let numpy = py.import("numpy")?;
+    let array = numpy.call_method1("asarray", (value,))?;
+    let flat = array.call_method1("reshape", (-1,))?;
+    let values = flat
+        .call_method1("astype", ("float64",))?
+        .call_method0("tolist")?
+        .extract::<Vec<f64>>()?;
+    if values.is_empty() {
+        return Err(PyValueError::new_err(format!(
+            "{context}: a cannot be empty unless no samples are taken",
+        )));
+    }
+    Ok(values)
+}
+
+fn random_state_f64_parts(
+    random_state: &mut CoreRandomState,
+    size: Option<Vec<usize>>,
+) -> PyResult<(Vec<usize>, Vec<f64>, bool)> {
+    let (shape, len, scalar) = random_len_and_shape(size)?;
+    let values = (0..len).map(|_| random_state.next_f64()).collect();
+    Ok((shape, values, scalar))
 }
 
 #[derive(Clone, Copy)]
@@ -13649,36 +14164,124 @@ fn svdvals(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (N, M=None, k=0, dtype=None, order="C"))]
-#[allow(non_snake_case)]
+#[pyo3(signature = (*args, **kwargs))]
 fn eye(
     py: Python<'_>,
-    N: i64,
-    M: Option<i64>,
-    k: i64,
-    dtype: Option<Py<PyAny>>,
-    order: &str,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // numpy.eye exposes capital `N` and `M` as kwarg names; the Rust
-    // params here match those exactly so that `fnp_python.eye(N=3, M=5)`
-    // and `fnp_python.eye(3, M=5)` both accept the numpy spelling.
-    let n = N;
-    let m = M;
     let numpy = py.import("numpy")?;
     let eye_fn = numpy.getattr("eye")?;
-    let dtype_for_parse = dtype.as_ref().map(|value| value.clone_ref(py));
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let kwargs = PyDict::new(py);
-        if let Some(m_val) = m {
-            kwargs.set_item("M", m_val)?;
+    let call_kwargs = PyDict::new(py);
+    if let Some(kwargs) = kwargs {
+        for (key, value) in kwargs.iter() {
+            let name = key.extract::<String>()?;
+            if name == "m" {
+                call_kwargs.set_item("M", value)?;
+            } else {
+                call_kwargs.set_item(key, value)?;
+            }
         }
-        kwargs.set_item("k", k)?;
-        if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    let fallback =
+        || -> PyResult<Py<PyAny>> { Ok(eye_fn.call(args, Some(&call_kwargs))?.unbind()) };
+
+    if args.len() > 5 {
+        return fallback();
+    }
+    for (key, _) in call_kwargs.iter() {
+        match key.extract::<String>()?.as_str() {
+            "N" | "M" | "k" | "dtype" | "order" => {}
+            _ => return fallback(),
         }
-        kwargs.set_item("order", order)?;
-        Ok(eye_fn.call((n,), Some(&kwargs))?.unbind())
+    }
+    if args.len() >= 1 && call_kwargs.contains("N")?
+        || args.len() >= 2 && call_kwargs.contains("M")?
+        || args.len() >= 3 && call_kwargs.contains("k")?
+        || args.len() >= 4 && call_kwargs.contains("dtype")?
+        || args.len() >= 5 && call_kwargs.contains("order")?
+    {
+        return fallback();
+    }
+
+    let n = if args.is_empty() {
+        match call_kwargs.get_item("N")? {
+            Some(value) => match value.extract::<i64>() {
+                Ok(value) => value,
+                Err(_) => return fallback(),
+            },
+            None => return fallback(),
+        }
+    } else {
+        match args.get_item(0)?.extract::<i64>() {
+            Ok(value) => value,
+            Err(_) => return fallback(),
+        }
     };
+    let m = if args.len() >= 2 {
+        let value = args.get_item(1)?;
+        if value.is_none() {
+            None
+        } else {
+            match value.extract::<i64>() {
+                Ok(value) => Some(value),
+                Err(_) => return fallback(),
+            }
+        }
+    } else {
+        match call_kwargs.get_item("M")? {
+            Some(value) if value.is_none() => None,
+            Some(value) => match value.extract::<i64>() {
+                Ok(value) => Some(value),
+                Err(_) => return fallback(),
+            },
+            None => None,
+        }
+    };
+    let k = if args.len() >= 3 {
+        match args.get_item(2)?.extract::<i64>() {
+            Ok(value) => value,
+            Err(_) => return fallback(),
+        }
+    } else {
+        match call_kwargs.get_item("k")? {
+            Some(value) => match value.extract::<i64>() {
+                Ok(value) => value,
+                Err(_) => return fallback(),
+            },
+            None => 0,
+        }
+    };
+    let dtype = if args.len() >= 4 {
+        let value = args.get_item(3)?;
+        if value.is_none() {
+            None
+        } else {
+            Some(value.unbind())
+        }
+    } else {
+        match call_kwargs.get_item("dtype")? {
+            Some(value) if value.is_none() => None,
+            Some(value) => Some(value.unbind()),
+            None => None,
+        }
+    };
+    let order = if args.len() >= 5 {
+        match args.get_item(4)?.extract::<String>() {
+            Ok(value) => value,
+            Err(_) => return fallback(),
+        }
+    } else {
+        match call_kwargs.get_item("order")? {
+            Some(value) => match value.extract::<String>() {
+                Ok(value) => value,
+                Err(_) => return fallback(),
+            },
+            None => String::from("C"),
+        }
+    };
+
+    let dtype_for_parse = dtype.as_ref().map(|value| value.clone_ref(py));
 
     if order != "C" || n < 0 || m.is_some_and(|value| value < 0) {
         return fallback();
@@ -17506,6 +18109,19 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("ogrid", Py::new(py, PyOGridClass)?)?;
     m.add("r_", Py::new(py, PyRClass)?)?;
     m.add("c_", Py::new(py, PyCClass)?)?;
+    {
+        let random = PyModule::new(py, "random")?;
+        random.add_class::<PyRandomGenerator>()?;
+        random.add_class::<PyRandomState>()?;
+        random.add_class::<PyMt19937>()?;
+        random.add_class::<PyPcg64>()?;
+        random.add_class::<PyPcg64Dxsm>()?;
+        random.add_class::<PyPhilox>()?;
+        random.add_class::<PySfc64>()?;
+        random.add_function(wrap_pyfunction!(default_rng, &random)?)?;
+        m.add_submodule(&random)?;
+        m.add("random", random)?;
+    }
     m.add_function(wrap_pyfunction!(frompyfunc, m)?)?;
     m.add_function(wrap_pyfunction!(vectorize, m)?)?;
     m.add_function(wrap_pyfunction!(digitize, m)?)?;
@@ -18621,6 +19237,72 @@ mod tests {
         );
         assert_eq!(actual.to_string(), expected.to_string());
         Ok(())
+    }
+
+    #[test]
+    fn random_namespace_matches_numpy_bit_generator_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+
+            for name in [
+                "Generator",
+                "RandomState",
+                "MT19937",
+                "PCG64",
+                "PCG64DXSM",
+                "Philox",
+                "SFC64",
+                "default_rng",
+            ] {
+                assert!(random.getattr(name).is_ok(), "missing random.{name}");
+            }
+
+            let ours_pcg64 = random.getattr("PCG64")?.call1((42_u64,))?;
+            let theirs_pcg64 = numpy_random.getattr("PCG64")?.call1((42_u64,))?;
+            assert_array_matches_numpy(
+                &ours_pcg64.call_method1("random_raw", (4_usize,))?,
+                &theirs_pcg64.call_method1("random_raw", (4_usize,))?,
+            )?;
+
+            let shape = PyTuple::new(py, [2_usize, 2_usize])?;
+            let ours_dxsm = random.getattr("PCG64DXSM")?.call1((123_u64,))?;
+            let theirs_dxsm = numpy_random.getattr("PCG64DXSM")?.call1((123_u64,))?;
+            let ours_generator = random.getattr("Generator")?.call1((ours_dxsm,))?;
+            let theirs_generator = numpy_random.getattr("Generator")?.call1((theirs_dxsm,))?;
+
+            assert_array_matches_numpy(
+                &ours_generator.call_method1("random", (shape.clone(),))?,
+                &theirs_generator.call_method1("random", (shape.clone(),))?,
+            )?;
+            assert_array_matches_numpy(
+                &ours_generator.call_method1("integers", (0_i64, 10_i64, shape.clone()))?,
+                &theirs_generator.call_method1("integers", (0_i64, 10_i64, shape.clone()))?,
+            )?;
+            assert_array_matches_numpy(
+                &ours_generator.call_method1("normal", (5.0_f64, 2.0_f64, 4_usize))?,
+                &theirs_generator.call_method1("normal", (5.0_f64, 2.0_f64, 4_usize))?,
+            )?;
+            assert_eq!(
+                repr_string(&ours_generator.call_method1("bytes", (8_usize,))?),
+                repr_string(&theirs_generator.call_method1("bytes", (8_usize,))?),
+            );
+
+            let ours_state = random.getattr("RandomState")?.call1((7_u64,))?;
+            let theirs_state = numpy_random.getattr("RandomState")?.call1((7_u64,))?;
+            assert_array_matches_numpy(
+                &ours_state.call_method1("random_sample", (shape.clone(),))?,
+                &theirs_state.call_method1("random_sample", (shape,))?,
+            )?;
+
+            Ok(())
+        });
     }
 
     #[test]

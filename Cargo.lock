@@ -525,6 +525,7 @@ dependencies = [
  "fnp-iter",
  "fnp-linalg",
  "fnp-ndarray",
+ "fnp-random",
  "fnp-ufunc",
  "pyo3",
 ]
