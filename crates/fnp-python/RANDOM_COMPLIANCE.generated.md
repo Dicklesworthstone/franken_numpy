@@ -11,30 +11,10 @@
 
 | Level | Present | Total | Coverage |
 |-------|--------:|------:|---------:|
-| MUST | 41 | 56 | 73.2% |
+| MUST | 56 | 56 | 100.0% |
 | SHOULD | 3 | 3 | 100.0% |
 | MAY | 2 | 2 | 100.0% |
-| **Total** | **46** | **61** | **75.4%** |
-
-## Missing names
-
-| Name | Level |
-|------|:-----:|
-| `binomial` | MUST |
-| `choice` | MUST |
-| `dirichlet` | MUST |
-| `hypergeometric` | MUST |
-| `logseries` | MUST |
-| `multinomial` | MUST |
-| `multivariate_normal` | MUST |
-| `negative_binomial` | MUST |
-| `noncentral_chisquare` | MUST |
-| `noncentral_f` | MUST |
-| `permutation` | MUST |
-| `poisson` | MUST |
-| `shuffle` | MUST |
-| `vonmises` | MUST |
-| `wald` | MUST |
+| **Total** | **61** | **61** | **100.0%** |
 
 ## Present names
 
@@ -50,20 +30,32 @@
 | `SFC64` | MUST |
 | `SeedSequence` | MUST |
 | `beta` | MUST |
+| `binomial` | MUST |
 | `bytes` | MUST |
 | `chisquare` | MUST |
+| `choice` | MUST |
 | `default_rng` | MUST |
+| `dirichlet` | MUST |
 | `exponential` | MUST |
 | `f` | MUST |
 | `gamma` | MUST |
 | `geometric` | MUST |
 | `get_state` | SHOULD |
 | `gumbel` | MUST |
+| `hypergeometric` | MUST |
 | `laplace` | MUST |
 | `logistic` | MUST |
 | `lognormal` | MUST |
+| `logseries` | MUST |
+| `multinomial` | MUST |
+| `multivariate_normal` | MUST |
+| `negative_binomial` | MUST |
+| `noncentral_chisquare` | MUST |
+| `noncentral_f` | MUST |
 | `normal` | MUST |
 | `pareto` | MUST |
+| `permutation` | MUST |
+| `poisson` | MUST |
 | `power` | MUST |
 | `rand` | MUST |
 | `randint` | MUST |
@@ -76,6 +68,7 @@
 | `sample` | MAY |
 | `seed` | SHOULD |
 | `set_state` | SHOULD |
+| `shuffle` | MUST |
 | `standard_cauchy` | MUST |
 | `standard_exponential` | MUST |
 | `standard_gamma` | MUST |
@@ -84,5 +77,7 @@
 | `tomaxint` | MUST |
 | `triangular` | MUST |
 | `uniform` | MUST |
+| `vonmises` | MUST |
+| `wald` | MUST |
 | `weibull` | MUST |
 | `zipf` | MUST |

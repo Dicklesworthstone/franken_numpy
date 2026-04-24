@@ -2709,12 +2709,7 @@ impl RandomState {
             .collect())
     }
 
-    pub fn logistic(
-        &mut self,
-        loc: f64,
-        scale: f64,
-        size: usize,
-    ) -> Result<Vec<f64>, RandomError> {
+    pub fn logistic(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
@@ -2823,7 +2818,7 @@ impl RandomState {
                     break;
                 }
             }
-            v *= v * v;
+            v = v * v * v;
             let u = self.next_f64();
             if u < 1.0 - 0.0331 * x * x * x * x {
                 return b * v;
@@ -2841,6 +2836,52 @@ impl RandomState {
 
     pub fn set_state(&mut self, state: &BitGeneratorState) -> Result<(), BitGeneratorError> {
         self.bit_generator.set_state(state)
+    }
+
+    /// Fisher-Yates shuffle over a slice. Mimics `numpy.random.RandomState.shuffle`
+    /// element-order semantics by drawing `random_interval(i)` for each
+    /// decreasing index i in [n-1, 1], then swapping x[i] and x[j].
+    /// Generic over the slice element type so callers can shuffle f64
+    /// arrays, permuted index vectors, or byte buffers identically.
+    pub fn shuffle_slice<T>(&mut self, x: &mut [T]) {
+        let n = x.len();
+        for i in (1..n).rev() {
+            let j = self.random_interval(i as u64) as usize;
+            x.swap(i, j);
+        }
+    }
+
+    /// Return a shuffled copy of `x`. Equivalent to
+    /// `numpy.random.RandomState.permutation(x)` for a 1-D f64 array.
+    pub fn permutation_f64(&mut self, x: &[f64]) -> Vec<f64> {
+        let mut out = x.to_vec();
+        self.shuffle_slice(&mut out);
+        out
+    }
+
+    /// Generate a random permutation of integers `[0, n)`. Equivalent to
+    /// `numpy.random.RandomState.permutation(n)`.
+    pub fn permutation_range(&mut self, n: usize) -> Vec<i64> {
+        let mut out: Vec<i64> = (0..n as i64).collect();
+        self.shuffle_slice(&mut out);
+        out
+    }
+
+    /// Return indices into a 1-D array of length `n_a` for `choice`.
+    ///
+    /// Bit-exact legacy parity with `numpy.random.RandomState.choice`
+    /// when `replace=true` + `p=None`: draws `size` independent
+    /// `random_interval(n_a - 1)` values. Matches the C-level
+    /// `rk_interval` routine numpy's mtrand uses internally. Returns
+    /// the raw index vector so callers can gather the actual values.
+    pub fn choice_indices_unweighted(&mut self, n_a: usize, size: usize) -> Vec<i64> {
+        if n_a == 0 {
+            return Vec::new();
+        }
+        let upper = (n_a - 1) as u64;
+        (0..size)
+            .map(|_| self.random_interval(upper) as i64)
+            .collect()
     }
 }
 
@@ -6312,16 +6353,16 @@ for child in rng.spawn(n_children):
         let mut shifted = RandomState::new(SeedMaterial::U64(42)).expect("shifted");
         let values = shifted.lognormal(0.5, 0.75, 10).expect("shifted");
         let expected = [
-            2.392_970_819_534_342_2,
-            1.486_317_782_123_621_1,
+            2.392_970_819_534_342,
+            1.486_317_782_123_621,
             2.679_864_955_663_915_4,
             5.166_897_399_904_688,
-            1.383_179_685_879_962_1,
+            1.383_179_685_879_962,
             1.383_196_717_533_594_4,
             5.389_268_231_643_371,
-            2.931_681_199_980_709_1,
+            2.931_681_199_980_709,
             1.159_390_238_618_054_1,
-            2.476_682_672_493_523_8,
+            2.476_682_672_493_524,
         ];
         assert_f64_seq("random_state_lognormal_shifted", &values, &expected);
 
@@ -6710,7 +6751,11 @@ for child in rng.spawn(n_children):
 
         let mut infinite = RandomState::new(SeedMaterial::U64(42)).expect("infinite");
         let values = infinite.rayleigh(f64::INFINITY, 3).expect("infinite");
-        assert!(values.iter().all(|value| value.is_infinite() && value.is_sign_positive()));
+        assert!(
+            values
+                .iter()
+                .all(|value| value.is_infinite() && value.is_sign_positive())
+        );
         let after: Vec<u64> = (0..5).map(|_| infinite.random_interval(9)).collect();
         assert_eq!(after, vec![4, 6, 9, 2, 6]);
 
@@ -6720,7 +6765,10 @@ for child in rng.spawn(n_children):
         assert_eq!(after, vec![9, 0, 1, 7, 1]);
 
         let mut invalid = RandomState::new(SeedMaterial::U64(42)).expect("invalid");
-        assert_eq!(invalid.rayleigh(-0.0, 1), Err(RandomError::InvalidParameter));
+        assert_eq!(
+            invalid.rayleigh(-0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
         let after: Vec<u64> = (0..3).map(|_| invalid.random_interval(9)).collect();
         assert_eq!(after, vec![6, 3, 7]);
     }
@@ -6867,7 +6915,7 @@ for child in rng.spawn(n_children):
             3.870_795_538_956_511_6,
             2.659_386_119_648_023_5,
             -1.493_897_824_886_198,
-            -1.494_361_653_518_716_1,
+            -1.494_361_653_518_716,
             -4.458_173_610_582_739,
             5.954_251_051_759_980_5,
             2.677_804_919_201_957_3,
@@ -6938,8 +6986,8 @@ for child in rng.spawn(n_children):
         let expected = [
             2.260_379_848_622_869_7,
             4.230_956_228_111_165_5,
-            3.206_658_789_225_223_8,
-            2.805_438_952_857_414_8,
+            3.206_658_789_225_224,
+            2.805_438_952_857_415,
             1.789_983_899_690_206_4,
             1.789_922_832_525_311_1,
             1.482_010_838_750_331_2,
@@ -6963,7 +7011,7 @@ for child in rng.spawn(n_children):
         let expected = [
             4.486_068_237_952_967,
             2.646_693_909_608_272_7,
-            2.553_256_360_776_482_2,
+            2.553_256_360_776_482,
         ];
         assert_f64_seq("random_state_triangular_cached", &values, &expected);
         let after: Vec<f64> = (0..3).map(|_| cached.next_f64()).collect();
@@ -6975,9 +7023,7 @@ for child in rng.spawn(n_children):
         assert_f64_seq("random_state_triangular_cached_after", &after, &expected);
 
         let mut right_mode = RandomState::new(SeedMaterial::U64(42)).expect("right mode");
-        let values = right_mode
-            .triangular(1.0, 5.0, 5.0, 3)
-            .expect("right mode");
+        let values = right_mode.triangular(1.0, 5.0, 5.0, 3).expect("right mode");
         let expected = [
             3.447_987_316_461_791,
             4.900_183_188_333_422,
@@ -6997,15 +7043,21 @@ for child in rng.spawn(n_children):
         let values = infinite
             .triangular(f64::NEG_INFINITY, 2.0, 5.0, 3)
             .expect("infinite");
-        assert!(values.iter().all(|value| value.is_infinite() && value.is_sign_negative()));
+        assert!(
+            values
+                .iter()
+                .all(|value| value.is_infinite() && value.is_sign_negative())
+        );
         let after: Vec<u64> = (0..5).map(|_| infinite.random_interval(9)).collect();
         assert_eq!(after, vec![4, 6, 9, 2, 6]);
 
         let mut empty = RandomState::new(SeedMaterial::U64(11)).expect("empty");
-        assert!(empty
-            .triangular(1.0, 2.0, 5.0, 0)
-            .expect("empty")
-            .is_empty());
+        assert!(
+            empty
+                .triangular(1.0, 2.0, 5.0, 0)
+                .expect("empty")
+                .is_empty()
+        );
         let after: Vec<u64> = (0..5).map(|_| empty.random_interval(9)).collect();
         assert_eq!(after, vec![9, 0, 1, 7, 1]);
 
@@ -7079,9 +7131,7 @@ for child in rng.spawn(n_children):
         assert_eq!(after, vec![4, 6, 9, 2, 6]);
 
         let mut infinite = RandomState::new(SeedMaterial::U64(42)).expect("infinite");
-        let values = infinite
-            .logistic(2.0, f64::INFINITY, 3)
-            .expect("infinite");
+        let values = infinite.logistic(2.0, f64::INFINITY, 3).expect("infinite");
         assert!(values[0].is_infinite() && values[0].is_sign_negative());
         assert!(values[1].is_infinite() && values[1].is_sign_positive());
         assert!(values[2].is_infinite() && values[2].is_sign_positive());
@@ -7116,7 +7166,7 @@ for child in rng.spawn(n_children):
             10.448_304_570_773_413,
             -0.096_240_715_110_335_72,
             2.253_139_298_098_811,
-            1.375_910_109_141_309_1,
+            1.375_910_109_141_309,
         ];
         assert_f64_seq("random_state_gumbel_shaped", &values, &expected);
         let after: Vec<u64> = (0..5).map(|_| shaped.random_interval(9)).collect();
@@ -7131,7 +7181,7 @@ for child in rng.spawn(n_children):
         let values = cached.gumbel(2.0, 3.0, 3).expect("cached gumbel");
         let expected = [
             -2.017_793_956_107_641_2,
-            2.771_403_212_308_204_2,
+            2.771_403_212_308_204,
             3.089_844_633_567_386_4,
         ];
         assert_f64_seq("random_state_gumbel_cached", &values, &expected);
