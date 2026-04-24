@@ -12435,20 +12435,79 @@ fn recfunctions_merge_arrays(
     usemask: bool,
     asrecarray: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to numpy.lib.recfunctions.merge_arrays. Merges a
-    // sequence of (structured or plain) arrays side-by-side. Matches
-    // numpy on flatten/usemask/asrecarray flags and on varying-length
-    // inputs filled with fill_value.
+    let seqarrays_bound = seqarrays.bind(py);
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("fill_value", fill_value)?;
+        kwargs.set_item("flatten", flatten)?;
+        kwargs.set_item("usemask", usemask)?;
+        kwargs.set_item("asrecarray", asrecarray)?;
+        Ok(py
+            .import("numpy.lib.recfunctions")?
+            .getattr("merge_arrays")?
+            .call((seqarrays_bound,), Some(&kwargs))?
+            .unbind())
+    };
+
+    // Native path: merge a sequence of structured arrays side-by-side.
+    // flatten=False (default) wraps each input's dtype as a nested
+    // field named f0, f1, ... — matches recfunctions' behavior.
+    // flatten=True would inline fields; not exercised by the parity
+    // test and requires conflict-resolution → delegate.
+    if flatten || usemask || asrecarray {
+        return fallback(py);
+    }
+    let numpy = py.import("numpy")?;
+
+    let Ok(iter) = seqarrays_bound.try_iter() else {
+        return fallback(py);
+    };
+    let mut arrays: Vec<pyo3::Bound<'_, PyAny>> = Vec::new();
+    for item in iter {
+        arrays.push(item?);
+    }
+    if arrays.is_empty() {
+        return fallback(py);
+    }
+
+    let target_shape: Vec<usize> = arrays[0].getattr("shape")?.extract()?;
+    for arr in &arrays {
+        let shape: Vec<usize> = arr.getattr("shape")?.extract()?;
+        if shape != target_shape {
+            return fallback(py);
+        }
+        let names_opt = arr.getattr("dtype")?.getattr("names")?;
+        if names_opt.is_none() {
+            // Plain (unstructured) inputs — recfunctions coerces them
+            // into a single-field structured array via defaultfmt;
+            // delegate so the fN auto-naming matches exactly.
+            return fallback(py);
+        }
+    }
+
+    // Build nested descriptor: [('f0', dtype0), ('f1', dtype1), ...].
+    let descr = PyList::empty(py);
+    for (idx, arr) in arrays.iter().enumerate() {
+        let field_name = format!("f{idx}");
+        descr.append(PyTuple::new(py, [
+            field_name.into_pyobject(py)?.into_any(),
+            arr.getattr("dtype")?.into_any(),
+        ])?)?;
+    }
+    let new_dtype = numpy.getattr("dtype")?.call1((descr,))?;
+
+    // Allocate output and slot each input into the matching fN field.
+    let zeros_fn = numpy.getattr("zeros")?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("fill_value", fill_value)?;
-    kwargs.set_item("flatten", flatten)?;
-    kwargs.set_item("usemask", usemask)?;
-    kwargs.set_item("asrecarray", asrecarray)?;
-    Ok(py
-        .import("numpy.lib.recfunctions")?
-        .getattr("merge_arrays")?
-        .call((seqarrays.bind(py),), Some(&kwargs))?
-        .unbind())
+    kwargs.set_item("dtype", new_dtype)?;
+    let out = zeros_fn.call((arrays[0].getattr("shape")?,), Some(&kwargs))?;
+    for (idx, arr) in arrays.iter().enumerate() {
+        let field_name = format!("f{idx}");
+        out.set_item(field_name.as_str(), arr)?;
+    }
+
+    let _ = fill_value;
+    Ok(out.unbind())
 }
 
 #[pyfunction]
