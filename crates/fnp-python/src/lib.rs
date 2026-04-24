@@ -1353,6 +1353,26 @@ impl PyRandomState {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
+    #[pyo3(signature = (mean=0.0, sigma=1.0, size=None))]
+    fn lognormal(
+        &mut self,
+        py: Python<'_>,
+        mean: f64,
+        sigma: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        if sigma < 0.0 {
+            return Err(PyValueError::new_err("sigma < 0"));
+        }
+        let size = random_size_from_py(py, size, "RandomState.lognormal(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self
+            .inner
+            .lognormal(mean, sigma, len)
+            .map_err(map_random_error)?;
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
     #[pyo3(signature = (size=None))]
     fn standard_exponential(
         &mut self,
@@ -22128,6 +22148,91 @@ mod tests {
                 &ours_restore.call_method1("random_sample", (shape.clone(),))?,
                 &theirs_restore.call_method1("random_sample", (shape,))?,
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_state_legacy_lognormal_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_state_legacy_lognormal")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+            let shape = PyTuple::new(py, [2_usize, 3_usize])?;
+
+            let ours_scalar = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_scalar = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_scalar.call_method0("lognormal")?,
+                &theirs_scalar.call_method0("lognormal")?,
+            )?;
+
+            let ours_shaped = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_shaped = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_shaped.call_method1("lognormal", (0.5_f64, 0.75_f64, shape.clone()))?,
+                &theirs_shaped.call_method1("lognormal", (0.5_f64, 0.75_f64, shape.clone()))?,
+            )?;
+
+            let ours_zero = random.getattr("RandomState")?.call1((11_u64,))?;
+            let theirs_zero = numpy_random.getattr("RandomState")?.call1((11_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_zero.call_method1("lognormal", (0.5_f64, 0.0_f64, 6_usize))?,
+                &theirs_zero.call_method1("lognormal", (0.5_f64, 0.0_f64, 6_usize))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_zero.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+                &theirs_zero.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
+
+            let ours_nan = random.getattr("RandomState")?.call1((1_u64,))?;
+            let theirs_nan = numpy_random.getattr("RandomState")?.call1((1_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_nan.call_method1("lognormal", (0.5_f64, f64::NAN, 3_usize))?,
+                &theirs_nan.call_method1("lognormal", (0.5_f64, f64::NAN, 3_usize))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_nan.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+                &theirs_nan.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
+
+            let ours_infinite = random.getattr("RandomState")?.call1((1_u64,))?;
+            let theirs_infinite = numpy_random.getattr("RandomState")?.call1((1_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_infinite.call_method1("lognormal", (0.5_f64, f64::INFINITY, 6_usize))?,
+                &theirs_infinite.call_method1("lognormal", (0.5_f64, f64::INFINITY, 6_usize))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_infinite.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+                &theirs_infinite.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
+
+            let ours_negative = random.getattr("RandomState")?.call1((1_u64,))?;
+            let theirs_negative = numpy_random.getattr("RandomState")?.call1((1_u64,))?;
+            let ours_negative = match ours_negative.call_method1("lognormal", (0.0_f64, -1.0_f64)) {
+                Ok(_) => {
+                    return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        "RandomState.lognormal(0.0, -1.0) unexpectedly succeeded",
+                    ));
+                }
+                Err(err) => err,
+            };
+            let theirs_negative =
+                match theirs_negative.call_method1("lognormal", (0.0_f64, -1.0_f64)) {
+                    Ok(_) => {
+                        return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                            "numpy RandomState.lognormal(0.0, -1.0) unexpectedly succeeded",
+                        ));
+                    }
+                    Err(err) => err,
+                };
+            assert_pyerr_matches_numpy(py, ours_negative, theirs_negative)?;
 
             Ok(())
         });

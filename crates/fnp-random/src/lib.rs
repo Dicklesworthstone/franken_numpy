@@ -2506,6 +2506,20 @@ impl RandomState {
             .collect())
     }
 
+    pub fn lognormal(
+        &mut self,
+        mean: f64,
+        sigma: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, RandomError> {
+        if sigma < 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| (mean + sigma * self.legacy_gauss()).exp())
+            .collect())
+    }
+
     #[must_use]
     pub fn standard_exponential(&mut self, size: usize) -> Vec<f64> {
         (0..size)
@@ -6064,6 +6078,62 @@ for child in rng.spawn(n_children):
         );
         assert!(zero_shape.standard_gamma(-1.0, 1).is_err());
         assert!(zero_shape.gamma(1.0, -1.0, 1).is_err());
+    }
+
+    #[test]
+    fn random_state_legacy_lognormal_matches_numpy_oracles() {
+        let mut standard = RandomState::new(SeedMaterial::U64(42)).expect("standard");
+        let values = standard.lognormal(0.0, 1.0, 10).expect("lognormal");
+        let expected = [
+            1.643_312_715_586_001_2,
+            0.870_868_489_764_019_3,
+            1.911_118_242_660_092_6,
+            4.586_099_388_741_997,
+            0.791_240_450_303_457_2,
+            0.791_253_440_817_110_2,
+            4.851_135_569_125_472,
+            2.154_232_968_599_504,
+            0.625_330_864_615_459_1,
+            1.720_405_542_550_246_7,
+        ];
+        assert_f64_seq("random_state_lognormal", &values, &expected);
+
+        let mut shifted = RandomState::new(SeedMaterial::U64(42)).expect("shifted");
+        let values = shifted.lognormal(0.5, 0.75, 10).expect("shifted");
+        let expected = [
+            2.392_970_819_534_342_2,
+            1.486_317_782_123_621_1,
+            2.679_864_955_663_915_4,
+            5.166_897_399_904_688,
+            1.383_179_685_879_962_1,
+            1.383_196_717_533_594_4,
+            5.389_268_231_643_371,
+            2.931_681_199_980_709_1,
+            1.159_390_238_618_054_1,
+            2.476_682_672_493_523_8,
+        ];
+        assert_f64_seq("random_state_lognormal_shifted", &values, &expected);
+
+        let mut zero_sigma = RandomState::new(SeedMaterial::U64(11)).expect("zero sigma");
+        let values = zero_sigma.lognormal(0.5, 0.0, 6).expect("zero sigma");
+        assert_f64_seq(
+            "random_state_lognormal_zero_sigma",
+            &values,
+            &[1.648_721_270_700_128_2; 6],
+        );
+        let after: Vec<u64> = (0..5).map(|_| zero_sigma.random_interval(9)).collect();
+        assert_eq!(after, vec![0, 4, 2, 1, 5]);
+
+        let mut nan_sigma = RandomState::new(SeedMaterial::U64(1)).expect("nan sigma");
+        let values = nan_sigma.lognormal(0.5, f64::NAN, 3).expect("nan sigma");
+        assert!(values.iter().all(|value| value.is_nan()));
+
+        assert!(
+            RandomState::new(SeedMaterial::U64(1))
+                .expect("negative sigma")
+                .lognormal(0.0, -1.0, 1)
+                .is_err()
+        );
     }
 
     #[test]
