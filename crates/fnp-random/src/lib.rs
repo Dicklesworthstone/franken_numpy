@@ -4627,6 +4627,63 @@ impl Generator {
             .collect())
     }
 
+    /// Multivariate hypergeometric distribution using NumPy's "count" method.
+    pub fn multivariate_hypergeometric_count(
+        &mut self,
+        colors: &[u64],
+        nsample: u64,
+        size: usize,
+    ) -> Result<Vec<Vec<u64>>, RandomError> {
+        let total = colors.iter().try_fold(0_u64, |acc, &color| {
+            acc.checked_add(color).ok_or(RandomError::InvalidParameter)
+        })?;
+        if nsample > total {
+            return Err(RandomError::InvalidParameter);
+        }
+
+        let total_len = usize::try_from(total).map_err(|_| RandomError::InvalidParameter)?;
+        let mut choices = Vec::with_capacity(total_len);
+        for (color_index, &color_count) in colors.iter().enumerate() {
+            let count = usize::try_from(color_count).map_err(|_| RandomError::InvalidParameter)?;
+            choices.extend(std::iter::repeat_n(color_index, count));
+        }
+
+        let more_than_half = nsample > total / 2;
+        let draw_count = if more_than_half {
+            total - nsample
+        } else {
+            nsample
+        };
+        let draw_count = usize::try_from(draw_count).map_err(|_| RandomError::InvalidParameter)?;
+
+        let mut samples = Vec::with_capacity(size);
+        for _ in 0..size {
+            let mut sample = vec![0_u64; colors.len()];
+
+            for j in 0..draw_count {
+                let upper =
+                    u64::try_from(total_len - j - 1).map_err(|_| RandomError::InvalidParameter)?;
+                let k = j + usize::try_from(self.random_interval(upper))
+                    .map_err(|_| RandomError::InvalidParameter)?;
+                choices.swap(j, k);
+            }
+
+            for &color_index in choices.iter().take(draw_count) {
+                sample[color_index] += 1;
+            }
+
+            if more_than_half {
+                for (sampled, &color_count) in sample.iter_mut().zip(colors) {
+                    *sampled = color_count - *sampled;
+                }
+            }
+
+            samples.push(sample);
+        }
+
+        Ok(samples)
+    }
+
     /// Full multivariate normal with arbitrary covariance matrix.
     /// Uses Cholesky decomposition: if Sigma = L L^T, then
     /// X = mean + L * z where z ~ N(0, I).
@@ -7626,6 +7683,18 @@ for child in rng.spawn(n_children):
         assert!(rng.multivariate_hypergeometric(&[5, 10], 20, 1).is_err());
         // valid parameters should succeed
         assert!(rng.multivariate_hypergeometric(&[100, 200], 50, 1).is_ok());
+    }
+
+    #[test]
+    fn multivariate_hypergeometric_count_matches_numpy_oracle() {
+        let mut rng = Generator::from_pcg64_dxsm(254).unwrap();
+        let samples = rng
+            .multivariate_hypergeometric_count(&[10, 20, 30], 5, 4)
+            .unwrap();
+        assert_eq!(
+            samples,
+            vec![vec![0, 1, 4], vec![0, 1, 4], vec![1, 2, 2], vec![1, 2, 2]]
+        );
     }
 
     #[test]

@@ -764,14 +764,20 @@ impl PyRandomGenerator {
         build_random_f64_matrix_parts(py, shape, values, width)
     }
 
-    #[pyo3(signature = (colors, nsample, size=None))]
+    #[pyo3(signature = (colors, nsample, size=None, method="marginals"))]
     fn multivariate_hypergeometric(
         &mut self,
         py: Python<'_>,
         colors: Py<PyAny>,
         nsample: u64,
         size: Option<Py<PyAny>>,
+        method: &str,
     ) -> PyResult<Py<PyAny>> {
+        if !matches!(method, "count" | "marginals") {
+            return Err(PyValueError::new_err(
+                "method must be \"count\" or \"marginals\".",
+            ));
+        }
         let colors = extract_random_u64_population(
             py,
             colors.bind(py),
@@ -780,10 +786,14 @@ impl PyRandomGenerator {
         let size = random_size_from_py(py, size, "Generator.multivariate_hypergeometric(size)")?;
         let (shape, len, _) = random_len_and_shape(size)?;
         let width = colors.len();
-        let values = self
-            .inner
-            .multivariate_hypergeometric(&colors, nsample, len)
-            .map_err(map_random_error)?;
+        let values = if method == "count" {
+            self.inner
+                .multivariate_hypergeometric_count(&colors, nsample, len)
+        } else {
+            self.inner
+                .multivariate_hypergeometric(&colors, nsample, len)
+        }
+        .map_err(map_random_error)?;
         build_random_u64_matrix_as_i64_parts(py, shape, values, width)
     }
 
@@ -21207,9 +21217,71 @@ mod tests {
                 )?,
                 &theirs.call_method1(
                     "multivariate_hypergeometric",
-                    (vec![10_u64, 20, 30], 5_u64, shape),
+                    (vec![10_u64, 20, 30], 5_u64, shape.clone()),
                 )?,
             )?;
+
+            let marginals_kwargs = PyDict::new(py);
+            marginals_kwargs.set_item("method", "marginals")?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 253)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method(
+                    "multivariate_hypergeometric",
+                    (vec![10_u64, 20, 30], 5_u64, shape.clone()),
+                    Some(&marginals_kwargs),
+                )?,
+                &theirs.call_method(
+                    "multivariate_hypergeometric",
+                    (vec![10_u64, 20, 30], 5_u64, shape.clone()),
+                    Some(&marginals_kwargs),
+                )?,
+            )?;
+
+            let count_kwargs = PyDict::new(py);
+            count_kwargs.set_item("method", "count")?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 254)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method(
+                    "multivariate_hypergeometric",
+                    (vec![10_u64, 20, 30], 5_u64, shape.clone()),
+                    Some(&count_kwargs),
+                )?,
+                &theirs.call_method(
+                    "multivariate_hypergeometric",
+                    (vec![10_u64, 20, 30], 5_u64, shape),
+                    Some(&count_kwargs),
+                )?,
+            )?;
+
+            let invalid_kwargs = PyDict::new(py);
+            invalid_kwargs.set_item("method", "invalid")?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 255)?;
+            assert_eq!(
+                call_outcome(
+                    py,
+                    &ours.getattr("multivariate_hypergeometric")?,
+                    &PyTuple::new(
+                        py,
+                        [
+                            vec![10_u64, 20, 30].into_pyobject(py)?.into_any(),
+                            5_u64.into_pyobject(py)?.into_any()
+                        ]
+                    )?,
+                    Some(&invalid_kwargs),
+                )?,
+                call_outcome(
+                    py,
+                    &theirs.getattr("multivariate_hypergeometric")?,
+                    &PyTuple::new(
+                        py,
+                        [
+                            vec![10_u64, 20, 30].into_pyobject(py)?.into_any(),
+                            5_u64.into_pyobject(py)?.into_any()
+                        ]
+                    )?,
+                    Some(&invalid_kwargs),
+                )?
+            );
 
             Ok(())
         });
