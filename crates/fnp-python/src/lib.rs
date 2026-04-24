@@ -974,12 +974,13 @@ impl PyRandomGenerator {
         Ok(py.None())
     }
 
-    #[pyo3(signature = (x, *, axis=None))]
+    #[pyo3(signature = (x, *, axis=None, out=None))]
     fn permuted(
         &mut self,
         py: Python<'_>,
         x: Py<PyAny>,
         axis: Option<Py<PyAny>>,
+        out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let (shape, values) = extract_random_f64_array(py, x.bind(py), "Generator.permuted(x)")?;
         let axis = match extract_axis_spec(py, axis, "Generator.permuted(axis)")? {
@@ -1003,7 +1004,27 @@ impl PyRandomGenerator {
             .inner
             .permuted_shaped(&values, &shape, axis)
             .map_err(map_random_error)?;
-        build_random_f64_output(py, output)
+        let generated = build_random_f64_output(py, output)?;
+        let Some(out) = out else {
+            return Ok(generated);
+        };
+        let out_bound = out.bind(py);
+        if out_bound.is_none() {
+            return Ok(generated);
+        }
+        require_numpy_ndarray(py, out_bound, "Generator.permuted(out)")?;
+        let out_shape = out_bound.getattr("shape")?.extract::<Vec<usize>>()?;
+        if out_shape != shape {
+            return Err(PyValueError::new_err("out must have the same shape as x"));
+        }
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("casting", "safe")?;
+        py.import("numpy")?.call_method(
+            "copyto",
+            (out_bound, generated.bind(py)),
+            Some(&kwargs),
+        )?;
+        Ok(out)
     }
 }
 
@@ -21369,7 +21390,8 @@ mod tests {
             let module = PyModule::new(py, "fnp_python_test_random_permuted")?;
             fnp_python(&module)?;
             let random = module.getattr("random")?;
-            let numpy_random = py.import("numpy")?.getattr("random")?;
+            let numpy = py.import("numpy")?;
+            let numpy_random = numpy.getattr("random")?;
             let matrix = vec![
                 vec![1.0_f64, 2.0, 3.0],
                 vec![4.0_f64, 5.0, 6.0],
@@ -21395,8 +21417,87 @@ mod tests {
             let (ours, theirs) = random_generator_pair(&random, &numpy_random, 312)?;
             assert_random_sample_matches_numpy(
                 &ours.call_method("permuted", (matrix.clone(),), Some(&axis_last_kwargs))?,
-                &theirs.call_method("permuted", (matrix,), Some(&axis_last_kwargs))?,
+                &theirs.call_method("permuted", (matrix.clone(),), Some(&axis_last_kwargs))?,
             )?;
+
+            let ours_input = numpy.call_method1("array", (matrix.clone(),))?;
+            let theirs_input = numpy.call_method1("array", (matrix.clone(),))?;
+            let ours_out = numpy.getattr("empty_like")?.call1((&ours_input,))?;
+            let theirs_out = numpy.getattr("empty_like")?.call1((&theirs_input,))?;
+            let ours_out_kwargs = PyDict::new(py);
+            ours_out_kwargs.set_item("out", &ours_out)?;
+            let theirs_out_kwargs = PyDict::new(py);
+            theirs_out_kwargs.set_item("out", &theirs_out)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 313)?;
+            let actual = ours.call_method("permuted", (&ours_input,), Some(&ours_out_kwargs))?;
+            let expected =
+                theirs.call_method("permuted", (&theirs_input,), Some(&theirs_out_kwargs))?;
+            assert!(actual.is(&ours_out));
+            assert!(expected.is(&theirs_out));
+            assert_random_sample_matches_numpy(&ours_out, &theirs_out)?;
+
+            let ours_input = numpy.call_method1("array", (matrix.clone(),))?;
+            let theirs_input = numpy.call_method1("array", (matrix.clone(),))?;
+            let ours_axis_out = numpy.getattr("empty_like")?.call1((&ours_input,))?;
+            let theirs_axis_out = numpy.getattr("empty_like")?.call1((&theirs_input,))?;
+            let ours_axis_kwargs = PyDict::new(py);
+            ours_axis_kwargs.set_item("axis", -1_i64)?;
+            ours_axis_kwargs.set_item("out", &ours_axis_out)?;
+            let theirs_axis_kwargs = PyDict::new(py);
+            theirs_axis_kwargs.set_item("axis", -1_i64)?;
+            theirs_axis_kwargs.set_item("out", &theirs_axis_out)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 314)?;
+            let actual = ours.call_method("permuted", (&ours_input,), Some(&ours_axis_kwargs))?;
+            let expected =
+                theirs.call_method("permuted", (&theirs_input,), Some(&theirs_axis_kwargs))?;
+            assert!(actual.is(&ours_axis_out));
+            assert!(expected.is(&theirs_axis_out));
+            assert_random_sample_matches_numpy(&ours_axis_out, &theirs_axis_out)?;
+
+            let mismatch_out = numpy
+                .getattr("empty")?
+                .call1((PyTuple::new(py, [2_usize, 2_usize])?,))?;
+            let mismatch_kwargs = PyDict::new(py);
+            mismatch_kwargs.set_item("out", &mismatch_out)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 315)?;
+            assert_eq!(
+                call_outcome(
+                    py,
+                    &ours.getattr("permuted")?,
+                    &PyTuple::new(py, [numpy.call_method1("array", (matrix.clone(),))?])?,
+                    Some(&mismatch_kwargs),
+                )?,
+                call_outcome(
+                    py,
+                    &theirs.getattr("permuted")?,
+                    &PyTuple::new(py, [numpy.call_method1("array", (matrix.clone(),))?])?,
+                    Some(&mismatch_kwargs),
+                )?
+            );
+
+            let dtype_kwargs = PyDict::new(py);
+            dtype_kwargs.set_item("dtype", numpy.getattr("int64")?)?;
+            let dtype_mismatch_out = numpy.getattr("empty_like")?.call(
+                (numpy.call_method1("array", (matrix.clone(),))?,),
+                Some(&dtype_kwargs),
+            )?;
+            let dtype_mismatch_kwargs = PyDict::new(py);
+            dtype_mismatch_kwargs.set_item("out", &dtype_mismatch_out)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 316)?;
+            assert_eq!(
+                call_outcome(
+                    py,
+                    &ours.getattr("permuted")?,
+                    &PyTuple::new(py, [numpy.call_method1("array", (matrix.clone(),))?])?,
+                    Some(&dtype_mismatch_kwargs),
+                )?,
+                call_outcome(
+                    py,
+                    &theirs.getattr("permuted")?,
+                    &PyTuple::new(py, [numpy.call_method1("array", (matrix,))?])?,
+                    Some(&dtype_mismatch_kwargs),
+                )?
+            );
 
             Ok(())
         });
