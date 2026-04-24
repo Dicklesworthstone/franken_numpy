@@ -185,6 +185,138 @@ impl PyRandomGenerator {
         build_random_f64_output(py, output)
     }
 
+    #[pyo3(signature = (scale=1.0, size=None))]
+    fn exponential(
+        &mut self,
+        py: Python<'_>,
+        scale: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.exponential(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self
+            .inner
+            .exponential(scale, len)
+            .map_err(map_random_error)?;
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (size=None))]
+    fn standard_exponential(
+        &mut self,
+        py: Python<'_>,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.standard_exponential(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self.inner.standard_exponential(len);
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (shape, size=None))]
+    fn standard_gamma(
+        &mut self,
+        py: Python<'_>,
+        shape: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.standard_gamma(size)")?;
+        let (out_shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self
+            .inner
+            .standard_gamma(shape, len)
+            .map_err(map_random_error)?;
+        build_random_f64_parts(py, out_shape, values, scalar)
+    }
+
+    #[pyo3(signature = (shape, scale=1.0, size=None))]
+    fn gamma(
+        &mut self,
+        py: Python<'_>,
+        shape: f64,
+        scale: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.gamma(size)")?;
+        let (out_shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self
+            .inner
+            .gamma(shape, scale, len)
+            .map_err(map_random_error)?;
+        build_random_f64_parts(py, out_shape, values, scalar)
+    }
+
+    #[pyo3(signature = (lam=1.0, size=None))]
+    fn poisson(
+        &mut self,
+        py: Python<'_>,
+        lam: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.poisson(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self.inner.poisson(lam, len).map_err(map_random_error)?;
+        build_random_u64_as_i64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (n, p, size=None))]
+    fn binomial(
+        &mut self,
+        py: Python<'_>,
+        n: u64,
+        p: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.binomial(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self.inner.binomial(n, p, len).map_err(map_random_error)?;
+        build_random_u64_as_i64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (a, b, size=None))]
+    fn beta(
+        &mut self,
+        py: Python<'_>,
+        a: f64,
+        b: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.beta(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self.inner.beta(a, b, len).map_err(map_random_error)?;
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (mean=0.0, sigma=1.0, size=None))]
+    fn lognormal(
+        &mut self,
+        py: Python<'_>,
+        mean: f64,
+        sigma: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.lognormal(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self
+            .inner
+            .lognormal(mean, sigma, len)
+            .map_err(map_random_error)?;
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (df, size=None))]
+    fn chisquare(
+        &mut self,
+        py: Python<'_>,
+        df: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.chisquare(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self.inner.chisquare(df, len).map_err(map_random_error)?;
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
     #[pyo3(signature = (low=0.0, high=1.0, size=None))]
     fn uniform(
         &mut self,
@@ -617,6 +749,22 @@ fn build_random_i64_parts(
         return Ok(value.into_pyobject(py)?.into_any().unbind());
     }
     build_numpy_array_from_storage(py, &shape, ArrayStorage::I64(values))
+}
+
+fn build_random_u64_as_i64_parts(
+    py: Python<'_>,
+    shape: Vec<usize>,
+    values: Vec<u64>,
+    scalar: bool,
+) -> PyResult<Py<PyAny>> {
+    let values = values
+        .into_iter()
+        .map(|value| {
+            i64::try_from(value)
+                .map_err(|_| PyValueError::new_err("random integer sample exceeds int64"))
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    build_random_i64_parts(py, shape, values, scalar)
 }
 
 fn build_random_f64_output(py: Python<'_>, output: ShapedRandomOutput<f64>) -> PyResult<Py<PyAny>> {
@@ -19239,6 +19387,19 @@ mod tests {
         Ok(())
     }
 
+    fn random_generator_pair<'py>(
+        random: &Bound<'py, PyAny>,
+        numpy_random: &Bound<'py, PyAny>,
+        seed: u64,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
+        let ours_bg = random.getattr("PCG64DXSM")?.call1((seed,))?;
+        let theirs_bg = numpy_random.getattr("PCG64DXSM")?.call1((seed,))?;
+        Ok((
+            random.getattr("Generator")?.call1((ours_bg,))?,
+            numpy_random.getattr("Generator")?.call1((theirs_bg,))?,
+        ))
+    }
+
     #[test]
     fn random_namespace_matches_numpy_bit_generator_oracles() {
         with_python(|py| {
@@ -19299,6 +19460,77 @@ mod tests {
             assert_array_matches_numpy(
                 &ours_state.call_method1("random_sample", (shape.clone(),))?,
                 &theirs_state.call_method1("random_sample", (shape,))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_generator_distribution_methods_match_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_distributions")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+            let shape = PyTuple::new(py, [2_usize, 2_usize])?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 200)?;
+            assert_array_matches_numpy(
+                &ours.call_method1("standard_exponential", (shape.clone(),))?,
+                &theirs.call_method1("standard_exponential", (shape.clone(),))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 201)?;
+            assert_array_matches_numpy(
+                &ours.call_method1("exponential", (1.5_f64, shape.clone()))?,
+                &theirs.call_method1("exponential", (1.5_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 202)?;
+            assert_array_matches_numpy(
+                &ours.call_method1("standard_gamma", (2.5_f64, shape.clone()))?,
+                &theirs.call_method1("standard_gamma", (2.5_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 203)?;
+            assert_array_matches_numpy(
+                &ours.call_method1("gamma", (2.5_f64, 1.25_f64, shape.clone()))?,
+                &theirs.call_method1("gamma", (2.5_f64, 1.25_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 204)?;
+            assert_array_matches_numpy(
+                &ours.call_method1("poisson", (3.5_f64, shape.clone()))?,
+                &theirs.call_method1("poisson", (3.5_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 205)?;
+            assert_array_matches_numpy(
+                &ours.call_method1("binomial", (12_u64, 0.4_f64, shape.clone()))?,
+                &theirs.call_method1("binomial", (12_u64, 0.4_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 206)?;
+            assert_array_matches_numpy(
+                &ours.call_method1("beta", (2.0_f64, 5.0_f64, shape.clone()))?,
+                &theirs.call_method1("beta", (2.0_f64, 5.0_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 207)?;
+            assert_array_matches_numpy(
+                &ours.call_method1("lognormal", (0.5_f64, 0.75_f64, shape.clone()))?,
+                &theirs.call_method1("lognormal", (0.5_f64, 0.75_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 208)?;
+            assert_array_matches_numpy(
+                &ours.call_method1("chisquare", (4.0_f64, shape.clone()))?,
+                &theirs.call_method1("chisquare", (4.0_f64, shape))?,
             )?;
 
             Ok(())
