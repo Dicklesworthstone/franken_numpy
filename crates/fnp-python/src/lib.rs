@@ -857,6 +857,27 @@ impl PyRandomGenerator {
         build_random_f64_parts(py, shape, values, false)
     }
 
+    #[pyo3(signature = (x, axis=0))]
+    fn shuffle(&mut self, py: Python<'_>, x: Py<PyAny>, axis: isize) -> PyResult<Py<PyAny>> {
+        let bound = x.bind(py);
+        let (shape, values) = extract_random_f64_array(py, bound, "Generator.shuffle(x)")?;
+        let axis = try_normalize_axis(axis, shape.len()).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "axis {axis} is out of bounds for array of dimension {}",
+                shape.len()
+            ))
+        })?;
+        let order = self
+            .inner
+            .permutation_range(shape[axis])
+            .map_err(map_random_error)?;
+        let values = permute_random_f64_axis(&values, &shape, axis, &order)?;
+        let shuffled = build_random_f64_parts(py, shape, values, false)?;
+        py.import("numpy")?
+            .call_method1("copyto", (bound, shuffled.bind(py)))?;
+        Ok(py.None())
+    }
+
     #[pyo3(signature = (x, *, axis=None))]
     fn permuted(
         &mut self,
@@ -20666,6 +20687,44 @@ mod tests {
                 &ours.call_method1("permutation", (5_i64,))?,
                 &theirs.call_method1("permutation", (5_i64,))?,
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_generator_shuffle_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_shuffle")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy = py.import("numpy")?;
+            let numpy_random = numpy.getattr("random")?;
+            let matrix = vec![
+                vec![0.0_f64, 1.0, 2.0, 3.0],
+                vec![4.0_f64, 5.0, 6.0, 7.0],
+                vec![8.0_f64, 9.0, 10.0, 11.0],
+            ];
+
+            let ours_array = numpy.call_method1("array", (matrix.clone(),))?;
+            let theirs_array = numpy.call_method1("array", (matrix.clone(),))?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 320)?;
+            ours.call_method1("shuffle", (&ours_array,))?;
+            theirs.call_method1("shuffle", (&theirs_array,))?;
+            assert_random_sample_matches_numpy(&ours_array, &theirs_array)?;
+
+            let axis_last_kwargs = PyDict::new(py);
+            axis_last_kwargs.set_item("axis", -1_i64)?;
+            let ours_array = numpy.call_method1("array", (matrix.clone(),))?;
+            let theirs_array = numpy.call_method1("array", (matrix,))?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 321)?;
+            ours.call_method("shuffle", (&ours_array,), Some(&axis_last_kwargs))?;
+            theirs.call_method("shuffle", (&theirs_array,), Some(&axis_last_kwargs))?;
+            assert_random_sample_matches_numpy(&ours_array, &theirs_array)?;
 
             Ok(())
         });
