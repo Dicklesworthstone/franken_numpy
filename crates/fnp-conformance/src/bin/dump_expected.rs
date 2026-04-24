@@ -21,8 +21,9 @@ fn main() {
     let mut g = Generator::from_pcg64_dxsm(seed).expect(seed_msg);
     println!(
         "dirichlet: {:?}",
-        g.dirichlet(&[1.0, 2.0, 3.0], 2)
-            .expect("fnp-conformance dump_expected: dirichlet with constant alpha vector and size=2")
+        g.dirichlet(&[1.0, 2.0, 3.0], 2).expect(
+            "fnp-conformance dump_expected: dirichlet with constant alpha vector and size=2"
+        )
     );
 
     let mut g = Generator::from_pcg64_dxsm(seed).expect(seed_msg);
@@ -53,8 +54,9 @@ fn main() {
     let mut g = Generator::from_pcg64_dxsm(seed).expect(seed_msg);
     println!(
         "hypergeometric: {:?}",
-        g.hypergeometric(10, 20, 5, 5)
-            .expect("fnp-conformance dump_expected: hypergeometric with ngood=10, nbad=20, nsample=5")
+        g.hypergeometric(10, 20, 5, 5).expect(
+            "fnp-conformance dump_expected: hypergeometric with ngood=10, nbad=20, nsample=5"
+        )
     );
 
     let mut g = Generator::from_pcg64_dxsm(seed).expect(seed_msg);
