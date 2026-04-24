@@ -1591,6 +1591,33 @@ impl PyRandomState {
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
+    #[pyo3(signature = (left, mode, right, size=None))]
+    fn triangular(
+        &mut self,
+        py: Python<'_>,
+        left: f64,
+        mode: f64,
+        right: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        if left > mode {
+            return Err(PyValueError::new_err("left > mode"));
+        }
+        if mode > right {
+            return Err(PyValueError::new_err("mode > right"));
+        }
+        if left == right {
+            return Err(PyValueError::new_err("left == right"));
+        }
+        let size = random_size_from_py(py, size, "RandomState.triangular(size)")?;
+        let (out_shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self
+            .inner
+            .triangular(left, mode, right, len)
+            .map_err(map_random_error)?;
+        build_random_f64_parts(py, out_shape, values, scalar)
+    }
+
     #[pyo3(signature = (loc=0.0, scale=1.0, size=None))]
     fn logistic(
         &mut self,
@@ -23115,6 +23142,152 @@ mod tests {
             assert_random_sample_matches_numpy(
                 &ours_invalid.call_method1("randint", (0_i64, 10_i64, 3_usize))?,
                 &theirs_invalid.call_method1("randint", (0_i64, 10_i64, 3_usize))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_state_legacy_triangular_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_state_legacy_triangular")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+            let shape = PyTuple::new(py, [2_usize, 3_usize])?;
+
+            let ours_scalar = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_scalar = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_scalar.call_method1("triangular", (1.0_f64, 2.0_f64, 5.0_f64))?,
+                &theirs_scalar.call_method1("triangular", (1.0_f64, 2.0_f64, 5.0_f64))?,
+            )?;
+
+            let ours_shaped = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_shaped = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_shaped.call_method1(
+                    "triangular",
+                    (1.0_f64, 2.0_f64, 5.0_f64, shape.clone()),
+                )?,
+                &theirs_shaped.call_method1(
+                    "triangular",
+                    (1.0_f64, 2.0_f64, 5.0_f64, shape.clone()),
+                )?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_shaped.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+                &theirs_shaped.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
+
+            let ours_cached = random.getattr("RandomState")?.call1((7_u64,))?;
+            let theirs_cached = numpy_random.getattr("RandomState")?.call1((7_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_cached.call_method1("standard_normal", (1_usize,))?,
+                &theirs_cached.call_method1("standard_normal", (1_usize,))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_cached.call_method1("triangular", (1.0_f64, 2.0_f64, 5.0_f64, 3_usize))?,
+                &theirs_cached.call_method1("triangular", (1.0_f64, 2.0_f64, 5.0_f64, 3_usize))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_cached.call_method1("random_sample", (3_usize,))?,
+                &theirs_cached.call_method1("random_sample", (3_usize,))?,
+            )?;
+
+            let ours_right_mode = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_right_mode = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_right_mode.call_method1(
+                    "triangular",
+                    (1.0_f64, 5.0_f64, 5.0_f64, 3_usize),
+                )?,
+                &theirs_right_mode.call_method1(
+                    "triangular",
+                    (1.0_f64, 5.0_f64, 5.0_f64, 3_usize),
+                )?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_right_mode.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+                &theirs_right_mode.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
+
+            let ours_nan = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_nan = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_nan.call_method1("triangular", (f64::NAN, 2.0_f64, 5.0_f64, 3_usize))?,
+                &theirs_nan.call_method1("triangular", (f64::NAN, 2.0_f64, 5.0_f64, 3_usize))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_nan.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+                &theirs_nan.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
+
+            let ours_inf = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_inf = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_inf.call_method1(
+                    "triangular",
+                    (f64::NEG_INFINITY, 2.0_f64, 5.0_f64, 3_usize),
+                )?,
+                &theirs_inf.call_method1(
+                    "triangular",
+                    (f64::NEG_INFINITY, 2.0_f64, 5.0_f64, 3_usize),
+                )?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_inf.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+                &theirs_inf.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
+
+            let ours_empty = random.getattr("RandomState")?.call1((11_u64,))?;
+            let theirs_empty = numpy_random.getattr("RandomState")?.call1((11_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_empty.call_method1("triangular", (1.0_f64, 2.0_f64, 5.0_f64, 0_usize))?,
+                &theirs_empty.call_method1("triangular", (1.0_f64, 2.0_f64, 5.0_f64, 0_usize))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_empty.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+                &theirs_empty.call_method1("randint", (0_i64, 10_i64, 5_usize))?,
+            )?;
+
+            let ours_invalid = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_invalid = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert!(
+                ours_invalid
+                    .call_method1("triangular", (2.0_f64, 1.0_f64, 5.0_f64, 1_usize))
+                    .is_err()
+            );
+            assert!(
+                theirs_invalid
+                    .call_method1("triangular", (2.0_f64, 1.0_f64, 5.0_f64, 1_usize))
+                    .is_err()
+            );
+            assert_random_sample_matches_numpy(
+                &ours_invalid.call_method1("randint", (0_i64, 10_i64, 3_usize))?,
+                &theirs_invalid.call_method1("randint", (0_i64, 10_i64, 3_usize))?,
+            )?;
+
+            let ours_degenerate = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_degenerate = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert!(
+                ours_degenerate
+                    .call_method1("triangular", (5.0_f64, 5.0_f64, 5.0_f64, 1_usize))
+                    .is_err()
+            );
+            assert!(
+                theirs_degenerate
+                    .call_method1("triangular", (5.0_f64, 5.0_f64, 5.0_f64, 1_usize))
+                    .is_err()
+            );
+            assert_random_sample_matches_numpy(
+                &ours_degenerate.call_method1("randint", (0_i64, 10_i64, 3_usize))?,
+                &theirs_degenerate.call_method1("randint", (0_i64, 10_i64, 3_usize))?,
             )?;
 
             Ok(())

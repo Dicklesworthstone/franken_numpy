@@ -2669,6 +2669,33 @@ impl RandomState {
             .collect())
     }
 
+    pub fn triangular(
+        &mut self,
+        left: f64,
+        mode: f64,
+        right: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, RandomError> {
+        if left > mode || mode > right || left == right {
+            return Err(RandomError::InvalidParameter);
+        }
+        let base = right - left;
+        let leftbase = mode - left;
+        let ratio = leftbase / base;
+        let leftprod = leftbase * base;
+        let rightprod = (right - mode) * base;
+        Ok((0..size)
+            .map(|_| {
+                let u = self.next_f64();
+                if u <= ratio {
+                    left + (u * leftprod).sqrt()
+                } else {
+                    right - ((1.0 - u) * rightprod).sqrt()
+                }
+            })
+            .collect())
+    }
+
     pub fn logistic(
         &mut self,
         loc: f64,
@@ -6854,6 +6881,101 @@ for child in rng.spawn(n_children):
             Err(RandomError::InvalidParameter)
         );
         let after: Vec<u64> = (0..3).map(|_| invalid.random_interval(9)).collect();
+        assert_eq!(after, vec![6, 3, 7]);
+    }
+
+    #[test]
+    fn random_state_legacy_triangular_matches_numpy_oracles() {
+        let mut shaped = RandomState::new(SeedMaterial::U64(42)).expect("shaped");
+        let values = shaped.triangular(1.0, 2.0, 5.0, 10).expect("triangular");
+        let expected = [
+            2.260_379_848_622_869_7,
+            4.230_956_228_111_165_5,
+            3.206_658_789_225_223_8,
+            2.805_438_952_857_414_8,
+            1.789_983_899_690_206_4,
+            1.789_922_832_525_311_1,
+            1.482_010_838_750_331_2,
+            3.732_764_327_087_981,
+            2.812_165_486_358_373,
+            3.128_335_215_256_895,
+        ];
+        assert_f64_seq("random_state_triangular_shaped", &values, &expected);
+        let after: Vec<u64> = (0..5).map(|_| shaped.random_interval(9)).collect();
+        assert_eq!(after, vec![5, 4, 1, 7, 5]);
+
+        let mut cached = RandomState::new(SeedMaterial::U64(7)).expect("cached");
+        assert_f64_seq(
+            "random_state_triangular_cached_normal_prefix",
+            &cached.standard_normal(1),
+            &[1.690_525_703_800_356],
+        );
+        let values = cached
+            .triangular(1.0, 2.0, 5.0, 3)
+            .expect("cached triangular");
+        let expected = [
+            4.486_068_237_952_967,
+            2.646_693_909_608_272_7,
+            2.553_256_360_776_482_2,
+        ];
+        assert_f64_seq("random_state_triangular_cached", &values, &expected);
+        let after: Vec<f64> = (0..3).map(|_| cached.next_f64()).collect();
+        let expected = [
+            0.072_051_133_359_761_54,
+            0.268_438_980_101_871_17,
+            0.499_882_500_825_559_96,
+        ];
+        assert_f64_seq("random_state_triangular_cached_after", &after, &expected);
+
+        let mut right_mode = RandomState::new(SeedMaterial::U64(42)).expect("right mode");
+        let values = right_mode
+            .triangular(1.0, 5.0, 5.0, 3)
+            .expect("right mode");
+        let expected = [
+            3.447_987_316_461_791,
+            4.900_183_188_333_422,
+            4.422_265_780_003_429,
+        ];
+        assert_f64_seq("random_state_triangular_right_mode", &values, &expected);
+        let after: Vec<u64> = (0..5).map(|_| right_mode.random_interval(9)).collect();
+        assert_eq!(after, vec![4, 6, 9, 2, 6]);
+
+        let mut nan = RandomState::new(SeedMaterial::U64(42)).expect("nan");
+        let values = nan.triangular(f64::NAN, 2.0, 5.0, 3).expect("nan");
+        assert!(values.iter().all(|value| value.is_nan()));
+        let after: Vec<u64> = (0..5).map(|_| nan.random_interval(9)).collect();
+        assert_eq!(after, vec![4, 6, 9, 2, 6]);
+
+        let mut infinite = RandomState::new(SeedMaterial::U64(42)).expect("infinite");
+        let values = infinite
+            .triangular(f64::NEG_INFINITY, 2.0, 5.0, 3)
+            .expect("infinite");
+        assert!(values.iter().all(|value| value.is_infinite() && value.is_sign_negative()));
+        let after: Vec<u64> = (0..5).map(|_| infinite.random_interval(9)).collect();
+        assert_eq!(after, vec![4, 6, 9, 2, 6]);
+
+        let mut empty = RandomState::new(SeedMaterial::U64(11)).expect("empty");
+        assert!(empty
+            .triangular(1.0, 2.0, 5.0, 0)
+            .expect("empty")
+            .is_empty());
+        let after: Vec<u64> = (0..5).map(|_| empty.random_interval(9)).collect();
+        assert_eq!(after, vec![9, 0, 1, 7, 1]);
+
+        let mut invalid = RandomState::new(SeedMaterial::U64(42)).expect("invalid");
+        assert_eq!(
+            invalid.triangular(2.0, 1.0, 5.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+        let after: Vec<u64> = (0..3).map(|_| invalid.random_interval(9)).collect();
+        assert_eq!(after, vec![6, 3, 7]);
+
+        let mut degenerate = RandomState::new(SeedMaterial::U64(42)).expect("degenerate");
+        assert_eq!(
+            degenerate.triangular(5.0, 5.0, 5.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+        let after: Vec<u64> = (0..3).map(|_| degenerate.random_interval(9)).collect();
         assert_eq!(after, vec![6, 3, 7]);
     }
 
