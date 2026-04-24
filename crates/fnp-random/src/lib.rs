@@ -4161,26 +4161,38 @@ impl Generator {
     ///
     /// NumPy requires `kappa >= 0`.
     pub fn vonmises(&mut self, mu: f64, kappa: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if kappa < 0.0 || kappa.is_nan() {
+        if kappa < 0.0 {
             return Err(RandomError::InvalidParameter);
+        }
+        if kappa.is_nan() {
+            return Ok(vec![f64::NAN; size]);
         }
         Ok((0..size)
             .map(|_| {
-                if kappa < 1e-6 {
+                if kappa < 1e-8 {
                     return std::f64::consts::PI * (2.0 * self.next_f64() - 1.0);
                 }
-                let tau = 1.0 + (1.0 + 4.0 * kappa * kappa).sqrt();
-                let rho = (tau - (2.0 * tau).sqrt()) / (2.0 * kappa);
-                let r = (1.0 + rho * rho) / (2.0 * rho);
+                if kappa > 1e6 {
+                    return wrap_angle_to_pi(
+                        mu + (1.0 / kappa).sqrt() * self.sample_standard_normal_single(),
+                    );
+                }
+                let s = if kappa < 1e-5 {
+                    1.0 / kappa + kappa
+                } else {
+                    let r = 1.0 + (1.0 + 4.0 * kappa * kappa).sqrt();
+                    let rho = (r - (2.0 * r).sqrt()) / (2.0 * kappa);
+                    (1.0 + rho * rho) / (2.0 * rho)
+                };
                 loop {
                     let u1 = self.next_f64();
                     let z = (std::f64::consts::PI * u1).cos();
-                    let f = (1.0 + r * z) / (r + z);
-                    let c = kappa * (r - f);
+                    let w = (1.0 + s * z) / (s + z);
+                    let y = kappa * (s - w);
                     let u2 = self.next_f64();
-                    if u2 < c * (2.0 - c) || u2 <= c * (-c).exp() {
+                    if y * (2.0 - y) - u2 >= 0.0 || (y / u2).ln() + 1.0 - y >= 0.0 {
                         let u3 = self.next_f64();
-                        let theta = if u3 > 0.5 { f.acos() } else { -f.acos() };
+                        let theta = if u3 < 0.5 { -w.acos() } else { w.acos() };
                         return wrap_angle_to_pi(mu + theta);
                     }
                 }

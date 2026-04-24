@@ -529,6 +529,90 @@ impl PyRandomGenerator {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
+    #[pyo3(signature = (a, size=None))]
+    fn zipf(&mut self, py: Python<'_>, a: f64, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.zipf(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self
+            .inner
+            .zipf(a, len)
+            .map_err(map_random_error)?
+            .into_iter()
+            .map(|value| {
+                if value > i64::MAX as f64 {
+                    return Err(PyValueError::new_err("zipf sample exceeds int64"));
+                }
+                Ok(value as i64)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        build_random_i64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (p, size=None))]
+    fn logseries(
+        &mut self,
+        py: Python<'_>,
+        p: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.logseries(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self.inner.logseries(p, len).map_err(map_random_error)?;
+        build_random_u64_as_i64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (mu, kappa, size=None))]
+    fn vonmises(
+        &mut self,
+        py: Python<'_>,
+        mu: f64,
+        kappa: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.vonmises(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self
+            .inner
+            .vonmises(mu, kappa, len)
+            .map_err(map_random_error)?;
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (df, nonc, size=None))]
+    fn noncentral_chisquare(
+        &mut self,
+        py: Python<'_>,
+        df: f64,
+        nonc: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.noncentral_chisquare(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self
+            .inner
+            .noncentral_chisquare(df, nonc, len)
+            .map_err(map_random_error)?;
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (dfnum, dfden, nonc, size=None))]
+    fn noncentral_f(
+        &mut self,
+        py: Python<'_>,
+        dfnum: f64,
+        dfden: f64,
+        nonc: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.noncentral_f(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self
+            .inner
+            .noncentral_f(dfnum, dfden, nonc, len)
+            .map_err(map_random_error)?;
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
     #[pyo3(signature = (low=0.0, high=1.0, size=None))]
     fn uniform(
         &mut self,
@@ -19884,6 +19968,53 @@ mod tests {
             assert_random_sample_matches_numpy(
                 &ours.call_method1("wald", (2.0_f64, 1.5_f64, shape.clone()))?,
                 &theirs.call_method1("wald", (2.0_f64, 1.5_f64, shape))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_generator_tail_distribution_methods_match_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_tail_distributions")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+            let shape = PyTuple::new(py, [2_usize, 2_usize])?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 240)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("zipf", (2.5_f64, shape.clone()))?,
+                &theirs.call_method1("zipf", (2.5_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 241)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("logseries", (0.35_f64, shape.clone()))?,
+                &theirs.call_method1("logseries", (0.35_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 242)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("vonmises", (0.5_f64, 1.25_f64, shape.clone()))?,
+                &theirs.call_method1("vonmises", (0.5_f64, 1.25_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 243)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("noncentral_chisquare", (3.5_f64, 1.25_f64, shape.clone()))?,
+                &theirs.call_method1("noncentral_chisquare", (3.5_f64, 1.25_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 244)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("noncentral_f", (5.0_f64, 7.0_f64, 1.25_f64, shape.clone()))?,
+                &theirs.call_method1("noncentral_f", (5.0_f64, 7.0_f64, 1.25_f64, shape))?,
             )?;
 
             Ok(())
