@@ -2668,6 +2668,22 @@ impl RandomState {
             .collect())
     }
 
+    pub fn gumbel(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
+            .map(|_| {
+                loop {
+                    let u = 1.0 - self.next_f64();
+                    if u < 1.0 {
+                        return loc - scale * (-u.ln()).ln();
+                    }
+                }
+            })
+            .collect())
+    }
+
     fn legacy_standard_exponential(&mut self) -> f64 {
         -(1.0 - self.next_f64()).ln()
     }
@@ -6819,6 +6835,80 @@ for child in rng.spawn(n_children):
         let mut invalid = RandomState::new(SeedMaterial::U64(42)).expect("invalid");
         assert_eq!(
             invalid.logistic(2.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+        let after: Vec<u64> = (0..3).map(|_| invalid.random_interval(9)).collect();
+        assert_eq!(after, vec![6, 3, 7]);
+    }
+
+    #[test]
+    fn random_state_legacy_gumbel_matches_numpy_oracles() {
+        let mut shaped = RandomState::new(SeedMaterial::U64(42)).expect("shaped");
+        let values = shaped.gumbel(2.0, 3.0, 10).expect("gumbel");
+        let expected = [
+            4.269_743_160_286_506,
+            -1.305_941_261_333_688_7,
+            1.174_510_073_425_900_6,
+            2.273_246_961_967_822_6,
+            7.322_497_773_494_485,
+            7.323_003_258_723_209,
+            10.448_304_570_773_413,
+            -0.096_240_715_110_335_72,
+            2.253_139_298_098_811,
+            1.375_910_109_141_309_1,
+        ];
+        assert_f64_seq("random_state_gumbel_shaped", &values, &expected);
+        let after: Vec<u64> = (0..5).map(|_| shaped.random_interval(9)).collect();
+        assert_eq!(after, vec![5, 4, 1, 7, 5]);
+
+        let mut cached = RandomState::new(SeedMaterial::U64(7)).expect("cached");
+        assert_f64_seq(
+            "random_state_gumbel_cached_normal_prefix",
+            &cached.standard_normal(1),
+            &[1.690_525_703_800_356],
+        );
+        let values = cached.gumbel(2.0, 3.0, 3).expect("cached gumbel");
+        let expected = [
+            -2.017_793_956_107_641_2,
+            2.771_403_212_308_204_2,
+            3.089_844_633_567_386_4,
+        ];
+        assert_f64_seq("random_state_gumbel_cached", &values, &expected);
+        let after: Vec<f64> = (0..3).map(|_| cached.next_f64()).collect();
+        let expected = [
+            0.072_051_133_359_761_54,
+            0.268_438_980_101_871_17,
+            0.499_882_500_825_559_96,
+        ];
+        assert_f64_seq("random_state_gumbel_cached_after", &after, &expected);
+
+        let mut zero = RandomState::new(SeedMaterial::U64(42)).expect("zero");
+        assert_eq!(zero.gumbel(2.0, 0.0, 3).expect("zero"), vec![2.0; 3]);
+        let after: Vec<u64> = (0..5).map(|_| zero.random_interval(9)).collect();
+        assert_eq!(after, vec![4, 6, 9, 2, 6]);
+
+        let mut nan = RandomState::new(SeedMaterial::U64(42)).expect("nan");
+        let values = nan.gumbel(2.0, f64::NAN, 3).expect("nan");
+        assert!(values.iter().all(|value| value.is_nan()));
+        let after: Vec<u64> = (0..5).map(|_| nan.random_interval(9)).collect();
+        assert_eq!(after, vec![4, 6, 9, 2, 6]);
+
+        let mut infinite = RandomState::new(SeedMaterial::U64(42)).expect("infinite");
+        let values = infinite.gumbel(2.0, f64::INFINITY, 3).expect("infinite");
+        assert!(values[0].is_infinite() && values[0].is_sign_positive());
+        assert!(values[1].is_infinite() && values[1].is_sign_negative());
+        assert!(values[2].is_infinite() && values[2].is_sign_negative());
+        let after: Vec<u64> = (0..5).map(|_| infinite.random_interval(9)).collect();
+        assert_eq!(after, vec![4, 6, 9, 2, 6]);
+
+        let mut empty = RandomState::new(SeedMaterial::U64(11)).expect("empty");
+        assert!(empty.gumbel(2.0, 3.0, 0).expect("empty").is_empty());
+        let after: Vec<u64> = (0..5).map(|_| empty.random_interval(9)).collect();
+        assert_eq!(after, vec![9, 0, 1, 7, 1]);
+
+        let mut invalid = RandomState::new(SeedMaterial::U64(42)).expect("invalid");
+        assert_eq!(
+            invalid.gumbel(2.0, -0.0, 1),
             Err(RandomError::InvalidParameter)
         );
         let after: Vec<u64> = (0..3).map(|_| invalid.random_interval(9)).collect();
