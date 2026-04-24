@@ -1276,6 +1276,13 @@ impl PyRandomState {
         })
     }
 
+    #[pyo3(signature = (seed=None))]
+    fn seed(&mut self, py: Python<'_>, seed: Option<Py<PyAny>>) -> PyResult<()> {
+        let seed = random_state_seed_material_from_py(py, seed)?;
+        self.inner = CoreRandomState::new(seed).map_err(map_bit_generator_error)?;
+        Ok(())
+    }
+
     #[pyo3(signature = (size=None))]
     fn random_sample(&mut self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         let size = random_size_from_py(py, size, "RandomState.random_sample(size)")?;
@@ -1878,6 +1885,35 @@ fn random_state_rand_size_from_dims(dims: &Bound<'_, PyTuple>) -> PyResult<Optio
     }
     element_count(&shape).map_err(|err| PyValueError::new_err(err.to_string()))?;
     Ok(Some(shape))
+}
+
+fn random_state_seed_material_from_py(
+    py: Python<'_>,
+    seed: Option<Py<PyAny>>,
+) -> PyResult<SeedMaterial> {
+    let Some(seed) = seed else {
+        return Ok(SeedMaterial::None);
+    };
+    let seed = seed.bind(py);
+    if seed.is_none() {
+        return Ok(SeedMaterial::None);
+    }
+    let out_of_range = || PyValueError::new_err("Seed must be between 0 and 2**32 - 1".to_string());
+    if let Ok(value) = seed.extract::<i128>() {
+        if !(0..=i128::from(u32::MAX)).contains(&value) {
+            return Err(out_of_range());
+        }
+        return Ok(SeedMaterial::U64(value as u64));
+    }
+    if let Ok(value) = seed.extract::<u128>() {
+        if value > u128::from(u32::MAX) {
+            return Err(out_of_range());
+        }
+        return Ok(SeedMaterial::U64(value as u64));
+    }
+    Err(PyTypeError::new_err(
+        "Cannot cast scalar to dtype('int64') according to the rule 'safe'",
+    ))
 }
 
 fn random_len_and_shape(size: Option<Vec<usize>>) -> PyResult<(Vec<usize>, usize, bool)> {
@@ -21170,6 +21206,108 @@ mod tests {
                 &ours_reversed.call_method1("uniform", (5.0_f64, 2.0_f64, 2_usize))?,
                 &theirs_reversed.call_method1("uniform", (5.0_f64, 2.0_f64, 2_usize))?,
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_state_seed_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_state_seed")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+            let shape = PyTuple::new(py, [2_usize, 3_usize])?;
+
+            let ours = random.getattr("RandomState")?.call1((99_u64,))?;
+            let theirs = numpy_random.getattr("RandomState")?.call1((99_u64,))?;
+            ours.call_method1("random_sample", (3_usize,))?;
+            theirs.call_method1("random_sample", (3_usize,))?;
+            assert_eq!(
+                repr_string(&ours.call_method1("seed", (7_u64,))?),
+                repr_string(&theirs.call_method1("seed", (7_u64,))?)
+            );
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("random_sample", (shape.clone(),))?,
+                &theirs.call_method1("random_sample", (shape.clone(),))?,
+            )?;
+
+            let ours_max = random.getattr("RandomState")?.call1((1_u64,))?;
+            let theirs_max = numpy_random.getattr("RandomState")?.call1((1_u64,))?;
+            ours_max.call_method1("seed", (u64::from(u32::MAX),))?;
+            theirs_max.call_method1("seed", (u64::from(u32::MAX),))?;
+            assert_random_sample_matches_numpy(
+                &ours_max.call_method1("random_sample", (3_usize,))?,
+                &theirs_max.call_method1("random_sample", (3_usize,))?,
+            )?;
+
+            let ours_true = random.getattr("RandomState")?.call1((7_u64,))?;
+            let theirs_true = numpy_random.getattr("RandomState")?.call1((7_u64,))?;
+            ours_true.call_method1("seed", (true,))?;
+            theirs_true.call_method1("seed", (true,))?;
+            assert_random_sample_matches_numpy(
+                &ours_true.call_method1("random_sample", (3_usize,))?,
+                &theirs_true.call_method1("random_sample", (3_usize,))?,
+            )?;
+
+            let ours_none = random.getattr("RandomState")?.call1((7_u64,))?;
+            assert_eq!(
+                repr_string(&ours_none.call_method1("seed", (py.None(),))?),
+                "None"
+            );
+            assert_eq!(
+                ours_none
+                    .call_method1("random_sample", (3_usize,))?
+                    .getattr("shape")?
+                    .extract::<Vec<usize>>()?,
+                vec![3]
+            );
+
+            let ours_negative = random.getattr("RandomState")?.call1((7_u64,))?;
+            let theirs_negative = numpy_random.getattr("RandomState")?.call1((7_u64,))?;
+            let ours_negative_err = match ours_negative.call_method1("seed", (-1_i64,)) {
+                Ok(_) => {
+                    return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        "RandomState.seed(-1) unexpectedly succeeded",
+                    ));
+                }
+                Err(err) => err,
+            };
+            let theirs_negative_err = match theirs_negative.call_method1("seed", (-1_i64,)) {
+                Ok(_) => {
+                    return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        "numpy RandomState.seed(-1) unexpectedly succeeded",
+                    ));
+                }
+                Err(err) => err,
+            };
+            assert_pyerr_matches_numpy(py, ours_negative_err, theirs_negative_err)?;
+
+            let too_large = u64::from(u32::MAX) + 1;
+            let ours_large = random.getattr("RandomState")?.call1((7_u64,))?;
+            let theirs_large = numpy_random.getattr("RandomState")?.call1((7_u64,))?;
+            let ours_large_err = match ours_large.call_method1("seed", (too_large,)) {
+                Ok(_) => {
+                    return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        "RandomState.seed(2**32) unexpectedly succeeded",
+                    ));
+                }
+                Err(err) => err,
+            };
+            let theirs_large_err = match theirs_large.call_method1("seed", (too_large,)) {
+                Ok(_) => {
+                    return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        "numpy RandomState.seed(2**32) unexpectedly succeeded",
+                    ));
+                }
+                Err(err) => err,
+            };
+            assert_pyerr_matches_numpy(py, ours_large_err, theirs_large_err)?;
 
             Ok(())
         });
