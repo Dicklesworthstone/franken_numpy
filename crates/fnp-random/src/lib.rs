@@ -2614,6 +2614,18 @@ impl RandomState {
             .collect())
     }
 
+    pub fn weibull(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if a < 0.0 || (a == 0.0 && a.is_sign_negative()) {
+            return Err(RandomError::InvalidParameter);
+        }
+        if a == 0.0 {
+            return Ok(vec![0.0; size]);
+        }
+        Ok((0..size)
+            .map(|_| self.legacy_standard_exponential().powf(1.0 / a))
+            .collect())
+    }
+
     fn legacy_standard_exponential(&mut self) -> f64 {
         -(1.0 - self.next_f64()).ln()
     }
@@ -6399,6 +6411,98 @@ for child in rng.spawn(n_children):
         let mut invalid = RandomState::new(SeedMaterial::U64(42)).expect("invalid");
         assert_eq!(
             invalid.geometric(0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+        let after: Vec<u64> = (0..3).map(|_| invalid.random_interval(9)).collect();
+        assert_eq!(after, vec![6, 3, 7]);
+    }
+
+    #[test]
+    fn random_state_legacy_weibull_matches_numpy_oracles() {
+        let mut shaped = RandomState::new(SeedMaterial::U64(42)).expect("shaped");
+        let values = shaped.weibull(2.0, 10).expect("weibull");
+        let expected = [
+            0.685_031_451_815_797_4,
+            1.734_970_152_745_435_8,
+            1.147_495_400_228_449_4,
+            0.955_480_273_881_126_9,
+            0.411_855_399_943_167_3,
+            0.411_820_703_601_221_6,
+            0.244_619_640_684_636_5,
+            1.418_178_713_872_105_6,
+            0.958_687_724_771_348_3,
+            1.109_617_078_863_06,
+        ];
+        assert_f64_seq("random_state_weibull_shaped", &values, &expected);
+        let after: Vec<u64> = (0..5).map(|_| shaped.random_interval(9)).collect();
+        assert_eq!(after, vec![5, 4, 1, 7, 5]);
+
+        let mut small_shape = RandomState::new(SeedMaterial::U64(42)).expect("small_shape");
+        let values = small_shape.weibull(0.5, 10).expect("weibull");
+        let expected = [
+            0.220_212_540_270_529_53,
+            9.060_831_028_868_945,
+            1.733_819_221_470_486_4,
+            0.833_464_106_494_959_3,
+            0.028_772_596_679_367_757,
+            0.028_762_902_231_183_975,
+            0.003_580_678_228_603_228,
+            4.045_049_590_236_725,
+            0.844_712_005_116_130_6,
+            1.515_976_714_447_557_3,
+        ];
+        assert_f64_seq("random_state_weibull_small_shape", &values, &expected);
+        let after: Vec<u64> = (0..5).map(|_| small_shape.random_interval(9)).collect();
+        assert_eq!(after, vec![5, 4, 1, 7, 5]);
+
+        let mut cached = RandomState::new(SeedMaterial::U64(7)).expect("cached");
+        assert_f64_seq(
+            "random_state_weibull_cached_normal_prefix",
+            &cached.standard_normal(1),
+            &[1.690_525_703_800_356],
+        );
+        let values = cached.weibull(2.0, 3).expect("cached weibull");
+        let expected = [
+            1.953_518_930_493_146_6,
+            0.879_354_466_008_743_3,
+            0.833_900_846_932_591_3,
+        ];
+        assert_f64_seq("random_state_weibull_cached", &values, &expected);
+        let after: Vec<f64> = (0..3).map(|_| cached.next_f64()).collect();
+        let expected = [
+            0.072_051_133_359_761_54,
+            0.268_438_980_101_871_17,
+            0.499_882_500_825_559_96,
+        ];
+        assert_f64_seq("random_state_weibull_cached_after", &after, &expected);
+
+        let mut zero = RandomState::new(SeedMaterial::U64(42)).expect("zero");
+        assert_eq!(zero.weibull(0.0, 3).expect("zero"), vec![0.0; 3]);
+        let after: Vec<u64> = (0..5).map(|_| zero.random_interval(9)).collect();
+        assert_eq!(after, vec![6, 3, 7, 4, 6]);
+
+        let mut nan = RandomState::new(SeedMaterial::U64(42)).expect("nan");
+        let values = nan.weibull(f64::NAN, 3).expect("nan");
+        assert!(values.iter().all(|value| value.is_nan()));
+        let after: Vec<u64> = (0..5).map(|_| nan.random_interval(9)).collect();
+        assert_eq!(after, vec![4, 6, 9, 2, 6]);
+
+        let mut infinite = RandomState::new(SeedMaterial::U64(42)).expect("infinite");
+        assert_eq!(
+            infinite.weibull(f64::INFINITY, 3).expect("infinite"),
+            vec![1.0; 3]
+        );
+        let after: Vec<u64> = (0..5).map(|_| infinite.random_interval(9)).collect();
+        assert_eq!(after, vec![4, 6, 9, 2, 6]);
+
+        let mut empty = RandomState::new(SeedMaterial::U64(11)).expect("empty");
+        assert!(empty.weibull(2.0, 0).expect("empty").is_empty());
+        let after: Vec<u64> = (0..5).map(|_| empty.random_interval(9)).collect();
+        assert_eq!(after, vec![9, 0, 1, 7, 1]);
+
+        let mut invalid = RandomState::new(SeedMaterial::U64(42)).expect("invalid");
+        assert_eq!(
+            invalid.weibull(-0.0, 1),
             Err(RandomError::InvalidParameter)
         );
         let after: Vec<u64> = (0..3).map(|_| invalid.random_interval(9)).collect();
