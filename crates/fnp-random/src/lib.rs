@@ -2644,6 +2644,13 @@ impl RandomState {
             .collect())
     }
 
+    pub fn power(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if a <= 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size).map(|_| self.next_f64().powf(1.0 / a)).collect())
+    }
+
     fn legacy_standard_exponential(&mut self) -> f64 {
         -(1.0 - self.next_f64()).ln()
     }
@@ -6655,6 +6662,72 @@ for child in rng.spawn(n_children):
 
         let mut invalid = RandomState::new(SeedMaterial::U64(42)).expect("invalid");
         assert_eq!(invalid.pareto(0.0, 1), Err(RandomError::InvalidParameter));
+        let after: Vec<u64> = (0..3).map(|_| invalid.random_interval(9)).collect();
+        assert_eq!(after, vec![6, 3, 7]);
+    }
+
+    #[test]
+    fn random_state_legacy_power_matches_numpy_oracles() {
+        let mut shaped = RandomState::new(SeedMaterial::U64(42)).expect("shaped");
+        let values = shaped.power(2.5, 10).expect("power");
+        let expected = [
+            0.675_148_547_376_754_9,
+            0.979_986_316_494_324_9,
+            0.882_679_407_244_968_8,
+            0.814_463_557_037_856,
+            0.475_631_485_107_399_83,
+            0.475_602_071_150_102_2,
+            0.320_347_579_421_724_26,
+            0.944_153_239_713_172_9,
+            0.815_798_738_703_877_9,
+            0.871_025_982_593_861_7,
+        ];
+        assert_f64_seq("random_state_power_shaped", &values, &expected);
+        let after: Vec<u64> = (0..5).map(|_| shaped.random_interval(9)).collect();
+        assert_eq!(after, vec![5, 4, 1, 7, 5]);
+
+        let mut cached = RandomState::new(SeedMaterial::U64(7)).expect("cached");
+        assert_f64_seq(
+            "random_state_power_cached_normal_prefix",
+            &cached.standard_normal(1),
+            &[1.690_525_703_800_356],
+        );
+        let values = cached.power(2.5, 3).expect("cached power");
+        let expected = [
+            0.991_136_977_040_656,
+            0.780_679_815_585_524_8,
+            0.758_537_149_239_386_1,
+        ];
+        assert_f64_seq("random_state_power_cached", &values, &expected);
+        let after: Vec<f64> = (0..3).map(|_| cached.next_f64()).collect();
+        let expected = [
+            0.072_051_133_359_761_54,
+            0.268_438_980_101_871_17,
+            0.499_882_500_825_559_96,
+        ];
+        assert_f64_seq("random_state_power_cached_after", &after, &expected);
+
+        let mut nan = RandomState::new(SeedMaterial::U64(42)).expect("nan");
+        let values = nan.power(f64::NAN, 3).expect("nan");
+        assert!(values.iter().all(|value| value.is_nan()));
+        let after: Vec<u64> = (0..5).map(|_| nan.random_interval(9)).collect();
+        assert_eq!(after, vec![4, 6, 9, 2, 6]);
+
+        let mut infinite = RandomState::new(SeedMaterial::U64(42)).expect("infinite");
+        assert_eq!(
+            infinite.power(f64::INFINITY, 3).expect("infinite"),
+            vec![1.0; 3]
+        );
+        let after: Vec<u64> = (0..5).map(|_| infinite.random_interval(9)).collect();
+        assert_eq!(after, vec![4, 6, 9, 2, 6]);
+
+        let mut empty = RandomState::new(SeedMaterial::U64(11)).expect("empty");
+        assert!(empty.power(2.5, 0).expect("empty").is_empty());
+        let after: Vec<u64> = (0..5).map(|_| empty.random_interval(9)).collect();
+        assert_eq!(after, vec![9, 0, 1, 7, 1]);
+
+        let mut invalid = RandomState::new(SeedMaterial::U64(42)).expect("invalid");
+        assert_eq!(invalid.power(0.0, 1), Err(RandomError::InvalidParameter));
         let after: Vec<u64> = (0..3).map(|_| invalid.random_interval(9)).collect();
         assert_eq!(after, vec![6, 3, 7]);
     }
