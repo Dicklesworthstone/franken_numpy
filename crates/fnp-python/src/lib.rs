@@ -317,6 +317,218 @@ impl PyRandomGenerator {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
+    #[pyo3(signature = (p, size=None))]
+    fn geometric(
+        &mut self,
+        py: Python<'_>,
+        p: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.geometric(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self.inner.geometric(p, len).map_err(map_random_error)?;
+        build_random_u64_as_i64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (size=None))]
+    fn standard_cauchy(&mut self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.standard_cauchy(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self.inner.standard_cauchy(len);
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (left, mode, right, size=None))]
+    fn triangular(
+        &mut self,
+        py: Python<'_>,
+        left: f64,
+        mode: f64,
+        right: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.triangular(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self
+            .inner
+            .triangular(left, mode, right, len)
+            .map_err(map_random_error)?;
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (loc=0.0, scale=1.0, size=None))]
+    fn laplace(
+        &mut self,
+        py: Python<'_>,
+        loc: f64,
+        scale: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.laplace(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self
+            .inner
+            .laplace(loc, scale, len)
+            .map_err(map_random_error)?;
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (loc=0.0, scale=1.0, size=None))]
+    fn gumbel(
+        &mut self,
+        py: Python<'_>,
+        loc: f64,
+        scale: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.gumbel(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self
+            .inner
+            .gumbel(loc, scale, len)
+            .map_err(map_random_error)?;
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (a, size=None))]
+    fn weibull(&mut self, py: Python<'_>, a: f64, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.weibull(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self.inner.weibull(a, len).map_err(map_random_error)?;
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (n, p, size=None))]
+    fn negative_binomial(
+        &mut self,
+        py: Python<'_>,
+        n: f64,
+        p: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.negative_binomial(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self
+            .inner
+            .negative_binomial(n, p, len)
+            .map_err(map_random_error)?;
+        build_random_u64_as_i64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (dfnum, dfden, size=None))]
+    fn f(
+        &mut self,
+        py: Python<'_>,
+        dfnum: f64,
+        dfden: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.f(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self.inner.f(dfnum, dfden, len).map_err(map_random_error)?;
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (df, size=None))]
+    fn standard_t(
+        &mut self,
+        py: Python<'_>,
+        df: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        if df <= 0.0 {
+            return Err(PyValueError::new_err("df <= 0"));
+        }
+        let size = random_size_from_py(py, size, "Generator.standard_t(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self.inner.standard_t(df, len);
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (a, size=None))]
+    fn power(&mut self, py: Python<'_>, a: f64, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.power(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self.inner.power(a, len).map_err(map_random_error)?;
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (scale=1.0, size=None))]
+    fn rayleigh(
+        &mut self,
+        py: Python<'_>,
+        scale: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.rayleigh(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self.inner.rayleigh(scale, len).map_err(map_random_error)?;
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (a, size=None))]
+    fn pareto(&mut self, py: Python<'_>, a: f64, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.pareto(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self.inner.pareto(a, len).map_err(map_random_error)?;
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (loc=0.0, scale=1.0, size=None))]
+    fn logistic(
+        &mut self,
+        py: Python<'_>,
+        loc: f64,
+        scale: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.logistic(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self
+            .inner
+            .logistic(loc, scale, len)
+            .map_err(map_random_error)?;
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (ngood, nbad, nsample, size=None))]
+    fn hypergeometric(
+        &mut self,
+        py: Python<'_>,
+        ngood: u64,
+        nbad: u64,
+        nsample: u64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let size = random_size_from_py(py, size, "Generator.hypergeometric(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self
+            .inner
+            .hypergeometric(ngood, nbad, nsample, len)
+            .map_err(map_random_error)?;
+        build_random_u64_as_i64_parts(py, shape, values, scalar)
+    }
+
+    #[pyo3(signature = (mean, scale, size=None))]
+    fn wald(
+        &mut self,
+        py: Python<'_>,
+        mean: f64,
+        scale: f64,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        if mean <= 0.0 {
+            return Err(PyValueError::new_err("mean <= 0"));
+        }
+        if scale <= 0.0 {
+            return Err(PyValueError::new_err("scale <= 0"));
+        }
+        let size = random_size_from_py(py, size, "Generator.wald(size)")?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let values = self.inner.wald(mean, scale, len);
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
     #[pyo3(signature = (low=0.0, high=1.0, size=None))]
     fn uniform(
         &mut self,
@@ -19332,6 +19544,40 @@ mod tests {
         Ok(())
     }
 
+    fn assert_random_sample_matches_numpy(
+        actual: &pyo3::Bound<'_, pyo3::types::PyAny>,
+        expected: &pyo3::Bound<'_, pyo3::types::PyAny>,
+    ) -> PyResult<()> {
+        let py = actual.py();
+        if actual.getattr("dtype").is_err() {
+            assert!(
+                expected.getattr("dtype").is_err(),
+                "assert_random_sample_matches_numpy: sides disagree on array-ness \
+                 (ours is scalar, theirs is array)"
+            );
+        } else {
+            assert_eq!(
+                actual.getattr("dtype")?.str()?.extract::<String>()?,
+                expected.getattr("dtype")?.str()?.extract::<String>()?
+            );
+            assert_eq!(
+                actual.getattr("shape")?.extract::<Vec<usize>>()?,
+                expected.getattr("shape")?.extract::<Vec<usize>>()?
+            );
+        }
+
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("rtol", 1e-14_f64)?;
+        kwargs.set_item("atol", 0.0_f64)?;
+        kwargs.set_item("equal_nan", true)?;
+        py.import("numpy")?.getattr("testing")?.call_method(
+            "assert_allclose",
+            (actual, expected),
+            Some(&kwargs),
+        )?;
+        Ok(())
+    }
+
     fn assert_index_tuple_matches_numpy(
         actual: &pyo3::Bound<'_, pyo3::types::PyAny>,
         expected: &pyo3::Bound<'_, pyo3::types::PyAny>,
@@ -19531,6 +19777,113 @@ mod tests {
             assert_array_matches_numpy(
                 &ours.call_method1("chisquare", (4.0_f64, shape.clone()))?,
                 &theirs.call_method1("chisquare", (4.0_f64, shape))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_generator_additional_distribution_methods_match_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_more_distributions")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+            let shape = PyTuple::new(py, [2_usize, 2_usize])?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 220)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("geometric", (0.35_f64, shape.clone()))?,
+                &theirs.call_method1("geometric", (0.35_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 221)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("standard_cauchy", (shape.clone(),))?,
+                &theirs.call_method1("standard_cauchy", (shape.clone(),))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 222)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("triangular", (-1.0_f64, 0.25_f64, 2.0_f64, shape.clone()))?,
+                &theirs.call_method1("triangular", (-1.0_f64, 0.25_f64, 2.0_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 223)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("laplace", (0.5_f64, 1.25_f64, shape.clone()))?,
+                &theirs.call_method1("laplace", (0.5_f64, 1.25_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 224)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("gumbel", (0.5_f64, 1.25_f64, shape.clone()))?,
+                &theirs.call_method1("gumbel", (0.5_f64, 1.25_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 225)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("weibull", (1.5_f64, shape.clone()))?,
+                &theirs.call_method1("weibull", (1.5_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 226)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("negative_binomial", (5.0_f64, 0.4_f64, shape.clone()))?,
+                &theirs.call_method1("negative_binomial", (5.0_f64, 0.4_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 227)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("f", (5.0_f64, 7.0_f64, shape.clone()))?,
+                &theirs.call_method1("f", (5.0_f64, 7.0_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 228)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("standard_t", (8.0_f64, shape.clone()))?,
+                &theirs.call_method1("standard_t", (8.0_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 229)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("power", (2.5_f64, shape.clone()))?,
+                &theirs.call_method1("power", (2.5_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 230)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("rayleigh", (1.25_f64, shape.clone()))?,
+                &theirs.call_method1("rayleigh", (1.25_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 231)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("pareto", (2.5_f64, shape.clone()))?,
+                &theirs.call_method1("pareto", (2.5_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 232)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("logistic", (0.5_f64, 1.25_f64, shape.clone()))?,
+                &theirs.call_method1("logistic", (0.5_f64, 1.25_f64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 233)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("hypergeometric", (20_u64, 30_u64, 10_u64, shape.clone()))?,
+                &theirs.call_method1("hypergeometric", (20_u64, 30_u64, 10_u64, shape.clone()))?,
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 234)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("wald", (2.0_f64, 1.5_f64, shape.clone()))?,
+                &theirs.call_method1("wald", (2.0_f64, 1.5_f64, shape))?,
             )?;
 
             Ok(())
