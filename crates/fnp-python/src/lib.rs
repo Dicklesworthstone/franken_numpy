@@ -5,7 +5,7 @@ use fnp_ndarray::{broadcast_shapes, element_count};
 use fnp_random::{
     BIT_GENERATOR_STATE_SCHEMA_VERSION, BitGenerator, BitGeneratorError, BitGeneratorKind,
     BitGeneratorState, Generator as RandomGenerator, RandomError, RandomState as CoreRandomState,
-    SeedMaterial, SeedSequence, ShapedRandomOutput,
+    SeedMaterial, SeedSequence, SeedSequenceSnapshot, ShapedRandomOutput,
 };
 use fnp_ufunc::{
     BinaryOp, FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
@@ -76,6 +76,19 @@ pub struct PyRandomGenerator {
 #[pyclass(name = "RandomState", unsendable)]
 pub struct PyRandomState {
     inner: CoreRandomState,
+}
+
+#[derive(Clone)]
+enum PySeedSequenceEntropy {
+    Scalar(u128),
+    Sequence(Vec<u32>),
+}
+
+#[pyclass(name = "SeedSequence", unsendable, skip_from_py_object)]
+#[derive(Clone)]
+pub struct PySeedSequence {
+    inner: SeedSequence,
+    entropy: PySeedSequenceEntropy,
 }
 
 macro_rules! define_py_bit_generator {
@@ -163,6 +176,135 @@ define_py_bit_generator!(PyPcg64, "PCG64", BitGeneratorKind::Pcg64);
 define_py_bit_generator!(PyPcg64Dxsm, "PCG64DXSM", BitGeneratorKind::Pcg64Dxsm);
 define_py_bit_generator!(PyPhilox, "Philox", BitGeneratorKind::Philox);
 define_py_bit_generator!(PySfc64, "SFC64", BitGeneratorKind::Sfc64);
+
+#[pymethods]
+impl PySeedSequence {
+    #[new]
+    #[pyo3(signature = (entropy=None, *, spawn_key=None, pool_size=4, n_children_spawned=0))]
+    fn new(
+        py: Python<'_>,
+        entropy: Option<Py<PyAny>>,
+        spawn_key: Option<Py<PyAny>>,
+        pool_size: usize,
+        n_children_spawned: u64,
+    ) -> PyResult<Self> {
+        let (entropy_words, entropy) = seed_sequence_entropy_from_py(py, entropy)?;
+        let spawn_key = seed_sequence_spawn_key_from_py(py, spawn_key)?;
+        let inner = SeedSequence::from_snapshot(&SeedSequenceSnapshot {
+            entropy: entropy_words,
+            spawn_key,
+            pool_size,
+            spawn_counter: n_children_spawned,
+        })
+        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        Ok(Self { inner, entropy })
+    }
+
+    #[getter]
+    fn entropy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.entropy {
+            PySeedSequenceEntropy::Scalar(value) => Ok(py_int_from_u128(py, *value)?.unbind()),
+            PySeedSequenceEntropy::Sequence(values) => {
+                Ok(PyList::new(py, values.iter().copied())?.into_any().unbind())
+            }
+        }
+    }
+
+    #[getter]
+    fn spawn_key(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(PyTuple::new(py, self.inner.spawn_key().iter().copied())?
+            .into_any()
+            .unbind())
+    }
+
+    #[getter]
+    fn pool_size(&self) -> usize {
+        self.inner.pool_size()
+    }
+
+    #[getter]
+    fn n_children_spawned(&self) -> u64 {
+        self.inner.spawn_counter()
+    }
+
+    #[getter]
+    fn pool(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        build_numpy_array_from_storage(
+            py,
+            &[self.inner.pool_size()],
+            ArrayStorage::U32(self.inner.pool().to_vec()),
+        )
+    }
+
+    #[getter]
+    fn state(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let dict = PyDict::new(py);
+        dict.set_item("entropy", self.entropy(py)?)?;
+        dict.set_item("spawn_key", self.spawn_key(py)?)?;
+        dict.set_item("pool_size", self.inner.pool_size())?;
+        dict.set_item("n_children_spawned", self.inner.spawn_counter())?;
+        Ok(dict.into_any().unbind())
+    }
+
+    #[pyo3(signature = (n_words, dtype=None))]
+    fn generate_state(
+        &self,
+        py: Python<'_>,
+        n_words: usize,
+        dtype: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let dtype =
+            extract_python_dtype(py, dtype, DType::U32, "SeedSequence.generate_state(dtype)")?;
+        match dtype {
+            DType::U32 => build_numpy_array_from_storage(
+                py,
+                &[n_words],
+                ArrayStorage::U32(
+                    self.inner
+                        .generate_state_u32(n_words)
+                        .map_err(|err| PyValueError::new_err(err.to_string()))?,
+                ),
+            ),
+            DType::U64 => build_numpy_array_from_storage(
+                py,
+                &[n_words],
+                ArrayStorage::U64(
+                    self.inner
+                        .generate_state_u64(n_words)
+                        .map_err(|err| PyValueError::new_err(err.to_string()))?,
+                ),
+            ),
+            _ => Err(PyTypeError::new_err(
+                "Unsupported dtype for SeedSequence.generate_state",
+            )),
+        }
+    }
+
+    fn spawn(&mut self, py: Python<'_>, n_children: usize) -> PyResult<Py<PyAny>> {
+        let list = PyList::empty(py);
+        if n_children == 0 {
+            return Ok(list.into_any().unbind());
+        }
+        for child in self
+            .inner
+            .spawn(n_children)
+            .map_err(|err| PyValueError::new_err(err.to_string()))?
+        {
+            list.append(Py::new(
+                py,
+                Self {
+                    inner: child,
+                    entropy: self.entropy.clone(),
+                },
+            )?)?;
+        }
+        Ok(list.into_any().unbind())
+    }
+
+    fn __repr__(&self) -> String {
+        "SeedSequence".to_string()
+    }
+}
 
 #[pymethods]
 impl PyRandomGenerator {
@@ -1314,6 +1456,80 @@ fn map_random_error(error: RandomError) -> PyErr {
 fn construct_bit_generator(kind: BitGeneratorKind, seed: Option<u64>) -> PyResult<BitGenerator> {
     let seed = seed.map_or(SeedMaterial::None, SeedMaterial::U64);
     BitGenerator::new(kind, seed).map_err(map_bit_generator_error)
+}
+
+fn seed_sequence_words_from_u128(value: u128) -> Vec<u32> {
+    let mut words = vec![(value & 0xFFFF_FFFF) as u32];
+    let mut remaining = value >> 32;
+    while remaining > 0 {
+        words.push((remaining & 0xFFFF_FFFF) as u32);
+        remaining >>= 32;
+    }
+    words
+}
+
+fn nondeterministic_seed_sequence_entropy() -> u128 {
+    let nanos = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_nanos(),
+        Err(_) => 0,
+    };
+    nanos ^ (u128::from(std::process::id()) << 64)
+}
+
+fn seed_sequence_u32_values_from_py(value: &Bound<'_, PyAny>, context: &str) -> PyResult<Vec<u32>> {
+    let mut values = Vec::new();
+    for item in value.try_iter()? {
+        let item = item?;
+        let value = py_state_u64(&item, context)?;
+        values.push(
+            u32::try_from(value)
+                .map_err(|_| PyValueError::new_err(format!("{context} values must fit uint32")))?,
+        );
+    }
+    Ok(values)
+}
+
+fn seed_sequence_entropy_from_py(
+    py: Python<'_>,
+    entropy: Option<Py<PyAny>>,
+) -> PyResult<(Vec<u32>, PySeedSequenceEntropy)> {
+    let Some(entropy) = entropy else {
+        let entropy = nondeterministic_seed_sequence_entropy();
+        return Ok((
+            seed_sequence_words_from_u128(entropy),
+            PySeedSequenceEntropy::Scalar(entropy),
+        ));
+    };
+    let entropy = entropy.bind(py);
+    if entropy.is_none() {
+        let entropy = nondeterministic_seed_sequence_entropy();
+        return Ok((
+            seed_sequence_words_from_u128(entropy),
+            PySeedSequenceEntropy::Scalar(entropy),
+        ));
+    }
+    if let Ok(value) = py_state_u128(entropy, "SeedSequence(entropy)") {
+        return Ok((
+            seed_sequence_words_from_u128(value),
+            PySeedSequenceEntropy::Scalar(value),
+        ));
+    }
+    let values = seed_sequence_u32_values_from_py(entropy, "SeedSequence(entropy)")?;
+    Ok((values.clone(), PySeedSequenceEntropy::Sequence(values)))
+}
+
+fn seed_sequence_spawn_key_from_py(
+    py: Python<'_>,
+    spawn_key: Option<Py<PyAny>>,
+) -> PyResult<Vec<u32>> {
+    let Some(spawn_key) = spawn_key else {
+        return Ok(Vec::new());
+    };
+    let spawn_key = spawn_key.bind(py);
+    if spawn_key.is_none() {
+        return Ok(Vec::new());
+    }
+    seed_sequence_u32_values_from_py(spawn_key, "SeedSequence(spawn_key)")
 }
 
 fn seed_sequence_from_u64(seed: u64) -> PyResult<SeedSequence> {
@@ -19534,6 +19750,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("c_", Py::new(py, PyCClass)?)?;
     {
         let random = PyModule::new(py, "random")?;
+        random.add_class::<PySeedSequence>()?;
         random.add_class::<PyRandomGenerator>()?;
         random.add_class::<PyRandomState>()?;
         random.add_class::<PyMt19937>()?;
@@ -20722,6 +20939,7 @@ mod tests {
             let numpy_random = py.import("numpy")?.getattr("random")?;
 
             for name in [
+                "SeedSequence",
                 "Generator",
                 "RandomState",
                 "MT19937",
@@ -20769,6 +20987,95 @@ mod tests {
             assert_array_matches_numpy(
                 &ours_state.call_method1("random_sample", (shape.clone(),))?,
                 &theirs_state.call_method1("random_sample", (shape,))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_seed_sequence_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_seed_sequence")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy = py.import("numpy")?;
+            let numpy_random = numpy.getattr("random")?;
+
+            let ours = random.getattr("SeedSequence")?.call1((42_u64,))?;
+            let theirs = numpy_random.getattr("SeedSequence")?.call1((42_u64,))?;
+            assert_eq!(
+                repr_string(&ours.getattr("entropy")?),
+                repr_string(&theirs.getattr("entropy")?)
+            );
+            assert_eq!(
+                repr_string(&ours.getattr("spawn_key")?),
+                repr_string(&theirs.getattr("spawn_key")?)
+            );
+            assert_eq!(
+                ours.getattr("pool_size")?.extract::<usize>()?,
+                theirs.getattr("pool_size")?.extract::<usize>()?
+            );
+            assert_eq!(
+                ours.getattr("n_children_spawned")?.extract::<u64>()?,
+                theirs.getattr("n_children_spawned")?.extract::<u64>()?
+            );
+            assert_array_matches_numpy(&ours.getattr("pool")?, &theirs.getattr("pool")?)?;
+            assert_array_matches_numpy(
+                &ours.call_method1("generate_state", (4_usize,))?,
+                &theirs.call_method1("generate_state", (4_usize,))?,
+            )?;
+
+            let uint64_kwargs = PyDict::new(py);
+            uint64_kwargs.set_item("dtype", numpy.getattr("uint64")?)?;
+            assert_array_matches_numpy(
+                &ours.call_method("generate_state", (3_usize,), Some(&uint64_kwargs))?,
+                &theirs.call_method("generate_state", (3_usize,), Some(&uint64_kwargs))?,
+            )?;
+
+            assert_eq!(ours.call_method1("spawn", (0_usize,))?.len()?, 0);
+            assert_eq!(theirs.call_method1("spawn", (0_usize,))?.len()?, 0);
+            let ours_children = ours.call_method1("spawn", (2_usize,))?;
+            let theirs_children = theirs.call_method1("spawn", (2_usize,))?;
+            assert_eq!(ours_children.len()?, theirs_children.len()?);
+            for index in 0..ours_children.len()? {
+                let ours_child = ours_children.get_item(index)?;
+                let theirs_child = theirs_children.get_item(index)?;
+                assert_eq!(
+                    repr_string(&ours_child.getattr("spawn_key")?),
+                    repr_string(&theirs_child.getattr("spawn_key")?)
+                );
+                assert_array_matches_numpy(
+                    &ours_child.call_method1("generate_state", (4_usize,))?,
+                    &theirs_child.call_method1("generate_state", (4_usize,))?,
+                )?;
+            }
+            assert_eq!(
+                ours.getattr("n_children_spawned")?.extract::<u64>()?,
+                theirs.getattr("n_children_spawned")?.extract::<u64>()?
+            );
+
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("spawn_key", PyTuple::new(py, [4_u32])?)?;
+            kwargs.set_item("n_children_spawned", 3_u64)?;
+            let entropy = PyList::new(py, [1_u32, 2_u32, 3_u32])?;
+            let ours = random
+                .getattr("SeedSequence")?
+                .call((entropy.clone(),), Some(&kwargs))?;
+            let theirs = numpy_random
+                .getattr("SeedSequence")?
+                .call((entropy,), Some(&kwargs))?;
+            assert_eq!(
+                repr_string(&ours.getattr("state")?),
+                repr_string(&theirs.getattr("state")?)
+            );
+            assert_array_matches_numpy(
+                &ours.call_method1("generate_state", (4_usize,))?,
+                &theirs.call_method1("generate_state", (4_usize,))?,
             )?;
 
             Ok(())
