@@ -1392,6 +1392,20 @@ impl PyRandomState {
         build_random_integer_parts(py, shape, values, scalar, DType::I64)
     }
 
+    #[pyo3(signature = (size=None))]
+    fn tomaxint(&mut self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        let size = random_state_tomaxint_size_from_py(py, size)?;
+        let (shape, len, scalar) = random_len_and_shape(size)?;
+        let mut values = Vec::with_capacity(len);
+        for _ in 0..len {
+            values.push(
+                i64::try_from(self.inner.next_u64() >> 1)
+                    .map_err(|_| PyValueError::new_err("tomaxint sample exceeds int64"))?,
+            );
+        }
+        build_random_integer_parts(py, shape, values, scalar, DType::I64)
+    }
+
     fn bytes(&mut self, py: Python<'_>, length: usize) -> PyResult<Py<PyAny>> {
         let mut out = Vec::with_capacity(length);
         while out.len() < length {
@@ -2631,6 +2645,50 @@ fn random_state_integer_inclusive_sample(
     let interval = high_bits.wrapping_sub(low_bits);
     let offset = random_state.random_interval(interval);
     low.wrapping_add_unsigned(offset)
+}
+
+fn random_state_tomaxint_size_from_py(
+    py: Python<'_>,
+    size: Option<Py<PyAny>>,
+) -> PyResult<Option<Vec<usize>>> {
+    let Some(size) = size else {
+        return Ok(None);
+    };
+    let value = size.bind(py);
+    if value.is_none() {
+        return Ok(None);
+    }
+    if value.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(format!(
+            "expected a sequence of integers or a single integer, got '{}'",
+            value.str()?.extract::<String>()?,
+        )));
+    }
+    if let Ok(dim) = value.extract::<i64>() {
+        if dim < 0 {
+            return Err(PyValueError::new_err("negative dimensions are not allowed"));
+        }
+        let dim =
+            usize::try_from(dim).map_err(|_| PyValueError::new_err("size dimension is too large"))?;
+        return Ok(Some(vec![dim]));
+    }
+    if let Ok(dims) = value.extract::<Vec<i64>>() {
+        let mut shape = Vec::with_capacity(dims.len());
+        for dim in dims {
+            if dim < 0 {
+                return Err(PyValueError::new_err("negative dimensions are not allowed"));
+            }
+            shape.push(usize::try_from(dim).map_err(|_| {
+                PyValueError::new_err("size dimension is too large")
+            })?);
+        }
+        element_count(&shape).map_err(|err| PyValueError::new_err(err.to_string()))?;
+        return Ok(Some(shape));
+    }
+    Err(PyTypeError::new_err(format!(
+        "expected a sequence of integers or a single integer, got '{}'",
+        value.str()?.extract::<String>()?,
+    )))
 }
 
 fn warn_random_integers_deprecated(py: Python<'_>, low: i64, high: i64) -> PyResult<()> {
@@ -21683,6 +21741,92 @@ mod tests {
                     Err(err) => err,
                 };
             assert_pyerr_matches_numpy(py, ours_error, theirs_error)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_state_tomaxint_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_state_tomaxint")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+
+            let ours_scalar = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_scalar = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_array_matches_numpy(
+                &ours_scalar.call_method0("tomaxint")?,
+                &theirs_scalar.call_method0("tomaxint")?,
+            )?;
+
+            let zero_dim = PyTuple::empty(py);
+            let ours_zero_dim = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_zero_dim = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_array_matches_numpy(
+                &ours_zero_dim.call_method1("tomaxint", (zero_dim.clone(),))?,
+                &theirs_zero_dim.call_method1("tomaxint", (zero_dim,))?,
+            )?;
+
+            let shape = PyTuple::new(py, [2_usize, 3_usize])?;
+            let ours_shaped = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_shaped = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_array_matches_numpy(
+                &ours_shaped.call_method1("tomaxint", (shape.clone(),))?,
+                &theirs_shaped.call_method1("tomaxint", (shape,))?,
+            )?;
+
+            let ours_empty = random.getattr("RandomState")?.call1((42_u64,))?;
+            let theirs_empty = numpy_random.getattr("RandomState")?.call1((42_u64,))?;
+            assert_array_matches_numpy(
+                &ours_empty.call_method1("tomaxint", (0_usize,))?,
+                &theirs_empty.call_method1("tomaxint", (0_usize,))?,
+            )?;
+
+            let ours_negative = random.getattr("RandomState")?.call1((1_u64,))?;
+            let theirs_negative = numpy_random.getattr("RandomState")?.call1((1_u64,))?;
+            let ours_negative = match ours_negative.call_method1("tomaxint", (-1_i64,)) {
+                Ok(_) => {
+                    return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        "RandomState.tomaxint(-1) unexpectedly succeeded",
+                    ));
+                }
+                Err(err) => err,
+            };
+            let theirs_negative = match theirs_negative.call_method1("tomaxint", (-1_i64,)) {
+                Ok(_) => {
+                    return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        "numpy RandomState.tomaxint(-1) unexpectedly succeeded",
+                    ));
+                }
+                Err(err) => err,
+            };
+            assert_pyerr_matches_numpy(py, ours_negative, theirs_negative)?;
+
+            let ours_bool = random.getattr("RandomState")?.call1((1_u64,))?;
+            let theirs_bool = numpy_random.getattr("RandomState")?.call1((1_u64,))?;
+            let ours_bool = match ours_bool.call_method1("tomaxint", (true,)) {
+                Ok(_) => {
+                    return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        "RandomState.tomaxint(True) unexpectedly succeeded",
+                    ));
+                }
+                Err(err) => err,
+            };
+            let theirs_bool = match theirs_bool.call_method1("tomaxint", (true,)) {
+                Ok(_) => {
+                    return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        "numpy RandomState.tomaxint(True) unexpectedly succeeded",
+                    ));
+                }
+                Err(err) => err,
+            };
+            assert_pyerr_matches_numpy(py, ours_bool, theirs_bool)?;
 
             Ok(())
         });
