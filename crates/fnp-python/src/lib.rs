@@ -13813,6 +13813,213 @@ fn hermint(
         .unbind())
 }
 
+// numpy.polynomial.hermite_e (herme*) wrappers — probabilist's Hermite
+// polynomials. Parallel to the physicist's hermite family above; each
+// entry is a direct passthrough preserving numpy's dtype, ValueError,
+// and tuple-return contracts.
+
+#[pyfunction]
+#[pyo3(signature = (c1, c2))]
+fn hermeadd(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite_e")?
+        .getattr("hermeadd")?
+        .call1((c1.bind(py), c2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c1, c2))]
+fn hermesub(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite_e")?
+        .getattr("hermesub")?
+        .call1((c1.bind(py), c2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c1, c2))]
+fn hermemul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite_e")?
+        .getattr("hermemul")?
+        .call1((c1.bind(py), c2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, c, tensor=true))]
+fn hermeval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("tensor", tensor)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite_e")?
+        .getattr("hermeval")?
+        .call((x.bind(py), c.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c,))]
+fn hermeroots(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite_e")?
+        .getattr("hermeroots")?
+        .call1((c.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (roots,))]
+fn hermefromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite_e")?
+        .getattr("hermefromroots")?
+        .call1((roots.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c, pow, maxpower=16))]
+fn hermepow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("maxpower", maxpower)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite_e")?
+        .getattr("hermepow")?
+        .call((c.bind(py), pow.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c1, c2))]
+fn hermediv(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite_e")?
+        .getattr("hermediv")?
+        .call1((c1.bind(py), c2.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (off, scl))]
+fn hermeline(py: Python<'_>, off: Py<PyAny>, scl: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite_e")?
+        .getattr("hermeline")?
+        .call1((off.bind(py), scl.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c,))]
+fn hermemulx(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite_e")?
+        .getattr("hermemulx")?
+        .call1((c.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c, tol=0.0))]
+fn hermetrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite_e")?
+        .getattr("hermetrim")?
+        .call1((c.bind(py), tol))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c, m=1, scl=1.0, axis=0))]
+fn hermeder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("scl", scl)?;
+    kwargs.set_item("axis", axis)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite_e")?
+        .getattr("hermeder")?
+        .call((c.bind(py), m), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c, m=1, k=None, lbnd=0.0, scl=1.0, axis=0))]
+fn hermeint(
+    py: Python<'_>,
+    c: Py<PyAny>,
+    m: i64,
+    k: Option<Py<PyAny>>,
+    lbnd: f64,
+    scl: f64,
+    axis: i64,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(k_val) = k {
+        kwargs.set_item("k", k_val.bind(py))?;
+    }
+    kwargs.set_item("lbnd", lbnd)?;
+    kwargs.set_item("scl", scl)?;
+    kwargs.set_item("axis", axis)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite_e")?
+        .getattr("hermeint")?
+        .call((c.bind(py), m), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (pol,))]
+fn herme2poly(py: Python<'_>, pol: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite_e")?
+        .getattr("herme2poly")?
+        .call1((pol.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (pol,))]
+fn poly2herme(py: Python<'_>, pol: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite_e")?
+        .getattr("poly2herme")?
+        .call1((pol.bind(py),))?
+        .unbind())
+}
+
 // numpy.polynomial.laguerre wrappers. API shape mirrors chebyshev and
 // hermite; each is a direct passthrough.
 
@@ -21018,6 +21225,22 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hermtrim, m)?)?;
     m.add_function(wrap_pyfunction!(hermder, m)?)?;
     m.add_function(wrap_pyfunction!(hermint, m)?)?;
+    // 7a8q: numpy.polynomial.hermite_e (probabilist's Hermite) family.
+    m.add_function(wrap_pyfunction!(hermeadd, m)?)?;
+    m.add_function(wrap_pyfunction!(hermesub, m)?)?;
+    m.add_function(wrap_pyfunction!(hermemul, m)?)?;
+    m.add_function(wrap_pyfunction!(hermeval, m)?)?;
+    m.add_function(wrap_pyfunction!(hermeroots, m)?)?;
+    m.add_function(wrap_pyfunction!(hermefromroots, m)?)?;
+    m.add_function(wrap_pyfunction!(hermepow, m)?)?;
+    m.add_function(wrap_pyfunction!(hermediv, m)?)?;
+    m.add_function(wrap_pyfunction!(hermeline, m)?)?;
+    m.add_function(wrap_pyfunction!(hermemulx, m)?)?;
+    m.add_function(wrap_pyfunction!(hermetrim, m)?)?;
+    m.add_function(wrap_pyfunction!(hermeder, m)?)?;
+    m.add_function(wrap_pyfunction!(hermeint, m)?)?;
+    m.add_function(wrap_pyfunction!(herme2poly, m)?)?;
+    m.add_function(wrap_pyfunction!(poly2herme, m)?)?;
     m.add_function(wrap_pyfunction!(lagadd, m)?)?;
     m.add_function(wrap_pyfunction!(lagsub, m)?)?;
     m.add_function(wrap_pyfunction!(lagmul, m)?)?;
@@ -22106,6 +22329,90 @@ mod tests {
                 &numpy_random.call_method1("randint", (0_i64, 100_i64, 5_usize))?,
             )?;
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn hermite_e_wrappers_match_numpy() {
+        // 7a8q: every fnp_python.herme* wrapper must produce bit-exact
+        // output against numpy.polynomial.hermite_e.<same_name>. 15
+        // wrappers × 1 representative call each.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_hermite_e")?;
+            fnp_python(&module)?;
+            let np_hermite_e = py.import("numpy.polynomial.hermite_e")?;
+
+            let c1 = PyTuple::new(py, [1.0_f64, 2.0_f64, 3.0_f64])?;
+            let c2 = PyTuple::new(py, [1.0_f64, 0.0_f64, 1.0_f64])?;
+            let x = 0.5_f64;
+            let roots = PyTuple::new(py, [-1.0_f64, 1.0_f64])?;
+
+            for (name, call_args) in [
+                ("hermeadd", "binary"),
+                ("hermesub", "binary"),
+                ("hermemul", "binary"),
+                ("hermediv", "binary"),
+                ("hermeroots", "unary"),
+                ("hermefromroots", "roots"),
+                ("hermemulx", "unary"),
+                ("hermetrim", "unary_tol"),
+                ("herme2poly", "unary"),
+                ("poly2herme", "unary"),
+            ] {
+                let ours_fn = module.getattr(name)?;
+                let theirs_fn = np_hermite_e.getattr(name)?;
+                let (ours, theirs): (Py<PyAny>, Py<PyAny>) = match call_args {
+                    "binary" => (
+                        ours_fn.call1((c1.clone(), c2.clone()))?.unbind(),
+                        theirs_fn.call1((c1.clone(), c2.clone()))?.unbind(),
+                    ),
+                    "unary" => match name {
+                        "hermeroots" | "hermemulx" => (
+                            ours_fn.call1((c1.clone(),))?.unbind(),
+                            theirs_fn.call1((c1.clone(),))?.unbind(),
+                        ),
+                        _ => (
+                            ours_fn.call1((c1.clone(),))?.unbind(),
+                            theirs_fn.call1((c1.clone(),))?.unbind(),
+                        ),
+                    },
+                    "roots" => (
+                        ours_fn.call1((roots.clone(),))?.unbind(),
+                        theirs_fn.call1((roots.clone(),))?.unbind(),
+                    ),
+                    "unary_tol" => (
+                        ours_fn.call1((c1.clone(), 0.0_f64))?.unbind(),
+                        theirs_fn.call1((c1.clone(), 0.0_f64))?.unbind(),
+                    ),
+                    _ => unreachable!(),
+                };
+                assert_eq!(
+                    repr_string(ours.bind(py)),
+                    repr_string(theirs.bind(py)),
+                    "fnp_python.{name} diverges from numpy.polynomial.hermite_e.{name}"
+                );
+            }
+            // hermeval / hermeder / hermeint / hermepow / hermeline have
+            // unique signatures — exercise each with a single call.
+            let ours_val = module.getattr("hermeval")?.call1((x, c1.clone()))?;
+            let theirs_val = np_hermite_e.getattr("hermeval")?.call1((x, c1.clone()))?;
+            assert_eq!(repr_string(&ours_val), repr_string(&theirs_val));
+            let ours_der = module.getattr("hermeder")?.call1((c1.clone(),))?;
+            let theirs_der = np_hermite_e.getattr("hermeder")?.call1((c1.clone(),))?;
+            assert_eq!(repr_string(&ours_der), repr_string(&theirs_der));
+            let ours_int = module.getattr("hermeint")?.call1((c1.clone(),))?;
+            let theirs_int = np_hermite_e.getattr("hermeint")?.call1((c1.clone(),))?;
+            assert_eq!(repr_string(&ours_int), repr_string(&theirs_int));
+            let ours_pow = module.getattr("hermepow")?.call1((c1.clone(), 2_i64))?;
+            let theirs_pow = np_hermite_e.getattr("hermepow")?.call1((c1.clone(), 2_i64))?;
+            assert_eq!(repr_string(&ours_pow), repr_string(&theirs_pow));
+            let ours_line = module.getattr("hermeline")?.call1((1.0_f64, 2.0_f64))?;
+            let theirs_line = np_hermite_e.getattr("hermeline")?.call1((1.0_f64, 2.0_f64))?;
+            assert_eq!(repr_string(&ours_line), repr_string(&theirs_line));
             Ok(())
         });
     }
