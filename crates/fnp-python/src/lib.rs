@@ -4,7 +4,7 @@ use fnp_linalg::{pinv_hermitian_nxn_with_tolerance_aliases, pinv_mxn_with_tolera
 use fnp_ndarray::{broadcast_shapes, element_count};
 use fnp_random::{
     BitGenerator, BitGeneratorError, BitGeneratorKind, Generator as RandomGenerator, RandomError,
-    RandomState as CoreRandomState, SeedMaterial, ShapedRandomOutput,
+    RandomState as CoreRandomState, SeedMaterial, SeedSequence, ShapedRandomOutput,
 };
 use fnp_ufunc::{
     BinaryOp, FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
@@ -83,6 +83,7 @@ macro_rules! define_py_bit_generator {
         #[derive(Clone)]
         pub struct $type_name {
             inner: BitGenerator,
+            seed_sequence: Option<SeedSequence>,
         }
 
         #[pymethods]
@@ -90,8 +91,11 @@ macro_rules! define_py_bit_generator {
             #[new]
             #[pyo3(signature = (seed=None))]
             fn new(seed: Option<u64>) -> PyResult<Self> {
+                let (inner, seed_sequence) =
+                    construct_bit_generator_with_seed_sequence($kind, seed)?;
                 Ok(Self {
-                    inner: construct_bit_generator($kind, seed)?,
+                    inner,
+                    seed_sequence,
                 })
             }
 
@@ -113,7 +117,27 @@ macro_rules! define_py_bit_generator {
             fn jumped(&self, jumps: u64) -> PyResult<Self> {
                 Ok(Self {
                     inner: self.inner.jumped(jumps).map_err(map_bit_generator_error)?,
+                    seed_sequence: self.seed_sequence.clone(),
                 })
+            }
+
+            fn spawn(&mut self, py: Python<'_>, n_children: usize) -> PyResult<Py<PyAny>> {
+                let list = PyList::empty(py);
+                for (inner, seed_sequence) in spawn_bit_generator_children(
+                    $kind,
+                    &mut self.inner,
+                    &mut self.seed_sequence,
+                    n_children,
+                )? {
+                    list.append(Py::new(
+                        py,
+                        Self {
+                            inner,
+                            seed_sequence,
+                        },
+                    )?)?;
+                }
+                Ok(list.into_any().unbind())
             }
 
             fn __repr__(&self) -> String {
@@ -133,10 +157,15 @@ define_py_bit_generator!(PySfc64, "SFC64", BitGeneratorKind::Sfc64);
 impl PyRandomGenerator {
     #[new]
     fn new(bit_generator: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let bit_generator = extract_bit_generator(bit_generator)?;
-        Ok(Self {
-            inner: RandomGenerator::from_bit_generator(bit_generator),
-        })
+        let (bit_generator, seed_sequence) = extract_bit_generator_binding(bit_generator)?;
+        let inner = match seed_sequence.as_ref() {
+            Some(seed_sequence) => {
+                RandomGenerator::bind_seed_sequence(bit_generator.clone(), seed_sequence)
+                    .unwrap_or_else(|_| RandomGenerator::from_bit_generator(bit_generator))
+            }
+            None => RandomGenerator::from_bit_generator(bit_generator),
+        };
+        Ok(Self { inner })
     }
 
     #[getter]
@@ -147,6 +176,21 @@ impl PyRandomGenerator {
     #[getter]
     fn state(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         build_bit_generator_state_dict(py, self.inner.bit_generator())
+    }
+
+    fn spawn(&mut self, py: Python<'_>, n_children: usize) -> PyResult<Py<PyAny>> {
+        let list = PyList::empty(py);
+        if n_children == 0 {
+            return Ok(list.into_any().unbind());
+        }
+        for inner in self
+            .inner
+            .spawn(n_children)
+            .map_err(map_bit_generator_error)?
+        {
+            list.append(Py::new(py, Self { inner })?)?;
+        }
+        Ok(list.into_any().unbind())
     }
 
     #[pyo3(signature = (size=None, dtype=None, out=None))]
@@ -1137,12 +1181,18 @@ impl PyRandomState {
 #[pyfunction]
 #[pyo3(signature = (seed=None))]
 fn default_rng(seed: Option<u64>) -> PyResult<PyRandomGenerator> {
-    Ok(PyRandomGenerator {
-        inner: RandomGenerator::from_bit_generator(construct_bit_generator(
+    let inner = match seed {
+        Some(seed) => {
+            let seed_sequence = seed_sequence_from_u64(seed)?;
+            RandomGenerator::from_seed_sequence(BitGeneratorKind::Pcg64, &seed_sequence)
+                .map_err(map_bit_generator_error)?
+        }
+        None => RandomGenerator::from_bit_generator(construct_bit_generator(
             BitGeneratorKind::Pcg64,
-            seed,
+            None,
         )?),
-    })
+    };
+    Ok(PyRandomGenerator { inner })
 }
 
 #[derive(Clone, Copy)]
@@ -1255,6 +1305,60 @@ fn construct_bit_generator(kind: BitGeneratorKind, seed: Option<u64>) -> PyResul
     BitGenerator::new(kind, seed).map_err(map_bit_generator_error)
 }
 
+fn seed_sequence_from_u64(seed: u64) -> PyResult<SeedSequence> {
+    let entropy = if seed <= u64::from(u32::MAX) {
+        vec![seed as u32]
+    } else {
+        vec![seed as u32, (seed >> 32) as u32]
+    };
+    SeedSequence::new(&entropy).map_err(|err| PyValueError::new_err(err.to_string()))
+}
+
+fn construct_bit_generator_with_seed_sequence(
+    kind: BitGeneratorKind,
+    seed: Option<u64>,
+) -> PyResult<(BitGenerator, Option<SeedSequence>)> {
+    let Some(seed) = seed else {
+        return Ok((construct_bit_generator(kind, None)?, None));
+    };
+    let seed_sequence = seed_sequence_from_u64(seed)?;
+    let bit_generator =
+        BitGenerator::from_seed_sequence(kind, &seed_sequence).map_err(map_bit_generator_error)?;
+    Ok((bit_generator, Some(seed_sequence)))
+}
+
+fn spawn_bit_generator_children(
+    kind: BitGeneratorKind,
+    bit_generator: &mut BitGenerator,
+    seed_sequence: &mut Option<SeedSequence>,
+    n_children: usize,
+) -> PyResult<Vec<(BitGenerator, Option<SeedSequence>)>> {
+    if n_children == 0 {
+        return Ok(Vec::new());
+    }
+    if let Some(seed_sequence) = seed_sequence.as_mut() {
+        return seed_sequence
+            .spawn(n_children)
+            .map_err(|err| PyValueError::new_err(err.to_string()))?
+            .into_iter()
+            .map(|child_sequence| {
+                let child = BitGenerator::from_seed_sequence(kind, &child_sequence)
+                    .map_err(map_bit_generator_error)?;
+                Ok((child, Some(child_sequence)))
+            })
+            .collect();
+    }
+    bit_generator
+        .spawn(n_children)
+        .map_err(map_bit_generator_error)
+        .map(|children| {
+            children
+                .into_iter()
+                .map(|child| (child, None))
+                .collect::<Vec<_>>()
+        })
+}
+
 fn bit_generator_numpy_name(kind: BitGeneratorKind) -> &'static str {
     match kind {
         BitGeneratorKind::Mt19937 => "MT19937",
@@ -1295,21 +1399,38 @@ fn build_bit_generator_state_dict(
     Ok(dict.into_any().unbind())
 }
 
-fn extract_bit_generator(value: &Bound<'_, PyAny>) -> PyResult<BitGenerator> {
+fn extract_bit_generator_binding(
+    value: &Bound<'_, PyAny>,
+) -> PyResult<(BitGenerator, Option<SeedSequence>)> {
     if let Ok(bit_generator) = value.extract::<PyRef<'_, PyMt19937>>() {
-        return Ok(bit_generator.inner.clone());
+        return Ok((
+            bit_generator.inner.clone(),
+            bit_generator.seed_sequence.clone(),
+        ));
     }
     if let Ok(bit_generator) = value.extract::<PyRef<'_, PyPcg64>>() {
-        return Ok(bit_generator.inner.clone());
+        return Ok((
+            bit_generator.inner.clone(),
+            bit_generator.seed_sequence.clone(),
+        ));
     }
     if let Ok(bit_generator) = value.extract::<PyRef<'_, PyPcg64Dxsm>>() {
-        return Ok(bit_generator.inner.clone());
+        return Ok((
+            bit_generator.inner.clone(),
+            bit_generator.seed_sequence.clone(),
+        ));
     }
     if let Ok(bit_generator) = value.extract::<PyRef<'_, PyPhilox>>() {
-        return Ok(bit_generator.inner.clone());
+        return Ok((
+            bit_generator.inner.clone(),
+            bit_generator.seed_sequence.clone(),
+        ));
     }
     if let Ok(bit_generator) = value.extract::<PyRef<'_, PySfc64>>() {
-        return Ok(bit_generator.inner.clone());
+        return Ok((
+            bit_generator.inner.clone(),
+            bit_generator.seed_sequence.clone(),
+        ));
     }
     Err(PyTypeError::new_err(
         "Generator expects an fnp_python.random bit generator",
@@ -20514,6 +20635,66 @@ mod tests {
             assert_array_matches_numpy(
                 &ours_state.call_method1("random_sample", (shape.clone(),))?,
                 &theirs_state.call_method1("random_sample", (shape,))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_spawn_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_spawn")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+
+            let ours_bg = random.getattr("PCG64DXSM")?.call1((12345_u64,))?;
+            let theirs_bg = numpy_random.getattr("PCG64DXSM")?.call1((12345_u64,))?;
+            assert_eq!(ours_bg.call_method1("spawn", (0_usize,))?.len()?, 0);
+            assert_eq!(theirs_bg.call_method1("spawn", (0_usize,))?.len()?, 0);
+            let ours_children = ours_bg.call_method1("spawn", (2_usize,))?;
+            let theirs_children = theirs_bg.call_method1("spawn", (2_usize,))?;
+            assert_eq!(ours_children.len()?, theirs_children.len()?);
+            for index in 0..ours_children.len()? {
+                let ours_child = ours_children.get_item(index)?;
+                let theirs_child = theirs_children.get_item(index)?;
+                assert_array_matches_numpy(
+                    &ours_child.call_method1("random_raw", (4_usize,))?,
+                    &theirs_child.call_method1("random_raw", (4_usize,))?,
+                )?;
+            }
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 12345)?;
+            assert_eq!(ours.call_method1("spawn", (0_usize,))?.len()?, 0);
+            assert_eq!(theirs.call_method1("spawn", (0_usize,))?.len()?, 0);
+            let ours_children = ours.call_method1("spawn", (2_usize,))?;
+            let theirs_children = theirs.call_method1("spawn", (2_usize,))?;
+            assert_eq!(ours_children.len()?, theirs_children.len()?);
+            for index in 0..ours_children.len()? {
+                let ours_child = ours_children.get_item(index)?;
+                let theirs_child = theirs_children.get_item(index)?;
+                assert_random_sample_matches_numpy(
+                    &ours_child.call_method1("random", (4_usize,))?,
+                    &theirs_child.call_method1("random", (4_usize,))?,
+                )?;
+            }
+
+            let ours_default = random.call_method1("default_rng", (2468_u64,))?;
+            let theirs_default = numpy_random.call_method1("default_rng", (2468_u64,))?;
+            let ours_child = ours_default
+                .call_method1("spawn", (1_usize,))?
+                .get_item(0)?;
+            let theirs_child = theirs_default
+                .call_method1("spawn", (1_usize,))?
+                .get_item(0)?;
+            assert_random_sample_matches_numpy(
+                &ours_child.call_method1("integers", (0_i64, 100_i64, 5_usize))?,
+                &theirs_child.call_method1("integers", (0_i64, 100_i64, 5_usize))?,
             )?;
 
             Ok(())
