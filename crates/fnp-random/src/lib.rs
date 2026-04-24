@@ -6501,10 +6501,7 @@ for child in rng.spawn(n_children):
         assert_eq!(after, vec![9, 0, 1, 7, 1]);
 
         let mut invalid = RandomState::new(SeedMaterial::U64(42)).expect("invalid");
-        assert_eq!(
-            invalid.weibull(-0.0, 1),
-            Err(RandomError::InvalidParameter)
-        );
+        assert_eq!(invalid.weibull(-0.0, 1), Err(RandomError::InvalidParameter));
         let after: Vec<u64> = (0..3).map(|_| invalid.random_interval(9)).collect();
         assert_eq!(after, vec![6, 3, 7]);
     }
