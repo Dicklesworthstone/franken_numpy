@@ -1288,6 +1288,13 @@ impl PyRandomState {
         self.random_sample(py, size)
     }
 
+    #[pyo3(signature = (*dims))]
+    fn rand(&mut self, py: Python<'_>, dims: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+        let size = random_state_rand_size_from_dims(dims)?;
+        let (shape, values, scalar) = random_state_f64_parts(&mut self.inner, size)?;
+        build_random_f64_parts(py, shape, values, scalar)
+    }
+
     #[pyo3(signature = (low, high=None, size=None))]
     fn randint(
         &mut self,
@@ -1833,6 +1840,31 @@ fn random_size_from_py(
     Err(PyTypeError::new_err(format!(
         "{context}: size must be None, int, or tuple/list of ints",
     )))
+}
+
+fn random_state_rand_size_from_dims(dims: &Bound<'_, PyTuple>) -> PyResult<Option<Vec<usize>>> {
+    let dim_count = dims.len();
+    if dim_count == 0 {
+        return Ok(None);
+    }
+
+    let mut shape = Vec::with_capacity(dim_count);
+    for dim in dims.try_iter()? {
+        let dim = dim?;
+        if dim.is_instance_of::<PyBool>() {
+            return Err(PyTypeError::new_err("an integer is required"));
+        }
+        let dim = dim.extract::<i64>()?;
+        if dim < 0 {
+            return Err(PyValueError::new_err("negative dimensions are not allowed"));
+        }
+        shape.push(
+            usize::try_from(dim)
+                .map_err(|_| PyValueError::new_err("size dimension is too large"))?,
+        );
+    }
+    element_count(&shape).map_err(|err| PyValueError::new_err(err.to_string()))?;
+    Ok(Some(shape))
 }
 
 fn random_len_and_shape(size: Option<Vec<usize>>) -> PyResult<(Vec<usize>, usize, bool)> {
@@ -20988,6 +21020,77 @@ mod tests {
                 &ours_state.call_method1("random_sample", (shape.clone(),))?,
                 &theirs_state.call_method1("random_sample", (shape,))?,
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_state_rand_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_state_rand")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+
+            let ours_state = random.getattr("RandomState")?.call1((7_u64,))?;
+            let theirs_state = numpy_random.getattr("RandomState")?.call1((7_u64,))?;
+            assert_random_sample_matches_numpy(
+                &ours_state.call_method0("rand")?,
+                &theirs_state.call_method0("rand")?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_state.call_method1("rand", (2_usize, 3_usize))?,
+                &theirs_state.call_method1("rand", (2_usize, 3_usize))?,
+            )?;
+            assert_random_sample_matches_numpy(
+                &ours_state.call_method1("rand", (0_usize,))?,
+                &theirs_state.call_method1("rand", (0_usize,))?,
+            )?;
+
+            let ours_negative = random.getattr("RandomState")?.call1((7_u64,))?;
+            let theirs_negative = numpy_random.getattr("RandomState")?.call1((7_u64,))?;
+            let ours_negative_err = match ours_negative.call_method1("rand", (-1_i64,)) {
+                Ok(_) => {
+                    return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        "RandomState.rand(-1) unexpectedly succeeded",
+                    ));
+                }
+                Err(err) => err,
+            };
+            let theirs_negative_err = match theirs_negative.call_method1("rand", (-1_i64,)) {
+                Ok(_) => {
+                    return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        "numpy RandomState.rand(-1) unexpectedly succeeded",
+                    ));
+                }
+                Err(err) => err,
+            };
+            assert_pyerr_matches_numpy(py, ours_negative_err, theirs_negative_err)?;
+
+            let ours_bool = random.getattr("RandomState")?.call1((7_u64,))?;
+            let theirs_bool = numpy_random.getattr("RandomState")?.call1((7_u64,))?;
+            let ours_bool_err = match ours_bool.call_method1("rand", (true,)) {
+                Ok(_) => {
+                    return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        "RandomState.rand(True) unexpectedly succeeded",
+                    ));
+                }
+                Err(err) => err,
+            };
+            let theirs_bool_err = match theirs_bool.call_method1("rand", (true,)) {
+                Ok(_) => {
+                    return Err(pyo3::PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
+                        "numpy RandomState.rand(True) unexpectedly succeeded",
+                    ));
+                }
+                Err(err) => err,
+            };
+            assert_pyerr_matches_numpy(py, ours_bool_err, theirs_bool_err)?;
 
             Ok(())
         });
