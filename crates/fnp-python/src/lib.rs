@@ -3,8 +3,9 @@ use fnp_iter::{Nditer, NditerOptions, NditerOrder};
 use fnp_linalg::{pinv_hermitian_nxn_with_tolerance_aliases, pinv_mxn_with_tolerance_aliases};
 use fnp_ndarray::{broadcast_shapes, element_count};
 use fnp_random::{
-    BitGenerator, BitGeneratorError, BitGeneratorKind, Generator as RandomGenerator, RandomError,
-    RandomState as CoreRandomState, SeedMaterial, SeedSequence, ShapedRandomOutput,
+    BIT_GENERATOR_STATE_SCHEMA_VERSION, BitGenerator, BitGeneratorError, BitGeneratorKind,
+    BitGeneratorState, Generator as RandomGenerator, RandomError, RandomState as CoreRandomState,
+    SeedMaterial, SeedSequence, ShapedRandomOutput,
 };
 use fnp_ufunc::{
     BinaryOp, FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
@@ -102,6 +103,16 @@ macro_rules! define_py_bit_generator {
             #[getter]
             fn state(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
                 build_bit_generator_state_dict(py, &self.inner)
+            }
+
+            #[setter]
+            fn set_state(&mut self, py: Python<'_>, state: Py<PyAny>) -> PyResult<()> {
+                let state = py_bit_generator_state_from_dict(state.bind(py))?;
+                self.inner
+                    .set_state(&state)
+                    .map_err(map_bit_generator_error)?;
+                self.seed_sequence = None;
+                Ok(())
             }
 
             #[pyo3(signature = (size=None))]
@@ -1397,6 +1408,129 @@ fn build_bit_generator_state_dict(
     dict.set_item("has_uint32", 0)?;
     dict.set_item("uinteger", 0)?;
     Ok(dict.into_any().unbind())
+}
+
+fn required_dict_item<'py>(dict: &Bound<'py, PyDict>, key: &str) -> PyResult<Bound<'py, PyAny>> {
+    dict.get_item(key)?
+        .ok_or_else(|| PyValueError::new_err(format!("bit-generator state is missing {key:?}")))
+}
+
+fn bit_generator_kind_from_state_name(name: &str) -> PyResult<BitGeneratorKind> {
+    match name {
+        "MT19937" | "mt19937" => Ok(BitGeneratorKind::Mt19937),
+        "PCG64" | "pcg64" => Ok(BitGeneratorKind::Pcg64),
+        "PCG64DXSM" | "pcg64dxsm" => Ok(BitGeneratorKind::Pcg64Dxsm),
+        "Philox" | "philox" => Ok(BitGeneratorKind::Philox),
+        "SFC64" | "sfc64" => Ok(BitGeneratorKind::Sfc64),
+        _ => Err(PyValueError::new_err(format!(
+            "unsupported bit-generator state algorithm {name:?}"
+        ))),
+    }
+}
+
+fn py_state_u128(value: &Bound<'_, PyAny>, field_name: &str) -> PyResult<u128> {
+    if let Ok(value) = value.extract::<u128>() {
+        return Ok(value);
+    }
+    let text = value.extract::<String>()?;
+    text.parse::<u128>().map_err(|_| {
+        PyValueError::new_err(format!(
+            "bit-generator state field {field_name:?} must be an unsigned integer"
+        ))
+    })
+}
+
+fn py_state_u64(value: &Bound<'_, PyAny>, field_name: &str) -> PyResult<u64> {
+    if let Ok(value) = value.extract::<u64>() {
+        return Ok(value);
+    }
+    let text = value.extract::<String>()?;
+    text.parse::<u64>().map_err(|_| {
+        PyValueError::new_err(format!(
+            "bit-generator state field {field_name:?} must be a u64-compatible integer"
+        ))
+    })
+}
+
+fn py_bit_generator_schema_entries_from_list(
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Vec<(String, u64)>> {
+    let mut entries = Vec::new();
+    for entry in value.try_iter()? {
+        let entry = entry?;
+        let entry = entry.cast::<PyTuple>()?;
+        if entry.len() != 2 {
+            return Err(PyValueError::new_err(
+                "bit-generator schema_entries items must be 2-tuples",
+            ));
+        }
+        let key = entry.get_item(0)?.extract::<String>()?;
+        let value = py_state_u64(&entry.get_item(1)?, &key)?;
+        entries.push((key, value));
+    }
+    Ok(entries)
+}
+
+fn numpy_pcg_state_schema_entries(
+    kind: BitGeneratorKind,
+    seed: u128,
+    counter: u128,
+) -> PyResult<Vec<(String, u64)>> {
+    if !matches!(kind, BitGeneratorKind::Pcg64 | BitGeneratorKind::Pcg64Dxsm) {
+        return Err(PyValueError::new_err(
+            "bit-generator state requires FrankenNumPy schema_entries for this algorithm",
+        ));
+    }
+
+    let seed_lo = seed as u64;
+    let counter_lo = counter as u64;
+    let algorithm_value =
+        BitGeneratorState::algorithm_state_schema_value(kind, seed_lo, counter_lo).ok_or_else(
+            || PyValueError::new_err("bit-generator state cannot synthesize algorithm metadata"),
+        )?;
+    Ok(vec![
+        ("stream_seed".to_string(), seed_lo),
+        ("counter".to_string(), counter_lo),
+        ("algorithm_tag".to_string(), kind.stream_tag()),
+        (
+            "schema_version".to_string(),
+            u64::from(BIT_GENERATOR_STATE_SCHEMA_VERSION),
+        ),
+        (kind.state_schema_key().to_string(), algorithm_value),
+        ("pcg64_state_hi".to_string(), (seed >> 64) as u64),
+        ("pcg64_state_lo".to_string(), seed_lo),
+        ("pcg64_inc_hi".to_string(), (counter >> 64) as u64),
+        ("pcg64_inc_lo".to_string(), counter_lo),
+    ])
+}
+
+fn py_bit_generator_state_from_dict(state: &Bound<'_, PyAny>) -> PyResult<BitGeneratorState> {
+    let dict = state.cast::<PyDict>()?;
+    let kind_name = required_dict_item(dict, "bit_generator")?.extract::<String>()?;
+    let kind = bit_generator_kind_from_state_name(&kind_name)?;
+
+    let state_dict = required_dict_item(dict, "state")?;
+    let state_dict = state_dict.cast::<PyDict>()?;
+    let seed = py_state_u128(&required_dict_item(state_dict, "state")?, "state.state")?;
+    let counter = py_state_u128(&required_dict_item(state_dict, "inc")?, "state.inc")?;
+
+    let schema_version = match dict.get_item("schema_version")? {
+        Some(value) => value.extract::<u32>()?,
+        None => BIT_GENERATOR_STATE_SCHEMA_VERSION,
+    };
+
+    let schema_entries = match dict.get_item("schema_entries")? {
+        Some(value) => py_bit_generator_schema_entries_from_list(&value)?,
+        None => numpy_pcg_state_schema_entries(kind, seed, counter)?,
+    };
+
+    Ok(BitGeneratorState {
+        kind,
+        schema_version,
+        seed,
+        counter,
+        schema_entries,
+    })
 }
 
 fn extract_bit_generator_binding(
@@ -20636,6 +20770,54 @@ mod tests {
                 &ours_state.call_method1("random_sample", (shape.clone(),))?,
                 &theirs_state.call_method1("random_sample", (shape,))?,
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn random_bit_generator_state_setter_matches_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_random_state_setter")?;
+            fnp_python(&module)?;
+            let random = module.getattr("random")?;
+            let numpy_random = py.import("numpy")?.getattr("random")?;
+
+            for name in ["MT19937", "PCG64", "PCG64DXSM", "Philox", "SFC64"] {
+                let ours = random.getattr(name)?.call1((987_u64,))?;
+                let theirs = numpy_random.getattr(name)?.call1((987_u64,))?;
+                let _ = ours.call_method1("random_raw", (3_usize,))?;
+                let _ = theirs.call_method1("random_raw", (3_usize,))?;
+
+                let ours_state = ours.getattr("state")?;
+                let theirs_state = theirs.getattr("state")?;
+                let ours_expected = ours.call_method1("random_raw", (5_usize,))?;
+                let theirs_expected = theirs.call_method1("random_raw", (5_usize,))?;
+
+                ours.setattr("state", ours_state)?;
+                theirs.setattr("state", theirs_state)?;
+                let ours_restored = ours.call_method1("random_raw", (5_usize,))?;
+                let theirs_restored = theirs.call_method1("random_raw", (5_usize,))?;
+
+                assert_array_matches_numpy(&ours_restored, &ours_expected)?;
+                assert_array_matches_numpy(&theirs_restored, &theirs_expected)?;
+            }
+
+            for name in ["PCG64", "PCG64DXSM"] {
+                let ours = random.getattr(name)?.call1((2468_u64,))?;
+                let theirs = numpy_random.getattr(name)?.call1((2468_u64,))?;
+                let _ = ours.call_method1("random_raw", (2_usize,))?;
+                let _ = theirs.call_method1("random_raw", (2_usize,))?;
+                ours.setattr("state", theirs.getattr("state")?)?;
+                assert_array_matches_numpy(
+                    &ours.call_method1("random_raw", (6_usize,))?,
+                    &theirs.call_method1("random_raw", (6_usize,))?,
+                )?;
+            }
 
             Ok(())
         });

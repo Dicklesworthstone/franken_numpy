@@ -533,13 +533,24 @@ impl BitGeneratorKind {
     }
 
     #[must_use]
-    const fn stream_tag(self) -> u64 {
+    pub const fn stream_tag(self) -> u64 {
         match self {
             Self::Mt19937 => 0x4D54_3139_3937_u64,
             Self::Pcg64 => 0x5043_4736_3400_u64,
             Self::Pcg64Dxsm => 0x5043_4736_3444_5853_u64,
             Self::Philox => 0x5048_494C_4F58_u64,
             Self::Sfc64 => 0x5346_4336_3400_u64,
+        }
+    }
+
+    #[must_use]
+    pub const fn state_schema_key(self) -> &'static str {
+        match self {
+            Self::Mt19937 => "mt19937_index",
+            Self::Pcg64 => "pcg64_stream",
+            Self::Pcg64Dxsm => "pcg64dxsm_stream",
+            Self::Philox => "philox_key",
+            Self::Sfc64 => "sfc64_carry",
         }
     }
 
@@ -1677,7 +1688,7 @@ pub struct BitGeneratorState {
 }
 
 impl BitGeneratorState {
-    fn algorithm_state_schema_value(
+    pub fn algorithm_state_schema_value(
         kind: BitGeneratorKind,
         seed: u64,
         counter: u64,
@@ -1794,13 +1805,7 @@ impl BitGeneratorState {
 }
 
 fn algorithm_state_schema_key(kind: BitGeneratorKind) -> &'static str {
-    match kind {
-        BitGeneratorKind::Mt19937 => "mt19937_index",
-        BitGeneratorKind::Pcg64 => "pcg64_stream",
-        BitGeneratorKind::Pcg64Dxsm => "pcg64dxsm_stream",
-        BitGeneratorKind::Philox => "philox_key",
-        BitGeneratorKind::Sfc64 => "sfc64_carry",
-    }
+    kind.state_schema_key()
 }
 
 fn default_state_schema_entries(
