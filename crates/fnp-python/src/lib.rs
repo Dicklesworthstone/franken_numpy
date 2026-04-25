@@ -23345,6 +23345,25 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 testing.add(numpy_name, value)?;
             }
         }
+        let testing_numpy_names = [
+            "assert_raises",
+            "assert_raises_regex",
+            "assert_warns",
+            "assert_no_warnings",
+            "test",
+        ];
+        if let Ok(np_testing) = py.import("numpy.testing") {
+            for name in testing_numpy_names {
+                if let Ok(value) = np_testing.getattr(name) {
+                    testing.add(name, value)?;
+                }
+            }
+        }
+        let testing_getattr_src = pyo3::ffi::c_str!(
+            "_NUMPY_TESTING_NAMES = frozenset(('assert_raises','assert_raises_regex','assert_warns','assert_no_warnings','test'))\ndef __getattr__(name):\n    if name in _NUMPY_TESTING_NAMES:\n        import numpy.testing as _testing\n        return getattr(_testing, name)\n    raise AttributeError(name)\n"
+        );
+        let testing_dict = testing.dict();
+        py.run(testing_getattr_src, Some(&testing_dict), None)?;
         m.add_submodule(&testing)?;
         m.add("testing", testing)?;
     }
@@ -60757,6 +60776,22 @@ mod tests {
             fnp_python(&module)?;
             let numpy = py.import("numpy")?;
             let array_fn = numpy.getattr("array")?;
+            let testing = module.getattr("testing")?;
+            let numpy_testing = py.import("numpy.testing")?;
+
+            for name in [
+                "assert_raises",
+                "assert_raises_regex",
+                "assert_warns",
+                "assert_no_warnings",
+                "test",
+            ] {
+                if !testing.getattr(name)?.is(&numpy_testing.getattr(name)?) {
+                    return Err(PyValueError::new_err(format!(
+                        "fnp_python.testing.{name} must be numpy.testing.{name}"
+                    )));
+                }
+            }
 
             // assert_equal: scalar pass/fail and nested-structure surface.
             let ae_fn = module.getattr("testing_assert_equal")?;
