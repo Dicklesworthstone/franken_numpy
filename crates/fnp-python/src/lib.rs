@@ -51157,9 +51157,7 @@ mod tests {
                     theirs_to_poly.call1((theirs_to_basis.call1((power_coeffs.clone(),))?,))?;
                 assert_array_matches_numpy(&our_roundtrip, &their_roundtrip)?;
 
-                let bad = numpy
-                    .getattr("array")?
-                    .call1((vec![vec![1.0_f64, 2.0]],))?;
+                let bad = numpy.getattr("array")?.call1((vec![vec![1.0_f64, 2.0]],))?;
                 let ours_err = ours_to_basis.call1((bad.clone(),)).unwrap_err();
                 let theirs_err = theirs_to_basis.call1((bad.clone(),)).unwrap_err();
                 assert_eq!(
