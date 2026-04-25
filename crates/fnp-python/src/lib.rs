@@ -22226,6 +22226,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                     polynomial.setattr(name, cls)?;
                 }
             }
+            if let Ok(func) = np_poly.getattr("set_default_printstyle") {
+                polynomial.setattr("set_default_printstyle", func)?;
+            }
         }
         // Install __getattr__ unconditionally so any class missing
         // from the eager path (including on numpy-less init) resolves
@@ -22234,7 +22237,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // (polynomial, chebyshev, legendre, hermite, hermite_e,
         // laguerre, polyutils) also resolve to numpy's modules when available.
         let poly_getattr_src = pyo3::ffi::c_str!(
-            "_CLASS_NAMES = frozenset(('Polynomial','Chebyshev','Legendre','Hermite','HermiteE','Laguerre'))\n_SUB_NAMES = frozenset(('polynomial','chebyshev','legendre','hermite','hermite_e','laguerre','polyutils'))\ndef __getattr__(name):\n    if name in _CLASS_NAMES:\n        import numpy.polynomial as _p\n        return getattr(_p, name)\n    if name in _SUB_NAMES:\n        import importlib\n        return importlib.import_module('numpy.polynomial.' + name)\n    raise AttributeError(name)\n"
+            "_CLASS_NAMES = frozenset(('Polynomial','Chebyshev','Legendre','Hermite','HermiteE','Laguerre'))\n_FUNC_NAMES = frozenset(('set_default_printstyle',))\n_SUB_NAMES = frozenset(('polynomial','chebyshev','legendre','hermite','hermite_e','laguerre','polyutils'))\ndef __getattr__(name):\n    if name in _CLASS_NAMES or name in _FUNC_NAMES:\n        import numpy.polynomial as _p\n        return getattr(_p, name)\n    if name in _SUB_NAMES:\n        import importlib\n        return importlib.import_module('numpy.polynomial.' + name)\n    raise AttributeError(name)\n"
         );
         let poly_dict = polynomial.dict();
         py.run(poly_getattr_src, Some(&poly_dict), None)?;
@@ -24213,6 +24216,18 @@ mod tests {
                     "fnp_python.polynomial.{name} must BE numpy.polynomial.{name} (identity, not just equality)"
                 );
             }
+            let ours_set_style = polynomial.getattr("set_default_printstyle")?;
+            let theirs_set_style = np_poly.getattr("set_default_printstyle")?;
+            assert!(
+                ours_set_style.is(&theirs_set_style),
+                "fnp_python.polynomial.set_default_printstyle must BE numpy.polynomial.set_default_printstyle"
+            );
+            assert!(ours_set_style.call1(("unicode",))?.is_none());
+            let bad_style = PyTuple::new(py, ["bogus"])?;
+            assert_eq!(
+                call_outcome(py, &ours_set_style, &bad_style, None)?,
+                call_outcome(py, &theirs_set_style, &bad_style, None)?
+            );
             // Round-trip: constructing a Polynomial via fnp_python yields
             // the same coefficients numpy would produce.
             let cls = polynomial.getattr("Polynomial")?;
