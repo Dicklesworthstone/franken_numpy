@@ -22011,7 +22011,14 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     {
         // numpy.lib.recfunctions — nested two levels deep.
         let lib_module = PyModule::new(py, "lib")?;
+        let parent_name = m.getattr("__name__")?.extract::<String>()?;
+        let lib_qualified_name = format!("{parent_name}.lib");
+        lib_module.setattr("__name__", &lib_qualified_name)?;
+        lib_module.setattr("__package__", &parent_name)?;
         let recfunctions = PyModule::new(py, "recfunctions")?;
+        let recfunctions_qualified_name = format!("{lib_qualified_name}.recfunctions");
+        recfunctions.setattr("__name__", &recfunctions_qualified_name)?;
+        recfunctions.setattr("__package__", &lib_qualified_name)?;
         for (numpy_name, flat_name) in [
             ("drop_fields", "recfunctions_drop_fields"),
             ("rename_fields", "recfunctions_rename_fields"),
@@ -22028,6 +22035,27 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         }
         lib_module.add_submodule(&recfunctions)?;
         lib_module.add("recfunctions", recfunctions)?;
+        let stride_tricks = PyModule::new(py, "stride_tricks")?;
+        let stride_tricks_qualified_name = format!("{lib_qualified_name}.stride_tricks");
+        stride_tricks.setattr("__name__", &stride_tricks_qualified_name)?;
+        stride_tricks.setattr("__package__", &lib_qualified_name)?;
+        for name in ["sliding_window_view", "as_strided"] {
+            if let Ok(value) = m.getattr(name) {
+                stride_tricks.add(name, value)?;
+            }
+        }
+        lib_module.add_submodule(&stride_tricks)?;
+        lib_module.add("stride_tricks", stride_tricks)?;
+        let sys_modules = py.import("sys")?.getattr("modules")?;
+        sys_modules.set_item(&lib_qualified_name, &lib_module)?;
+        sys_modules.set_item(
+            &recfunctions_qualified_name,
+            lib_module.getattr("recfunctions")?,
+        )?;
+        sys_modules.set_item(
+            &stride_tricks_qualified_name,
+            lib_module.getattr("stride_tricks")?,
+        )?;
         m.add_submodule(&lib_module)?;
         m.add("lib", lib_module)?;
     }
@@ -27318,9 +27346,10 @@ mod tests {
     #[test]
     fn k74v_5_nested_submodules_expose_numpy_native_names() {
         // Verifies the k74v.5 namespace-strategy resolution: fnp_python
-        // exposes .fft / .linalg / .ma / .testing / .lib.recfunctions as real
-        // nested submodules so `import fnp_python as np; np.linalg.svd(...)`
-        // works verbatim against numpy-native spellings.
+        // exposes .fft / .linalg / .ma / .testing / .lib.recfunctions and
+        // .lib.stride_tricks as real nested submodules so
+        // `import fnp_python as np; np.linalg.svd(...)` works verbatim
+        // against numpy-native spellings.
         with_python(|py| {
             let module = PyModule::new(py, "fnp_python_test")?;
             fnp_python(&module)?;
@@ -27481,6 +27510,24 @@ mod tests {
                     "fnp_python.lib.recfunctions.{name} missing"
                 );
             }
+            let stride_tricks = lib_mod.getattr("stride_tricks")?;
+            for name in ["sliding_window_view", "as_strided"] {
+                assert!(
+                    stride_tricks.getattr(name).is_ok(),
+                    "fnp_python.lib.stride_tricks.{name} missing"
+                );
+            }
+            let sys_modules = py.import("sys")?.getattr("modules")?;
+            assert!(
+                sys_modules.get_item("fnp_python_test.lib")?.is(&lib_mod),
+                "fnp_python.lib should be registered under sys.modules",
+            );
+            assert!(
+                sys_modules
+                    .get_item("fnp_python_test.lib.stride_tricks")?
+                    .is(&stride_tricks),
+                "fnp_python.lib.stride_tricks should be registered under sys.modules",
+            );
 
             // Sanity-check an actual call round-trips through the submodule.
             if numpy_available(py) {
@@ -27505,6 +27552,16 @@ mod tests {
                         .extract::<bool>()?,
                     "fnp_python.fft.fft(...) diverges from numpy.fft.fft(...)",
                 );
+                let base = numpy.getattr("arange")?.call1((5_i64,))?;
+                let ours_window = stride_tricks
+                    .getattr("sliding_window_view")?
+                    .call1((base.clone(), 3_i64))?;
+                let theirs_window = numpy
+                    .getattr("lib")?
+                    .getattr("stride_tricks")?
+                    .getattr("sliding_window_view")?
+                    .call1((base, 3_i64))?;
+                assert_array_matches_numpy(&ours_window, &theirs_window)?;
 
                 let eye3 = numpy.getattr("eye")?.call1((3_i64,))?;
                 let our_svd = linalg.getattr("svd")?.call1((eye3.clone(),))?;
