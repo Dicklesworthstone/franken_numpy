@@ -22236,6 +22236,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             if let Ok(func) = np_poly.getattr("set_default_printstyle") {
                 polynomial.setattr("set_default_printstyle", func)?;
             }
+            if let Ok(test_attr) = np_poly.getattr("test") {
+                polynomial.setattr("test", test_attr)?;
+            }
         }
         // Install __getattr__ unconditionally so any class missing
         // from the eager path (including on numpy-less init) resolves
@@ -22244,7 +22247,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // (polynomial, chebyshev, legendre, hermite, hermite_e,
         // laguerre, polyutils) also resolve to numpy's modules when available.
         let poly_getattr_src = pyo3::ffi::c_str!(
-            "_CLASS_NAMES = frozenset(('Polynomial','Chebyshev','Legendre','Hermite','HermiteE','Laguerre'))\n_FUNC_NAMES = frozenset(('set_default_printstyle',))\n_SUB_NAMES = frozenset(('polynomial','chebyshev','legendre','hermite','hermite_e','laguerre','polyutils'))\ndef __getattr__(name):\n    if name in _CLASS_NAMES or name in _FUNC_NAMES:\n        import numpy.polynomial as _p\n        return getattr(_p, name)\n    if name in _SUB_NAMES:\n        import importlib\n        return importlib.import_module('numpy.polynomial.' + name)\n    raise AttributeError(name)\n"
+            "_CLASS_NAMES = frozenset(('Polynomial','Chebyshev','Legendre','Hermite','HermiteE','Laguerre'))\n_FUNC_NAMES = frozenset(('set_default_printstyle','test'))\n_SUB_NAMES = frozenset(('polynomial','chebyshev','legendre','hermite','hermite_e','laguerre','polyutils'))\ndef __getattr__(name):\n    if name in _CLASS_NAMES or name in _FUNC_NAMES:\n        import numpy.polynomial as _p\n        return getattr(_p, name)\n    if name in _SUB_NAMES:\n        import importlib\n        return importlib.import_module('numpy.polynomial.' + name)\n    raise AttributeError(name)\n"
         );
         let poly_dict = polynomial.dict();
         py.run(poly_getattr_src, Some(&poly_dict), None)?;
@@ -24371,6 +24374,12 @@ mod tests {
             assert!(
                 ours_set_style.is(&theirs_set_style),
                 "fnp_python.polynomial.set_default_printstyle must BE numpy.polynomial.set_default_printstyle"
+            );
+            let ours_test = polynomial.getattr("test")?;
+            let theirs_test = np_poly.getattr("test")?;
+            assert!(
+                ours_test.is(&theirs_test),
+                "fnp_python.polynomial.test must BE numpy.polynomial.test"
             );
             assert!(ours_set_style.call1(("unicode",))?.is_none());
             let bad_style = PyTuple::new(py, ["bogus"])?;
