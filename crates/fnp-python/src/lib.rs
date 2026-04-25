@@ -13403,6 +13403,53 @@ fn polydiv(py: Python<'_>, u: Py<PyAny>, v: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (roots,))]
+fn polyfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to numpy.polynomial.polynomial.polyfromroots. Builds
+    // ascending-power coefficients for the monic polynomial whose roots
+    // are supplied; empty input returns the constant polynomial [1.0].
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("polynomial")?
+        .getattr("polyfromroots")?
+        .call1((roots.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c, pow, maxpower=16))]
+fn polypow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyResult<Py<PyAny>> {
+    // Passthrough to numpy.polynomial.polynomial.polypow. Raises a
+    // power-basis series to a non-negative integer power, bounded by
+    // maxpower to match NumPy's allocation guard.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("maxpower", maxpower)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("polynomial")?
+        .getattr("polypow")?
+        .call((c.bind(py), pow.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c,))]
+fn polyroots(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to numpy.polynomial.polynomial.polyroots. Input
+    // coefficients are ascending-power (c[0] + c[1]x + ...); a
+    // constant series returns an empty array.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("polynomial")?
+        .getattr("polyroots")?
+        .call1((c.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a1, a2))]
 fn polymul(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.polymul. Returns the product polynomial with
@@ -21231,6 +21278,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(polysub, m)?)?;
     m.add_function(wrap_pyfunction!(polymul, m)?)?;
     m.add_function(wrap_pyfunction!(polydiv, m)?)?;
+    m.add_function(wrap_pyfunction!(polyfromroots, m)?)?;
+    m.add_function(wrap_pyfunction!(polypow, m)?)?;
+    m.add_function(wrap_pyfunction!(polyroots, m)?)?;
     m.add_function(wrap_pyfunction!(sliding_window_view, m)?)?;
     m.add_function(wrap_pyfunction!(as_strided, m)?)?;
     m.add_function(wrap_pyfunction!(chebadd, m)?)?;
@@ -22442,10 +22492,14 @@ mod tests {
             let theirs_int = np_hermite_e.getattr("hermeint")?.call1((c1.clone(),))?;
             assert_eq!(repr_string(&ours_int), repr_string(&theirs_int));
             let ours_pow = module.getattr("hermepow")?.call1((c1.clone(), 2_i64))?;
-            let theirs_pow = np_hermite_e.getattr("hermepow")?.call1((c1.clone(), 2_i64))?;
+            let theirs_pow = np_hermite_e
+                .getattr("hermepow")?
+                .call1((c1.clone(), 2_i64))?;
             assert_eq!(repr_string(&ours_pow), repr_string(&theirs_pow));
             let ours_line = module.getattr("hermeline")?.call1((1.0_f64, 2.0_f64))?;
-            let theirs_line = np_hermite_e.getattr("hermeline")?.call1((1.0_f64, 2.0_f64))?;
+            let theirs_line = np_hermite_e
+                .getattr("hermeline")?
+                .call1((1.0_f64, 2.0_f64))?;
             assert_eq!(repr_string(&ours_line), repr_string(&theirs_line));
             Ok(())
         });
@@ -22490,13 +22544,10 @@ mod tests {
                     PyTuple::new(py, [1.0_f64, 2.0_f64])?,
                     PyTuple::new(py, [1.0_f64, 1.0_f64, 3.0_f64])?,
                 ))?;
-            let theirs_chebadd = np_poly
-                .getattr("chebyshev")?
-                .getattr("chebadd")?
-                .call1((
-                    PyTuple::new(py, [1.0_f64, 2.0_f64])?,
-                    PyTuple::new(py, [1.0_f64, 1.0_f64, 3.0_f64])?,
-                ))?;
+            let theirs_chebadd = np_poly.getattr("chebyshev")?.getattr("chebadd")?.call1((
+                PyTuple::new(py, [1.0_f64, 2.0_f64])?,
+                PyTuple::new(py, [1.0_f64, 1.0_f64, 3.0_f64])?,
+            ))?;
             assert_eq!(repr_string(&ours_chebadd), repr_string(&theirs_chebadd));
             Ok(())
         });
@@ -50451,6 +50502,70 @@ mod tests {
             let bad = numpy.getattr("array")?.call1((vec![vec![1.0, 2.0]],))?; // 2-D
             let err = pm.call1((bad.clone(), vec![1.0, 2.0])).err();
             assert!(err.is_some(), "polymul must reject 2-D inputs");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn polynomial_power_basis_must_helpers_match_numpy() {
+        // Pin the remaining MUST-level numpy.polynomial.polynomial power-basis
+        // helpers exposed at fnp_python's flat namespace.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_polynomial_power_basis")?;
+            fnp_python(&module)?;
+            let numpy_poly = py.import("numpy.polynomial.polynomial")?;
+
+            let our_fromroots = module.getattr("polyfromroots")?;
+            let np_fromroots = numpy_poly.getattr("polyfromroots")?;
+            for roots in [Vec::<f64>::new(), vec![1.0_f64], vec![1.0_f64, 2.0, 3.0]] {
+                assert_array_matches_numpy(
+                    &our_fromroots.call1((roots.clone(),))?,
+                    &np_fromroots.call1((roots.clone(),))?,
+                )?;
+            }
+
+            let our_pow = module.getattr("polypow")?;
+            let np_pow = numpy_poly.getattr("polypow")?;
+            for (coeffs, pow) in [
+                (vec![1.0_f64, 2.0], 0_i64),
+                (vec![1.0_f64, 2.0], 3_i64),
+                (vec![0.0_f64, 1.0, 1.0], 2_i64),
+            ] {
+                assert_array_matches_numpy(
+                    &our_pow.call1((coeffs.clone(), pow))?,
+                    &np_pow.call1((coeffs.clone(), pow))?,
+                )?;
+            }
+            let kw_maxpower = PyDict::new(py);
+            kw_maxpower.set_item("maxpower", 2_i64)?;
+            let ours_err = our_pow
+                .call((vec![1.0_f64, 2.0], 3_i64), Some(&kw_maxpower))
+                .unwrap_err();
+            let theirs_err = np_pow
+                .call((vec![1.0_f64, 2.0], 3_i64), Some(&kw_maxpower))
+                .unwrap_err();
+            assert_eq!(
+                ours_err.get_type(py).name()?.extract::<String>()?,
+                theirs_err.get_type(py).name()?.extract::<String>()?
+            );
+
+            let our_roots = module.getattr("polyroots")?;
+            let np_roots = numpy_poly.getattr("polyroots")?;
+            for coeffs in [
+                vec![1.0_f64],
+                vec![-1.0_f64, 0.0, 1.0],
+                vec![-6.0_f64, 11.0, -6.0, 1.0],
+            ] {
+                assert_array_matches_numpy(
+                    &our_roots.call1((coeffs.clone(),))?,
+                    &np_roots.call1((coeffs.clone(),))?,
+                )?;
+            }
 
             Ok(())
         });

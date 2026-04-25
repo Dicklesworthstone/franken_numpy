@@ -9,10 +9,10 @@
 
 | Level | Present | Total | Coverage |
 |-------|--------:|------:|---------:|
-| MUST | 63 | 66 | 95.5% |
+| MUST | 66 | 66 | 100.0% |
 | SHOULD | 17 | 34 | 50.0% |
 | MAY | 0 | 0 | 0.0% |
-| **Total** | **80** | **100** | **80.0%** |
+| **Total** | **83** | **100** | **83.0%** |
 
 ## Per-subtree coverage
 
@@ -24,7 +24,7 @@
 | `hermite_e` | 15 | 16 | 93.8% |
 | `laguerre` | 13 | 16 | 81.2% |
 | `legendre` | 13 | 16 | 81.2% |
-| `polynomial` | 7 | 14 | 50.0% |
+| `polynomial` | 10 | 14 | 71.4% |
 
 ## Missing names
 
@@ -43,10 +43,7 @@
 | `poly2herm` | SHOULD | `hermite` |
 | `poly2lag` | SHOULD | `laguerre` |
 | `poly2leg` | SHOULD | `legendre` |
-| `polyfromroots` | MUST | `polynomial` |
 | `polyline` | SHOULD | `polynomial` |
-| `polypow` | MUST | `polynomial` |
-| `polyroots` | MUST | `polynomial` |
 | `polytrim` | SHOULD | `polynomial` |
 | `polyvalfromroots` | SHOULD | `polynomial` |
 | `polyvander` | SHOULD | `polynomial` |
@@ -131,7 +128,10 @@
 | `polyadd` | MUST | `polynomial` |
 | `polyder` | MUST | `polynomial` |
 | `polydiv` | MUST | `polynomial` |
+| `polyfromroots` | MUST | `polynomial` |
 | `polyint` | MUST | `polynomial` |
 | `polymul` | MUST | `polynomial` |
+| `polypow` | MUST | `polynomial` |
+| `polyroots` | MUST | `polynomial` |
 | `polysub` | MUST | `polynomial` |
 | `polyval` | MUST | `polynomial` |
