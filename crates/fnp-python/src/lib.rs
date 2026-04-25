@@ -22158,6 +22158,68 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("c_", Py::new(py, PyCClass)?)?;
     {
         let random = PyModule::new(py, "random")?;
+        let random_public_names = [
+            "beta",
+            "binomial",
+            "bytes",
+            "chisquare",
+            "choice",
+            "dirichlet",
+            "exponential",
+            "f",
+            "gamma",
+            "geometric",
+            "get_state",
+            "gumbel",
+            "hypergeometric",
+            "laplace",
+            "logistic",
+            "lognormal",
+            "logseries",
+            "multinomial",
+            "multivariate_normal",
+            "negative_binomial",
+            "noncentral_chisquare",
+            "noncentral_f",
+            "normal",
+            "pareto",
+            "permutation",
+            "poisson",
+            "power",
+            "rand",
+            "randint",
+            "randn",
+            "random",
+            "random_integers",
+            "random_sample",
+            "ranf",
+            "rayleigh",
+            "sample",
+            "seed",
+            "set_state",
+            "shuffle",
+            "standard_cauchy",
+            "standard_exponential",
+            "standard_gamma",
+            "standard_normal",
+            "standard_t",
+            "triangular",
+            "uniform",
+            "vonmises",
+            "wald",
+            "weibull",
+            "zipf",
+            "Generator",
+            "RandomState",
+            "SeedSequence",
+            "MT19937",
+            "Philox",
+            "PCG64",
+            "PCG64DXSM",
+            "SFC64",
+            "default_rng",
+            "BitGenerator",
+        ];
         random.add_class::<PySeedSequence>()?;
         random.add_class::<PyRandomGenerator>()?;
         random.add_class::<PyRandomState>()?;
@@ -22209,6 +22271,22 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         if let Some(install_fn) = ns.get_item("install")? {
             let rs_cls = random.getattr("RandomState")?;
             install_fn.call1((&random, rs_cls))?;
+        }
+        if let Ok(np_random) = py.import("numpy.random")
+            && let Ok(all_names) = np_random.getattr("__all__")
+        {
+            random.setattr("__all__", all_names.clone())?;
+            for item in all_names.try_iter()? {
+                let name = item?.extract::<String>()?;
+                if random.getattr(name.as_str()).is_err()
+                    && let Ok(value) = np_random.getattr(name.as_str())
+                {
+                    random.setattr(name.as_str(), value)?;
+                }
+            }
+        }
+        if random.getattr("__all__").is_err() {
+            random.setattr("__all__", PyList::new(py, random_public_names)?)?;
         }
         m.add_submodule(&random)?;
         m.add("random", random)?;
@@ -24141,6 +24219,20 @@ mod tests {
             fnp_python(&module)?;
             let random = module.getattr("random")?;
             let numpy_random = py.import("numpy")?.getattr("random")?;
+            let numpy_random_all = numpy_random.getattr("__all__")?;
+            if repr_string(&random.getattr("__all__")?) != repr_string(&numpy_random_all) {
+                return Err(PyValueError::new_err(
+                    "fnp_python.random.__all__ must match numpy.random.__all__",
+                ));
+            }
+            for item in numpy_random_all.try_iter()? {
+                let name = item?.extract::<String>()?;
+                if !random.hasattr(name.as_str())? {
+                    return Err(PyValueError::new_err(format!(
+                        "fnp_python.random missing numpy.random public name {name}"
+                    )));
+                }
+            }
 
             for name in [
                 "SeedSequence",
