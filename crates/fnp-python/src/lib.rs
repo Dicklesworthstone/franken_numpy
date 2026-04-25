@@ -13798,6 +13798,18 @@ fn cheb2poly(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
         .unbind())
 }
 
+#[pyfunction]
+#[pyo3(signature = (x, deg))]
+fn chebvander(py: Python<'_>, x: Py<PyAny>, deg: i64) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("chebyshev")?
+        .getattr("chebvander")?
+        .call1((x.bind(py), deg))?
+        .unbind())
+}
+
 // numpy.polynomial.hermite wrappers. Same API shape as the chebyshev
 // helpers above; each is a direct passthrough that preserves NumPy's
 // dtype, ValueError, and tuple-return contracts.
@@ -14003,6 +14015,18 @@ fn herm2poly(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
         .getattr("hermite")?
         .getattr("herm2poly")?
         .call1((c.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, deg))]
+fn hermvander(py: Python<'_>, x: Py<PyAny>, deg: i64) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite")?
+        .getattr("hermvander")?
+        .call1((x.bind(py), deg))?
         .unbind())
 }
 
@@ -14213,6 +14237,18 @@ fn poly2herme(py: Python<'_>, pol: Py<PyAny>) -> PyResult<Py<PyAny>> {
         .unbind())
 }
 
+#[pyfunction]
+#[pyo3(signature = (x, deg))]
+fn hermevander(py: Python<'_>, x: Py<PyAny>, deg: i64) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("hermite_e")?
+        .getattr("hermevander")?
+        .call1((x.bind(py), deg))?
+        .unbind())
+}
+
 // numpy.polynomial.laguerre wrappers. API shape mirrors chebyshev and
 // hermite; each is a direct passthrough.
 
@@ -14417,6 +14453,18 @@ fn lag2poly(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
         .getattr("laguerre")?
         .getattr("lag2poly")?
         .call1((c.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, deg))]
+fn lagvander(py: Python<'_>, x: Py<PyAny>, deg: i64) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("laguerre")?
+        .getattr("lagvander")?
+        .call1((x.bind(py), deg))?
         .unbind())
 }
 
@@ -14625,6 +14673,18 @@ fn leg2poly(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
         .getattr("legendre")?
         .getattr("leg2poly")?
         .call1((c.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, deg))]
+fn legvander(py: Python<'_>, x: Py<PyAny>, deg: i64) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("legendre")?
+        .getattr("legvander")?
+        .call1((x.bind(py), deg))?
         .unbind())
 }
 
@@ -21510,6 +21570,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chebtrim, m)?)?;
     m.add_function(wrap_pyfunction!(poly2cheb, m)?)?;
     m.add_function(wrap_pyfunction!(cheb2poly, m)?)?;
+    m.add_function(wrap_pyfunction!(chebvander, m)?)?;
     m.add_function(wrap_pyfunction!(hermadd, m)?)?;
     m.add_function(wrap_pyfunction!(hermsub, m)?)?;
     m.add_function(wrap_pyfunction!(hermmul, m)?)?;
@@ -21525,6 +21586,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hermint, m)?)?;
     m.add_function(wrap_pyfunction!(poly2herm, m)?)?;
     m.add_function(wrap_pyfunction!(herm2poly, m)?)?;
+    m.add_function(wrap_pyfunction!(hermvander, m)?)?;
     // 7a8q: numpy.polynomial.hermite_e (probabilist's Hermite) family.
     m.add_function(wrap_pyfunction!(hermeadd, m)?)?;
     m.add_function(wrap_pyfunction!(hermesub, m)?)?;
@@ -21541,6 +21603,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hermeint, m)?)?;
     m.add_function(wrap_pyfunction!(herme2poly, m)?)?;
     m.add_function(wrap_pyfunction!(poly2herme, m)?)?;
+    m.add_function(wrap_pyfunction!(hermevander, m)?)?;
     m.add_function(wrap_pyfunction!(lagadd, m)?)?;
     m.add_function(wrap_pyfunction!(lagsub, m)?)?;
     m.add_function(wrap_pyfunction!(lagmul, m)?)?;
@@ -21556,6 +21619,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lagint, m)?)?;
     m.add_function(wrap_pyfunction!(poly2lag, m)?)?;
     m.add_function(wrap_pyfunction!(lag2poly, m)?)?;
+    m.add_function(wrap_pyfunction!(lagvander, m)?)?;
     m.add_function(wrap_pyfunction!(legadd, m)?)?;
     m.add_function(wrap_pyfunction!(legsub, m)?)?;
     m.add_function(wrap_pyfunction!(legmul, m)?)?;
@@ -21571,6 +21635,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(legint, m)?)?;
     m.add_function(wrap_pyfunction!(poly2leg, m)?)?;
     m.add_function(wrap_pyfunction!(leg2poly, m)?)?;
+    m.add_function(wrap_pyfunction!(legvander, m)?)?;
     m.add_function(wrap_pyfunction!(tile, m)?)?;
     m.add_function(wrap_pyfunction!(array_equal, m)?)?;
     m.add_function(wrap_pyfunction!(array_equiv, m)?)?;
@@ -51164,6 +51229,58 @@ mod tests {
                     ours_err.get_type(py).name()?.extract::<String>()?,
                     theirs_err.get_type(py).name()?.extract::<String>()?,
                     "{poly_to_basis} error type diverged"
+                );
+            }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn polynomial_vandermonde_helpers_match_numpy() {
+        // ur9y: each orthogonal polynomial family exposes its Vandermonde
+        // helper at the fnp_python top level with NumPy's shape and error
+        // surface.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_polynomial_vanders")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let np_poly = numpy.getattr("polynomial")?;
+            let x1 = PyList::new(py, [0.0_f64, 0.5, 1.0])?;
+            let x2 = numpy
+                .getattr("array")?
+                .call1((vec![vec![0.0_f64, 0.5], vec![1.0, 1.5]],))?;
+
+            for (family, name) in [
+                ("chebyshev", "chebvander"),
+                ("hermite", "hermvander"),
+                ("hermite_e", "hermevander"),
+                ("laguerre", "lagvander"),
+                ("legendre", "legvander"),
+            ] {
+                let ours = module.getattr(name)?;
+                let theirs = np_poly.getattr(family)?.getattr(name)?;
+                for deg in [0_i64, 1, 4] {
+                    assert_array_matches_numpy(
+                        &ours.call1((x1.clone(), deg))?,
+                        &theirs.call1((x1.clone(), deg))?,
+                    )?;
+                }
+                assert_array_matches_numpy(
+                    &ours.call1((x2.clone(), 3_i64))?,
+                    &theirs.call1((x2.clone(), 3_i64))?,
+                )?;
+
+                let ours_err = ours.call1((x1.clone(), -1_i64)).unwrap_err();
+                let theirs_err = theirs.call1((x1.clone(), -1_i64)).unwrap_err();
+                assert_eq!(
+                    ours_err.get_type(py).name()?.extract::<String>()?,
+                    theirs_err.get_type(py).name()?.extract::<String>()?,
+                    "{name} negative-degree error type diverged"
                 );
             }
 
