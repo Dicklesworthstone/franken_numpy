@@ -12368,6 +12368,54 @@ fn setdiff1d(
 }
 
 #[pyfunction]
+#[pyo3(signature = (ar1, ar2, assume_unique=false))]
+fn setxor1d(
+    py: Python<'_>,
+    ar1: Py<PyAny>,
+    ar2: Py<PyAny>,
+    assume_unique: bool,
+) -> PyResult<Py<PyAny>> {
+    // Native setxor1d via UFuncArray::setxor1d. Falls back to numpy
+    // when assume_unique=true or when dtype coercion/error behavior
+    // belongs to numpy's object/string/complex dispatch.
+    let numpy = py.import("numpy")?;
+    let setxor1d_fn = numpy.getattr("setxor1d")?;
+    let ar1_for_fallback = ar1.clone_ref(py);
+    let ar2_for_fallback = ar2.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("assume_unique", assume_unique)?;
+        Ok(setxor1d_fn
+            .call(
+                (ar1_for_fallback.bind(py), ar2_for_fallback.bind(py)),
+                Some(&kwargs),
+            )?
+            .unbind())
+    };
+    if assume_unique {
+        return fallback();
+    }
+    let a = match extract_precise_numeric_array(py, ar1.bind(py), "setxor1d(ar1)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let b = match extract_precise_numeric_array(py, ar2.bind(py), "setxor1d(ar2)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    if a.has_integer_sidecar()
+        || b.has_integer_sidecar()
+        || matches!(a.dtype(), DType::Complex64 | DType::Complex128)
+        || matches!(b.dtype(), DType::Complex64 | DType::Complex128)
+        || a.dtype() != b.dtype()
+    {
+        return fallback();
+    }
+    let result = a.setxor1d(&b);
+    build_numpy_array_from_ufunc(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(signature = (element, test_elements, assume_unique=false, invert=false, kind=None))]
 fn isin(
     py: Python<'_>,
@@ -22373,6 +22421,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(intersect1d, m)?)?;
     m.add_function(wrap_pyfunction!(union1d, m)?)?;
     m.add_function(wrap_pyfunction!(setdiff1d, m)?)?;
+    m.add_function(wrap_pyfunction!(setxor1d, m)?)?;
     m.add_function(wrap_pyfunction!(isin, m)?)?;
     m.add_function(wrap_pyfunction!(vander, m)?)?;
     m.add_function(wrap_pyfunction!(arange, m)?)?;
@@ -28340,6 +28389,7 @@ mod tests {
             assert!(module.getattr("intersect1d").is_ok());
             assert!(module.getattr("union1d").is_ok());
             assert!(module.getattr("setdiff1d").is_ok());
+            assert!(module.getattr("setxor1d").is_ok());
             assert!(module.getattr("isin").is_ok());
             assert!(module.getattr("vander").is_ok());
             assert!(module.getattr("arange").is_ok());
@@ -50090,6 +50140,98 @@ mod tests {
             assert_array_matches_numpy(
                 &setdiff1d_fn.call1((two_d_left.clone(), two_d_right.clone()))?,
                 &numpy_setdiff1d.call1((two_d_left.clone(), two_d_right.clone()))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn setxor1d_matches_numpy_across_duplicates_assume_unique_strings_and_flattening() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let setxor1d_fn = module.getattr("setxor1d")?;
+            let numpy = py.import("numpy")?;
+            let numpy_setxor1d = numpy.getattr("setxor1d")?;
+
+            // Duplicate handling collapses to sorted unique symmetric
+            // difference.
+            let left = numpy.getattr("array")?.call1((vec![1_i64, 2, 2, 4, 5],))?;
+            let right = numpy.getattr("array")?.call1((vec![2_i64, 3, 4, 4, 6],))?;
+            assert_array_matches_numpy(
+                &setxor1d_fn.call1((left.clone(), right.clone()))?,
+                &numpy_setxor1d.call1((left.clone(), right.clone()))?,
+            )?;
+
+            // assume_unique=True is delegated to numpy for exact semantics.
+            let unique_left = numpy.getattr("array")?.call1((vec![1_i64, 3, 5, 7],))?;
+            let unique_right = numpy.getattr("array")?.call1((vec![3_i64, 4, 8],))?;
+            assert_array_matches_numpy(
+                &setxor1d_fn.call(
+                    (unique_left.clone(), unique_right.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("assume_unique", true)?;
+                        kw
+                    }),
+                )?,
+                &numpy_setxor1d.call(
+                    (unique_left.clone(), unique_right.clone()),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("assume_unique", true)?;
+                        kw
+                    }),
+                )?,
+            )?;
+
+            // Empty operands keep numpy's dtype and shape behavior.
+            let empty = numpy.getattr("array")?.call1((Vec::<i64>::new(),))?;
+            let nonempty = numpy.getattr("array")?.call1((vec![3_i64, 1, 3, 2],))?;
+            assert_array_matches_numpy(
+                &setxor1d_fn.call1((empty.clone(), nonempty.clone()))?,
+                &numpy_setxor1d.call1((empty.clone(), nonempty.clone()))?,
+            )?;
+
+            // String arrays fall back through numpy's non-numeric dispatch.
+            let strings_left = numpy
+                .getattr("array")?
+                .call1((vec!["pear", "apple", "pear", "plum"],))?;
+            let strings_right = numpy.getattr("array")?.call1((vec!["apple", "kiwi"],))?;
+            assert_array_matches_numpy(
+                &setxor1d_fn.call1((strings_left.clone(), strings_right.clone()))?,
+                &numpy_setxor1d.call1((strings_left.clone(), strings_right.clone()))?,
+            )?;
+
+            // Non-1-D inputs are flattened before computing the symmetric
+            // difference.
+            let two_d_left = numpy
+                .getattr("array")?
+                .call1((vec![vec![1_i64, 2], vec![2, 3]],))?;
+            let two_d_right = numpy
+                .getattr("array")?
+                .call1((vec![vec![2_i64, 4], vec![5, 6]],))?;
+            assert_array_matches_numpy(
+                &setxor1d_fn.call1((two_d_left.clone(), two_d_right.clone()))?,
+                &numpy_setxor1d.call1((two_d_left.clone(), two_d_right.clone()))?,
+            )?;
+
+            // Float NaN/sign-zero behavior stays aligned with numpy's
+            // arraysetops rules.
+            let float_left = numpy
+                .getattr("array")?
+                .call1((vec![1.5_f64, f64::NAN, -0.0, 2.5],))?;
+            let float_right = numpy
+                .getattr("array")?
+                .call1((vec![2.5_f64, f64::NAN, 0.0, 3.5],))?;
+            assert_array_matches_numpy(
+                &setxor1d_fn.call1((float_left.clone(), float_right.clone()))?,
+                &numpy_setxor1d.call1((float_left.clone(), float_right.clone()))?,
             )?;
 
             Ok(())
