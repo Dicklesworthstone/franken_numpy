@@ -23532,6 +23532,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         let scimath_qualified_name = format!("{lib_qualified_name}.scimath");
         scimath.setattr("__name__", &scimath_qualified_name)?;
         scimath.setattr("__package__", &lib_qualified_name)?;
+        let scimath_names = [
+            "sqrt", "log", "log2", "logn", "log10", "power", "arccos", "arcsin", "arctanh",
+        ];
         for (numpy_name, flat_name) in [
             ("sqrt", "scimath_sqrt"),
             ("log", "scimath_log"),
@@ -23547,6 +23550,27 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 scimath.add(numpy_name, value)?;
             }
         }
+        if let Ok(np_scimath) = py.import("numpy.lib.scimath")
+            && let Ok(all_names) = np_scimath.getattr("__all__")
+        {
+            scimath.setattr("__all__", all_names.clone())?;
+            for item in all_names.try_iter()? {
+                let name = item?.extract::<String>()?;
+                if scimath.getattr(name.as_str()).is_err()
+                    && let Ok(value) = np_scimath.getattr(name.as_str())
+                {
+                    scimath.add(name.as_str(), value)?;
+                }
+            }
+        }
+        if scimath.getattr("__all__").is_err() {
+            scimath.setattr("__all__", PyList::new(py, scimath_names)?)?;
+        }
+        let scimath_getattr_src = pyo3::ffi::c_str!(
+            "_SCIMATH_NAMES = frozenset(('sqrt','log','log2','logn','log10','power','arccos','arcsin','arctanh'))\ndef __getattr__(name):\n    if name in _SCIMATH_NAMES:\n        import numpy.lib.scimath as _scimath\n        return getattr(_scimath, name)\n    raise AttributeError(name)\n"
+        );
+        let scimath_dict = scimath.dict();
+        py.run(scimath_getattr_src, Some(&scimath_dict), None)?;
         lib_module.add_submodule(&scimath)?;
         lib_module.add("scimath", scimath)?;
         let array_utils = PyModule::new(py, "array_utils")?;
@@ -62013,6 +62037,20 @@ mod tests {
             fnp_python(&module)?;
             let scimath = module.getattr("lib")?.getattr("scimath")?;
             let numpy_scimath = py.import("numpy.lib.scimath")?;
+            let numpy_scimath_all = numpy_scimath.getattr("__all__")?;
+            if repr_string(&scimath.getattr("__all__")?) != repr_string(&numpy_scimath_all) {
+                return Err(PyValueError::new_err(
+                    "fnp_python.lib.scimath.__all__ must match numpy.lib.scimath.__all__",
+                ));
+            }
+            for item in numpy_scimath_all.try_iter()? {
+                let name = item?.extract::<String>()?;
+                if !scimath.hasattr(name.as_str())? {
+                    return Err(PyValueError::new_err(format!(
+                        "fnp_python.lib.scimath missing numpy.lib.scimath public name {name}"
+                    )));
+                }
+            }
             let numpy = py.import("numpy")?;
             let builtins = py.import("builtins")?;
             let eval_fn = builtins.getattr("eval")?;
