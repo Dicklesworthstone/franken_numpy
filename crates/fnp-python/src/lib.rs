@@ -23115,26 +23115,22 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         linalg.add_function(wrap_pyfunction!(linalg_vector_norm, &linalg)?)?;
         linalg.setattr("vector_norm", linalg.getattr("linalg_vector_norm")?)?;
         linalg.delattr("linalg_vector_norm")?;
-        // Re-export numpy.linalg.LinAlgError so users catching
-        // fnp_python.linalg.LinAlgError still catch numpy's exception type.
-        // Eagerly pull the class in at init-time if numpy is importable;
-        // when the host Python has no numpy (e.g. stripped-down CI workers),
-        // install a lazy __getattr__ so `linalg.LinAlgError` still resolves
-        // the first time user code that *does* have numpy accesses it.
-        let mut linalg_error_cached = false;
-        if let Ok(np_linalg) = py.import("numpy.linalg")
-            && let Ok(exc) = np_linalg.getattr("LinAlgError")
-        {
-            linalg.setattr("LinAlgError", exc)?;
-            linalg_error_cached = true;
+        // Re-export numpy.linalg-owned objects so users catching
+        // fnp_python.linalg.LinAlgError and callers of linalg.test see the
+        // exact NumPy objects. Lazy __getattr__ keeps resolution working for
+        // hosts where numpy is unavailable during embedded interpreter init.
+        if let Ok(np_linalg) = py.import("numpy.linalg") {
+            for name in ["LinAlgError", "test"] {
+                if let Ok(value) = np_linalg.getattr(name) {
+                    linalg.setattr(name, value)?;
+                }
+            }
         }
-        if !linalg_error_cached {
-            let getattr_src = pyo3::ffi::c_str!(
-                "def __getattr__(name):\n    if name == 'LinAlgError':\n        import numpy.linalg as _l\n        return _l.LinAlgError\n    raise AttributeError(name)\n"
-            );
-            let linalg_dict = linalg.dict();
-            py.run(getattr_src, Some(&linalg_dict), None)?;
-        }
+        let getattr_src = pyo3::ffi::c_str!(
+            "def __getattr__(name):\n    if name in ('LinAlgError', 'test'):\n        import numpy.linalg as _l\n        return getattr(_l, name)\n    raise AttributeError(name)\n"
+        );
+        let linalg_dict = linalg.dict();
+        py.run(getattr_src, Some(&linalg_dict), None)?;
         m.add_submodule(&linalg)?;
         // Also expose as top-level attribute so `fnp_python.linalg` resolves
         // via attribute access regardless of import style.
@@ -29278,16 +29274,24 @@ mod tests {
                 "trace",
                 "vector_norm",
             ];
-            // LinAlgError is a numpy type re-export — only verify when numpy
-            // is actually importable on the host Python. On numpy-less CI
-            // workers the lazy __getattr__ fallback can't resolve it.
+            // LinAlgError and test are NumPy re-exports — only verify when
+            // numpy is importable on the host Python. On numpy-less CI
+            // workers the lazy __getattr__ fallback can't resolve them.
             if numpy_available(py) {
                 linalg_names.push("LinAlgError");
+                linalg_names.push("test");
             }
             for name in linalg_names {
                 assert!(
                     linalg.getattr(name).is_ok(),
                     "fnp_python.linalg.{name} missing"
+                );
+            }
+            if numpy_available(py) {
+                let numpy_linalg = py.import("numpy.linalg")?;
+                assert!(
+                    linalg.getattr("test")?.is(&numpy_linalg.getattr("test")?),
+                    "fnp_python.linalg.test must be numpy.linalg.test",
                 );
             }
 
