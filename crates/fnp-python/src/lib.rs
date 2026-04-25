@@ -23587,25 +23587,48 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         lib_module.add_submodule(&stride_tricks)?;
         lib_module.add("stride_tricks", stride_tricks)?;
         let lib_root_names = [
-            "NumpyVersion",
             "Arrayterator",
             "add_docstring",
             "add_newdoc",
+            "array_utils",
+            "format",
             "introspect",
             "mixins",
+            "NumpyVersion",
             "npyio",
-            "test",
+            "scimath",
+            "stride_tricks",
             "tracemalloc_domain",
         ];
         if let Ok(np_lib) = py.import("numpy.lib") {
-            for name in lib_root_names {
-                if let Ok(value) = np_lib.getattr(name) {
-                    lib_module.add(name, value)?;
+            if let Ok(all_names) = np_lib.getattr("__all__") {
+                lib_module.setattr("__all__", all_names.clone())?;
+                for item in all_names.try_iter()? {
+                    let name = item?.extract::<String>()?;
+                    if lib_module.getattr(name.as_str()).is_err()
+                        && let Ok(value) = np_lib.getattr(name.as_str())
+                    {
+                        lib_module.add(name.as_str(), value)?;
+                    }
+                }
+            } else {
+                for name in lib_root_names {
+                    if lib_module.getattr(name).is_err()
+                        && let Ok(value) = np_lib.getattr(name)
+                    {
+                        lib_module.add(name, value)?;
+                    }
                 }
             }
+            if let Ok(test_attr) = np_lib.getattr("test") {
+                lib_module.add("test", test_attr)?;
+            }
+        }
+        if lib_module.getattr("__all__").is_err() {
+            lib_module.setattr("__all__", PyList::new(py, lib_root_names)?)?;
         }
         let lib_getattr_src = pyo3::ffi::c_str!(
-            "_LIB_NAMES = frozenset(('NumpyVersion','Arrayterator','add_docstring','add_newdoc','introspect','mixins','npyio','test','tracemalloc_domain'))\ndef __getattr__(name):\n    if name in _LIB_NAMES:\n        import numpy.lib as _lib\n        return getattr(_lib, name)\n    raise AttributeError(name)\n"
+            "_LIB_NAMES = frozenset(('Arrayterator','add_docstring','add_newdoc','array_utils','format','introspect','mixins','NumpyVersion','npyio','scimath','stride_tricks','tracemalloc_domain','test'))\ndef __getattr__(name):\n    if name in _LIB_NAMES:\n        import numpy.lib as _lib\n        return getattr(_lib, name)\n    raise AttributeError(name)\n"
         );
         let lib_dict = lib_module.dict();
         py.run(lib_getattr_src, Some(&lib_dict), None)?;
@@ -62210,6 +62233,21 @@ mod tests {
             let numpy = py.import("numpy")?;
             let numpy_lib = py.import("numpy.lib")?;
 
+            let numpy_lib_all = numpy_lib.getattr("__all__")?;
+            if repr_string(&lib_module.getattr("__all__")?) != repr_string(&numpy_lib_all) {
+                return Err(PyValueError::new_err(
+                    "fnp_python.lib.__all__ must match numpy.lib.__all__",
+                ));
+            }
+            for item in numpy_lib_all.try_iter()? {
+                let name = item?.extract::<String>()?;
+                if !lib_module.hasattr(name.as_str())? {
+                    return Err(PyValueError::new_err(format!(
+                        "fnp_python.lib missing numpy.lib public name {name}"
+                    )));
+                }
+            }
+
             for name in [
                 "NumpyVersion",
                 "Arrayterator",
@@ -62228,11 +62266,19 @@ mod tests {
             }
 
             let sys_modules = py.import("sys")?.getattr("modules")?;
-            for name in ["introspect", "mixins", "npyio"] {
+            for name in [
+                "array_utils",
+                "format",
+                "introspect",
+                "mixins",
+                "npyio",
+                "scimath",
+                "stride_tricks",
+            ] {
                 let registered =
                     sys_modules.get_item(format!("fnp_python_test_lib_root.lib.{name}"))?;
                 assert!(
-                    registered.is(&numpy_lib.getattr(name)?),
+                    registered.is(&lib_module.getattr(name)?),
                     "fnp_python.lib.{name} should be registered under sys.modules"
                 );
             }
