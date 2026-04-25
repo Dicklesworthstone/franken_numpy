@@ -16735,6 +16735,26 @@ fn recfunctions_find_duplicates(
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
+fn recfunctions_apply_along_fields(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    recfunctions_passthrough(py, "apply_along_fields", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn recfunctions_stack_arrays(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    recfunctions_passthrough(py, "stack_arrays", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
 fn recfunctions_get_names(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -21998,6 +22018,8 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(recfunctions_recursive_fill_fields, m)?)?;
     m.add_function(wrap_pyfunction!(recfunctions_join_by, m)?)?;
     m.add_function(wrap_pyfunction!(recfunctions_find_duplicates, m)?)?;
+    m.add_function(wrap_pyfunction!(recfunctions_apply_along_fields, m)?)?;
+    m.add_function(wrap_pyfunction!(recfunctions_stack_arrays, m)?)?;
     m.add_function(wrap_pyfunction!(recfunctions_get_names, m)?)?;
     m.add_function(wrap_pyfunction!(recfunctions_get_names_flat, m)?)?;
     m.add_function(wrap_pyfunction!(recfunctions_flatten_descr, m)?)?;
@@ -22598,6 +22620,8 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             ),
             ("join_by", "recfunctions_join_by"),
             ("find_duplicates", "recfunctions_find_duplicates"),
+            ("apply_along_fields", "recfunctions_apply_along_fields"),
+            ("stack_arrays", "recfunctions_stack_arrays"),
             ("get_names", "recfunctions_get_names"),
             ("get_names_flat", "recfunctions_get_names_flat"),
             ("flatten_descr", "recfunctions_flatten_descr"),
@@ -27461,6 +27485,8 @@ mod tests {
             assert!(module.getattr("recfunctions_recursive_fill_fields").is_ok());
             assert!(module.getattr("recfunctions_join_by").is_ok());
             assert!(module.getattr("recfunctions_find_duplicates").is_ok());
+            assert!(module.getattr("recfunctions_apply_along_fields").is_ok());
+            assert!(module.getattr("recfunctions_stack_arrays").is_ok());
             assert!(module.getattr("recfunctions_get_names").is_ok());
             assert!(module.getattr("recfunctions_get_names_flat").is_ok());
             assert!(module.getattr("recfunctions_flatten_descr").is_ok());
@@ -28127,6 +28153,8 @@ mod tests {
                 "recursive_fill_fields",
                 "join_by",
                 "find_duplicates",
+                "apply_along_fields",
+                "stack_arrays",
                 "get_names",
                 "get_names_flat",
                 "flatten_descr",
@@ -58910,6 +58938,113 @@ mod tests {
                     "{numpy_name}"
                 );
             }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn recfunctions_stack_and_apply_helpers_match_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let recfunctions = module.getattr("lib")?.getattr("recfunctions")?;
+            let nrf = py.import("numpy.lib.recfunctions")?;
+            let numpy = py.import("numpy")?;
+            let builtins = py.import("builtins")?;
+            let eval_fn = builtins.getattr("eval")?;
+            let globals = PyDict::new(py);
+            globals.set_item("np", numpy.clone())?;
+            let eval_with_globals = |code: &str| -> PyResult<pyo3::Bound<'_, PyAny>> {
+                eval_fn.call((code, &globals), None::<&pyo3::Bound<'_, PyDict>>)
+            };
+
+            let base =
+                eval_with_globals("np.array([(1, 2.5), (3, 4.5)], dtype=[('a','i4'),('b','f8')])")?;
+            let extra = eval_with_globals("np.array([(5, 'x')], dtype=[('a','i4'),('c','U1')])")?;
+            let masked = eval_with_globals(
+                "np.ma.array([(1, 2.5), (3, 4.5)], mask=[(False, True), (False, False)], dtype=[('a','i4'),('b','f8')])",
+            )?;
+
+            let apply_top = module.getattr("recfunctions_apply_along_fields")?;
+            let apply_nested = recfunctions.getattr("apply_along_fields")?;
+            let apply_numpy = nrf.getattr("apply_along_fields")?;
+            for reducer in ["mean", "sum"] {
+                let func = numpy.getattr(reducer)?;
+                let ours = apply_top.call1((func.clone(), base.clone()))?;
+                let nested_result = apply_nested.call1((func.clone(), base.clone()))?;
+                let theirs = apply_numpy.call1((func.clone(), base.clone()))?;
+                assert_array_matches_numpy(&ours, &theirs)?;
+                assert_array_matches_numpy(&nested_result, &theirs)?;
+            }
+
+            let masked_mean = numpy.getattr("ma")?.getattr("mean")?;
+            let ours_masked = apply_top.call1((masked_mean.clone(), masked.clone()))?;
+            let nested_masked = apply_nested.call1((masked_mean.clone(), masked.clone()))?;
+            let theirs_masked = apply_numpy.call1((masked_mean.clone(), masked.clone()))?;
+            assert_array_matches_numpy(&ours_masked, &theirs_masked)?;
+            assert_array_matches_numpy(&nested_masked, &theirs_masked)?;
+
+            let bad_input = numpy.getattr("arange")?.call1((3_i64,))?;
+            let ours_bad = apply_top.call1((numpy.getattr("sum")?, bad_input.clone()));
+            let theirs_bad = apply_numpy.call1((numpy.getattr("sum")?, bad_input.clone()));
+            match (ours_bad, theirs_bad) {
+                (Err(ours), Err(theirs)) => {
+                    assert_eq!(
+                        ours.get_type(py).name()?.extract::<String>()?,
+                        theirs.get_type(py).name()?.extract::<String>()?
+                    );
+                    assert_eq!(
+                        ours.value(py).str()?.extract::<String>()?,
+                        theirs.value(py).str()?.extract::<String>()?
+                    );
+                }
+                (ours, theirs) => {
+                    return Err(pyo3::exceptions::PyAssertionError::new_err(format!(
+                        "apply_along_fields bad-input outcome diverged: ours={ours:?} theirs={theirs:?}"
+                    )));
+                }
+            }
+
+            let stack_top = module.getattr("recfunctions_stack_arrays")?;
+            let stack_nested = recfunctions.getattr("stack_arrays")?;
+            let stack_numpy = nrf.getattr("stack_arrays")?;
+            let stack_kwargs = PyDict::new(py);
+            stack_kwargs.set_item("usemask", false)?;
+            stack_kwargs.set_item("autoconvert", true)?;
+            let ours_stack =
+                stack_top.call(((base.clone(), extra.clone()),), Some(&stack_kwargs))?;
+            let nested_stack =
+                stack_nested.call(((base.clone(), extra.clone()),), Some(&stack_kwargs))?;
+            let theirs_stack =
+                stack_numpy.call(((base.clone(), extra.clone()),), Some(&stack_kwargs))?;
+            assert_array_matches_numpy(&ours_stack, &theirs_stack)?;
+            assert_array_matches_numpy(&nested_stack, &theirs_stack)?;
+            assert_eq!(
+                repr_string(&ours_stack.getattr("dtype")?),
+                repr_string(&theirs_stack.getattr("dtype")?)
+            );
+
+            let masked_stack_kwargs = PyDict::new(py);
+            masked_stack_kwargs.set_item("usemask", true)?;
+            let ours_masked_stack =
+                stack_top.call(((base.clone(), extra.clone()),), Some(&masked_stack_kwargs))?;
+            let nested_masked_stack =
+                stack_nested.call(((base.clone(), extra.clone()),), Some(&masked_stack_kwargs))?;
+            let theirs_masked_stack =
+                stack_numpy.call(((base.clone(), extra.clone()),), Some(&masked_stack_kwargs))?;
+            assert_eq!(
+                repr_string(&ours_masked_stack),
+                repr_string(&theirs_masked_stack)
+            );
+            assert_eq!(
+                repr_string(&nested_masked_stack),
+                repr_string(&theirs_masked_stack)
+            );
 
             Ok(())
         });
