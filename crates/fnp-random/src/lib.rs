@@ -1049,14 +1049,12 @@ impl PhiloxRng {
 
     #[must_use]
     pub fn new(key: [u64; 2], ctr: [u64; 4]) -> Self {
-        let mut rng = Self {
+        Self {
             ctr,
             key,
             buffer: [0; 4],
             buffer_pos: 4,
-        };
-        rng.fill_buffer();
-        rng
+        }
     }
 
     fn fill_buffer(&mut self) {
@@ -1114,6 +1112,7 @@ impl PhiloxRng {
                 }
             }
         }
+        self.buffer = [0; 4];
         self.buffer_pos = 4; // Force refill
     }
 
@@ -5438,7 +5437,7 @@ mod tests {
 
     use super::{
         BIT_GENERATOR_STATE_SCHEMA_VERSION, BitGenerator, BitGeneratorError, BitGeneratorKind,
-        DEFAULT_RNG_SEED, DeterministicRng, Generator, GeneratorPicklePayload,
+        BitGeneratorState, DEFAULT_RNG_SEED, DeterministicRng, Generator, GeneratorPicklePayload,
         MAX_RNG_JUMP_OPERATIONS, MAX_SEED_SEQUENCE_CHILDREN, MAX_SEED_SEQUENCE_WORDS, Mt19937,
         Mt19937Rng, Pcg64, Pcg64DxsmRng, Pcg64Rng, Philox, RANDOM_PACKET_REASON_CODES,
         RNG_CORE_REASON_CODES, RandomError, RandomLogRecord, RandomPolicyError, RandomRuntimeMode,
@@ -7665,6 +7664,59 @@ for child in rng.spawn(n_children):
         let mut sfc64 = Sfc64::new(SeedMaterial::U64(9123)).expect("sfc64");
         let diverged = (0..64).any(|_| philox.next_u64() != sfc64.next_u64());
         assert!(diverged);
+    }
+
+    #[test]
+    fn philox_raw_stream_and_state_match_numpy_seed_260() {
+        fn state_entry(state: &BitGeneratorState, key: &str) -> u64 {
+            state
+                .schema_entries
+                .iter()
+                .find_map(|(entry_key, value)| (entry_key == key).then_some(*value))
+                .expect("state entry")
+        }
+
+        let mut generator = BitGenerator::new(BitGeneratorKind::Philox, SeedMaterial::U64(260))
+            .expect("philox generator");
+        let initial_state = generator.state();
+        assert_eq!(state_entry(&initial_state, "philox_ctr0"), 0);
+        assert_eq!(state_entry(&initial_state, "philox_buf0"), 0);
+        assert_eq!(state_entry(&initial_state, "philox_buf1"), 0);
+        assert_eq!(state_entry(&initial_state, "philox_buf2"), 0);
+        assert_eq!(state_entry(&initial_state, "philox_buf3"), 0);
+        assert_eq!(state_entry(&initial_state, "philox_pos"), 4);
+
+        assert_eq!(
+            generator.fill_u64(8),
+            vec![
+                9_561_486_093_893_703_818,
+                8_181_252_859_509_590_530,
+                3_852_486_318_122_729_759,
+                11_813_103_681_880_688_843,
+                13_931_012_205_712_661_596,
+                7_876_777_772_601_146_840,
+                15_840_940_227_501_013_079,
+                7_976_966_402_840_105_899,
+            ]
+        );
+
+        let advanced_state = generator.state();
+        assert_eq!(state_entry(&advanced_state, "philox_ctr0"), 2);
+        assert_eq!(state_entry(&advanced_state, "philox_pos"), 4);
+        assert_eq!(
+            [
+                state_entry(&advanced_state, "philox_buf0"),
+                state_entry(&advanced_state, "philox_buf1"),
+                state_entry(&advanced_state, "philox_buf2"),
+                state_entry(&advanced_state, "philox_buf3"),
+            ],
+            [
+                13_931_012_205_712_661_596,
+                7_876_777_772_601_146_840,
+                15_840_940_227_501_013_079,
+                7_976_966_402_840_105_899,
+            ]
+        );
     }
 
     #[test]

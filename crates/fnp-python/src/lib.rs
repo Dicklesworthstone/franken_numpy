@@ -2985,11 +2985,6 @@ fn random_generator_numpy_method(
 ) -> PyResult<Py<PyAny>> {
     let numpy_random = py.import("numpy.random")?;
     let kind = generator.bit_generator().kind();
-    if !matches!(kind, BitGeneratorKind::Pcg64 | BitGeneratorKind::Pcg64Dxsm) {
-        return Err(PyValueError::new_err(
-            "Generator.multivariate_normal currently supports PCG64 and PCG64DXSM bit generators",
-        ));
-    }
     let bit_generator_name = bit_generator_numpy_name(kind);
     let numpy_bit_generator = numpy_random.getattr(bit_generator_name)?.call0()?;
     let state = build_numpy_compatible_bit_generator_state_dict(py, generator.bit_generator())?;
@@ -27787,6 +27782,27 @@ mod tests {
                         (mean.clone(), cov.clone(), 2_usize),
                         Some(&cholesky_kwargs),
                     )?,
+                )?;
+            }
+
+            for name in ["MT19937", "Philox", "SFC64"] {
+                let ours_bg = random.getattr(name)?.call1((260_u64,))?;
+                let theirs_bg = numpy_random.getattr(name)?.call1((260_u64,))?;
+                let ours = random.getattr("Generator")?.call1((ours_bg,))?;
+                let theirs = numpy_random.getattr("Generator")?.call1((theirs_bg,))?;
+                assert_random_sample_matches_numpy(
+                    &ours.call_method1(
+                        "multivariate_normal",
+                        (mean.clone(), cov.clone(), 2_usize),
+                    )?,
+                    &theirs.call_method1(
+                        "multivariate_normal",
+                        (mean.clone(), cov.clone(), 2_usize),
+                    )?,
+                )?;
+                assert_random_sample_matches_numpy(
+                    &ours.call_method1("random", (3_usize,))?,
+                    &theirs.call_method1("random", (3_usize,))?,
                 )?;
             }
 
