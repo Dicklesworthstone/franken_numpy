@@ -16926,6 +16926,49 @@ fn scimath_arctanh(
     scimath_passthrough(py, "arctanh", args, kwargs)
 }
 
+fn array_utils_passthrough(
+    py: Python<'_>,
+    name: &str,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    Ok(py
+        .import("numpy.lib.array_utils")?
+        .getattr(name)?
+        .call(args, kwargs)?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn array_utils_byte_bounds(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    array_utils_passthrough(py, "byte_bounds", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn array_utils_normalize_axis_index(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    array_utils_passthrough(py, "normalize_axis_index", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn array_utils_normalize_axis_tuple(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    array_utils_passthrough(py, "normalize_axis_tuple", args, kwargs)
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, fill_value=None, out=None, *, keepdims=false))]
 fn ma_argmax(
@@ -22169,6 +22212,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(scimath_arccos, m)?)?;
     m.add_function(wrap_pyfunction!(scimath_arcsin, m)?)?;
     m.add_function(wrap_pyfunction!(scimath_arctanh, m)?)?;
+    m.add_function(wrap_pyfunction!(array_utils_byte_bounds, m)?)?;
+    m.add_function(wrap_pyfunction!(array_utils_normalize_axis_index, m)?)?;
+    m.add_function(wrap_pyfunction!(array_utils_normalize_axis_tuple, m)?)?;
     m.add_function(wrap_pyfunction!(i0, m)?)?;
     m.add_function(wrap_pyfunction!(asfortranarray, m)?)?;
     m.add_function(wrap_pyfunction!(isrealobj, m)?)?;
@@ -22802,6 +22848,21 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         }
         lib_module.add_submodule(&scimath)?;
         lib_module.add("scimath", scimath)?;
+        let array_utils = PyModule::new(py, "array_utils")?;
+        let array_utils_qualified_name = format!("{lib_qualified_name}.array_utils");
+        array_utils.setattr("__name__", &array_utils_qualified_name)?;
+        array_utils.setattr("__package__", &lib_qualified_name)?;
+        for (numpy_name, flat_name) in [
+            ("byte_bounds", "array_utils_byte_bounds"),
+            ("normalize_axis_index", "array_utils_normalize_axis_index"),
+            ("normalize_axis_tuple", "array_utils_normalize_axis_tuple"),
+        ] {
+            if let Ok(value) = m.getattr(flat_name) {
+                array_utils.add(numpy_name, value)?;
+            }
+        }
+        lib_module.add_submodule(&array_utils)?;
+        lib_module.add("array_utils", array_utils)?;
         let stride_tricks = PyModule::new(py, "stride_tricks")?;
         let stride_tricks_qualified_name = format!("{lib_qualified_name}.stride_tricks");
         stride_tricks.setattr("__name__", &stride_tricks_qualified_name)?;
@@ -22820,6 +22881,10 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             lib_module.getattr("recfunctions")?,
         )?;
         sys_modules.set_item(&scimath_qualified_name, lib_module.getattr("scimath")?)?;
+        sys_modules.set_item(
+            &array_utils_qualified_name,
+            lib_module.getattr("array_utils")?,
+        )?;
         sys_modules.set_item(
             &stride_tricks_qualified_name,
             lib_module.getattr("stride_tricks")?,
@@ -27673,6 +27738,9 @@ mod tests {
             assert!(module.getattr("scimath_arccos").is_ok());
             assert!(module.getattr("scimath_arcsin").is_ok());
             assert!(module.getattr("scimath_arctanh").is_ok());
+            assert!(module.getattr("array_utils_byte_bounds").is_ok());
+            assert!(module.getattr("array_utils_normalize_axis_index").is_ok());
+            assert!(module.getattr("array_utils_normalize_axis_tuple").is_ok());
             assert!(module.getattr("i0").is_ok());
             assert!(module.getattr("asfortranarray").is_ok());
             assert!(module.getattr("isrealobj").is_ok());
@@ -28359,6 +28427,17 @@ mod tests {
                     "fnp_python.lib.scimath.{name} missing"
                 );
             }
+            let array_utils = lib_mod.getattr("array_utils")?;
+            for name in [
+                "byte_bounds",
+                "normalize_axis_index",
+                "normalize_axis_tuple",
+            ] {
+                assert!(
+                    array_utils.getattr(name).is_ok(),
+                    "fnp_python.lib.array_utils.{name} missing"
+                );
+            }
             let stride_tricks = lib_mod.getattr("stride_tricks")?;
             for name in ["sliding_window_view", "as_strided"] {
                 assert!(
@@ -28382,6 +28461,12 @@ mod tests {
                     .get_item("fnp_python_test.lib.scimath")?
                     .is(&scimath),
                 "fnp_python.lib.scimath should be registered under sys.modules",
+            );
+            assert!(
+                sys_modules
+                    .get_item("fnp_python_test.lib.array_utils")?
+                    .is(&array_utils),
+                "fnp_python.lib.array_utils should be registered under sys.modules",
             );
 
             // Sanity-check an actual call round-trips through the submodule.
@@ -59466,6 +59551,133 @@ mod tests {
                     )));
                 }
             }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn array_utils_helpers_match_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let array_utils = module.getattr("lib")?.getattr("array_utils")?;
+            let numpy_array_utils = py.import("numpy.lib.array_utils")?;
+            let numpy = py.import("numpy")?;
+            let builtins = py.import("builtins")?;
+            let eval_fn = builtins.getattr("eval")?;
+            let globals = PyDict::new(py);
+            globals.set_item("np", numpy.clone())?;
+            let eval_with_globals = |code: &str| -> PyResult<pyo3::Bound<'_, PyAny>> {
+                eval_fn.call((code, &globals), None::<&pyo3::Bound<'_, PyDict>>)
+            };
+            let assert_matching_error = |context: &str,
+                                         ours: PyResult<pyo3::Bound<'_, PyAny>>,
+                                         theirs: PyResult<pyo3::Bound<'_, PyAny>>|
+             -> PyResult<()> {
+                match (ours, theirs) {
+                    (Err(ours), Err(theirs)) => {
+                        assert_eq!(
+                            ours.get_type(py).name()?.extract::<String>()?,
+                            theirs.get_type(py).name()?.extract::<String>()?,
+                            "{context} error type"
+                        );
+                        assert_eq!(
+                            ours.value(py).str()?.extract::<String>()?,
+                            theirs.value(py).str()?.extract::<String>()?,
+                            "{context} error message"
+                        );
+                    }
+                    (ours, theirs) => {
+                        return Err(pyo3::exceptions::PyAssertionError::new_err(format!(
+                            "{context} outcome diverged: ours={ours:?} theirs={theirs:?}"
+                        )));
+                    }
+                }
+                Ok(())
+            };
+
+            let byte_bounds_top = module.getattr("array_utils_byte_bounds")?;
+            let byte_bounds_nested = array_utils.getattr("byte_bounds")?;
+            let byte_bounds_numpy = numpy_array_utils.getattr("byte_bounds")?;
+            for input in [
+                eval_with_globals("np.arange(12, dtype=np.int16).reshape(3, 4)")?,
+                eval_with_globals("np.arange(12, dtype=np.int16).reshape(3, 4)[:, ::2]")?,
+            ] {
+                let ours = byte_bounds_top.call1((input.clone(),))?;
+                let nested = byte_bounds_nested.call1((input.clone(),))?;
+                let theirs = byte_bounds_numpy.call1((input.clone(),))?;
+                assert_eq!(repr_string(&ours), repr_string(&theirs));
+                assert_eq!(repr_string(&nested), repr_string(&theirs));
+            }
+
+            let axis_index_top = module.getattr("array_utils_normalize_axis_index")?;
+            let axis_index_nested = array_utils.getattr("normalize_axis_index")?;
+            let axis_index_numpy = numpy_array_utils.getattr("normalize_axis_index")?;
+            let ours_axis = axis_index_top.call1((-1_i64, 3_i64))?;
+            let nested_axis = axis_index_nested.call1((-1_i64, 3_i64))?;
+            let theirs_axis = axis_index_numpy.call1((-1_i64, 3_i64))?;
+            assert_eq!(repr_string(&ours_axis), repr_string(&theirs_axis));
+            assert_eq!(repr_string(&nested_axis), repr_string(&theirs_axis));
+
+            let bad_axis_kwargs = PyDict::new(py);
+            bad_axis_kwargs.set_item("msg_prefix", "axis")?;
+            assert_matching_error(
+                "normalize_axis_index out-of-range",
+                axis_index_top.call((4_i64, 3_i64), Some(&bad_axis_kwargs)),
+                axis_index_numpy.call((4_i64, 3_i64), Some(&bad_axis_kwargs)),
+            )?;
+            assert_matching_error(
+                "nested normalize_axis_index out-of-range",
+                axis_index_nested.call((4_i64, 3_i64), Some(&bad_axis_kwargs)),
+                axis_index_numpy.call((4_i64, 3_i64), Some(&bad_axis_kwargs)),
+            )?;
+
+            let axis_tuple_top = module.getattr("array_utils_normalize_axis_tuple")?;
+            let axis_tuple_nested = array_utils.getattr("normalize_axis_tuple")?;
+            let axis_tuple_numpy = numpy_array_utils.getattr("normalize_axis_tuple")?;
+            let axes = PyTuple::new(py, [-1_i64, 0_i64])?;
+            let ours_tuple = axis_tuple_top.call1((axes.clone(), 3_i64))?;
+            let nested_tuple = axis_tuple_nested.call1((axes.clone(), 3_i64))?;
+            let theirs_tuple = axis_tuple_numpy.call1((axes.clone(), 3_i64))?;
+            assert_eq!(repr_string(&ours_tuple), repr_string(&theirs_tuple));
+            assert_eq!(repr_string(&nested_tuple), repr_string(&theirs_tuple));
+
+            let duplicate_axes = PyTuple::new(py, [1_i64, -2_i64])?;
+            assert_matching_error(
+                "normalize_axis_tuple duplicate rejection",
+                axis_tuple_top.call1((duplicate_axes.clone(), 3_i64)),
+                axis_tuple_numpy.call1((duplicate_axes.clone(), 3_i64)),
+            )?;
+            assert_matching_error(
+                "nested normalize_axis_tuple duplicate rejection",
+                axis_tuple_nested.call1((duplicate_axes.clone(), 3_i64)),
+                axis_tuple_numpy.call1((duplicate_axes.clone(), 3_i64)),
+            )?;
+
+            let allow_duplicate_kwargs = PyDict::new(py);
+            allow_duplicate_kwargs.set_item("allow_duplicate", true)?;
+            let ours_duplicate = axis_tuple_top.call(
+                (duplicate_axes.clone(), 3_i64),
+                Some(&allow_duplicate_kwargs),
+            )?;
+            let nested_duplicate = axis_tuple_nested.call(
+                (duplicate_axes.clone(), 3_i64),
+                Some(&allow_duplicate_kwargs),
+            )?;
+            let theirs_duplicate = axis_tuple_numpy.call(
+                (duplicate_axes.clone(), 3_i64),
+                Some(&allow_duplicate_kwargs),
+            )?;
+            assert_eq!(repr_string(&ours_duplicate), repr_string(&theirs_duplicate));
+            assert_eq!(
+                repr_string(&nested_duplicate),
+                repr_string(&theirs_duplicate)
+            );
 
             Ok(())
         });
