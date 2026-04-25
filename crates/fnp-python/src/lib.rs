@@ -43294,6 +43294,88 @@ mod tests {
     }
 
     #[test]
+    fn masked_all_like_matches_numpy_shape_dtype_and_masks() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let masked_all_like_fn = module.getattr("masked_all_like")?;
+            let ma_module = module.getattr("ma")?;
+            let nested_masked_all_like_fn = ma_module.getattr("masked_all_like")?;
+            let numpy = py.import("numpy")?;
+            let numpy_ma = numpy.getattr("ma")?;
+            let numpy_masked_all_like = numpy_ma.getattr("masked_all_like")?;
+            let numpy_getmaskarray = numpy_ma.getattr("getmaskarray")?;
+            let numpy_all = numpy.getattr("all")?;
+            let numpy_array = numpy.getattr("array")?;
+
+            let float32_kwargs = PyDict::new(py);
+            float32_kwargs.set_item("dtype", numpy.getattr("float32")?)?;
+            let float32_2d = numpy_array
+                .call(
+                    (vec![vec![1.0_f64, 2.0], vec![3.0, 4.0]],),
+                    Some(&float32_kwargs),
+                )?
+                .unbind();
+
+            let int16_kwargs = PyDict::new(py);
+            int16_kwargs.set_item("dtype", numpy.getattr("int16")?)?;
+            let int16_scalar = numpy_array.call((7_i64,), Some(&int16_kwargs))?.unbind();
+
+            let masked_kwargs = PyDict::new(py);
+            masked_kwargs.set_item("mask", vec![vec![false, true], vec![true, false]])?;
+            let masked_2d = numpy_ma
+                .getattr("array")?
+                .call((vec![vec![1_i64, 2], vec![3, 4]],), Some(&masked_kwargs))?
+                .unbind();
+
+            let cases = [
+                ("float32-2d", float32_2d),
+                ("int16-scalar", int16_scalar),
+                ("masked-2d", masked_2d),
+            ];
+
+            for (label, input) in cases {
+                let ours = masked_all_like_fn.call1((input.bind(py),))?;
+                let nested = nested_masked_all_like_fn.call1((input.bind(py),))?;
+                let theirs = numpy_masked_all_like.call1((input.bind(py),))?;
+
+                assert_eq!(
+                    repr_string(&ours.getattr("shape")?),
+                    repr_string(&theirs.getattr("shape")?),
+                    "{label} shape diverged"
+                );
+                assert_eq!(
+                    repr_string(&ours.getattr("dtype")?),
+                    repr_string(&theirs.getattr("dtype")?),
+                    "{label} dtype diverged"
+                );
+                assert_eq!(
+                    repr_string(&ours.getattr("fill_value")?),
+                    repr_string(&theirs.getattr("fill_value")?),
+                    "{label} fill_value diverged"
+                );
+
+                let ours_mask = numpy_getmaskarray.call1((ours.clone(),))?;
+                let nested_mask = numpy_getmaskarray.call1((nested.clone(),))?;
+                let theirs_mask = numpy_getmaskarray.call1((theirs.clone(),))?;
+                assert_array_matches_numpy(&ours_mask, &theirs_mask)?;
+                assert_array_matches_numpy(&nested_mask, &theirs_mask)?;
+
+                assert!(
+                    numpy_all.call1((ours_mask.clone(),))?.extract::<bool>()?,
+                    "{label} should produce an all-True mask"
+                );
+            }
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn ifft2_matches_numpy_across_shape_axes_and_norm() {
         with_python(|py| {
             if !numpy_available(py) {
