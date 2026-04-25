@@ -23472,6 +23472,11 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "Arrayterator",
             "add_docstring",
             "add_newdoc",
+            "introspect",
+            "mixins",
+            "npyio",
+            "test",
+            "tracemalloc_domain",
         ];
         if let Ok(np_lib) = py.import("numpy.lib") {
             for name in lib_root_names {
@@ -23481,7 +23486,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             }
         }
         let lib_getattr_src = pyo3::ffi::c_str!(
-            "_LIB_NAMES = frozenset(('NumpyVersion','Arrayterator','add_docstring','add_newdoc'))\ndef __getattr__(name):\n    if name in _LIB_NAMES:\n        import numpy.lib as _lib\n        return getattr(_lib, name)\n    raise AttributeError(name)\n"
+            "_LIB_NAMES = frozenset(('NumpyVersion','Arrayterator','add_docstring','add_newdoc','introspect','mixins','npyio','test','tracemalloc_domain'))\ndef __getattr__(name):\n    if name in _LIB_NAMES:\n        import numpy.lib as _lib\n        return getattr(_lib, name)\n    raise AttributeError(name)\n"
         );
         let lib_dict = lib_module.dict();
         py.run(lib_getattr_src, Some(&lib_dict), None)?;
@@ -23501,6 +23506,11 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             &stride_tricks_qualified_name,
             lib_module.getattr("stride_tricks")?,
         )?;
+        for name in ["introspect", "mixins", "npyio"] {
+            if let Ok(value) = lib_module.getattr(name) {
+                sys_modules.set_item(format!("{lib_qualified_name}.{name}"), value)?;
+            }
+        }
         m.add_submodule(&lib_module)?;
         m.add("lib", lib_module)?;
     }
@@ -61945,10 +61955,24 @@ mod tests {
                 "Arrayterator",
                 "add_docstring",
                 "add_newdoc",
+                "introspect",
+                "mixins",
+                "npyio",
+                "test",
+                "tracemalloc_domain",
             ] {
                 assert!(
                     lib_module.getattr(name)?.is(&numpy_lib.getattr(name)?),
                     "fnp_python.lib.{name} must be numpy.lib.{name}"
+                );
+            }
+
+            let sys_modules = py.import("sys")?.getattr("modules")?;
+            for name in ["introspect", "mixins", "npyio"] {
+                let registered = sys_modules.get_item(format!("fnp_python_test_lib_root.lib.{name}"))?;
+                assert!(
+                    registered.is(&numpy_lib.getattr(name)?),
+                    "fnp_python.lib.{name} should be registered under sys.modules"
                 );
             }
 
