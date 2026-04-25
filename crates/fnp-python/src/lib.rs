@@ -963,6 +963,16 @@ impl PyRandomGenerator {
         build_random_f64_matrix_parts(py, shape, values, width)
     }
 
+    #[pyo3(signature = (*args, **kwargs))]
+    fn multivariate_normal(
+        &mut self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        random_generator_numpy_method(py, &mut self.inner, "multivariate_normal", args, kwargs)
+    }
+
     #[pyo3(signature = (colors, nsample, size=None, method="marginals"))]
     fn multivariate_hypergeometric(
         &mut self,
@@ -2234,6 +2244,170 @@ fn build_bit_generator_state_dict(
     Ok(dict.into_any().unbind())
 }
 
+fn bit_generator_schema_entry_u64(entries: &[(String, u64)], key: &str) -> PyResult<u64> {
+    entries
+        .iter()
+        .find_map(|(entry_key, value)| (entry_key == key).then_some(*value))
+        .ok_or_else(|| PyValueError::new_err(format!("bit-generator state is missing {key:?}")))
+}
+
+fn bit_generator_schema_entry_u32(entries: &[(String, u64)], key: &str) -> PyResult<u32> {
+    let value = bit_generator_schema_entry_u64(entries, key)?;
+    u32::try_from(value).map_err(|_| {
+        PyValueError::new_err(format!(
+            "bit-generator state field {key:?} must be a u32-compatible integer"
+        ))
+    })
+}
+
+fn numpy_array_from_u64_list<'py>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyAny>,
+    values: &[u64],
+) -> PyResult<Bound<'py, PyAny>> {
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "uint64")?;
+    numpy
+        .getattr("array")?
+        .call((PyList::new(py, values)?,), Some(&kwargs))
+}
+
+fn numpy_array_from_u32_list<'py>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyAny>,
+    values: &[u32],
+) -> PyResult<Bound<'py, PyAny>> {
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "uint32")?;
+    numpy
+        .getattr("array")?
+        .call((PyList::new(py, values)?,), Some(&kwargs))
+}
+
+fn py_array_to_u64_vec(value: &Bound<'_, PyAny>, field_name: &str) -> PyResult<Vec<u64>> {
+    value
+        .call_method0("tolist")?
+        .extract::<Vec<u64>>()
+        .map_err(|_| {
+            PyValueError::new_err(format!(
+                "bit-generator state field {field_name:?} must be a uint64 array"
+            ))
+        })
+}
+
+fn py_array_to_u32_vec(value: &Bound<'_, PyAny>, field_name: &str) -> PyResult<Vec<u32>> {
+    value
+        .call_method0("tolist")?
+        .extract::<Vec<u32>>()
+        .map_err(|_| {
+            PyValueError::new_err(format!(
+                "bit-generator state field {field_name:?} must be a uint32 array"
+            ))
+        })
+}
+
+fn default_bit_generator_schema_entries(
+    kind: BitGeneratorKind,
+    seed: u128,
+    counter: u128,
+) -> PyResult<Vec<(String, u64)>> {
+    let seed_lo = seed as u64;
+    let counter_lo = counter as u64;
+    let algorithm_value =
+        BitGeneratorState::algorithm_state_schema_value(kind, seed_lo, counter_lo).ok_or_else(
+            || PyValueError::new_err("bit-generator state cannot synthesize algorithm metadata"),
+        )?;
+    Ok(vec![
+        ("stream_seed".to_string(), seed_lo),
+        ("counter".to_string(), counter_lo),
+        ("algorithm_tag".to_string(), kind.stream_tag()),
+        (
+            "schema_version".to_string(),
+            u64::from(BIT_GENERATOR_STATE_SCHEMA_VERSION),
+        ),
+        (kind.state_schema_key().to_string(), algorithm_value),
+    ])
+}
+
+fn build_numpy_compatible_bit_generator_state_dict(
+    py: Python<'_>,
+    bit_generator: &BitGenerator,
+) -> PyResult<Py<PyAny>> {
+    let state = bit_generator.state();
+    let dict = PyDict::new(py);
+    dict.set_item("bit_generator", bit_generator_numpy_name(state.kind))?;
+
+    let state_dict = PyDict::new(py);
+    match state.kind {
+        BitGeneratorKind::Pcg64 | BitGeneratorKind::Pcg64Dxsm => {
+            state_dict.set_item("state", py_int_from_u128(py, state.seed)?)?;
+            state_dict.set_item("inc", py_int_from_u128(py, state.counter)?)?;
+            dict.set_item("state", state_dict)?;
+        }
+        BitGeneratorKind::Mt19937 => {
+            let numpy = py.import("numpy")?;
+            let mut key = Vec::with_capacity(624);
+            for index in 0..624 {
+                key.push(bit_generator_schema_entry_u32(
+                    &state.schema_entries,
+                    &format!("mt19937_s{index}"),
+                )?);
+            }
+            state_dict.set_item("key", numpy_array_from_u32_list(py, &numpy, &key)?)?;
+            state_dict.set_item(
+                "pos",
+                bit_generator_schema_entry_u64(&state.schema_entries, "mt19937_pos")?,
+            )?;
+            dict.set_item("state", state_dict)?;
+        }
+        BitGeneratorKind::Philox => {
+            let numpy = py.import("numpy")?;
+            let counter = [
+                bit_generator_schema_entry_u64(&state.schema_entries, "philox_ctr0")?,
+                bit_generator_schema_entry_u64(&state.schema_entries, "philox_ctr1")?,
+                bit_generator_schema_entry_u64(&state.schema_entries, "philox_ctr2")?,
+                bit_generator_schema_entry_u64(&state.schema_entries, "philox_ctr3")?,
+            ];
+            let key = [
+                bit_generator_schema_entry_u64(&state.schema_entries, "philox_key0")?,
+                bit_generator_schema_entry_u64(&state.schema_entries, "philox_key1")?,
+            ];
+            let buffer = [
+                bit_generator_schema_entry_u64(&state.schema_entries, "philox_buf0")?,
+                bit_generator_schema_entry_u64(&state.schema_entries, "philox_buf1")?,
+                bit_generator_schema_entry_u64(&state.schema_entries, "philox_buf2")?,
+                bit_generator_schema_entry_u64(&state.schema_entries, "philox_buf3")?,
+            ];
+            state_dict.set_item("counter", numpy_array_from_u64_list(py, &numpy, &counter)?)?;
+            state_dict.set_item("key", numpy_array_from_u64_list(py, &numpy, &key)?)?;
+            dict.set_item("state", state_dict)?;
+            dict.set_item("buffer", numpy_array_from_u64_list(py, &numpy, &buffer)?)?;
+            dict.set_item(
+                "buffer_pos",
+                bit_generator_schema_entry_u64(&state.schema_entries, "philox_pos")?,
+            )?;
+        }
+        BitGeneratorKind::Sfc64 => {
+            let numpy = py.import("numpy")?;
+            let state_values = [
+                bit_generator_schema_entry_u64(&state.schema_entries, "sfc64_s0")?,
+                bit_generator_schema_entry_u64(&state.schema_entries, "sfc64_s1")?,
+                bit_generator_schema_entry_u64(&state.schema_entries, "sfc64_s2")?,
+                bit_generator_schema_entry_u64(&state.schema_entries, "sfc64_s3")?,
+            ];
+            state_dict.set_item(
+                "state",
+                numpy_array_from_u64_list(py, &numpy, &state_values)?,
+            )?;
+            dict.set_item("state", state_dict)?;
+        }
+    }
+
+    dict.set_item("has_uint32", 0)?;
+    dict.set_item("uinteger", 0)?;
+    Ok(dict.into_any().unbind())
+}
+
 fn required_dict_item<'py>(dict: &Bound<'py, PyDict>, key: &str) -> PyResult<Bound<'py, PyAny>> {
     dict.get_item(key)?
         .ok_or_else(|| PyValueError::new_err(format!("bit-generator state is missing {key:?}")))
@@ -2335,6 +2509,95 @@ fn py_bit_generator_state_from_dict(state: &Bound<'_, PyAny>) -> PyResult<BitGen
 
     let state_dict = required_dict_item(dict, "state")?;
     let state_dict = state_dict.cast::<PyDict>()?;
+
+    if kind == BitGeneratorKind::Mt19937
+        && let Some(key_value) = state_dict.get_item("key")?
+    {
+        let key = py_array_to_u32_vec(&key_value, "state.key")?;
+        if key.len() != 624 {
+            return Err(PyValueError::new_err(
+                "MT19937 state key must contain exactly 624 entries",
+            ));
+        }
+        let pos = required_dict_item(state_dict, "pos")?.extract::<usize>()?;
+        let seed = 0_u128;
+        let counter = pos as u128;
+        let mut schema_entries = default_bit_generator_schema_entries(kind, seed, counter)?;
+        schema_entries.push(("mt19937_pos".to_string(), pos as u64));
+        for (index, value) in key.into_iter().enumerate() {
+            schema_entries.push((format!("mt19937_s{index}"), u64::from(value)));
+        }
+        return Ok(BitGeneratorState {
+            kind,
+            schema_version: BIT_GENERATOR_STATE_SCHEMA_VERSION,
+            seed,
+            counter,
+            schema_entries,
+        });
+    }
+
+    if kind == BitGeneratorKind::Philox
+        && let Some(counter_value) = state_dict.get_item("counter")?
+    {
+        let counter_array = py_array_to_u64_vec(&counter_value, "state.counter")?;
+        let key_array = py_array_to_u64_vec(&required_dict_item(state_dict, "key")?, "state.key")?;
+        let buffer_array = py_array_to_u64_vec(&required_dict_item(dict, "buffer")?, "buffer")?;
+        if counter_array.len() != 4 || key_array.len() != 2 || buffer_array.len() != 4 {
+            return Err(PyValueError::new_err(
+                "Philox state must contain counter[4], key[2], and buffer[4]",
+            ));
+        }
+        let buffer_pos = required_dict_item(dict, "buffer_pos")?.extract::<usize>()?;
+        if buffer_pos > 4 {
+            return Err(PyValueError::new_err("Philox buffer_pos must be <= 4"));
+        }
+        let seed = 0_u128;
+        let counter = 0_u128;
+        let mut schema_entries = default_bit_generator_schema_entries(kind, seed, counter)?;
+        for (index, value) in counter_array.into_iter().enumerate() {
+            schema_entries.push((format!("philox_ctr{index}"), value));
+        }
+        for (index, value) in key_array.into_iter().enumerate() {
+            schema_entries.push((format!("philox_key{index}"), value));
+        }
+        for (index, value) in buffer_array.into_iter().enumerate() {
+            schema_entries.push((format!("philox_buf{index}"), value));
+        }
+        schema_entries.push(("philox_pos".to_string(), buffer_pos as u64));
+        return Ok(BitGeneratorState {
+            kind,
+            schema_version: BIT_GENERATOR_STATE_SCHEMA_VERSION,
+            seed,
+            counter,
+            schema_entries,
+        });
+    }
+
+    if kind == BitGeneratorKind::Sfc64
+        && let Some(state_value) = state_dict.get_item("state")?
+        && state_value.getattr("tolist").is_ok()
+    {
+        let state_array = py_array_to_u64_vec(&state_value, "state.state")?;
+        if state_array.len() != 4 {
+            return Err(PyValueError::new_err(
+                "SFC64 state must contain exactly 4 entries",
+            ));
+        }
+        let seed = 0_u128;
+        let counter = 0_u128;
+        let mut schema_entries = default_bit_generator_schema_entries(kind, seed, counter)?;
+        for (index, value) in state_array.into_iter().enumerate() {
+            schema_entries.push((format!("sfc64_s{index}"), value));
+        }
+        return Ok(BitGeneratorState {
+            kind,
+            schema_version: BIT_GENERATOR_STATE_SCHEMA_VERSION,
+            seed,
+            counter,
+            schema_entries,
+        });
+    }
+
     let seed = py_state_u128(&required_dict_item(state_dict, "state")?, "state.state")?;
     let counter = py_state_u128(&required_dict_item(state_dict, "inc")?, "state.inc")?;
 
@@ -2710,6 +2973,37 @@ fn random_state_numpy_legacy_method(
         .set_state(&updated_state.bit_generator_state)
         .map_err(map_bit_generator_error)?;
     random_state.set_gaussian_cache(updated_state.has_gaussian, updated_state.gaussian);
+    Ok(result)
+}
+
+fn random_generator_numpy_method(
+    py: Python<'_>,
+    generator: &mut RandomGenerator,
+    name: &str,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let numpy_random = py.import("numpy.random")?;
+    let kind = generator.bit_generator().kind();
+    if !matches!(kind, BitGeneratorKind::Pcg64 | BitGeneratorKind::Pcg64Dxsm) {
+        return Err(PyValueError::new_err(
+            "Generator.multivariate_normal currently supports PCG64 and PCG64DXSM bit generators",
+        ));
+    }
+    let bit_generator_name = bit_generator_numpy_name(kind);
+    let numpy_bit_generator = numpy_random.getattr(bit_generator_name)?.call0()?;
+    let state = build_numpy_compatible_bit_generator_state_dict(py, generator.bit_generator())?;
+    numpy_bit_generator.setattr("state", state)?;
+
+    let numpy_generator = numpy_random
+        .getattr("Generator")?
+        .call1((numpy_bit_generator,))?;
+    let result = numpy_generator.getattr(name)?.call(args, kwargs)?.unbind();
+    let updated_state = numpy_generator.getattr("bit_generator")?.getattr("state")?;
+    let updated_state = py_bit_generator_state_from_dict(&updated_state)?;
+    generator
+        .set_state(&updated_state)
+        .map_err(map_bit_generator_error)?;
     Ok(result)
 }
 
@@ -27377,6 +27671,7 @@ mod tests {
             let module = PyModule::new(py, "fnp_python_test_random_multivariate_distributions")?;
             fnp_python(&module)?;
             let random = module.getattr("random")?;
+            let numpy = py.import("numpy")?;
             let numpy_random = py.import("numpy")?.getattr("random")?;
             let shape = PyTuple::new(py, [2_usize, 2_usize])?;
 
@@ -27391,6 +27686,109 @@ mod tests {
                 &ours.call_method1("dirichlet", (vec![1.0_f64, 2.0, 3.0], shape.clone()))?,
                 &theirs.call_method1("dirichlet", (vec![1.0_f64, 2.0, 3.0], shape.clone()))?,
             )?;
+
+            let mean = PyList::new(py, [0.25_f64, -0.5])?;
+            let cov = numpy.call_method1(
+                "array",
+                (vec![vec![1.5_f64, 0.25_f64], vec![0.25_f64, 0.75_f64]],),
+            )?;
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 256)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("multivariate_normal", (mean.clone(), cov.clone(), 3_usize))?,
+                &theirs
+                    .call_method1("multivariate_normal", (mean.clone(), cov.clone(), 3_usize))?,
+            )?;
+
+            let eigh_kwargs = PyDict::new(py);
+            eigh_kwargs.set_item("method", "eigh")?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 257)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method(
+                    "multivariate_normal",
+                    (mean.clone(), cov.clone(), shape.clone()),
+                    Some(&eigh_kwargs),
+                )?,
+                &theirs.call_method(
+                    "multivariate_normal",
+                    (mean.clone(), cov.clone(), shape.clone()),
+                    Some(&eigh_kwargs),
+                )?,
+            )?;
+
+            let cholesky_kwargs = PyDict::new(py);
+            cholesky_kwargs.set_item("method", "cholesky")?;
+            for name in ["PCG64", "PCG64DXSM"] {
+                let ours_bg = random.getattr(name)?.call1((258_u64,))?;
+                let theirs_bg = numpy_random.getattr(name)?.call1((258_u64,))?;
+                let ours = random.getattr("Generator")?.call1((ours_bg,))?;
+                let theirs = numpy_random.getattr("Generator")?.call1((theirs_bg,))?;
+                assert_random_sample_matches_numpy(
+                    &ours.call_method(
+                        "multivariate_normal",
+                        (mean.clone(), cov.clone(), 2_usize),
+                        Some(&cholesky_kwargs),
+                    )?,
+                    &theirs.call_method(
+                        "multivariate_normal",
+                        (mean.clone(), cov.clone(), 2_usize),
+                        Some(&cholesky_kwargs),
+                    )?,
+                )?;
+            }
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 259)?;
+            let _ =
+                ours.call_method1("multivariate_normal", (mean.clone(), cov.clone(), 2_usize))?;
+            let _ =
+                theirs.call_method1("multivariate_normal", (mean.clone(), cov.clone(), 2_usize))?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method1("random", (4_usize,))?,
+                &theirs.call_method1("random", (4_usize,))?,
+            )?;
+
+            let invalid_method_kwargs = PyDict::new(py);
+            invalid_method_kwargs.set_item("method", "invalid")?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 265)?;
+            assert_eq!(
+                call_outcome(
+                    py,
+                    &ours.getattr("multivariate_normal")?,
+                    &PyTuple::new(py, [mean.clone().into_any(), cov.clone().into_any()])?,
+                    Some(&invalid_method_kwargs),
+                )?,
+                call_outcome(
+                    py,
+                    &theirs.getattr("multivariate_normal")?,
+                    &PyTuple::new(py, [mean.clone().into_any(), cov.clone().into_any()])?,
+                    Some(&invalid_method_kwargs),
+                )?
+            );
+
+            let invalid_cov = numpy.call_method1(
+                "array",
+                (vec![vec![1.0_f64, 2.0_f64], vec![2.0_f64, 1.0_f64]],),
+            )?;
+            let raise_kwargs = PyDict::new(py);
+            raise_kwargs.set_item("check_valid", "raise")?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 266)?;
+            assert_eq!(
+                call_outcome(
+                    py,
+                    &ours.getattr("multivariate_normal")?,
+                    &PyTuple::new(
+                        py,
+                        [mean.clone().into_any(), invalid_cov.clone().into_any()]
+                    )?,
+                    Some(&raise_kwargs),
+                )?,
+                call_outcome(
+                    py,
+                    &theirs.getattr("multivariate_normal")?,
+                    &PyTuple::new(py, [mean.clone().into_any(), invalid_cov.into_any()])?,
+                    Some(&raise_kwargs),
+                )?
+            );
 
             let (ours, theirs) = random_generator_pair(&random, &numpy_random, 252)?;
             assert_random_sample_matches_numpy(
