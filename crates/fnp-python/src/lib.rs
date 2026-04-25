@@ -18398,6 +18398,17 @@ fn masked_all(py: Python<'_>, shape: Py<PyAny>, dtype: Option<Py<PyAny>>) -> PyR
 }
 
 #[pyfunction]
+#[pyo3(signature = (arr,))]
+fn masked_all_like(py: Python<'_>, arr: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("ma")?
+        .getattr("masked_all_like")?
+        .call1((arr.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (x,))]
 fn compressed(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -21725,6 +21736,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
+    m.add_function(wrap_pyfunction!(masked_all_like, m)?)?;
     m.add_function(wrap_pyfunction!(compressed, m)?)?;
     m.add_function(wrap_pyfunction!(ifft, m)?)?;
     m.add_function(wrap_pyfunction!(fft2, m)?)?;
@@ -22194,6 +22206,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "masked_values",
             "masked_invalid",
             "masked_all",
+            "masked_all_like",
             "compressed",
             "getmask",
             "getmaskarray",
@@ -27129,6 +27142,7 @@ mod tests {
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
             assert!(module.getattr("masked_all").is_ok());
+            assert!(module.getattr("masked_all_like").is_ok());
             assert!(module.getattr("compressed").is_ok());
             assert!(module.getattr("ifft").is_ok());
             assert!(module.getattr("fft2").is_ok());
@@ -27691,6 +27705,7 @@ mod tests {
                 "masked_values",
                 "masked_invalid",
                 "masked_all",
+                "masked_all_like",
                 "compressed",
                 "getmask",
                 "getmaskarray",

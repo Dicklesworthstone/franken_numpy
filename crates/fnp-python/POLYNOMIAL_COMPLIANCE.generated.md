@@ -10,43 +10,21 @@
 | Level | Present | Total | Coverage |
 |-------|--------:|------:|---------:|
 | MUST | 66 | 66 | 100.0% |
-| SHOULD | 17 | 34 | 50.0% |
+| SHOULD | 34 | 34 | 100.0% |
 | MAY | 0 | 0 | 0.0% |
-| **Total** | **83** | **100** | **83.0%** |
+| **Total** | **100** | **100** | **100.0%** |
 
 ## Per-subtree coverage
 
 | Subtree | Present | Total | Coverage |
 |---------|--------:|------:|---------:|
-| `chebyshev` | 13 | 16 | 81.2% |
+| `chebyshev` | 16 | 16 | 100.0% |
 | `class` | 6 | 6 | 100.0% |
-| `hermite` | 13 | 16 | 81.2% |
-| `hermite_e` | 15 | 16 | 93.8% |
-| `laguerre` | 13 | 16 | 81.2% |
-| `legendre` | 13 | 16 | 81.2% |
-| `polynomial` | 10 | 14 | 71.4% |
-
-## Missing names
-
-| Name | Level | Subtree |
-|------|:-----:|---------|
-| `cheb2poly` | SHOULD | `chebyshev` |
-| `chebvander` | SHOULD | `chebyshev` |
-| `herm2poly` | SHOULD | `hermite` |
-| `hermevander` | SHOULD | `hermite_e` |
-| `hermvander` | SHOULD | `hermite` |
-| `lag2poly` | SHOULD | `laguerre` |
-| `lagvander` | SHOULD | `laguerre` |
-| `leg2poly` | SHOULD | `legendre` |
-| `legvander` | SHOULD | `legendre` |
-| `poly2cheb` | SHOULD | `chebyshev` |
-| `poly2herm` | SHOULD | `hermite` |
-| `poly2lag` | SHOULD | `laguerre` |
-| `poly2leg` | SHOULD | `legendre` |
-| `polyline` | SHOULD | `polynomial` |
-| `polytrim` | SHOULD | `polynomial` |
-| `polyvalfromroots` | SHOULD | `polynomial` |
-| `polyvander` | SHOULD | `polynomial` |
+| `hermite` | 16 | 16 | 100.0% |
+| `hermite_e` | 16 | 16 | 100.0% |
+| `laguerre` | 16 | 16 | 100.0% |
+| `legendre` | 16 | 16 | 100.0% |
+| `polynomial` | 14 | 14 | 100.0% |
 
 ## Present names
 
@@ -58,6 +36,7 @@
 | `Laguerre` | MUST | `class` |
 | `Legendre` | MUST | `class` |
 | `Polynomial` | MUST | `class` |
+| `cheb2poly` | SHOULD | `chebyshev` |
 | `chebadd` | MUST | `chebyshev` |
 | `chebder` | MUST | `chebyshev` |
 | `chebdiv` | MUST | `chebyshev` |
@@ -71,6 +50,8 @@
 | `chebsub` | MUST | `chebyshev` |
 | `chebtrim` | SHOULD | `chebyshev` |
 | `chebval` | MUST | `chebyshev` |
+| `chebvander` | SHOULD | `chebyshev` |
+| `herm2poly` | SHOULD | `hermite` |
 | `hermadd` | MUST | `hermite` |
 | `hermder` | MUST | `hermite` |
 | `hermdiv` | MUST | `hermite` |
@@ -88,6 +69,7 @@
 | `hermesub` | MUST | `hermite_e` |
 | `hermetrim` | SHOULD | `hermite_e` |
 | `hermeval` | MUST | `hermite_e` |
+| `hermevander` | SHOULD | `hermite_e` |
 | `hermfromroots` | MUST | `hermite` |
 | `hermint` | MUST | `hermite` |
 | `hermline` | SHOULD | `hermite` |
@@ -98,6 +80,8 @@
 | `hermsub` | MUST | `hermite` |
 | `hermtrim` | SHOULD | `hermite` |
 | `hermval` | MUST | `hermite` |
+| `hermvander` | SHOULD | `hermite` |
+| `lag2poly` | SHOULD | `laguerre` |
 | `lagadd` | MUST | `laguerre` |
 | `lagder` | MUST | `laguerre` |
 | `lagdiv` | MUST | `laguerre` |
@@ -111,6 +95,8 @@
 | `lagsub` | MUST | `laguerre` |
 | `lagtrim` | SHOULD | `laguerre` |
 | `lagval` | MUST | `laguerre` |
+| `lagvander` | SHOULD | `laguerre` |
+| `leg2poly` | SHOULD | `legendre` |
 | `legadd` | MUST | `legendre` |
 | `legder` | MUST | `legendre` |
 | `legdiv` | MUST | `legendre` |
@@ -124,14 +110,23 @@
 | `legsub` | MUST | `legendre` |
 | `legtrim` | SHOULD | `legendre` |
 | `legval` | MUST | `legendre` |
+| `legvander` | SHOULD | `legendre` |
+| `poly2cheb` | SHOULD | `chebyshev` |
+| `poly2herm` | SHOULD | `hermite` |
 | `poly2herme` | SHOULD | `hermite_e` |
+| `poly2lag` | SHOULD | `laguerre` |
+| `poly2leg` | SHOULD | `legendre` |
 | `polyadd` | MUST | `polynomial` |
 | `polyder` | MUST | `polynomial` |
 | `polydiv` | MUST | `polynomial` |
 | `polyfromroots` | MUST | `polynomial` |
 | `polyint` | MUST | `polynomial` |
+| `polyline` | SHOULD | `polynomial` |
 | `polymul` | MUST | `polynomial` |
 | `polypow` | MUST | `polynomial` |
 | `polyroots` | MUST | `polynomial` |
 | `polysub` | MUST | `polynomial` |
+| `polytrim` | SHOULD | `polynomial` |
 | `polyval` | MUST | `polynomial` |
+| `polyvalfromroots` | SHOULD | `polynomial` |
+| `polyvander` | SHOULD | `polynomial` |
