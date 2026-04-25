@@ -21793,6 +21793,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // callers using linalg_eig / ma_count / testing_assert_allclose /
     // recfunctions_drop_fields) AND via real nested submodules so that
     //     import fnp_python as np
+    //     np.fft.fft([1, 2, 3])
     //     np.linalg.svd(np.eye(3))
     //     np.ma.count(np.ma.array([1, 2]))
     //     np.testing.assert_allclose(a, b)
@@ -21803,8 +21804,56 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     //
     // Implementation: create one PyModule per submodule, populate by
     // aliasing `m.getattr("<flat_name>")` onto the unprefixed member,
-    // then wire it up via m.add_submodule / m.add. Functions remain
-    // registered at the top level so nothing changes for existing callers.
+    // then wire it up via m.add_submodule / m.add. `fft` is installed as a
+    // callable module so the existing flat `fnp_python.fft(...)` path still
+    // delegates to the canonical `fnp_python.fft.fft(...)` member.
+    {
+        let fft_module = PyModule::new(py, "fft")?;
+        let fft_names = [
+            "fft",
+            "ifft",
+            "fft2",
+            "ifft2",
+            "fftn",
+            "ifftn",
+            "rfft",
+            "irfft",
+            "rfftn",
+            "irfftn",
+            "hfft",
+            "ihfft",
+            "rfft2",
+            "irfft2",
+            "fftfreq",
+            "rfftfreq",
+            "fftshift",
+            "ifftshift",
+        ];
+        for name in fft_names {
+            if let Ok(value) = m.getattr(name) {
+                fft_module.add(name, value)?;
+            }
+        }
+        fft_module.setattr("__all__", PyTuple::new(py, fft_names)?)?;
+        let parent_name = m.getattr("__name__")?.extract::<String>()?;
+        let qualified_name = format!("{parent_name}.fft");
+        fft_module.setattr("__name__", &qualified_name)?;
+        fft_module.setattr("__package__", &parent_name)?;
+        let callable_module_src = pyo3::ffi::c_str!(
+            "import types\nclass _CallableFFTModule(types.ModuleType):\n    def __call__(self, *args, **kwargs):\n        return self.fft(*args, **kwargs)\n"
+        );
+        let callable_module_ns = PyDict::new(py);
+        py.run(callable_module_src, Some(&callable_module_ns), None)?;
+        if let Some(callable_module_cls) = callable_module_ns.get_item("_CallableFFTModule")? {
+            fft_module.setattr("__class__", callable_module_cls)?;
+        }
+        py.import("sys")?
+            .getattr("modules")?
+            .set_item(&qualified_name, &fft_module)?;
+        m.add_submodule(&fft_module)?;
+        m.add("fft", fft_module)?;
+    }
+
     {
         let linalg = PyModule::new(py, "linalg")?;
         // linalg_* prefixed (3).
@@ -27269,12 +27318,50 @@ mod tests {
     #[test]
     fn k74v_5_nested_submodules_expose_numpy_native_names() {
         // Verifies the k74v.5 namespace-strategy resolution: fnp_python
-        // exposes .linalg / .ma / .testing / .lib.recfunctions as real
+        // exposes .fft / .linalg / .ma / .testing / .lib.recfunctions as real
         // nested submodules so `import fnp_python as np; np.linalg.svd(...)`
         // works verbatim against numpy-native spellings.
         with_python(|py| {
             let module = PyModule::new(py, "fnp_python_test")?;
             fnp_python(&module)?;
+
+            // fft submodule.
+            let fft = module.getattr("fft")?;
+            for name in [
+                "fft",
+                "ifft",
+                "fft2",
+                "ifft2",
+                "fftn",
+                "ifftn",
+                "rfft",
+                "irfft",
+                "rfftn",
+                "irfftn",
+                "hfft",
+                "ihfft",
+                "rfft2",
+                "irfft2",
+                "fftfreq",
+                "rfftfreq",
+                "fftshift",
+                "ifftshift",
+            ] {
+                assert!(fft.getattr(name).is_ok(), "fnp_python.fft.{name} missing");
+            }
+            let callable = py.import("builtins")?.getattr("callable")?;
+            assert!(
+                callable.call1((&fft,))?.extract::<bool>()?,
+                "fnp_python.fft must remain callable as a flat fft(...) compatibility path",
+            );
+            let registered_fft = py
+                .import("sys")?
+                .getattr("modules")?
+                .get_item("fnp_python_test.fft")?;
+            assert!(
+                registered_fft.is(&fft),
+                "fnp_python.fft submodule should be registered under sys.modules",
+            );
 
             // linalg submodule.
             let linalg = module.getattr("linalg")?;
@@ -27398,6 +27485,27 @@ mod tests {
             // Sanity-check an actual call round-trips through the submodule.
             if numpy_available(py) {
                 let numpy = py.import("numpy")?;
+                let signal = numpy
+                    .getattr("array")?
+                    .call1((PyList::new(py, [1.0_f64, 2.0, 3.0, 4.0])?,))?;
+                let numpy_fft = numpy.getattr("fft")?.getattr("fft")?;
+                let allclose = numpy.getattr("allclose")?;
+                let expected_fft = numpy_fft.call1((signal.clone(),))?;
+                let flat_fft = fft.call1((signal.clone(),))?;
+                assert!(
+                    allclose
+                        .call1((&flat_fft, &expected_fft))?
+                        .extract::<bool>()?,
+                    "callable fnp_python.fft(...) diverges from numpy.fft.fft(...)",
+                );
+                let nested_fft = fft.getattr("fft")?.call1((signal,))?;
+                assert!(
+                    allclose
+                        .call1((&nested_fft, &expected_fft))?
+                        .extract::<bool>()?,
+                    "fnp_python.fft.fft(...) diverges from numpy.fft.fft(...)",
+                );
+
                 let eye3 = numpy.getattr("eye")?.call1((3_i64,))?;
                 let our_svd = linalg.getattr("svd")?.call1((eye3.clone(),))?;
                 let their_svd = numpy.getattr("linalg")?.getattr("svd")?.call1((eye3,))?;
@@ -41482,7 +41590,7 @@ mod tests {
 
             let module = PyModule::new(py, "fnp_python_test")?;
             fnp_python(&module)?;
-            let fft_fn = module.getattr("fft")?;
+            let fft_fn = module.getattr("fft")?.getattr("fft")?;
             let numpy = py.import("numpy")?;
             let numpy_fft = numpy.getattr("fft")?.getattr("fft")?;
             let allclose = numpy.getattr("allclose")?;
