@@ -22179,6 +22179,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 "bit_generator",
                 "get_bit_generator",
                 "set_bit_generator",
+                "test",
             ] {
                 if let Ok(value) = np_random.getattr(name) {
                     random.setattr(name, value)?;
@@ -22186,7 +22187,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             }
         }
         let random_getattr_src = pyo3::ffi::c_str!(
-            "_NUMPY_RANDOM_NAMES = frozenset(('BitGenerator','bit_generator','get_bit_generator','set_bit_generator'))\ndef __getattr__(name):\n    if name in _NUMPY_RANDOM_NAMES:\n        import numpy.random as _r\n        return getattr(_r, name)\n    raise AttributeError(name)\n"
+            "_NUMPY_RANDOM_NAMES = frozenset(('BitGenerator','bit_generator','get_bit_generator','set_bit_generator','test'))\ndef __getattr__(name):\n    if name in _NUMPY_RANDOM_NAMES:\n        import numpy.random as _r\n        return getattr(_r, name)\n    raise AttributeError(name)\n"
         );
         let random_dict = random.dict();
         py.run(random_getattr_src, Some(&random_dict), None)?;
@@ -23906,6 +23907,7 @@ mod tests {
                 "bit_generator",
                 "get_bit_generator",
                 "set_bit_generator",
+                "test",
                 // t44q: module-level legacy aliases bound to the shared
                 // numpy.random._rand RandomState singleton.
                 "_rand",
@@ -23969,6 +23971,7 @@ mod tests {
                 "bit_generator",
                 "get_bit_generator",
                 "set_bit_generator",
+                "test",
             ] {
                 assert!(
                     random.getattr(name)?.is(&numpy_random.getattr(name)?),
