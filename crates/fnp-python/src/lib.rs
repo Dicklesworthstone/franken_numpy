@@ -16735,6 +16735,36 @@ fn recfunctions_find_duplicates(
 
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
+fn recfunctions_rec_append_fields(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    recfunctions_passthrough(py, "rec_append_fields", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn recfunctions_rec_drop_fields(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    recfunctions_passthrough(py, "rec_drop_fields", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn recfunctions_rec_join(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    recfunctions_passthrough(py, "rec_join", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
 fn recfunctions_apply_along_fields(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -22018,6 +22048,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(recfunctions_recursive_fill_fields, m)?)?;
     m.add_function(wrap_pyfunction!(recfunctions_join_by, m)?)?;
     m.add_function(wrap_pyfunction!(recfunctions_find_duplicates, m)?)?;
+    m.add_function(wrap_pyfunction!(recfunctions_rec_append_fields, m)?)?;
+    m.add_function(wrap_pyfunction!(recfunctions_rec_drop_fields, m)?)?;
+    m.add_function(wrap_pyfunction!(recfunctions_rec_join, m)?)?;
     m.add_function(wrap_pyfunction!(recfunctions_apply_along_fields, m)?)?;
     m.add_function(wrap_pyfunction!(recfunctions_stack_arrays, m)?)?;
     m.add_function(wrap_pyfunction!(recfunctions_get_names, m)?)?;
@@ -22620,6 +22653,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             ),
             ("join_by", "recfunctions_join_by"),
             ("find_duplicates", "recfunctions_find_duplicates"),
+            ("rec_append_fields", "recfunctions_rec_append_fields"),
+            ("rec_drop_fields", "recfunctions_rec_drop_fields"),
+            ("rec_join", "recfunctions_rec_join"),
             ("apply_along_fields", "recfunctions_apply_along_fields"),
             ("stack_arrays", "recfunctions_stack_arrays"),
             ("get_names", "recfunctions_get_names"),
@@ -27485,6 +27521,9 @@ mod tests {
             assert!(module.getattr("recfunctions_recursive_fill_fields").is_ok());
             assert!(module.getattr("recfunctions_join_by").is_ok());
             assert!(module.getattr("recfunctions_find_duplicates").is_ok());
+            assert!(module.getattr("recfunctions_rec_append_fields").is_ok());
+            assert!(module.getattr("recfunctions_rec_drop_fields").is_ok());
+            assert!(module.getattr("recfunctions_rec_join").is_ok());
             assert!(module.getattr("recfunctions_apply_along_fields").is_ok());
             assert!(module.getattr("recfunctions_stack_arrays").is_ok());
             assert!(module.getattr("recfunctions_get_names").is_ok());
@@ -28153,6 +28192,9 @@ mod tests {
                 "recursive_fill_fields",
                 "join_by",
                 "find_duplicates",
+                "rec_append_fields",
+                "rec_drop_fields",
+                "rec_join",
                 "apply_along_fields",
                 "stack_arrays",
                 "get_names",
@@ -59044,6 +59086,93 @@ mod tests {
             assert_eq!(
                 repr_string(&nested_masked_stack),
                 repr_string(&theirs_masked_stack)
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn recfunctions_legacy_rec_aliases_match_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let recfunctions = module.getattr("lib")?.getattr("recfunctions")?;
+            let nrf = py.import("numpy.lib.recfunctions")?;
+            let numpy = py.import("numpy")?;
+            let builtins = py.import("builtins")?;
+            let eval_fn = builtins.getattr("eval")?;
+            let globals = PyDict::new(py);
+            globals.set_item("np", numpy.clone())?;
+            let eval_with_globals = |code: &str| -> PyResult<pyo3::Bound<'_, PyAny>> {
+                eval_fn.call((code, &globals), None::<&pyo3::Bound<'_, PyDict>>)
+            };
+
+            let base =
+                eval_with_globals("np.array([(1, 2.5), (3, 4.5)], dtype=[('a','i4'),('b','f8')])")?;
+            let masked = eval_with_globals(
+                "np.ma.array([(1, 2.5), (3, 4.5)], mask=[(False, True), (False, False)], dtype=[('a','i4'),('b','f8')])",
+            )?;
+            let recarray_type = numpy.getattr("recarray")?;
+
+            let append_top = module.getattr("recfunctions_rec_append_fields")?;
+            let append_nested = recfunctions.getattr("rec_append_fields")?;
+            let append_numpy = nrf.getattr("rec_append_fields")?;
+            let ours_append = append_top.call1((base.clone(), "c", vec![10_i64, 20]))?;
+            let nested_append = append_nested.call1((base.clone(), "c", vec![10_i64, 20]))?;
+            let theirs_append = append_numpy.call1((base.clone(), "c", vec![10_i64, 20]))?;
+            assert_array_matches_numpy(&ours_append, &theirs_append)?;
+            assert_array_matches_numpy(&nested_append, &theirs_append)?;
+            assert!(ours_append.is_instance(&recarray_type)?);
+            assert!(nested_append.is_instance(&recarray_type)?);
+            assert_eq!(
+                repr_string(&ours_append.getattr("dtype")?),
+                repr_string(&theirs_append.getattr("dtype")?)
+            );
+
+            let drop_top = module.getattr("recfunctions_rec_drop_fields")?;
+            let drop_nested = recfunctions.getattr("rec_drop_fields")?;
+            let drop_numpy = nrf.getattr("rec_drop_fields")?;
+            let ours_drop = drop_top.call1((masked.clone(), "b"))?;
+            let nested_drop = drop_nested.call1((masked.clone(), "b"))?;
+            let theirs_drop = drop_numpy.call1((masked.clone(), "b"))?;
+            assert_eq!(repr_string(&ours_drop), repr_string(&theirs_drop));
+            assert_eq!(repr_string(&nested_drop), repr_string(&theirs_drop));
+            assert!(ours_drop.is_instance(&recarray_type)?);
+            assert!(nested_drop.is_instance(&recarray_type)?);
+
+            let left = eval_with_globals(
+                "np.array([(1, 'a'), (1, 'b'), (2, 'c')], dtype=[('key','i4'),('left','U1')])",
+            )?;
+            let right = eval_with_globals(
+                "np.array([(1, 10.0), (1, 11.0), (3, 30.0)], dtype=[('key','i4'),('right','f8')])",
+            )?;
+            let join_kwargs = PyDict::new(py);
+            join_kwargs.set_item("jointype", "outer")?;
+            let defaults = PyDict::new(py);
+            defaults.set_item("left", "N")?;
+            defaults.set_item("right", -1.0_f64)?;
+            join_kwargs.set_item("defaults", defaults)?;
+            let join_top = module.getattr("recfunctions_rec_join")?;
+            let join_nested = recfunctions.getattr("rec_join")?;
+            let join_numpy = nrf.getattr("rec_join")?;
+            let ours_join =
+                join_top.call(("key", left.clone(), right.clone()), Some(&join_kwargs))?;
+            let nested_join =
+                join_nested.call(("key", left.clone(), right.clone()), Some(&join_kwargs))?;
+            let theirs_join =
+                join_numpy.call(("key", left.clone(), right.clone()), Some(&join_kwargs))?;
+            assert_array_matches_numpy(&ours_join, &theirs_join)?;
+            assert_array_matches_numpy(&nested_join, &theirs_join)?;
+            assert!(ours_join.is_instance(&recarray_type)?);
+            assert!(nested_join.is_instance(&recarray_type)?);
+            assert_eq!(
+                repr_string(&ours_join.getattr("dtype")?),
+                repr_string(&theirs_join.getattr("dtype")?)
             );
 
             Ok(())
