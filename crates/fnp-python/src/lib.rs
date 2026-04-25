@@ -10271,6 +10271,10 @@ fn masked_where(
             .unbind())
     };
 
+    if !copy {
+        return fallback();
+    }
+
     let condition = match extract_numeric_array(py, condition.bind(py), "masked_where(condition)") {
         Ok(condition) => condition,
         Err(_) => return fallback(),
@@ -41071,6 +41075,31 @@ mod tests {
             let expected_nocopy =
                 numpy_masked_where.call((cond.clone(), data.clone()), Some(&copy_kwargs_n))?;
             assert_eq!(repr_string(&actual_nocopy), repr_string(&expected_nocopy));
+
+            let shares_memory = numpy.getattr("shares_memory")?;
+            let actual_nocopy_shares = shares_memory
+                .call1((actual_nocopy.getattr("data")?, data.clone()))?
+                .extract::<bool>()?;
+            let expected_nocopy_shares = shares_memory
+                .call1((expected_nocopy.getattr("data")?, data.clone()))?
+                .extract::<bool>()?;
+            assert_eq!(
+                actual_nocopy_shares, expected_nocopy_shares,
+                "masked_where(copy=False) data sharing must match numpy",
+            );
+
+            let actual_copy = masked_where_fn.call1((cond.clone(), data.clone()))?;
+            let expected_copy = numpy_masked_where.call1((cond.clone(), data.clone()))?;
+            let actual_copy_shares = shares_memory
+                .call1((actual_copy.getattr("data")?, data.clone()))?
+                .extract::<bool>()?;
+            let expected_copy_shares = shares_memory
+                .call1((expected_copy.getattr("data")?, data.clone()))?
+                .extract::<bool>()?;
+            assert_eq!(
+                actual_copy_shares, expected_copy_shares,
+                "masked_where(copy=True) data sharing must match numpy",
+            );
 
             Ok(())
         });
