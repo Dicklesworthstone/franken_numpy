@@ -11609,6 +11609,34 @@ fn rfftn(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, s=None, axes=None, norm=None, out=None))]
+fn irfftn(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    s: Option<Py<PyAny>>,
+    axes: Option<Py<PyAny>>,
+    norm: Option<String>,
+    out: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let irfftn_fn = numpy.getattr("fft")?.getattr("irfftn")?;
+    let kwargs = PyDict::new(py);
+    if let Some(s_val) = s {
+        kwargs.set_item("s", s_val.bind(py))?;
+    }
+    if let Some(axes_val) = axes {
+        kwargs.set_item("axes", axes_val.bind(py))?;
+    }
+    if let Some(norm_val) = norm {
+        kwargs.set_item("norm", norm_val)?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    Ok(irfftn_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (m, axis=None))]
 fn flip(py: Python<'_>, m: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     let m_for_fallback = m.clone_ref(py);
@@ -19254,6 +19282,32 @@ fn hfft(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, n=None, axis=-1, norm=None, out=None))]
+fn ihfft(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    n: Option<usize>,
+    axis: i64,
+    norm: Option<String>,
+    out: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let ihfft_fn = numpy.getattr("fft")?.getattr("ihfft")?;
+    let kwargs = PyDict::new(py);
+    if let Some(n_val) = n {
+        kwargs.set_item("n", n_val)?;
+    }
+    kwargs.set_item("axis", axis)?;
+    if let Some(norm_val) = norm {
+        kwargs.set_item("norm", norm_val)?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    Ok(ihfft_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (a, s=None, axes=None, norm=None, out=None))]
 fn rfft2(
     py: Python<'_>,
@@ -21225,6 +21279,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(nanquantile, m)?)?;
     m.add_function(wrap_pyfunction!(lexsort, m)?)?;
     m.add_function(wrap_pyfunction!(rfftn, m)?)?;
+    m.add_function(wrap_pyfunction!(irfftn, m)?)?;
     m.add_function(wrap_pyfunction!(flip, m)?)?;
     m.add_function(wrap_pyfunction!(flipud, m)?)?;
     m.add_function(wrap_pyfunction!(fliplr, m)?)?;
@@ -21469,6 +21524,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rfftfreq, m)?)?;
     m.add_function(wrap_pyfunction!(fftfreq, m)?)?;
     m.add_function(wrap_pyfunction!(hfft, m)?)?;
+    m.add_function(wrap_pyfunction!(ihfft, m)?)?;
     m.add_function(wrap_pyfunction!(rfft2, m)?)?;
     m.add_function(wrap_pyfunction!(irfft2, m)?)?;
     m.add_function(wrap_pyfunction!(diag, m)?)?;
@@ -26627,6 +26683,7 @@ mod tests {
             assert!(module.getattr("nanquantile").is_ok());
             assert!(module.getattr("lexsort").is_ok());
             assert!(module.getattr("rfftn").is_ok());
+            assert!(module.getattr("irfftn").is_ok());
             assert!(module.getattr("flip").is_ok());
             assert!(module.getattr("flipud").is_ok());
             assert!(module.getattr("fliplr").is_ok());
@@ -26791,6 +26848,10 @@ mod tests {
             assert!(module.getattr("ifftshift").is_ok());
             assert!(module.getattr("rfft").is_ok());
             assert!(module.getattr("irfft").is_ok());
+            assert!(module.getattr("hfft").is_ok());
+            assert!(module.getattr("ihfft").is_ok());
+            assert!(module.getattr("rfft2").is_ok());
+            assert!(module.getattr("irfft2").is_ok());
             assert!(module.getattr("slogdet").is_ok());
             assert!(module.getattr("matrix_rank").is_ok());
             assert!(module.getattr("matrix_power").is_ok());
@@ -46215,8 +46276,10 @@ mod tests {
             let module = PyModule::new(py, "fnp_python_test")?;
             fnp_python(&module)?;
             let rfftn_fn = module.getattr("rfftn")?;
+            let irfftn_fn = module.getattr("irfftn")?;
             let numpy = py.import("numpy")?;
             let numpy_rfftn = numpy.getattr("fft")?.getattr("rfftn")?;
+            let numpy_irfftn = numpy.getattr("fft")?.getattr("irfftn")?;
             let allclose = numpy.getattr("allclose")?;
 
             // 3-D real input, default all-axes transform.
@@ -46314,7 +46377,6 @@ mod tests {
             );
 
             // Round-trip: irfftn(rfftn(x)) ≈ x for even-shape input.
-            let irfftn_fn = numpy.getattr("fft")?.getattr("irfftn")?;
             let s_for_inv = PyTuple::new(py, [2_usize, 2, 4])?;
             let round_trip = irfftn_fn.call(
                 (rfftn_fn.call1((three_d.clone(),))?,),
@@ -46326,6 +46388,97 @@ mod tests {
             )?;
             let ok_rt: bool = allclose.call1((&round_trip, &three_d))?.extract()?;
             assert!(ok_rt, "irfftn(rfftn(x)) must round-trip for even-shape x");
+
+            let ours_inv = irfftn_fn.call(
+                (ours.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("s", &s_for_inv)?;
+                    kw
+                }),
+            )?;
+            let theirs_inv = numpy_irfftn.call(
+                (theirs.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("s", &s_for_inv)?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_inv, &theirs_inv)?;
+
+            let axes_inv = PyTuple::new(py, [-1_i64, -2])?;
+            let shape_inv = PyTuple::new(py, [4_usize, 4])?;
+            let ours_axes_inv = irfftn_fn.call(
+                (ours_axes.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("s", &shape_inv)?;
+                    kw.set_item("axes", &axes_inv)?;
+                    kw.set_item("norm", "ortho")?;
+                    kw
+                }),
+            )?;
+            let theirs_axes_inv = numpy_irfftn.call(
+                (theirs_axes.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("s", &shape_inv)?;
+                    kw.set_item("axes", &axes_inv)?;
+                    kw.set_item("norm", "ortho")?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_axes_inv, &theirs_axes_inv)?;
+
+            let all_axes = PyTuple::new(py, [0_i64, 1, 2])?;
+            let inv_out_expected = numpy_irfftn.call(
+                (theirs.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("s", &s_for_inv)?;
+                    kw.set_item("axes", &all_axes)?;
+                    kw
+                }),
+            )?;
+            let inv_out_buf = numpy
+                .getattr("empty_like")?
+                .call1((inv_out_expected.clone(),))?;
+            let expected_inv_out_buf = numpy
+                .getattr("empty_like")?
+                .call1((inv_out_expected.clone(),))?;
+            let ours_out = irfftn_fn.call(
+                (ours.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("s", &s_for_inv)?;
+                    kw.set_item("axes", &all_axes)?;
+                    kw.set_item("out", inv_out_buf.clone())?;
+                    kw
+                }),
+            )?;
+            let theirs_out = numpy_irfftn.call(
+                (theirs.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("s", &s_for_inv)?;
+                    kw.set_item("axes", &all_axes)?;
+                    kw.set_item("out", expected_inv_out_buf.clone())?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_out, &theirs_out)?;
+            assert_array_matches_numpy(&inv_out_buf, &expected_inv_out_buf)?;
+
+            let mismatched_shape_axes = PyDict::new(py);
+            mismatched_shape_axes.set_item("s", PyTuple::new(py, [2_usize, 2])?)?;
+            mismatched_shape_axes.set_item("axes", PyTuple::new(py, [0_i64])?)?;
+            let ir_args = PyTuple::new(py, [ours.clone()])?;
+            assert_eq!(
+                call_outcome(py, &irfftn_fn, &ir_args, Some(&mismatched_shape_axes),)?,
+                call_outcome(py, &numpy_irfftn, &ir_args, Some(&mismatched_shape_axes),)?,
+                "irfftn mismatched s/axes error surface diverged"
+            );
 
             Ok(())
         });
@@ -57873,11 +58026,97 @@ mod tests {
             let eq_h2: bool = allclose.call1((&ours_h2, &theirs_h2))?.extract()?;
             assert!(eq_h2, "hfft n=8 norm=ortho parity");
 
-            // hfft(ihfft(x)) round-trip — numpy guarantees real-to-real
-            // recovery up to FP noise.
+            // --- ihfft ---
             let real_signal =
                 numpy.call_method("array", ([1.0_f64, 2.0, 3.0, 4.0].to_vec(),), None)?;
-            let ihfft_of_x = np_fft.getattr("ihfft")?.call1((real_signal.clone(),))?;
+            let ours_ih = module.getattr("ihfft")?.call1((real_signal.clone(),))?;
+            let theirs_ih = np_fft.getattr("ihfft")?.call1((real_signal.clone(),))?;
+            let eq_ih: bool = allclose.call1((&ours_ih, &theirs_ih))?.extract()?;
+            assert!(eq_ih, "ihfft default 1-D parity");
+
+            let ihdtype: String = ours_ih.getattr("dtype")?.getattr("name")?.extract()?;
+            assert!(
+                ihdtype == "complex128" || ihdtype == "complex64",
+                "ihfft output must be complex (got {ihdtype})"
+            );
+
+            let ihkwargs = PyDict::new(py);
+            ihkwargs.set_item("n", 6_usize)?;
+            ihkwargs.set_item("norm", "forward")?;
+            let ours_ih2 = module
+                .getattr("ihfft")?
+                .call((real_signal.clone(),), Some(&ihkwargs))?;
+            let theirs_ih2 = np_fft
+                .getattr("ihfft")?
+                .call((real_signal.clone(),), Some(&ihkwargs))?;
+            let eq_ih2: bool = allclose.call1((&ours_ih2, &theirs_ih2))?.extract()?;
+            assert!(eq_ih2, "ihfft n=6 norm=forward parity");
+
+            let axis_signal = numpy
+                .getattr("arange")?
+                .call1((8_i64,))?
+                .call_method1("reshape", (2_i64, 4_i64))?
+                .call_method1("astype", ("float64",))?;
+            let ih_axis_kwargs = PyDict::new(py);
+            ih_axis_kwargs.set_item("n", 4_usize)?;
+            ih_axis_kwargs.set_item("axis", 0_i64)?;
+            ih_axis_kwargs.set_item("norm", "ortho")?;
+            let ih_axis_expected = np_fft
+                .getattr("ihfft")?
+                .call((axis_signal.clone(),), Some(&ih_axis_kwargs))?;
+            let ih_out_buf = numpy
+                .getattr("empty_like")?
+                .call1((ih_axis_expected.clone(),))?;
+            let ih_expected_out_buf = numpy
+                .getattr("empty_like")?
+                .call1((ih_axis_expected.clone(),))?;
+            let ours_ih_out = module.getattr("ihfft")?.call(
+                (axis_signal.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("n", 4_usize)?;
+                    kw.set_item("axis", 0_i64)?;
+                    kw.set_item("norm", "ortho")?;
+                    kw.set_item("out", ih_out_buf.clone())?;
+                    kw
+                }),
+            )?;
+            let theirs_ih_out = np_fft.getattr("ihfft")?.call(
+                (axis_signal.clone(),),
+                Some(&{
+                    let kw = PyDict::new(py);
+                    kw.set_item("n", 4_usize)?;
+                    kw.set_item("axis", 0_i64)?;
+                    kw.set_item("norm", "ortho")?;
+                    kw.set_item("out", ih_expected_out_buf.clone())?;
+                    kw
+                }),
+            )?;
+            assert_array_matches_numpy(&ours_ih_out, &theirs_ih_out)?;
+            assert_array_matches_numpy(&ih_out_buf, &ih_expected_out_buf)?;
+
+            let bad_norm_kwargs = PyDict::new(py);
+            bad_norm_kwargs.set_item("norm", "bad")?;
+            let ih_args = PyTuple::new(py, [real_signal.clone()])?;
+            assert_eq!(
+                call_outcome(
+                    py,
+                    &module.getattr("ihfft")?,
+                    &ih_args,
+                    Some(&bad_norm_kwargs),
+                )?,
+                call_outcome(
+                    py,
+                    &np_fft.getattr("ihfft")?,
+                    &ih_args,
+                    Some(&bad_norm_kwargs),
+                )?,
+                "ihfft invalid norm error surface diverged"
+            );
+
+            // hfft(ihfft(x)) round-trip — numpy guarantees real-to-real
+            // recovery up to FP noise.
+            let ihfft_of_x = module.getattr("ihfft")?.call1((real_signal.clone(),))?;
             let hfft_of_ihfft = module.getattr("hfft")?.call1((ihfft_of_x.clone(),))?;
             let rt_h: bool = allclose.call1((&hfft_of_ihfft, &real_signal))?.extract()?;
             assert!(rt_h, "hfft(ihfft(x)) ≈ x round-trip");
