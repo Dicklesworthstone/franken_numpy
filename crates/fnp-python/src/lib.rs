@@ -10054,6 +10054,66 @@ fn mask_cols(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<
     }
 }
 
+fn numpy_ma_unary(py: Python<'_>, name: &str, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let func = numpy.getattr("ma")?.getattr(name)?;
+    Ok(func.call1((a.bind(py),))?.unbind())
+}
+
+fn numpy_ma_axis(
+    py: Python<'_>,
+    name: &str,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let func = numpy.getattr("ma")?.getattr(name)?;
+    match axis {
+        Some(axis) => {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("axis", axis.bind(py))?;
+            Ok(func.call((a.bind(py),), Some(&kwargs))?.unbind())
+        }
+        None => Ok(func.call1((a.bind(py),))?.unbind()),
+    }
+}
+
+#[pyfunction]
+fn flatnotmasked_edges(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    numpy_ma_unary(py, "flatnotmasked_edges", a)
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, axis=None))]
+fn notmasked_edges(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    numpy_ma_axis(py, "notmasked_edges", a, axis)
+}
+
+#[pyfunction]
+fn flatnotmasked_contiguous(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    numpy_ma_unary(py, "flatnotmasked_contiguous", a)
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, axis=None))]
+fn notmasked_contiguous(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    numpy_ma_axis(py, "notmasked_contiguous", a, axis)
+}
+
+#[pyfunction]
+fn clump_unmasked(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    numpy_ma_unary(py, "clump_unmasked", a)
+}
+
+#[pyfunction]
+fn clump_masked(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    numpy_ma_unary(py, "clump_masked", a)
+}
+
 #[pyfunction]
 #[pyo3(signature = (x, value, copy=true))]
 fn masked_equal(py: Python<'_>, x: Py<PyAny>, value: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny>> {
@@ -21520,6 +21580,12 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(mask_rowcols, m)?)?;
     m.add_function(wrap_pyfunction!(mask_rows, m)?)?;
     m.add_function(wrap_pyfunction!(mask_cols, m)?)?;
+    m.add_function(wrap_pyfunction!(flatnotmasked_edges, m)?)?;
+    m.add_function(wrap_pyfunction!(notmasked_edges, m)?)?;
+    m.add_function(wrap_pyfunction!(flatnotmasked_contiguous, m)?)?;
+    m.add_function(wrap_pyfunction!(notmasked_contiguous, m)?)?;
+    m.add_function(wrap_pyfunction!(clump_unmasked, m)?)?;
+    m.add_function(wrap_pyfunction!(clump_masked, m)?)?;
     m.add_function(wrap_pyfunction!(masked_equal, m)?)?;
     m.add_function(wrap_pyfunction!(masked_not_equal, m)?)?;
     m.add_function(wrap_pyfunction!(vdot, m)?)?;
@@ -22270,6 +22336,12 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "mask_rowcols",
             "mask_rows",
             "mask_cols",
+            "flatnotmasked_edges",
+            "notmasked_edges",
+            "flatnotmasked_contiguous",
+            "notmasked_contiguous",
+            "clump_unmasked",
+            "clump_masked",
         ] {
             if let Ok(value) = m.getattr(name) {
                 ma.add(name, value)?;
@@ -27026,6 +27098,12 @@ mod tests {
             assert!(module.getattr("mask_rowcols").is_ok());
             assert!(module.getattr("mask_rows").is_ok());
             assert!(module.getattr("mask_cols").is_ok());
+            assert!(module.getattr("flatnotmasked_edges").is_ok());
+            assert!(module.getattr("notmasked_edges").is_ok());
+            assert!(module.getattr("flatnotmasked_contiguous").is_ok());
+            assert!(module.getattr("notmasked_contiguous").is_ok());
+            assert!(module.getattr("clump_unmasked").is_ok());
+            assert!(module.getattr("clump_masked").is_ok());
             assert!(module.getattr("masked_equal").is_ok());
             assert!(module.getattr("masked_not_equal").is_ok());
             assert!(module.getattr("vdot").is_ok());
@@ -27775,6 +27853,12 @@ mod tests {
                 "mask_rowcols",
                 "mask_rows",
                 "mask_cols",
+                "flatnotmasked_edges",
+                "notmasked_edges",
+                "flatnotmasked_contiguous",
+                "notmasked_contiguous",
+                "clump_unmasked",
+                "clump_masked",
             ] {
                 assert!(ma.getattr(name).is_ok(), "fnp_python.ma.{name} missing");
             }
@@ -39667,6 +39751,151 @@ mod tests {
                             repr_string(&theirs),
                             "{name} {label} {axis_label} repr diverged"
                         );
+                    }
+                }
+            }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ma_notmasked_clump_locator_helpers_match_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let ma_module = module.getattr("ma")?;
+            let numpy = py.import("numpy")?;
+            let numpy_ma = numpy.getattr("ma")?;
+            let ma_array = numpy_ma.getattr("array")?;
+
+            let partial_1d_kwargs = PyDict::new(py);
+            partial_1d_kwargs.set_item("mask", vec![true, false, false, true, false])?;
+            let partial_1d = ma_array
+                .call((vec![1_i64, 2, 3, 4, 5],), Some(&partial_1d_kwargs))?
+                .unbind();
+
+            let all_masked_kwargs = PyDict::new(py);
+            all_masked_kwargs.set_item("mask", vec![true, true, true])?;
+            let all_masked_1d = ma_array
+                .call((vec![10_i64, 20, 30],), Some(&all_masked_kwargs))?
+                .unbind();
+
+            let empty_kwargs = PyDict::new(py);
+            empty_kwargs.set_item("mask", Vec::<bool>::new())?;
+            let empty_1d = ma_array
+                .call((Vec::<i64>::new(),), Some(&empty_kwargs))?
+                .unbind();
+
+            let partial_2d_kwargs = PyDict::new(py);
+            partial_2d_kwargs.set_item(
+                "mask",
+                vec![vec![false, true, false], vec![true, true, false]],
+            )?;
+            let partial_2d = ma_array
+                .call(
+                    (vec![vec![0_i64, 1, 2], vec![3, 4, 5]],),
+                    Some(&partial_2d_kwargs),
+                )?
+                .unbind();
+
+            let all_valid_2d = numpy
+                .getattr("array")?
+                .call1((vec![vec![6_i64, 7, 8], vec![9, 10, 11]],))?
+                .unbind();
+
+            let cases = [
+                ("partial-1d", partial_1d),
+                ("all-masked-1d", all_masked_1d),
+                ("empty-1d", empty_1d),
+                ("partial-2d", partial_2d),
+                ("all-valid-2d", all_valid_2d),
+            ];
+
+            for name in [
+                "flatnotmasked_edges",
+                "flatnotmasked_contiguous",
+                "clump_unmasked",
+                "clump_masked",
+            ] {
+                let ours_fn = module.getattr(name)?;
+                let nested_fn = ma_module.getattr(name)?;
+                let numpy_fn = numpy_ma.getattr(name)?;
+
+                for (label, input) in &cases {
+                    let args = PyTuple::new(py, [input.bind(py)])?;
+                    let ours = call_outcome(py, &ours_fn, &args, None)?;
+                    let nested = call_outcome(py, &nested_fn, &args, None)?;
+                    let theirs = call_outcome(py, &numpy_fn, &args, None)?;
+                    assert_eq!(ours, theirs, "{name} top-level {label} outcome diverged");
+                    assert_eq!(nested, theirs, "{name} nested {label} outcome diverged");
+                }
+            }
+
+            for name in ["notmasked_edges", "notmasked_contiguous"] {
+                let ours_fn = module.getattr(name)?;
+                let nested_fn = ma_module.getattr(name)?;
+                let numpy_fn = numpy_ma.getattr(name)?;
+
+                for (label, input) in &cases {
+                    let args = PyTuple::new(py, [input.bind(py)])?;
+                    let ours_default = call_outcome(py, &ours_fn, &args, None)?;
+                    let nested_default = call_outcome(py, &nested_fn, &args, None)?;
+                    let theirs_default = call_outcome(py, &numpy_fn, &args, None)?;
+                    assert_eq!(
+                        ours_default, theirs_default,
+                        "{name} default top-level {label} outcome diverged"
+                    );
+                    assert_eq!(
+                        nested_default, theirs_default,
+                        "{name} default nested {label} outcome diverged"
+                    );
+
+                    let ours_none_kwargs = PyDict::new(py);
+                    ours_none_kwargs.set_item("axis", py.None())?;
+                    let nested_none_kwargs = PyDict::new(py);
+                    nested_none_kwargs.set_item("axis", py.None())?;
+                    let theirs_none_kwargs = PyDict::new(py);
+                    theirs_none_kwargs.set_item("axis", py.None())?;
+                    let ours_none = call_outcome(py, &ours_fn, &args, Some(&ours_none_kwargs))?;
+                    let nested_none =
+                        call_outcome(py, &nested_fn, &args, Some(&nested_none_kwargs))?;
+                    let theirs_none =
+                        call_outcome(py, &numpy_fn, &args, Some(&theirs_none_kwargs))?;
+                    assert_eq!(
+                        ours_none, theirs_none,
+                        "{name} axis=None top-level {label} outcome diverged"
+                    );
+                    assert_eq!(
+                        nested_none, theirs_none,
+                        "{name} axis=None nested {label} outcome diverged"
+                    );
+
+                    if label.ends_with("2d") {
+                        for axis in [0_i64, 1_i64] {
+                            let ours_kwargs = PyDict::new(py);
+                            ours_kwargs.set_item("axis", axis)?;
+                            let nested_kwargs = PyDict::new(py);
+                            nested_kwargs.set_item("axis", axis)?;
+                            let theirs_kwargs = PyDict::new(py);
+                            theirs_kwargs.set_item("axis", axis)?;
+
+                            let ours = call_outcome(py, &ours_fn, &args, Some(&ours_kwargs))?;
+                            let nested = call_outcome(py, &nested_fn, &args, Some(&nested_kwargs))?;
+                            let theirs = call_outcome(py, &numpy_fn, &args, Some(&theirs_kwargs))?;
+                            assert_eq!(
+                                ours, theirs,
+                                "{name} axis={axis} top-level {label} outcome diverged"
+                            );
+                            assert_eq!(
+                                nested, theirs,
+                                "{name} axis={axis} nested {label} outcome diverged"
+                            );
+                        }
                     }
                 }
             }
