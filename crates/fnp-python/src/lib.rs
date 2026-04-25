@@ -21889,11 +21889,11 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // Install __getattr__ unconditionally so any class missing
         // from the eager path (including on numpy-less init) resolves
         // on first access via a live numpy.polynomial lookup.
-        // crid: extend the resolver so the 6 nested subpackage names
+        // crid: extend the resolver so the nested subpackage names
         // (polynomial, chebyshev, legendre, hermite, hermite_e,
-        // laguerre) also resolve — to numpy's modules when available.
+        // laguerre, polyutils) also resolve to numpy's modules when available.
         let poly_getattr_src = pyo3::ffi::c_str!(
-            "_CLASS_NAMES = frozenset(('Polynomial','Chebyshev','Legendre','Hermite','HermiteE','Laguerre'))\n_SUB_NAMES = frozenset(('polynomial','chebyshev','legendre','hermite','hermite_e','laguerre'))\ndef __getattr__(name):\n    if name in _CLASS_NAMES:\n        import numpy.polynomial as _p\n        return getattr(_p, name)\n    if name in _SUB_NAMES:\n        import importlib\n        return importlib.import_module('numpy.polynomial.' + name)\n    raise AttributeError(name)\n"
+            "_CLASS_NAMES = frozenset(('Polynomial','Chebyshev','Legendre','Hermite','HermiteE','Laguerre'))\n_SUB_NAMES = frozenset(('polynomial','chebyshev','legendre','hermite','hermite_e','laguerre','polyutils'))\ndef __getattr__(name):\n    if name in _CLASS_NAMES:\n        import numpy.polynomial as _p\n        return getattr(_p, name)\n    if name in _SUB_NAMES:\n        import importlib\n        return importlib.import_module('numpy.polynomial.' + name)\n    raise AttributeError(name)\n"
         );
         let poly_dict = polynomial.dict();
         py.run(poly_getattr_src, Some(&poly_dict), None)?;
@@ -21908,6 +21908,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 "hermite",
                 "hermite_e",
                 "laguerre",
+                "polyutils",
             ] {
                 if let Ok(submod) = np_poly.getattr(sub) {
                     polynomial.setattr(sub, submod)?;
@@ -23570,7 +23571,7 @@ mod tests {
     #[test]
     fn polynomial_namespace_exposes_nested_subpackages() {
         // crid: fnp_python.polynomial.{polynomial, chebyshev, legendre,
-        // hermite, hermite_e, laguerre} must resolve to numpy's real
+        // hermite, hermite_e, laguerre, polyutils} must resolve to numpy's real
         // submodules so user code written against numpy's canonical
         // import paths works verbatim.
         with_python(|py| {
@@ -23588,6 +23589,7 @@ mod tests {
                 "hermite",
                 "hermite_e",
                 "laguerre",
+                "polyutils",
             ] {
                 let ours = polynomial.getattr(sub)?;
                 let theirs = np_poly.getattr(sub)?;
@@ -23611,6 +23613,153 @@ mod tests {
                 PyTuple::new(py, [1.0_f64, 1.0_f64, 3.0_f64])?,
             ))?;
             assert_eq!(repr_string(&ours_chebadd), repr_string(&theirs_chebadd));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn polynomial_polyutils_helpers_match_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_polynomial_polyutils")?;
+            fnp_python(&module)?;
+            let polyutils = module.getattr("polynomial")?.getattr("polyutils")?;
+            let numpy_polyutils = py.import("numpy.polynomial.polyutils")?;
+            assert!(
+                polyutils.is(&numpy_polyutils),
+                "fnp_python.polynomial.polyutils must BE numpy.polynomial.polyutils"
+            );
+
+            let numpy = py.import("numpy")?;
+            let builtins = py.import("builtins")?;
+            let eval_fn = builtins.getattr("eval")?;
+            let globals = PyDict::new(py);
+            globals.set_item("np", numpy.clone())?;
+            let eval_with_globals = |code: &str| -> PyResult<pyo3::Bound<'_, PyAny>> {
+                eval_fn.call((code, &globals), None::<&pyo3::Bound<'_, PyDict>>)
+            };
+
+            let as_series_input = eval_with_globals(
+                "[[1.0, 2.0, 0.0], np.array([0.0, 3.0, 0.0], dtype=np.float32)]",
+            )?;
+            let as_series = polyutils.getattr("as_series")?;
+            let numpy_as_series = numpy_polyutils.getattr("as_series")?;
+            assert_eq!(
+                repr_string(&as_series.call1((as_series_input.clone(),))?),
+                repr_string(&numpy_as_series.call1((as_series_input.clone(),))?)
+            );
+            let no_trim_kwargs = PyDict::new(py);
+            no_trim_kwargs.set_item("trim", false)?;
+            assert_eq!(
+                repr_string(&as_series.call((as_series_input.clone(),), Some(&no_trim_kwargs))?),
+                repr_string(
+                    &numpy_as_series.call((as_series_input.clone(),), Some(&no_trim_kwargs))?
+                )
+            );
+
+            let trimseq = polyutils.getattr("trimseq")?;
+            let numpy_trimseq = numpy_polyutils.getattr("trimseq")?;
+            assert_eq!(
+                repr_string(&trimseq.call1((vec![1.0_f64, 2.0, 0.0, 0.0],))?),
+                repr_string(&numpy_trimseq.call1((vec![1.0_f64, 2.0, 0.0, 0.0],))?)
+            );
+
+            let trimcoef = polyutils.getattr("trimcoef")?;
+            let numpy_trimcoef = numpy_polyutils.getattr("trimcoef")?;
+            assert_array_matches_numpy(
+                &trimcoef.call1((vec![1.0_f64, 1.0e-5, 0.0], 1.0e-4_f64))?,
+                &numpy_trimcoef.call1((vec![1.0_f64, 1.0e-5, 0.0], 1.0e-4_f64))?,
+            )?;
+            let all_zero_coeffs = vec![0.0_f64, 0.0, 0.0];
+            assert_array_matches_numpy(
+                &trimcoef.call1((all_zero_coeffs.clone(),))?,
+                &numpy_trimcoef.call1((all_zero_coeffs.clone(),))?,
+            )?;
+
+            let getdomain = polyutils.getattr("getdomain")?;
+            let numpy_getdomain = numpy_polyutils.getattr("getdomain")?;
+            for code in [
+                "np.array([3.0, -1.0, 2.0])",
+                "np.array([1.0 + 2.0j, -3.0 + 0.5j])",
+            ] {
+                let input = eval_with_globals(code)?;
+                assert_array_matches_numpy(
+                    &getdomain.call1((input.clone(),))?,
+                    &numpy_getdomain.call1((input.clone(),))?,
+                )?;
+            }
+
+            let mapparms = polyutils.getattr("mapparms")?;
+            let numpy_mapparms = numpy_polyutils.getattr("mapparms")?;
+            assert_eq!(
+                repr_string(&mapparms.call1((vec![-1.0_f64, 1.0], vec![0.0_f64, 10.0]))?),
+                repr_string(&numpy_mapparms.call1((vec![-1.0_f64, 1.0], vec![0.0_f64, 10.0]))?)
+            );
+
+            let mapdomain = polyutils.getattr("mapdomain")?;
+            let numpy_mapdomain = numpy_polyutils.getattr("mapdomain")?;
+            assert_array_matches_numpy(
+                &mapdomain.call1((
+                    vec![-1.0_f64, 0.0, 1.0],
+                    vec![-1.0_f64, 1.0],
+                    vec![0.0_f64, 10.0],
+                ))?,
+                &numpy_mapdomain.call1((
+                    vec![-1.0_f64, 0.0, 1.0],
+                    vec![-1.0_f64, 1.0],
+                    vec![0.0_f64, 10.0],
+                ))?,
+            )?;
+
+            let format_float = polyutils.getattr("format_float")?;
+            let numpy_format_float = numpy_polyutils.getattr("format_float")?;
+            assert_eq!(
+                repr_string(&format_float.call1((1.25_f64,))?),
+                repr_string(&numpy_format_float.call1((1.25_f64,))?)
+            );
+            let parens_kwargs = PyDict::new(py);
+            parens_kwargs.set_item("parens", true)?;
+            assert_eq!(
+                repr_string(&format_float.call((-1.25_f64,), Some(&parens_kwargs))?),
+                repr_string(&numpy_format_float.call((-1.25_f64,), Some(&parens_kwargs))?)
+            );
+
+            let bad_series = eval_with_globals("[np.array([[1.0, 2.0]])]")?;
+            assert_eq!(
+                call_outcome(
+                    py,
+                    &as_series,
+                    &PyTuple::new(py, [bad_series.clone()])?,
+                    None,
+                )?,
+                call_outcome(
+                    py,
+                    &numpy_as_series,
+                    &PyTuple::new(py, [bad_series.clone()])?,
+                    None,
+                )?
+            );
+            let bad_tol_kwargs = PyDict::new(py);
+            bad_tol_kwargs.set_item("tol", -1.0_f64)?;
+            let coeffs = eval_with_globals("[1.0, 2.0]")?;
+            assert_eq!(
+                call_outcome(
+                    py,
+                    &trimcoef,
+                    &PyTuple::new(py, [coeffs.clone()])?,
+                    Some(&bad_tol_kwargs),
+                )?,
+                call_outcome(
+                    py,
+                    &numpy_trimcoef,
+                    &PyTuple::new(py, [coeffs.clone()])?,
+                    Some(&bad_tol_kwargs),
+                )?
+            );
+
             Ok(())
         });
     }
