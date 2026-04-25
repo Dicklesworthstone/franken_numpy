@@ -22998,6 +22998,46 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         }
         lib_module.add_submodule(&array_utils)?;
         lib_module.add("array_utils", array_utils)?;
+        let format_module = PyModule::new(py, "format")?;
+        let format_qualified_name = format!("{lib_qualified_name}.format");
+        format_module.setattr("__name__", &format_qualified_name)?;
+        format_module.setattr("__package__", &lib_qualified_name)?;
+        let format_names = [
+            "ARRAY_ALIGN",
+            "BUFFER_SIZE",
+            "EXPECTED_KEYS",
+            "GROWTH_AXIS_MAX_DIGITS",
+            "MAGIC_LEN",
+            "MAGIC_PREFIX",
+            "descr_to_dtype",
+            "drop_metadata",
+            "dtype_to_descr",
+            "header_data_from_array_1_0",
+            "isfileobj",
+            "magic",
+            "open_memmap",
+            "read_array",
+            "read_array_header_1_0",
+            "read_array_header_2_0",
+            "read_magic",
+            "write_array",
+            "write_array_header_1_0",
+            "write_array_header_2_0",
+        ];
+        if let Ok(np_format) = py.import("numpy.lib.format") {
+            for name in format_names {
+                if let Ok(value) = np_format.getattr(name) {
+                    format_module.add(name, value)?;
+                }
+            }
+        }
+        let format_getattr_src = pyo3::ffi::c_str!(
+            "_FORMAT_NAMES = frozenset(('ARRAY_ALIGN','BUFFER_SIZE','EXPECTED_KEYS','GROWTH_AXIS_MAX_DIGITS','MAGIC_LEN','MAGIC_PREFIX','descr_to_dtype','drop_metadata','dtype_to_descr','header_data_from_array_1_0','isfileobj','magic','open_memmap','read_array','read_array_header_1_0','read_array_header_2_0','read_magic','write_array','write_array_header_1_0','write_array_header_2_0'))\ndef __getattr__(name):\n    if name in _FORMAT_NAMES:\n        import numpy.lib.format as _fmt\n        return getattr(_fmt, name)\n    raise AttributeError(name)\n"
+        );
+        let format_dict = format_module.dict();
+        py.run(format_getattr_src, Some(&format_dict), None)?;
+        lib_module.add_submodule(&format_module)?;
+        lib_module.add("format", format_module)?;
         let stride_tricks = PyModule::new(py, "stride_tricks")?;
         let stride_tricks_qualified_name = format!("{lib_qualified_name}.stride_tricks");
         stride_tricks.setattr("__name__", &stride_tricks_qualified_name)?;
@@ -23020,6 +23060,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             &array_utils_qualified_name,
             lib_module.getattr("array_utils")?,
         )?;
+        sys_modules.set_item(&format_qualified_name, lib_module.getattr("format")?)?;
         sys_modules.set_item(
             &stride_tricks_qualified_name,
             lib_module.getattr("stride_tricks")?,
@@ -28757,6 +28798,34 @@ mod tests {
                     "fnp_python.lib.array_utils.{name} missing"
                 );
             }
+            let format_module = lib_mod.getattr("format")?;
+            for name in [
+                "ARRAY_ALIGN",
+                "BUFFER_SIZE",
+                "EXPECTED_KEYS",
+                "GROWTH_AXIS_MAX_DIGITS",
+                "MAGIC_LEN",
+                "MAGIC_PREFIX",
+                "descr_to_dtype",
+                "drop_metadata",
+                "dtype_to_descr",
+                "header_data_from_array_1_0",
+                "isfileobj",
+                "magic",
+                "open_memmap",
+                "read_array",
+                "read_array_header_1_0",
+                "read_array_header_2_0",
+                "read_magic",
+                "write_array",
+                "write_array_header_1_0",
+                "write_array_header_2_0",
+            ] {
+                assert!(
+                    format_module.getattr(name).is_ok(),
+                    "fnp_python.lib.format.{name} missing"
+                );
+            }
             let stride_tricks = lib_mod.getattr("stride_tricks")?;
             for name in ["sliding_window_view", "as_strided"] {
                 assert!(
@@ -28786,6 +28855,12 @@ mod tests {
                     .get_item("fnp_python_test.lib.array_utils")?
                     .is(&array_utils),
                 "fnp_python.lib.array_utils should be registered under sys.modules",
+            );
+            assert!(
+                sys_modules
+                    .get_item("fnp_python_test.lib.format")?
+                    .is(&format_module),
+                "fnp_python.lib.format should be registered under sys.modules",
             );
 
             // Sanity-check an actual call round-trips through the submodule.
@@ -60272,6 +60347,202 @@ mod tests {
             assert_eq!(
                 repr_string(&nested_duplicate),
                 repr_string(&theirs_duplicate)
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn lib_format_helpers_match_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_lib_format")?;
+            fnp_python(&module)?;
+            let format_module = module.getattr("lib")?.getattr("format")?;
+            let numpy_format = py.import("numpy.lib.format")?;
+            let numpy = py.import("numpy")?;
+            let io = py.import("io")?;
+            let bytes_io = io.getattr("BytesIO")?;
+            let builtins = py.import("builtins")?;
+            let eval_fn = builtins.getattr("eval")?;
+            let globals = PyDict::new(py);
+            globals.set_item("np", numpy.clone())?;
+            let eval_with_globals = |code: &str| -> PyResult<pyo3::Bound<'_, PyAny>> {
+                eval_fn.call((code, &globals), None::<&pyo3::Bound<'_, PyDict>>)
+            };
+
+            for name in [
+                "ARRAY_ALIGN",
+                "BUFFER_SIZE",
+                "EXPECTED_KEYS",
+                "GROWTH_AXIS_MAX_DIGITS",
+                "MAGIC_LEN",
+                "MAGIC_PREFIX",
+                "descr_to_dtype",
+                "drop_metadata",
+                "dtype_to_descr",
+                "header_data_from_array_1_0",
+                "isfileobj",
+                "magic",
+                "open_memmap",
+                "read_array",
+                "read_array_header_1_0",
+                "read_array_header_2_0",
+                "read_magic",
+                "write_array",
+                "write_array_header_1_0",
+                "write_array_header_2_0",
+            ] {
+                assert!(
+                    format_module
+                        .getattr(name)?
+                        .is(&numpy_format.getattr(name)?),
+                    "fnp_python.lib.format.{name} must be numpy.lib.format.{name}"
+                );
+            }
+
+            for name in [
+                "ARRAY_ALIGN",
+                "BUFFER_SIZE",
+                "EXPECTED_KEYS",
+                "MAGIC_LEN",
+                "MAGIC_PREFIX",
+            ] {
+                assert_eq!(
+                    repr_string(&format_module.getattr(name)?),
+                    repr_string(&numpy_format.getattr(name)?),
+                    "numpy.lib.format.{name} constant"
+                );
+            }
+
+            for (major, minor) in [(1_i64, 0_i64), (2_i64, 0_i64)] {
+                let ours = format_module.getattr("magic")?.call1((major, minor))?;
+                let theirs = numpy_format.getattr("magic")?.call1((major, minor))?;
+                assert_eq!(repr_string(&ours), repr_string(&theirs));
+            }
+
+            for dtype_code in [
+                "np.dtype('int16')",
+                "np.dtype([('x', 'i4'), ('y', 'f8', (2,))])",
+            ] {
+                let dtype = eval_with_globals(dtype_code)?;
+                let ours_descr = format_module
+                    .getattr("dtype_to_descr")?
+                    .call1((dtype.clone(),))?;
+                let theirs_descr = numpy_format
+                    .getattr("dtype_to_descr")?
+                    .call1((dtype.clone(),))?;
+                assert_eq!(repr_string(&ours_descr), repr_string(&theirs_descr));
+
+                let ours_dtype = format_module
+                    .getattr("descr_to_dtype")?
+                    .call1((ours_descr.clone(),))?;
+                let theirs_dtype = numpy_format
+                    .getattr("descr_to_dtype")?
+                    .call1((theirs_descr.clone(),))?;
+                assert_eq!(repr_string(&ours_dtype), repr_string(&theirs_dtype));
+            }
+
+            let array = eval_with_globals("np.arange(6, dtype=np.int16).reshape(2, 3)")?;
+            let ours_header = format_module
+                .getattr("header_data_from_array_1_0")?
+                .call1((array.clone(),))?;
+            let theirs_header = numpy_format
+                .getattr("header_data_from_array_1_0")?
+                .call1((array.clone(),))?;
+            assert_eq!(repr_string(&ours_header), repr_string(&theirs_header));
+
+            let ours_header_buf = bytes_io.call0()?;
+            let theirs_header_buf = bytes_io.call0()?;
+            assert!(
+                format_module
+                    .getattr("write_array_header_1_0")?
+                    .call1((ours_header_buf.clone(), ours_header.clone()))?
+                    .is_none()
+            );
+            assert!(
+                numpy_format
+                    .getattr("write_array_header_1_0")?
+                    .call1((theirs_header_buf.clone(), theirs_header.clone()))?
+                    .is_none()
+            );
+            ours_header_buf.call_method1("seek", (0_i64,))?;
+            theirs_header_buf.call_method1("seek", (0_i64,))?;
+            let ours_magic = format_module
+                .getattr("read_magic")?
+                .call1((ours_header_buf.clone(),))?;
+            let theirs_magic = numpy_format
+                .getattr("read_magic")?
+                .call1((theirs_header_buf.clone(),))?;
+            assert_eq!(repr_string(&ours_magic), repr_string(&theirs_magic));
+            let ours_read_header = format_module
+                .getattr("read_array_header_1_0")?
+                .call1((ours_header_buf.clone(),))?;
+            let theirs_read_header = numpy_format
+                .getattr("read_array_header_1_0")?
+                .call1((theirs_header_buf.clone(),))?;
+            assert_eq!(
+                repr_string(&ours_read_header),
+                repr_string(&theirs_read_header)
+            );
+
+            let ours_array_buf = bytes_io.call0()?;
+            let theirs_array_buf = bytes_io.call0()?;
+            assert!(
+                format_module
+                    .getattr("write_array")?
+                    .call1((ours_array_buf.clone(), array.clone()))?
+                    .is_none()
+            );
+            assert!(
+                numpy_format
+                    .getattr("write_array")?
+                    .call1((theirs_array_buf.clone(), array.clone()))?
+                    .is_none()
+            );
+            ours_array_buf.call_method1("seek", (0_i64,))?;
+            theirs_array_buf.call_method1("seek", (0_i64,))?;
+            let ours_loaded = format_module
+                .getattr("read_array")?
+                .call1((ours_array_buf.clone(),))?;
+            let theirs_loaded = numpy_format
+                .getattr("read_array")?
+                .call1((theirs_array_buf.clone(),))?;
+            assert_array_matches_numpy(&ours_loaded, &theirs_loaded)?;
+
+            assert_eq!(
+                repr_string(
+                    &format_module
+                        .getattr("isfileobj")?
+                        .call1((bytes_io.call0()?,))?
+                ),
+                repr_string(
+                    &numpy_format
+                        .getattr("isfileobj")?
+                        .call1((bytes_io.call0()?,))?
+                )
+            );
+
+            let bad_payload = eval_with_globals("b'not-a-npy-file'")?;
+            let ours_bad = bytes_io.call1((bad_payload.clone(),))?;
+            let theirs_bad = bytes_io.call1((bad_payload.clone(),))?;
+            assert_eq!(
+                call_outcome(
+                    py,
+                    &format_module.getattr("read_magic")?,
+                    &PyTuple::new(py, [ours_bad])?,
+                    None,
+                )?,
+                call_outcome(
+                    py,
+                    &numpy_format.getattr("read_magic")?,
+                    &PyTuple::new(py, [theirs_bad])?,
+                    None,
+                )?
             );
 
             Ok(())
