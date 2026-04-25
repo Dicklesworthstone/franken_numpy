@@ -10171,6 +10171,86 @@ fn ma_apply_over_axes(
 }
 
 #[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn masked_object(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    numpy_ma_passthrough(py, "masked_object", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn make_mask_none(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    numpy_ma_passthrough(py, "make_mask_none", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn make_mask_descr(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    numpy_ma_passthrough(py, "make_mask_descr", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn flatten_mask(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    numpy_ma_passthrough(py, "flatten_mask", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn flatten_structured_array(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    numpy_ma_passthrough(py, "flatten_structured_array", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn common_fill_value(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    numpy_ma_passthrough(py, "common_fill_value", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn default_fill_value(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    numpy_ma_passthrough(py, "default_fill_value", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn set_fill_value(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    numpy_ma_passthrough(py, "set_fill_value", args, kwargs)
+}
+
+#[pyfunction]
 #[pyo3(signature = (x, value, copy=true))]
 fn masked_equal(py: Python<'_>, x: Py<PyAny>, value: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny>> {
     masked_scalar_compare(
@@ -21867,6 +21947,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fix_invalid, m)?)?;
     m.add_function(wrap_pyfunction!(minimum_fill_value, m)?)?;
     m.add_function(wrap_pyfunction!(maximum_fill_value, m)?)?;
+    m.add_function(wrap_pyfunction!(common_fill_value, m)?)?;
+    m.add_function(wrap_pyfunction!(default_fill_value, m)?)?;
+    m.add_function(wrap_pyfunction!(set_fill_value, m)?)?;
     m.add_function(wrap_pyfunction!(pinv, m)?)?;
     m.add_function(wrap_pyfunction!(eigvals, m)?)?;
     m.add_function(wrap_pyfunction!(slogdet, m)?)?;
@@ -22247,6 +22330,11 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(size_count, m)?)?;
     m.add_function(wrap_pyfunction!(quantile, m)?)?;
     m.add_function(wrap_pyfunction!(make_mask, m)?)?;
+    m.add_function(wrap_pyfunction!(make_mask_none, m)?)?;
+    m.add_function(wrap_pyfunction!(make_mask_descr, m)?)?;
+    m.add_function(wrap_pyfunction!(flatten_mask, m)?)?;
+    m.add_function(wrap_pyfunction!(flatten_structured_array, m)?)?;
+    m.add_function(wrap_pyfunction!(masked_object, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all, m)?)?;
     m.add_function(wrap_pyfunction!(masked_all_like, m)?)?;
     m.add_function(wrap_pyfunction!(compressed, m)?)?;
@@ -22709,6 +22797,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // Top-level ma functions (already exposed under numpy-native names).
         for name in [
             "masked_where",
+            "masked_object",
             "masked_equal",
             "masked_not_equal",
             "masked_less",
@@ -22727,10 +22816,17 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "is_masked",
             "mask_or",
             "make_mask",
+            "make_mask_none",
+            "make_mask_descr",
+            "flatten_mask",
+            "flatten_structured_array",
             "allequal",
             "count_masked",
             "minimum_fill_value",
             "maximum_fill_value",
+            "common_fill_value",
+            "default_fill_value",
+            "set_fill_value",
             "filled",
             "fix_invalid",
             "mask_rowcols",
@@ -27559,6 +27655,9 @@ mod tests {
             assert!(module.getattr("fix_invalid").is_ok());
             assert!(module.getattr("minimum_fill_value").is_ok());
             assert!(module.getattr("maximum_fill_value").is_ok());
+            assert!(module.getattr("common_fill_value").is_ok());
+            assert!(module.getattr("default_fill_value").is_ok());
+            assert!(module.getattr("set_fill_value").is_ok());
             assert!(module.getattr("pinv").is_ok());
             assert!(module.getattr("eigvals").is_ok());
             assert!(module.getattr("masked_where").is_ok());
@@ -27773,6 +27872,11 @@ mod tests {
             assert!(module.getattr("size_count").is_ok());
             assert!(module.getattr("quantile").is_ok());
             assert!(module.getattr("make_mask").is_ok());
+            assert!(module.getattr("make_mask_none").is_ok());
+            assert!(module.getattr("make_mask_descr").is_ok());
+            assert!(module.getattr("flatten_mask").is_ok());
+            assert!(module.getattr("flatten_structured_array").is_ok());
+            assert!(module.getattr("masked_object").is_ok());
             assert!(module.getattr("masked_all").is_ok());
             assert!(module.getattr("masked_all_like").is_ok());
             assert!(module.getattr("compressed").is_ok());
@@ -28326,6 +28430,7 @@ mod tests {
                 "average",
                 "ediff1d",
                 "masked_where",
+                "masked_object",
                 "masked_equal",
                 "masked_not_equal",
                 "masked_less",
@@ -28344,10 +28449,17 @@ mod tests {
                 "is_masked",
                 "mask_or",
                 "make_mask",
+                "make_mask_none",
+                "make_mask_descr",
+                "flatten_mask",
+                "flatten_structured_array",
                 "allequal",
                 "count_masked",
                 "minimum_fill_value",
                 "maximum_fill_value",
+                "common_fill_value",
+                "default_fill_value",
+                "set_fill_value",
                 "filled",
                 "fix_invalid",
                 "mask_rowcols",
@@ -44408,6 +44520,169 @@ mod tests {
                 }),
             )?;
             assert_array_matches_numpy(&ours_structured, &theirs_structured)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ma_construction_fill_helpers_match_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let ma = module.getattr("ma")?;
+            let numpy = py.import("numpy")?;
+            let numpy_ma = numpy.getattr("ma")?;
+            let builtins = py.import("builtins")?;
+            let eval_fn = builtins.getattr("eval")?;
+            let globals = PyDict::new(py);
+            globals.set_item("np", numpy.clone())?;
+            let eval_with_globals = |code: &str| -> PyResult<pyo3::Bound<'_, PyAny>> {
+                eval_fn.call((code, &globals), None::<&pyo3::Bound<'_, PyDict>>)
+            };
+
+            let object_values =
+                eval_with_globals("np.array(['sentinel', 'keep', 'sentinel'], dtype=object)")?;
+            let masked_object_top = module.getattr("masked_object")?;
+            let masked_object_nested = ma.getattr("masked_object")?;
+            let masked_object_numpy = numpy_ma.getattr("masked_object")?;
+            let ours_masked = masked_object_top.call1((object_values.clone(), "sentinel"))?;
+            let nested_masked = masked_object_nested.call1((object_values.clone(), "sentinel"))?;
+            let theirs_masked = masked_object_numpy.call1((object_values.clone(), "sentinel"))?;
+            assert_array_matches_numpy(&ours_masked, &theirs_masked)?;
+            assert_array_matches_numpy(&nested_masked, &theirs_masked)?;
+            assert_eq!(
+                repr_string(&ours_masked.getattr("fill_value")?),
+                repr_string(&theirs_masked.getattr("fill_value")?)
+            );
+
+            let make_mask_none_top = module.getattr("make_mask_none")?;
+            let make_mask_none_nested = ma.getattr("make_mask_none")?;
+            let make_mask_none_numpy = numpy_ma.getattr("make_mask_none")?;
+            let shape_2x3 = eval_with_globals("(2, 3)")?;
+            let ours_none = make_mask_none_top.call1((shape_2x3.clone(),))?;
+            let nested_none = make_mask_none_nested.call1((shape_2x3.clone(),))?;
+            let theirs_none = make_mask_none_numpy.call1((shape_2x3.clone(),))?;
+            assert_array_matches_numpy(&ours_none, &theirs_none)?;
+            assert_array_matches_numpy(&nested_none, &theirs_none)?;
+
+            let structured_dtype = eval_with_globals("np.dtype([('x', 'i4'), ('y', 'f8')])")?;
+            let structured_mask_kwargs = PyDict::new(py);
+            structured_mask_kwargs.set_item("dtype", structured_dtype.clone())?;
+            let shape_1d = eval_with_globals("(2,)")?;
+            let ours_structured_none =
+                make_mask_none_top.call((shape_1d.clone(),), Some(&structured_mask_kwargs))?;
+            let nested_structured_none =
+                make_mask_none_nested.call((shape_1d.clone(),), Some(&structured_mask_kwargs))?;
+            let theirs_structured_none =
+                make_mask_none_numpy.call((shape_1d.clone(),), Some(&structured_mask_kwargs))?;
+            assert_array_matches_numpy(&ours_structured_none, &theirs_structured_none)?;
+            assert_array_matches_numpy(&nested_structured_none, &theirs_structured_none)?;
+            assert_eq!(
+                repr_string(&ours_structured_none.getattr("dtype")?),
+                repr_string(&theirs_structured_none.getattr("dtype")?)
+            );
+
+            let make_mask_descr_top = module.getattr("make_mask_descr")?;
+            let make_mask_descr_nested = ma.getattr("make_mask_descr")?;
+            let make_mask_descr_numpy = numpy_ma.getattr("make_mask_descr")?;
+            let ours_descr = make_mask_descr_top.call1((structured_dtype.clone(),))?;
+            let nested_descr = make_mask_descr_nested.call1((structured_dtype.clone(),))?;
+            let theirs_descr = make_mask_descr_numpy.call1((structured_dtype.clone(),))?;
+            assert_eq!(repr_string(&ours_descr), repr_string(&theirs_descr));
+            assert_eq!(repr_string(&nested_descr), repr_string(&theirs_descr));
+
+            let structured_mask = eval_with_globals(
+                "np.array([(True, False), (False, True)], dtype=[('x', '?'), ('y', '?')])",
+            )?;
+            let flatten_mask_top = module.getattr("flatten_mask")?;
+            let flatten_mask_nested = ma.getattr("flatten_mask")?;
+            let flatten_mask_numpy = numpy_ma.getattr("flatten_mask")?;
+            let ours_flat_mask = flatten_mask_top.call1((structured_mask.clone(),))?;
+            let nested_flat_mask = flatten_mask_nested.call1((structured_mask.clone(),))?;
+            let theirs_flat_mask = flatten_mask_numpy.call1((structured_mask.clone(),))?;
+            assert_array_matches_numpy(&ours_flat_mask, &theirs_flat_mask)?;
+            assert_array_matches_numpy(&nested_flat_mask, &theirs_flat_mask)?;
+
+            let structured_values = eval_with_globals(
+                "np.array([(1, 2.0), (3, 4.0)], dtype=[('x', 'i4'), ('y', 'f8')])",
+            )?;
+            let flatten_structured_top = module.getattr("flatten_structured_array")?;
+            let flatten_structured_nested = ma.getattr("flatten_structured_array")?;
+            let flatten_structured_numpy = numpy_ma.getattr("flatten_structured_array")?;
+            let ours_flat_structured =
+                flatten_structured_top.call1((structured_values.clone(),))?;
+            let nested_flat_structured =
+                flatten_structured_nested.call1((structured_values.clone(),))?;
+            let theirs_flat_structured =
+                flatten_structured_numpy.call1((structured_values.clone(),))?;
+            assert_array_matches_numpy(&ours_flat_structured, &theirs_flat_structured)?;
+            assert_array_matches_numpy(&nested_flat_structured, &theirs_flat_structured)?;
+
+            let common_fill_top = module.getattr("common_fill_value")?;
+            let common_fill_nested = ma.getattr("common_fill_value")?;
+            let common_fill_numpy = numpy_ma.getattr("common_fill_value")?;
+            let fill_a = eval_with_globals("np.ma.array([1, 2], fill_value=-5)")?;
+            let fill_b_same = eval_with_globals("np.ma.array([3, 4], fill_value=-5)")?;
+            let fill_b_diff = eval_with_globals("np.ma.array([3, 4], fill_value=-6)")?;
+            let ours_common = common_fill_top.call1((fill_a.clone(), fill_b_same.clone()))?;
+            let nested_common = common_fill_nested.call1((fill_a.clone(), fill_b_same.clone()))?;
+            let theirs_common = common_fill_numpy.call1((fill_a.clone(), fill_b_same.clone()))?;
+            assert_eq!(repr_string(&ours_common), repr_string(&theirs_common));
+            assert_eq!(repr_string(&nested_common), repr_string(&theirs_common));
+            let ours_none_common = common_fill_top.call1((fill_a.clone(), fill_b_diff.clone()))?;
+            let nested_none_common =
+                common_fill_nested.call1((fill_a.clone(), fill_b_diff.clone()))?;
+            let theirs_none_common =
+                common_fill_numpy.call1((fill_a.clone(), fill_b_diff.clone()))?;
+            assert!(ours_none_common.is_none());
+            assert!(nested_none_common.is_none());
+            assert!(theirs_none_common.is_none());
+
+            let default_fill_top = module.getattr("default_fill_value")?;
+            let default_fill_nested = ma.getattr("default_fill_value")?;
+            let default_fill_numpy = numpy_ma.getattr("default_fill_value")?;
+            let int_array = eval_with_globals("np.array([1], dtype=np.int16)")?;
+            let float_dtype = eval_with_globals("np.dtype('float32')")?;
+            for input in [int_array, float_dtype] {
+                let ours_default = default_fill_top.call1((input.clone(),))?;
+                let nested_default = default_fill_nested.call1((input.clone(),))?;
+                let theirs_default = default_fill_numpy.call1((input.clone(),))?;
+                assert_eq!(repr_string(&ours_default), repr_string(&theirs_default));
+                assert_eq!(repr_string(&nested_default), repr_string(&theirs_default));
+            }
+
+            let set_fill_top = module.getattr("set_fill_value")?;
+            let set_fill_nested = ma.getattr("set_fill_value")?;
+            let set_fill_numpy = numpy_ma.getattr("set_fill_value")?;
+            let ours_set = eval_with_globals("np.ma.array([1, 2], mask=[False, True])")?;
+            let nested_set = eval_with_globals("np.ma.array([1, 2], mask=[False, True])")?;
+            let theirs_set = eval_with_globals("np.ma.array([1, 2], mask=[False, True])")?;
+            assert!(set_fill_top.call1((ours_set.clone(), -7_i64))?.is_none());
+            assert!(
+                set_fill_nested
+                    .call1((nested_set.clone(), -7_i64))?
+                    .is_none()
+            );
+            assert!(
+                set_fill_numpy
+                    .call1((theirs_set.clone(), -7_i64))?
+                    .is_none()
+            );
+            assert_eq!(
+                repr_string(&ours_set.getattr("fill_value")?),
+                repr_string(&theirs_set.getattr("fill_value")?)
+            );
+            assert_eq!(
+                repr_string(&nested_set.getattr("fill_value")?),
+                repr_string(&theirs_set.getattr("fill_value")?)
+            );
+            assert_eq!(repr_string(&ours_set), repr_string(&theirs_set));
+            assert_eq!(repr_string(&nested_set), repr_string(&theirs_set));
 
             Ok(())
         });
