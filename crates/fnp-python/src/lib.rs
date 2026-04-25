@@ -23307,6 +23307,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "all",
             "any",
             "allclose",
+            "test",
         ];
         if let Ok(np_ma) = py.import("numpy.ma") {
             for name in ma_core_names {
@@ -23316,7 +23317,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             }
         }
         let ma_getattr_src = pyo3::ffi::c_str!(
-            "_NUMPY_MA_CORE_NAMES = frozenset(('MaskedArray','masked_array','array','asarray','asanyarray','masked','nomask','masked_print_option','masked_singleton','MAError','MaskError','MaskType','mvoid','getdata','is_mask','isMA','isMaskedArray','isarray','harden_mask','soften_mask','cov','corrcoef','sum','prod','min','max','mean','median','std','var','ptp','anom','concatenate','stack','hstack','vstack','reshape','resize','transpose','diagonal','trace','abs','absolute','sqrt','exp','log','log10','sin','cos','power','add','subtract','multiply','divide','empty','empty_like','zeros','zeros_like','ones','ones_like','arange','frombuffer','fromfunction','identity','indices','where','sort','argsort','choose','compress','take','put','nonzero','equal','not_equal','less','less_equal','greater','greater_equal','logical_and','logical_or','logical_xor','logical_not','all','any','allclose'))\ndef __getattr__(name):\n    if name in _NUMPY_MA_CORE_NAMES:\n        import numpy.ma as _ma\n        return getattr(_ma, name)\n    raise AttributeError(name)\n"
+            "_NUMPY_MA_CORE_NAMES = frozenset(('MaskedArray','masked_array','array','asarray','asanyarray','masked','nomask','masked_print_option','masked_singleton','MAError','MaskError','MaskType','mvoid','getdata','is_mask','isMA','isMaskedArray','isarray','harden_mask','soften_mask','cov','corrcoef','sum','prod','min','max','mean','median','std','var','ptp','anom','concatenate','stack','hstack','vstack','reshape','resize','transpose','diagonal','trace','abs','absolute','sqrt','exp','log','log10','sin','cos','power','add','subtract','multiply','divide','empty','empty_like','zeros','zeros_like','ones','ones_like','arange','frombuffer','fromfunction','identity','indices','where','sort','argsort','choose','compress','take','put','nonzero','equal','not_equal','less','less_equal','greater','greater_equal','logical_and','logical_or','logical_xor','logical_not','all','any','allclose','test'))\ndef __getattr__(name):\n    if name in _NUMPY_MA_CORE_NAMES:\n        import numpy.ma as _ma\n        return getattr(_ma, name)\n    raise AttributeError(name)\n"
         );
         let ma_dict = ma.dict();
         py.run(ma_getattr_src, Some(&ma_dict), None)?;
@@ -29382,6 +29383,13 @@ mod tests {
                 "soften_mask",
             ] {
                 assert!(ma.getattr(name).is_ok(), "fnp_python.ma.{name} missing");
+            }
+            if numpy_available(py) {
+                let numpy_ma = py.import("numpy.ma")?;
+                assert!(
+                    ma.getattr("test")?.is(&numpy_ma.getattr("test")?),
+                    "fnp_python.ma.test must be numpy.ma.test",
+                );
             }
 
             // testing submodule.
