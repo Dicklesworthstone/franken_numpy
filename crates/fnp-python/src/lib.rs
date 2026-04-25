@@ -22173,13 +22173,20 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // be importable (numpy-less CI workers); in that case install a
         // module-level __getattr__ that lazy-loads on first access, same
         // pattern as linalg.LinAlgError.
-        if let Ok(np_random) = py.import("numpy.random")
-            && let Ok(bit_gen_cls) = np_random.getattr("BitGenerator")
-        {
-            random.setattr("BitGenerator", bit_gen_cls)?;
+        if let Ok(np_random) = py.import("numpy.random") {
+            for name in [
+                "BitGenerator",
+                "bit_generator",
+                "get_bit_generator",
+                "set_bit_generator",
+            ] {
+                if let Ok(value) = np_random.getattr(name) {
+                    random.setattr(name, value)?;
+                }
+            }
         }
         let random_getattr_src = pyo3::ffi::c_str!(
-            "def __getattr__(name):\n    if name == 'BitGenerator':\n        import numpy.random as _r\n        return _r.BitGenerator\n    raise AttributeError(name)\n"
+            "_NUMPY_RANDOM_NAMES = frozenset(('BitGenerator','bit_generator','get_bit_generator','set_bit_generator'))\ndef __getattr__(name):\n    if name in _NUMPY_RANDOM_NAMES:\n        import numpy.random as _r\n        return getattr(_r, name)\n    raise AttributeError(name)\n"
         );
         let random_dict = random.dict();
         py.run(random_getattr_src, Some(&random_dict), None)?;
@@ -23883,8 +23890,12 @@ mod tests {
                 "Philox",
                 "SFC64",
                 "default_rng",
-                // g1ji: BitGenerator abstract base class re-export.
+                // g1ji/x9my: NumPy-owned bit-generator abstract base and
+                // singleton bridge helpers.
                 "BitGenerator",
+                "bit_generator",
+                "get_bit_generator",
+                "set_bit_generator",
                 // t44q: module-level legacy aliases bound to the shared
                 // numpy.random._rand RandomState singleton.
                 "_rand",
@@ -23942,6 +23953,38 @@ mod tests {
             ] {
                 assert!(random.getattr(name).is_ok(), "missing random.{name}");
             }
+
+            for name in [
+                "BitGenerator",
+                "bit_generator",
+                "get_bit_generator",
+                "set_bit_generator",
+            ] {
+                assert!(
+                    random.getattr(name)?.is(&numpy_random.getattr(name)?),
+                    "fnp_python.random.{name} must be numpy.random.{name}"
+                );
+            }
+
+            let get_bit_generator = random.getattr("get_bit_generator")?;
+            let set_bit_generator = random.getattr("set_bit_generator")?;
+            let original_bit_generator = get_bit_generator.call0()?;
+            let replacement_bit_generator = numpy_random.getattr("PCG64")?.call1((777_u64,))?;
+            let set_result = set_bit_generator.call1((&replacement_bit_generator,))?;
+            let bridged_bit_generator = get_bit_generator.call0()?;
+            let numpy_bit_generator = numpy_random.getattr("get_bit_generator")?.call0()?;
+            let bridge_matches = set_result.is_none()
+                && bridged_bit_generator.is(&replacement_bit_generator)
+                && numpy_bit_generator.is(&replacement_bit_generator);
+            set_bit_generator.call1((&original_bit_generator,))?;
+            assert!(
+                bridge_matches,
+                "fnp_python.random bit-generator bridge must track numpy.random singleton"
+            );
+            assert!(
+                get_bit_generator.call0()?.is(&original_bit_generator),
+                "fnp_python.random.set_bit_generator must restore numpy.random singleton"
+            );
 
             let ours_pcg64 = random.getattr("PCG64")?.call1((42_u64,))?;
             let theirs_pcg64 = numpy_random.getattr("PCG64")?.call1((42_u64,))?;

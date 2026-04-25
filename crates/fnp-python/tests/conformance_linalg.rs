@@ -42,10 +42,10 @@ fn conformance_linalg_matrix() {
         let linalg_mod = module.getattr("linalg").expect("fnp_python.linalg");
         let np_linalg = numpy.getattr("linalg").expect("numpy.linalg");
         let linalg = linalg_mod
-            .downcast_into::<pyo3::types::PyModule>()
+            .cast_into::<pyo3::types::PyModule>()
             .expect("fnp_python.linalg should be a submodule");
         let numpy_linalg = np_linalg
-            .downcast_into::<pyo3::types::PyModule>()
+            .cast_into::<pyo3::types::PyModule>()
             .expect("numpy.linalg should be a submodule");
 
         // ─── matrix_transpose: LAPACK-free, native ─────────────────────
