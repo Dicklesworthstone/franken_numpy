@@ -23011,22 +23011,22 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         let fft_names = [
             "fft",
             "ifft",
+            "rfft",
+            "irfft",
+            "hfft",
+            "ihfft",
+            "rfftn",
+            "irfftn",
+            "rfft2",
+            "irfft2",
             "fft2",
             "ifft2",
             "fftn",
             "ifftn",
-            "rfft",
-            "irfft",
-            "rfftn",
-            "irfftn",
-            "hfft",
-            "ihfft",
-            "rfft2",
-            "irfft2",
-            "fftfreq",
-            "rfftfreq",
             "fftshift",
             "ifftshift",
+            "fftfreq",
+            "rfftfreq",
         ];
         for name in fft_names {
             if let Ok(value) = m.getattr(name) {
@@ -23038,7 +23038,13 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         {
             fft_module.add("test", test_attr)?;
         }
-        fft_module.setattr("__all__", PyTuple::new(py, fft_names)?)?;
+        if let Ok(np_fft) = py.import("numpy.fft")
+            && let Ok(all_names) = np_fft.getattr("__all__")
+        {
+            fft_module.setattr("__all__", all_names)?;
+        } else {
+            fft_module.setattr("__all__", PyList::new(py, fft_names)?)?;
+        }
         let parent_name = m.getattr("__name__")?.extract::<String>()?;
         let qualified_name = format!("{parent_name}.fft");
         fft_module.setattr("__name__", &qualified_name)?;
@@ -29264,6 +29270,20 @@ mod tests {
                 assert!(fft.getattr(name).is_ok(), "fnp_python.fft.{name} missing");
             }
             let numpy_fft = py.import("numpy.fft")?;
+            let numpy_fft_all = numpy_fft.getattr("__all__")?;
+            if repr_string(&fft.getattr("__all__")?) != repr_string(&numpy_fft_all) {
+                return Err(PyValueError::new_err(
+                    "fnp_python.fft.__all__ must match numpy.fft.__all__",
+                ));
+            }
+            for item in numpy_fft_all.try_iter()? {
+                let name = item?.extract::<String>()?;
+                if !fft.hasattr(name.as_str())? {
+                    return Err(PyValueError::new_err(format!(
+                        "fnp_python.fft missing numpy.fft public name {name}"
+                    )));
+                }
+            }
             assert!(
                 fft.getattr("test")?.is(&numpy_fft.getattr("test")?),
                 "fnp_python.fft.test must be numpy.fft.test",
