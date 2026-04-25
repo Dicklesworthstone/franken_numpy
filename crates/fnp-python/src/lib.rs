@@ -13446,6 +13446,63 @@ fn polyfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (off, scl))]
+fn polyline(py: Python<'_>, off: Py<PyAny>, scl: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("polynomial")?
+        .getattr("polyline")?
+        .call1((off.bind(py), scl.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (c, tol=0.0))]
+fn polytrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("tol", tol)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("polynomial")?
+        .getattr("polytrim")?
+        .call((c.bind(py),), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, r, tensor=true))]
+fn polyvalfromroots(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    r: Py<PyAny>,
+    tensor: bool,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("tensor", tensor)?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("polynomial")?
+        .getattr("polyvalfromroots")?
+        .call((x.bind(py), r.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, deg))]
+fn polyvander(py: Python<'_>, x: Py<PyAny>, deg: i64) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("polynomial")?
+        .getattr("polynomial")?
+        .getattr("polyvander")?
+        .call1((x.bind(py), deg))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (c, pow, maxpower=16))]
 fn polypow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyResult<Py<PyAny>> {
     // Passthrough to numpy.polynomial.polynomial.polypow. Raises a
@@ -21334,6 +21391,10 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(polymul, m)?)?;
     m.add_function(wrap_pyfunction!(polydiv, m)?)?;
     m.add_function(wrap_pyfunction!(polyfromroots, m)?)?;
+    m.add_function(wrap_pyfunction!(polyline, m)?)?;
+    m.add_function(wrap_pyfunction!(polytrim, m)?)?;
+    m.add_function(wrap_pyfunction!(polyvalfromroots, m)?)?;
+    m.add_function(wrap_pyfunction!(polyvander, m)?)?;
     m.add_function(wrap_pyfunction!(polypow, m)?)?;
     m.add_function(wrap_pyfunction!(polyroots, m)?)?;
     m.add_function(wrap_pyfunction!(sliding_window_view, m)?)?;
@@ -50836,6 +50897,7 @@ mod tests {
 
             let module = PyModule::new(py, "fnp_python_test_polynomial_power_basis")?;
             fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
             let numpy_poly = py.import("numpy.polynomial.polynomial")?;
 
             let our_fromroots = module.getattr("polyfromroots")?;
@@ -50846,6 +50908,65 @@ mod tests {
                     &np_fromroots.call1((roots.clone(),))?,
                 )?;
             }
+
+            let our_line = module.getattr("polyline")?;
+            let np_line = numpy_poly.getattr("polyline")?;
+            for (off, scl) in [(1.0_f64, -1.0_f64), (0.0, 0.0), (-2.5, 3.25)] {
+                assert_array_matches_numpy(
+                    &our_line.call1((off, scl))?,
+                    &np_line.call1((off, scl))?,
+                )?;
+            }
+
+            let our_trim = module.getattr("polytrim")?;
+            let np_trim = numpy_poly.getattr("polytrim")?;
+            for (coeffs, tol) in [
+                (vec![1.0_f64, 2.0, 0.0, 0.0], 0.0_f64),
+                (vec![1.0_f64, 1.0e-4, 1.0e-8], 1.0e-5),
+                (vec![0.0_f64, 0.0, 0.0], 0.0),
+            ] {
+                assert_array_matches_numpy(
+                    &our_trim.call1((coeffs.clone(), tol))?,
+                    &np_trim.call1((coeffs.clone(), tol))?,
+                )?;
+            }
+
+            let our_val_fromroots = module.getattr("polyvalfromroots")?;
+            let np_val_fromroots = numpy_poly.getattr("polyvalfromroots")?;
+            let points = PyList::new(py, [0.0_f64, 1.0, 2.0, 3.0])?;
+            let roots = PyList::new(py, [1.0_f64, 3.0])?;
+            assert_array_matches_numpy(
+                &our_val_fromroots.call1((points.clone(), roots.clone()))?,
+                &np_val_fromroots.call1((points.clone(), roots.clone()))?,
+            )?;
+            let root_matrix = numpy
+                .getattr("array")?
+                .call1((vec![vec![1.0_f64, 2.0], vec![3.0_f64, 4.0]],))?;
+            let paired_points = PyList::new(py, [0.5_f64, 2.5])?;
+            let kw_tensor_false = PyDict::new(py);
+            kw_tensor_false.set_item("tensor", false)?;
+            assert_array_matches_numpy(
+                &our_val_fromroots.call(
+                    (paired_points.clone(), root_matrix.clone()),
+                    Some(&kw_tensor_false),
+                )?,
+                &np_val_fromroots.call((paired_points, root_matrix), Some(&kw_tensor_false))?,
+            )?;
+
+            let our_vander = module.getattr("polyvander")?;
+            let np_vander = numpy_poly.getattr("polyvander")?;
+            for deg in [0_i64, 1_i64, 4_i64] {
+                assert_array_matches_numpy(
+                    &our_vander.call1((points.clone(), deg))?,
+                    &np_vander.call1((points.clone(), deg))?,
+                )?;
+            }
+            let ours_err = our_vander.call1((points.clone(), -1_i64)).unwrap_err();
+            let theirs_err = np_vander.call1((points.clone(), -1_i64)).unwrap_err();
+            assert_eq!(
+                ours_err.get_type(py).name()?.extract::<String>()?,
+                theirs_err.get_type(py).name()?.extract::<String>()?
+            );
 
             let our_pow = module.getattr("polypow")?;
             let np_pow = numpy_poly.getattr("polypow")?;
