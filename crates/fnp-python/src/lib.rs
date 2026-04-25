@@ -46277,18 +46277,18 @@ mod tests {
                         Ok(())
                     }
                     (Ok(ours), Err(theirs)) => {
-                        panic!(
+                        Err(pyo3::exceptions::PyAssertionError::new_err(format!(
                             "{ours_code} unexpectedly succeeded with {} while NumPy raised {}",
                             repr_string(&ours),
                             theirs
-                        );
+                        )))
                     }
                     (Err(ours), Ok(theirs)) => {
-                        panic!(
+                        Err(pyo3::exceptions::PyAssertionError::new_err(format!(
                             "{ours_code} raised {} while NumPy succeeded with {}",
                             ours,
                             repr_string(&theirs)
-                        );
+                        )))
                     }
                 }
             };
