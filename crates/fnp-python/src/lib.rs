@@ -23252,6 +23252,17 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "subtract",
             "multiply",
             "divide",
+            "empty",
+            "empty_like",
+            "zeros",
+            "zeros_like",
+            "ones",
+            "ones_like",
+            "arange",
+            "frombuffer",
+            "fromfunction",
+            "identity",
+            "indices",
         ];
         if let Ok(np_ma) = py.import("numpy.ma") {
             for name in ma_core_names {
@@ -23261,7 +23272,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             }
         }
         let ma_getattr_src = pyo3::ffi::c_str!(
-            "_NUMPY_MA_CORE_NAMES = frozenset(('MaskedArray','masked_array','array','asarray','asanyarray','masked','nomask','masked_print_option','masked_singleton','MAError','MaskError','MaskType','mvoid','getdata','is_mask','isMA','isMaskedArray','isarray','harden_mask','soften_mask','cov','corrcoef','sum','prod','min','max','mean','median','std','var','ptp','anom','concatenate','stack','hstack','vstack','reshape','resize','transpose','diagonal','trace','abs','absolute','sqrt','exp','log','log10','sin','cos','power','add','subtract','multiply','divide'))\ndef __getattr__(name):\n    if name in _NUMPY_MA_CORE_NAMES:\n        import numpy.ma as _ma\n        return getattr(_ma, name)\n    raise AttributeError(name)\n"
+            "_NUMPY_MA_CORE_NAMES = frozenset(('MaskedArray','masked_array','array','asarray','asanyarray','masked','nomask','masked_print_option','masked_singleton','MAError','MaskError','MaskType','mvoid','getdata','is_mask','isMA','isMaskedArray','isarray','harden_mask','soften_mask','cov','corrcoef','sum','prod','min','max','mean','median','std','var','ptp','anom','concatenate','stack','hstack','vstack','reshape','resize','transpose','diagonal','trace','abs','absolute','sqrt','exp','log','log10','sin','cos','power','add','subtract','multiply','divide','empty','empty_like','zeros','zeros_like','ones','ones_like','arange','frombuffer','fromfunction','identity','indices'))\ndef __getattr__(name):\n    if name in _NUMPY_MA_CORE_NAMES:\n        import numpy.ma as _ma\n        return getattr(_ma, name)\n    raise AttributeError(name)\n"
         );
         let ma_dict = ma.dict();
         py.run(ma_getattr_src, Some(&ma_dict), None)?;
@@ -45885,6 +45896,125 @@ mod tests {
     }
 
     #[test]
+    fn ma_creation_helpers_match_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_ma_creation")?;
+            fnp_python(&module)?;
+            let ma = module.getattr("ma")?;
+            let numpy = py.import("numpy")?;
+            let numpy_ma = numpy.getattr("ma")?;
+            let builtins = py.import("builtins")?;
+            let eval_fn = builtins.getattr("eval")?;
+            let globals = PyDict::new(py);
+            globals.set_item("np", numpy.clone())?;
+            globals.set_item("fnp_ma", ma.clone())?;
+            globals.set_item("np_ma", numpy_ma.clone())?;
+            let eval_with_globals = |code: &str| -> PyResult<pyo3::Bound<'_, PyAny>> {
+                eval_fn.call((code, &globals), None::<&pyo3::Bound<'_, PyDict>>)
+            };
+
+            let names = [
+                "empty",
+                "empty_like",
+                "zeros",
+                "zeros_like",
+                "ones",
+                "ones_like",
+                "arange",
+                "frombuffer",
+                "fromfunction",
+                "identity",
+                "indices",
+            ];
+            for name in names {
+                assert!(
+                    ma.getattr(name)?.is(&numpy_ma.getattr(name)?),
+                    "fnp_python.ma.{name} must be numpy.ma.{name}"
+                );
+            }
+
+            let assert_same_repr = |ours_code: &str, theirs_code: &str| -> PyResult<()> {
+                let ours = eval_with_globals(ours_code)?;
+                let theirs = eval_with_globals(theirs_code)?;
+                assert_eq!(repr_string(&ours), repr_string(&theirs), "{ours_code}");
+                Ok(())
+            };
+            let assert_same_metadata = |ours_code: &str, theirs_code: &str| -> PyResult<()> {
+                let ours = eval_with_globals(ours_code)?;
+                let theirs = eval_with_globals(theirs_code)?;
+                for attr in ["shape", "dtype", "mask", "fill_value", "_hardmask"] {
+                    assert_eq!(
+                        repr_string(&ours.getattr(attr)?),
+                        repr_string(&theirs.getattr(attr)?),
+                        "{ours_code} attribute {attr}"
+                    );
+                }
+                Ok(())
+            };
+
+            assert_same_metadata(
+                "fnp_ma.empty((2, 3), dtype=np.int16, fill_value=-5, hardmask=True)",
+                "np_ma.empty((2, 3), dtype=np.int16, fill_value=-5, hardmask=True)",
+            )?;
+            assert_same_metadata(
+                "fnp_ma.empty_like(np.ma.array([1, 2, 3], mask=[False, True, False]), \
+                 dtype=np.float32, shape=(2, 2))",
+                "np_ma.empty_like(np.ma.array([1, 2, 3], mask=[False, True, False]), \
+                 dtype=np.float32, shape=(2, 2))",
+            )?;
+
+            for (ours_code, theirs_code) in [
+                (
+                    "fnp_ma.zeros((2, 3), dtype=np.int16, fill_value=-7, hardmask=True)",
+                    "np_ma.zeros((2, 3), dtype=np.int16, fill_value=-7, hardmask=True)",
+                ),
+                (
+                    "fnp_ma.zeros_like(np.ma.array([[1, 2], [3, 4]], \
+                     mask=[[False, True], [False, False]]), dtype=np.float32)",
+                    "np_ma.zeros_like(np.ma.array([[1, 2], [3, 4]], \
+                     mask=[[False, True], [False, False]]), dtype=np.float32)",
+                ),
+                (
+                    "fnp_ma.ones((2, 2), dtype=np.float32, fill_value=99.0)",
+                    "np_ma.ones((2, 2), dtype=np.float32, fill_value=99.0)",
+                ),
+                (
+                    "fnp_ma.ones_like(np.ma.array([1.5, 2.5], mask=[False, True]), shape=(2, 2))",
+                    "np_ma.ones_like(np.ma.array([1.5, 2.5], mask=[False, True]), shape=(2, 2))",
+                ),
+                (
+                    "fnp_ma.arange(1, 6, 2, dtype=np.int64, fill_value=-1, hardmask=True)",
+                    "np_ma.arange(1, 6, 2, dtype=np.int64, fill_value=-1, hardmask=True)",
+                ),
+                (
+                    "fnp_ma.frombuffer(b'\\x01\\x00\\x02\\x00\\x03\\x00\\x04\\x00', dtype='<i2', count=3, offset=2)",
+                    "np_ma.frombuffer(b'\\x01\\x00\\x02\\x00\\x03\\x00\\x04\\x00', dtype='<i2', count=3, offset=2)",
+                ),
+                (
+                    "fnp_ma.fromfunction(lambda i, j: i + 10 * j, (2, 3), dtype=int)",
+                    "np_ma.fromfunction(lambda i, j: i + 10 * j, (2, 3), dtype=int)",
+                ),
+                (
+                    "fnp_ma.identity(3, dtype=np.int16, fill_value=-9, hardmask=True)",
+                    "np_ma.identity(3, dtype=np.int16, fill_value=-9, hardmask=True)",
+                ),
+                (
+                    "fnp_ma.indices((2, 3), dtype=np.int16, fill_value=-2, hardmask=True)",
+                    "np_ma.indices((2, 3), dtype=np.int16, fill_value=-2, hardmask=True)",
+                ),
+            ] {
+                assert_same_repr(ours_code, theirs_code)?;
+            }
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn ma_core_classes_constants_helpers_match_numpy_oracles() {
         with_python(|py| {
             if !numpy_available(py) {
@@ -45952,6 +46082,17 @@ mod tests {
                 "subtract",
                 "multiply",
                 "divide",
+                "empty",
+                "empty_like",
+                "zeros",
+                "zeros_like",
+                "ones",
+                "ones_like",
+                "arange",
+                "frombuffer",
+                "fromfunction",
+                "identity",
+                "indices",
             ] {
                 assert!(
                     ma.getattr(name)?.is(&numpy_ma.getattr(name)?),
@@ -57297,18 +57438,16 @@ mod tests {
             let theirs_complex = numpy_identity.call((2_i64,), Some(&complex_kwargs))?;
             assert_array_matches_numpy(&ours_complex, &theirs_complex)?;
 
-            let ours_eye_kwargs = PyDict::new(py);
-            ours_eye_kwargs.set_item("m", 5_i64)?;
-            ours_eye_kwargs.set_item("k", -1_i64)?;
-            ours_eye_kwargs.set_item("dtype", numpy.getattr("uint16")?)?;
-            ours_eye_kwargs.set_item("order", "C")?;
-            let theirs_eye_kwargs = PyDict::new(py);
-            theirs_eye_kwargs.set_item("M", 5_i64)?;
-            theirs_eye_kwargs.set_item("k", -1_i64)?;
-            theirs_eye_kwargs.set_item("dtype", numpy.getattr("uint16")?)?;
-            theirs_eye_kwargs.set_item("order", "C")?;
-            let ours_eye = eye_fn.call((4_i64,), Some(&ours_eye_kwargs))?;
-            let theirs_eye = numpy_eye.call((4_i64,), Some(&theirs_eye_kwargs))?;
+            // numpy.eye uses kwargs N + M (capital). fnp_python.eye now
+            // matches that spelling exactly so the same kwargs dict feeds
+            // both sides.
+            let eye_kwargs = PyDict::new(py);
+            eye_kwargs.set_item("M", 5_i64)?;
+            eye_kwargs.set_item("k", -1_i64)?;
+            eye_kwargs.set_item("dtype", numpy.getattr("uint16")?)?;
+            eye_kwargs.set_item("order", "C")?;
+            let ours_eye = eye_fn.call((4_i64,), Some(&eye_kwargs))?;
+            let theirs_eye = numpy_eye.call((4_i64,), Some(&eye_kwargs))?;
             assert_array_matches_numpy(&ours_eye, &theirs_eye)?;
 
             let ours_fortran_kwargs = PyDict::new(py);
