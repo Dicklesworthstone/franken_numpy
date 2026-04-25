@@ -23316,9 +23316,20 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                     ma.add(name, value)?;
                 }
             }
+            if let Ok(all_names) = np_ma.getattr("__all__") {
+                ma.setattr("__all__", all_names.clone())?;
+                for item in all_names.try_iter()? {
+                    let name = item?.extract::<String>()?;
+                    if ma.getattr(name.as_str()).is_err()
+                        && let Ok(value) = np_ma.getattr(name.as_str())
+                    {
+                        ma.add(name.as_str(), value)?;
+                    }
+                }
+            }
         }
         let ma_getattr_src = pyo3::ffi::c_str!(
-            "_NUMPY_MA_CORE_NAMES = frozenset(('MaskedArray','masked_array','array','asarray','asanyarray','masked','nomask','masked_print_option','masked_singleton','MAError','MaskError','MaskType','mvoid','getdata','is_mask','isMA','isMaskedArray','isarray','harden_mask','soften_mask','cov','corrcoef','sum','prod','min','max','mean','median','std','var','ptp','anom','concatenate','stack','hstack','vstack','reshape','resize','transpose','diagonal','trace','abs','absolute','sqrt','exp','log','log10','sin','cos','power','add','subtract','multiply','divide','empty','empty_like','zeros','zeros_like','ones','ones_like','arange','frombuffer','fromfunction','identity','indices','where','sort','argsort','choose','compress','take','put','nonzero','equal','not_equal','less','less_equal','greater','greater_equal','logical_and','logical_or','logical_xor','logical_not','all','any','allclose','test'))\ndef __getattr__(name):\n    if name in _NUMPY_MA_CORE_NAMES:\n        import numpy.ma as _ma\n        return getattr(_ma, name)\n    raise AttributeError(name)\n"
+            "_NUMPY_MA_CORE_NAMES = frozenset(('MaskedArray','masked_array','array','asarray','asanyarray','masked','nomask','masked_print_option','masked_singleton','MAError','MaskError','MaskType','mvoid','getdata','is_mask','isMA','isMaskedArray','isarray','harden_mask','soften_mask','cov','corrcoef','sum','prod','min','max','mean','median','std','var','ptp','anom','concatenate','stack','hstack','vstack','reshape','resize','transpose','diagonal','trace','abs','absolute','sqrt','exp','log','log10','sin','cos','power','add','subtract','multiply','divide','empty','empty_like','zeros','zeros_like','ones','ones_like','arange','frombuffer','fromfunction','identity','indices','where','sort','argsort','choose','compress','take','put','nonzero','equal','not_equal','less','less_equal','greater','greater_equal','logical_and','logical_or','logical_xor','logical_not','all','any','allclose','test'))\ndef __getattr__(name):\n    import numpy.ma as _ma\n    if name in _NUMPY_MA_CORE_NAMES or name in getattr(_ma, '__all__', ()):\n        return getattr(_ma, name)\n    raise AttributeError(name)\n"
         );
         let ma_dict = ma.dict();
         py.run(ma_getattr_src, Some(&ma_dict), None)?;
@@ -29224,7 +29235,8 @@ mod tests {
         // `import fnp_python as np; np.linalg.svd(...)` works verbatim
         // against numpy-native spellings.
         with_python(|py| {
-            let module = PyModule::new(py, "fnp_python_test")?;
+            let module_name = "fnp_python_test_k74v_5_nested_submodules";
+            let module = PyModule::new(py, module_name)?;
             fnp_python(&module)?;
 
             // fft submodule.
@@ -29264,7 +29276,7 @@ mod tests {
             let registered_fft = py
                 .import("sys")?
                 .getattr("modules")?
-                .get_item("fnp_python_test.fft")?;
+                .get_item(format!("{module_name}.fft"))?;
             assert!(
                 registered_fft.is(&fft),
                 "fnp_python.fft submodule should be registered under sys.modules",
@@ -29520,30 +29532,32 @@ mod tests {
             }
             let sys_modules = py.import("sys")?.getattr("modules")?;
             assert!(
-                sys_modules.get_item("fnp_python_test.lib")?.is(&lib_mod),
+                sys_modules
+                    .get_item(format!("{module_name}.lib"))?
+                    .is(&lib_mod),
                 "fnp_python.lib should be registered under sys.modules",
             );
             assert!(
                 sys_modules
-                    .get_item("fnp_python_test.lib.stride_tricks")?
+                    .get_item(format!("{module_name}.lib.stride_tricks"))?
                     .is(&stride_tricks),
                 "fnp_python.lib.stride_tricks should be registered under sys.modules",
             );
             assert!(
                 sys_modules
-                    .get_item("fnp_python_test.lib.scimath")?
+                    .get_item(format!("{module_name}.lib.scimath"))?
                     .is(&scimath),
                 "fnp_python.lib.scimath should be registered under sys.modules",
             );
             assert!(
                 sys_modules
-                    .get_item("fnp_python_test.lib.array_utils")?
+                    .get_item(format!("{module_name}.lib.array_utils"))?
                     .is(&array_utils),
                 "fnp_python.lib.array_utils should be registered under sys.modules",
             );
             assert!(
                 sys_modules
-                    .get_item("fnp_python_test.lib.format")?
+                    .get_item(format!("{module_name}.lib.format"))?
                     .is(&format_module),
                 "fnp_python.lib.format should be registered under sys.modules",
             );
@@ -46604,6 +46618,29 @@ mod tests {
                     ma.getattr(name)?.is(&numpy_ma.getattr(name)?),
                     "fnp_python.ma.{name} must be numpy.ma.{name}"
                 );
+            }
+            let numpy_ma_all = numpy_ma.getattr("__all__")?;
+            if repr_string(&ma.getattr("__all__")?) != repr_string(&numpy_ma_all) {
+                return Err(PyValueError::new_err(
+                    "fnp_python.ma.__all__ must match numpy.ma.__all__",
+                ));
+            }
+            for item in numpy_ma_all.try_iter()? {
+                let name = item?.extract::<String>()?;
+                if !ma.hasattr(name.as_str())? {
+                    return Err(PyValueError::new_err(format!(
+                        "fnp_python.ma missing numpy.ma public name {name}"
+                    )));
+                }
+            }
+            for name in [
+                "putmask", "alltrue", "amax", "amin", "angle", "append", "arctan2",
+            ] {
+                if !ma.getattr(name)?.is(&numpy_ma.getattr(name)?) {
+                    return Err(PyValueError::new_err(format!(
+                        "fnp_python.ma.{name} must be numpy.ma.{name}"
+                    )));
+                }
             }
 
             let mask_kwargs = PyDict::new(py);
