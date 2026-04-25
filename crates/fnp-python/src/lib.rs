@@ -23029,11 +23029,21 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 fft_module.add(name, value)?;
             }
         }
+        if let Ok(np_fft) = py.import("numpy.fft")
+            && let Ok(test_attr) = np_fft.getattr("test")
+        {
+            fft_module.add("test", test_attr)?;
+        }
         fft_module.setattr("__all__", PyTuple::new(py, fft_names)?)?;
         let parent_name = m.getattr("__name__")?.extract::<String>()?;
         let qualified_name = format!("{parent_name}.fft");
         fft_module.setattr("__name__", &qualified_name)?;
         fft_module.setattr("__package__", &parent_name)?;
+        let fft_getattr_src = pyo3::ffi::c_str!(
+            "def __getattr__(name):\n    if name == 'test':\n        import numpy.fft as _fft\n        return _fft.test\n    raise AttributeError(name)\n"
+        );
+        let fft_dict = fft_module.dict();
+        py.run(fft_getattr_src, Some(&fft_dict), None)?;
         let callable_module_src = pyo3::ffi::c_str!(
             "import types\nclass _CallableFFTModule(types.ModuleType):\n    def __call__(self, *args, **kwargs):\n        return self.fft(*args, **kwargs)\n"
         );
@@ -29213,6 +29223,11 @@ mod tests {
             ] {
                 assert!(fft.getattr(name).is_ok(), "fnp_python.fft.{name} missing");
             }
+            let numpy_fft = py.import("numpy.fft")?;
+            assert!(
+                fft.getattr("test")?.is(&numpy_fft.getattr("test")?),
+                "fnp_python.fft.test must be numpy.fft.test",
+            );
             let callable = py.import("builtins")?.getattr("callable")?;
             assert!(
                 callable.call1((&fft,))?.extract::<bool>()?,
