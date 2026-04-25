@@ -10115,6 +10115,28 @@ fn clump_masked(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (x, axis=None))]
+fn compress_nd(py: Python<'_>, x: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    numpy_ma_axis(py, "compress_nd", x, axis)
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, axis=None))]
+fn compress_rowcols(py: Python<'_>, x: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    numpy_ma_axis(py, "compress_rowcols", x, axis)
+}
+
+#[pyfunction]
+fn compress_rows(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    numpy_ma_unary(py, "compress_rows", a)
+}
+
+#[pyfunction]
+fn compress_cols(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    numpy_ma_unary(py, "compress_cols", a)
+}
+
+#[pyfunction]
 #[pyo3(signature = (x, value, copy=true))]
 fn masked_equal(py: Python<'_>, x: Py<PyAny>, value: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny>> {
     masked_scalar_compare(
@@ -21586,6 +21608,10 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(notmasked_contiguous, m)?)?;
     m.add_function(wrap_pyfunction!(clump_unmasked, m)?)?;
     m.add_function(wrap_pyfunction!(clump_masked, m)?)?;
+    m.add_function(wrap_pyfunction!(compress_nd, m)?)?;
+    m.add_function(wrap_pyfunction!(compress_rowcols, m)?)?;
+    m.add_function(wrap_pyfunction!(compress_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(compress_cols, m)?)?;
     m.add_function(wrap_pyfunction!(masked_equal, m)?)?;
     m.add_function(wrap_pyfunction!(masked_not_equal, m)?)?;
     m.add_function(wrap_pyfunction!(vdot, m)?)?;
@@ -22342,6 +22368,10 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "notmasked_contiguous",
             "clump_unmasked",
             "clump_masked",
+            "compress_nd",
+            "compress_rowcols",
+            "compress_rows",
+            "compress_cols",
         ] {
             if let Ok(value) = m.getattr(name) {
                 ma.add(name, value)?;
@@ -27104,6 +27134,10 @@ mod tests {
             assert!(module.getattr("notmasked_contiguous").is_ok());
             assert!(module.getattr("clump_unmasked").is_ok());
             assert!(module.getattr("clump_masked").is_ok());
+            assert!(module.getattr("compress_nd").is_ok());
+            assert!(module.getattr("compress_rowcols").is_ok());
+            assert!(module.getattr("compress_rows").is_ok());
+            assert!(module.getattr("compress_cols").is_ok());
             assert!(module.getattr("masked_equal").is_ok());
             assert!(module.getattr("masked_not_equal").is_ok());
             assert!(module.getattr("vdot").is_ok());
@@ -27859,6 +27893,10 @@ mod tests {
                 "notmasked_contiguous",
                 "clump_unmasked",
                 "clump_masked",
+                "compress_nd",
+                "compress_rowcols",
+                "compress_rows",
+                "compress_cols",
             ] {
                 assert!(ma.getattr(name).is_ok(), "fnp_python.ma.{name} missing");
             }
@@ -39897,6 +39935,216 @@ mod tests {
                             );
                         }
                     }
+                }
+            }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ma_compress_row_column_helpers_match_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let ma_module = module.getattr("ma")?;
+            let numpy = py.import("numpy")?;
+            let numpy_ma = numpy.getattr("ma")?;
+            let ma_array = numpy_ma.getattr("array")?;
+
+            let partial_2d_kwargs = PyDict::new(py);
+            partial_2d_kwargs.set_item(
+                "mask",
+                vec![
+                    vec![true, false, false],
+                    vec![true, false, false],
+                    vec![false, false, false],
+                ],
+            )?;
+            let partial_2d = ma_array
+                .call(
+                    (vec![vec![0_i64, 1, 2], vec![3, 4, 5], vec![6, 7, 8]],),
+                    Some(&partial_2d_kwargs),
+                )?
+                .unbind();
+
+            let all_masked_2d_kwargs = PyDict::new(py);
+            all_masked_2d_kwargs.set_item("mask", vec![vec![true, true], vec![true, true]])?;
+            let all_masked_2d = ma_array
+                .call(
+                    (vec![vec![10_i64, 20], vec![30, 40]],),
+                    Some(&all_masked_2d_kwargs),
+                )?
+                .unbind();
+
+            let plain_2d = numpy
+                .getattr("array")?
+                .call1((vec![vec![5_i64, 6], vec![7, 8]],))?
+                .unbind();
+
+            let bad_1d = numpy
+                .getattr("array")?
+                .call1((vec![1_i64, 2, 3],))?
+                .unbind();
+
+            let rowcol_cases = [
+                ("partial-2d", partial_2d),
+                ("all-masked-2d", all_masked_2d),
+                ("plain-2d", plain_2d),
+                ("bad-1d", bad_1d),
+            ];
+
+            for name in ["compress_rows", "compress_cols"] {
+                let ours_fn = module.getattr(name)?;
+                let nested_fn = ma_module.getattr(name)?;
+                let numpy_fn = numpy_ma.getattr(name)?;
+
+                for (label, input) in &rowcol_cases {
+                    let args = PyTuple::new(py, [input.bind(py)])?;
+                    let ours = call_outcome(py, &ours_fn, &args, None)?;
+                    let nested = call_outcome(py, &nested_fn, &args, None)?;
+                    let theirs = call_outcome(py, &numpy_fn, &args, None)?;
+                    assert_eq!(ours, theirs, "{name} top-level {label} outcome diverged");
+                    assert_eq!(nested, theirs, "{name} nested {label} outcome diverged");
+                }
+            }
+
+            let compress_rowcols = module.getattr("compress_rowcols")?;
+            let nested_compress_rowcols = ma_module.getattr("compress_rowcols")?;
+            let numpy_compress_rowcols = numpy_ma.getattr("compress_rowcols")?;
+            for (label, input) in &rowcol_cases {
+                let args = PyTuple::new(py, [input.bind(py)])?;
+                let ours_default = call_outcome(py, &compress_rowcols, &args, None)?;
+                let nested_default = call_outcome(py, &nested_compress_rowcols, &args, None)?;
+                let theirs_default = call_outcome(py, &numpy_compress_rowcols, &args, None)?;
+                assert_eq!(
+                    ours_default, theirs_default,
+                    "compress_rowcols default top-level {label} outcome diverged"
+                );
+                assert_eq!(
+                    nested_default, theirs_default,
+                    "compress_rowcols default nested {label} outcome diverged"
+                );
+
+                for axis in [0_i64, 1_i64, -1_i64] {
+                    let ours_kwargs = PyDict::new(py);
+                    ours_kwargs.set_item("axis", axis)?;
+                    let nested_kwargs = PyDict::new(py);
+                    nested_kwargs.set_item("axis", axis)?;
+                    let theirs_kwargs = PyDict::new(py);
+                    theirs_kwargs.set_item("axis", axis)?;
+                    let ours = call_outcome(py, &compress_rowcols, &args, Some(&ours_kwargs))?;
+                    let nested =
+                        call_outcome(py, &nested_compress_rowcols, &args, Some(&nested_kwargs))?;
+                    let theirs =
+                        call_outcome(py, &numpy_compress_rowcols, &args, Some(&theirs_kwargs))?;
+                    assert_eq!(
+                        ours, theirs,
+                        "compress_rowcols axis={axis} top-level {label} outcome diverged"
+                    );
+                    assert_eq!(
+                        nested, theirs,
+                        "compress_rowcols axis={axis} nested {label} outcome diverged"
+                    );
+                }
+            }
+
+            let partial_3d_kwargs = PyDict::new(py);
+            partial_3d_kwargs.set_item(
+                "mask",
+                vec![
+                    vec![vec![false, false], vec![false, true]],
+                    vec![vec![false, false], vec![false, false]],
+                ],
+            )?;
+            let partial_3d = ma_array
+                .call(
+                    (vec![
+                        vec![vec![0_i64, 1], vec![2, 3]],
+                        vec![vec![4, 5], vec![6, 7]],
+                    ],),
+                    Some(&partial_3d_kwargs),
+                )?
+                .unbind();
+
+            let all_masked_3d_kwargs = PyDict::new(py);
+            all_masked_3d_kwargs.set_item(
+                "mask",
+                vec![
+                    vec![vec![true, true], vec![true, true]],
+                    vec![vec![true, true], vec![true, true]],
+                ],
+            )?;
+            let all_masked_3d = ma_array
+                .call(
+                    (vec![
+                        vec![vec![0_i64, 1], vec![2, 3]],
+                        vec![vec![4, 5], vec![6, 7]],
+                    ],),
+                    Some(&all_masked_3d_kwargs),
+                )?
+                .unbind();
+
+            let plain_3d = numpy
+                .getattr("array")?
+                .call1((vec![
+                    vec![vec![1_i64, 2], vec![3, 4]],
+                    vec![vec![5, 6], vec![7, 8]],
+                ],))?
+                .unbind();
+
+            let compress_nd_cases = [
+                ("partial-3d", partial_3d),
+                ("all-masked-3d", all_masked_3d),
+                ("plain-3d", plain_3d),
+            ];
+            let compress_nd = module.getattr("compress_nd")?;
+            let nested_compress_nd = ma_module.getattr("compress_nd")?;
+            let numpy_compress_nd = numpy_ma.getattr("compress_nd")?;
+            for (label, input) in &compress_nd_cases {
+                let args = PyTuple::new(py, [input.bind(py)])?;
+                let ours_default = call_outcome(py, &compress_nd, &args, None)?;
+                let nested_default = call_outcome(py, &nested_compress_nd, &args, None)?;
+                let theirs_default = call_outcome(py, &numpy_compress_nd, &args, None)?;
+                assert_eq!(
+                    ours_default, theirs_default,
+                    "compress_nd default top-level {label} outcome diverged"
+                );
+                assert_eq!(
+                    nested_default, theirs_default,
+                    "compress_nd default nested {label} outcome diverged"
+                );
+
+                for (axis_label, axis) in [
+                    ("axis-0", 0_i64.into_pyobject(py)?.into_any().unbind()),
+                    ("axis-1", 1_i64.into_pyobject(py)?.into_any().unbind()),
+                    (
+                        "axes-0-2",
+                        PyTuple::new(py, [0_i64, 2_i64])?.into_any().unbind(),
+                    ),
+                ] {
+                    let ours_kwargs = PyDict::new(py);
+                    ours_kwargs.set_item("axis", axis.bind(py))?;
+                    let nested_kwargs = PyDict::new(py);
+                    nested_kwargs.set_item("axis", axis.bind(py))?;
+                    let theirs_kwargs = PyDict::new(py);
+                    theirs_kwargs.set_item("axis", axis.bind(py))?;
+                    let ours = call_outcome(py, &compress_nd, &args, Some(&ours_kwargs))?;
+                    let nested =
+                        call_outcome(py, &nested_compress_nd, &args, Some(&nested_kwargs))?;
+                    let theirs = call_outcome(py, &numpy_compress_nd, &args, Some(&theirs_kwargs))?;
+                    assert_eq!(
+                        ours, theirs,
+                        "compress_nd {axis_label} top-level {label} outcome diverged"
+                    );
+                    assert_eq!(
+                        nested, theirs,
+                        "compress_nd {axis_label} nested {label} outcome diverged"
+                    );
                 }
             }
 
