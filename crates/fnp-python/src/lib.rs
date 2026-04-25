@@ -23230,6 +23230,15 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "var",
             "ptp",
             "anom",
+            "concatenate",
+            "stack",
+            "hstack",
+            "vstack",
+            "reshape",
+            "resize",
+            "transpose",
+            "diagonal",
+            "trace",
         ];
         if let Ok(np_ma) = py.import("numpy.ma") {
             for name in ma_core_names {
@@ -23239,7 +23248,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             }
         }
         let ma_getattr_src = pyo3::ffi::c_str!(
-            "_NUMPY_MA_CORE_NAMES = frozenset(('MaskedArray','masked_array','array','asarray','asanyarray','masked','nomask','masked_print_option','masked_singleton','MAError','MaskError','MaskType','mvoid','getdata','is_mask','isMA','isMaskedArray','isarray','harden_mask','soften_mask','cov','corrcoef','sum','prod','min','max','mean','median','std','var','ptp','anom'))\ndef __getattr__(name):\n    if name in _NUMPY_MA_CORE_NAMES:\n        import numpy.ma as _ma\n        return getattr(_ma, name)\n    raise AttributeError(name)\n"
+            "_NUMPY_MA_CORE_NAMES = frozenset(('MaskedArray','masked_array','array','asarray','asanyarray','masked','nomask','masked_print_option','masked_singleton','MAError','MaskError','MaskType','mvoid','getdata','is_mask','isMA','isMaskedArray','isarray','harden_mask','soften_mask','cov','corrcoef','sum','prod','min','max','mean','median','std','var','ptp','anom','concatenate','stack','hstack','vstack','reshape','resize','transpose','diagonal','trace'))\ndef __getattr__(name):\n    if name in _NUMPY_MA_CORE_NAMES:\n        import numpy.ma as _ma\n        return getattr(_ma, name)\n    raise AttributeError(name)\n"
         );
         let ma_dict = ma.dict();
         py.run(ma_getattr_src, Some(&ma_dict), None)?;
@@ -45672,6 +45681,121 @@ mod tests {
     }
 
     #[test]
+    fn ma_shape_composition_helpers_match_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_ma_shape")?;
+            fnp_python(&module)?;
+            let ma = module.getattr("ma")?;
+            let numpy = py.import("numpy")?;
+            let numpy_ma = numpy.getattr("ma")?;
+            let builtins = py.import("builtins")?;
+            let eval_fn = builtins.getattr("eval")?;
+            let globals = PyDict::new(py);
+            globals.set_item("np", numpy.clone())?;
+            let eval_with_globals = |code: &str| -> PyResult<pyo3::Bound<'_, PyAny>> {
+                eval_fn.call((code, &globals), None::<&pyo3::Bound<'_, PyDict>>)
+            };
+
+            let names = [
+                "concatenate",
+                "stack",
+                "hstack",
+                "vstack",
+                "reshape",
+                "resize",
+                "transpose",
+                "diagonal",
+                "trace",
+            ];
+            for name in names {
+                assert!(
+                    ma.getattr(name)?.is(&numpy_ma.getattr(name)?),
+                    "fnp_python.ma.{name} must be numpy.ma.{name}"
+                );
+            }
+
+            let arrays = eval_with_globals(
+                "[np.ma.array([[1, 2], [3, 4]], mask=[[False, True], [False, False]]), \
+                 np.ma.array([[5, 6], [7, 8]], mask=[[False, False], [True, False]])]",
+            )?;
+            let matrix = eval_with_globals(
+                "np.ma.array([[1, 2, 3], [4, 5, 6]], \
+                 mask=[[False, True, False], [False, False, True]])",
+            )?;
+            let square = eval_with_globals(
+                "np.ma.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]], \
+                 mask=[[False, True, False], [False, False, True], [True, False, False]])",
+            )?;
+            let shape_3x2 = eval_with_globals("(3, 2)")?;
+            let shape_3x4 = eval_with_globals("(3, 4)")?;
+            let axes_swap = eval_with_globals("(1, 0)")?;
+
+            let assert_same_call = |name: &str,
+                                    args: &pyo3::Bound<'_, PyTuple>,
+                                    kwargs: Option<&pyo3::Bound<'_, PyDict>>|
+             -> PyResult<()> {
+                let ours = ma.getattr(name)?.call(args, kwargs)?;
+                let theirs = numpy_ma.getattr(name)?.call(args, kwargs)?;
+                assert_eq!(
+                    repr_string(&ours),
+                    repr_string(&theirs),
+                    "numpy.ma.{name} result parity"
+                );
+                Ok(())
+            };
+
+            let arrays_args = PyTuple::new(py, [arrays.clone()])?;
+            for name in ["concatenate", "hstack", "vstack"] {
+                assert_same_call(name, &arrays_args, None)?;
+            }
+
+            let axis_one = PyDict::new(py);
+            axis_one.set_item("axis", 1)?;
+            assert_same_call("concatenate", &arrays_args, Some(&axis_one))?;
+            assert_same_call("stack", &arrays_args, None)?;
+            assert_same_call("stack", &arrays_args, Some(&axis_one))?;
+
+            assert_same_call(
+                "reshape",
+                &PyTuple::new(py, [matrix.clone(), shape_3x2.clone()])?,
+                None,
+            )?;
+            assert_same_call(
+                "resize",
+                &PyTuple::new(py, [matrix.clone(), shape_3x4.clone()])?,
+                None,
+            )?;
+            assert_same_call("transpose", &PyTuple::new(py, [matrix.clone()])?, None)?;
+            assert_same_call(
+                "transpose",
+                &PyTuple::new(py, [matrix.clone(), axes_swap.clone()])?,
+                None,
+            )?;
+
+            assert_same_call("diagonal", &PyTuple::new(py, [square.clone()])?, None)?;
+            let offset_one = PyDict::new(py);
+            offset_one.set_item("offset", 1)?;
+            assert_same_call(
+                "diagonal",
+                &PyTuple::new(py, [square.clone()])?,
+                Some(&offset_one),
+            )?;
+            assert_same_call("trace", &PyTuple::new(py, [square.clone()])?, None)?;
+            assert_same_call(
+                "trace",
+                &PyTuple::new(py, [square.clone()])?,
+                Some(&offset_one),
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn ma_core_classes_constants_helpers_match_numpy_oracles() {
         with_python(|py| {
             if !numpy_available(py) {
@@ -45717,6 +45841,15 @@ mod tests {
                 "var",
                 "ptp",
                 "anom",
+                "concatenate",
+                "stack",
+                "hstack",
+                "vstack",
+                "reshape",
+                "resize",
+                "transpose",
+                "diagonal",
+                "trace",
             ] {
                 assert!(
                     ma.getattr(name)?.is(&numpy_ma.getattr(name)?),
