@@ -23263,6 +23263,34 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "fromfunction",
             "identity",
             "indices",
+            // g0i7: masked selection/sorting helpers. Re-export numpy.ma
+            // functions so mask-aware where/sort/take/put semantics and error
+            // surfaces stay identical to NumPy.
+            "where",
+            "sort",
+            "argsort",
+            "choose",
+            "compress",
+            "take",
+            "put",
+            "nonzero",
+            // fsr5: comparison + logical helpers — mask-aware element-wise
+            // predicates and the boolean reducers that operate over masked
+            // arrays. Re-export so `fnp_python.ma.equal(a, b)` etc. dispatch
+            // through numpy.ma's mask-propagating implementations.
+            "equal",
+            "not_equal",
+            "less",
+            "less_equal",
+            "greater",
+            "greater_equal",
+            "logical_and",
+            "logical_or",
+            "logical_xor",
+            "logical_not",
+            "all",
+            "any",
+            "allclose",
         ];
         if let Ok(np_ma) = py.import("numpy.ma") {
             for name in ma_core_names {
@@ -23272,7 +23300,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             }
         }
         let ma_getattr_src = pyo3::ffi::c_str!(
-            "_NUMPY_MA_CORE_NAMES = frozenset(('MaskedArray','masked_array','array','asarray','asanyarray','masked','nomask','masked_print_option','masked_singleton','MAError','MaskError','MaskType','mvoid','getdata','is_mask','isMA','isMaskedArray','isarray','harden_mask','soften_mask','cov','corrcoef','sum','prod','min','max','mean','median','std','var','ptp','anom','concatenate','stack','hstack','vstack','reshape','resize','transpose','diagonal','trace','abs','absolute','sqrt','exp','log','log10','sin','cos','power','add','subtract','multiply','divide','empty','empty_like','zeros','zeros_like','ones','ones_like','arange','frombuffer','fromfunction','identity','indices'))\ndef __getattr__(name):\n    if name in _NUMPY_MA_CORE_NAMES:\n        import numpy.ma as _ma\n        return getattr(_ma, name)\n    raise AttributeError(name)\n"
+            "_NUMPY_MA_CORE_NAMES = frozenset(('MaskedArray','masked_array','array','asarray','asanyarray','masked','nomask','masked_print_option','masked_singleton','MAError','MaskError','MaskType','mvoid','getdata','is_mask','isMA','isMaskedArray','isarray','harden_mask','soften_mask','cov','corrcoef','sum','prod','min','max','mean','median','std','var','ptp','anom','concatenate','stack','hstack','vstack','reshape','resize','transpose','diagonal','trace','abs','absolute','sqrt','exp','log','log10','sin','cos','power','add','subtract','multiply','divide','empty','empty_like','zeros','zeros_like','ones','ones_like','arange','frombuffer','fromfunction','identity','indices','where','sort','argsort','choose','compress','take','put','nonzero','equal','not_equal','less','less_equal','greater','greater_equal','logical_and','logical_or','logical_xor','logical_not','all','any','allclose'))\ndef __getattr__(name):\n    if name in _NUMPY_MA_CORE_NAMES:\n        import numpy.ma as _ma\n        return getattr(_ma, name)\n    raise AttributeError(name)\n"
         );
         let ma_dict = ma.dict();
         py.run(ma_getattr_src, Some(&ma_dict), None)?;
@@ -46009,6 +46037,300 @@ mod tests {
             ] {
                 assert_same_repr(ours_code, theirs_code)?;
             }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ma_comparison_helpers_match_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_ma_comparison")?;
+            fnp_python(&module)?;
+            let ma = module.getattr("ma")?;
+            let numpy = py.import("numpy")?;
+            let numpy_ma = numpy.getattr("ma")?;
+            let builtins = py.import("builtins")?;
+            let eval_fn = builtins.getattr("eval")?;
+            let globals = PyDict::new(py);
+            globals.set_item("np", numpy.clone())?;
+            globals.set_item("fnp_ma", ma.clone())?;
+            globals.set_item("np_ma", numpy_ma.clone())?;
+            let eval_with_globals = |code: &str| -> PyResult<pyo3::Bound<'_, PyAny>> {
+                eval_fn.call((code, &globals), None::<&pyo3::Bound<'_, PyDict>>)
+            };
+
+            // fsr5 surface: every name must be the *same* numpy.ma object
+            // so isinstance/identity checks done against numpy.ma still
+            // succeed when callers come through fnp_python.ma.
+            let names = [
+                "equal",
+                "not_equal",
+                "less",
+                "less_equal",
+                "greater",
+                "greater_equal",
+                "logical_and",
+                "logical_or",
+                "logical_xor",
+                "logical_not",
+                "all",
+                "any",
+                "allclose",
+            ];
+            for name in names {
+                assert!(
+                    ma.getattr(name)?.is(&numpy_ma.getattr(name)?),
+                    "fnp_python.ma.{name} must be numpy.ma.{name}"
+                );
+            }
+
+            let assert_same_repr = |ours_code: &str, theirs_code: &str| -> PyResult<()> {
+                let ours = eval_with_globals(ours_code)?;
+                let theirs = eval_with_globals(theirs_code)?;
+                assert_eq!(repr_string(&ours), repr_string(&theirs), "{ours_code}");
+                Ok(())
+            };
+
+            // Element-wise binary comparisons preserve mask propagation:
+            // a position masked in either operand is masked in the output.
+            for op in ["equal", "not_equal", "less", "less_equal", "greater", "greater_equal"] {
+                let ours = format!(
+                    "fnp_ma.{op}(np.ma.array([1, 2, 3, 4], mask=[False, True, False, False]), \
+                     np.ma.array([1, 2, 5, 4], mask=[False, False, False, True]))"
+                );
+                let theirs = format!(
+                    "np_ma.{op}(np.ma.array([1, 2, 3, 4], mask=[False, True, False, False]), \
+                     np.ma.array([1, 2, 5, 4], mask=[False, False, False, True]))"
+                );
+                assert_same_repr(&ours, &theirs)?;
+
+                // Scalar broadcast — scalar against a partially-masked
+                // array exercises the broadcast-then-mask path.
+                let ours_scalar = format!(
+                    "fnp_ma.{op}(np.ma.array([1, 2, 3, 4], mask=[False, True, False, False]), 2)"
+                );
+                let theirs_scalar = format!(
+                    "np_ma.{op}(np.ma.array([1, 2, 3, 4], mask=[False, True, False, False]), 2)"
+                );
+                assert_same_repr(&ours_scalar, &theirs_scalar)?;
+            }
+
+            // Logical reducers: bool inputs with masked positions.
+            for op in ["logical_and", "logical_or", "logical_xor"] {
+                let ours = format!(
+                    "fnp_ma.{op}(np.ma.array([True, False, True], mask=[False, False, True]), \
+                     np.ma.array([True, True, False], mask=[False, True, False]))"
+                );
+                let theirs = format!(
+                    "np_ma.{op}(np.ma.array([True, False, True], mask=[False, False, True]), \
+                     np.ma.array([True, True, False], mask=[False, True, False]))"
+                );
+                assert_same_repr(&ours, &theirs)?;
+            }
+            assert_same_repr(
+                "fnp_ma.logical_not(np.ma.array([True, False, True], mask=[False, True, False]))",
+                "np_ma.logical_not(np.ma.array([True, False, True], mask=[False, True, False]))",
+            )?;
+
+            // all / any over masked arrays — mask=True positions are
+            // ignored by both reducers, axis=0/1 must agree, and the
+            // empty-after-masking case still returns the documented
+            // identity (True for all, False for any).
+            for op in ["all", "any"] {
+                for code in [
+                    format!(
+                        "fnp_ma.{op}(np.ma.array([[True, True], [True, False]], \
+                         mask=[[False, True], [False, False]]))"
+                    ),
+                    format!(
+                        "fnp_ma.{op}(np.ma.array([[True, True], [True, False]], \
+                         mask=[[False, True], [False, False]]), axis=0)"
+                    ),
+                    format!(
+                        "fnp_ma.{op}(np.ma.array([[True, True], [True, False]], \
+                         mask=[[False, True], [False, False]]), axis=1)"
+                    ),
+                ] {
+                    let theirs = code.replacen("fnp_ma", "np_ma", 1);
+                    assert_same_repr(&code, &theirs)?;
+                }
+            }
+
+            // allclose on masked arrays: masked positions are not
+            // compared, finite mismatches must surface.
+            assert_same_repr(
+                "bool(fnp_ma.allclose(\
+                 np.ma.array([1.0, 2.0, 3.0], mask=[False, True, False]), \
+                 np.ma.array([1.0 + 1e-9, 99.0, 3.0], mask=[False, True, False])))",
+                "bool(np_ma.allclose(\
+                 np.ma.array([1.0, 2.0, 3.0], mask=[False, True, False]), \
+                 np.ma.array([1.0 + 1e-9, 99.0, 3.0], mask=[False, True, False])))",
+            )?;
+            assert_same_repr(
+                "bool(fnp_ma.allclose(\
+                 np.ma.array([1.0, 2.0, 3.0], mask=False), \
+                 np.ma.array([1.0, 2.5, 3.0], mask=False)))",
+                "bool(np_ma.allclose(\
+                 np.ma.array([1.0, 2.0, 3.0], mask=False), \
+                 np.ma.array([1.0, 2.5, 3.0], mask=False)))",
+            )?;
+
+            // The PEP-562 fallback path: dropping the eager re-export
+            // forces the lazy __getattr__ to resolve. Build a fresh
+            // module, strip eager attrs, and confirm comparison helpers
+            // still resolve to numpy.ma's objects.
+            let lazy_module = PyModule::new(py, "fnp_python_test_ma_comparison_lazy")?;
+            fnp_python(&lazy_module)?;
+            let lazy_ma = lazy_module.getattr("ma")?;
+            for name in names {
+                if lazy_ma.hasattr(name)? {
+                    lazy_ma.delattr(name)?;
+                }
+                let resolved = lazy_ma.getattr(name)?;
+                assert!(
+                    resolved.is(&numpy_ma.getattr(name)?),
+                    "lazy fallback for fnp_python.ma.{name} must resolve to numpy.ma.{name}"
+                );
+            }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ma_selection_sorting_helpers_match_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_ma_selection")?;
+            fnp_python(&module)?;
+            let ma = module.getattr("ma")?;
+            let numpy = py.import("numpy")?;
+            let numpy_ma = numpy.getattr("ma")?;
+            let builtins = py.import("builtins")?;
+            let eval_fn = builtins.getattr("eval")?;
+            let globals = PyDict::new(py);
+            globals.set_item("np", numpy.clone())?;
+            globals.set_item("fnp_ma", ma.clone())?;
+            globals.set_item("np_ma", numpy_ma.clone())?;
+            let eval_with_globals = |code: &str| -> PyResult<pyo3::Bound<'_, PyAny>> {
+                eval_fn.call((code, &globals), None::<&pyo3::Bound<'_, PyDict>>)
+            };
+
+            for name in [
+                "where", "sort", "argsort", "choose", "compress", "take", "put", "nonzero",
+            ] {
+                assert!(
+                    ma.getattr(name)?.is(&numpy_ma.getattr(name)?),
+                    "fnp_python.ma.{name} must be numpy.ma.{name}"
+                );
+            }
+
+            let assert_same_repr = |ours_code: &str, theirs_code: &str| -> PyResult<()> {
+                let ours = eval_with_globals(ours_code)?;
+                let theirs = eval_with_globals(theirs_code)?;
+                assert_eq!(repr_string(&ours), repr_string(&theirs), "{ours_code}");
+                Ok(())
+            };
+            let assert_same_error = |ours_code: &str, theirs_code: &str| -> PyResult<()> {
+                match (
+                    eval_with_globals(ours_code),
+                    eval_with_globals(theirs_code),
+                ) {
+                    (Err(ours), Err(theirs)) => assert_pyerr_matches_numpy(py, ours, theirs),
+                    (Ok(ours), Ok(theirs)) => {
+                        assert_eq!(repr_string(&ours), repr_string(&theirs), "{ours_code}");
+                        Ok(())
+                    }
+                    (Ok(ours), Err(theirs)) => {
+                        panic!(
+                            "{ours_code} unexpectedly succeeded with {} while NumPy raised {}",
+                            repr_string(&ours),
+                            theirs
+                        );
+                    }
+                    (Err(ours), Ok(theirs)) => {
+                        panic!(
+                            "{ours_code} raised {} while NumPy succeeded with {}",
+                            ours,
+                            repr_string(&theirs)
+                        );
+                    }
+                }
+            };
+
+            assert_same_repr(
+                "fnp_ma.where(np.ma.array([True, False, True], mask=[False, True, False]), \
+                 np.ma.array([1, 2, 3], mask=[False, False, True]), \
+                 np.ma.array([10, 20, 30], mask=[False, True, False]))",
+                "np_ma.where(np.ma.array([True, False, True], mask=[False, True, False]), \
+                 np.ma.array([1, 2, 3], mask=[False, False, True]), \
+                 np.ma.array([10, 20, 30], mask=[False, True, False]))",
+            )?;
+            assert_same_repr(
+                "fnp_ma.sort(np.ma.array([[3, 1, 2], [6, 5, 4]], \
+                 mask=[[False, True, False], [True, False, False]]), axis=1, endwith=False)",
+                "np_ma.sort(np.ma.array([[3, 1, 2], [6, 5, 4]], \
+                 mask=[[False, True, False], [True, False, False]]), axis=1, endwith=False)",
+            )?;
+            assert_same_repr(
+                "fnp_ma.argsort(np.ma.array([[3, 1, 2], [6, 5, 4]], \
+                 mask=[[False, True, False], [True, False, False]]), axis=0, endwith=True)",
+                "np_ma.argsort(np.ma.array([[3, 1, 2], [6, 5, 4]], \
+                 mask=[[False, True, False], [True, False, False]]), axis=0, endwith=True)",
+            )?;
+            assert_same_repr(
+                "fnp_ma.choose(np.ma.array([0, 1, 2, 1], mask=[False, False, True, False]), \
+                 [np.ma.array([10, 11, 12, 13], mask=[False, True, False, False]), \
+                  np.ma.array([20, 21, 22, 23], mask=[False, False, False, True]), \
+                  np.ma.array([30, 31, 32, 33], mask=[True, False, False, False])])",
+                "np_ma.choose(np.ma.array([0, 1, 2, 1], mask=[False, False, True, False]), \
+                 [np.ma.array([10, 11, 12, 13], mask=[False, True, False, False]), \
+                  np.ma.array([20, 21, 22, 23], mask=[False, False, False, True]), \
+                  np.ma.array([30, 31, 32, 33], mask=[True, False, False, False])])",
+            )?;
+            assert_same_repr(
+                "fnp_ma.compress([True, False], np.ma.array([[1, 2, 3], [4, 5, 6]], \
+                 mask=[[False, True, False], [False, False, True]]), axis=0)",
+                "np_ma.compress([True, False], np.ma.array([[1, 2, 3], [4, 5, 6]], \
+                 mask=[[False, True, False], [False, False, True]]), axis=0)",
+            )?;
+            assert_same_repr(
+                "fnp_ma.take(np.ma.array([[1, 2, 3], [4, 5, 6]], \
+                 mask=[[False, True, False], [False, False, True]]), [2, 0], axis=1)",
+                "np_ma.take(np.ma.array([[1, 2, 3], [4, 5, 6]], \
+                 mask=[[False, True, False], [False, False, True]]), [2, 0], axis=1)",
+            )?;
+            assert_same_repr(
+                "(lambda a: (fnp_ma.put(a, [0, 2], \
+                 np.ma.array([99, 77], mask=[False, True])), a))\
+                 (np.ma.array([1, 2, 3], mask=[False, True, False]))",
+                "(lambda a: (np_ma.put(a, [0, 2], \
+                 np.ma.array([99, 77], mask=[False, True])), a))\
+                 (np.ma.array([1, 2, 3], mask=[False, True, False]))",
+            )?;
+            assert_same_repr(
+                "fnp_ma.nonzero(np.ma.array([[0, 2], [3, 0]], \
+                 mask=[[False, True], [False, False]]))",
+                "np_ma.nonzero(np.ma.array([[0, 2], [3, 0]], \
+                 mask=[[False, True], [False, False]]))",
+            )?;
+
+            assert_same_error(
+                "fnp_ma.sort(np.ma.array([1, 2, 3]), axis=2)",
+                "np_ma.sort(np.ma.array([1, 2, 3]), axis=2)",
+            )?;
+            assert_same_error(
+                "fnp_ma.take(np.ma.array([1, 2, 3]), [0], mode='invalid')",
+                "np_ma.take(np.ma.array([1, 2, 3]), [0], mode='invalid')",
+            )?;
 
             Ok(())
         });
