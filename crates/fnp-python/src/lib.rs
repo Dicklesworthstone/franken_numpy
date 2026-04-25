@@ -16660,6 +16660,119 @@ fn recfunctions_unstructured_to_structured(
     Ok(out.unbind())
 }
 
+fn recfunctions_passthrough(
+    py: Python<'_>,
+    name: &str,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    Ok(py
+        .import("numpy.lib.recfunctions")?
+        .getattr(name)?
+        .call(args, kwargs)?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn recfunctions_repack_fields(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    recfunctions_passthrough(py, "repack_fields", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn recfunctions_require_fields(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    recfunctions_passthrough(py, "require_fields", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn recfunctions_assign_fields_by_name(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    recfunctions_passthrough(py, "assign_fields_by_name", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn recfunctions_recursive_fill_fields(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    recfunctions_passthrough(py, "recursive_fill_fields", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn recfunctions_join_by(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    recfunctions_passthrough(py, "join_by", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn recfunctions_find_duplicates(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    recfunctions_passthrough(py, "find_duplicates", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn recfunctions_get_names(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    recfunctions_passthrough(py, "get_names", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn recfunctions_get_names_flat(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    recfunctions_passthrough(py, "get_names_flat", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn recfunctions_flatten_descr(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    recfunctions_passthrough(py, "flatten_descr", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn recfunctions_get_fieldstructure(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    recfunctions_passthrough(py, "get_fieldstructure", args, kwargs)
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, fill_value=None, out=None, *, keepdims=false))]
 fn ma_argmax(
@@ -21879,6 +21992,16 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         recfunctions_unstructured_to_structured,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(recfunctions_repack_fields, m)?)?;
+    m.add_function(wrap_pyfunction!(recfunctions_require_fields, m)?)?;
+    m.add_function(wrap_pyfunction!(recfunctions_assign_fields_by_name, m)?)?;
+    m.add_function(wrap_pyfunction!(recfunctions_recursive_fill_fields, m)?)?;
+    m.add_function(wrap_pyfunction!(recfunctions_join_by, m)?)?;
+    m.add_function(wrap_pyfunction!(recfunctions_find_duplicates, m)?)?;
+    m.add_function(wrap_pyfunction!(recfunctions_get_names, m)?)?;
+    m.add_function(wrap_pyfunction!(recfunctions_get_names_flat, m)?)?;
+    m.add_function(wrap_pyfunction!(recfunctions_flatten_descr, m)?)?;
+    m.add_function(wrap_pyfunction!(recfunctions_get_fieldstructure, m)?)?;
     m.add_function(wrap_pyfunction!(i0, m)?)?;
     m.add_function(wrap_pyfunction!(asfortranarray, m)?)?;
     m.add_function(wrap_pyfunction!(isrealobj, m)?)?;
@@ -22462,6 +22585,23 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 "unstructured_to_structured",
                 "recfunctions_unstructured_to_structured",
             ),
+            ("structured_to_unstructured", "structured_to_unstructured"),
+            ("repack_fields", "recfunctions_repack_fields"),
+            ("require_fields", "recfunctions_require_fields"),
+            (
+                "assign_fields_by_name",
+                "recfunctions_assign_fields_by_name",
+            ),
+            (
+                "recursive_fill_fields",
+                "recfunctions_recursive_fill_fields",
+            ),
+            ("join_by", "recfunctions_join_by"),
+            ("find_duplicates", "recfunctions_find_duplicates"),
+            ("get_names", "recfunctions_get_names"),
+            ("get_names_flat", "recfunctions_get_names_flat"),
+            ("flatten_descr", "recfunctions_flatten_descr"),
+            ("get_fieldstructure", "recfunctions_get_fieldstructure"),
         ] {
             if let Ok(value) = m.getattr(flat_name) {
                 recfunctions.add(numpy_name, value)?;
@@ -27315,6 +27455,16 @@ mod tests {
                     .getattr("recfunctions_unstructured_to_structured")
                     .is_ok()
             );
+            assert!(module.getattr("recfunctions_repack_fields").is_ok());
+            assert!(module.getattr("recfunctions_require_fields").is_ok());
+            assert!(module.getattr("recfunctions_assign_fields_by_name").is_ok());
+            assert!(module.getattr("recfunctions_recursive_fill_fields").is_ok());
+            assert!(module.getattr("recfunctions_join_by").is_ok());
+            assert!(module.getattr("recfunctions_find_duplicates").is_ok());
+            assert!(module.getattr("recfunctions_get_names").is_ok());
+            assert!(module.getattr("recfunctions_get_names_flat").is_ok());
+            assert!(module.getattr("recfunctions_flatten_descr").is_ok());
+            assert!(module.getattr("recfunctions_get_fieldstructure").is_ok());
             assert!(module.getattr("i0").is_ok());
             assert!(module.getattr("asfortranarray").is_ok());
             assert!(module.getattr("isrealobj").is_ok());
@@ -27970,6 +28120,17 @@ mod tests {
                 "append_fields",
                 "merge_arrays",
                 "unstructured_to_structured",
+                "structured_to_unstructured",
+                "repack_fields",
+                "require_fields",
+                "assign_fields_by_name",
+                "recursive_fill_fields",
+                "join_by",
+                "find_duplicates",
+                "get_names",
+                "get_names_flat",
+                "flatten_descr",
+                "get_fieldstructure",
             ] {
                 assert!(
                     recfunctions.getattr(name).is_ok(),
@@ -58575,6 +58736,180 @@ mod tests {
             let ours_u2s = u2s_fn.call((unstructured.clone(),), Some(&dkw))?;
             let theirs_u2s = numpy_u2s.call((unstructured.clone(),), Some(&dkw))?;
             assert_array_matches_numpy(&ours_u2s, &theirs_u2s)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn recfunctions_remaining_helpers_match_numpy_structured_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let recfunctions = module.getattr("lib")?.getattr("recfunctions")?;
+            let nrf = py.import("numpy.lib.recfunctions")?;
+            let numpy = py.import("numpy")?;
+            let builtins = py.import("builtins")?;
+            let eval_fn = builtins.getattr("eval")?;
+            let globals = PyDict::new(py);
+            globals.set_item("np", numpy.clone())?;
+            let eval_with_globals = |code: &str| -> PyResult<pyo3::Bound<'_, PyAny>> {
+                eval_fn.call((code, &globals), None::<&pyo3::Bound<'_, PyDict>>)
+            };
+
+            let flat =
+                eval_with_globals("np.array([(1, 2.5), (3, 4.5)], dtype=[('a','i4'),('b','f8')])")?;
+            let nested = eval_with_globals(
+                "np.array([(1, (2.0, 3), (4, 5)), (6, (7.0, 8), (9, 10))], dtype=[('id','i4'),('meta',[('score','f4'),('flag','i2')]),('vec','i4',(2,))])",
+            )?;
+
+            // structured_to_unstructured is already a top-level NumPy helper;
+            // this bead also exposes it through lib.recfunctions.
+            let s2u_top = module.getattr("structured_to_unstructured")?;
+            let s2u_nested = recfunctions.getattr("structured_to_unstructured")?;
+            let s2u_numpy = nrf.getattr("structured_to_unstructured")?;
+            let dtype_kwargs = PyDict::new(py);
+            dtype_kwargs.set_item("dtype", numpy.getattr("float32")?)?;
+            let ours_s2u = s2u_top.call((flat.clone(),), Some(&dtype_kwargs))?;
+            let nested_s2u = s2u_nested.call((flat.clone(),), Some(&dtype_kwargs))?;
+            let theirs_s2u = s2u_numpy.call((flat.clone(),), Some(&dtype_kwargs))?;
+            assert_array_matches_numpy(&ours_s2u, &theirs_s2u)?;
+            assert_array_matches_numpy(&nested_s2u, &theirs_s2u)?;
+
+            let repack_kwargs = PyDict::new(py);
+            repack_kwargs.set_item("recurse", true)?;
+            let ours_repack = module
+                .getattr("recfunctions_repack_fields")?
+                .call((nested.clone(),), Some(&repack_kwargs))?;
+            let nested_repack = recfunctions
+                .getattr("repack_fields")?
+                .call((nested.clone(),), Some(&repack_kwargs))?;
+            let theirs_repack = nrf
+                .getattr("repack_fields")?
+                .call((nested.clone(),), Some(&repack_kwargs))?;
+            assert_array_matches_numpy(&ours_repack, &theirs_repack)?;
+            assert_array_matches_numpy(&nested_repack, &theirs_repack)?;
+            assert_eq!(
+                repr_string(&ours_repack.getattr("dtype")?.getattr("descr")?),
+                repr_string(&theirs_repack.getattr("dtype")?.getattr("descr")?)
+            );
+
+            let required_dtype = eval_with_globals("np.dtype([('vec','i4',(2,)),('id','i4')])")?;
+            let ours_require = module
+                .getattr("recfunctions_require_fields")?
+                .call1((nested.clone(), required_dtype.clone()))?;
+            let nested_require = recfunctions
+                .getattr("require_fields")?
+                .call1((nested.clone(), required_dtype.clone()))?;
+            let theirs_require = nrf
+                .getattr("require_fields")?
+                .call1((nested.clone(), required_dtype.clone()))?;
+            assert_array_matches_numpy(&ours_require, &theirs_require)?;
+            assert_array_matches_numpy(&nested_require, &theirs_require)?;
+
+            let make_assign_dst =
+                || eval_with_globals("np.zeros(2, dtype=[('b','f8'),('a','i4'),('extra','i1')])");
+            let assign_kwargs = PyDict::new(py);
+            assign_kwargs.set_item("zero_unassigned", false)?;
+            let top_dst = make_assign_dst()?;
+            let nested_dst = make_assign_dst()?;
+            let numpy_dst = make_assign_dst()?;
+            let top_assign = module.getattr("recfunctions_assign_fields_by_name")?;
+            let nested_assign = recfunctions.getattr("assign_fields_by_name")?;
+            let numpy_assign = nrf.getattr("assign_fields_by_name")?;
+            assert!(
+                top_assign
+                    .call((top_dst.clone(), flat.clone()), Some(&assign_kwargs))?
+                    .is_none()
+            );
+            assert!(
+                nested_assign
+                    .call((nested_dst.clone(), flat.clone()), Some(&assign_kwargs))?
+                    .is_none()
+            );
+            assert!(
+                numpy_assign
+                    .call((numpy_dst.clone(), flat.clone()), Some(&assign_kwargs))?
+                    .is_none()
+            );
+            assert_array_matches_numpy(&top_dst, &numpy_dst)?;
+            assert_array_matches_numpy(&nested_dst, &numpy_dst)?;
+
+            let make_fill_dst = || eval_with_globals("np.zeros(2, dtype=[('a','i4'),('b','f8')])");
+            let top_fill_dst = make_fill_dst()?;
+            let nested_fill_dst = make_fill_dst()?;
+            let numpy_fill_dst = make_fill_dst()?;
+            let top_fill = module.getattr("recfunctions_recursive_fill_fields")?;
+            let nested_fill = recfunctions.getattr("recursive_fill_fields")?;
+            let numpy_fill = nrf.getattr("recursive_fill_fields")?;
+            let ours_fill = top_fill.call1((flat.clone(), top_fill_dst.clone()))?;
+            let nested_fill_result = nested_fill.call1((flat.clone(), nested_fill_dst.clone()))?;
+            let theirs_fill = numpy_fill.call1((flat.clone(), numpy_fill_dst.clone()))?;
+            assert_array_matches_numpy(&ours_fill, &theirs_fill)?;
+            assert_array_matches_numpy(&nested_fill_result, &theirs_fill)?;
+            assert_array_matches_numpy(&top_fill_dst, &numpy_fill_dst)?;
+            assert_array_matches_numpy(&nested_fill_dst, &numpy_fill_dst)?;
+
+            let left = eval_with_globals(
+                "np.array([(1, 'a'), (2, 'b')], dtype=[('key','i4'),('left','U1')])",
+            )?;
+            let right = eval_with_globals(
+                "np.array([(2, 10.0), (3, 30.0)], dtype=[('key','i4'),('right','f8')])",
+            )?;
+            let join_kwargs = PyDict::new(py);
+            join_kwargs.set_item("jointype", "inner")?;
+            join_kwargs.set_item("usemask", false)?;
+            let ours_join = module
+                .getattr("recfunctions_join_by")?
+                .call(("key", left.clone(), right.clone()), Some(&join_kwargs))?;
+            let nested_join = recfunctions
+                .getattr("join_by")?
+                .call(("key", left.clone(), right.clone()), Some(&join_kwargs))?;
+            let theirs_join = nrf
+                .getattr("join_by")?
+                .call(("key", left.clone(), right.clone()), Some(&join_kwargs))?;
+            assert_array_matches_numpy(&ours_join, &theirs_join)?;
+            assert_array_matches_numpy(&nested_join, &theirs_join)?;
+
+            let duplicates = eval_with_globals(
+                "np.ma.array([(1, 'a'), (1, 'b'), (2, 'c')], dtype=[('key','i4'),('val','U1')])",
+            )?;
+            let dup_kwargs = PyDict::new(py);
+            dup_kwargs.set_item("key", "key")?;
+            dup_kwargs.set_item("return_index", true)?;
+            let ours_dup = module
+                .getattr("recfunctions_find_duplicates")?
+                .call((duplicates.clone(),), Some(&dup_kwargs))?;
+            let nested_dup = recfunctions
+                .getattr("find_duplicates")?
+                .call((duplicates.clone(),), Some(&dup_kwargs))?;
+            let theirs_dup = nrf
+                .getattr("find_duplicates")?
+                .call((duplicates.clone(),), Some(&dup_kwargs))?;
+            assert_eq!(repr_string(&ours_dup), repr_string(&theirs_dup));
+            assert_eq!(repr_string(&nested_dup), repr_string(&theirs_dup));
+
+            let nested_dtype = nested.getattr("dtype")?;
+            for (top_name, numpy_name) in [
+                ("recfunctions_get_names", "get_names"),
+                ("recfunctions_get_names_flat", "get_names_flat"),
+                ("recfunctions_flatten_descr", "flatten_descr"),
+                ("recfunctions_get_fieldstructure", "get_fieldstructure"),
+            ] {
+                let ours = module.getattr(top_name)?.call1((&nested_dtype,))?;
+                let nested_result = recfunctions.getattr(numpy_name)?.call1((&nested_dtype,))?;
+                let theirs = nrf.getattr(numpy_name)?.call1((&nested_dtype,))?;
+                assert_eq!(repr_string(&ours), repr_string(&theirs), "{top_name}");
+                assert_eq!(
+                    repr_string(&nested_result),
+                    repr_string(&theirs),
+                    "{numpy_name}"
+                );
+            }
 
             Ok(())
         });
