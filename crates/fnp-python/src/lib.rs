@@ -22221,6 +22221,21 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // workers still satisfy attribute-existence probes and
         // resolve to the real class on first access.
         let polynomial = PyModule::new(py, "polynomial")?;
+        let polynomial_root_names = [
+            "set_default_printstyle",
+            "polynomial",
+            "Polynomial",
+            "chebyshev",
+            "Chebyshev",
+            "legendre",
+            "Legendre",
+            "hermite",
+            "Hermite",
+            "hermite_e",
+            "HermiteE",
+            "laguerre",
+            "Laguerre",
+        ];
         if let Ok(np_poly) = py.import("numpy.polynomial") {
             for name in [
                 "Polynomial",
@@ -22269,6 +22284,20 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                     polynomial.setattr(sub, submod)?;
                 }
             }
+            if let Ok(all_names) = np_poly.getattr("__all__") {
+                polynomial.setattr("__all__", all_names.clone())?;
+                for item in all_names.try_iter()? {
+                    let name = item?.extract::<String>()?;
+                    if polynomial.getattr(name.as_str()).is_err()
+                        && let Ok(value) = np_poly.getattr(name.as_str())
+                    {
+                        polynomial.setattr(name.as_str(), value)?;
+                    }
+                }
+            }
+        }
+        if polynomial.getattr("__all__").is_err() {
+            polynomial.setattr("__all__", PyList::new(py, polynomial_root_names)?)?;
         }
         m.add_submodule(&polynomial)?;
         m.add("polynomial", polynomial)?;
@@ -24482,6 +24511,20 @@ mod tests {
             fnp_python(&module)?;
             let polynomial = module.getattr("polynomial")?;
             let np_poly = py.import("numpy.polynomial")?;
+            let numpy_polynomial_all = np_poly.getattr("__all__")?;
+            if repr_string(&polynomial.getattr("__all__")?) != repr_string(&numpy_polynomial_all) {
+                return Err(PyValueError::new_err(
+                    "fnp_python.polynomial.__all__ must match numpy.polynomial.__all__",
+                ));
+            }
+            for item in numpy_polynomial_all.try_iter()? {
+                let name = item?.extract::<String>()?;
+                if !polynomial.hasattr(name.as_str())? {
+                    return Err(PyValueError::new_err(format!(
+                        "fnp_python.polynomial missing numpy.polynomial public name {name}"
+                    )));
+                }
+            }
             for name in [
                 "Polynomial",
                 "Chebyshev",
