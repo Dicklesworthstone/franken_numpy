@@ -16823,6 +16823,109 @@ fn recfunctions_get_fieldstructure(
     recfunctions_passthrough(py, "get_fieldstructure", args, kwargs)
 }
 
+fn scimath_passthrough(
+    py: Python<'_>,
+    name: &str,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    Ok(py
+        .import("numpy.lib.scimath")?
+        .getattr(name)?
+        .call(args, kwargs)?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn scimath_sqrt(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    scimath_passthrough(py, "sqrt", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn scimath_log(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    scimath_passthrough(py, "log", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn scimath_log2(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    scimath_passthrough(py, "log2", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn scimath_log10(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    scimath_passthrough(py, "log10", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn scimath_logn(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    scimath_passthrough(py, "logn", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn scimath_power(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    scimath_passthrough(py, "power", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn scimath_arccos(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    scimath_passthrough(py, "arccos", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn scimath_arcsin(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    scimath_passthrough(py, "arcsin", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn scimath_arctanh(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    scimath_passthrough(py, "arctanh", args, kwargs)
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, fill_value=None, out=None, *, keepdims=false))]
 fn ma_argmax(
@@ -22057,6 +22160,15 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(recfunctions_get_names_flat, m)?)?;
     m.add_function(wrap_pyfunction!(recfunctions_flatten_descr, m)?)?;
     m.add_function(wrap_pyfunction!(recfunctions_get_fieldstructure, m)?)?;
+    m.add_function(wrap_pyfunction!(scimath_sqrt, m)?)?;
+    m.add_function(wrap_pyfunction!(scimath_log, m)?)?;
+    m.add_function(wrap_pyfunction!(scimath_log2, m)?)?;
+    m.add_function(wrap_pyfunction!(scimath_log10, m)?)?;
+    m.add_function(wrap_pyfunction!(scimath_logn, m)?)?;
+    m.add_function(wrap_pyfunction!(scimath_power, m)?)?;
+    m.add_function(wrap_pyfunction!(scimath_arccos, m)?)?;
+    m.add_function(wrap_pyfunction!(scimath_arcsin, m)?)?;
+    m.add_function(wrap_pyfunction!(scimath_arctanh, m)?)?;
     m.add_function(wrap_pyfunction!(i0, m)?)?;
     m.add_function(wrap_pyfunction!(asfortranarray, m)?)?;
     m.add_function(wrap_pyfunction!(isrealobj, m)?)?;
@@ -22669,6 +22781,27 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         }
         lib_module.add_submodule(&recfunctions)?;
         lib_module.add("recfunctions", recfunctions)?;
+        let scimath = PyModule::new(py, "scimath")?;
+        let scimath_qualified_name = format!("{lib_qualified_name}.scimath");
+        scimath.setattr("__name__", &scimath_qualified_name)?;
+        scimath.setattr("__package__", &lib_qualified_name)?;
+        for (numpy_name, flat_name) in [
+            ("sqrt", "scimath_sqrt"),
+            ("log", "scimath_log"),
+            ("log2", "scimath_log2"),
+            ("log10", "scimath_log10"),
+            ("logn", "scimath_logn"),
+            ("power", "scimath_power"),
+            ("arccos", "scimath_arccos"),
+            ("arcsin", "scimath_arcsin"),
+            ("arctanh", "scimath_arctanh"),
+        ] {
+            if let Ok(value) = m.getattr(flat_name) {
+                scimath.add(numpy_name, value)?;
+            }
+        }
+        lib_module.add_submodule(&scimath)?;
+        lib_module.add("scimath", scimath)?;
         let stride_tricks = PyModule::new(py, "stride_tricks")?;
         let stride_tricks_qualified_name = format!("{lib_qualified_name}.stride_tricks");
         stride_tricks.setattr("__name__", &stride_tricks_qualified_name)?;
@@ -22686,6 +22819,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             &recfunctions_qualified_name,
             lib_module.getattr("recfunctions")?,
         )?;
+        sys_modules.set_item(&scimath_qualified_name, lib_module.getattr("scimath")?)?;
         sys_modules.set_item(
             &stride_tricks_qualified_name,
             lib_module.getattr("stride_tricks")?,
@@ -27530,6 +27664,15 @@ mod tests {
             assert!(module.getattr("recfunctions_get_names_flat").is_ok());
             assert!(module.getattr("recfunctions_flatten_descr").is_ok());
             assert!(module.getattr("recfunctions_get_fieldstructure").is_ok());
+            assert!(module.getattr("scimath_sqrt").is_ok());
+            assert!(module.getattr("scimath_log").is_ok());
+            assert!(module.getattr("scimath_log2").is_ok());
+            assert!(module.getattr("scimath_log10").is_ok());
+            assert!(module.getattr("scimath_logn").is_ok());
+            assert!(module.getattr("scimath_power").is_ok());
+            assert!(module.getattr("scimath_arccos").is_ok());
+            assert!(module.getattr("scimath_arcsin").is_ok());
+            assert!(module.getattr("scimath_arctanh").is_ok());
             assert!(module.getattr("i0").is_ok());
             assert!(module.getattr("asfortranarray").is_ok());
             assert!(module.getattr("isrealobj").is_ok());
@@ -28207,6 +28350,15 @@ mod tests {
                     "fnp_python.lib.recfunctions.{name} missing"
                 );
             }
+            let scimath = lib_mod.getattr("scimath")?;
+            for name in [
+                "sqrt", "log", "log2", "log10", "logn", "power", "arccos", "arcsin", "arctanh",
+            ] {
+                assert!(
+                    scimath.getattr(name).is_ok(),
+                    "fnp_python.lib.scimath.{name} missing"
+                );
+            }
             let stride_tricks = lib_mod.getattr("stride_tricks")?;
             for name in ["sliding_window_view", "as_strided"] {
                 assert!(
@@ -28224,6 +28376,12 @@ mod tests {
                     .get_item("fnp_python_test.lib.stride_tricks")?
                     .is(&stride_tricks),
                 "fnp_python.lib.stride_tricks should be registered under sys.modules",
+            );
+            assert!(
+                sys_modules
+                    .get_item("fnp_python_test.lib.scimath")?
+                    .is(&scimath),
+                "fnp_python.lib.scimath should be registered under sys.modules",
             );
 
             // Sanity-check an actual call round-trips through the submodule.
@@ -59174,6 +59332,140 @@ mod tests {
                 repr_string(&ours_join.getattr("dtype")?),
                 repr_string(&theirs_join.getattr("dtype")?)
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn scimath_helpers_match_numpy_complex_aware_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let scimath = module.getattr("lib")?.getattr("scimath")?;
+            let numpy_scimath = py.import("numpy.lib.scimath")?;
+            let numpy = py.import("numpy")?;
+            let builtins = py.import("builtins")?;
+            let eval_fn = builtins.getattr("eval")?;
+            let globals = PyDict::new(py);
+            globals.set_item("np", numpy.clone())?;
+            let eval_with_globals = |code: &str| -> PyResult<pyo3::Bound<'_, PyAny>> {
+                eval_fn.call((code, &globals), None::<&pyo3::Bound<'_, PyDict>>)
+            };
+
+            for (flat_name, numpy_name, input_code) in [
+                ("scimath_sqrt", "sqrt", "np.array([-4.0, -1.0, 1.0, 9.0])"),
+                ("scimath_log", "log", "np.array([-4.0, -1.0, 1.0, 9.0])"),
+                ("scimath_log2", "log2", "np.array([-4.0, -1.0, 1.0, 8.0])"),
+                (
+                    "scimath_log10",
+                    "log10",
+                    "np.array([-100.0, -1.0, 1.0, 100.0])",
+                ),
+                (
+                    "scimath_arccos",
+                    "arccos",
+                    "np.array([-2.0, -0.5, 0.5, 2.0])",
+                ),
+                (
+                    "scimath_arcsin",
+                    "arcsin",
+                    "np.array([-2.0, -0.5, 0.5, 2.0])",
+                ),
+                (
+                    "scimath_arctanh",
+                    "arctanh",
+                    "np.array([-2.0, -0.5, 0.5, 2.0])",
+                ),
+            ] {
+                let input = eval_with_globals(input_code)?;
+                let ours = module.getattr(flat_name)?.call1((input.clone(),))?;
+                let nested_result = scimath.getattr(numpy_name)?.call1((input.clone(),))?;
+                let theirs = numpy_scimath.getattr(numpy_name)?.call1((input.clone(),))?;
+                assert_array_matches_numpy(&ours, &theirs)?;
+                assert_array_matches_numpy(&nested_result, &theirs)?;
+                assert_eq!(
+                    repr_string(&ours.getattr("dtype")?),
+                    repr_string(&theirs.getattr("dtype")?),
+                    "{numpy_name} dtype"
+                );
+            }
+
+            let small_ints = eval_with_globals("np.array([-1, 4], dtype=np.int16)")?;
+            let ours_small = module
+                .getattr("scimath_sqrt")?
+                .call1((small_ints.clone(),))?;
+            let nested_small = scimath.getattr("sqrt")?.call1((small_ints.clone(),))?;
+            let theirs_small = numpy_scimath
+                .getattr("sqrt")?
+                .call1((small_ints.clone(),))?;
+            assert_array_matches_numpy(&ours_small, &theirs_small)?;
+            assert_array_matches_numpy(&nested_small, &theirs_small)?;
+            assert_eq!(
+                repr_string(&ours_small.getattr("dtype")?),
+                repr_string(&theirs_small.getattr("dtype")?)
+            );
+
+            let logn_input = eval_with_globals("np.array([-9.0, -1.0, 1.0, 9.0])")?;
+            let ours_logn = module
+                .getattr("scimath_logn")?
+                .call1((3.0_f64, logn_input.clone()))?;
+            let nested_logn = scimath
+                .getattr("logn")?
+                .call1((3.0_f64, logn_input.clone()))?;
+            let theirs_logn = numpy_scimath
+                .getattr("logn")?
+                .call1((3.0_f64, logn_input.clone()))?;
+            assert_array_matches_numpy(&ours_logn, &theirs_logn)?;
+            assert_array_matches_numpy(&nested_logn, &theirs_logn)?;
+
+            let power_input = eval_with_globals("np.array([-8.0, -1.0, 0.0, 4.0])")?;
+            let ours_power = module
+                .getattr("scimath_power")?
+                .call1((power_input.clone(), 0.5_f64))?;
+            let nested_power = scimath
+                .getattr("power")?
+                .call1((power_input.clone(), 0.5_f64))?;
+            let theirs_power = numpy_scimath
+                .getattr("power")?
+                .call1((power_input.clone(), 0.5_f64))?;
+            assert_array_matches_numpy(&ours_power, &theirs_power)?;
+            assert_array_matches_numpy(&nested_power, &theirs_power)?;
+
+            let positive = eval_with_globals("np.array([1.0, 4.0, 9.0], dtype=np.float32)")?;
+            let ours_positive = module.getattr("scimath_log")?.call1((positive.clone(),))?;
+            let nested_positive = scimath.getattr("log")?.call1((positive.clone(),))?;
+            let theirs_positive = numpy_scimath.getattr("log")?.call1((positive.clone(),))?;
+            assert_array_matches_numpy(&ours_positive, &theirs_positive)?;
+            assert_array_matches_numpy(&nested_positive, &theirs_positive)?;
+            assert_eq!(
+                repr_string(&ours_positive.getattr("dtype")?),
+                repr_string(&theirs_positive.getattr("dtype")?)
+            );
+
+            let ours_bad = module.getattr("scimath_sqrt")?.call0();
+            let theirs_bad = numpy_scimath.getattr("sqrt")?.call0();
+            match (ours_bad, theirs_bad) {
+                (Err(ours), Err(theirs)) => {
+                    assert_eq!(
+                        ours.get_type(py).name()?.extract::<String>()?,
+                        theirs.get_type(py).name()?.extract::<String>()?
+                    );
+                    assert_eq!(
+                        ours.value(py).str()?.extract::<String>()?,
+                        theirs.value(py).str()?.extract::<String>()?
+                    );
+                }
+                (ours, theirs) => {
+                    return Err(pyo3::exceptions::PyAssertionError::new_err(format!(
+                        "scimath sqrt arity outcome diverged: ours={ours:?} theirs={theirs:?}"
+                    )));
+                }
+            }
 
             Ok(())
         });
