@@ -45763,7 +45763,7 @@ mod tests {
                 "diagonal",
                 "trace",
             ];
-            for name in names {
+            for name in names.iter().copied() {
                 assert!(
                     ma.getattr(name)?.is(&numpy_ma.getattr(name)?),
                     "fnp_python.ma.{name} must be numpy.ma.{name}"
@@ -45994,6 +45994,12 @@ mod tests {
                 "np_ma.empty_like(np.ma.array([1, 2, 3], mask=[False, True, False]), \
                  dtype=np.float32, shape=(2, 2))",
             )?;
+            assert_same_repr(
+                "tuple(fnp_ma.empty((2, 3), order='F').flags[key] \
+                 for key in ('F_CONTIGUOUS', 'C_CONTIGUOUS'))",
+                "tuple(np_ma.empty((2, 3), order='F').flags[key] \
+                 for key in ('F_CONTIGUOUS', 'C_CONTIGUOUS'))",
+            )?;
 
             for (ours_code, theirs_code) in [
                 (
@@ -46036,6 +46042,20 @@ mod tests {
                 ),
             ] {
                 assert_same_repr(ours_code, theirs_code)?;
+            }
+
+            let lazy_module = PyModule::new(py, "fnp_python_test_ma_creation_lazy")?;
+            fnp_python(&lazy_module)?;
+            let lazy_ma = lazy_module.getattr("ma")?;
+            for name in names {
+                if lazy_ma.hasattr(name)? {
+                    lazy_ma.delattr(name)?;
+                }
+                let resolved = lazy_ma.getattr(name)?;
+                assert!(
+                    resolved.is(&numpy_ma.getattr(name)?),
+                    "lazy fallback for fnp_python.ma.{name} must resolve to numpy.ma.{name}"
+                );
             }
 
             Ok(())
