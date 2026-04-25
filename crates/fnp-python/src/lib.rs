@@ -23218,6 +23218,8 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "isarray",
             "harden_mask",
             "soften_mask",
+            "cov",
+            "corrcoef",
         ];
         if let Ok(np_ma) = py.import("numpy.ma") {
             for name in ma_core_names {
@@ -23227,7 +23229,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             }
         }
         let ma_getattr_src = pyo3::ffi::c_str!(
-            "_NUMPY_MA_CORE_NAMES = frozenset(('MaskedArray','masked_array','array','asarray','asanyarray','masked','nomask','masked_print_option','masked_singleton','MAError','MaskError','MaskType','mvoid','getdata','is_mask','isMA','isMaskedArray','isarray','harden_mask','soften_mask'))\ndef __getattr__(name):\n    if name in _NUMPY_MA_CORE_NAMES:\n        import numpy.ma as _ma\n        return getattr(_ma, name)\n    raise AttributeError(name)\n"
+            "_NUMPY_MA_CORE_NAMES = frozenset(('MaskedArray','masked_array','array','asarray','asanyarray','masked','nomask','masked_print_option','masked_singleton','MAError','MaskError','MaskType','mvoid','getdata','is_mask','isMA','isMaskedArray','isarray','harden_mask','soften_mask','cov','corrcoef'))\ndef __getattr__(name):\n    if name in _NUMPY_MA_CORE_NAMES:\n        import numpy.ma as _ma\n        return getattr(_ma, name)\n    raise AttributeError(name)\n"
         );
         let ma_dict = ma.dict();
         py.run(ma_getattr_src, Some(&ma_dict), None)?;
@@ -45497,6 +45499,91 @@ mod tests {
     }
 
     #[test]
+    fn ma_cov_corrcoef_match_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_ma_cov_corrcoef")?;
+            fnp_python(&module)?;
+            let ma = module.getattr("ma")?;
+            let numpy = py.import("numpy")?;
+            let numpy_ma = numpy.getattr("ma")?;
+            let builtins = py.import("builtins")?;
+            let eval_fn = builtins.getattr("eval")?;
+            let globals = PyDict::new(py);
+            globals.set_item("np", numpy.clone())?;
+            let eval_with_globals = |code: &str| -> PyResult<pyo3::Bound<'_, PyAny>> {
+                eval_fn.call((code, &globals), None::<&pyo3::Bound<'_, PyDict>>)
+            };
+
+            for name in ["cov", "corrcoef"] {
+                assert!(
+                    ma.getattr(name)?.is(&numpy_ma.getattr(name)?),
+                    "fnp_python.ma.{name} must be numpy.ma.{name}"
+                );
+            }
+
+            let masked_x = eval_with_globals(
+                "np.ma.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], \
+                 mask=[[False, False, False], [False, True, False]])",
+            )?;
+            let masked_y = eval_with_globals(
+                "np.ma.array([[2.0, 0.0, 1.0], [1.0, 3.0, 5.0]], \
+                 mask=[[False, False, True], [False, False, False]])",
+            )?;
+
+            let cov = ma.getattr("cov")?;
+            let numpy_cov = numpy_ma.getattr("cov")?;
+            assert_array_matches_numpy(
+                &cov.call1((masked_x.clone(),))?,
+                &numpy_cov.call1((masked_x.clone(),))?,
+            )?;
+
+            let rowvar_false = PyDict::new(py);
+            rowvar_false.set_item("rowvar", false)?;
+            assert_array_matches_numpy(
+                &cov.call((masked_x.clone(),), Some(&rowvar_false))?,
+                &numpy_cov.call((masked_x.clone(),), Some(&rowvar_false))?,
+            )?;
+
+            let bias_kwargs = PyDict::new(py);
+            bias_kwargs.set_item("bias", true)?;
+            bias_kwargs.set_item("ddof", 0)?;
+            assert_array_matches_numpy(
+                &cov.call((masked_x.clone(), masked_y.clone()), Some(&bias_kwargs))?,
+                &numpy_cov.call((masked_x.clone(), masked_y.clone()), Some(&bias_kwargs))?,
+            )?;
+
+            let corrcoef = ma.getattr("corrcoef")?;
+            let numpy_corrcoef = numpy_ma.getattr("corrcoef")?;
+            assert_array_matches_numpy(
+                &corrcoef.call1((masked_x.clone(),))?,
+                &numpy_corrcoef.call1((masked_x.clone(),))?,
+            )?;
+            assert_array_matches_numpy(
+                &corrcoef.call((masked_x.clone(), masked_y.clone()), Some(&rowvar_false))?,
+                &numpy_corrcoef.call((masked_x.clone(), masked_y.clone()), Some(&rowvar_false))?,
+            )?;
+
+            let disallow_masked = PyDict::new(py);
+            disallow_masked.set_item("allow_masked", false)?;
+            let masked_args = PyTuple::new(py, [masked_x.clone()])?;
+            assert_eq!(
+                call_outcome(py, &cov, &masked_args, Some(&disallow_masked))?,
+                call_outcome(py, &numpy_cov, &masked_args, Some(&disallow_masked))?
+            );
+            assert_eq!(
+                call_outcome(py, &corrcoef, &masked_args, Some(&disallow_masked))?,
+                call_outcome(py, &numpy_corrcoef, &masked_args, Some(&disallow_masked))?
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn ma_core_classes_constants_helpers_match_numpy_oracles() {
         with_python(|py| {
             if !numpy_available(py) {
@@ -45530,6 +45617,8 @@ mod tests {
                 "isarray",
                 "harden_mask",
                 "soften_mask",
+                "cov",
+                "corrcoef",
             ] {
                 assert!(
                     ma.getattr(name)?.is(&numpy_ma.getattr(name)?),
