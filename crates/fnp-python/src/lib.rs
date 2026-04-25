@@ -18017,24 +18017,31 @@ fn testing_assert_string_equal(py: Python<'_>, actual: &str, desired: &str) -> P
     //   if any non-equal markers: msg = "Differences in strings:\n" + ''.join(diff).rstrip()
     let difflib = py.import("difflib")?;
     let differ = difflib.getattr("Differ")?.call0()?;
-    let actual_split: Vec<&str> = lines_keepends(actual);
-    let desired_split: Vec<&str> = lines_keepends(desired);
-    let actual_py = pyo3::types::PyList::new(py, &actual_split)?;
-    let desired_py = pyo3::types::PyList::new(py, &desired_split)?;
-    let diff_iter = differ.call_method1("compare", (actual_py, desired_py))?;
+    // 2axo: route through Python's str.splitlines(keepends=True) so
+    // the canonical Python separator set (\r\n, \n, \r, \v, \f, \x1c,
+    // \x1d, \x1e, \x85, U+2028, U+2029) is honored — the prior
+    // hand-rolled lines_keepends only handled \n / \r / \r\n which
+    // diverged from numpy on rare separators.
+    let actual_py: Bound<'_, PyAny> = actual.into_pyobject(py)?.into_any();
+    let desired_py: Bound<'_, PyAny> = desired.into_pyobject(py)?.into_any();
+    let actual_lines = actual_py.call_method1("splitlines", (true,))?;
+    let desired_lines = desired_py.call_method1("splitlines", (true,))?;
+    let diff_iter = differ.call_method1("compare", (actual_lines, desired_lines))?;
+    // Mirror numpy.testing._private.utils.assert_string_equal:
+    // collect every diff line BUT only emit `- `/`+ `/`? ` markers for
+    // changed pairs, dropping the `  ` lines that mark unchanged
+    // context. The simple "skip `  ` and `? `" filter matches numpy's
+    // emitted output exactly because the surrounding `? ` hint lines
+    // already reference their adjacent `-`/`+` counterparts.
     let mut diff_lines: Vec<String> = Vec::new();
-    let mut has_change = false;
     for item in diff_iter.try_iter()? {
         let s: String = item?.extract()?;
-        if s.starts_with("? ") {
+        if s.starts_with("  ") {
             continue;
-        }
-        if !s.starts_with("  ") {
-            has_change = true;
         }
         diff_lines.push(s);
     }
-    if !has_change {
+    if diff_lines.is_empty() {
         return Ok(());
     }
     let body = diff_lines.join("");
@@ -18044,34 +18051,8 @@ fn testing_assert_string_equal(py: Python<'_>, actual: &str, desired: &str) -> P
     )))
 }
 
-fn lines_keepends(s: &str) -> Vec<&str> {
-    // Mirror Python's str.splitlines(keepends=True). Python recognises
-    // \r\n, \n, \r, \v, \f, \x1c, \x1d, \x1e, \x85,  ,   as
-    // line separators; for typical test input the only ones in play
-    // are \n and \r\n, so handle those exactly and fall back to a
-    // single segment otherwise.
-    let bytes = s.as_bytes();
-    let mut out = Vec::new();
-    let mut start = 0;
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\r' && i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-            out.push(&s[start..=i + 1]);
-            i += 2;
-            start = i;
-        } else if bytes[i] == b'\n' || bytes[i] == b'\r' {
-            out.push(&s[start..=i]);
-            i += 1;
-            start = i;
-        } else {
-            i += 1;
-        }
-    }
-    if start < bytes.len() {
-        out.push(&s[start..]);
-    }
-    out
-}
+// 2axo: lines_keepends helper removed — testing_assert_string_equal now
+// delegates to Python's str.splitlines(True) for canonical separator coverage.
 
 #[pyfunction]
 #[pyo3(signature = (actual, desired, rtol=1e-7, atol=0.0, equal_nan=true, err_msg=None, verbose=true))]
@@ -61574,6 +61555,26 @@ mod tests {
                 .call1(("foo", "bar"))
                 .expect_err("numpy string mismatch must fail");
             assert_pyerr_matches_numpy(py, ours_as_err, theirs_as_err)?;
+
+            // 2axo regression probe: a string containing \v (vertical
+            // tab) tokenises differently if str.splitlines isn't
+            // honored. The prior hand-rolled lines_keepends only knew
+            // \n / \r / \r\n, so this would diverge from numpy. After
+            // the 2axo fix we route through Python's str.splitlines so
+            // \v / \f / \x1c-1e / \x85 / U+2028 / U+2029 also split.
+            for (lhs, rhs) in [
+                ("a\x0bb\nc", "a\x0bX\nc"),       // \v separator
+                ("line1\x0cline2", "line1\x0cBAD"), // \f separator
+                ("alpha\x1ebeta", "alpha\x1edelta"), // \x1e separator
+            ] {
+                let ours_err = as_fn
+                    .call1((lhs, rhs))
+                    .expect_err("uncommon-separator mismatch must fail");
+                let theirs_err = as_numpy
+                    .call1((lhs, rhs))
+                    .expect_err("numpy uncommon-separator mismatch must fail");
+                assert_pyerr_matches_numpy(py, ours_err, theirs_err)?;
+            }
 
             Ok(())
         });
