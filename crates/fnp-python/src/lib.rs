@@ -23100,6 +23100,40 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     {
         let linalg = PyModule::new(py, "linalg")?;
+        let linalg_public_names = [
+            "matrix_power",
+            "solve",
+            "tensorsolve",
+            "tensorinv",
+            "inv",
+            "cholesky",
+            "eigvals",
+            "eigvalsh",
+            "pinv",
+            "slogdet",
+            "det",
+            "svd",
+            "svdvals",
+            "eig",
+            "eigh",
+            "lstsq",
+            "norm",
+            "qr",
+            "cond",
+            "matrix_rank",
+            "LinAlgError",
+            "multi_dot",
+            "trace",
+            "diagonal",
+            "cross",
+            "outer",
+            "tensordot",
+            "matmul",
+            "matrix_transpose",
+            "matrix_norm",
+            "vector_norm",
+            "vecdot",
+        ];
         // linalg_* prefixed (3).
         linalg.add("eig", m.getattr("linalg_eig")?)?;
         linalg.add("matrix_norm", m.getattr("linalg_matrix_norm")?)?;
@@ -23164,6 +23198,20 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                     linalg.setattr(name, value)?;
                 }
             }
+            if let Ok(all_names) = np_linalg.getattr("__all__") {
+                linalg.setattr("__all__", all_names.clone())?;
+                for item in all_names.try_iter()? {
+                    let name = item?.extract::<String>()?;
+                    if linalg.getattr(name.as_str()).is_err()
+                        && let Ok(value) = np_linalg.getattr(name.as_str())
+                    {
+                        linalg.setattr(name.as_str(), value)?;
+                    }
+                }
+            }
+        }
+        if linalg.getattr("__all__").is_err() {
+            linalg.setattr("__all__", PyList::new(py, linalg_public_names)?)?;
         }
         let getattr_src = pyo3::ffi::c_str!(
             "def __getattr__(name):\n    if name in ('LinAlgError', 'test'):\n        import numpy.linalg as _l\n        return getattr(_l, name)\n    raise AttributeError(name)\n"
@@ -29534,6 +29582,20 @@ mod tests {
             }
             if numpy_available(py) {
                 let numpy_linalg = py.import("numpy.linalg")?;
+                let numpy_linalg_all = numpy_linalg.getattr("__all__")?;
+                if repr_string(&linalg.getattr("__all__")?) != repr_string(&numpy_linalg_all) {
+                    return Err(PyValueError::new_err(
+                        "fnp_python.linalg.__all__ must match numpy.linalg.__all__",
+                    ));
+                }
+                for item in numpy_linalg_all.try_iter()? {
+                    let name = item?.extract::<String>()?;
+                    if !linalg.hasattr(name.as_str())? {
+                        return Err(PyValueError::new_err(format!(
+                            "fnp_python.linalg missing numpy.linalg public name {name}"
+                        )));
+                    }
+                }
                 assert!(
                     linalg.getattr("test")?.is(&numpy_linalg.getattr("test")?),
                     "fnp_python.linalg.test must be numpy.linalg.test",
@@ -29806,6 +29868,32 @@ mod tests {
                     our_svd.get_type().name()?.extract::<String>()?,
                     their_svd.get_type().name()?.extract::<String>()?,
                     "fnp_python.linalg.svd return type diverges from numpy.linalg.svd"
+                );
+
+                let eye2 = numpy.getattr("eye")?.call1((2_i64,))?;
+                let ours_matrix_norm = linalg.getattr("matrix_norm")?.call1((eye2.clone(),))?;
+                let theirs_matrix_norm = numpy
+                    .getattr("linalg")?
+                    .getattr("matrix_norm")?
+                    .call1((eye2,))?;
+                assert_eq!(
+                    repr_string(&ours_matrix_norm),
+                    repr_string(&theirs_matrix_norm),
+                    "fnp_python.linalg.matrix_norm diverges from numpy.linalg.matrix_norm"
+                );
+
+                let vector = numpy
+                    .getattr("array")?
+                    .call1((PyList::new(py, [3.0_f64, 4.0])?,))?;
+                let ours_vector_norm = linalg.getattr("vector_norm")?.call1((vector.clone(),))?;
+                let theirs_vector_norm = numpy
+                    .getattr("linalg")?
+                    .getattr("vector_norm")?
+                    .call1((vector,))?;
+                assert_eq!(
+                    repr_string(&ours_vector_norm),
+                    repr_string(&theirs_vector_norm),
+                    "fnp_python.linalg.vector_norm diverges from numpy.linalg.vector_norm"
                 );
 
                 // linalg.cross must REJECT 2-D input (stricter than top-
