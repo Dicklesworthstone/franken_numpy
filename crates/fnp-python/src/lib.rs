@@ -23363,21 +23363,86 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             }
         }
         let testing_numpy_names = [
+            "assert_equal",
+            "assert_almost_equal",
+            "assert_approx_equal",
+            "assert_array_equal",
+            "assert_array_less",
+            "assert_string_equal",
+            "assert_array_almost_equal",
             "assert_raises",
+            "build_err_msg",
+            "decorate_methods",
+            "jiffies",
+            "memusage",
+            "print_assert_equal",
+            "rundocs",
+            "runstring",
+            "verbose",
+            "measure",
+            "assert_",
+            "assert_array_almost_equal_nulp",
             "assert_raises_regex",
+            "assert_array_max_ulp",
             "assert_warns",
             "assert_no_warnings",
-            "test",
+            "assert_allclose",
+            "IgnoreException",
+            "clear_and_catch_warnings",
+            "SkipTest",
+            "KnownFailureException",
+            "temppath",
+            "tempdir",
+            "IS_PYPY",
+            "HAS_REFCOUNT",
+            "IS_WASM",
+            "suppress_warnings",
+            "assert_array_compare",
+            "assert_no_gc_cycles",
+            "break_cycles",
+            "HAS_LAPACK64",
+            "IS_PYSTON",
+            "IS_MUSL",
+            "check_support_sve",
+            "NOGIL_BUILD",
+            "IS_EDITABLE",
+            "IS_INSTALLED",
+            "NUMPY_ROOT",
+            "run_threaded",
+            "IS_64BIT",
+            "BLAS_SUPPORTS_FPE",
+            "TestCase",
+            "overrides",
         ];
         if let Ok(np_testing) = py.import("numpy.testing") {
-            for name in testing_numpy_names {
-                if let Ok(value) = np_testing.getattr(name) {
-                    testing.add(name, value)?;
+            if let Ok(all_names) = np_testing.getattr("__all__") {
+                testing.setattr("__all__", all_names.clone())?;
+                for item in all_names.try_iter()? {
+                    let name = item?.extract::<String>()?;
+                    if testing.getattr(name.as_str()).is_err()
+                        && let Ok(value) = np_testing.getattr(name.as_str())
+                    {
+                        testing.add(name.as_str(), value)?;
+                    }
+                }
+            } else {
+                for name in testing_numpy_names {
+                    if testing.getattr(name).is_err()
+                        && let Ok(value) = np_testing.getattr(name)
+                    {
+                        testing.add(name, value)?;
+                    }
                 }
             }
+            if let Ok(test_attr) = np_testing.getattr("test") {
+                testing.add("test", test_attr)?;
+            }
+        }
+        if testing.getattr("__all__").is_err() {
+            testing.setattr("__all__", PyList::new(py, testing_numpy_names)?)?;
         }
         let testing_getattr_src = pyo3::ffi::c_str!(
-            "_NUMPY_TESTING_NAMES = frozenset(('assert_raises','assert_raises_regex','assert_warns','assert_no_warnings','test'))\ndef __getattr__(name):\n    if name in _NUMPY_TESTING_NAMES:\n        import numpy.testing as _testing\n        return getattr(_testing, name)\n    raise AttributeError(name)\n"
+            "_NUMPY_TESTING_NAMES = frozenset(('assert_equal','assert_almost_equal','assert_approx_equal','assert_array_equal','assert_array_less','assert_string_equal','assert_array_almost_equal','assert_raises','build_err_msg','decorate_methods','jiffies','memusage','print_assert_equal','rundocs','runstring','verbose','measure','assert_','assert_array_almost_equal_nulp','assert_raises_regex','assert_array_max_ulp','assert_warns','assert_no_warnings','assert_allclose','IgnoreException','clear_and_catch_warnings','SkipTest','KnownFailureException','temppath','tempdir','IS_PYPY','HAS_REFCOUNT','IS_WASM','suppress_warnings','assert_array_compare','assert_no_gc_cycles','break_cycles','HAS_LAPACK64','IS_PYSTON','IS_MUSL','check_support_sve','NOGIL_BUILD','IS_EDITABLE','IS_INSTALLED','NUMPY_ROOT','run_threaded','IS_64BIT','BLAS_SUPPORTS_FPE','TestCase','overrides','test'))\ndef __getattr__(name):\n    if name in _NUMPY_TESTING_NAMES:\n        import numpy.testing as _testing\n        return getattr(_testing, name)\n    raise AttributeError(name)\n"
         );
         let testing_dict = testing.dict();
         py.run(testing_getattr_src, Some(&testing_dict), None)?;
@@ -60836,12 +60901,33 @@ mod tests {
             let testing = module.getattr("testing")?;
             let numpy_testing = py.import("numpy.testing")?;
 
+            let numpy_testing_all = numpy_testing.getattr("__all__")?;
+            if repr_string(&testing.getattr("__all__")?) != repr_string(&numpy_testing_all) {
+                return Err(PyValueError::new_err(
+                    "fnp_python.testing.__all__ must match numpy.testing.__all__",
+                ));
+            }
+            for item in numpy_testing_all.try_iter()? {
+                let name = item?.extract::<String>()?;
+                if !testing.hasattr(name.as_str())? {
+                    return Err(PyValueError::new_err(format!(
+                        "fnp_python.testing missing numpy.testing public name {name}"
+                    )));
+                }
+            }
+
             for name in [
                 "assert_raises",
                 "assert_raises_regex",
                 "assert_warns",
                 "assert_no_warnings",
                 "test",
+                "assert_",
+                "assert_array_almost_equal_nulp",
+                "assert_array_max_ulp",
+                "suppress_warnings",
+                "clear_and_catch_warnings",
+                "TestCase",
             ] {
                 if !testing.getattr(name)?.is(&numpy_testing.getattr(name)?) {
                     return Err(PyValueError::new_err(format!(
