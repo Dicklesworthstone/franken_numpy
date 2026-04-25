@@ -43,13 +43,15 @@ for output in "${OUTPUTS[@]}"; do
     fi
 done
 
-# Run all three generators. They write their outputs in place. If any
-# generator exits non-zero on its own gate (e.g. MUST < 95%), surface
-# that exit too — that's a regression we want to flag.
+# 14rm: run all three generators regardless of any one's exit code so
+# engineers see the full surface picture in a single run. Per-generator
+# gate failures (MUST < 95%) and drift events both contribute to a
+# unified non-zero exit at the end.
+generator_failures=()
 for gen in "${GENERATORS[@]}"; do
     if ! python3 "$gen"; then
-        echo "FAIL: $gen exited non-zero (likely MUST coverage below threshold)" >&2
-        exit 1
+        generator_failures+=("$gen")
+        echo "FAIL: $gen exited non-zero (gate or runtime error)" >&2
     fi
 done
 
@@ -68,7 +70,15 @@ for output in "${OUTPUTS[@]}"; do
     fi
 done
 
-if [[ $drift -ne 0 ]]; then
+if [[ ${#generator_failures[@]} -gt 0 ]]; then
+    echo "" >&2
+    echo "Generator(s) exited non-zero (likely MUST < 95% gate):" >&2
+    for gen in "${generator_failures[@]}"; do
+        echo "  $gen" >&2
+    done
+fi
+
+if [[ ${#generator_failures[@]} -gt 0 || $drift -ne 0 ]]; then
     echo "" >&2
     echo "Compliance matrix regression detected. If the surface change is" >&2
     echo "intentional, regenerate and commit the snapshot:" >&2
