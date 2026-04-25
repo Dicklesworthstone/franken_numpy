@@ -23394,6 +23394,24 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         }
         lib_module.add_submodule(&stride_tricks)?;
         lib_module.add("stride_tricks", stride_tricks)?;
+        let lib_root_names = [
+            "NumpyVersion",
+            "Arrayterator",
+            "add_docstring",
+            "add_newdoc",
+        ];
+        if let Ok(np_lib) = py.import("numpy.lib") {
+            for name in lib_root_names {
+                if let Ok(value) = np_lib.getattr(name) {
+                    lib_module.add(name, value)?;
+                }
+            }
+        }
+        let lib_getattr_src = pyo3::ffi::c_str!(
+            "_LIB_NAMES = frozenset(('NumpyVersion','Arrayterator','add_docstring','add_newdoc'))\ndef __getattr__(name):\n    if name in _LIB_NAMES:\n        import numpy.lib as _lib\n        return getattr(_lib, name)\n    raise AttributeError(name)\n"
+        );
+        let lib_dict = lib_module.dict();
+        py.run(lib_getattr_src, Some(&lib_dict), None)?;
         let sys_modules = py.import("sys")?.getattr("modules")?;
         sys_modules.set_item(&lib_qualified_name, &lib_module)?;
         sys_modules.set_item(
@@ -60948,6 +60966,72 @@ mod tests {
                 repr_string(&nested_duplicate),
                 repr_string(&theirs_duplicate)
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn lib_root_classes_and_doc_helpers_match_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_lib_root")?;
+            fnp_python(&module)?;
+            let lib_module = module.getattr("lib")?;
+            let numpy = py.import("numpy")?;
+            let numpy_lib = py.import("numpy.lib")?;
+
+            for name in [
+                "NumpyVersion",
+                "Arrayterator",
+                "add_docstring",
+                "add_newdoc",
+            ] {
+                assert!(
+                    lib_module.getattr(name)?.is(&numpy_lib.getattr(name)?),
+                    "fnp_python.lib.{name} must be numpy.lib.{name}"
+                );
+            }
+
+            let ours_version = lib_module.getattr("NumpyVersion")?.call1(("1.2.3",))?;
+            let theirs_version = numpy_lib.getattr("NumpyVersion")?.call1(("1.2.3",))?;
+            assert_eq!(
+                repr_string(&ours_version),
+                repr_string(&theirs_version),
+                "NumpyVersion repr diverged"
+            );
+            assert!(
+                ours_version
+                    .call_method1("__lt__", ("2.0.0",))?
+                    .extract::<bool>()?,
+                "NumpyVersion comparison must match numpy"
+            );
+
+            let array = numpy
+                .getattr("arange")?
+                .call1((12_i64,))?
+                .call_method1("reshape", (3_i64, 4_i64))?;
+            let ours_iter = lib_module
+                .getattr("Arrayterator")?
+                .call1((array.clone(), 3_i64))?;
+            let theirs_iter = numpy_lib
+                .getattr("Arrayterator")?
+                .call1((array.clone(), 3_i64))?;
+            assert_eq!(
+                repr_string(&ours_iter.getattr("shape")?),
+                repr_string(&theirs_iter.getattr("shape")?)
+            );
+            assert_array_matches_numpy(
+                &ours_iter
+                    .call_method0("__iter__")?
+                    .call_method0("__next__")?,
+                &theirs_iter
+                    .call_method0("__iter__")?
+                    .call_method0("__next__")?,
+            )?;
 
             Ok(())
         });
