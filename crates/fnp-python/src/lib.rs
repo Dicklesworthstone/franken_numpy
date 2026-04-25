@@ -23652,6 +23652,52 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 recfunctions.add(numpy_name, value)?;
             }
         }
+        // 78g9: numpy.lib.recfunctions.__all__ parity. When numpy is
+        // importable mirror its list verbatim (preserving NumPy order)
+        // and lazily fill in any name we don't yet wrap so isinstance
+        // checks against numpy.lib.recfunctions still work. The
+        // explicit fallback list captures the canonical 21 names from
+        // numpy 2.x for the embedded interpreter that completes module
+        // init without numpy on sys.path.
+        let recfunctions_fallback_all = [
+            "append_fields",
+            "apply_along_fields",
+            "assign_fields_by_name",
+            "drop_fields",
+            "find_duplicates",
+            "flatten_descr",
+            "get_fieldstructure",
+            "get_names",
+            "get_names_flat",
+            "join_by",
+            "merge_arrays",
+            "rec_append_fields",
+            "rec_drop_fields",
+            "rec_join",
+            "recursive_fill_fields",
+            "rename_fields",
+            "repack_fields",
+            "require_fields",
+            "stack_arrays",
+            "structured_to_unstructured",
+            "unstructured_to_structured",
+        ];
+        if let Ok(np_recfunctions) = py.import("numpy.lib.recfunctions")
+            && let Ok(all_names) = np_recfunctions.getattr("__all__")
+        {
+            recfunctions.setattr("__all__", all_names.clone())?;
+            for item in all_names.try_iter()? {
+                let name = item?.extract::<String>()?;
+                if recfunctions.getattr(name.as_str()).is_err()
+                    && let Ok(value) = np_recfunctions.getattr(name.as_str())
+                {
+                    recfunctions.setattr(name.as_str(), value)?;
+                }
+            }
+        }
+        if recfunctions.getattr("__all__").is_err() {
+            recfunctions.setattr("__all__", PyList::new(py, recfunctions_fallback_all)?)?;
+        }
         lib_module.add_submodule(&recfunctions)?;
         lib_module.add("recfunctions", recfunctions)?;
         let scimath = PyModule::new(py, "scimath")?;
@@ -61750,6 +61796,92 @@ mod tests {
             let theirs_flat: i64 = numpy_amx.call1((m2.clone(),))?.extract()?;
             assert_eq!(ours_flat, theirs_flat);
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn recfunctions_all_namespace_matches_numpy() {
+        // 78g9: numpy.lib.recfunctions exposes a 21-name __all__ in
+        // canonical NumPy order. fnp_python.lib.recfunctions must
+        // mirror that list verbatim, every name must resolve, and the
+        // explicit fallback list (used when numpy isn't importable
+        // during module init) must also contain every NumPy name.
+        with_python(|py| {
+            let module = PyModule::new(py, "fnp_python_test_recfunctions_all")?;
+            fnp_python(&module)?;
+            let recfunctions = module.getattr("lib")?.getattr("recfunctions")?;
+            let our_all: Vec<String> = recfunctions.getattr("__all__")?.extract()?;
+            assert!(
+                !our_all.is_empty(),
+                "fnp_python.lib.recfunctions.__all__ must be non-empty"
+            );
+            for name in &our_all {
+                assert!(
+                    recfunctions.getattr(name.as_str()).is_ok(),
+                    "fnp_python.lib.recfunctions.__all__ lists '{name}' but the attribute is missing"
+                );
+            }
+
+            if numpy_available(py) {
+                let np_recfunctions = py.import("numpy.lib.recfunctions")?;
+                let theirs_all: Vec<String> = np_recfunctions.getattr("__all__")?.extract()?;
+                assert_eq!(
+                    our_all, theirs_all,
+                    "fnp_python.lib.recfunctions.__all__ must equal numpy's verbatim (order included)"
+                );
+                for name in &theirs_all {
+                    let ours = recfunctions.getattr(name.as_str())?;
+                    let theirs = np_recfunctions.getattr(name.as_str())?;
+                    if !ours.is(&theirs) {
+                        // Local wrapper — fine, it's still a callable
+                        // exposing the same surface. Pure passthroughs
+                        // should be the same object; local wrappers are
+                        // permitted to differ but must be callable.
+                        assert!(
+                            ours.is_callable(),
+                            "fnp_python.lib.recfunctions.{name} is neither numpy.lib.recfunctions.{name} nor a callable wrapper"
+                        );
+                    }
+                    assert!(
+                        theirs.is_callable(),
+                        "numpy.lib.recfunctions.{name} expected to be callable"
+                    );
+                }
+            } else {
+                // No numpy at module-init time → fallback list must
+                // still cover the canonical 21 names so callers that
+                // iterate __all__ get a complete surface.
+                let expected: [&str; 21] = [
+                    "append_fields",
+                    "apply_along_fields",
+                    "assign_fields_by_name",
+                    "drop_fields",
+                    "find_duplicates",
+                    "flatten_descr",
+                    "get_fieldstructure",
+                    "get_names",
+                    "get_names_flat",
+                    "join_by",
+                    "merge_arrays",
+                    "rec_append_fields",
+                    "rec_drop_fields",
+                    "rec_join",
+                    "recursive_fill_fields",
+                    "rename_fields",
+                    "repack_fields",
+                    "require_fields",
+                    "stack_arrays",
+                    "structured_to_unstructured",
+                    "unstructured_to_structured",
+                ];
+                for name in &expected {
+                    assert!(
+                        our_all.iter().any(|x| x == name),
+                        "fallback fnp_python.lib.recfunctions.__all__ missing canonical name '{name}'"
+                    );
+                }
+            }
             Ok(())
         });
     }
