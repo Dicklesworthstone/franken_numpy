@@ -10010,6 +10010,51 @@ fn masked_where(
 }
 
 #[pyfunction]
+#[pyo3(signature = (a, axis=None))]
+fn mask_rowcols(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let mask_rowcols_fn = numpy.getattr("ma")?.getattr("mask_rowcols")?;
+    match axis {
+        Some(axis) => {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("axis", axis.bind(py))?;
+            Ok(mask_rowcols_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+        }
+        None => Ok(mask_rowcols_fn.call1((a.bind(py),))?.unbind()),
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, axis=None))]
+fn mask_rows(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let mask_rows_fn = numpy.getattr("ma")?.getattr("mask_rows")?;
+    match axis {
+        Some(axis) => {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("axis", axis.bind(py))?;
+            Ok(mask_rows_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+        }
+        None => Ok(mask_rows_fn.call1((a.bind(py),))?.unbind()),
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, axis=None))]
+fn mask_cols(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let mask_cols_fn = numpy.getattr("ma")?.getattr("mask_cols")?;
+    match axis {
+        Some(axis) => {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("axis", axis.bind(py))?;
+            Ok(mask_cols_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+        }
+        None => Ok(mask_cols_fn.call1((a.bind(py),))?.unbind()),
+    }
+}
+
+#[pyfunction]
 #[pyo3(signature = (x, value, copy=true))]
 fn masked_equal(py: Python<'_>, x: Py<PyAny>, value: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny>> {
     masked_scalar_compare(
@@ -21472,6 +21517,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(indices, m)?)?;
     m.add_function(wrap_pyfunction!(tri, m)?)?;
     m.add_function(wrap_pyfunction!(masked_where, m)?)?;
+    m.add_function(wrap_pyfunction!(mask_rowcols, m)?)?;
+    m.add_function(wrap_pyfunction!(mask_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(mask_cols, m)?)?;
     m.add_function(wrap_pyfunction!(masked_equal, m)?)?;
     m.add_function(wrap_pyfunction!(masked_not_equal, m)?)?;
     m.add_function(wrap_pyfunction!(vdot, m)?)?;
@@ -22219,6 +22267,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "maximum_fill_value",
             "filled",
             "fix_invalid",
+            "mask_rowcols",
+            "mask_rows",
+            "mask_cols",
         ] {
             if let Ok(value) = m.getattr(name) {
                 ma.add(name, value)?;
@@ -26972,6 +27023,9 @@ mod tests {
             assert!(module.getattr("pinv").is_ok());
             assert!(module.getattr("eigvals").is_ok());
             assert!(module.getattr("masked_where").is_ok());
+            assert!(module.getattr("mask_rowcols").is_ok());
+            assert!(module.getattr("mask_rows").is_ok());
+            assert!(module.getattr("mask_cols").is_ok());
             assert!(module.getattr("masked_equal").is_ok());
             assert!(module.getattr("masked_not_equal").is_ok());
             assert!(module.getattr("vdot").is_ok());
@@ -27718,6 +27772,9 @@ mod tests {
                 "maximum_fill_value",
                 "filled",
                 "fix_invalid",
+                "mask_rowcols",
+                "mask_rows",
+                "mask_cols",
             ] {
                 assert!(ma.getattr(name).is_ok(), "fnp_python.ma.{name} missing");
             }
@@ -39534,6 +39591,85 @@ mod tests {
             let expected_nocopy =
                 numpy_masked_where.call((cond.clone(), data.clone()), Some(&copy_kwargs_n))?;
             assert_eq!(repr_string(&actual_nocopy), repr_string(&expected_nocopy));
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ma_mask_row_column_helpers_match_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let ma_module = module.getattr("ma")?;
+            let numpy = py.import("numpy")?;
+            let numpy_ma = numpy.getattr("ma")?;
+            let ma_array = numpy_ma.getattr("array")?;
+
+            let partial_kwargs = PyDict::new(py);
+            partial_kwargs.set_item("mask", vec![vec![false, true], vec![false, false]])?;
+            let partial = ma_array
+                .call((vec![vec![1_i64, 2], vec![3, 4]],), Some(&partial_kwargs))?
+                .unbind();
+
+            let row_col_kwargs = PyDict::new(py);
+            row_col_kwargs.set_item("mask", vec![vec![true, false], vec![false, true]])?;
+            let row_col = ma_array
+                .call(
+                    (vec![vec![10.0_f64, 20.0], vec![30.0, 40.0]],),
+                    Some(&row_col_kwargs),
+                )?
+                .unbind();
+
+            let plain = numpy
+                .getattr("array")?
+                .call1((vec![vec![5_i64, 6], vec![7, 8]],))?
+                .unbind();
+
+            let inputs = [("partial", partial), ("row-col", row_col), ("plain", plain)];
+            let axes = [
+                ("axis-none", py.None()),
+                ("axis-0", 0_i64.into_pyobject(py)?.into_any().unbind()),
+                ("axis-1", 1_i64.into_pyobject(py)?.into_any().unbind()),
+            ];
+
+            for name in ["mask_rowcols", "mask_rows", "mask_cols"] {
+                let ours_fn = module.getattr(name)?;
+                let nested_fn = ma_module.getattr(name)?;
+                let numpy_fn = numpy_ma.getattr(name)?;
+
+                for (label, input) in &inputs {
+                    let ours_default = ours_fn.call1((input.bind(py),))?;
+                    let nested_default = nested_fn.call1((input.bind(py),))?;
+                    let theirs_default = numpy_fn.call1((input.bind(py),))?;
+                    assert_array_matches_numpy(&ours_default, &theirs_default)?;
+                    assert_array_matches_numpy(&nested_default, &theirs_default)?;
+
+                    for (axis_label, axis) in &axes {
+                        let ours_kwargs = PyDict::new(py);
+                        ours_kwargs.set_item("axis", axis.bind(py))?;
+                        let nested_kwargs = PyDict::new(py);
+                        nested_kwargs.set_item("axis", axis.bind(py))?;
+                        let theirs_kwargs = PyDict::new(py);
+                        theirs_kwargs.set_item("axis", axis.bind(py))?;
+
+                        let ours = ours_fn.call((input.bind(py),), Some(&ours_kwargs))?;
+                        let nested = nested_fn.call((input.bind(py),), Some(&nested_kwargs))?;
+                        let theirs = numpy_fn.call((input.bind(py),), Some(&theirs_kwargs))?;
+                        assert_array_matches_numpy(&ours, &theirs)?;
+                        assert_array_matches_numpy(&nested, &theirs)?;
+                        assert_eq!(
+                            repr_string(&ours),
+                            repr_string(&theirs),
+                            "{name} {label} {axis_label} repr diverged"
+                        );
+                    }
+                }
+            }
 
             Ok(())
         });
