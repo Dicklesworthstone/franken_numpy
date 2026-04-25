@@ -61969,7 +61969,8 @@ mod tests {
 
             let sys_modules = py.import("sys")?.getattr("modules")?;
             for name in ["introspect", "mixins", "npyio"] {
-                let registered = sys_modules.get_item(format!("fnp_python_test_lib_root.lib.{name}"))?;
+                let registered =
+                    sys_modules.get_item(format!("fnp_python_test_lib_root.lib.{name}"))?;
                 assert!(
                     registered.is(&numpy_lib.getattr(name)?),
                     "fnp_python.lib.{name} should be registered under sys.modules"
