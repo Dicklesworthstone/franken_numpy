@@ -22848,6 +22848,44 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 ma.add(name, value)?;
             }
         }
+        // tgaq: numpy.ma's core public surface includes class objects,
+        // singletons/constants, constructors, and predicate/data helpers in
+        // addition to the operation wrappers above. Re-export those objects
+        // from numpy.ma so import-site identity and isinstance checks match.
+        let ma_core_names = [
+            "MaskedArray",
+            "masked_array",
+            "array",
+            "asarray",
+            "asanyarray",
+            "masked",
+            "nomask",
+            "masked_print_option",
+            "masked_singleton",
+            "MAError",
+            "MaskError",
+            "MaskType",
+            "mvoid",
+            "getdata",
+            "is_mask",
+            "isMA",
+            "isMaskedArray",
+            "isarray",
+            "harden_mask",
+            "soften_mask",
+        ];
+        if let Ok(np_ma) = py.import("numpy.ma") {
+            for name in ma_core_names {
+                if let Ok(value) = np_ma.getattr(name) {
+                    ma.add(name, value)?;
+                }
+            }
+        }
+        let ma_getattr_src = pyo3::ffi::c_str!(
+            "_NUMPY_MA_CORE_NAMES = frozenset(('MaskedArray','masked_array','array','asarray','asanyarray','masked','nomask','masked_print_option','masked_singleton','MAError','MaskError','MaskType','mvoid','getdata','is_mask','isMA','isMaskedArray','isarray','harden_mask','soften_mask'))\ndef __getattr__(name):\n    if name in _NUMPY_MA_CORE_NAMES:\n        import numpy.ma as _ma\n        return getattr(_ma, name)\n    raise AttributeError(name)\n"
+        );
+        let ma_dict = ma.dict();
+        py.run(ma_getattr_src, Some(&ma_dict), None)?;
         m.add_submodule(&ma)?;
         m.add("ma", ma)?;
     }
@@ -28626,6 +28664,26 @@ mod tests {
                 "compress_cols",
                 "apply_along_axis",
                 "apply_over_axes",
+                "MaskedArray",
+                "masked_array",
+                "array",
+                "asarray",
+                "asanyarray",
+                "masked",
+                "nomask",
+                "masked_print_option",
+                "masked_singleton",
+                "MAError",
+                "MaskError",
+                "MaskType",
+                "mvoid",
+                "getdata",
+                "is_mask",
+                "isMA",
+                "isMaskedArray",
+                "isarray",
+                "harden_mask",
+                "soften_mask",
             ] {
                 assert!(ma.getattr(name).is_ok(), "fnp_python.ma.{name} missing");
             }
@@ -44832,6 +44890,119 @@ mod tests {
             );
             assert_eq!(repr_string(&ours_set), repr_string(&theirs_set));
             assert_eq!(repr_string(&nested_set), repr_string(&theirs_set));
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ma_core_classes_constants_helpers_match_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_ma_core")?;
+            fnp_python(&module)?;
+            let ma = module.getattr("ma")?;
+            let numpy = py.import("numpy")?;
+            let numpy_ma = numpy.getattr("ma")?;
+
+            for name in [
+                "MaskedArray",
+                "masked_array",
+                "array",
+                "asarray",
+                "asanyarray",
+                "masked",
+                "nomask",
+                "masked_print_option",
+                "masked_singleton",
+                "MAError",
+                "MaskError",
+                "MaskType",
+                "mvoid",
+                "getdata",
+                "is_mask",
+                "isMA",
+                "isMaskedArray",
+                "isarray",
+                "harden_mask",
+                "soften_mask",
+            ] {
+                assert!(
+                    ma.getattr(name)?.is(&numpy_ma.getattr(name)?),
+                    "fnp_python.ma.{name} must be numpy.ma.{name}"
+                );
+            }
+
+            let mask_kwargs = PyDict::new(py);
+            mask_kwargs.set_item("mask", vec![false, true, false])?;
+            let ours_array = ma
+                .getattr("array")?
+                .call((vec![1_i64, 2, 3],), Some(&mask_kwargs))?;
+            let theirs_array = numpy_ma
+                .getattr("array")?
+                .call((vec![1_i64, 2, 3],), Some(&mask_kwargs))?;
+            assert_eq!(repr_string(&ours_array), repr_string(&theirs_array));
+
+            assert_array_matches_numpy(
+                &ma.getattr("getdata")?.call1((ours_array.clone(),))?,
+                &numpy_ma
+                    .getattr("getdata")?
+                    .call1((theirs_array.clone(),))?,
+            )?;
+
+            let assert_same_unary = |name: &str, input: &Bound<'_, PyAny>| -> PyResult<()> {
+                let ours = ma.getattr(name)?.call1((input.clone(),))?;
+                let theirs = numpy_ma.getattr(name)?.call1((input.clone(),))?;
+                assert_eq!(
+                    repr_string(&ours),
+                    repr_string(&theirs),
+                    "numpy.ma.{name} parity"
+                );
+                Ok(())
+            };
+
+            let plain = numpy.getattr("array")?.call1((vec![1_i64, 2, 3],))?;
+            let bool_mask = numpy.getattr("array")?.call1((vec![false, true, false],))?;
+            let nomask = numpy_ma.getattr("nomask")?;
+            let actual_mask = ours_array.getattr("mask")?;
+
+            for name in ["isMA", "isMaskedArray", "isarray"] {
+                assert_same_unary(name, &ours_array)?;
+                assert_same_unary(name, &plain)?;
+            }
+            for input in [bool_mask, nomask, actual_mask] {
+                assert_same_unary("is_mask", &input)?;
+            }
+
+            let hard_kwargs = PyDict::new(py);
+            hard_kwargs.set_item("mask", vec![false, true])?;
+            let ours_hard = ma
+                .getattr("array")?
+                .call((vec![10_i64, 20],), Some(&hard_kwargs))?;
+            let theirs_hard = numpy_ma
+                .getattr("array")?
+                .call((vec![10_i64, 20],), Some(&hard_kwargs))?;
+            let ours_hardened = ma.getattr("harden_mask")?.call1((ours_hard.clone(),))?;
+            let theirs_hardened = numpy_ma
+                .getattr("harden_mask")?
+                .call1((theirs_hard.clone(),))?;
+            assert_eq!(repr_string(&ours_hardened), repr_string(&theirs_hardened));
+            assert_eq!(
+                repr_string(&ours_hard.getattr("_hardmask")?),
+                repr_string(&theirs_hard.getattr("_hardmask")?)
+            );
+            let ours_softened = ma.getattr("soften_mask")?.call1((ours_hard.clone(),))?;
+            let theirs_softened = numpy_ma
+                .getattr("soften_mask")?
+                .call1((theirs_hard.clone(),))?;
+            assert_eq!(repr_string(&ours_softened), repr_string(&theirs_softened));
+            assert_eq!(
+                repr_string(&ours_hard.getattr("_hardmask")?),
+                repr_string(&theirs_hard.getattr("_hardmask")?)
+            );
 
             Ok(())
         });
