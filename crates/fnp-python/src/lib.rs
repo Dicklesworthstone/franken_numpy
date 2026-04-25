@@ -18001,12 +18001,76 @@ fn testing_assert_approx_equal(
 #[pyfunction]
 #[pyo3(signature = (actual, desired))]
 fn testing_assert_string_equal(py: Python<'_>, actual: &str, desired: &str) -> PyResult<()> {
-    // Passthrough to numpy.testing.assert_string_equal. Raises
-    // AssertionError if the two strings differ; otherwise returns None.
-    let numpy = py.import("numpy")?;
-    let assert_fn = numpy.getattr("testing")?.getattr("assert_string_equal")?;
-    assert_fn.call1((actual, desired))?;
-    Ok(())
+    // u98f — native assert_string_equal. numpy's semantic is plain
+    // string equality with an AssertionError on mismatch whose message
+    // includes a difflib-rendered diff. We replicate the exact numpy
+    // message format by routing through Python's stdlib difflib (no
+    // numpy import required) so the helper works on numpy-less CI
+    // workers and downstream log scrapers continue to match.
+    if actual == desired {
+        return Ok(());
+    }
+    // Replicate numpy.testing._private.utils.assert_string_equal:
+    //   diff = list(difflib.Differ().compare(
+    //       actual.splitlines(True), desired.splitlines(True)))
+    //   diff = [d for d in diff if not d.startswith('? ')]
+    //   if any non-equal markers: msg = "Differences in strings:\n" + ''.join(diff).rstrip()
+    let difflib = py.import("difflib")?;
+    let differ = difflib.getattr("Differ")?.call0()?;
+    let actual_split: Vec<&str> = lines_keepends(actual);
+    let desired_split: Vec<&str> = lines_keepends(desired);
+    let actual_py = pyo3::types::PyList::new(py, &actual_split)?;
+    let desired_py = pyo3::types::PyList::new(py, &desired_split)?;
+    let diff_iter = differ.call_method1("compare", (actual_py, desired_py))?;
+    let mut diff_lines: Vec<String> = Vec::new();
+    let mut has_change = false;
+    for item in diff_iter.try_iter()? {
+        let s: String = item?.extract()?;
+        if s.starts_with("? ") {
+            continue;
+        }
+        if !s.starts_with("  ") {
+            has_change = true;
+        }
+        diff_lines.push(s);
+    }
+    if !has_change {
+        return Ok(());
+    }
+    let body = diff_lines.join("");
+    let body = body.trim_end();
+    Err(pyo3::exceptions::PyAssertionError::new_err(format!(
+        "Differences in strings:\n{body}"
+    )))
+}
+
+fn lines_keepends(s: &str) -> Vec<&str> {
+    // Mirror Python's str.splitlines(keepends=True). Python recognises
+    // \r\n, \n, \r, \v, \f, \x1c, \x1d, \x1e, \x85,  ,   as
+    // line separators; for typical test input the only ones in play
+    // are \n and \r\n, so handle those exactly and fall back to a
+    // single segment otherwise.
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' && i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+            out.push(&s[start..=i + 1]);
+            i += 2;
+            start = i;
+        } else if bytes[i] == b'\n' || bytes[i] == b'\r' {
+            out.push(&s[start..=i]);
+            i += 1;
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+    if start < bytes.len() {
+        out.push(&s[start..]);
+    }
+    out
 }
 
 #[pyfunction]
@@ -23603,6 +23667,72 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         py.run(testing_getattr_src, Some(&testing_dict), None)?;
         m.add_submodule(&testing)?;
         m.add("testing", testing)?;
+    }
+
+    {
+        // 7o9k: numpy.exceptions submodule. NumPy 2.x consolidated the
+        // long-tail warning + error classes into numpy.exceptions and
+        // forwards each name on the top-level numpy namespace too.
+        // Mirror both surfaces (eager re-export + PEP-562 lazy
+        // fallback + explicit fallback list when numpy isn't importable
+        // at module init).
+        let exceptions = PyModule::new(py, "exceptions")?;
+        let parent_name = m.getattr("__name__")?.extract::<String>()?;
+        let exceptions_qualified_name = format!("{parent_name}.exceptions");
+        exceptions.setattr("__name__", &exceptions_qualified_name)?;
+        exceptions.setattr("__package__", &parent_name)?;
+        // numpy 2.x dropped RankWarning from numpy.exceptions.__all__
+        // (it now lives only on numpy.polynomial). Track the live
+        // 6-name list as the canonical fallback.
+        let exceptions_fallback_all: [&str; 6] = [
+            "ComplexWarning",
+            "VisibleDeprecationWarning",
+            "ModuleDeprecationWarning",
+            "TooHardError",
+            "AxisError",
+            "DTypePromotionError",
+        ];
+        if let Ok(np_exceptions) = py.import("numpy.exceptions") {
+            // Mirror __all__ verbatim when present, else use the
+            // canonical fallback list.
+            if let Ok(all_names) = np_exceptions.getattr("__all__") {
+                exceptions.setattr("__all__", all_names.clone())?;
+                for item in all_names.try_iter()? {
+                    let name = item?.extract::<String>()?;
+                    if exceptions.getattr(name.as_str()).is_err()
+                        && let Ok(value) = np_exceptions.getattr(name.as_str())
+                    {
+                        exceptions.setattr(name.as_str(), value)?;
+                    }
+                    // Top-level forwarding: numpy.AxisError works
+                    // because numpy re-exports each exception. Mirror
+                    // that on fnp_python.<Name>.
+                    if let Ok(value) = np_exceptions.getattr(name.as_str()) {
+                        m.setattr(name.as_str(), value)?;
+                    }
+                }
+            }
+            for name in &exceptions_fallback_all {
+                if exceptions.getattr(*name).is_err()
+                    && let Ok(value) = np_exceptions.getattr(*name)
+                {
+                    exceptions.setattr(*name, &value)?;
+                    if m.getattr(*name).is_err() {
+                        m.setattr(*name, &value)?;
+                    }
+                }
+            }
+        }
+        if exceptions.getattr("__all__").is_err() {
+            exceptions.setattr("__all__", PyList::new(py, exceptions_fallback_all)?)?;
+        }
+        let exceptions_getattr_src = pyo3::ffi::c_str!(
+            "_EXCEPTIONS_NAMES = frozenset(('ComplexWarning','VisibleDeprecationWarning','ModuleDeprecationWarning','TooHardError','AxisError','DTypePromotionError'))\ndef __getattr__(name):\n    if name in _EXCEPTIONS_NAMES:\n        import numpy.exceptions as _exc\n        return getattr(_exc, name)\n    raise AttributeError(name)\n"
+        );
+        let exceptions_dict = exceptions.dict();
+        py.run(exceptions_getattr_src, Some(&exceptions_dict), None)?;
+        m.add_submodule(&exceptions)?;
+        m.add("exceptions", exceptions)?;
     }
 
     {
@@ -61796,6 +61926,91 @@ mod tests {
             let theirs_flat: i64 = numpy_amx.call1((m2.clone(),))?.extract()?;
             assert_eq!(ours_flat, theirs_flat);
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn exceptions_submodule_matches_numpy() {
+        // 7o9k: numpy.exceptions parity.
+        // - fnp_python.exceptions.__all__ must equal numpy.exceptions's
+        //   verbatim (when numpy is importable).
+        // - Every name in __all__ must resolve to the SAME class object
+        //   as numpy's so isinstance(err, fnp_python.AxisError) catches
+        //   what numpy raises.
+        // - The top-level fnp_python.<Name> forwards (matching numpy's
+        //   own re-export at the package root) must also be identity.
+        // - When numpy isn't importable at module init, the embedded
+        //   fallback list still includes every canonical name.
+        with_python(|py| {
+            let module = PyModule::new(py, "fnp_python_test_exceptions")?;
+            fnp_python(&module)?;
+            let exc_mod = module.getattr("exceptions")?;
+            let our_all: Vec<String> = exc_mod.getattr("__all__")?.extract()?;
+            assert!(
+                !our_all.is_empty(),
+                "fnp_python.exceptions.__all__ must be non-empty"
+            );
+            let canonical: [&str; 6] = [
+                "ComplexWarning",
+                "VisibleDeprecationWarning",
+                "ModuleDeprecationWarning",
+                "TooHardError",
+                "AxisError",
+                "DTypePromotionError",
+            ];
+            for name in &canonical {
+                assert!(
+                    our_all.iter().any(|x| x == name),
+                    "fnp_python.exceptions.__all__ missing canonical name '{name}'"
+                );
+            }
+
+            if numpy_available(py) {
+                let np_exc = py.import("numpy.exceptions")?;
+                let theirs_all: Vec<String> = np_exc.getattr("__all__")?.extract()?;
+                assert_eq!(
+                    our_all, theirs_all,
+                    "fnp_python.exceptions.__all__ must equal numpy.exceptions's verbatim (order included)"
+                );
+                for name in &theirs_all {
+                    let ours = exc_mod.getattr(name.as_str())?;
+                    let theirs = np_exc.getattr(name.as_str())?;
+                    assert!(
+                        ours.is(&theirs),
+                        "fnp_python.exceptions.{name} must be the same object as numpy.exceptions.{name}"
+                    );
+                    // Top-level forwarding parity.
+                    if let Ok(top_ours) = module.getattr(name.as_str()) {
+                        assert!(
+                            top_ours.is(&theirs),
+                            "fnp_python.{name} must be the same object as numpy.exceptions.{name}"
+                        );
+                    } else {
+                        panic!(
+                            "fnp_python.{name} top-level forward missing \
+                             (numpy exposes {name} on the package root)"
+                        );
+                    }
+                }
+
+                // PEP-562 lazy fallback: build a fresh module, drop
+                // each eager re-export, and re-getattr. Each name must
+                // still resolve back to numpy.exceptions.<name>.
+                let lazy = PyModule::new(py, "fnp_python_test_exceptions_lazy")?;
+                fnp_python(&lazy)?;
+                let lazy_exc = lazy.getattr("exceptions")?;
+                for name in &theirs_all {
+                    if lazy_exc.hasattr(name.as_str())? {
+                        lazy_exc.delattr(name.as_str())?;
+                    }
+                    let resolved = lazy_exc.getattr(name.as_str())?;
+                    assert!(
+                        resolved.is(&np_exc.getattr(name.as_str())?),
+                        "lazy fnp_python.exceptions.{name} must resolve to numpy.exceptions.{name}"
+                    );
+                }
+            }
             Ok(())
         });
     }
