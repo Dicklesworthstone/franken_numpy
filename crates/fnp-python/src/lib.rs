@@ -23736,6 +23736,86 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
 
     {
+        // vbpx: numpy.dtypes submodule. NumPy 2.x consolidates concrete
+        // DType classes here for explicit construction (e.g.
+        // np.dtypes.Int64DType()) and isinstance checks. Mirror eagerly
+        // when numpy is importable; ship an explicit 33-name fallback
+        // for the embedded interpreter that finishes module init
+        // before numpy is on sys.path. PEP-562 __getattr__ fills in
+        // anything we missed at lazy lookup time.
+        let dtypes_module = PyModule::new(py, "dtypes")?;
+        let parent_name = m.getattr("__name__")?.extract::<String>()?;
+        let dtypes_qualified_name = format!("{parent_name}.dtypes");
+        dtypes_module.setattr("__name__", &dtypes_qualified_name)?;
+        dtypes_module.setattr("__package__", &parent_name)?;
+        let dtypes_fallback_all: [&str; 33] = [
+            "BoolDType",
+            "Int8DType",
+            "ByteDType",
+            "UInt8DType",
+            "UByteDType",
+            "Int16DType",
+            "ShortDType",
+            "UInt16DType",
+            "UShortDType",
+            "Int32DType",
+            "IntDType",
+            "UInt32DType",
+            "UIntDType",
+            "Int64DType",
+            "LongDType",
+            "UInt64DType",
+            "ULongDType",
+            "LongLongDType",
+            "ULongLongDType",
+            "Float16DType",
+            "Float32DType",
+            "Float64DType",
+            "LongDoubleDType",
+            "Complex64DType",
+            "Complex128DType",
+            "CLongDoubleDType",
+            "ObjectDType",
+            "BytesDType",
+            "StrDType",
+            "VoidDType",
+            "DateTime64DType",
+            "TimeDelta64DType",
+            "StringDType",
+        ];
+        if let Ok(np_dtypes) = py.import("numpy.dtypes") {
+            if let Ok(all_names) = np_dtypes.getattr("__all__") {
+                dtypes_module.setattr("__all__", all_names.clone())?;
+                for item in all_names.try_iter()? {
+                    let name = item?.extract::<String>()?;
+                    if dtypes_module.getattr(name.as_str()).is_err()
+                        && let Ok(value) = np_dtypes.getattr(name.as_str())
+                    {
+                        dtypes_module.setattr(name.as_str(), value)?;
+                    }
+                }
+            }
+            for name in &dtypes_fallback_all {
+                if dtypes_module.getattr(*name).is_err()
+                    && let Ok(value) = np_dtypes.getattr(*name)
+                {
+                    dtypes_module.setattr(*name, value)?;
+                }
+            }
+        }
+        if dtypes_module.getattr("__all__").is_err() {
+            dtypes_module.setattr("__all__", PyList::new(py, dtypes_fallback_all)?)?;
+        }
+        let dtypes_getattr_src = pyo3::ffi::c_str!(
+            "_DTYPES_NAMES = frozenset(('BoolDType','Int8DType','ByteDType','UInt8DType','UByteDType','Int16DType','ShortDType','UInt16DType','UShortDType','Int32DType','IntDType','UInt32DType','UIntDType','Int64DType','LongDType','UInt64DType','ULongDType','LongLongDType','ULongLongDType','Float16DType','Float32DType','Float64DType','LongDoubleDType','Complex64DType','Complex128DType','CLongDoubleDType','ObjectDType','BytesDType','StrDType','VoidDType','DateTime64DType','TimeDelta64DType','StringDType'))\ndef __getattr__(name):\n    if name in _DTYPES_NAMES:\n        import numpy.dtypes as _dt\n        return getattr(_dt, name)\n    raise AttributeError(name)\n"
+        );
+        let dtypes_dict = dtypes_module.dict();
+        py.run(dtypes_getattr_src, Some(&dtypes_dict), None)?;
+        m.add_submodule(&dtypes_module)?;
+        m.add("dtypes", dtypes_module)?;
+    }
+
+    {
         // numpy.lib.recfunctions — nested two levels deep.
         let lib_module = PyModule::new(py, "lib")?;
         let parent_name = m.getattr("__name__")?.extract::<String>()?;
@@ -61926,6 +62006,104 @@ mod tests {
             let theirs_flat: i64 = numpy_amx.call1((m2.clone(),))?.extract()?;
             assert_eq!(ours_flat, theirs_flat);
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn dtypes_submodule_matches_numpy() {
+        // vbpx: numpy.dtypes parity.
+        // - fnp_python.dtypes.__all__ == numpy.dtypes.__all__ verbatim
+        //   when numpy is importable.
+        // - Each name resolves to the SAME class object as
+        //   numpy.dtypes.<name> so isinstance(dt, fnp_python.dtypes.X)
+        //   matches numpy's classification.
+        // - Fallback list (no numpy at module init) covers every
+        //   canonical 33-name entry.
+        // - PEP-562 lazy fallback: drop each eager attr and re-getattr;
+        //   each name must still resolve through numpy.dtypes.
+        with_python(|py| {
+            let module = PyModule::new(py, "fnp_python_test_dtypes")?;
+            fnp_python(&module)?;
+            let dtypes_mod = module.getattr("dtypes")?;
+            let our_all: Vec<String> = dtypes_mod.getattr("__all__")?.extract()?;
+            assert!(
+                !our_all.is_empty(),
+                "fnp_python.dtypes.__all__ must be non-empty"
+            );
+            let canonical: [&str; 33] = [
+                "BoolDType",
+                "Int8DType",
+                "ByteDType",
+                "UInt8DType",
+                "UByteDType",
+                "Int16DType",
+                "ShortDType",
+                "UInt16DType",
+                "UShortDType",
+                "Int32DType",
+                "IntDType",
+                "UInt32DType",
+                "UIntDType",
+                "Int64DType",
+                "LongDType",
+                "UInt64DType",
+                "ULongDType",
+                "LongLongDType",
+                "ULongLongDType",
+                "Float16DType",
+                "Float32DType",
+                "Float64DType",
+                "LongDoubleDType",
+                "Complex64DType",
+                "Complex128DType",
+                "CLongDoubleDType",
+                "ObjectDType",
+                "BytesDType",
+                "StrDType",
+                "VoidDType",
+                "DateTime64DType",
+                "TimeDelta64DType",
+                "StringDType",
+            ];
+            for name in &canonical {
+                assert!(
+                    our_all.iter().any(|x| x == name),
+                    "fnp_python.dtypes.__all__ missing canonical name '{name}'"
+                );
+            }
+
+            if numpy_available(py) {
+                let np_dtypes = py.import("numpy.dtypes")?;
+                let theirs_all: Vec<String> = np_dtypes.getattr("__all__")?.extract()?;
+                assert_eq!(
+                    our_all, theirs_all,
+                    "fnp_python.dtypes.__all__ must equal numpy.dtypes's verbatim (order included)"
+                );
+                for name in &theirs_all {
+                    let ours = dtypes_mod.getattr(name.as_str())?;
+                    let theirs = np_dtypes.getattr(name.as_str())?;
+                    assert!(
+                        ours.is(&theirs),
+                        "fnp_python.dtypes.{name} must be the same object as numpy.dtypes.{name}"
+                    );
+                }
+
+                // Lazy fallback verification.
+                let lazy = PyModule::new(py, "fnp_python_test_dtypes_lazy")?;
+                fnp_python(&lazy)?;
+                let lazy_dtypes = lazy.getattr("dtypes")?;
+                for name in &theirs_all {
+                    if lazy_dtypes.hasattr(name.as_str())? {
+                        lazy_dtypes.delattr(name.as_str())?;
+                    }
+                    let resolved = lazy_dtypes.getattr(name.as_str())?;
+                    assert!(
+                        resolved.is(&np_dtypes.getattr(name.as_str())?),
+                        "lazy fnp_python.dtypes.{name} must resolve to numpy.dtypes.{name}"
+                    );
+                }
+            }
             Ok(())
         });
     }
