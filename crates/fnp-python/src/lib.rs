@@ -10078,6 +10078,20 @@ fn numpy_ma_axis(
     }
 }
 
+fn numpy_ma_passthrough(
+    py: Python<'_>,
+    name: &str,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("ma")?
+        .getattr(name)?
+        .call(args, kwargs)?
+        .unbind())
+}
+
 #[pyfunction]
 fn flatnotmasked_edges(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     numpy_ma_unary(py, "flatnotmasked_edges", a)
@@ -10134,6 +10148,26 @@ fn compress_rows(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 fn compress_cols(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     numpy_ma_unary(py, "compress_cols", a)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn ma_apply_along_axis(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    numpy_ma_passthrough(py, "apply_along_axis", args, kwargs)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn ma_apply_over_axes(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    numpy_ma_passthrough(py, "apply_over_axes", args, kwargs)
 }
 
 #[pyfunction]
@@ -21612,6 +21646,8 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compress_rowcols, m)?)?;
     m.add_function(wrap_pyfunction!(compress_rows, m)?)?;
     m.add_function(wrap_pyfunction!(compress_cols, m)?)?;
+    m.add_function(wrap_pyfunction!(ma_apply_along_axis, m)?)?;
+    m.add_function(wrap_pyfunction!(ma_apply_over_axes, m)?)?;
     m.add_function(wrap_pyfunction!(masked_equal, m)?)?;
     m.add_function(wrap_pyfunction!(masked_not_equal, m)?)?;
     m.add_function(wrap_pyfunction!(vdot, m)?)?;
@@ -22320,13 +22356,15 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     {
         let ma = PyModule::new(py, "ma")?;
-        // ma_* prefixed (5).
+        // ma_* prefixed (7).
         for (numpy_name, flat_name) in [
             ("count", "ma_count"),
             ("argmax", "ma_argmax"),
             ("argmin", "ma_argmin"),
             ("average", "ma_average"),
             ("ediff1d", "ma_ediff1d"),
+            ("apply_along_axis", "ma_apply_along_axis"),
+            ("apply_over_axes", "ma_apply_over_axes"),
         ] {
             if let Ok(value) = m.getattr(flat_name) {
                 ma.add(numpy_name, value)?;
@@ -27138,6 +27176,8 @@ mod tests {
             assert!(module.getattr("compress_rowcols").is_ok());
             assert!(module.getattr("compress_rows").is_ok());
             assert!(module.getattr("compress_cols").is_ok());
+            assert!(module.getattr("ma_apply_along_axis").is_ok());
+            assert!(module.getattr("ma_apply_over_axes").is_ok());
             assert!(module.getattr("masked_equal").is_ok());
             assert!(module.getattr("masked_not_equal").is_ok());
             assert!(module.getattr("vdot").is_ok());
@@ -27897,6 +27937,8 @@ mod tests {
                 "compress_rowcols",
                 "compress_rows",
                 "compress_cols",
+                "apply_along_axis",
+                "apply_over_axes",
             ] {
                 assert!(ma.getattr(name).is_ok(), "fnp_python.ma.{name} missing");
             }
@@ -40147,6 +40189,117 @@ mod tests {
                     );
                 }
             }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ma_apply_helpers_match_numpy_callable_and_axis_semantics() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let ma_module = module.getattr("ma")?;
+            let numpy = py.import("numpy")?;
+            let numpy_ma = numpy.getattr("ma")?;
+            let ma_array = numpy_ma.getattr("array")?;
+
+            let helper_ns = PyDict::new(py);
+            helper_ns.set_item("np", &numpy)?;
+            py.run(
+                pyo3::ffi::c_str!(
+                    "def row_stat(v, offset=0):\n    return np.ma.sum(v) + offset\n\ndef mask_gt_two(v):\n    return np.ma.masked_where(v > 2, v)\n"
+                ),
+                Some(&helper_ns),
+                None,
+            )?;
+            let row_stat = helper_ns
+                .get_item("row_stat")?
+                .expect("row_stat should be defined");
+            let mask_gt_two = helper_ns
+                .get_item("mask_gt_two")?
+                .expect("mask_gt_two should be defined");
+
+            let masked_kwargs = PyDict::new(py);
+            masked_kwargs.set_item(
+                "mask",
+                vec![
+                    vec![false, true, false],
+                    vec![false, false, false],
+                    vec![true, false, false],
+                ],
+            )?;
+            let masked_2d = ma_array
+                .call(
+                    (vec![vec![0_i64, 1, 2], vec![3, 4, 5], vec![6, 7, 8]],),
+                    Some(&masked_kwargs),
+                )?
+                .unbind();
+
+            let apply_along = module.getattr("ma_apply_along_axis")?;
+            let nested_apply_along = ma_module.getattr("apply_along_axis")?;
+            let numpy_apply_along = numpy_ma.getattr("apply_along_axis")?;
+            let offset_kwargs = PyDict::new(py);
+            offset_kwargs.set_item("offset", 10_i64)?;
+
+            let ours_row =
+                apply_along.call((&row_stat, 1_i64, masked_2d.bind(py)), Some(&offset_kwargs))?;
+            let nested_row = nested_apply_along
+                .call((&row_stat, 1_i64, masked_2d.bind(py)), Some(&offset_kwargs))?;
+            let theirs_row = numpy_apply_along
+                .call((&row_stat, 1_i64, masked_2d.bind(py)), Some(&offset_kwargs))?;
+            assert_eq!(repr_string(&ours_row), repr_string(&theirs_row));
+            assert_eq!(repr_string(&nested_row), repr_string(&theirs_row));
+
+            let ours_masked = apply_along.call1((&mask_gt_two, 0_i64, masked_2d.bind(py)))?;
+            let nested_masked =
+                nested_apply_along.call1((&mask_gt_two, 0_i64, masked_2d.bind(py)))?;
+            let theirs_masked =
+                numpy_apply_along.call1((&mask_gt_two, 0_i64, masked_2d.bind(py)))?;
+            assert_eq!(repr_string(&ours_masked), repr_string(&theirs_masked));
+            assert_eq!(repr_string(&nested_masked), repr_string(&theirs_masked));
+
+            let ours_bad = apply_along.call1((&row_stat, 5_i64, masked_2d.bind(py)));
+            let theirs_bad = numpy_apply_along.call1((&row_stat, 5_i64, masked_2d.bind(py)));
+            match (ours_bad, theirs_bad) {
+                (Err(ours), Err(theirs)) => {
+                    assert_eq!(
+                        ours.get_type(py).name()?.extract::<String>()?,
+                        theirs.get_type(py).name()?.extract::<String>()?
+                    );
+                    assert_eq!(
+                        ours.value(py).str()?.extract::<String>()?,
+                        theirs.value(py).str()?.extract::<String>()?
+                    );
+                }
+                (ours, theirs) => {
+                    return Err(pyo3::exceptions::PyAssertionError::new_err(format!(
+                        "apply_along_axis bad-axis outcome diverged: ours={ours:?} theirs={theirs:?}"
+                    )));
+                }
+            }
+
+            let apply_over = module.getattr("ma_apply_over_axes")?;
+            let nested_apply_over = ma_module.getattr("apply_over_axes")?;
+            let numpy_apply_over = numpy_ma.getattr("apply_over_axes")?;
+            let ma_sum = numpy_ma.getattr("sum")?;
+
+            let ours_axis0 = apply_over.call1((&ma_sum, masked_2d.bind(py), 0_i64))?;
+            let nested_axis0 = nested_apply_over.call1((&ma_sum, masked_2d.bind(py), 0_i64))?;
+            let theirs_axis0 = numpy_apply_over.call1((&ma_sum, masked_2d.bind(py), 0_i64))?;
+            assert_eq!(repr_string(&ours_axis0), repr_string(&theirs_axis0));
+            assert_eq!(repr_string(&nested_axis0), repr_string(&theirs_axis0));
+
+            let axes = PyTuple::new(py, [0_i64, 1_i64])?;
+            let ours_axes = apply_over.call1((&ma_sum, masked_2d.bind(py), &axes))?;
+            let nested_axes = nested_apply_over.call1((&ma_sum, masked_2d.bind(py), &axes))?;
+            let theirs_axes = numpy_apply_over.call1((&ma_sum, masked_2d.bind(py), &axes))?;
+            assert_eq!(repr_string(&ours_axes), repr_string(&theirs_axes));
+            assert_eq!(repr_string(&nested_axes), repr_string(&theirs_axes));
 
             Ok(())
         });
