@@ -23220,6 +23220,16 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "soften_mask",
             "cov",
             "corrcoef",
+            "sum",
+            "prod",
+            "min",
+            "max",
+            "mean",
+            "median",
+            "std",
+            "var",
+            "ptp",
+            "anom",
         ];
         if let Ok(np_ma) = py.import("numpy.ma") {
             for name in ma_core_names {
@@ -23229,7 +23239,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             }
         }
         let ma_getattr_src = pyo3::ffi::c_str!(
-            "_NUMPY_MA_CORE_NAMES = frozenset(('MaskedArray','masked_array','array','asarray','asanyarray','masked','nomask','masked_print_option','masked_singleton','MAError','MaskError','MaskType','mvoid','getdata','is_mask','isMA','isMaskedArray','isarray','harden_mask','soften_mask','cov','corrcoef'))\ndef __getattr__(name):\n    if name in _NUMPY_MA_CORE_NAMES:\n        import numpy.ma as _ma\n        return getattr(_ma, name)\n    raise AttributeError(name)\n"
+            "_NUMPY_MA_CORE_NAMES = frozenset(('MaskedArray','masked_array','array','asarray','asanyarray','masked','nomask','masked_print_option','masked_singleton','MAError','MaskError','MaskType','mvoid','getdata','is_mask','isMA','isMaskedArray','isarray','harden_mask','soften_mask','cov','corrcoef','sum','prod','min','max','mean','median','std','var','ptp','anom'))\ndef __getattr__(name):\n    if name in _NUMPY_MA_CORE_NAMES:\n        import numpy.ma as _ma\n        return getattr(_ma, name)\n    raise AttributeError(name)\n"
         );
         let ma_dict = ma.dict();
         py.run(ma_getattr_src, Some(&ma_dict), None)?;
@@ -45584,6 +45594,84 @@ mod tests {
     }
 
     #[test]
+    fn ma_reduction_stat_helpers_match_numpy_oracles() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_ma_reductions")?;
+            fnp_python(&module)?;
+            let ma = module.getattr("ma")?;
+            let numpy = py.import("numpy")?;
+            let numpy_ma = numpy.getattr("ma")?;
+            let builtins = py.import("builtins")?;
+            let eval_fn = builtins.getattr("eval")?;
+            let globals = PyDict::new(py);
+            globals.set_item("np", numpy.clone())?;
+            let eval_with_globals = |code: &str| -> PyResult<pyo3::Bound<'_, PyAny>> {
+                eval_fn.call((code, &globals), None::<&pyo3::Bound<'_, PyDict>>)
+            };
+
+            let names = [
+                "sum", "prod", "min", "max", "mean", "median", "std", "var", "ptp", "anom",
+            ];
+            for name in names {
+                assert!(
+                    ma.getattr(name)?.is(&numpy_ma.getattr(name)?),
+                    "fnp_python.ma.{name} must be numpy.ma.{name}"
+                );
+            }
+
+            let masked = eval_with_globals(
+                "np.ma.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], \
+                 mask=[[False, True, False], [False, False, True]])",
+            )?;
+            let all_masked = eval_with_globals("np.ma.masked_all((2, 3), dtype=float)")?;
+
+            let assert_same_call = |name: &str,
+                                    input: &pyo3::Bound<'_, PyAny>,
+                                    kwargs: Option<&pyo3::Bound<'_, PyDict>>|
+             -> PyResult<()> {
+                let ours = ma.getattr(name)?.call((input.clone(),), kwargs)?;
+                let theirs = numpy_ma.getattr(name)?.call((input.clone(),), kwargs)?;
+                assert_eq!(
+                    repr_string(&ours),
+                    repr_string(&theirs),
+                    "numpy.ma.{name} result parity"
+                );
+                Ok(())
+            };
+
+            for name in [
+                "sum", "prod", "min", "max", "mean", "median", "std", "var", "ptp",
+            ] {
+                assert_same_call(name, &masked, None)?;
+                assert_same_call(name, &all_masked, None)?;
+
+                let axis_kwargs = PyDict::new(py);
+                axis_kwargs.set_item("axis", 1)?;
+                axis_kwargs.set_item("keepdims", true)?;
+                assert_same_call(name, &masked, Some(&axis_kwargs))?;
+            }
+
+            for name in ["std", "var"] {
+                let ddof_kwargs = PyDict::new(py);
+                ddof_kwargs.set_item("axis", 0)?;
+                ddof_kwargs.set_item("ddof", 1)?;
+                assert_same_call(name, &masked, Some(&ddof_kwargs))?;
+            }
+
+            assert_same_call("anom", &masked, None)?;
+            let anom_axis_kwargs = PyDict::new(py);
+            anom_axis_kwargs.set_item("axis", 1)?;
+            assert_same_call("anom", &masked, Some(&anom_axis_kwargs))?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn ma_core_classes_constants_helpers_match_numpy_oracles() {
         with_python(|py| {
             if !numpy_available(py) {
@@ -45619,6 +45707,16 @@ mod tests {
                 "soften_mask",
                 "cov",
                 "corrcoef",
+                "sum",
+                "prod",
+                "min",
+                "max",
+                "mean",
+                "median",
+                "std",
+                "var",
+                "ptp",
+                "anom",
             ] {
                 assert!(
                     ma.getattr(name)?.is(&numpy_ma.getattr(name)?),
