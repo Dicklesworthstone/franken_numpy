@@ -23577,15 +23577,41 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         let array_utils_qualified_name = format!("{lib_qualified_name}.array_utils");
         array_utils.setattr("__name__", &array_utils_qualified_name)?;
         array_utils.setattr("__package__", &lib_qualified_name)?;
+        let array_utils_names = [
+            "byte_bounds",
+            "normalize_axis_tuple",
+            "normalize_axis_index",
+        ];
         for (numpy_name, flat_name) in [
             ("byte_bounds", "array_utils_byte_bounds"),
-            ("normalize_axis_index", "array_utils_normalize_axis_index"),
             ("normalize_axis_tuple", "array_utils_normalize_axis_tuple"),
+            ("normalize_axis_index", "array_utils_normalize_axis_index"),
         ] {
             if let Ok(value) = m.getattr(flat_name) {
                 array_utils.add(numpy_name, value)?;
             }
         }
+        if let Ok(np_array_utils) = py.import("numpy.lib.array_utils")
+            && let Ok(all_names) = np_array_utils.getattr("__all__")
+        {
+            array_utils.setattr("__all__", all_names.clone())?;
+            for item in all_names.try_iter()? {
+                let name = item?.extract::<String>()?;
+                if array_utils.getattr(name.as_str()).is_err()
+                    && let Ok(value) = np_array_utils.getattr(name.as_str())
+                {
+                    array_utils.add(name.as_str(), value)?;
+                }
+            }
+        }
+        if array_utils.getattr("__all__").is_err() {
+            array_utils.setattr("__all__", PyList::new(py, array_utils_names)?)?;
+        }
+        let array_utils_getattr_src = pyo3::ffi::c_str!(
+            "_ARRAY_UTILS_NAMES = frozenset(('byte_bounds','normalize_axis_tuple','normalize_axis_index'))\ndef __getattr__(name):\n    if name in _ARRAY_UTILS_NAMES:\n        import numpy.lib.array_utils as _array_utils\n        return getattr(_array_utils, name)\n    raise AttributeError(name)\n"
+        );
+        let array_utils_dict = array_utils.dict();
+        py.run(array_utils_getattr_src, Some(&array_utils_dict), None)?;
         lib_module.add_submodule(&array_utils)?;
         lib_module.add("array_utils", array_utils)?;
         let format_module = PyModule::new(py, "format")?;
@@ -62185,6 +62211,21 @@ mod tests {
             fnp_python(&module)?;
             let array_utils = module.getattr("lib")?.getattr("array_utils")?;
             let numpy_array_utils = py.import("numpy.lib.array_utils")?;
+            let numpy_array_utils_all = numpy_array_utils.getattr("__all__")?;
+            if repr_string(&array_utils.getattr("__all__")?) != repr_string(&numpy_array_utils_all)
+            {
+                return Err(PyValueError::new_err(
+                    "fnp_python.lib.array_utils.__all__ must match numpy.lib.array_utils.__all__",
+                ));
+            }
+            for item in numpy_array_utils_all.try_iter()? {
+                let name = item?.extract::<String>()?;
+                if !array_utils.hasattr(name.as_str())? {
+                    return Err(PyValueError::new_err(format!(
+                        "fnp_python.lib.array_utils missing numpy public name {name}"
+                    )));
+                }
+            }
             let numpy = py.import("numpy")?;
             let builtins = py.import("builtins")?;
             let eval_fn = builtins.getattr("eval")?;
