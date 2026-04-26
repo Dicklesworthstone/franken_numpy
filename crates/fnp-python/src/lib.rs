@@ -9375,15 +9375,34 @@ fn searchsorted(
     side: &str,
     sorter: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // Mirror numpy's scalar-vs-array return shape: when `v` is a Python
+    // scalar or a 0-D ndarray, numpy.searchsorted returns a numpy scalar
+    // (e.g. np.int64(2)); otherwise it returns an ndarray. Detect on the
+    // *original* Python object before we materialize a UFuncArray, since
+    // extract_numeric_array normalizes everything to an array.
+    let v_bound = v.bind(py);
+    let v_is_scalar = v_bound
+        .getattr("ndim")
+        .and_then(|n| n.extract::<i64>())
+        .map(|n| n == 0)
+        .unwrap_or(true);
     let a = extract_numeric_array(py, a.bind(py), "searchsorted(a)")?;
-    let v = extract_numeric_array(py, v.bind(py), "searchsorted(v)")?;
+    let v = extract_numeric_array(py, v_bound, "searchsorted(v)")?;
     let sorter = sorter
         .map(|sorter| extract_index_vector(py, sorter.bind(py), "searchsorted(sorter)"))
         .transpose()?;
     let result = a
         .searchsorted(&v, Some(side), sorter.as_deref())
         .map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    let array = build_numpy_array_from_ufunc(py, &result)?;
+    if v_is_scalar {
+        // result[()] unwraps a 0-D ndarray into the corresponding numpy
+        // scalar (np.intp / np.int64), matching numpy.searchsorted's
+        // scalar-input return type exactly.
+        Ok(array.bind(py).get_item(())?.unbind())
+    } else {
+        Ok(array)
+    }
 }
 
 #[pyfunction]
