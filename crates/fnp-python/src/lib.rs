@@ -20367,14 +20367,45 @@ fn validate_irfft_norm(norm: Option<&str>) -> PyResult<()> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, n=None, norm=None))]
+#[pyo3(signature = (a, n=None, axis=-1, norm=None, out=None))]
 fn rfft(
     py: Python<'_>,
     a: Py<PyAny>,
     n: Option<usize>,
+    axis: i64,
     norm: Option<String>,
+    out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let array = extract_precise_numeric_array(py, a.bind(py), "rfft(a)")?;
+    // Native fast path only handles 1-D inputs along the last axis with
+    // no `out=` destination. Anything else (multi-D input, non-default
+    // axis, explicit out) falls back to numpy.fft.rfft so the kwarg
+    // surface matches numpy exactly.
+    let bound = a.bind(py);
+    let ndim = bound
+        .getattr("ndim")
+        .and_then(|n| n.extract::<i64>())
+        .unwrap_or(1);
+    let last_axis = axis == -1 || axis == ndim - 1;
+    let native_eligible = ndim == 1 && last_axis && out.is_none();
+    if !native_eligible {
+        let numpy = py.import("numpy")?;
+        let kwargs = PyDict::new(py);
+        if let Some(n_val) = n {
+            kwargs.set_item("n", n_val)?;
+        }
+        kwargs.set_item("axis", axis)?;
+        if let Some(norm_val) = norm {
+            kwargs.set_item("norm", norm_val)?;
+        }
+        if let Some(out_val) = out {
+            kwargs.set_item("out", out_val.bind(py))?;
+        }
+        return Ok(numpy
+            .getattr("fft")?
+            .call_method("rfft", (bound,), Some(&kwargs))?
+            .unbind());
+    }
+    let array = extract_precise_numeric_array(py, bound, "rfft(a)")?;
     let input_n = n.unwrap_or_else(|| array.values().len());
     let result = array.rfft(n).map_err(map_ufunc_error)?;
     let scale = rfft_norm_scale(norm.as_deref(), input_n)?;
@@ -20389,12 +20420,14 @@ fn rfft(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, n=None, norm=None))]
+#[pyo3(signature = (a, n=None, axis=-1, norm=None, out=None))]
 fn irfft(
     py: Python<'_>,
     a: Py<PyAny>,
     n: Option<usize>,
+    axis: i64,
     norm: Option<String>,
+    out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     validate_irfft_norm(norm.as_deref())?;
     let numpy = py.import("numpy")?;
@@ -20402,8 +20435,12 @@ fn irfft(
     if let Some(n) = n {
         kwargs.set_item("n", n)?;
     }
+    kwargs.set_item("axis", axis)?;
     if let Some(norm) = norm {
         kwargs.set_item("norm", norm)?;
+    }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
     }
     Ok(numpy
         .getattr("fft")?
@@ -40258,7 +40295,7 @@ mod tests {
             let numpy = py.import("numpy")?;
             let input = numpy.call_method1("array", (vec![1.0_f64, 2.0, 3.0, 4.0],))?;
 
-            let actual_default = crate::rfft(py, input.clone().unbind(), None, None)?;
+            let actual_default = crate::rfft(py, input.clone().unbind(), None, -1, None, None)?;
             let expected_default = numpy
                 .getattr("fft")?
                 .call_method1("rfft", (input.clone(),))?;
@@ -40268,7 +40305,9 @@ mod tests {
                 py,
                 input.clone().unbind(),
                 None,
+                -1,
                 Some("backward".to_string()),
+                None,
             )?;
             let expected_backward = numpy.getattr("fft")?.call_method(
                 "rfft",
@@ -40282,7 +40321,7 @@ mod tests {
             assert_array_matches_numpy(actual_backward.bind(py), &expected_backward)?;
 
             let actual_ortho =
-                crate::rfft(py, input.clone().unbind(), None, Some("ortho".to_string()))?;
+                crate::rfft(py, input.clone().unbind(), None, -1, Some("ortho".to_string()), None)?;
             let expected_ortho = numpy.getattr("fft")?.call_method(
                 "rfft",
                 (input.clone(),),
@@ -40298,7 +40337,9 @@ mod tests {
                 py,
                 input.clone().unbind(),
                 None,
+                -1,
                 Some("forward".to_string()),
+                None,
             )?;
             let expected_forward = numpy.getattr("fft")?.call_method(
                 "rfft",
@@ -40311,7 +40352,7 @@ mod tests {
             )?;
             assert_array_matches_numpy(actual_forward.bind(py), &expected_forward)?;
 
-            let err = crate::rfft(py, input.unbind(), None, Some("bad".to_string())).unwrap_err();
+            let err = crate::rfft(py, input.unbind(), None, -1, Some("bad".to_string()), None).unwrap_err();
             assert!(err.is_instance_of::<PyValueError>(py));
             assert_eq!(
                 err.value(py).str()?.extract::<String>()?,
@@ -40335,7 +40376,7 @@ mod tests {
                 .getattr("fft")?
                 .call_method1("rfft", (input.clone(),))?;
 
-            let actual_default = crate::irfft(py, spectrum.clone().unbind(), None, None)?;
+            let actual_default = crate::irfft(py, spectrum.clone().unbind(), None, -1, None, None)?;
             let expected_default = numpy
                 .getattr("fft")?
                 .call_method1("irfft", (spectrum.clone(),))?;
@@ -40345,7 +40386,9 @@ mod tests {
                 py,
                 spectrum.clone().unbind(),
                 None,
+                -1,
                 Some("backward".to_string()),
+                None,
             )?;
             let expected_backward = numpy.getattr("fft")?.call_method(
                 "irfft",
@@ -40362,7 +40405,9 @@ mod tests {
                 py,
                 spectrum.clone().unbind(),
                 None,
+                -1,
                 Some("ortho".to_string()),
+                None,
             )?;
             let expected_ortho = numpy.getattr("fft")?.call_method(
                 "irfft",
@@ -40379,7 +40424,9 @@ mod tests {
                 py,
                 spectrum.clone().unbind(),
                 None,
+                -1,
                 Some("forward".to_string()),
+                None,
             )?;
             let expected_forward = numpy.getattr("fft")?.call_method(
                 "irfft",
@@ -40396,7 +40443,9 @@ mod tests {
                 py,
                 spectrum.clone().unbind(),
                 Some(6),
+                -1,
                 Some("forward".to_string()),
+                None,
             )?;
             let expected_n = numpy.getattr("fft")?.call_method(
                 "irfft",
@@ -40411,7 +40460,7 @@ mod tests {
             assert_array_matches_numpy(actual_n.bind(py), &expected_n)?;
 
             let err =
-                crate::irfft(py, spectrum.unbind(), None, Some("bad".to_string())).unwrap_err();
+                crate::irfft(py, spectrum.unbind(), None, -1, Some("bad".to_string()), None).unwrap_err();
             assert!(err.is_instance_of::<PyValueError>(py));
             assert_eq!(
                 err.value(py).str()?.extract::<String>()?,
