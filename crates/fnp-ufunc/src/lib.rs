@@ -18969,7 +18969,7 @@ impl UFuncArray {
         let values: Vec<f64> = self
             .values
             .iter()
-            .map(|&v| (v * factor).round() / factor)
+            .map(|&v| (v * factor).round_ties_even() / factor)
             .collect();
         Self {
             shape: self.shape.clone(),
@@ -40655,10 +40655,35 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn round_to_zero_decimals_uses_bankers_rounding() {
+        let a = UFuncArray::new(
+            vec![8],
+            vec![0.5, 1.5, 2.5, 3.5, -0.5, -1.5, -2.5, -3.5],
+            DType::F64,
+        )
+        .unwrap();
+        let r = a.round_to(0);
+        assert_eq!(r.values(), &[0.0, 2.0, 2.0, 4.0, -0.0, -2.0, -2.0, -4.0]);
+        assert!(r.values()[4].is_sign_negative());
+    }
+
+    #[test]
     fn round_to_negative_decimals() {
         let a = UFuncArray::new(vec![3], vec![123.0, 456.0, 789.0], DType::F64).unwrap();
         let r = a.round_to(-2);
         assert_eq!(r.values(), &[100.0, 500.0, 800.0]);
+    }
+
+    #[test]
+    fn round_to_negative_decimals_uses_bankers_rounding() {
+        let a = UFuncArray::new(
+            vec![6],
+            vec![15.0, 25.0, 35.0, -15.0, -25.0, -35.0],
+            DType::F64,
+        )
+        .unwrap();
+        let r = a.round_to(-1);
+        assert_eq!(r.values(), &[20.0, 20.0, 40.0, -20.0, -20.0, -40.0]);
     }
 
     #[test]
