@@ -384,14 +384,31 @@ fn conformance_special_math_matrix() {
         }
 
         // ─── histogram ────────────────────────────────────────────
-        // NOTE: input deliberately avoids values at bin edges (1.2,
-        // 1.4, …) because fnp_python.histogram has a bin-edge
-        // assignment off-by-one for left-inclusive boundaries — see
-        // franken_numpy-zcjo. The off-edge inputs below exercise the
-        // happy path that is already correct.
+        // Original failing input from the franken_numpy-zcjo
+        // discovery: values at bin-edges (1.0, 1.2 boundaries on the
+        // 10-bin auto range) used to land in the wrong bin under f64
+        // rounding. Now passes after the searchsorted-right fix.
         {
             let our_fn = module.getattr("histogram")?;
             let their_fn = numpy.getattr("histogram")?;
+            run_case_resolved(
+                py,
+                "special-histogram-bin-edge-regression",
+                "histogram",
+                &our_fn,
+                &their_fn,
+                RequirementLevel::Must,
+                CompareMode::Surface,
+                t,
+                |py| {
+                    Ok(PyTuple::new(
+                        py,
+                        [np_array_f(py, vec![1.0, 2.0, 1.5, 3.0, 2.5, 1.2])?],
+                    )?)
+                },
+                no_kwargs,
+            );
+            // Off-edge sample retained as additional MUST coverage.
             run_case_resolved(
                 py,
                 "special-histogram-off-edge",

@@ -15167,16 +15167,27 @@ impl UFuncArray {
         let range = max - min;
         let width = range / bins as f64;
 
-        let mut counts = vec![0.0f64; bins];
-        for &v in &self.values {
-            let idx = ((v - min) / width) as usize;
-            let idx = idx.min(bins - 1); // clamp last edge
-            counts[idx] += 1.0;
-        }
-
         let mut edges = Vec::with_capacity(bins + 1);
         for i in 0..=bins {
             edges.push(min + i as f64 * width);
+        }
+
+        // Use searchsorted-right semantics over the precomputed edge
+        // array, identical to numpy.histogram. The naive
+        // ((v - min) / width) as usize approach drops values at
+        // internal bin edges into the *previous* bin under f64
+        // rounding (e.g. (1.2 - 1.0) / 0.2 = 0.9999… → bin 0 instead
+        // of bin 1). partition_point on the edges gives the exact
+        // numpy semantic: bin = #edges <= v - 1, with the last edge
+        // clamped to the final bin so values equal to max land there.
+        let mut counts = vec![0.0f64; bins];
+        for &v in &self.values {
+            let count_le = edges.partition_point(|edge| *edge <= v);
+            let mut bin = if count_le == 0 { 0 } else { count_le - 1 };
+            if bin >= bins {
+                bin = bins - 1;
+            }
+            counts[bin] += 1.0;
         }
 
         let counts_arr = Self {
