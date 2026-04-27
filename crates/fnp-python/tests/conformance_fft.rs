@@ -461,6 +461,31 @@ fn conformance_fft_matrix() {
                 Ok(Some(kw))
             },
         );
+        // Regression: prior native-eligibility ndim fallback was
+        // `unwrap_or(1)`, which let nested-list 2-D inputs (no `ndim`
+        // attribute) take the 1-D-only native path and silently produce
+        // wrong output. MUST tier so the fix can't silently regress.
+        run_case(
+            py,
+            &fft,
+            &np_fft,
+            "fft-rfft-nested-list-2d-input",
+            "rfft",
+            RequirementLevel::Must,
+            CompareMode::Close,
+            t,
+            |py| {
+                let nested = pyo3::types::PyList::new(
+                    py,
+                    [
+                        pyo3::types::PyList::new(py, [1.0_f64, 2.0, 3.0, 4.0])?,
+                        pyo3::types::PyList::new(py, [5.0_f64, 6.0, 7.0, 8.0])?,
+                    ],
+                )?;
+                PyTuple::new(py, [nested.into_any()])
+            },
+            no_kwargs,
+        );
         run_case(
             py,
             &fft,

@@ -20410,11 +20410,27 @@ fn rfft(
     // no `out=` destination. Anything else (multi-D input, non-default
     // axis, explicit out) falls back to numpy.fft.rfft so the kwarg
     // surface matches numpy exactly.
+    //
+    // Sibling of the searchsorted scalar-detection bug: the prior
+    // `unwrap_or(1)` fallback for missing `ndim` made nested-list inputs
+    // (e.g. `[[1,2],[3,4]]`) take the 1-D-only native path. The native
+    // body uses `shape[0]` as the FFT length, silently producing wrong
+    // output where numpy would compute rfft along the last axis. Fix:
+    // when `ndim` isn't directly available, derive it from numpy.asarray
+    // so sequence inputs route correctly (and unknown objects still fall
+    // through to the numpy passthrough).
     let bound = a.bind(py);
-    let ndim = bound
-        .getattr("ndim")
-        .and_then(|n| n.extract::<i64>())
-        .unwrap_or(1);
+    let ndim = match bound.getattr("ndim").and_then(|n| n.extract::<i64>()) {
+        Ok(value) => value,
+        Err(_) => {
+            let numpy = py.import("numpy")?;
+            let coerced = numpy.getattr("asarray")?.call1((bound,))?;
+            coerced
+                .getattr("ndim")
+                .and_then(|n| n.extract::<i64>())
+                .unwrap_or(-1)
+        }
+    };
     let last_axis = axis == -1 || axis == ndim - 1;
     let native_eligible = ndim == 1 && last_axis && out.is_none();
     if !native_eligible {
