@@ -13,9 +13,7 @@
 
 mod common;
 
-use common::{
-    CompareMode, RequirementLevel, Totals, run_case_resolved, with_fnp_and_numpy,
-};
+use common::{CompareMode, RequirementLevel, Totals, run_case_resolved, with_fnp_and_numpy};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
@@ -66,7 +64,7 @@ fn conformance_special_math_matrix() {
                 move |py| {
                     let m_obj: pyo3::Bound<'_, pyo3::types::PyAny> =
                         m_value.into_pyobject(py)?.into_any();
-                    Ok(PyTuple::new(py, [m_obj])?)
+                    PyTuple::new(py, [m_obj])
                 },
                 no_kwargs,
             );
@@ -93,7 +91,7 @@ fn conformance_special_math_matrix() {
                 move |py| {
                     let m_obj: pyo3::Bound<'_, pyo3::types::PyAny> =
                         m_value.into_pyobject(py)?.into_any();
-                    Ok(PyTuple::new(py, [m_obj])?)
+                    PyTuple::new(py, [m_obj])
                 },
                 no_kwargs,
             );
@@ -116,7 +114,7 @@ fn conformance_special_math_matrix() {
                         12_i64.into_pyobject(py)?.into_any();
                     let beta: pyo3::Bound<'_, pyo3::types::PyAny> =
                         14.0_f64.into_pyobject(py)?.into_any();
-                    Ok(PyTuple::new(py, [m_obj, beta])?)
+                    PyTuple::new(py, [m_obj, beta])
                 },
                 no_kwargs,
             );
@@ -134,7 +132,7 @@ fn conformance_special_math_matrix() {
                         8_i64.into_pyobject(py)?.into_any();
                     let beta: pyo3::Bound<'_, pyo3::types::PyAny> =
                         0.0_f64.into_pyobject(py)?.into_any();
-                    Ok(PyTuple::new(py, [m_obj, beta])?)
+                    PyTuple::new(py, [m_obj, beta])
                 },
                 no_kwargs,
             );
@@ -153,7 +151,7 @@ fn conformance_special_math_matrix() {
                 RequirementLevel::Must,
                 CompareMode::Close,
                 t,
-                |py| Ok(PyTuple::new(py, [np_array_f(py, vec![0.0, 1.0, 2.5, 5.0])?])?),
+                |py| PyTuple::new(py, [np_array_f(py, vec![0.0, 1.0, 2.5, 5.0])?]),
                 no_kwargs,
             );
         }
@@ -169,7 +167,7 @@ fn conformance_special_math_matrix() {
                 RequirementLevel::Must,
                 CompareMode::Close,
                 t,
-                |py| Ok(PyTuple::new(py, [np_array_f(py, vec![-2.0, -1.0, 0.0, 1.0, 2.0])?])?),
+                |py| PyTuple::new(py, [np_array_f(py, vec![-2.0, -1.0, 0.0, 1.0, 2.0])?]),
                 no_kwargs,
             );
             // SHOULD: sinc(0) is exactly 1 (numpy uses normalized sinc).
@@ -185,7 +183,7 @@ fn conformance_special_math_matrix() {
                 |py| {
                     let zero: pyo3::Bound<'_, pyo3::types::PyAny> =
                         0.0_f64.into_pyobject(py)?.into_any();
-                    Ok(PyTuple::new(py, [zero])?)
+                    PyTuple::new(py, [zero])
                 },
                 no_kwargs,
             );
@@ -211,7 +209,7 @@ fn conformance_special_math_matrix() {
                 RequirementLevel::Must,
                 CompareMode::Close,
                 t,
-                |py| Ok(PyTuple::new(py, [np_array_f(py, vec![1.0, 2.0, 3.0, 4.0])?])?),
+                |py| PyTuple::new(py, [np_array_f(py, vec![1.0, 2.0, 3.0, 4.0])?]),
                 no_kwargs,
             );
             // SHOULD: explicit dx kwarg.
@@ -224,7 +222,7 @@ fn conformance_special_math_matrix() {
                 RequirementLevel::Should,
                 CompareMode::Close,
                 t,
-                |py| Ok(PyTuple::new(py, [np_array_f(py, vec![1.0, 4.0, 9.0, 16.0])?])?),
+                |py| PyTuple::new(py, [np_array_f(py, vec![1.0, 4.0, 9.0, 16.0])?]),
                 |py| {
                     let kwargs = PyDict::new(py);
                     kwargs.set_item("dx", 0.5_f64)?;
@@ -247,14 +245,14 @@ fn conformance_special_math_matrix() {
                 CompareMode::Close,
                 t,
                 |py| {
-                    Ok(PyTuple::new(
+                    PyTuple::new(
                         py,
                         [
                             np_array_f(py, vec![1.5, 2.5, 3.5])?,
                             np_array_f(py, vec![1.0, 2.0, 3.0, 4.0])?,
                             np_array_f(py, vec![10.0, 20.0, 30.0, 40.0])?,
                         ],
-                    )?)
+                    )
                 },
                 no_kwargs,
             );
@@ -269,14 +267,14 @@ fn conformance_special_math_matrix() {
                 CompareMode::Close,
                 t,
                 |py| {
-                    Ok(PyTuple::new(
+                    PyTuple::new(
                         py,
                         [
                             np_array_f(py, vec![0.0, 5.0])?,
                             np_array_f(py, vec![1.0, 2.0, 3.0, 4.0])?,
                             np_array_f(py, vec![10.0, 20.0, 30.0, 40.0])?,
                         ],
-                    )?)
+                    )
                 },
                 no_kwargs,
             );
@@ -296,13 +294,13 @@ fn conformance_special_math_matrix() {
                 CompareMode::Strict,
                 t,
                 |py| {
-                    Ok(PyTuple::new(
+                    PyTuple::new(
                         py,
                         [
                             np_array_f(py, vec![0.5, 1.5, 2.5, 3.5])?,
                             np_array_f(py, vec![1.0, 2.0, 3.0])?,
                         ],
-                    )?)
+                    )
                 },
                 no_kwargs,
             );
@@ -318,14 +316,14 @@ fn conformance_special_math_matrix() {
                 t,
                 |py| {
                     let true_obj = pyo3::types::PyBool::new(py, true).to_owned().into_any();
-                    Ok(PyTuple::new(
+                    PyTuple::new(
                         py,
                         [
                             np_array_f(py, vec![1.0, 2.0, 3.0])?,
                             np_array_f(py, vec![1.0, 2.0, 3.0])?,
                             true_obj,
                         ],
-                    )?)
+                    )
                 },
                 no_kwargs,
             );
@@ -344,7 +342,7 @@ fn conformance_special_math_matrix() {
                 RequirementLevel::Must,
                 CompareMode::Strict,
                 t,
-                |py| Ok(PyTuple::new(py, [np_array_i(py, vec![0, 1, 1, 3, 2, 1, 7])?])?),
+                |py| PyTuple::new(py, [np_array_i(py, vec![0, 1, 1, 3, 2, 1, 7])?]),
                 no_kwargs,
             );
             // SHOULD: minlength kwarg pads zeros at the tail.
@@ -357,7 +355,7 @@ fn conformance_special_math_matrix() {
                 RequirementLevel::Should,
                 CompareMode::Strict,
                 t,
-                |py| Ok(PyTuple::new(py, [np_array_i(py, vec![0, 1, 2])?])?),
+                |py| PyTuple::new(py, [np_array_i(py, vec![0, 1, 2])?]),
                 |py| {
                     let kwargs = PyDict::new(py);
                     kwargs.set_item("minlength", 6_i64)?;
@@ -374,7 +372,7 @@ fn conformance_special_math_matrix() {
                 RequirementLevel::Should,
                 CompareMode::Close,
                 t,
-                |py| Ok(PyTuple::new(py, [np_array_i(py, vec![0, 1, 2, 1, 0])?])?),
+                |py| PyTuple::new(py, [np_array_i(py, vec![0, 1, 2, 1, 0])?]),
                 |py| {
                     let kwargs = PyDict::new(py);
                     kwargs.set_item("weights", np_array_f(py, vec![1.0, 2.0, 3.0, 4.0, 5.0])?)?;
@@ -400,12 +398,7 @@ fn conformance_special_math_matrix() {
                 RequirementLevel::Must,
                 CompareMode::Surface,
                 t,
-                |py| {
-                    Ok(PyTuple::new(
-                        py,
-                        [np_array_f(py, vec![1.0, 2.0, 1.5, 3.0, 2.5, 1.2])?],
-                    )?)
-                },
+                |py| PyTuple::new(py, [np_array_f(py, vec![1.0, 2.0, 1.5, 3.0, 2.5, 1.2])?]),
                 no_kwargs,
             );
             // Off-edge sample retained as additional MUST coverage.
@@ -418,12 +411,7 @@ fn conformance_special_math_matrix() {
                 RequirementLevel::Must,
                 CompareMode::Surface,
                 t,
-                |py| {
-                    Ok(PyTuple::new(
-                        py,
-                        [np_array_f(py, vec![1.05, 1.55, 2.05, 2.55, 1.35])?],
-                    )?)
-                },
+                |py| PyTuple::new(py, [np_array_f(py, vec![1.05, 1.55, 2.05, 2.55, 1.35])?]),
                 no_kwargs,
             );
             // SHOULD: explicit bins int + range. Off-edge sample so
@@ -437,12 +425,7 @@ fn conformance_special_math_matrix() {
                 RequirementLevel::Should,
                 CompareMode::Surface,
                 t,
-                |py| {
-                    Ok(PyTuple::new(
-                        py,
-                        [np_array_f(py, vec![1.05, 1.55, 2.05, 2.55, 1.35])?],
-                    )?)
-                },
+                |py| PyTuple::new(py, [np_array_f(py, vec![1.05, 1.55, 2.05, 2.55, 1.35])?]),
                 |py| {
                     let kwargs = PyDict::new(py);
                     kwargs.set_item("bins", 4_i64)?;
@@ -461,7 +444,7 @@ fn conformance_special_math_matrix() {
                 RequirementLevel::Should,
                 CompareMode::Surface,
                 t,
-                |py| Ok(PyTuple::new(py, [np_array_f(py, vec![1.0, 2.0, 1.5, 3.0, 2.5, 1.2])?])?),
+                |py| PyTuple::new(py, [np_array_f(py, vec![1.0, 2.0, 1.5, 3.0, 2.5, 1.2])?]),
                 |py| {
                     let kwargs = PyDict::new(py);
                     kwargs.set_item("density", true)?;

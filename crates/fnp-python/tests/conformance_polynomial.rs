@@ -20,9 +20,7 @@
 
 mod common;
 
-use common::{
-    CompareMode, RequirementLevel, Totals, run_case_resolved, with_fnp_and_numpy,
-};
+use common::{CompareMode, RequirementLevel, Totals, run_case_resolved, with_fnp_and_numpy};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
@@ -31,15 +29,21 @@ fn no_kwargs<'py>(_py: Python<'py>) -> PyResult<Option<pyo3::Bound<'py, PyDict>>
 }
 
 fn coef_3<'py>(py: Python<'py>) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
-    py.import("numpy")?.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))
+    py.import("numpy")?
+        .getattr("array")?
+        .call1((vec![1.0_f64, 2.0, 3.0],))
 }
 
 fn coef_3b<'py>(py: Python<'py>) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
-    py.import("numpy")?.getattr("array")?.call1((vec![1.0_f64, 0.5, 0.25],))
+    py.import("numpy")?
+        .getattr("array")?
+        .call1((vec![1.0_f64, 0.5, 0.25],))
 }
 
 fn roots_2<'py>(py: Python<'py>) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
-    py.import("numpy")?.getattr("array")?.call1((vec![-1.0_f64, 1.0],))
+    py.import("numpy")?
+        .getattr("array")?
+        .call1((vec![-1.0_f64, 1.0],))
 }
 
 #[test]
@@ -75,12 +79,36 @@ fn conformance_polynomial_matrix() {
             // legacy top-level numpy.poly{add,sub,mul,div,val} use
             // decreasing-power and therefore have different math —
             // they're tested by the legacy_polynomial_ops loop below.
-            Base { base: "polynomial", prefix: "poly", numpy_subpackage: Some("polynomial") },
-            Base { base: "chebyshev", prefix: "cheb", numpy_subpackage: Some("chebyshev") },
-            Base { base: "hermite", prefix: "herm", numpy_subpackage: Some("hermite") },
-            Base { base: "hermite_e", prefix: "herme", numpy_subpackage: Some("hermite_e") },
-            Base { base: "laguerre", prefix: "lag", numpy_subpackage: Some("laguerre") },
-            Base { base: "legendre", prefix: "leg", numpy_subpackage: Some("legendre") },
+            Base {
+                base: "polynomial",
+                prefix: "poly",
+                numpy_subpackage: Some("polynomial"),
+            },
+            Base {
+                base: "chebyshev",
+                prefix: "cheb",
+                numpy_subpackage: Some("chebyshev"),
+            },
+            Base {
+                base: "hermite",
+                prefix: "herm",
+                numpy_subpackage: Some("hermite"),
+            },
+            Base {
+                base: "hermite_e",
+                prefix: "herme",
+                numpy_subpackage: Some("hermite_e"),
+            },
+            Base {
+                base: "laguerre",
+                prefix: "lag",
+                numpy_subpackage: Some("laguerre"),
+            },
+            Base {
+                base: "legendre",
+                prefix: "leg",
+                numpy_subpackage: Some("legendre"),
+            },
         ];
 
         // Names below are the polynomial-base ops fnp_python routes to
@@ -98,14 +126,13 @@ fn conformance_polynomial_matrix() {
             for op in ["add", "sub", "mul"] {
                 let our_name = format!("{}{}", base.prefix, op);
                 let our_fn = module.getattr(our_name.as_str())?;
-                let their_fn =
-                    if base.base == "polynomial" && polynomial_legacy_ops.contains(op) {
-                        numpy.getattr(our_name.as_str())?
-                    } else {
-                        np_poly
-                            .getattr(base.numpy_subpackage.unwrap())?
-                            .getattr(our_name.as_str())?
-                    };
+                let their_fn = if base.base == "polynomial" && polynomial_legacy_ops.contains(op) {
+                    numpy.getattr(our_name.as_str())?
+                } else {
+                    np_poly
+                        .getattr(base.numpy_subpackage.unwrap())?
+                        .getattr(our_name.as_str())?
+                };
                 run_case_resolved(
                     py,
                     &format!("polynomial-{}-{}", base.base, op),
@@ -115,7 +142,7 @@ fn conformance_polynomial_matrix() {
                     RequirementLevel::Must,
                     CompareMode::Strict,
                     t,
-                    |py| Ok(PyTuple::new(py, [coef_3(py)?, coef_3b(py)?])?),
+                    |py| PyTuple::new(py, [coef_3(py)?, coef_3b(py)?]),
                     no_kwargs,
                 );
             }
@@ -124,18 +151,18 @@ fn conformance_polynomial_matrix() {
             // (p, x)), so polynomial-base val gets the legacy reference.
             let our_val_name = format!("{}val", base.prefix);
             let our_val = module.getattr(our_val_name.as_str())?;
-            let their_val =
-                if base.base == "polynomial" && polynomial_legacy_ops.contains("val") {
-                    numpy.getattr(our_val_name.as_str())?
-                } else {
-                    np_poly
-                        .getattr(base.numpy_subpackage.unwrap())?
-                        .getattr(our_val_name.as_str())?
-                };
+            let their_val = if base.base == "polynomial" && polynomial_legacy_ops.contains("val") {
+                numpy.getattr(our_val_name.as_str())?
+            } else {
+                np_poly
+                    .getattr(base.numpy_subpackage.unwrap())?
+                    .getattr(our_val_name.as_str())?
+            };
             // numpy.polyval signature is (p, x) — DECREASING-power; all
             // other bases use (x, c) — INCREASING-power. Build args in
             // the matching order so each side sees its native shape.
-            let val_legacy_order = base.base == "polynomial" && polynomial_legacy_ops.contains("val");
+            let val_legacy_order =
+                base.base == "polynomial" && polynomial_legacy_ops.contains("val");
             run_case_resolved(
                 py,
                 &format!("polynomial-{}-val", base.base),
@@ -147,7 +174,10 @@ fn conformance_polynomial_matrix() {
                 t,
                 move |py| {
                     let coef = coef_3(py)?;
-                    let xs = py.import("numpy")?.getattr("array")?.call1((vec![0.5_f64, 1.0, 1.5],))?;
+                    let xs = py
+                        .import("numpy")?
+                        .getattr("array")?
+                        .call1((vec![0.5_f64, 1.0, 1.5],))?;
                     if val_legacy_order {
                         // (p, x) order — coef first
                         Ok(PyTuple::new(py, [coef, xs])?)
@@ -176,7 +206,7 @@ fn conformance_polynomial_matrix() {
                 RequirementLevel::Must,
                 CompareMode::Close,
                 t,
-                |py| Ok(PyTuple::new(py, [coef_3(py)?])?),
+                |py| PyTuple::new(py, [coef_3(py)?]),
                 no_kwargs,
             );
 
@@ -204,14 +234,14 @@ fn conformance_polynomial_matrix() {
                 // pow,line,mulx,trim} per 9w2r) but fall back to
                 // top-level numpy for legacy poly{der,int} which keep
                 // decreasing-power semantics.
-                let their_op_fn =
-                    if base.base == "polynomial" && polynomial_legacy_ops.contains(op) {
-                        numpy.getattr(our_name.as_str())
-                    } else {
-                        np_poly
-                            .getattr(base.numpy_subpackage.unwrap())
-                            .and_then(|s| s.getattr(our_name.as_str()))
-                    };
+                let their_op_fn = if base.base == "polynomial" && polynomial_legacy_ops.contains(op)
+                {
+                    numpy.getattr(our_name.as_str())
+                } else {
+                    np_poly
+                        .getattr(base.numpy_subpackage.unwrap())
+                        .and_then(|s| s.getattr(our_name.as_str()))
+                };
                 let Ok(their_op_fn) = their_op_fn else {
                     continue;
                 };
@@ -258,7 +288,12 @@ fn conformance_polynomial_matrix() {
         // Hermite, HermiteE, Laguerre} must BE numpy's class objects.
         let our_poly_mod = module.getattr("polynomial")?;
         for cls_name in [
-            "Polynomial", "Chebyshev", "Legendre", "Hermite", "HermiteE", "Laguerre",
+            "Polynomial",
+            "Chebyshev",
+            "Legendre",
+            "Hermite",
+            "HermiteE",
+            "Laguerre",
         ] {
             let ours = our_poly_mod.getattr(cls_name)?;
             let theirs = np_poly.getattr(cls_name)?;

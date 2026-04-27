@@ -40366,8 +40366,14 @@ mod tests {
             )?;
             assert_array_matches_numpy(actual_backward.bind(py), &expected_backward)?;
 
-            let actual_ortho =
-                crate::rfft(py, input.clone().unbind(), None, -1, Some("ortho".to_string()), None)?;
+            let actual_ortho = crate::rfft(
+                py,
+                input.clone().unbind(),
+                None,
+                -1,
+                Some("ortho".to_string()),
+                None,
+            )?;
             let expected_ortho = numpy.getattr("fft")?.call_method(
                 "rfft",
                 (input.clone(),),
@@ -40398,7 +40404,8 @@ mod tests {
             )?;
             assert_array_matches_numpy(actual_forward.bind(py), &expected_forward)?;
 
-            let err = crate::rfft(py, input.unbind(), None, -1, Some("bad".to_string()), None).unwrap_err();
+            let err = crate::rfft(py, input.unbind(), None, -1, Some("bad".to_string()), None)
+                .unwrap_err();
             assert!(err.is_instance_of::<PyValueError>(py));
             assert_eq!(
                 err.value(py).str()?.extract::<String>()?,
@@ -40505,8 +40512,15 @@ mod tests {
             )?;
             assert_array_matches_numpy(actual_n.bind(py), &expected_n)?;
 
-            let err =
-                crate::irfft(py, spectrum.unbind(), None, -1, Some("bad".to_string()), None).unwrap_err();
+            let err = crate::irfft(
+                py,
+                spectrum.unbind(),
+                None,
+                -1,
+                Some("bad".to_string()),
+                None,
+            )
+            .unwrap_err();
             assert!(err.is_instance_of::<PyValueError>(py));
             assert_eq!(
                 err.value(py).str()?.extract::<String>()?,
@@ -61658,8 +61672,8 @@ mod tests {
             // the 2axo fix we route through Python's str.splitlines so
             // \v / \f / \x1c-1e / \x85 / U+2028 / U+2029 also split.
             for (lhs, rhs) in [
-                ("a\x0bb\nc", "a\x0bX\nc"),       // \v separator
-                ("line1\x0cline2", "line1\x0cBAD"), // \f separator
+                ("a\x0bb\nc", "a\x0bX\nc"),          // \v separator
+                ("line1\x0cline2", "line1\x0cBAD"),  // \f separator
                 ("alpha\x1ebeta", "alpha\x1edelta"), // \x1e separator
             ] {
                 let ours_err = as_fn
