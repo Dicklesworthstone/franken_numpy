@@ -9380,12 +9380,23 @@ fn searchsorted(
     // (e.g. np.int64(2)); otherwise it returns an ndarray. Detect on the
     // *original* Python object before we materialize a UFuncArray, since
     // extract_numeric_array normalizes everything to an array.
+    //
+    // Self-review on 9awh found that the prior fallback `unwrap_or(true)`
+    // misclassified Python lists/tuples (which lack `ndim`) as scalars,
+    // making `searchsorted([1,3,5], [4])` return a scalar instead of
+    // array([2]) like numpy. Fix: when `ndim` is unavailable, treat as
+    // scalar only if the object also extracts as a Python numeric scalar
+    // (int / float / bool). Lists, tuples, and other sequences fail that
+    // extraction and correctly fall through to the array branch.
     let v_bound = v.bind(py);
-    let v_is_scalar = v_bound
-        .getattr("ndim")
-        .and_then(|n| n.extract::<i64>())
-        .map(|n| n == 0)
-        .unwrap_or(true);
+    let v_is_scalar = match v_bound.getattr("ndim").and_then(|n| n.extract::<i64>()) {
+        Ok(ndim_val) => ndim_val == 0,
+        Err(_) => {
+            v_bound.extract::<i64>().is_ok()
+                || v_bound.extract::<f64>().is_ok()
+                || v_bound.extract::<bool>().is_ok()
+        }
+    };
     let a = extract_numeric_array(py, a.bind(py), "searchsorted(a)")?;
     let v = extract_numeric_array(py, v_bound, "searchsorted(v)")?;
     let sorter = sorter

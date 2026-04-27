@@ -286,6 +286,56 @@ fn conformance_searching_matrix() {
             },
             no_kwargs,
         );
+        // Regression: prior scalar-detection fallback misclassified Python
+        // lists as scalars (no `ndim` → unwrap_or(true)) and returned a
+        // scalar where numpy returns array([2]). MUST tier so the fix
+        // can't silently regress.
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-searchsorted-python-list-input",
+            "searchsorted",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| {
+                let v_list = pyo3::types::PyList::new(py, vec![4_i64])?.into_any();
+                PyTuple::new(
+                    py,
+                    [
+                        np_array_1d_f(py, vec![1.0, 3.0, 5.0, 7.0, 9.0])?.into_any(),
+                        v_list,
+                    ],
+                )
+            },
+            no_kwargs,
+        );
+        // Regression sibling: 0-D ndarray input must still return scalar.
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-searchsorted-0d-array-input",
+            "searchsorted",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| {
+                let int64_4 = py
+                    .import("numpy")?
+                    .getattr("int64")?
+                    .call1((4_i64,))?;
+                PyTuple::new(
+                    py,
+                    [
+                        np_array_1d_f(py, vec![1.0, 3.0, 5.0, 7.0, 9.0])?.into_any(),
+                        int64_4,
+                    ],
+                )
+            },
+            no_kwargs,
+        );
         run_case(
             py,
             &module,
