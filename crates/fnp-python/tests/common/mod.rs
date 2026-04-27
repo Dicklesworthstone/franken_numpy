@@ -163,6 +163,45 @@ where
     });
 }
 
+/// Run a single parity case with pre-resolved function objects so the
+/// harness can compare a flat-namespace fnp_python wrapper (e.g.
+/// `chebadd`) against a nested-path numpy reference (e.g.
+/// `numpy.polynomial.chebyshev.chebadd`). Both functions are passed in
+/// as `Bound<PyAny>` so the caller controls lookup.
+#[allow(clippy::too_many_arguments)]
+pub fn run_case_resolved<F, G>(
+    py: Python<'_>,
+    id: &str,
+    label: &str,
+    our_fn: &Bound<'_, pyo3::types::PyAny>,
+    their_fn: &Bound<'_, pyo3::types::PyAny>,
+    level: RequirementLevel,
+    mode: CompareMode,
+    totals: &Totals,
+    build_args: F,
+    build_kwargs: G,
+) where
+    F: for<'py> Fn(Python<'py>) -> PyResult<Bound<'py, PyTuple>>,
+    G: for<'py> Fn(Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>>,
+{
+    let args_ours = build_args(py).expect("args builder failed (ours)");
+    let kwargs_ours = build_kwargs(py).expect("kwargs builder failed (ours)");
+    let args_theirs = build_args(py).expect("args builder failed (theirs)");
+    let kwargs_theirs = build_kwargs(py).expect("kwargs builder failed (theirs)");
+
+    let ours = our_fn.call(&args_ours, kwargs_ours.as_ref());
+    let theirs = their_fn.call(&args_theirs, kwargs_theirs.as_ref());
+
+    let outcome = compare(py, mode, ours, theirs);
+    emit_verdict(id, label, level, &outcome);
+    totals.record(level, &outcome);
+    if let CaseOutcome::Fail(reason) = &outcome
+        && level == RequirementLevel::Must
+    {
+        panic!("MUST clause {id} ({label}) failed: {reason}");
+    }
+}
+
 /// Run a single parity case: call both implementations with the same
 /// args, compare per the requested mode, record the outcome.
 #[allow(clippy::too_many_arguments)]
