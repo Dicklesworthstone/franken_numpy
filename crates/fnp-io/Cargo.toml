@@ -7,3 +7,6 @@ license-file = "../../LICENSE"
 [dependencies]
 bytemuck = "1.25.0"
 flate2 = "1.1.9"
+
+[dev-dependencies]
+insta = "1.47.2"

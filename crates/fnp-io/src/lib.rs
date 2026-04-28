@@ -4108,6 +4108,21 @@ mm.flush()
         encoded
     }
 
+    fn hex_snapshot(label: &str, bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
+
+        let mut output = String::new();
+        let _ = writeln!(&mut output, "{label} len={}", bytes.len());
+        for (line, chunk) in bytes.chunks(16).enumerate() {
+            let _ = write!(&mut output, "{:04x}:", line * 16);
+            for byte in chunk {
+                let _ = write!(&mut output, " {byte:02x}");
+            }
+            output.push('\n');
+        }
+        output
+    }
+
     #[test]
     fn reason_code_registry_matches_packet_contract() {
         assert_eq!(
@@ -4257,6 +4272,26 @@ mm.flush()
         assert_eq!(decoded.version, (1, 0));
         assert_eq!(decoded.header, header);
         assert_eq!(decoded.payload, payload.into());
+    }
+
+    #[test]
+    fn npy_writer_byte_layout_matches_golden_snapshot() {
+        let header = NpyHeader {
+            shape: vec![2, 2],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let payload = [1.0_f64, -0.0_f64, f64::INFINITY, -2.5_f64]
+            .into_iter()
+            .flat_map(f64::to_le_bytes)
+            .collect::<Vec<_>>();
+
+        let encoded = write_npy_bytes(&header, &payload, false).expect("encode npy bytes");
+
+        insta::assert_snapshot!(
+            "fnp_io_npy_f64_2x2_v1_byte_layout",
+            hex_snapshot("npy_f64_2x2_v1", &encoded)
+        );
     }
 
     #[test]
@@ -4468,27 +4503,35 @@ mm.flush()
     #[test]
     fn load_auto_dispatches_npy_npz_pickle() {
         let npy = save(&[2], &[1.0, 2.0], IOSupportedDType::F64).expect("save npy");
-        match load_auto(&npy, false).expect("auto npy") {
-            LoadBytes::Npy(array) => {
-                assert_eq!(array.header.shape, vec![2]);
-                assert_eq!(array.header.descr, IOSupportedDType::F64);
-            }
-            other => panic!("expected npy dispatch, got {other:?}"),
+        let loaded = load_auto(&npy, false).expect("auto npy");
+        assert!(
+            matches!(&loaded, LoadBytes::Npy(_)),
+            "expected npy dispatch, got {loaded:?}"
+        );
+        if let LoadBytes::Npy(array) = loaded {
+            assert_eq!(array.header.shape, vec![2]);
+            assert_eq!(array.header.descr, IOSupportedDType::F64);
         }
 
         let npz = savez(&[("arr", &[2], &[1.0, 2.0], IOSupportedDType::F64)]).expect("savez npz");
-        match load_auto(&npz, false).expect("auto npz") {
-            LoadBytes::Npz(entries) => {
-                assert_eq!(entries.len(), 1);
-                assert_eq!(entries[0].name, "arr");
-            }
-            other => panic!("expected npz dispatch, got {other:?}"),
+        let loaded = load_auto(&npz, false).expect("auto npz");
+        assert!(
+            matches!(&loaded, LoadBytes::Npz(_)),
+            "expected npz dispatch, got {loaded:?}"
+        );
+        if let LoadBytes::Npz(entries) = loaded {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].name, "arr");
         }
 
         let pickle = vec![0x80, 0x05, 0x95, 0x00];
-        match load_auto(&pickle, true).expect("auto pickle") {
-            LoadBytes::Pickle(bytes) => assert_eq!(bytes, pickle),
-            other => panic!("expected pickle dispatch, got {other:?}"),
+        let loaded = load_auto(&pickle, true).expect("auto pickle");
+        assert!(
+            matches!(&loaded, LoadBytes::Pickle(_)),
+            "expected pickle dispatch, got {loaded:?}"
+        );
+        if let LoadBytes::Pickle(bytes) = loaded {
+            assert_eq!(bytes, pickle);
         }
 
         let err = load_auto(&pickle, false).expect_err("pickle gated");
@@ -4508,9 +4551,13 @@ mm.flush()
             0x00, 0x00, // comment length
         ];
 
-        match load_auto(&empty_npz, false).expect("empty npz") {
-            LoadBytes::Npz(entries) => assert!(entries.is_empty()),
-            other => panic!("expected empty npz dispatch, got {other:?}"),
+        let loaded = load_auto(&empty_npz, false).expect("empty npz");
+        assert!(
+            matches!(&loaded, LoadBytes::Npz(_)),
+            "expected empty npz dispatch, got {loaded:?}"
+        );
+        if let LoadBytes::Npz(entries) = loaded {
+            assert!(entries.is_empty());
         }
     }
 
@@ -6543,6 +6590,31 @@ mm.flush()
         let strings =
             fromfile_strings(&loaded.columns[1], IOSupportedDType::Bytes(5), None).unwrap();
         assert_eq!(strings, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn structured_npy_writer_byte_layout_matches_golden_snapshot() {
+        let desc = StructuredIODescriptor {
+            fields: vec![
+                StructuredIOField {
+                    name: "id".to_string(),
+                    dtype: IOSupportedDType::I32,
+                },
+                StructuredIOField {
+                    name: "label".to_string(),
+                    dtype: IOSupportedDType::Bytes(5),
+                },
+            ],
+        };
+        let col_id: Vec<u8> = [7i32.to_le_bytes(), 11i32.to_le_bytes()].concat();
+        let col_label: Vec<u8> = [b"alpha".to_vec(), b"omega".to_vec()].concat();
+
+        let encoded = save_structured(&[2], &desc, &[col_id, col_label]).expect("save structured");
+
+        insta::assert_snapshot!(
+            "fnp_io_structured_npy_i32_s5_v1_byte_layout",
+            hex_snapshot("structured_npy_i32_s5_v1", &encoded)
+        );
     }
 
     #[test]
