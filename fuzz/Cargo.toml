@@ -48,5 +48,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "structured_dtype"
+path = "fuzz_targets/structured_dtype.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]
