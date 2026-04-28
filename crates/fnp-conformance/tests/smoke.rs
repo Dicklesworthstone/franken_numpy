@@ -283,7 +283,7 @@ fn nditer_python_bridge_matches_rust_external_loop_c_order_chunks() {
 }
 
 #[test]
-fn nditer_python_bridge_matches_rust_f_order_seek_from_iterindex() {
+fn nditer_python_bridge_matches_rust_f_order_external_loop_chunk() {
     let python = real_numpy_python();
     let options = NditerOptions {
         order: NditerOrder::F,
@@ -291,16 +291,11 @@ fn nditer_python_bridge_matches_rust_f_order_seek_from_iterindex() {
     };
     let bridge =
         nditer_python_with_interpreter(vec![2, 3, 4], 8, options, python).expect("python bridge");
-    let mut rust_iter = Nditer::new(vec![2, 3, 4], 8, options).expect("rust nditer");
-    rust_iter
-        .set_iterindex(2)
-        .expect("aligned external_loop seek should succeed");
+    let rust_iter = Nditer::new(vec![2, 3, 4], 8, options).expect("rust nditer");
     let rust_steps: Vec<NditerStep> = rust_iter.collect();
 
     assert_eq!(
-        bridge
-            .steps_from_iterindex(2)
-            .expect("python bridge seek-by-iterindex"),
+        bridge.steps().expect("python bridge external-loop chunk"),
         rust_steps
     );
 }

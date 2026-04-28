@@ -578,7 +578,7 @@ impl NditerPlan {
         let element_count = checked_element_count(&shape)?;
         let compatible_strides = compatible_nditer_strides(&shape, item_size, options.order)?;
         let (iteration_shape, inner_loop_axis, inner_loop_len) =
-            plan_external_loop(&shape, options);
+            plan_external_loop(&shape, element_count, options);
 
         Ok(Self {
             shape,
@@ -793,30 +793,54 @@ if shape:
 else:
     element_count = 1
 
-inner_loop_len = 1
-if external_loop and shape:
-    inner_axis = len(shape) - 1 if order == "C" else 0
-    inner_loop_len = shape[inner_axis]
+if element_count == 0:
+    print(json.dumps({"states": []}))
+    raise SystemExit(0)
+
+if shape:
+    values = np.arange(element_count, dtype=np.int64).reshape(tuple(shape), order=order)
+else:
+    values = np.array(0, dtype=np.int64)
 
 if seek_multi_index is None:
     start = 0
 else:
     start = int(np.ravel_multi_index(tuple(seek_multi_index), tuple(shape), order=order))
-    if external_loop and inner_loop_len and start % inner_loop_len != 0:
-        raise ValueError("multi-index must align to external_loop chunk boundaries")
 
 states = []
-if element_count != 0:
-    for iterindex in range(start, element_count, inner_loop_len):
+if external_loop:
+    for chunk in np.nditer(values, flags=["external_loop"], order=order):
+        linear_indices = [int(idx) for idx in np.asarray(chunk).reshape(-1)]
+        if not linear_indices:
+            continue
+        iterindex = linear_indices[0]
+        if iterindex < start:
+            if linear_indices[-1] < start:
+                continue
+            raise ValueError("multi-index must align to external_loop chunk boundaries")
         if shape:
             multi_index = [int(idx) for idx in np.unravel_index(iterindex, tuple(shape), order=order)]
         else:
             multi_index = []
-        linear_indices = list(range(iterindex, iterindex + inner_loop_len))
         states.append({
             "iterindex": int(iterindex),
             "multi_index": multi_index,
             "linear_indices": linear_indices,
+        })
+else:
+    iterator = np.nditer(values, flags=["multi_index"], order=order)
+    for scalar in iterator:
+        iterindex = int(scalar)
+        if iterindex < start:
+            continue
+        if shape:
+            multi_index = [int(idx) for idx in iterator.multi_index]
+        else:
+            multi_index = []
+        states.append({
+            "iterindex": int(iterindex),
+            "multi_index": multi_index,
+            "linear_indices": [int(iterindex)],
         })
 
 print(json.dumps({"states": states}))
@@ -1472,23 +1496,18 @@ fn merge_broadcast_shape(lhs: &[usize], rhs: &[usize]) -> Result<Vec<usize>, Ndi
 
 fn plan_external_loop(
     shape: &[usize],
+    element_count: usize,
     options: NditerOptions,
 ) -> (Vec<usize>, Option<usize>, usize) {
     if !options.external_loop || shape.is_empty() {
         return (shape.to_vec(), None, 1);
     }
 
-    let axis = match options.order {
-        NditerOrder::C => shape.len() - 1,
-        NditerOrder::F => 0,
-    };
-    let inner_loop_len = shape[axis];
-    let iteration_shape = shape
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, &dim)| (idx != axis).then_some(dim))
-        .collect();
-    (iteration_shape, Some(axis), inner_loop_len)
+    if element_count == 0 {
+        return (Vec::new(), None, 1);
+    }
+
+    (Vec::new(), None, element_count)
 }
 
 // ---------------------------------------------------------------------------
@@ -2153,7 +2172,7 @@ mod tests {
     }
 
     #[test]
-    fn nditer_plan_external_loop_c_order_tracks_last_axis() {
+    fn nditer_plan_external_loop_c_order_collapses_contiguous_operand() {
         let plan = NditerPlan::new(
             vec![2, 3, 4],
             8,
@@ -2163,13 +2182,13 @@ mod tests {
             },
         )
         .expect("plan");
-        assert_eq!(plan.iteration_shape(), &[2, 3]);
-        assert_eq!(plan.inner_loop_axis(), Some(2));
-        assert_eq!(plan.inner_loop_len(), 4);
+        assert_eq!(plan.iteration_shape(), &[] as &[usize]);
+        assert_eq!(plan.inner_loop_axis(), None);
+        assert_eq!(plan.inner_loop_len(), 24);
     }
 
     #[test]
-    fn nditer_plan_external_loop_f_order_tracks_first_axis() {
+    fn nditer_plan_external_loop_f_order_collapses_contiguous_operand() {
         let plan = NditerPlan::new(
             vec![2, 3, 4],
             8,
@@ -2179,9 +2198,9 @@ mod tests {
             },
         )
         .expect("plan");
-        assert_eq!(plan.iteration_shape(), &[3, 4]);
-        assert_eq!(plan.inner_loop_axis(), Some(0));
-        assert_eq!(plan.inner_loop_len(), 2);
+        assert_eq!(plan.iteration_shape(), &[] as &[usize]);
+        assert_eq!(plan.inner_loop_axis(), None);
+        assert_eq!(plan.inner_loop_len(), 24);
     }
 
     #[test]
@@ -2398,7 +2417,7 @@ mod tests {
     }
 
     #[test]
-    fn nditer_wrapper_external_loop_groups_last_axis_for_c_order() {
+    fn nditer_wrapper_external_loop_emits_one_contiguous_c_order_chunk() {
         let mut iter = Nditer::new(
             vec![2, 3, 4],
             8,
@@ -2409,8 +2428,8 @@ mod tests {
         )
         .expect("iter");
 
-        assert_eq!(iter.ndim(), 2);
-        assert_eq!(iter.chunk_count(), 6);
+        assert_eq!(iter.ndim(), 0);
+        assert_eq!(iter.chunk_count(), 1);
         assert_eq!(iter.remaining_elements(), 24);
 
         let first = iter.next().expect("first chunk");
@@ -2419,24 +2438,15 @@ mod tests {
             NditerStep {
                 iterindex: 0,
                 multi_index: vec![0, 0, 0],
-                linear_indices: vec![0, 1, 2, 3],
+                linear_indices: (0..24).collect(),
             }
         );
-        assert_eq!(first.inner_loop_len(), 4);
-
-        let second = iter.next().expect("second chunk");
-        assert_eq!(
-            second,
-            NditerStep {
-                iterindex: 4,
-                multi_index: vec![0, 1, 0],
-                linear_indices: vec![4, 5, 6, 7],
-            }
-        );
+        assert_eq!(first.inner_loop_len(), 24);
+        assert!(iter.next().is_none());
     }
 
     #[test]
-    fn nditer_wrapper_external_loop_f_order_seeks_on_chunk_boundaries() {
+    fn nditer_wrapper_external_loop_f_order_rejects_mid_chunk_seek() {
         let mut iter = Nditer::new(
             vec![2, 3, 4],
             8,
@@ -2447,21 +2457,20 @@ mod tests {
         )
         .expect("iter");
 
-        assert_eq!(iter.ndim(), 2);
-        assert_eq!(iter.chunk_count(), 12);
-        assert_eq!(iter.current().expect("current").linear_indices, vec![0, 1]);
-
-        iter.set_iterindex(2)
-            .expect("aligned external_loop seek should succeed");
-        assert_eq!(iter.multi_index().expect("seek multi-index"), vec![0, 1, 0]);
+        assert_eq!(iter.ndim(), 0);
+        assert_eq!(iter.chunk_count(), 1);
         assert_eq!(
-            iter.current().expect("seek current").linear_indices,
-            vec![2, 3]
+            iter.current().expect("current").linear_indices,
+            (0..24).collect::<Vec<_>>()
         );
 
+        iter.set_iterindex(0)
+            .expect("chunk-start external_loop seek should succeed");
+        assert_eq!(iter.multi_index().expect("seek multi-index"), vec![0, 0, 0]);
+
         let err = iter
-            .set_iterindex(1)
-            .expect_err("unaligned external_loop seek should fail");
+            .set_iterindex(2)
+            .expect_err("mid-chunk external_loop seek should fail");
         assert_eq!(err.reason_code(), "nditer_multi_index_contract_violation");
     }
 
@@ -2554,7 +2563,7 @@ mod tests {
         .expect("python bridge");
         let err = bridge
             .steps_from_iterindex(1)
-            .expect_err("unaligned external_loop iterindex should fail locally");
+            .expect_err("mid-chunk external_loop iterindex should fail locally");
         assert_eq!(err.reason_code(), "nditer_multi_index_contract_violation");
     }
 
@@ -2569,14 +2578,10 @@ mod tests {
         };
         let bridge = nditer_python_with_interpreter(vec![2, 3, 4], 8, options, python)
             .expect("python bridge");
-        let mut iter = Nditer::new(vec![2, 3, 4], 8, options).expect("rust nditer");
-        iter.set_iterindex(2)
-            .expect("aligned external_loop seek should succeed");
+        let iter = Nditer::new(vec![2, 3, 4], 8, options).expect("rust nditer");
 
         assert_eq!(
-            bridge
-                .steps_from_iterindex(2)
-                .expect("python bridge steps from iterindex"),
+            bridge.steps().expect("python bridge steps"),
             iter.collect::<Vec<_>>()
         );
     }
