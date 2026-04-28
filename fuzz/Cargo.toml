@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 fnp-io = { path = "../crates/fnp-io" }
+fnp-ufunc = { path = "../crates/fnp-ufunc" }
 libfuzzer-sys = "0.4.10"
 
 [[bin]]
@@ -21,6 +22,13 @@ bench = false
 [[bin]]
 name = "text_parsing"
 path = "fuzz_targets/text_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signature_parsing"
+path = "fuzz_targets/signature_parsing.rs"
 test = false
 doc = false
 bench = false
