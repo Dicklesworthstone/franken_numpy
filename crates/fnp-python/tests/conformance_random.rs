@@ -167,6 +167,107 @@ fn conformance_random_matrix() {
         let theirs = t.call_method1("gamma", (2.0_f64, 1.0_f64, 5_i64))?;
         assert_close(py, "random-rs-gamma-5", true, &ours, &theirs)?;
 
+        // ─── additional RandomState distributions (MUST) ────────────────
+        let (o, t) = make_rs_pair(42)?;
+        let ours = o.call_method1("beta", (2.0_f64, 5.0_f64, 6_i64))?;
+        let theirs = t.call_method1("beta", (2.0_f64, 5.0_f64, 6_i64))?;
+        assert_close(py, "random-rs-beta-6", true, &ours, &theirs)?;
+
+        let (o, t) = make_rs_pair(42)?;
+        let ours = o.call_method1("chisquare", (3.0_f64, 5_i64))?;
+        let theirs = t.call_method1("chisquare", (3.0_f64, 5_i64))?;
+        assert_close(py, "random-rs-chisquare-5", true, &ours, &theirs)?;
+
+        let (o, t) = make_rs_pair(42)?;
+        let ours = o.call_method1("f", (5.0_f64, 10.0_f64, 4_i64))?;
+        let theirs = t.call_method1("f", (5.0_f64, 10.0_f64, 4_i64))?;
+        assert_close(py, "random-rs-f-4", true, &ours, &theirs)?;
+
+        let (o, t) = make_rs_pair(42)?;
+        let ours = o.call_method1("geometric", (0.3_f64, 6_i64))?;
+        let theirs = t.call_method1("geometric", (0.3_f64, 6_i64))?;
+        assert_close(py, "random-rs-geometric-6", true, &ours, &theirs)?;
+
+        let (o, t) = make_rs_pair(42)?;
+        let ours = o.call_method1("laplace", (0.0_f64, 1.0_f64, 5_i64))?;
+        let theirs = t.call_method1("laplace", (0.0_f64, 1.0_f64, 5_i64))?;
+        assert_close(py, "random-rs-laplace-5", true, &ours, &theirs)?;
+
+        let (o, t) = make_rs_pair(42)?;
+        let ours = o.call_method1("logistic", (0.0_f64, 1.0_f64, 5_i64))?;
+        let theirs = t.call_method1("logistic", (0.0_f64, 1.0_f64, 5_i64))?;
+        assert_close(py, "random-rs-logistic-5", true, &ours, &theirs)?;
+
+        let (o, t) = make_rs_pair(42)?;
+        let ours = o.call_method1("lognormal", (0.0_f64, 1.0_f64, 5_i64))?;
+        let theirs = t.call_method1("lognormal", (0.0_f64, 1.0_f64, 5_i64))?;
+        assert_close(py, "random-rs-lognormal-5", true, &ours, &theirs)?;
+
+        let (o, t) = make_rs_pair(42)?;
+        let ours = o.call_method1("negative_binomial", (5_i64, 0.5_f64, 6_i64))?;
+        let theirs = t.call_method1("negative_binomial", (5_i64, 0.5_f64, 6_i64))?;
+        assert_close(py, "random-rs-negative_binomial-6", true, &ours, &theirs)?;
+
+        let (o, t) = make_rs_pair(42)?;
+        let ours = o.call_method1("pareto", (2.0_f64, 5_i64))?;
+        let theirs = t.call_method1("pareto", (2.0_f64, 5_i64))?;
+        assert_close(py, "random-rs-pareto-5", true, &ours, &theirs)?;
+
+        let (o, t) = make_rs_pair(42)?;
+        let ours = o.call_method1("power", (2.0_f64, 5_i64))?;
+        let theirs = t.call_method1("power", (2.0_f64, 5_i64))?;
+        assert_close(py, "random-rs-power-5", true, &ours, &theirs)?;
+
+        let (o, t) = make_rs_pair(42)?;
+        let ours = o.call_method1("rayleigh", (1.0_f64, 5_i64))?;
+        let theirs = t.call_method1("rayleigh", (1.0_f64, 5_i64))?;
+        assert_close(py, "random-rs-rayleigh-5", true, &ours, &theirs)?;
+
+        let (o, t) = make_rs_pair(42)?;
+        let ours = o.call_method1("standard_cauchy", (5_i64,))?;
+        let theirs = t.call_method1("standard_cauchy", (5_i64,))?;
+        assert_close(py, "random-rs-standard_cauchy-5", true, &ours, &theirs)?;
+
+        let (o, t) = make_rs_pair(42)?;
+        let ours = o.call_method1("standard_exponential", (5_i64,))?;
+        let theirs = t.call_method1("standard_exponential", (5_i64,))?;
+        assert_close(py, "random-rs-standard_exponential-5", true, &ours, &theirs)?;
+
+        let (o, t) = make_rs_pair(42)?;
+        let ours = o.call_method1("standard_gamma", (2.0_f64, 5_i64))?;
+        let theirs = t.call_method1("standard_gamma", (2.0_f64, 5_i64))?;
+        assert_close(py, "random-rs-standard_gamma-5", true, &ours, &theirs)?;
+
+        let (o, t) = make_rs_pair(42)?;
+        let ours = o.call_method1("standard_t", (5.0_f64, 5_i64))?;
+        let theirs = t.call_method1("standard_t", (5.0_f64, 5_i64))?;
+        assert_close(py, "random-rs-standard_t-5", true, &ours, &theirs)?;
+
+        let (o, t) = make_rs_pair(42)?;
+        let ours = o.call_method1("triangular", (0.0_f64, 0.5_f64, 1.0_f64, 5_i64))?;
+        let theirs = t.call_method1("triangular", (0.0_f64, 0.5_f64, 1.0_f64, 5_i64))?;
+        assert_close(py, "random-rs-triangular-5", true, &ours, &theirs)?;
+
+        let (o, t) = make_rs_pair(42)?;
+        let ours = o.call_method1("vonmises", (0.0_f64, 1.0_f64, 5_i64))?;
+        let theirs = t.call_method1("vonmises", (0.0_f64, 1.0_f64, 5_i64))?;
+        assert_close(py, "random-rs-vonmises-5", true, &ours, &theirs)?;
+
+        let (o, t) = make_rs_pair(42)?;
+        let ours = o.call_method1("wald", (1.0_f64, 1.0_f64, 5_i64))?;
+        let theirs = t.call_method1("wald", (1.0_f64, 1.0_f64, 5_i64))?;
+        assert_close(py, "random-rs-wald-5", true, &ours, &theirs)?;
+
+        let (o, t) = make_rs_pair(42)?;
+        let ours = o.call_method1("weibull", (2.0_f64, 5_i64))?;
+        let theirs = t.call_method1("weibull", (2.0_f64, 5_i64))?;
+        assert_close(py, "random-rs-weibull-5", true, &ours, &theirs)?;
+
+        let (o, t) = make_rs_pair(42)?;
+        let ours = o.call_method1("zipf", (2.0_f64, 5_i64))?;
+        let theirs = t.call_method1("zipf", (2.0_f64, 5_i64))?;
+        assert_close(py, "random-rs-zipf-5", true, &ours, &theirs)?;
+
         // ─── Generator API (modern, SHOULD) ─────────────────────────────
         if let (Ok(our_rng_fn), Ok(their_rng_fn)) = (
             our_random.getattr("default_rng"),
