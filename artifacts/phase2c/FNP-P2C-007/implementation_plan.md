@@ -7,23 +7,22 @@ subsystem: `RNG core and constructor contract`
 
 | Crate | Planned module boundary | Responsibility | Public surface contract |
 |---|---|---|---|
-| `crates/fnp-random` | `rng_constructor` (packet-D planned boundary; crate currently stub) | normalize seed input classes and route to deterministic generator initialization paths | `default_rng`-style constructor surface (planned) |
-| `crates/fnp-random` | `seed_sequence_core` (packet-D planned boundary) | entropy/spawn-key state model and deterministic `generate_state`/`spawn` behavior | seed-sequence interfaces for generation + lineage (planned) |
-| `crates/fnp-random` | `bit_generator_core` (packet-D planned boundary) | bit-generator trait/object lifecycle, state schema contracts, spawn/jump hooks | bit-generator state/get-set/spawn/jump interfaces (planned) |
-| `crates/fnp-random` | `algorithms_mt_pcg_philox_sfc` (packet-D/E planned boundary) | scoped adapters for MT19937/PCG/Philox/SFC64 constructor and jump/state classes | algorithm adapters with deterministic class behavior (planned) |
-| `crates/fnp-random` | `generator_facade` (packet-D planned boundary) | high-level generator wrapper over bit-generator core for constructor + serialization lifecycle | generator facade APIs and state binding hooks (planned) |
-| `crates/fnp-conformance` | `rng_packet_suite` (packet-F planned boundary) | fixture-driven differential/metamorphic/adversarial RNG contract checks | packet-F RNG runner and fixture manifests (planned) |
-| `crates/fnp-conformance` | workflow scenario integration (existing + packet-G extension) | replay scenarios for constructor/state/spawn/jump workflows | packet-G RNG scenario entries in workflow corpus (planned) |
+| `crates/fnp-random` | RNG constructor and generator facade surface (implemented crate boundary) | normalize supported seed input classes and route to deterministic generator initialization paths | generator construction/state APIs with NumPy-aligned reason codes |
+| `crates/fnp-random` | SeedSequence core (implemented crate boundary) | entropy/spawn-key state model and deterministic `generate_state`/`spawn` behavior | seed-sequence generation + lineage interfaces |
+| `crates/fnp-random` | Bit-generator state core (implemented crate boundary) | bit-generator lifecycle, state schema contracts, spawn/jump hooks | bit-generator state/get-set/spawn/jump interfaces |
+| `crates/fnp-random` | PCG64/PCG64DXSM and related adapter lanes (implemented/covered boundary) | scoped adapters for supported constructor, stream, jump, and state classes | deterministic algorithm behavior with unsupported classes kept fail-closed |
+| `crates/fnp-conformance` | RNG packet suite (implemented packet-F/I evidence) | fixture-driven differential/metamorphic/adversarial RNG contract checks | RNG runner, fixture manifests, and packet readiness artifacts |
+| `crates/fnp-conformance` | workflow scenario integration (implemented packet-G/H evidence) | replay scenarios for constructor/state/spawn/jump workflows | packet-G RNG scenario entries and packet-H optimization replay artifacts |
 | `crates/fnp-runtime` | policy/audit decision context (existing) | strict/hardened fail-closed mediation with seed-aware reason-code logging | `decide_and_record_with_context` integration for RNG harness paths |
 
 ## 2. Implementation Sequence (D-Stage to I-Stage)
 
-1. Land packet-D module skeleton in `fnp-random` (`rng_constructor`, `seed_sequence_core`, `bit_generator_core`, `generator_facade`).
+1. Land packet-D module boundary in `fnp-random` for constructor, seed-sequence, bit-generator state, and generator facade behavior.
 2. Define constructor/state/spawn/jump reason-code taxonomy aligned to contract rows `P2C007-R01`..`R10`.
 3. Encode deterministic seed-sequence lineage model and algorithm-neutral state schema boundaries.
-4. Introduce algorithm adapter stubs (MT/PCG/Philox/SFC) with explicit TODO gates for deferred parity debt.
-5. Add packet-F RNG fixture schema placeholders and conformance runner seams.
-6. Add packet-G workflow scenario placeholders linking RNG fixture IDs to replay/e2e script paths.
+4. Keep unsupported algorithm classes fail-closed while supported PCG64/PCG64DXSM lanes carry deterministic state and replay evidence.
+5. Add packet-F RNG fixture schema and conformance runner coverage.
+6. Add packet-G workflow scenario artifacts linking RNG fixture IDs to replay/e2e script paths.
 7. Wire RNG policy decisions into runtime audit context fields (`fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code`).
 8. Gate packet-H optimization work behind baseline/profile/isomorphism evidence.
 9. Close packet-I with parity summary + risk + durability sidecar/scrub/decode-proof artifacts.
@@ -70,10 +69,10 @@ All emissions must include:
 
 ## 7. Compile-Safe Skeleton Validation
 
-- Planning-stage validation rules:
-  - no behavior-changing RNG algorithm migration is shipped in this bead;
+- Validation rules:
+  - doc-only refreshes must not change RNG behavior;
   - packet contract and reason-code taxonomy remain internally consistent;
-  - packet validator continues reporting complete artifact fields for `FNP-P2C-007` (status may remain `not_ready` until downstream E-I artifacts land).
+  - packet validator continues reporting complete artifact fields for `FNP-P2C-007`.
 - Validation command (offloaded via `rch`):  
   `rch exec -- cargo run -p fnp-conformance --bin validate_phase2c_packet -- --packet-id FNP-P2C-007`
 

@@ -72,8 +72,8 @@ This map captures concrete legacy NumPy RNG anchors for constructor normalizatio
 
 | Rust path | Anchor | Coverage note |
 |---|---|---|
-| `crates/fnp-random/src/lib.rs:1` | placeholder `add` function | RNG subsystem is currently a stub; no constructor/state/spawn/jump contract exists yet |
-| `crates/fnp-conformance/src/lib.rs:103` | fixture/report seed fields | harness carries seed fields but has no RNG-specific differential suite yet |
+| `crates/fnp-random/src/lib.rs` | `SeedSequence`, `Pcg64Rng`, `Pcg64DxsmRng`, `Generator` state/serialization APIs | concrete RNG subsystem boundary for constructor, state, spawn, jump, and replay contracts |
+| `crates/fnp-conformance/src/lib.rs` | RNG fixture/report seed fields and packet suites | RNG-specific differential/metamorphic/adversarial evidence is wired into packet-local reports |
 | `crates/fnp-conformance/fixtures/runtime_policy_cases.json:9` | runtime policy fixture seed metadata | seed-aware logging schema exists at program level |
 | `crates/fnp-runtime/src/lib.rs:107` | `DecisionAuditContext.seed` | runtime decision ledger already models deterministic seed context |
 
@@ -88,6 +88,6 @@ This map captures concrete legacy NumPy RNG anchors for constructor normalizatio
 
 - Packet B (`bd-23m.18.2`) must codify strict/hardened invariants for constructor normalization, seed/state transitions, spawn semantics, and jump behavior.
 - Packet C (`bd-23m.18.3`) must define threat controls for seed/state abuse, replay poisoning, and override misuse.
-- Packet D (`bd-23m.18.4`) must introduce real RNG module boundaries in `fnp-random` (generator facade, seed sequence model, bit-generator interfaces).
-- Packet E/F (`bd-23m.18.5`, `bd-23m.18.6`) must add deterministic-seed witness suites and oracle differential coverage for constructor/state/spawn/jump families.
-- Packet G (`bd-23m.18.7`) must attach replay-forensics scenarios with structured seed/artifact linkage.
+- Packet D (`bd-23m.18.4`) introduced concrete RNG module boundaries in `fnp-random` (generator facade, seed sequence model, bit-generator interfaces).
+- Packet E/F (`bd-23m.18.5`, `bd-23m.18.6`) provide deterministic-seed witness suites and oracle differential coverage for constructor/state/spawn/jump families.
+- Packet G (`bd-23m.18.7`) attaches replay-forensics scenarios with structured seed/artifact linkage.

@@ -29,8 +29,8 @@ Subsystem: `RNG core and constructor contract`
 
 | Unknown ID | Description | Risk | Owner bead | Closure criteria |
 |---|---|---|---|---|
-| `P2C007-U01` | `fnp-random` is currently a stub and has no generator/seed-sequence/bit-generator boundary implementation. | high | `bd-23m.18.4` | land module skeleton with constructor/state/spawn/jump interfaces and baseline tests |
-| `P2C007-U02` | Deterministic-seed witness suites are not yet present in packet-scoped unit/property tests. | high | `bd-23m.18.5` | packet-E suites cover constructor/state/spawn/jump invariants with structured logs |
+| `P2C007-U01` | closed: `fnp-random` now carries concrete generator, seed-sequence, and bit-generator state boundaries with constructor/state/spawn/jump reason-code coverage. | closed | `bd-23m.18.4` | closed by the implemented `crates/fnp-random` seed/state APIs and packet-local FNP-P2C-007 evidence artifacts |
+| `P2C007-U02` | closed: deterministic-seed witness suites are present for the current packet-scoped constructor/state/spawn/jump surface. | closed | `bd-23m.18.5` | packet-E suites cover constructor/state/spawn/jump invariants with structured logs |
 | `P2C007-U03` | closed: packet-F differential/metamorphic/adversarial suites are packet-scoped for RNG constructor/state/jump/schema contracts with gate wiring evidence. | closed | `bd-23m.18.6` | closed by `artifacts/phase2c/FNP-P2C-007/differential_metamorphic_adversarial_evidence.json`, `rng_differential_report.json`, and gate reports. |
 | `P2C007-U04` | closed: packet-G replay/e2e scenarios include packet-specific RNG seed lineage traces across strict/hardened replay lanes. | closed | `bd-23m.18.7` | closed by `artifacts/phase2c/FNP-P2C-007/workflow_scenario_packet007_e2e.jsonl`, `workflow_scenario_packet007_artifact_index.json`, `workflow_scenario_packet007_reliability.json`, and `e2e_replay_forensics_evidence.json`. |
 | `P2C007-U05` | Constructor normalization across all supported seed input classes (including legacy adapters) remains unpinned in Rust tests. | medium | `bd-23m.18.2` + `bd-23m.18.5` | contract rows and packet-E tests lock accepted/rejected class behavior |
@@ -39,9 +39,9 @@ Subsystem: `RNG core and constructor contract`
 
 ## 4. Planned Verification Hooks
 
-| Verification lane | Planned hook | Artifact target |
+| Verification lane | Hook | Artifact target |
 |---|---|---|
-| Unit/property | deterministic seed/state/spawn/jump invariants for RNG constructors and bit-generator state model | packet-E tests in `fnp-random` with structured logging |
+| Unit/property | deterministic seed/state/spawn/jump invariants for RNG constructors and bit-generator state model | `fnp-random` unit tests plus packet-E structured evidence |
 | Differential/metamorphic/adversarial | packet-F RNG fixture corpus is wired into differential/metamorphic/adversarial suites and gate runners with deterministic replay metadata | `artifacts/phase2c/FNP-P2C-007/differential_metamorphic_adversarial_evidence.json`, `crates/fnp-conformance/fixtures/oracle_outputs/rng_differential_report.json`, packet-F gate reports |
 | E2E | strict/hardened RNG workflow scenarios with seed lineage and replay metadata | `scripts/e2e/run_rng_contract_journey.sh`, `artifacts/phase2c/FNP-P2C-007/workflow_scenario_packet007_e2e.jsonl`, `workflow_scenario_packet007_artifact_index.json`, `workflow_scenario_packet007_reliability.json`, `e2e_replay_forensics_evidence.json` |
 | Optimization/isomorphism | packet-H profile-first single-lever optimization with checksum/lookup parity checks and workflow rerun | `crates/fnp-conformance/src/bin/generate_packet007_optimization_report.rs`, `artifacts/phase2c/FNP-P2C-007/optimization_profile_report.json`, `optimization_profile_isomorphism_evidence.json`, `workflow_scenario_packet007_opt_e2e.jsonl`, `workflow_scenario_packet007_opt_artifact_index.json`, `workflow_scenario_packet007_opt_reliability.json` |

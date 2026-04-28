@@ -38,8 +38,8 @@ subsystem: `RNG core and constructor contract`
 
 | residual_id | residual risk | compensating controls | closure gate |
 |---|---|---|---|
-| `P2C007-RES-01` | `fnp-random` has no concrete constructor/state/spawn/jump implementation yet. | keep unsupported RNG semantics fail-closed and block promotion until packet-D lands | `bd-23m.18.4` + packet-E baseline tests |
-| `P2C007-RES-02` | deterministic-seed witness suites are not yet encoded in packet-scoped tests. | require packet-E witness suites before parity claims | `bd-23m.18.5` |
+| `P2C007-RES-01` | closed: concrete constructor/state/spawn/jump implementation exists in `fnp-random`. | keep unsupported RNG semantics fail-closed and maintain packet-D/E evidence when supported seed classes expand | `bd-23m.18.4` closure evidence plus packet-E baseline tests |
+| `P2C007-RES-02` | deterministic-seed witness suites are encoded in packet-scoped tests/evidence for the current supported surface. | maintain packet-E witness suites before expanding parity claims | `bd-23m.18.5` |
 | `P2C007-RES-03` | closed: RNG differential oracle coverage for state schema/jump semantics is implemented and gate-verified. | maintain packet-F fixture families and strict/hardened differential gates; update evidence when fixture families expand | `bd-23m.18.6` closure evidence in `artifacts/phase2c/FNP-P2C-007/differential_metamorphic_adversarial_evidence.json` |
 | `P2C007-RES-04` | closed: replay forensics for seed lineage is packet-specific for `FNP-P2C-007`. | maintain packet-G scenario logging fields and packet-local workflow artifact index linkage in closure evidence | `bd-23m.18.7` closure evidence in `artifacts/phase2c/FNP-P2C-007/e2e_replay_forensics_evidence.json` |
 | `P2C007-RES-05` | closed: hardened budget/calibration thresholds were revalidated using packet-H baseline/rebaseline profiling and behavior-isomorphism checks. | maintain packet-H optimization evidence (`optimization_profile_report.json`, `optimization_profile_isomorphism_evidence.json`) and re-run fallback trigger checks during packet-I closure. | `bd-23m.18.8` |
