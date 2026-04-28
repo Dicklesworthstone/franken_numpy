@@ -225,12 +225,7 @@ fn conformance_testing_matrix() {
             RequirementLevel::Must,
             CompareMode::Error,
             t,
-            |py| {
-                PyTuple::new(
-                    py,
-                    [1.0_f64.into_pyobject(py)?, 1.5_f64.into_pyobject(py)?],
-                )
-            },
+            |py| PyTuple::new(py, [1.0_f64.into_pyobject(py)?, 1.5_f64.into_pyobject(py)?]),
             no_kwargs,
         );
         run_case(
@@ -282,15 +277,7 @@ fn conformance_testing_matrix() {
             RequirementLevel::Must,
             CompareMode::Error,
             t,
-            |py| {
-                PyTuple::new(
-                    py,
-                    [
-                        1.0_f64.into_pyobject(py)?,
-                        2.0_f64.into_pyobject(py)?,
-                    ],
-                )
-            },
+            |py| PyTuple::new(py, [1.0_f64.into_pyobject(py)?, 2.0_f64.into_pyobject(py)?]),
             no_kwargs,
         );
         run_case(

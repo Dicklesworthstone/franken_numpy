@@ -399,15 +399,7 @@ fn conformance_setops_matrix() {
             RequirementLevel::May,
             CompareMode::Strict,
             t,
-            |py| {
-                PyTuple::new(
-                    py,
-                    [
-                        np_array_1d_i(py, vec![])?,
-                        np_array_1d_i(py, vec![])?,
-                    ],
-                )
-            },
+            |py| PyTuple::new(py, [np_array_1d_i(py, vec![])?, np_array_1d_i(py, vec![])?]),
             no_kwargs,
         );
         run_case(

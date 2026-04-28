@@ -72,7 +72,12 @@ fn conformance_searching_matrix() {
             RequirementLevel::Must,
             CompareMode::Surface,
             t,
-            |py| PyTuple::new(py, [np_array_2d_f(py, vec![vec![0.0, 1.0], vec![2.0, 0.0]])?]),
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_array_2d_f(py, vec![vec![0.0, 1.0], vec![2.0, 0.0]])?],
+                )
+            },
             no_kwargs,
         );
         run_case(
@@ -96,7 +101,12 @@ fn conformance_searching_matrix() {
             RequirementLevel::Must,
             CompareMode::Strict,
             t,
-            |py| PyTuple::new(py, [np_array_2d_f(py, vec![vec![0.0, 1.0], vec![2.0, 0.0]])?]),
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_array_2d_f(py, vec![vec![0.0, 1.0], vec![2.0, 0.0]])?],
+                )
+            },
             no_kwargs,
         );
 
@@ -181,7 +191,12 @@ fn conformance_searching_matrix() {
             RequirementLevel::Must,
             CompareMode::Strict,
             t,
-            |py| PyTuple::new(py, [np_array_1d_f(py, vec![3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0])?]),
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_array_1d_f(py, vec![3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0])?],
+                )
+            },
             no_kwargs,
         );
         run_case(
@@ -193,7 +208,12 @@ fn conformance_searching_matrix() {
             RequirementLevel::Must,
             CompareMode::Strict,
             t,
-            |py| PyTuple::new(py, [np_array_1d_f(py, vec![3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0])?]),
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_array_1d_f(py, vec![3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0])?],
+                )
+            },
             no_kwargs,
         );
         run_case(
@@ -322,10 +342,7 @@ fn conformance_searching_matrix() {
             CompareMode::Strict,
             t,
             |py| {
-                let int64_4 = py
-                    .import("numpy")?
-                    .getattr("int64")?
-                    .call1((4_i64,))?;
+                let int64_4 = py.import("numpy")?.getattr("int64")?.call1((4_i64,))?;
                 PyTuple::new(
                     py,
                     [

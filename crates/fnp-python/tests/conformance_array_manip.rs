@@ -257,11 +257,7 @@ fn conformance_array_manip_matrix() {
                 PyTuple::new(
                     py,
                     [
-                        np_array_3d_f(
-                            py,
-                            vec![vec![vec![1.0], vec![2.0], vec![3.0]]],
-                        )?
-                        .into_any(),
+                        np_array_3d_f(py, vec![vec![vec![1.0], vec![2.0], vec![3.0]]])?.into_any(),
                         0_i64.into_pyobject(py)?.into_any(),
                     ],
                 )
@@ -416,8 +412,7 @@ fn conformance_array_manip_matrix() {
                 PyTuple::new(
                     py,
                     [
-                        np_array_2d_f(py, vec![vec![1.0, 2.0], vec![3.0, 4.0]])?
-                            .into_any(),
+                        np_array_2d_f(py, vec![vec![1.0, 2.0], vec![3.0, 4.0]])?.into_any(),
                         3_i64.into_pyobject(py)?.into_any(),
                     ],
                 )
@@ -455,8 +450,7 @@ fn conformance_array_manip_matrix() {
                 PyTuple::new(
                     py,
                     [
-                        np_array_2d_f(py, vec![vec![1.0, 2.0], vec![3.0, 4.0]])?
-                            .into_any(),
+                        np_array_2d_f(py, vec![vec![1.0, 2.0], vec![3.0, 4.0]])?.into_any(),
                         0_i64.into_pyobject(py)?.into_any(),
                     ],
                 )

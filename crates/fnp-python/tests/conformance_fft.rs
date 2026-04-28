@@ -163,7 +163,10 @@ fn conformance_fft_matrix() {
             |py| {
                 PyTuple::new(
                     py,
-                    [np_array_1d(py, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])?],
+                    [np_array_1d(
+                        py,
+                        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+                    )?],
                 )
             },
             no_kwargs,
@@ -196,10 +199,7 @@ fn conformance_fft_matrix() {
                 let array = py.import("numpy")?.getattr("array")?;
                 let kw = PyDict::new(py);
                 kw.set_item("dtype", "complex128")?;
-                let x = array.call(
-                    (vec![vec![1.0, 2.0], vec![3.0, 4.0]],),
-                    Some(&kw),
-                )?;
+                let x = array.call((vec![vec![1.0, 2.0], vec![3.0, 4.0]],), Some(&kw))?;
                 PyTuple::new(py, [x])
             },
             no_kwargs,
@@ -228,10 +228,7 @@ fn conformance_fft_matrix() {
             // rfft2 on a 2x4 real input → 2x3 complex bins; pass that
             // through irfft2 with the default s= back to 2x4.
             |py| {
-                let x = np_array_2d(
-                    py,
-                    vec![vec![1.0, 2.0, 3.0, 4.0], vec![5.0, 6.0, 7.0, 8.0]],
-                )?;
+                let x = np_array_2d(py, vec![vec![1.0, 2.0, 3.0, 4.0], vec![5.0, 6.0, 7.0, 8.0]])?;
                 let rfft2_fn = py.import("numpy")?.getattr("fft")?.getattr("rfft2")?;
                 PyTuple::new(py, [rfft2_fn.call1((x,))?])
             },
@@ -301,14 +298,8 @@ fn conformance_fft_matrix() {
                     [np_array_3d(
                         py,
                         vec![
-                            vec![
-                                vec![1.0, 2.0, 3.0, 4.0],
-                                vec![5.0, 6.0, 7.0, 8.0],
-                            ],
-                            vec![
-                                vec![9.0, 10.0, 11.0, 12.0],
-                                vec![13.0, 14.0, 15.0, 16.0],
-                            ],
+                            vec![vec![1.0, 2.0, 3.0, 4.0], vec![5.0, 6.0, 7.0, 8.0]],
+                            vec![vec![9.0, 10.0, 11.0, 12.0], vec![13.0, 14.0, 15.0, 16.0]],
                         ],
                     )?],
                 )
@@ -330,14 +321,8 @@ fn conformance_fft_matrix() {
                 let x = np_array_3d(
                     py,
                     vec![
-                        vec![
-                            vec![1.0, 2.0, 3.0, 4.0],
-                            vec![5.0, 6.0, 7.0, 8.0],
-                        ],
-                        vec![
-                            vec![9.0, 10.0, 11.0, 12.0],
-                            vec![13.0, 14.0, 15.0, 16.0],
-                        ],
+                        vec![vec![1.0, 2.0, 3.0, 4.0], vec![5.0, 6.0, 7.0, 8.0]],
+                        vec![vec![9.0, 10.0, 11.0, 12.0], vec![13.0, 14.0, 15.0, 16.0]],
                     ],
                 )?;
                 let rfftn_fn = py.import("numpy")?.getattr("fft")?.getattr("rfftn")?;
@@ -495,7 +480,15 @@ fn conformance_fft_matrix() {
             RequirementLevel::Should,
             CompareMode::Strict,
             t,
-            |py| PyTuple::new(py, [np_array_2d(py, vec![vec![1.0, 2.0, 3.0, 4.0], vec![5.0, 6.0, 7.0, 8.0]])?]),
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_array_2d(
+                        py,
+                        vec![vec![1.0, 2.0, 3.0, 4.0], vec![5.0, 6.0, 7.0, 8.0]],
+                    )?],
+                )
+            },
             |py| {
                 let kw = PyDict::new(py);
                 kw.set_item("axes", 1_i64)?;

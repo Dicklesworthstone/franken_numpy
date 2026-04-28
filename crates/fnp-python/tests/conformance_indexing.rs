@@ -131,13 +131,7 @@ fn conformance_indexing_matrix() {
                 PyTuple::new(
                     py,
                     [
-                        np_array_2d_f(
-                            py,
-                            vec![
-                                vec![1.0, 2.0, 3.0],
-                                vec![4.0, 5.0, 6.0],
-                            ],
-                        )?,
+                        np_array_2d_f(py, vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]])?,
                         np_array_1d_i(py, vec![0, 2])?,
                     ],
                 )
@@ -163,13 +157,7 @@ fn conformance_indexing_matrix() {
                 PyTuple::new(
                     py,
                     [
-                        np_array_2d_f(
-                            py,
-                            vec![
-                                vec![10.0, 20.0, 30.0],
-                                vec![40.0, 50.0, 60.0],
-                            ],
-                        )?,
+                        np_array_2d_f(py, vec![vec![10.0, 20.0, 30.0], vec![40.0, 50.0, 60.0]])?,
                         np_array_2d_i(py, vec![vec![2, 0], vec![1, 2]])?,
                     ],
                 )
@@ -193,13 +181,7 @@ fn conformance_indexing_matrix() {
                 PyTuple::new(
                     py,
                     [
-                        np_array_2d_f(
-                            py,
-                            vec![
-                                vec![10.0, 20.0, 30.0],
-                                vec![40.0, 50.0, 60.0],
-                            ],
-                        )?,
+                        np_array_2d_f(py, vec![vec![10.0, 20.0, 30.0], vec![40.0, 50.0, 60.0]])?,
                         np_array_2d_i(py, vec![vec![2, 0], vec![1, 2]])?,
                     ],
                 )
@@ -246,13 +228,7 @@ fn conformance_indexing_matrix() {
                     py,
                     [
                         np_array_1d_b(py, vec![true, false, true])?,
-                        np_array_2d_f(
-                            py,
-                            vec![
-                                vec![1.0, 2.0, 3.0],
-                                vec![4.0, 5.0, 6.0],
-                            ],
-                        )?,
+                        np_array_2d_f(py, vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]])?,
                     ],
                 )
             },
@@ -370,10 +346,7 @@ fn conformance_indexing_matrix() {
                 let choice1 = np_array_1d_f(py, vec![200.0, 200.0, 200.0, 200.0])?;
                 let choicelist = PyList::new(py, [choice0, choice1])?;
                 let default = np_array_1d_f(py, vec![-1.0, -1.0, -1.0, -1.0])?;
-                PyTuple::new(
-                    py,
-                    [condlist.into_any(), choicelist.into_any(), default],
-                )
+                PyTuple::new(py, [condlist.into_any(), choicelist.into_any(), default])
             },
             no_kwargs,
         );
@@ -398,10 +371,7 @@ fn conformance_indexing_matrix() {
                 kw.set_item("dtype", "int64")?;
                 let empty_int: Vec<i64> = vec![];
                 let empty_indices = array.call((empty_int,), Some(&kw))?;
-                PyTuple::new(
-                    py,
-                    [np_array_1d_f(py, vec![1.0, 2.0, 3.0])?, empty_indices],
-                )
+                PyTuple::new(py, [np_array_1d_f(py, vec![1.0, 2.0, 3.0])?, empty_indices])
             },
             no_kwargs,
         );
