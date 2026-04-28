@@ -1,0 +1,22 @@
+[package]
+name = "franken_numpy-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+fnp-io = { path = "../crates/fnp-io" }
+libfuzzer-sys = "0.4.10"
+
+[[bin]]
+name = "npy_npz_bytes"
+path = "fuzz_targets/npy_npz_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
