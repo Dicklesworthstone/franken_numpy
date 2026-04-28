@@ -4906,14 +4906,32 @@ impl UFuncArray {
         if num == 1 {
             return Self::from_values_with_dtype(vec![1], vec![start], dtype);
         }
-        let divisor = if endpoint {
-            (num - 1) as f64
+        let sign = if start.is_sign_positive() && stop.is_sign_positive() {
+            1.0
+        } else if start.is_sign_negative() && stop.is_sign_negative() {
+            -1.0
         } else {
-            num as f64
+            return Err(UFuncError::Msg(
+                "geomspace mixed-sign real endpoints require complex output".to_string(),
+            ));
         };
-        let ratio = (stop / start).powf(1.0 / divisor);
-        let values: Vec<f64> = (0..num).map(|i| start * ratio.powi(i as i32)).collect();
-        Self::from_values_with_dtype(vec![num], values, dtype)
+
+        let mut result = Self::logspace_endpoint(
+            start.abs().log10(),
+            stop.abs().log10(),
+            num,
+            10.0,
+            endpoint,
+            dtype,
+        )?;
+        for value in &mut result.values {
+            *value *= sign;
+        }
+        result.values[0] = start;
+        if endpoint {
+            result.values[num - 1] = stop;
+        }
+        Ok(result)
     }
 
     /// Create an array by applying a function to each index.
@@ -40769,6 +40787,27 @@ print(json.dumps(payload))
         assert!((r.values()[1] - 10.0).abs() < 1e-10);
         assert!((r.values()[2] - 100.0).abs() < 1e-8);
         assert!((r.values()[3] - 1000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn geomspace_pins_same_sign_real_endpoints() {
+        let positive = UFuncArray::geomspace(1.0, 1000.0, 4, DType::F64).unwrap();
+        assert_eq!(positive.values()[0], 1.0);
+        assert_eq!(positive.values()[3], 1000.0);
+
+        let negative = UFuncArray::geomspace(-1000.0, -1.0, 4, DType::F64).unwrap();
+        assert_eq!(negative.values()[0], -1000.0);
+        assert_eq!(negative.values()[3], -1.0);
+    }
+
+    #[test]
+    fn geomspace_rejects_mixed_sign_real_endpoints() {
+        let err = UFuncArray::geomspace(-1.0, 1.0, 5, DType::F64)
+            .expect_err("mixed-sign real geomspace needs complex output");
+        assert!(
+            err.to_string()
+                .contains("mixed-sign real endpoints require complex output")
+        );
     }
 
     #[test]

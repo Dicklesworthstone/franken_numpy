@@ -12738,23 +12738,47 @@ fn geomspace(
     dtype: Option<Py<PyAny>>,
     axis: isize,
 ) -> PyResult<Py<PyAny>> {
-    // np.geomspace's exact ULP pattern (guaranteed endpoint reproduction
-    // plus negative/complex endpoint support) is not reproducible with a
-    // simple (stop/start)**(1/(num-1)) progression; bit-exact parity
-    // tests fail when we synthesize it ourselves. Keep this as a thin
-    // wrapper while preserving the kwarg surface.
     let numpy = py.import("numpy")?;
-    let geomspace_fn = numpy.getattr("geomspace")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("num", num)?;
-    kwargs.set_item("endpoint", endpoint)?;
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        let geomspace_fn = numpy.getattr("geomspace")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("num", num)?;
+        kwargs.set_item("endpoint", endpoint)?;
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        kwargs.set_item("axis", axis)?;
+        Ok(geomspace_fn
+            .call((start.bind(py), stop.bind(py)), Some(&kwargs))?
+            .unbind())
+    };
+
+    if axis != 0 || num < 0 {
+        return fallback(py);
     }
-    kwargs.set_item("axis", axis)?;
-    Ok(geomspace_fn
-        .call((start.bind(py), stop.bind(py)), Some(&kwargs))?
-        .unbind())
+
+    let Ok(start_f) = start.bind(py).extract::<f64>() else {
+        return fallback(py);
+    };
+    let Ok(stop_f) = stop.bind(py).extract::<f64>() else {
+        return fallback(py);
+    };
+    if !start_f.is_finite() || !stop_f.is_finite() || start_f <= 0.0 || stop_f <= 0.0 {
+        return fallback(py);
+    }
+    if dtype
+        .as_ref()
+        .is_some_and(|dtype_val| !dtype_val.bind(py).is_none())
+    {
+        return fallback(py);
+    }
+
+    let result =
+        match UFuncArray::geomspace_endpoint(start_f, stop_f, num as usize, endpoint, DType::F64) {
+            Ok(value) => value,
+            Err(_) => return fallback(py),
+        };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
