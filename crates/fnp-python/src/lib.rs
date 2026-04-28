@@ -18485,24 +18485,53 @@ fn logspace(
     dtype: Option<Py<PyAny>>,
     axis: i64,
 ) -> PyResult<Py<PyAny>> {
-    // numpy.logspace implements its power step via `np.power(base, linspace(...))`
-    // which can produce platform-dependent ULP drift for non-default bases.
-    // Keep delegation to numpy so parity with np.logspace is preserved
-    // across bases, endpoint handling, array-valued endpoints and axis
-    // insertion; that path is the behavioral oracle.
     let numpy = py.import("numpy")?;
-    let ls_fn = numpy.getattr("logspace")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("num", num)?;
-    kwargs.set_item("endpoint", endpoint)?;
-    kwargs.set_item("base", base)?;
-    if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        let ls_fn = numpy.getattr("logspace")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("num", num)?;
+        kwargs.set_item("endpoint", endpoint)?;
+        kwargs.set_item("base", base)?;
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
+        kwargs.set_item("axis", axis)?;
+        Ok(ls_fn
+            .call((start.bind(py), stop.bind(py)), Some(&kwargs))?
+            .unbind())
+    };
+
+    if axis != 0 || num < 0 || base.to_bits() != 10.0_f64.to_bits() {
+        return fallback(py);
     }
-    kwargs.set_item("axis", axis)?;
-    Ok(ls_fn
-        .call((start.bind(py), stop.bind(py)), Some(&kwargs))?
-        .unbind())
+    if dtype
+        .as_ref()
+        .is_some_and(|dtype_val| !dtype_val.bind(py).is_none())
+    {
+        return fallback(py);
+    }
+    let Ok(start_f) = start.bind(py).extract::<f64>() else {
+        return fallback(py);
+    };
+    let Ok(stop_f) = stop.bind(py).extract::<f64>() else {
+        return fallback(py);
+    };
+    if !start_f.is_finite() || !stop_f.is_finite() {
+        return fallback(py);
+    }
+
+    let result = match UFuncArray::logspace_endpoint(
+        start_f,
+        stop_f,
+        num as usize,
+        10.0,
+        endpoint,
+        DType::F64,
+    ) {
+        Ok(value) => value,
+        Err(_) => return fallback(py),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -53633,6 +53662,90 @@ mod tests {
             assert_array_matches_numpy(
                 &linspace_fn.call((starts.clone(), stops.clone()), Some(&axis_kwargs))?,
                 &numpy_linspace.call((starts.clone(), stops.clone()), Some(&axis_kwargs))?,
+            )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn logspace_matches_numpy_native_scalar_fast_path_and_fallbacks() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let logspace_fn = module.getattr("logspace")?;
+            let numpy = py.import("numpy")?;
+            let numpy_logspace = numpy.getattr("logspace")?;
+
+            let assert_logspace_matches =
+                |ours: &Bound<'_, PyAny>, theirs: &Bound<'_, PyAny>| -> PyResult<()> {
+                    assert_eq!(
+                        ours.getattr("dtype")?.str()?.to_string(),
+                        theirs.getattr("dtype")?.str()?.to_string(),
+                        "logspace dtype mismatch",
+                    );
+                    assert_eq!(
+                        ours.getattr("shape")?.extract::<Vec<usize>>()?,
+                        theirs.getattr("shape")?.extract::<Vec<usize>>()?,
+                        "logspace shape mismatch",
+                    );
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("rtol", 1e-14_f64)?;
+                    kwargs.set_item("atol", 0.0_f64)?;
+                    numpy.getattr("testing")?.call_method(
+                        "assert_allclose",
+                        (ours, theirs),
+                        Some(&kwargs),
+                    )?;
+                    Ok(())
+                };
+
+            // Default base=10 scalar path is Rust-owned.
+            assert_logspace_matches(
+                &logspace_fn.call1((0.0_f64, 3.0_f64))?,
+                &numpy_logspace.call1((0.0_f64, 3.0_f64))?,
+            )?;
+
+            // endpoint=False still uses the native scalar path.
+            let endpoint_kwargs = PyDict::new(py);
+            endpoint_kwargs.set_item("num", 5_i64)?;
+            endpoint_kwargs.set_item("endpoint", false)?;
+            assert_logspace_matches(
+                &logspace_fn.call((0.0_f64, 2.0_f64), Some(&endpoint_kwargs))?,
+                &numpy_logspace.call((0.0_f64, 2.0_f64), Some(&endpoint_kwargs))?,
+            )?;
+
+            // Degenerate counts keep NumPy's empty and singleton surfaces.
+            for num in [0_i64, 1_i64] {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("num", num)?;
+                assert_logspace_matches(
+                    &logspace_fn.call((2.0_f64, 4.0_f64), Some(&kwargs))?,
+                    &numpy_logspace.call((2.0_f64, 4.0_f64), Some(&kwargs))?,
+                )?;
+            }
+
+            // Explicit dtype and non-default base are intentionally still
+            // handled by NumPy fallback to preserve exact dtype/casting and
+            // non-default-base ULP behavior.
+            let dtype_kwargs = PyDict::new(py);
+            dtype_kwargs.set_item("num", 4_i64)?;
+            dtype_kwargs.set_item("dtype", numpy.getattr("float32")?)?;
+            assert_logspace_matches(
+                &logspace_fn.call((0_i64, 3_i64), Some(&dtype_kwargs))?,
+                &numpy_logspace.call((0_i64, 3_i64), Some(&dtype_kwargs))?,
+            )?;
+
+            let base_kwargs = PyDict::new(py);
+            base_kwargs.set_item("num", 4_i64)?;
+            base_kwargs.set_item("base", 2.0_f64)?;
+            assert_logspace_matches(
+                &logspace_fn.call((0.0_f64, 3.0_f64), Some(&base_kwargs))?,
+                &numpy_logspace.call((0.0_f64, 3.0_f64), Some(&base_kwargs))?,
             )?;
 
             Ok(())
