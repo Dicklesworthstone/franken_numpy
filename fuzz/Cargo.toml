@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 fnp-dtype = { path = "../crates/fnp-dtype" }
 fnp-io = { path = "../crates/fnp-io" }
+fnp-ndarray = { path = "../crates/fnp-ndarray" }
 fnp-ufunc = { path = "../crates/fnp-ufunc" }
 libfuzzer-sys = "0.4.10"
 
@@ -51,6 +52,13 @@ bench = false
 [[bin]]
 name = "structured_dtype"
 path = "fuzz_targets/structured_dtype.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "broadcast_shapes"
+path = "fuzz_targets/broadcast_shapes.rs"
 test = false
 doc = false
 bench = false
