@@ -21171,24 +21171,146 @@ fn any(
     core_numpy_passthrough(py, "any", args, kwargs)
 }
 
+// Cumulative sum with native Rust fast path.
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None))]
 fn cumsum(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    dtype: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "cumsum", args, kwargs)
+    let numpy = py.import("numpy")?;
+    let cumsum_fn = numpy.getattr("cumsum")?;
+
+    let a_for_fallback = a.clone_ref(py);
+    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
+    let dtype_for_fallback = dtype.as_ref().map(|v| v.clone_ref(py));
+    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
+
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(ax) = axis_for_fallback.as_ref() {
+            kwargs.set_item("axis", ax.bind(py))?;
+        }
+        if let Some(dt) = dtype_for_fallback.as_ref() {
+            kwargs.set_item("dtype", dt.bind(py))?;
+        }
+        if let Some(o) = out_for_fallback.as_ref() {
+            kwargs.set_item("out", o.bind(py))?;
+        }
+        Ok(cumsum_fn
+            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
+    // Fallback for `out` buffer or explicit dtype (conversion not native)
+    if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        || dtype.as_ref().is_some_and(|v| !v.bind(py).is_none())
+    {
+        return fallback();
+    }
+
+    // Parse axis: None or integer
+    let axis_val: Option<isize> = match &axis {
+        None => None,
+        Some(ax) => {
+            let ax_bound = ax.bind(py);
+            if ax_bound.is_none() {
+                None
+            } else if let Ok(i) = ax_bound.extract::<isize>() {
+                Some(i)
+            } else {
+                return fallback();
+            }
+        }
+    };
+
+    // Extract input array
+    let array = match extract_precise_numeric_array(py, a.bind(py), "cumsum(a)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+
+    // Call native Rust cumsum
+    let result = match array.cumsum(axis_val) {
+        Ok(r) => r,
+        Err(_) => return fallback(),
+    };
+
+    build_numpy_array_from_ufunc(py, &result)
 }
 
+// Cumulative product with native Rust fast path.
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None))]
 fn cumprod(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    dtype: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "cumprod", args, kwargs)
+    let numpy = py.import("numpy")?;
+    let cumprod_fn = numpy.getattr("cumprod")?;
+
+    let a_for_fallback = a.clone_ref(py);
+    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
+    let dtype_for_fallback = dtype.as_ref().map(|v| v.clone_ref(py));
+    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
+
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(ax) = axis_for_fallback.as_ref() {
+            kwargs.set_item("axis", ax.bind(py))?;
+        }
+        if let Some(dt) = dtype_for_fallback.as_ref() {
+            kwargs.set_item("dtype", dt.bind(py))?;
+        }
+        if let Some(o) = out_for_fallback.as_ref() {
+            kwargs.set_item("out", o.bind(py))?;
+        }
+        Ok(cumprod_fn
+            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
+    // Fallback for `out` buffer or explicit dtype (conversion not native)
+    if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        || dtype.as_ref().is_some_and(|v| !v.bind(py).is_none())
+    {
+        return fallback();
+    }
+
+    // Parse axis: None or integer
+    let axis_val: Option<isize> = match &axis {
+        None => None,
+        Some(ax) => {
+            let ax_bound = ax.bind(py);
+            if ax_bound.is_none() {
+                None
+            } else if let Ok(i) = ax_bound.extract::<isize>() {
+                Some(i)
+            } else {
+                return fallback();
+            }
+        }
+    };
+
+    // Extract input array
+    let array = match extract_precise_numeric_array(py, a.bind(py), "cumprod(a)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+
+    // Call native Rust cumprod
+    let result = match array.cumprod(axis_val) {
+        Ok(r) => r,
+        Err(_) => return fallback(),
+    };
+
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
