@@ -13,7 +13,7 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(text) = std::str::from_utf8(data) {
         let _ = parse_structured_descr(text);
 
-        let _ = IOSupportedDType::parse(text);
+        let _ = IOSupportedDType::decode(text);
 
         for prefix in ["[", "[(", "[('x',"] {
             let combined = format!("{prefix}{text}");
