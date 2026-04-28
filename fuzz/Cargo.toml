@@ -8,6 +8,7 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
+fnp-dtype = { path = "../crates/fnp-dtype" }
 fnp-io = { path = "../crates/fnp-io" }
 fnp-ufunc = { path = "../crates/fnp-ufunc" }
 libfuzzer-sys = "0.4.10"
@@ -36,6 +37,13 @@ bench = false
 [[bin]]
 name = "datetime_parsing"
 path = "fuzz_targets/datetime_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "einsum_subscripts"
+path = "fuzz_targets/einsum_subscripts.rs"
 test = false
 doc = false
 bench = false
