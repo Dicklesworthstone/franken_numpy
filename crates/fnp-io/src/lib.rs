@@ -1412,6 +1412,18 @@ pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, 
             "npz: split archive metadata is unsupported",
         ));
     }
+    let eocd_comment_len = u16::from_le_bytes([data[eocd + 20], data[eocd + 21]]) as usize;
+    let expected_archive_len = eocd
+        .checked_add(22)
+        .and_then(|end| end.checked_add(eocd_comment_len))
+        .ok_or(IOError::NpzArchiveContractViolation(
+            "npz: end of central directory comment length overflow",
+        ))?;
+    if expected_archive_len != data.len() {
+        return Err(IOError::NpzArchiveContractViolation(
+            "npz: end of central directory comment length mismatch",
+        ));
+    }
 
     let cd_size = u32::from_le_bytes([
         data[eocd + 12],
@@ -1817,6 +1829,11 @@ pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, 
         });
 
         pos = entry_end;
+    }
+    if pos != cd_end {
+        return Err(IOError::NpzArchiveContractViolation(
+            "npz: central directory length mismatch",
+        ));
     }
 
     Ok(entries)
@@ -5889,6 +5906,60 @@ mm.flush()
         npz.extend(std::iter::repeat_n(0u8, 70_000));
         let err = read_npz_bytes(&npz, false).expect_err("oversized trailing data should fail");
         assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
+    }
+
+    #[test]
+    fn npz_rejects_short_trailing_bytes_after_eocd() {
+        let h = NpyHeader {
+            shape: vec![1],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let p: Vec<u8> = 1.0_f64.to_le_bytes().to_vec();
+        let mut npz = write_npz_bytes(&[("a", &h, &p)]).expect("write");
+        npz.extend_from_slice(b"junk");
+
+        let err =
+            read_npz_bytes(&npz, false).expect_err("trailing bytes after EOCD must be rejected");
+        assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
+        assert!(
+            err.to_string().contains("comment length mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn npz_rejects_trailing_central_directory_bytes() {
+        let h = NpyHeader {
+            shape: vec![1],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let p: Vec<u8> = 1.0_f64.to_le_bytes().to_vec();
+        let mut npz = write_npz_bytes(&[("a", &h, &p)]).expect("write");
+        let eocd_pos = npz
+            .windows(4)
+            .position(|window| window == [0x50, 0x4B, 0x05, 0x06])
+            .expect("end of central directory signature");
+
+        npz.insert(eocd_pos, 0);
+        let eocd_pos = eocd_pos + 1;
+        let cd_size = u32::from_le_bytes([
+            npz[eocd_pos + 12],
+            npz[eocd_pos + 13],
+            npz[eocd_pos + 14],
+            npz[eocd_pos + 15],
+        ]);
+        npz[eocd_pos + 12..eocd_pos + 16].copy_from_slice(&(cd_size + 1).to_le_bytes());
+
+        let err = read_npz_bytes(&npz, false)
+            .expect_err("trailing central directory bytes must be rejected");
+        assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
+        assert!(
+            err.to_string()
+                .contains("central directory length mismatch"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
