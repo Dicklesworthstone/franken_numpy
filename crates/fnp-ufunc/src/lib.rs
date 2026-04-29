@@ -31617,6 +31617,42 @@ pub fn logical_not(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
     })
 }
 
+/// Element-wise bitwise AND of two arrays.
+/// NumPy equivalent: `np.bitwise_and(x1, x2)`.
+pub fn bitwise_and(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    x1.elementwise_binary(x2, BinaryOp::BitwiseAnd)
+}
+
+/// Element-wise bitwise OR of two arrays.
+/// NumPy equivalent: `np.bitwise_or(x1, x2)`.
+pub fn bitwise_or(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    x1.elementwise_binary(x2, BinaryOp::BitwiseOr)
+}
+
+/// Element-wise bitwise XOR of two arrays.
+/// NumPy equivalent: `np.bitwise_xor(x1, x2)`.
+pub fn bitwise_xor(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    x1.elementwise_binary(x2, BinaryOp::BitwiseXor)
+}
+
+/// Element-wise left bit shift.
+/// NumPy equivalent: `np.left_shift(x1, x2)`.
+pub fn left_shift(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    x1.elementwise_binary(x2, BinaryOp::LeftShift)
+}
+
+/// Element-wise right bit shift.
+/// NumPy equivalent: `np.right_shift(x1, x2)`.
+pub fn right_shift(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    x1.elementwise_binary(x2, BinaryOp::RightShift)
+}
+
+/// Element-wise bitwise NOT (invert).
+/// NumPy equivalent: `np.invert(x)` or `np.bitwise_not(x)`.
+pub fn invert(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    Ok(x.elementwise_unary(UnaryOp::Invert))
+}
+
 /// Sort a complex array by real part first, then imaginary part.
 ///
 /// The input is flattened, sorted, and returned as a 1-D complex array with

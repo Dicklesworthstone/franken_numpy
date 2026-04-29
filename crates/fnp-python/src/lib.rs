@@ -16,6 +16,9 @@ use fnp_ufunc::{
     less as ufunc_less, less_equal as ufunc_less_equal,
     logical_and as ufunc_logical_and, logical_or as ufunc_logical_or,
     logical_xor as ufunc_logical_xor, logical_not as ufunc_logical_not,
+    bitwise_and as ufunc_bitwise_and, bitwise_or as ufunc_bitwise_or,
+    bitwise_xor as ufunc_bitwise_xor, left_shift as ufunc_left_shift,
+    right_shift as ufunc_right_shift, invert as ufunc_invert,
     float_power as ufunc_float_power, fmax as ufunc_fmax, fmin as ufunc_fmin,
     fmod as ufunc_fmod, frexp as ufunc_frexp, gcd_arrays as ufunc_gcd,
     heaviside as ufunc_heaviside, hypot as ufunc_hypot, lcm_arrays as ufunc_lcm,
@@ -14040,6 +14043,95 @@ fn native_unary_logical_not_or_passthrough(
     }
 }
 
+fn native_binary_bitwise_and_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let x1 = extract_numeric_array(py, &args.get_item(0)?, "bitwise_and(x1)")?;
+        let x2 = extract_numeric_array(py, &args.get_item(1)?, "bitwise_and(x2)")?;
+        let result = ufunc_bitwise_and(&x1, &x2).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "bitwise_and", args, kwargs)
+    }
+}
+
+fn native_binary_bitwise_or_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let x1 = extract_numeric_array(py, &args.get_item(0)?, "bitwise_or(x1)")?;
+        let x2 = extract_numeric_array(py, &args.get_item(1)?, "bitwise_or(x2)")?;
+        let result = ufunc_bitwise_or(&x1, &x2).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "bitwise_or", args, kwargs)
+    }
+}
+
+fn native_binary_bitwise_xor_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let x1 = extract_numeric_array(py, &args.get_item(0)?, "bitwise_xor(x1)")?;
+        let x2 = extract_numeric_array(py, &args.get_item(1)?, "bitwise_xor(x2)")?;
+        let result = ufunc_bitwise_xor(&x1, &x2).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "bitwise_xor", args, kwargs)
+    }
+}
+
+fn native_binary_left_shift_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let x1 = extract_numeric_array(py, &args.get_item(0)?, "left_shift(x1)")?;
+        let x2 = extract_numeric_array(py, &args.get_item(1)?, "left_shift(x2)")?;
+        let result = ufunc_left_shift(&x1, &x2).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "left_shift", args, kwargs)
+    }
+}
+
+fn native_binary_right_shift_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let x1 = extract_numeric_array(py, &args.get_item(0)?, "right_shift(x1)")?;
+        let x2 = extract_numeric_array(py, &args.get_item(1)?, "right_shift(x2)")?;
+        let result = ufunc_right_shift(&x1, &x2).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "right_shift", args, kwargs)
+    }
+}
+
+fn native_unary_invert_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
+        let x = extract_numeric_array(py, &args.get_item(0)?, "invert(x)")?;
+        let result = ufunc_invert(&x).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "invert", args, kwargs)
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn square(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
@@ -22775,7 +22867,7 @@ fn bitwise_and(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "bitwise_and", args, kwargs)
+    native_binary_bitwise_and_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
@@ -22795,7 +22887,7 @@ fn bitwise_invert(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "bitwise_invert", args, kwargs)
+    native_unary_invert_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
@@ -22805,7 +22897,7 @@ fn bitwise_left_shift(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "bitwise_left_shift", args, kwargs)
+    native_binary_left_shift_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
@@ -22815,7 +22907,7 @@ fn bitwise_not(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "bitwise_not", args, kwargs)
+    native_unary_invert_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
@@ -22825,7 +22917,7 @@ fn bitwise_or(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "bitwise_or", args, kwargs)
+    native_binary_bitwise_or_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
@@ -22835,7 +22927,7 @@ fn bitwise_right_shift(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "bitwise_right_shift", args, kwargs)
+    native_binary_right_shift_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
@@ -22845,7 +22937,7 @@ fn bitwise_xor(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "bitwise_xor", args, kwargs)
+    native_binary_bitwise_xor_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
@@ -22855,7 +22947,7 @@ fn left_shift(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "left_shift", args, kwargs)
+    native_binary_left_shift_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
@@ -22865,7 +22957,7 @@ fn right_shift(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "right_shift", args, kwargs)
+    native_binary_right_shift_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
