@@ -17,6 +17,27 @@ fn numpy_oracle(script: &str) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+fn fnp_trace_script(body: String) -> String {
+    let library_name = format!(
+        "{}fnp_python{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
+    let module_path = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join(&library_name)))
+        .unwrap_or_else(|| library_name.into());
+    let module_literal = format!("{module_path:?}");
+    format!(
+        "import importlib.util\n\
+         import numpy as np\n\
+         spec = importlib.util.spec_from_file_location('fnp_python', {module_literal})\n\
+         fnp = importlib.util.module_from_spec(spec)\n\
+         spec.loader.exec_module(fnp)\n\
+         {body}"
+    )
+}
+
 fn parse_float(s: &str) -> f64 {
     s.trim().parse::<f64>().unwrap_or(f64::NAN)
 }
@@ -130,7 +151,7 @@ fn trace_2d_default_matches_numpy_across_50_cases() {
         let numpy_result = numpy_oracle(&script);
         let numpy_val = parse_float(&numpy_result);
 
-        let rust_script = format!("import numpy as np; print(np.trace(np.array({arr_str})))");
+        let rust_script = fnp_trace_script(format!("print(fnp.trace(np.array({arr_str})))"));
         let rust_result = numpy_oracle(&rust_script);
         let rust_val = parse_float(&rust_result);
 
@@ -195,8 +216,9 @@ fn trace_offset_matches_numpy() {
         let numpy_result = numpy_oracle(&script);
         let numpy_val = parse_float(&numpy_result);
 
-        let rust_script =
-            format!("import numpy as np; print(np.trace(np.array({arr_str}), offset={offset}))");
+        let rust_script = fnp_trace_script(format!(
+            "print(fnp.trace(np.array({arr_str}), offset={offset}))"
+        ));
         let rust_result = numpy_oracle(&rust_script);
         let rust_val = parse_float(&rust_result);
 
@@ -249,9 +271,9 @@ fn trace_3d_axis_matches_numpy() {
         let numpy_result = numpy_oracle(&script);
         let numpy_vals = parse_float_list(&numpy_result);
 
-        let rust_script = format!(
-            "import numpy as np; print(list(np.trace(np.array({arr_str}), offset={offset}, axis1={axis1}, axis2={axis2}).flatten()))"
-        );
+        let rust_script = fnp_trace_script(format!(
+            "print(list(fnp.trace(np.array({arr_str}), offset={offset}, axis1={axis1}, axis2={axis2}).flatten()))"
+        ));
         let rust_result = numpy_oracle(&rust_script);
         let rust_vals = parse_float_list(&rust_result);
 
@@ -293,7 +315,7 @@ fn trace_integer_dtypes_match_numpy() {
         let numpy_val = parse_float(&numpy_result);
 
         let rust_script =
-            format!("import numpy as np; print(np.trace({arr_expr}, offset={offset}))");
+            fnp_trace_script(format!("print(fnp.trace({arr_expr}, offset={offset}))"));
         let rust_result = numpy_oracle(&rust_script);
         let rust_val = parse_float(&rust_result);
 
@@ -317,7 +339,7 @@ fn trace_nan_handling_matches_numpy() {
         let script = format!("import numpy as np; print(np.trace(np.array({arr_str})))");
         let numpy_result = numpy_oracle(&script);
 
-        let rust_script = format!("import numpy as np; print(np.trace(np.array({arr_str})))");
+        let rust_script = fnp_trace_script(format!("print(fnp.trace(np.array({arr_str})))"));
         let rust_result = numpy_oracle(&rust_script);
 
         assert_eq!(
