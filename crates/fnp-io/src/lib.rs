@@ -3550,7 +3550,10 @@ fn parse_structured_quoted_string(s: &str, pos: usize) -> Result<(String, usize)
                     escaped = false;
                     continue;
                 }
-                _ => result.push(ch),
+                _ => {
+                    result.push('\\');
+                    result.push(ch);
+                }
             }
             escaped = false;
             idx = next_idx;
@@ -6537,6 +6540,14 @@ mm.flush()
         assert_eq!(desc.fields[1].name, "tab\tstop");
         assert_eq!(desc.fields[2].name, "nul\0byte");
         assert_eq!(desc.fields[3].name, "u\u{03b2}");
+    }
+
+    #[test]
+    fn structured_descriptor_preserves_unknown_python_escapes() {
+        let desc = parse_structured_descr("[('a\\qb', '<i4'), ('c\\zd', '<i2')]").unwrap();
+
+        assert_eq!(desc.fields[0].name, "a\\qb");
+        assert_eq!(desc.fields[1].name, "c\\zd");
     }
 
     #[test]
