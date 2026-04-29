@@ -21917,24 +21917,148 @@ fn trace(
 }
 
 // Arg reductions
+// Native Rust argmax with fallback for unsupported parameters.
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (a, axis=None, out=None, **kwargs))]
 fn argmax(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "argmax", args, kwargs)
+    let keepdims = kwargs
+        .and_then(|kw| kw.get_item("keepdims").ok().flatten())
+        .map(|v| v.extract::<bool>().unwrap_or(false))
+        .unwrap_or(false);
+    let numpy = py.import("numpy")?;
+    let argmax_fn = numpy.getattr("argmax")?;
+
+    let a_for_fallback = a.clone_ref(py);
+    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
+    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
+
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kw = PyDict::new(py);
+        if let Some(ax) = axis_for_fallback.as_ref() {
+            kw.set_item("axis", ax.bind(py))?;
+        }
+        if let Some(o) = out_for_fallback.as_ref() {
+            kw.set_item("out", o.bind(py))?;
+        }
+        if keepdims {
+            kw.set_item("keepdims", true)?;
+        }
+        Ok(argmax_fn
+            .call((a_for_fallback.bind(py),), Some(&kw))?
+            .unbind())
+    };
+
+    // Fallback for out or keepdims parameters
+    if out.as_ref().is_some_and(|v| !v.bind(py).is_none()) || keepdims {
+        return fallback();
+    }
+
+    // Parse axis: None or integer
+    let axis_val: Option<isize> = match &axis {
+        None => None,
+        Some(ax) => {
+            let ax_bound = ax.bind(py);
+            if ax_bound.is_none() {
+                None
+            } else if let Ok(i) = ax_bound.extract::<isize>() {
+                Some(i)
+            } else {
+                return fallback();
+            }
+        }
+    };
+
+    // Extract input array
+    let array = match extract_precise_numeric_array(py, a.bind(py), "argmax(a)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+
+    // Call native Rust reduce_argmax
+    let result = match array.reduce_argmax(axis_val) {
+        Ok(r) => r,
+        Err(_) => return fallback(),
+    };
+
+    build_numpy_array_from_ufunc(py, &result)
 }
 
+// Native Rust argmin with fallback for unsupported parameters.
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (a, axis=None, out=None, **kwargs))]
 fn argmin(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "argmin", args, kwargs)
+    let keepdims = kwargs
+        .and_then(|kw| kw.get_item("keepdims").ok().flatten())
+        .map(|v| v.extract::<bool>().unwrap_or(false))
+        .unwrap_or(false);
+    let numpy = py.import("numpy")?;
+    let argmin_fn = numpy.getattr("argmin")?;
+
+    let a_for_fallback = a.clone_ref(py);
+    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
+    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
+
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kw = PyDict::new(py);
+        if let Some(ax) = axis_for_fallback.as_ref() {
+            kw.set_item("axis", ax.bind(py))?;
+        }
+        if let Some(o) = out_for_fallback.as_ref() {
+            kw.set_item("out", o.bind(py))?;
+        }
+        if keepdims {
+            kw.set_item("keepdims", true)?;
+        }
+        Ok(argmin_fn
+            .call((a_for_fallback.bind(py),), Some(&kw))?
+            .unbind())
+    };
+
+    // Fallback for out or keepdims parameters
+    if out.as_ref().is_some_and(|v| !v.bind(py).is_none()) || keepdims {
+        return fallback();
+    }
+
+    // Parse axis: None or integer
+    let axis_val: Option<isize> = match &axis {
+        None => None,
+        Some(ax) => {
+            let ax_bound = ax.bind(py);
+            if ax_bound.is_none() {
+                None
+            } else if let Ok(i) = ax_bound.extract::<isize>() {
+                Some(i)
+            } else {
+                return fallback();
+            }
+        }
+    };
+
+    // Extract input array
+    let array = match extract_precise_numeric_array(py, a.bind(py), "argmin(a)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+
+    // Call native Rust reduce_argmin
+    let result = match array.reduce_argmin(axis_val) {
+        Ok(r) => r,
+        Err(_) => return fallback(),
+    };
+
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 // Linalg shortcuts
