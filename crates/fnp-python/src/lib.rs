@@ -22398,73 +22398,45 @@ fn exp2(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 // Trig (Array-API aliases for arc*/inverse trig — numpy exposes both).
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn acos(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "acos", args, kwargs)
+#[pyo3(signature = (x,))]
+fn acos(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    arccos(py, x)
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn acosh(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "acosh", args, kwargs)
+#[pyo3(signature = (x,))]
+fn acosh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    arccosh(py, x)
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn asin(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "asin", args, kwargs)
+#[pyo3(signature = (x,))]
+fn asin(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    arcsin(py, x)
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn asinh(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "asinh", args, kwargs)
+#[pyo3(signature = (x,))]
+fn asinh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    arcsinh(py, x)
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn atan(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "atan", args, kwargs)
+#[pyo3(signature = (x,))]
+fn atan(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    arctan(py, x)
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn atan2(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "atan2", args, kwargs)
+#[pyo3(signature = (x1, x2))]
+fn atan2(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    arctan2(py, x1, x2)
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn atanh(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "atanh", args, kwargs)
+#[pyo3(signature = (x,))]
+fn atanh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    arctanh(py, x)
 }
 
 #[pyfunction]
