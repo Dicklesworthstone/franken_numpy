@@ -30663,7 +30663,12 @@ pub fn modf(x: &UFuncArray) -> Result<(UFuncArray, UFuncArray), UFuncError> {
             integrals.push(v);
         } else {
             integrals.push(v.trunc());
-            fractionals.push(v.fract());
+            let frac = v.fract();
+            if frac == 0.0 && v.is_sign_negative() {
+                fractionals.push(-0.0);
+            } else {
+                fractionals.push(frac);
+            }
         }
     }
     let frac_arr = UFuncArray {
