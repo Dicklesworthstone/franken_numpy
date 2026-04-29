@@ -17895,6 +17895,8 @@ impl UFuncArray {
         let any_output_ellipsis = raw_output_sub.is_some_and(|s| s.contains("..."));
 
         let mut bcast_dims: Option<Vec<usize>> = None;
+        let mut captured_ellipsis_dims: Vec<Option<Vec<usize>>> =
+            Vec::with_capacity(raw_input_subs.len());
         if any_input_ellipsis {
             for (sub, op) in raw_input_subs.iter().zip(operands.iter()) {
                 if sub.contains("...") {
@@ -17919,23 +17921,28 @@ impl UFuncArray {
                         )));
                     }
                     let n_bcast = op.shape.len() - explicit_count;
-                    let (prefix, _) = sub.split_once("...").expect(
-                        "einsum: '...' ellipsis presence guarded by contains-check upstream",
-                    );
+                    let Some((prefix, _)) = sub.split_once("...") else {
+                        return Err(UFuncError::Msg(format!(
+                            "einsum: subscript '{sub}' has no ellipsis"
+                        )));
+                    };
                     let prefix_len = prefix.chars().count();
                     let dims: Vec<usize> = op.shape[prefix_len..prefix_len + n_bcast].to_vec();
-                    match &bcast_dims {
-                        None => bcast_dims = Some(dims),
-                        Some(existing) => {
-                            if *existing != dims {
-                                return Err(UFuncError::Msg(format!(
-                                    "einsum: ellipsis broadcast shapes differ: {existing:?} vs {dims:?}"
-                                )));
-                            }
-                        }
-                    }
+                    bcast_dims = Some(match bcast_dims.take() {
+                        None => dims.clone(),
+                        Some(existing) => broadcast_shape(&existing, &dims).map_err(|_| {
+                            UFuncError::Msg(format!(
+                                "einsum: ellipsis broadcast shapes differ: {existing:?} vs {dims:?}"
+                            ))
+                        })?,
+                    });
+                    captured_ellipsis_dims.push(Some(dims));
+                } else {
+                    captured_ellipsis_dims.push(None);
                 }
             }
+        } else {
+            captured_ellipsis_dims.resize(raw_input_subs.len(), None);
         }
         for sub in raw_input_subs {
             if !sub.contains("...") && sub.contains('.') {
@@ -17958,15 +17965,19 @@ impl UFuncArray {
             }
         }
         let bcast_len = bcast_dims.unwrap_or_default().len();
-        let placeholders: String = (0..bcast_len)
+        let placeholder_chars: Vec<char> = (0..bcast_len)
             .map(|i| char::from_u32(0xE000 + u32::try_from(i).unwrap_or(0)).unwrap_or('\u{E000}'))
             .collect();
+        let placeholders: String = placeholder_chars.iter().collect();
 
         let processed_input_subs: Vec<String> = raw_input_subs
             .iter()
-            .map(|s| {
-                if s.contains("...") {
-                    s.replace("...", &placeholders)
+            .zip(captured_ellipsis_dims.iter())
+            .map(|(s, dims)| {
+                if let Some(dims) = dims {
+                    let start = bcast_len.saturating_sub(dims.len());
+                    let op_placeholders: String = placeholder_chars[start..].iter().collect();
+                    s.replacen("...", &op_placeholders, 1)
                 } else {
                     (*s).to_string()
                 }
@@ -17981,6 +17992,33 @@ impl UFuncArray {
         });
 
         Ok((processed_input_subs, processed_output_sub, placeholders))
+    }
+
+    fn validate_einsum_output_labels(
+        context: &str,
+        input_subs: &[&str],
+        output_labels: &[char],
+    ) -> Result<(), UFuncError> {
+        let input_labels: std::collections::HashSet<char> =
+            input_subs.iter().flat_map(|sub| sub.chars()).collect();
+        let mut seen = std::collections::HashSet::new();
+
+        for &label in output_labels {
+            if !seen.insert(label) {
+                let escaped: String = label.escape_debug().collect();
+                return Err(UFuncError::Msg(format!(
+                    "{context}: output subscript contains repeated label '{escaped}'"
+                )));
+            }
+            if !input_labels.contains(&label) {
+                let escaped: String = label.escape_debug().collect();
+                return Err(UFuncError::Msg(format!(
+                    "{context}: output subscript label '{escaped}' does not appear in inputs"
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     pub fn einsum(subscripts: &str, operands: &[&Self]) -> Result<Self, UFuncError> {
@@ -18039,6 +18077,7 @@ impl UFuncArray {
             labels.extend(singletons);
             labels
         };
+        Self::validate_einsum_output_labels("einsum", &input_subs, &output_labels)?;
 
         // Build label-to-dimension mapping
         let mut label_sizes: std::collections::HashMap<char, usize> =
@@ -18055,12 +18094,19 @@ impl UFuncArray {
             }
             for (idx, &c) in chars.iter().enumerate() {
                 let dim = op.shape[idx];
-                if let Some(&existing) = label_sizes.get(&c) {
-                    if existing != dim {
-                        return Err(UFuncError::Msg(format!(
-                            "einsum: conflicting sizes for label '{}': {} vs {}",
-                            c, existing, dim
-                        )));
+                if let Some(existing) = label_sizes.get_mut(&c) {
+                    if *existing != dim {
+                        if *existing == 1 {
+                            *existing = dim;
+                        } else if dim == 1 {
+                            // A singleton operand dimension broadcasts against
+                            // the already-established label size.
+                        } else {
+                            return Err(UFuncError::Msg(format!(
+                                "einsum: conflicting sizes for label '{}': {} vs {}",
+                                c, *existing, dim
+                            )));
+                        }
                     }
                 } else {
                     label_sizes.insert(c, dim);
@@ -18132,8 +18178,17 @@ impl UFuncArray {
                 let mut op_flat = 0;
                 let mut op_stride = 1;
                 for i in (0..chars.len()).rev() {
-                    op_flat += label_vals[&chars[i]] * op_stride;
-                    op_stride *= op.shape[i];
+                    let dim = op.shape[i];
+                    let label_value = label_vals[&chars[i]];
+                    let local_index = if dim == 1 { 0 } else { label_value };
+                    if local_index >= dim {
+                        return Err(UFuncError::Msg(format!(
+                            "einsum: label '{}' index {} exceeds operand dimension {}",
+                            chars[i], local_index, dim
+                        )));
+                    }
+                    op_flat += local_index * op_stride;
+                    op_stride *= dim;
                 }
                 product *= op.values[op_flat];
             }
@@ -18179,6 +18234,13 @@ impl UFuncArray {
         let raw_output_sub: Option<&str> = Some(parts[1]);
         let (processed_input_subs, processed_output_sub, _placeholders) =
             Self::resolve_einsum_ellipsis(&raw_input_subs, raw_output_sub, operands)?;
+        let input_subs: Vec<&str> = processed_input_subs.iter().map(String::as_str).collect();
+        let output_labels: Vec<char> = processed_output_sub
+            .as_deref()
+            .unwrap_or("")
+            .chars()
+            .collect();
+        Self::validate_einsum_output_labels("einsum_path", &input_subs, &output_labels)?;
 
         let n = operands.len();
         if n <= 2 {
@@ -18192,11 +18254,6 @@ impl UFuncArray {
             return Ok((path, desc));
         }
 
-        let output_labels: Vec<char> = processed_output_sub
-            .as_deref()
-            .unwrap_or("")
-            .chars()
-            .collect();
         let output_str: String = output_labels.iter().collect();
 
         // Greedy algorithm: repeatedly contract the pair that removes the most
@@ -18310,6 +18367,7 @@ impl UFuncArray {
             labels.extend(singletons);
             labels
         };
+        Self::validate_einsum_output_labels("einsum_optimized", &input_subs, &output_labels)?;
         let output_str: String = output_labels.iter().collect();
 
         // Inline greedy contraction: repeatedly pick and contract the cheapest pair
@@ -55879,6 +55937,28 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn einsum_explicit_output_unknown_label_rejected() {
+        let a = UFuncArray::new(vec![2, 3], vec![1.0; 6], DType::F64).unwrap();
+
+        let err = UFuncArray::einsum("ij->\n", &[&a]).unwrap_err();
+        assert!(err.to_string().contains("does not appear in inputs"));
+
+        let path_err = UFuncArray::einsum_path("ij->\n", &[&a]).unwrap_err();
+        assert!(path_err.to_string().contains("does not appear in inputs"));
+
+        let opt_err = UFuncArray::einsum_optimized("ij->\n", &[&a], "greedy").unwrap_err();
+        assert!(opt_err.to_string().contains("does not appear in inputs"));
+    }
+
+    #[test]
+    fn einsum_explicit_output_repeated_label_rejected() {
+        let a = UFuncArray::new(vec![2, 3], vec![1.0; 6], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3, 4], vec![1.0; 12], DType::F64).unwrap();
+        let err = UFuncArray::einsum("ij,jk->ii", &[&a, &b]).unwrap_err();
+        assert!(err.to_string().contains("repeated label"));
+    }
+
+    #[test]
     fn einsum_ellipsis_batch_matmul() {
         // "...ij,...jk->...ik" with leading batch dim = 2
         let a =
@@ -55937,6 +56017,19 @@ print(json.dumps(payload))
         let b = UFuncArray::new(vec![3, 3, 2], vec![1.0; 18], DType::F64).unwrap();
         let err = UFuncArray::einsum("...ij,...jk->...ik", &[&a, &b]).unwrap_err();
         assert!(err.to_string().contains("ellipsis broadcast shapes differ"));
+    }
+
+    #[test]
+    fn einsum_ellipsis_broadcasts_singleton_batch_dims() {
+        let a = UFuncArray::new(vec![1, 2, 3], vec![1.0; 6], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![5, 3, 4], vec![1.0; 60], DType::F64).unwrap();
+
+        let c = UFuncArray::einsum("...ij,...jk->...ik", &[&a, &b]).unwrap();
+        assert_eq!(c.shape, vec![5, 2, 4]);
+        assert_eq!(c.values, vec![3.0; 40]);
+
+        let (path, _desc) = UFuncArray::einsum_path("...ij,...jk->...ik", &[&a, &b]).unwrap();
+        assert_eq!(path, vec![vec![0, 1]]);
     }
 
     #[test]
