@@ -7456,14 +7456,10 @@ impl UFuncArray {
             let n = normalize_axis(ax, ndim)?;
             count *= self.shape[n];
         }
-        let denom = count.saturating_sub(ddof) as f64;
         let mut values = sum_sq.values;
-        if denom == 0.0 {
-            values.fill(f64::NAN);
-        } else {
-            for v in &mut values {
-                *v /= denom;
-            }
+        let denom = count.saturating_sub(ddof) as f64;
+        for v in &mut values {
+            *v /= denom;
         }
         Ok(Self {
             shape: sum_sq.shape,
@@ -7893,15 +7889,12 @@ impl UFuncArray {
                 let n = self.values.len();
                 let mean = self.values.iter().copied().sum::<f64>() / n as f64;
                 let denom = n.saturating_sub(ddof) as f64;
-                let var = if denom == 0.0 {
-                    f64::NAN
-                } else {
-                    self.values
-                        .iter()
-                        .map(|&v| (v - mean) * (v - mean))
-                        .sum::<f64>()
-                        / denom
-                };
+                let var = self
+                    .values
+                    .iter()
+                    .map(|&v| (v - mean) * (v - mean))
+                    .sum::<f64>()
+                    / denom;
                 let shape = if keepdims {
                     vec![1; self.shape.len()]
                 } else {
@@ -7937,12 +7930,8 @@ impl UFuncArray {
                     &mut var_values,
                 );
                 let divisor = axis_len.saturating_sub(ddof) as f64;
-                if divisor == 0.0 {
-                    var_values.fill(f64::NAN);
-                } else {
-                    for v in &mut var_values {
-                        *v /= divisor;
-                    }
+                for v in &mut var_values {
+                    *v /= divisor;
                 }
 
                 Ok(Self {
@@ -36335,6 +36324,19 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn reduce_var_axis_none_ddof_ge_len_matches_numpy_zero_division() {
+        let arr = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).expect("arr");
+        let out = arr.reduce_var(None, false, 3).expect("var ddof=len");
+        assert!(out.values()[0].is_infinite());
+
+        let constant = UFuncArray::new(vec![3], vec![1.0, 1.0, 1.0], DType::F64).expect("arr");
+        let out2 = constant
+            .reduce_var(None, false, 3)
+            .expect("var constant ddof=len");
+        assert!(out2.values()[0].is_nan());
+    }
+
+    #[test]
     fn reduce_var_axis_one() {
         // np.var([[1,2,3],[4,5,6]], axis=1) = [0.6666..., 0.6666...]
         let arr = UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64)
@@ -36362,31 +36364,48 @@ print(json.dumps(payload))
     }
 
     #[test]
-    fn reduce_var_axis_ddof_ge_axis_len_returns_nan() {
-        // np.var([[1,2],[3,4]], axis=1, ddof=2) => [nan, nan]
+    fn reduce_var_axis_ddof_ge_axis_len_matches_numpy_zero_division() {
+        // np.var([[1,2],[3,4]], axis=1, ddof=2) => [inf, inf]
         let arr = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).expect("arr");
         let out = arr
             .reduce_var(Some(1), false, 2)
             .expect("var ddof=axis_len");
         assert_eq!(out.shape(), &[2]);
-        assert!(out.values()[0].is_nan());
-        assert!(out.values()[1].is_nan());
-        // ddof > axis_len should also return NaN
+        assert!(out.values()[0].is_infinite());
+        assert!(out.values()[1].is_infinite());
+        // ddof > axis_len clamps the divisor to zero as well.
         let out2 = arr
             .reduce_var(Some(1), false, 5)
             .expect("var ddof>axis_len");
-        assert!(out2.values()[0].is_nan());
-        assert!(out2.values()[1].is_nan());
+        assert!(out2.values()[0].is_infinite());
+        assert!(out2.values()[1].is_infinite());
+
+        // Zero squared-deviation lanes still produce NaN for 0.0 / 0.0.
+        let constant =
+            UFuncArray::new(vec![2, 2], vec![1.0, 1.0, 2.0, 2.0], DType::F64).expect("arr");
+        let out3 = constant
+            .reduce_var(Some(1), false, 2)
+            .expect("var constant ddof=axis_len");
+        assert!(out3.values()[0].is_nan());
+        assert!(out3.values()[1].is_nan());
     }
 
     #[test]
-    fn reduce_std_axis_ddof_ge_axis_len_returns_nan() {
+    fn reduce_std_axis_ddof_ge_axis_len_matches_numpy_zero_division() {
         let arr = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).expect("arr");
         let out = arr
             .reduce_std(Some(1), false, 2)
             .expect("std ddof=axis_len");
-        assert!(out.values()[0].is_nan());
-        assert!(out.values()[1].is_nan());
+        assert!(out.values()[0].is_infinite());
+        assert!(out.values()[1].is_infinite());
+
+        let constant =
+            UFuncArray::new(vec![2, 2], vec![1.0, 1.0, 2.0, 2.0], DType::F64).expect("arr");
+        let out2 = constant
+            .reduce_std(Some(1), false, 2)
+            .expect("std constant ddof=axis_len");
+        assert!(out2.values()[0].is_nan());
+        assert!(out2.values()[1].is_nan());
     }
 
     #[test]
@@ -36395,6 +36414,19 @@ print(json.dumps(payload))
         let arr = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).expect("arr");
         let out = arr.reduce_std(None, false, 0).expect("std");
         assert!((out.values()[0] - 1.25_f64.sqrt()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn reduce_std_axis_none_ddof_ge_len_matches_numpy_zero_division() {
+        let arr = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).expect("arr");
+        let out = arr.reduce_std(None, false, 3).expect("std ddof=len");
+        assert!(out.values()[0].is_infinite());
+
+        let constant = UFuncArray::new(vec![3], vec![1.0, 1.0, 1.0], DType::F64).expect("arr");
+        let out2 = constant
+            .reduce_std(None, false, 3)
+            .expect("std constant ddof=len");
+        assert!(out2.values()[0].is_nan());
     }
 
     #[test]
