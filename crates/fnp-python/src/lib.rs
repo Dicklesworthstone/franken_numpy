@@ -19,6 +19,7 @@ use fnp_ufunc::{
     bitwise_and as ufunc_bitwise_and, bitwise_or as ufunc_bitwise_or,
     bitwise_xor as ufunc_bitwise_xor, left_shift as ufunc_left_shift,
     right_shift as ufunc_right_shift, invert as ufunc_invert,
+    power as ufunc_power, divide as ufunc_divide,
     float_power as ufunc_float_power, fmax as ufunc_fmax, fmin as ufunc_fmin,
     fmod as ufunc_fmod, frexp as ufunc_frexp, gcd_arrays as ufunc_gcd,
     heaviside as ufunc_heaviside, hypot as ufunc_hypot, lcm_arrays as ufunc_lcm,
@@ -14132,6 +14133,36 @@ fn native_unary_invert_or_passthrough(
     }
 }
 
+fn native_binary_power_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let x1 = extract_numeric_array(py, &args.get_item(0)?, "power(x1)")?;
+        let x2 = extract_numeric_array(py, &args.get_item(1)?, "power(x2)")?;
+        let result = ufunc_power(&x1, &x2).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "power", args, kwargs)
+    }
+}
+
+fn native_binary_divide_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let x1 = extract_numeric_array(py, &args.get_item(0)?, "divide(x1)")?;
+        let x2 = extract_numeric_array(py, &args.get_item(1)?, "divide(x2)")?;
+        let result = ufunc_divide(&x1, &x2).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "divide", args, kwargs)
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn square(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
@@ -22737,7 +22768,7 @@ fn divide(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "divide", args, kwargs)
+    native_binary_divide_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
@@ -22747,7 +22778,7 @@ fn power(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "power", args, kwargs)
+    native_binary_power_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]

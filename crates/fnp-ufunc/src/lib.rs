@@ -31610,6 +31610,18 @@ pub fn invert(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
     Ok(x.elementwise_unary(UnaryOp::Invert))
 }
 
+/// Element-wise power (x1 ** x2).
+/// NumPy equivalent: `np.power(x1, x2)`.
+pub fn power(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    x1.elementwise_binary(x2, BinaryOp::Power)
+}
+
+/// Element-wise division (x1 / x2).
+/// NumPy equivalent: `np.divide(x1, x2)`.
+pub fn divide(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    x1.elementwise_binary(x2, BinaryOp::Div)
+}
+
 /// Sort a complex array by real part first, then imaginary part.
 ///
 /// The input is flattened, sorted, and returned as a 1-D complex array with
