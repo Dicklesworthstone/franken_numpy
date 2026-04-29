@@ -118,13 +118,12 @@ fn trim_zeros_default_mode_matches_numpy_across_50_cases() -> Result<(), String>
     ];
 
     for arr_expr in &test_cases {
-        let script = format!("import numpy as np; print(list(np.trim_zeros({arr_expr})))");
+        let script = format!("import numpy as np; print(np.trim_zeros({arr_expr}).tolist())");
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_float_list(&numpy_result);
 
-        let rust_script = fnp_trim_zeros_script(format!(
-            "print(list(fnp.trim_zeros({arr_expr})))"
-        ));
+        let rust_script =
+            fnp_trim_zeros_script(format!("print(fnp.trim_zeros({arr_expr}).tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_float_list(&rust_result);
 
@@ -155,13 +154,12 @@ fn trim_zeros_front_mode_matches_numpy() -> Result<(), String> {
     ];
 
     for arr_expr in &test_cases {
-        let script = format!("import numpy as np; print(list(np.trim_zeros({arr_expr}, 'f')))");
+        let script = format!("import numpy as np; print(np.trim_zeros({arr_expr}, 'f').tolist())");
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_float_list(&numpy_result);
 
-        let rust_script = fnp_trim_zeros_script(format!(
-            "print(list(fnp.trim_zeros({arr_expr}, 'f')))"
-        ));
+        let rust_script =
+            fnp_trim_zeros_script(format!("print(fnp.trim_zeros({arr_expr}, 'f').tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_float_list(&rust_result);
 
@@ -192,13 +190,12 @@ fn trim_zeros_back_mode_matches_numpy() -> Result<(), String> {
     ];
 
     for arr_expr in &test_cases {
-        let script = format!("import numpy as np; print(list(np.trim_zeros({arr_expr}, 'b')))");
+        let script = format!("import numpy as np; print(np.trim_zeros({arr_expr}, 'b').tolist())");
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_float_list(&numpy_result);
 
-        let rust_script = fnp_trim_zeros_script(format!(
-            "print(list(fnp.trim_zeros({arr_expr}, 'b')))"
-        ));
+        let rust_script =
+            fnp_trim_zeros_script(format!("print(fnp.trim_zeros({arr_expr}, 'b').tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_float_list(&rust_result);
 
@@ -222,14 +219,13 @@ fn trim_zeros_empty_result_matches_numpy() -> Result<(), String> {
 
     for arr_expr in &test_cases {
         for trim in &["fb", "f", "b"] {
-            let script = format!(
-                "import numpy as np; print(list(np.trim_zeros({arr_expr}, '{trim}')))"
-            );
+            let script =
+                format!("import numpy as np; print(np.trim_zeros({arr_expr}, '{trim}').tolist())");
             let numpy_result = numpy_oracle(&script)?;
             let numpy_vals = parse_float_list(&numpy_result);
 
             let rust_script = fnp_trim_zeros_script(format!(
-                "print(list(fnp.trim_zeros({arr_expr}, '{trim}')))"
+                "print(fnp.trim_zeros({arr_expr}, '{trim}').tolist())"
             ));
             let rust_result = numpy_oracle(&rust_script)?;
             let rust_vals = parse_float_list(&rust_result);
@@ -256,14 +252,13 @@ fn trim_zeros_no_zeros_matches_numpy() -> Result<(), String> {
 
     for arr_expr in &test_cases {
         for trim in &["fb", "f", "b"] {
-            let script = format!(
-                "import numpy as np; print(list(np.trim_zeros({arr_expr}, '{trim}')))"
-            );
+            let script =
+                format!("import numpy as np; print(np.trim_zeros({arr_expr}, '{trim}').tolist())");
             let numpy_result = numpy_oracle(&script)?;
             let numpy_vals = parse_float_list(&numpy_result);
 
             let rust_script = fnp_trim_zeros_script(format!(
-                "print(list(fnp.trim_zeros({arr_expr}, '{trim}')))"
+                "print(fnp.trim_zeros({arr_expr}, '{trim}').tolist())"
             ));
             let rust_result = numpy_oracle(&rust_script)?;
             let rust_vals = parse_float_list(&rust_result);

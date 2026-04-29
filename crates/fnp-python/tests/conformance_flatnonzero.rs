@@ -114,12 +114,13 @@ fn flatnonzero_1d_matches_numpy_across_50_cases() -> Result<(), String> {
     ];
 
     for arr_str in &test_cases {
-        let script = format!("import numpy as np; print(list(np.flatnonzero(np.array({arr_str}))))");
+        let script =
+            format!("import numpy as np; print(np.flatnonzero(np.array({arr_str})).tolist())");
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_int_list(&numpy_result);
 
         let rust_script = fnp_flatnonzero_script(format!(
-            "print(list(fnp.flatnonzero(np.array({arr_str}))))"
+            "print(fnp.flatnonzero(np.array({arr_str})).tolist())"
         ));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_int_list(&rust_result);
@@ -164,12 +165,13 @@ fn flatnonzero_2d_matches_numpy() -> Result<(), String> {
     ];
 
     for arr_str in &test_cases {
-        let script = format!("import numpy as np; print(list(np.flatnonzero(np.array({arr_str}))))");
+        let script =
+            format!("import numpy as np; print(np.flatnonzero(np.array({arr_str})).tolist())");
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_int_list(&numpy_result);
 
         let rust_script = fnp_flatnonzero_script(format!(
-            "print(list(fnp.flatnonzero(np.array({arr_str}))))"
+            "print(fnp.flatnonzero(np.array({arr_str})).tolist())"
         ));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_int_list(&rust_result);
@@ -198,12 +200,13 @@ fn flatnonzero_3d_matches_numpy() -> Result<(), String> {
     ];
 
     for arr_str in &test_cases {
-        let script = format!("import numpy as np; print(list(np.flatnonzero(np.array({arr_str}))))");
+        let script =
+            format!("import numpy as np; print(np.flatnonzero(np.array({arr_str})).tolist())");
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_int_list(&numpy_result);
 
         let rust_script = fnp_flatnonzero_script(format!(
-            "print(list(fnp.flatnonzero(np.array({arr_str}))))"
+            "print(fnp.flatnonzero(np.array({arr_str})).tolist())"
         ));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_int_list(&rust_result);
@@ -233,13 +236,12 @@ fn flatnonzero_dtypes_match_numpy() -> Result<(), String> {
     ];
 
     for arr_expr in &test_cases {
-        let script = format!("import numpy as np; print(list(np.flatnonzero({arr_expr})))");
+        let script = format!("import numpy as np; print(np.flatnonzero({arr_expr}).tolist())");
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_int_list(&numpy_result);
 
-        let rust_script = fnp_flatnonzero_script(format!(
-            "print(list(fnp.flatnonzero({arr_expr})))"
-        ));
+        let rust_script =
+            fnp_flatnonzero_script(format!("print(fnp.flatnonzero({arr_expr}).tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_int_list(&rust_result);
 
@@ -254,11 +256,12 @@ fn flatnonzero_dtypes_match_numpy() -> Result<(), String> {
 
 #[test]
 fn flatnonzero_empty_array_matches_numpy() -> Result<(), String> {
-    let script = "import numpy as np; print(list(np.flatnonzero(np.array([]))))";
+    let script = "import numpy as np; print(np.flatnonzero(np.array([])).tolist())";
     let numpy_result = numpy_oracle(script)?;
     let numpy_vals = parse_int_list(&numpy_result);
 
-    let rust_script = fnp_flatnonzero_script("print(list(fnp.flatnonzero(np.array([]))))".into());
+    let rust_script =
+        fnp_flatnonzero_script("print(fnp.flatnonzero(np.array([])).tolist())".into());
     let rust_result = numpy_oracle(&rust_script)?;
     let rust_vals = parse_int_list(&rust_result);
 
@@ -281,13 +284,12 @@ fn flatnonzero_large_sparse_matches_numpy() -> Result<(), String> {
     ];
 
     for arr_expr in &test_cases {
-        let script = format!("import numpy as np; print(list(np.flatnonzero({arr_expr})))");
+        let script = format!("import numpy as np; print(np.flatnonzero({arr_expr}).tolist())");
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_int_list(&numpy_result);
 
-        let rust_script = fnp_flatnonzero_script(format!(
-            "print(list(fnp.flatnonzero({arr_expr})))"
-        ));
+        let rust_script =
+            fnp_flatnonzero_script(format!("print(fnp.flatnonzero({arr_expr}).tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_int_list(&rust_result);
 
