@@ -13652,12 +13652,13 @@ fn positive(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn reciprocal(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.reciprocal (element-wise 1/x). Integer dtype
-    // is preserved, which means integer inputs use integer division
-    // (1//x); numpy's divide-by-zero behavior and RuntimeWarning
-    // emission are surfaced identically.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("reciprocal")?.call1((x.bind(py),))?.unbind())
+    native_unary_elementwise(
+        py,
+        x.bind(py),
+        UnaryOp::Reciprocal,
+        "reciprocal",
+        "reciprocal(x)",
+    )
 }
 
 #[pyfunction]
