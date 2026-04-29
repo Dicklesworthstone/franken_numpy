@@ -31227,6 +31227,41 @@ pub fn minimum(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncErro
     })
 }
 
+/// Compute the Heaviside step function.
+///
+/// The Heaviside step function is defined as:
+/// - 0 if x1 < 0
+/// - x2 if x1 == 0
+/// - 1 if x1 > 0
+///
+/// NumPy equivalent: `np.heaviside(x1, x2)`.
+pub fn heaviside(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
+    let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
+    let values: Vec<f64> = x1_bc
+        .values
+        .iter()
+        .zip(x2_bc.values.iter())
+        .map(|(&x, &h0)| {
+            if x.is_nan() {
+                f64::NAN
+            } else if x < 0.0 {
+                0.0
+            } else if x == 0.0 {
+                h0
+            } else {
+                1.0
+            }
+        })
+        .collect();
+    Ok(UFuncArray {
+        shape: x1_bc.shape.clone(),
+        values,
+        dtype: DType::F64,
+        integer_sidecar: None,
+    })
+}
+
 /// Logarithm of the sum of exponentiations: log(exp(x1) + exp(x2)).
 ///
 /// This is computed in a numerically stable way to avoid overflow.

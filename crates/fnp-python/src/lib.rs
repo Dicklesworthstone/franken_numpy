@@ -11,8 +11,8 @@ use fnp_ufunc::{
     BinaryOp, FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
     FromPyFuncReduceOptions, GridSpec, MAError, MaskedArray, UFuncArray, UnaryOp,
     arctan2 as ufunc_arctan2, copysign as ufunc_copysign, fmax as ufunc_fmax,
-    fmin as ufunc_fmin, frexp as ufunc_frexp, hypot as ufunc_hypot,
-    maximum as ufunc_maximum, minimum as ufunc_minimum,
+    fmin as ufunc_fmin, frexp as ufunc_frexp, heaviside as ufunc_heaviside,
+    hypot as ufunc_hypot, maximum as ufunc_maximum, minimum as ufunc_minimum,
     isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, ldexp as ufunc_ldexp,
     logaddexp as ufunc_logaddexp, logaddexp2 as ufunc_logaddexp2, ma_is_masked, ma_make_mask,
     ma_mask_or, modf as ufunc_modf, nextafter as ufunc_nextafter, reduce_frompyfunc_values,
@@ -13616,14 +13616,10 @@ fn blackman(py: Python<'_>, m: i64) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x1, x2))]
 fn heaviside(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.heaviside (step function: 0 for x1 < 0, x2 for
-    // x1 == 0, 1 for x1 > 0). Matches numpy for NaN-valued inputs which
-    // yield NaN result entries and for broadcasted x2 scalars/arrays.
-    let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("heaviside")?
-        .call1((x1.bind(py), x2.bind(py)))?
-        .unbind())
+    let x1 = extract_numeric_array(py, x1.bind(py), "heaviside(x1)")?;
+    let x2 = extract_numeric_array(py, x2.bind(py), "heaviside(x2)")?;
+    let result = ufunc_heaviside(&x1, &x2).map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
