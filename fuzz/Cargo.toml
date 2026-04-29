@@ -63,5 +63,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "dtype_parsing"
+path = "fuzz_targets/dtype_parsing.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]
