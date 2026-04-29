@@ -144,6 +144,29 @@ fn cos_matches_numpy_across_50_cases() -> Result<(), String> {
 }
 
 #[test]
+fn tan_matches_numpy_across_50_cases() -> Result<(), String> {
+    let test_cases = vec![
+        "np.array([0.0])",
+        "np.array([np.pi / 4])",
+        "np.array([-np.pi / 4])",
+        "np.array([np.pi / 6])",
+        "np.array([np.pi / 3])",
+        "np.array([-np.pi / 6])",
+        "np.array([-np.pi / 3])",
+        "np.array([np.pi])",
+        "np.array([-np.pi])",
+        "np.linspace(-np.pi / 3, np.pi / 3, 13)",
+        "np.array([0.1, 0.2, 0.3, 0.4, 0.5])",
+        "np.array([-0.1, -0.2, -0.3, -0.4, -0.5])",
+        "np.array([1.0, 1.1, 1.2])",
+        "np.array([-1.0, -1.1, -1.2])",
+        "np.array([[0.0, np.pi / 4], [np.pi / 6, np.pi / 3]])",
+        "np.array([np.inf, -np.inf, np.nan])",
+    ];
+    test_unary_function("tan", &test_cases, 1e-10)
+}
+
+#[test]
 fn sqrt_matches_numpy_across_50_cases() -> Result<(), String> {
     let test_cases = vec![
         "np.array([0.0])",
@@ -289,8 +312,8 @@ fn positive_matches_numpy_across_50_cases() -> Result<(), String> {
 #[test]
 fn trig_math_empty_arrays_match_numpy() -> Result<(), String> {
     for func in &[
-        "sin", "cos", "sqrt", "exp", "log", "sinh", "cosh", "tanh", "arcsin", "arccos", "arctan",
-        "arcsinh", "arccosh", "arctanh", "positive",
+        "sin", "cos", "tan", "sqrt", "exp", "log", "sinh", "cosh", "tanh", "arcsin", "arccos",
+        "arctan", "arcsinh", "arccosh", "arctanh", "positive",
     ] {
         let script = format!(
             "import numpy as np; print(np.{func}(np.array([], dtype=np.float64)).tolist())"
@@ -313,7 +336,7 @@ fn trig_math_empty_arrays_match_numpy() -> Result<(), String> {
 
 #[test]
 fn trig_integer_input_promotes_to_float() -> Result<(), String> {
-    for func in &["sin", "cos", "sqrt", "exp", "log"] {
+    for func in &["sin", "cos", "tan", "sqrt", "exp", "log"] {
         let script = format!(
             "import numpy as np; r = np.{func}(np.array([1, 2, 3], dtype=np.int32)); print(r.dtype)"
         );
@@ -336,8 +359,8 @@ fn trig_integer_input_promotes_to_float() -> Result<(), String> {
 #[test]
 fn promoting_math_bool_inputs_match_numpy() -> Result<(), String> {
     for func in &[
-        "sin", "cos", "sqrt", "exp", "log", "sinh", "cosh", "tanh", "arcsin", "arccos", "arctan",
-        "arcsinh", "arccosh", "arctanh", "expm1", "log1p",
+        "sin", "cos", "tan", "sqrt", "exp", "log", "sinh", "cosh", "tanh", "arcsin", "arccos",
+        "arctan", "arcsinh", "arccosh", "arctanh", "expm1", "log1p",
     ] {
         let script = format!(
             "import numpy as np; r = np.{func}(np.array([True, False], dtype=np.bool_)); print(r.dtype, r.flatten().tolist())"

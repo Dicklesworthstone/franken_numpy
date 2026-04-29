@@ -22468,13 +22468,9 @@ fn atanh(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn tan(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "tan", args, kwargs)
+#[pyo3(signature = (x,))]
+fn tan(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    native_unary_promoting(py, x.bind(py), UnaryOp::Tan, "tan", "tan(x)")
 }
 
 // Bitwise (11) — Array-API names + numpy legacy names.
