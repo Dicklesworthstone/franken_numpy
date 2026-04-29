@@ -18217,9 +18217,9 @@ impl UFuncArray {
         operands: &[&Self],
     ) -> Result<(Vec<Vec<usize>>, String), UFuncError> {
         let parts: Vec<&str> = subscripts.split("->").collect();
-        if parts.len() != 2 {
+        if parts.len() > 2 {
             return Err(UFuncError::Msg(
-                "einsum_path: subscripts must contain exactly one '->'".to_string(),
+                "einsum_path: subscripts must contain at most one '->'".to_string(),
             ));
         }
         let raw_input_subs: Vec<&str> = parts[0].split(',').collect();
@@ -18231,15 +18231,34 @@ impl UFuncArray {
             )));
         }
 
-        let raw_output_sub: Option<&str> = Some(parts[1]);
-        let (processed_input_subs, processed_output_sub, _placeholders) =
+        let raw_output_sub: Option<&str> = if parts.len() == 2 {
+            Some(parts[1])
+        } else {
+            None
+        };
+        let (processed_input_subs, processed_output_sub, placeholders) =
             Self::resolve_einsum_ellipsis(&raw_input_subs, raw_output_sub, operands)?;
         let input_subs: Vec<&str> = processed_input_subs.iter().map(String::as_str).collect();
-        let output_labels: Vec<char> = processed_output_sub
-            .as_deref()
-            .unwrap_or("")
-            .chars()
-            .collect();
+        let output_labels: Vec<char> = if let Some(out) = processed_output_sub.as_deref() {
+            out.chars().collect()
+        } else {
+            let mut labels: Vec<char> = placeholders.chars().collect();
+            let mut counts: std::collections::HashMap<char, usize> =
+                std::collections::HashMap::new();
+            for sub in &input_subs {
+                for c in sub.chars() {
+                    *counts.entry(c).or_insert(0) += 1;
+                }
+            }
+            let mut singletons: Vec<char> = counts
+                .into_iter()
+                .filter(|(c, count)| *count == 1 && !placeholders.contains(*c))
+                .map(|(c, _)| c)
+                .collect();
+            singletons.sort();
+            labels.extend(singletons);
+            labels
+        };
         Self::validate_einsum_output_labels("einsum_path", &input_subs, &output_labels)?;
 
         let n = operands.len();
@@ -45428,6 +45447,16 @@ print(json.dumps(payload))
         assert_eq!(path.len(), 1);
         assert_eq!(path[0], vec![0, 1]);
         assert!(desc.contains("ij,jk->ik"));
+    }
+
+    #[test]
+    fn einsum_path_accepts_implicit_output() {
+        let a = UFuncArray::new(vec![3, 4], vec![0.0; 12], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![4, 2], vec![0.0; 8], DType::F64).unwrap();
+        let (path, desc) = UFuncArray::einsum_path("ij,jk", &[&a, &b]).unwrap();
+        assert_eq!(path.len(), 1);
+        assert_eq!(path[0], vec![0, 1]);
+        assert!(desc.contains("ij,jk"));
     }
 
     #[test]
