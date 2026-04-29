@@ -21503,44 +21503,198 @@ fn var(
     build_numpy_array_from_ufunc(py, &result)
 }
 
+// Native Rust min with fallback for unsupported parameters.
 #[pyfunction]
-#[pyo3(name = "min", signature = (*args, **kwargs))]
+#[pyo3(name = "min", signature = (a, axis=None, out=None, keepdims=false, initial=None, **kwargs))]
+#[allow(clippy::too_many_arguments)]
 fn py_min(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
+    keepdims: bool,
+    initial: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "min", args, kwargs)
+    let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
+    let numpy = py.import("numpy")?;
+    let min_fn = numpy.getattr("min")?;
+
+    let a_for_fallback = a.clone_ref(py);
+    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
+    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
+    let initial_for_fallback = initial.as_ref().map(|v| v.clone_ref(py));
+    let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
+
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kw = PyDict::new(py);
+        if let Some(ax) = axis_for_fallback.as_ref() {
+            kw.set_item("axis", ax.bind(py))?;
+        }
+        if let Some(o) = out_for_fallback.as_ref() {
+            kw.set_item("out", o.bind(py))?;
+        }
+        kw.set_item("keepdims", keepdims)?;
+        if let Some(init) = initial_for_fallback.as_ref() {
+            kw.set_item("initial", init.bind(py))?;
+        }
+        if let Some(w) = where_for_fallback.as_ref() {
+            kw.set_item("where", w.bind(py))?;
+        }
+        Ok(min_fn
+            .call((a_for_fallback.bind(py),), Some(&kw))?
+            .unbind())
+    };
+
+    // Fallback for out, initial, or where parameters
+    if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        || initial.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        || where_.as_ref().is_some_and(|v| !v.is_none())
+    {
+        return fallback();
+    }
+
+    // Parse axis: None, integer, or tuple → fallback for tuple
+    let axis_val: Option<isize> = match &axis {
+        None => None,
+        Some(ax) => {
+            let ax_bound = ax.bind(py);
+            if ax_bound.is_none() {
+                None
+            } else if let Ok(i) = ax_bound.extract::<isize>() {
+                Some(i)
+            } else {
+                return fallback();
+            }
+        }
+    };
+
+    // Extract input array
+    let array = match extract_precise_numeric_array(py, a.bind(py), "min(a)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+
+    // Call native Rust reduce_min
+    let result = match array.reduce_min(axis_val, keepdims) {
+        Ok(r) => r,
+        Err(_) => return fallback(),
+    };
+
+    build_numpy_array_from_ufunc(py, &result)
 }
 
+// Native Rust max with fallback for unsupported parameters.
 #[pyfunction]
-#[pyo3(name = "max", signature = (*args, **kwargs))]
+#[pyo3(name = "max", signature = (a, axis=None, out=None, keepdims=false, initial=None, **kwargs))]
+#[allow(clippy::too_many_arguments)]
 fn py_max(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
+    keepdims: bool,
+    initial: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "max", args, kwargs)
+    let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
+    let numpy = py.import("numpy")?;
+    let max_fn = numpy.getattr("max")?;
+
+    let a_for_fallback = a.clone_ref(py);
+    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
+    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
+    let initial_for_fallback = initial.as_ref().map(|v| v.clone_ref(py));
+    let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
+
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kw = PyDict::new(py);
+        if let Some(ax) = axis_for_fallback.as_ref() {
+            kw.set_item("axis", ax.bind(py))?;
+        }
+        if let Some(o) = out_for_fallback.as_ref() {
+            kw.set_item("out", o.bind(py))?;
+        }
+        kw.set_item("keepdims", keepdims)?;
+        if let Some(init) = initial_for_fallback.as_ref() {
+            kw.set_item("initial", init.bind(py))?;
+        }
+        if let Some(w) = where_for_fallback.as_ref() {
+            kw.set_item("where", w.bind(py))?;
+        }
+        Ok(max_fn
+            .call((a_for_fallback.bind(py),), Some(&kw))?
+            .unbind())
+    };
+
+    // Fallback for out, initial, or where parameters
+    if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        || initial.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        || where_.as_ref().is_some_and(|v| !v.is_none())
+    {
+        return fallback();
+    }
+
+    // Parse axis: None, integer, or tuple → fallback for tuple
+    let axis_val: Option<isize> = match &axis {
+        None => None,
+        Some(ax) => {
+            let ax_bound = ax.bind(py);
+            if ax_bound.is_none() {
+                None
+            } else if let Ok(i) = ax_bound.extract::<isize>() {
+                Some(i)
+            } else {
+                return fallback();
+            }
+        }
+    };
+
+    // Extract input array
+    let array = match extract_precise_numeric_array(py, a.bind(py), "max(a)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+
+    // Call native Rust reduce_max
+    let result = match array.reduce_max(axis_val, keepdims) {
+        Ok(r) => r,
+        Err(_) => return fallback(),
+    };
+
+    build_numpy_array_from_ufunc(py, &result)
 }
 
+// amax is an alias for max
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (a, axis=None, out=None, keepdims=false, initial=None, **kwargs))]
+#[allow(clippy::too_many_arguments)]
 fn amax(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
+    keepdims: bool,
+    initial: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "amax", args, kwargs)
+    py_max(py, a, axis, out, keepdims, initial, kwargs)
 }
 
+// amin is an alias for min
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (a, axis=None, out=None, keepdims=false, initial=None, **kwargs))]
+#[allow(clippy::too_many_arguments)]
 fn amin(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
+    keepdims: bool,
+    initial: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "amin", args, kwargs)
+    py_min(py, a, axis, out, keepdims, initial, kwargs)
 }
 
 #[pyfunction]
