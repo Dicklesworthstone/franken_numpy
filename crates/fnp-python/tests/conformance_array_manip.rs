@@ -20,6 +20,17 @@ fn no_kwargs<'py>(_py: Python<'py>) -> PyResult<Option<pyo3::Bound<'py, PyDict>>
     Ok(None)
 }
 
+fn trace_axes_kwargs<'py>(
+    py: Python<'py>,
+    axis1: i64,
+    axis2: i64,
+) -> PyResult<Option<pyo3::Bound<'py, PyDict>>> {
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("axis1", axis1)?;
+    kwargs.set_item("axis2", axis2)?;
+    Ok(Some(kwargs))
+}
+
 fn np_array_1d_f<'py>(
     py: Python<'py>,
     values: Vec<f64>,
@@ -476,6 +487,66 @@ fn conformance_array_manip_matrix() {
                 )
             },
             no_kwargs,
+        );
+
+        // ─── trace scalar and axis-error parity ────────────────────────
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "manip-trace-2d-default-scalar",
+            "trace",
+            RequirementLevel::Must,
+            CompareMode::Surface,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_array_2d_f(
+                        py,
+                        vec![
+                            vec![1.0, 2.0, 3.0],
+                            vec![4.0, 5.0, 6.0],
+                            vec![7.0, 8.0, 9.0],
+                        ],
+                    )?],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "manip-trace-2d-duplicate-axes-error",
+            "trace",
+            RequirementLevel::Must,
+            CompareMode::Error,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_array_2d_f(py, vec![vec![1.0, 2.0], vec![3.0, 4.0]])?],
+                )
+            },
+            |py| trace_axes_kwargs(py, 0, 0),
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "manip-trace-2d-axis-out-of-bounds-error",
+            "trace",
+            RequirementLevel::Must,
+            CompareMode::Error,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_array_2d_f(py, vec![vec![1.0, 2.0], vec![3.0, 4.0]])?],
+                )
+            },
+            |py| trace_axes_kwargs(py, 0, 2),
         );
 
         // ─── degenerate shapes (MAY) ───────────────────────────────────

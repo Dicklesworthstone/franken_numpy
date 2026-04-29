@@ -11242,6 +11242,13 @@ impl UFuncArray {
                 "trace_axis requires at least a 2-D array".to_string(),
             ));
         }
+        let a1 = normalize_axis(axis1, ndim)?;
+        let a2 = normalize_axis(axis2, ndim)?;
+        if a1 == a2 {
+            return Err(UFuncError::Msg(
+                "trace_axis: axis1 and axis2 must be different".to_string(),
+            ));
+        }
 
         // For 2-D arrays, just use the simple trace
         if ndim == 2 {
@@ -39026,6 +39033,19 @@ print(json.dumps(payload))
         let t = a.trace_axis(0, 0, 1).unwrap();
         assert!(t.shape().is_empty());
         assert_eq!(t.values(), &[15.0]);
+    }
+
+    #[test]
+    fn trace_axis_2d_validates_axes_before_shortcut() {
+        let a = UFuncArray::new(
+            vec![3, 3],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+            DType::F64,
+        )
+        .unwrap();
+
+        assert!(a.trace_axis(0, 0, 0).is_err());
+        assert!(a.trace_axis(0, 0, 2).is_err());
     }
 
     #[test]
