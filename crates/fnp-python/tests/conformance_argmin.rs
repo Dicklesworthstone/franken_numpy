@@ -5,16 +5,37 @@
 
 use std::process::Command;
 
-fn numpy_oracle(script: &str) -> String {
+fn numpy_oracle(script: &str) -> Result<String, String> {
     let output = Command::new("python3")
         .args(["-c", script])
         .output()
-        .expect("python3 should be available");
+        .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        panic!("NumPy oracle failed: {stderr}\nScript: {script}");
+        return Err(format!("NumPy oracle failed: {stderr}\nScript: {script}"));
     }
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn fnp_argmin_script(body: String) -> String {
+    let library_name = format!(
+        "{}fnp_python{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
+    let module_path = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join(&library_name)))
+        .unwrap_or_else(|| library_name.into());
+    let module_literal = format!("{module_path:?}");
+    format!(
+        "import importlib.util\n\
+         import numpy as np\n\
+         spec = importlib.util.spec_from_file_location('fnp_python', {module_literal})\n\
+         fnp = importlib.util.module_from_spec(spec)\n\
+         spec.loader.exec_module(fnp)\n\
+         {body}"
+    )
 }
 
 fn parse_int(s: &str) -> i64 {
@@ -34,7 +55,7 @@ fn parse_int_list(s: &str) -> Vec<i64> {
 }
 
 #[test]
-fn argmin_flat_matches_numpy_across_50_cases() {
+fn argmin_flat_matches_numpy_across_50_cases() -> Result<(), String> {
     let test_cases = vec![
         // Basic arrays - min at various positions
         "[3, 1, 2]",
@@ -99,11 +120,11 @@ fn argmin_flat_matches_numpy_across_50_cases() {
 
     for arr_str in &test_cases {
         let script = format!("import numpy as np; print(np.argmin(np.array({arr_str})))");
-        let numpy_result = numpy_oracle(&script);
+        let numpy_result = numpy_oracle(&script)?;
         let numpy_val = parse_int(&numpy_result);
 
-        let rust_script = format!("import numpy as np; print(np.argmin(np.array({arr_str})))");
-        let rust_result = numpy_oracle(&rust_script);
+        let rust_script = fnp_argmin_script(format!("print(fnp.argmin(np.array({arr_str})))"));
+        let rust_result = numpy_oracle(&rust_script)?;
         let rust_val = parse_int(&rust_result);
 
         assert_eq!(
@@ -111,10 +132,12 @@ fn argmin_flat_matches_numpy_across_50_cases() {
             "argmin flat mismatch for {arr_str}\nnumpy: {numpy_val}\nrust: {rust_val}"
         );
     }
+
+    Ok(())
 }
 
 #[test]
-fn argmin_2d_axis_matches_numpy() {
+fn argmin_2d_axis_matches_numpy() -> Result<(), String> {
     let test_cases = vec![
         // 2D arrays with axis=0
         ("[[4, 2, 6], [1, 5, 3]]", "0"),
@@ -144,16 +167,15 @@ fn argmin_2d_axis_matches_numpy() {
     ];
 
     for (arr_str, axis) in &test_cases {
-        let script = format!(
-            "import numpy as np; print(list(np.argmin(np.array({arr_str}), axis={axis})))"
-        );
-        let numpy_result = numpy_oracle(&script);
+        let script =
+            format!("import numpy as np; print(list(np.argmin(np.array({arr_str}), axis={axis})))");
+        let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_int_list(&numpy_result);
 
-        let rust_script = format!(
-            "import numpy as np; print(list(np.argmin(np.array({arr_str}), axis={axis})))"
-        );
-        let rust_result = numpy_oracle(&rust_script);
+        let rust_script = fnp_argmin_script(format!(
+            "print(list(fnp.argmin(np.array({arr_str}), axis={axis})))"
+        ));
+        let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_int_list(&rust_result);
 
         assert_eq!(
@@ -161,10 +183,12 @@ fn argmin_2d_axis_matches_numpy() {
             "argmin axis={axis} mismatch for {arr_str}\nnumpy: {numpy_vals:?}\nrust: {rust_vals:?}"
         );
     }
+
+    Ok(())
 }
 
 #[test]
-fn argmin_3d_axis_matches_numpy() {
+fn argmin_3d_axis_matches_numpy() -> Result<(), String> {
     let test_cases = vec![
         // 3D arrays
         ("[[[8, 2], [3, 4]], [[5, 6], [7, 1]]]", "0"),
@@ -186,13 +210,13 @@ fn argmin_3d_axis_matches_numpy() {
         let script = format!(
             "import numpy as np; print(list(np.argmin(np.array({arr_str}), axis={axis}).flatten()))"
         );
-        let numpy_result = numpy_oracle(&script);
+        let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_int_list(&numpy_result);
 
-        let rust_script = format!(
-            "import numpy as np; print(list(np.argmin(np.array({arr_str}), axis={axis}).flatten()))"
-        );
-        let rust_result = numpy_oracle(&rust_script);
+        let rust_script = fnp_argmin_script(format!(
+            "print(list(fnp.argmin(np.array({arr_str}), axis={axis}).flatten()))"
+        ));
+        let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_int_list(&rust_result);
 
         assert_eq!(
@@ -200,10 +224,12 @@ fn argmin_3d_axis_matches_numpy() {
             "argmin 3D axis={axis} mismatch for {arr_str}\nnumpy: {numpy_vals:?}\nrust: {rust_vals:?}"
         );
     }
+
+    Ok(())
 }
 
 #[test]
-fn argmin_integer_dtypes_match_numpy() {
+fn argmin_integer_dtypes_match_numpy() -> Result<(), String> {
     let test_cases = vec![
         ("np.array([3, 1, 2], dtype=np.int32)", "None"),
         ("np.array([3, 1, 2], dtype=np.int64)", "None"),
@@ -222,12 +248,12 @@ fn argmin_integer_dtypes_match_numpy() {
             format!(", axis={axis}")
         };
         let script = format!("import numpy as np; print(int(np.argmin({arr_expr}{axis_arg})))");
-        let numpy_result = numpy_oracle(&script);
+        let numpy_result = numpy_oracle(&script)?;
         let numpy_val = parse_int(&numpy_result);
 
         let rust_script =
-            format!("import numpy as np; print(int(np.argmin({arr_expr}{axis_arg})))");
-        let rust_result = numpy_oracle(&rust_script);
+            fnp_argmin_script(format!("print(int(fnp.argmin({arr_expr}{axis_arg})))"));
+        let rust_result = numpy_oracle(&rust_script)?;
         let rust_val = parse_int(&rust_result);
 
         assert_eq!(
@@ -235,10 +261,12 @@ fn argmin_integer_dtypes_match_numpy() {
             "argmin dtype mismatch for {arr_expr} axis={axis}\nnumpy: {numpy_val}\nrust: {rust_val}"
         );
     }
+
+    Ok(())
 }
 
 #[test]
-fn argmin_first_occurrence_matches_numpy() {
+fn argmin_first_occurrence_matches_numpy() -> Result<(), String> {
     let test_cases = vec![
         "[1, 1, 1]",
         "[2, 1, 1, 3]",
@@ -249,11 +277,11 @@ fn argmin_first_occurrence_matches_numpy() {
 
     for arr_str in &test_cases {
         let script = format!("import numpy as np; print(np.argmin(np.array({arr_str})))");
-        let numpy_result = numpy_oracle(&script);
+        let numpy_result = numpy_oracle(&script)?;
         let numpy_val = parse_int(&numpy_result);
 
-        let rust_script = format!("import numpy as np; print(np.argmin(np.array({arr_str})))");
-        let rust_result = numpy_oracle(&rust_script);
+        let rust_script = fnp_argmin_script(format!("print(fnp.argmin(np.array({arr_str})))"));
+        let rust_result = numpy_oracle(&rust_script)?;
         let rust_val = parse_int(&rust_result);
 
         assert_eq!(
@@ -261,4 +289,6 @@ fn argmin_first_occurrence_matches_numpy() {
             "argmin first occurrence mismatch for {arr_str}\nnumpy: {numpy_val}\nrust: {rust_val}"
         );
     }
+
+    Ok(())
 }
