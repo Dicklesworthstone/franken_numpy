@@ -3495,32 +3495,37 @@ pub fn parse_structured_descr(value: &str) -> Result<StructuredIODescriptor, IOE
 /// Parse a single-quoted or double-quoted string starting at `pos`.
 /// Returns (string_content, position_after_closing_quote).
 fn parse_structured_quoted_string(s: &str, pos: usize) -> Result<(String, usize), IOError> {
-    let bytes = s.as_bytes();
-    if pos >= bytes.len() {
+    if pos >= s.len() || !s.is_char_boundary(pos) {
         return Err(IOError::DTypeDescriptorInvalid);
     }
-    let quote = bytes[pos];
-    if quote != b'\'' && quote != b'"' {
+    let quote = s[pos..]
+        .chars()
+        .next()
+        .ok_or(IOError::DTypeDescriptorInvalid)?;
+    if quote != '\'' && quote != '"' {
         return Err(IOError::DTypeDescriptorInvalid);
     }
 
     let mut result = String::new();
     let mut escaped = false;
-    let mut idx = pos + 1;
+    let mut idx = pos + quote.len_utf8();
 
-    while idx < bytes.len() {
-        let b = bytes[idx];
-        if b == quote && !escaped {
-            return Ok((result, idx + 1));
+    while idx < s.len() {
+        let ch = s[idx..]
+            .chars()
+            .next()
+            .ok_or(IOError::DTypeDescriptorInvalid)?;
+        if ch == quote && !escaped {
+            return Ok((result, idx + ch.len_utf8()));
         }
 
-        if b == b'\\' && !escaped {
+        if ch == '\\' && !escaped {
             escaped = true;
         } else {
-            result.push(char::from(b));
+            result.push(ch);
             escaped = false;
         }
-        idx += 1;
+        idx += ch.len_utf8();
     }
 
     Err(IOError::DTypeDescriptorInvalid)
@@ -6458,6 +6463,26 @@ mm.flush()
         let encoded = desc.to_descr_string();
         assert_eq!(encoded, "[('can\\'t', '<i4'), ('path\\\\name', '|S8')]");
         assert_eq!(parse_structured_descr(&encoded).unwrap(), desc);
+    }
+
+    #[test]
+    fn structured_descriptor_preserves_non_ascii_field_names() {
+        let desc = StructuredIODescriptor {
+            fields: vec![
+                StructuredIOField {
+                    name: "caf\u{00e9}".to_string(),
+                    dtype: IOSupportedDType::F64,
+                },
+                StructuredIOField {
+                    name: "\u{03b2}".to_string(),
+                    dtype: IOSupportedDType::I16,
+                },
+            ],
+        };
+
+        let encoded = desc.to_descr_string();
+        let parsed = parse_structured_descr(&encoded).unwrap();
+        assert_eq!(parsed, desc);
     }
 
     #[test]

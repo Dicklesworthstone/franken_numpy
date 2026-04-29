@@ -16,10 +16,17 @@ fuzz_target!(|data: &[u8]| {
             let _ = descriptor.field_offsets();
 
             let serialized = descriptor.to_descr_string();
+            let reparsed = parse_structured_descr(&serialized);
             assert!(
-                parse_structured_descr(&serialized).is_ok(),
+                reparsed.is_ok(),
                 "structured dtype descriptor did not serialize back to a parseable descriptor: {serialized}"
             );
+            if let Ok(reparsed) = reparsed {
+                assert_eq!(
+                    reparsed, descriptor,
+                    "structured dtype descriptor changed after serialization: {serialized}"
+                );
+            }
         }
 
         let _ = IOSupportedDType::decode(text);
