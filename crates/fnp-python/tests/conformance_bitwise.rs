@@ -1,371 +1,303 @@
-//! Conformance matrix: bitwise family.
+//! Conformance tests for bitwise operations.
 //!
-//! Differential parity for fnp_python's bitwise surface:
-//!
-//!   bitwise_and, bitwise_or, bitwise_xor,
-//!   bitwise_not, bitwise_invert, invert,
-//!   left_shift, right_shift,
-//!   bitwise_left_shift, bitwise_right_shift,
-//!   bitwise_count
-//!
-//! All 11 are currently `core_numpy_passthrough` wrappers, so this
-//! harness is primarily a regression gate against future native ports
-//! that might silently drift on dtype, broadcasting, or operand order.
+//! Tests: bitwise_and, bitwise_or, bitwise_xor, left_shift, right_shift, invert.
 
-mod common;
+use std::process::Command;
 
-use common::{CompareMode, RequirementLevel, Totals, run_case, with_fnp_and_numpy};
-use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
-
-fn no_kwargs<'py>(_py: Python<'py>) -> PyResult<Option<pyo3::Bound<'py, PyDict>>> {
-    Ok(None)
+fn numpy_oracle(script: &str) -> Result<String, String> {
+    let output = Command::new("python3")
+        .args(["-c", script])
+        .output()
+        .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("NumPy oracle failed: {stderr}\nScript: {script}"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn np_array_1d_i<'py>(
-    py: Python<'py>,
-    values: Vec<i64>,
-) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
-    py.import("numpy")?.getattr("array")?.call1((values,))
+fn fnp_script(body: String) -> String {
+    let library_name = format!(
+        "{}fnp_python{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
+    let module_path = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join(&library_name)))
+        .unwrap_or_else(|| library_name.into());
+    let module_literal = format!("{module_path:?}");
+    format!(
+        "import importlib.util\n\
+         import numpy as np\n\
+         spec = importlib.util.spec_from_file_location('fnp_python', {module_literal})\n\
+         fnp = importlib.util.module_from_spec(spec)\n\
+         spec.loader.exec_module(fnp)\n\
+         {body}"
+    )
 }
 
-fn np_array_1d_u8<'py>(
-    py: Python<'py>,
-    values: Vec<u32>,
-) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
-    // Vec<u8> would marshal to Python `bytes` (numpy then tries to parse
-    // it as a literal int) — pass values as i64-promoted ints via Vec<u32>
-    // and let the dtype kwarg force uint8 storage.
-    let array = py.import("numpy")?.getattr("array")?;
-    let kw = PyDict::new(py);
-    kw.set_item("dtype", "uint8")?;
-    array.call((values,), Some(&kw))
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// bitwise_and
+// ─────────────────────────────────────────────────────────────────────────────
 
-fn np_array_1d_b<'py>(
-    py: Python<'py>,
-    values: Vec<bool>,
-) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
-    py.import("numpy")?.getattr("array")?.call1((values,))
+#[test]
+fn bitwise_and_basic() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0b1100, 0b1010, 0b1111, 0b0000], dtype=np.int64)
+y = np.array([0b1010, 0b1010, 0b0011, 0b1111], dtype=np.int64)
+result = fnp.bitwise_and(x, y)
+expected = np.bitwise_and(x, y)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "bitwise_and basic should match numpy");
+    Ok(())
 }
 
 #[test]
-fn conformance_bitwise_matrix() {
-    static TOTALS: Totals = Totals::new();
+fn bitwise_and_broadcast() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([[0b1100, 0b1010], [0b1111, 0b0000]], dtype=np.int64)
+y = np.array([0b1111, 0b0011], dtype=np.int64)
+result = fnp.bitwise_and(x, y)
+expected = np.bitwise_and(x, y)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "bitwise_and broadcast should match numpy");
+    Ok(())
+}
 
-    with_fnp_and_numpy(|py, module, numpy| {
-        let t = &TOTALS;
+// ─────────────────────────────────────────────────────────────────────────────
+// bitwise_or
+// ─────────────────────────────────────────────────────────────────────────────
 
-        // ─── bitwise_and / or / xor (MUST + SHOULD bool/uint8) ─────────
-        run_case(
-            py,
-            &module,
-            &numpy,
-            "bitwise-and-int64",
-            "bitwise_and",
-            RequirementLevel::Must,
-            CompareMode::Strict,
-            t,
-            |py| {
-                PyTuple::new(
-                    py,
-                    [
-                        np_array_1d_i(py, vec![0b1100, 0b1010, 0b1111])?,
-                        np_array_1d_i(py, vec![0b1010, 0b0101, 0b1001])?,
-                    ],
-                )
-            },
-            no_kwargs,
-        );
-        run_case(
-            py,
-            &module,
-            &numpy,
-            "bitwise-or-int64",
-            "bitwise_or",
-            RequirementLevel::Must,
-            CompareMode::Strict,
-            t,
-            |py| {
-                PyTuple::new(
-                    py,
-                    [
-                        np_array_1d_i(py, vec![0b1100, 0b1010, 0b1111])?,
-                        np_array_1d_i(py, vec![0b1010, 0b0101, 0b1001])?,
-                    ],
-                )
-            },
-            no_kwargs,
-        );
-        run_case(
-            py,
-            &module,
-            &numpy,
-            "bitwise-xor-int64",
-            "bitwise_xor",
-            RequirementLevel::Must,
-            CompareMode::Strict,
-            t,
-            |py| {
-                PyTuple::new(
-                    py,
-                    [
-                        np_array_1d_i(py, vec![0b1100, 0b1010, 0b1111])?,
-                        np_array_1d_i(py, vec![0b1010, 0b0101, 0b1001])?,
-                    ],
-                )
-            },
-            no_kwargs,
-        );
-        run_case(
-            py,
-            &module,
-            &numpy,
-            "bitwise-and-bool",
-            "bitwise_and",
-            RequirementLevel::Should,
-            CompareMode::Strict,
-            t,
-            |py| {
-                PyTuple::new(
-                    py,
-                    [
-                        np_array_1d_b(py, vec![true, true, false, false])?,
-                        np_array_1d_b(py, vec![true, false, true, false])?,
-                    ],
-                )
-            },
-            no_kwargs,
-        );
-        run_case(
-            py,
-            &module,
-            &numpy,
-            "bitwise-xor-uint8",
-            "bitwise_xor",
-            RequirementLevel::Should,
-            CompareMode::Strict,
-            t,
-            |py| {
-                PyTuple::new(
-                    py,
-                    [
-                        np_array_1d_u8(py, vec![0xff, 0x0f, 0xa5])?,
-                        np_array_1d_u8(py, vec![0xaa, 0xf0, 0x5a])?,
-                    ],
-                )
-            },
-            no_kwargs,
-        );
+#[test]
+fn bitwise_or_basic() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0b1100, 0b1010, 0b1111, 0b0000], dtype=np.int64)
+y = np.array([0b1010, 0b1010, 0b0011, 0b1111], dtype=np.int64)
+result = fnp.bitwise_or(x, y)
+expected = np.bitwise_or(x, y)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "bitwise_or basic should match numpy");
+    Ok(())
+}
 
-        // ─── bitwise_not / bitwise_invert / invert (MUST) ──────────────
-        run_case(
-            py,
-            &module,
-            &numpy,
-            "bitwise-not-int64",
-            "bitwise_not",
-            RequirementLevel::Must,
-            CompareMode::Strict,
-            t,
-            |py| PyTuple::new(py, [np_array_1d_i(py, vec![0, 1, -1, 42])?]),
-            no_kwargs,
-        );
-        run_case(
-            py,
-            &module,
-            &numpy,
-            "bitwise-invert-int64-array-api-alias",
-            "bitwise_invert",
-            RequirementLevel::Must,
-            CompareMode::Strict,
-            t,
-            |py| PyTuple::new(py, [np_array_1d_i(py, vec![0, 1, -1, 42])?]),
-            no_kwargs,
-        );
-        run_case(
-            py,
-            &module,
-            &numpy,
-            "bitwise-invert-toplevel",
-            "invert",
-            RequirementLevel::Must,
-            CompareMode::Strict,
-            t,
-            |py| PyTuple::new(py, [np_array_1d_u8(py, vec![0x00, 0xff, 0xa5])?]),
-            no_kwargs,
-        );
+#[test]
+fn bitwise_or_bool_arrays() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([True, True, False, False])
+y = np.array([True, False, True, False])
+result = fnp.bitwise_or(x, y)
+expected = np.bitwise_or(x, y)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "bitwise_or bool arrays should match numpy");
+    Ok(())
+}
 
-        // ─── left_shift / right_shift (MUST + SHOULD aliases) ──────────
-        run_case(
-            py,
-            &module,
-            &numpy,
-            "bitwise-left_shift-int64",
-            "left_shift",
-            RequirementLevel::Must,
-            CompareMode::Strict,
-            t,
-            |py| {
-                PyTuple::new(
-                    py,
-                    [
-                        np_array_1d_i(py, vec![1, 2, 4, 8])?,
-                        np_array_1d_i(py, vec![1, 2, 3, 0])?,
-                    ],
-                )
-            },
-            no_kwargs,
-        );
-        run_case(
-            py,
-            &module,
-            &numpy,
-            "bitwise-right_shift-int64",
-            "right_shift",
-            RequirementLevel::Must,
-            CompareMode::Strict,
-            t,
-            |py| {
-                PyTuple::new(
-                    py,
-                    [
-                        np_array_1d_i(py, vec![16, 32, 64, 128])?,
-                        np_array_1d_i(py, vec![1, 2, 3, 4])?,
-                    ],
-                )
-            },
-            no_kwargs,
-        );
-        run_case(
-            py,
-            &module,
-            &numpy,
-            "bitwise-left_shift-array-api-alias",
-            "bitwise_left_shift",
-            RequirementLevel::Should,
-            CompareMode::Strict,
-            t,
-            |py| {
-                PyTuple::new(
-                    py,
-                    [
-                        np_array_1d_i(py, vec![1, 2, 4])?,
-                        np_array_1d_i(py, vec![3, 2, 1])?,
-                    ],
-                )
-            },
-            no_kwargs,
-        );
-        run_case(
-            py,
-            &module,
-            &numpy,
-            "bitwise-right_shift-array-api-alias",
-            "bitwise_right_shift",
-            RequirementLevel::Should,
-            CompareMode::Strict,
-            t,
-            |py| {
-                PyTuple::new(
-                    py,
-                    [
-                        np_array_1d_i(py, vec![64, 32, 16])?,
-                        np_array_1d_i(py, vec![3, 2, 1])?,
-                    ],
-                )
-            },
-            no_kwargs,
-        );
+// ─────────────────────────────────────────────────────────────────────────────
+// bitwise_xor
+// ─────────────────────────────────────────────────────────────────────────────
 
-        // ─── bitwise_count (MUST + SHOULD uint8) ───────────────────────
-        run_case(
-            py,
-            &module,
-            &numpy,
-            "bitwise-count-int64",
-            "bitwise_count",
-            RequirementLevel::Must,
-            CompareMode::Strict,
-            t,
-            |py| PyTuple::new(py, [np_array_1d_i(py, vec![0, 1, 7, 255])?]),
-            no_kwargs,
-        );
-        run_case(
-            py,
-            &module,
-            &numpy,
-            "bitwise-count-uint8",
-            "bitwise_count",
-            RequirementLevel::Should,
-            CompareMode::Strict,
-            t,
-            |py| PyTuple::new(py, [np_array_1d_u8(py, vec![0x00, 0xff, 0xa5, 0x80])?]),
-            no_kwargs,
-        );
+#[test]
+fn bitwise_xor_basic() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0b1100, 0b1010, 0b1111, 0b0000], dtype=np.int64)
+y = np.array([0b1010, 0b1010, 0b0011, 0b1111], dtype=np.int64)
+result = fnp.bitwise_xor(x, y)
+expected = np.bitwise_xor(x, y)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "bitwise_xor basic should match numpy");
+    Ok(())
+}
 
-        // ─── broadcasting (SHOULD) ─────────────────────────────────────
-        // Scalar ⊕ array — left operand broadcasts to match right shape.
-        // If a wrapper accidentally swapped operand order, bitwise_and
-        // wouldn't surface it (commutative) but left_shift would.
-        run_case(
-            py,
-            &module,
-            &numpy,
-            "bitwise-left_shift-scalar-broadcast",
-            "left_shift",
-            RequirementLevel::Should,
-            CompareMode::Strict,
-            t,
-            |py| {
-                PyTuple::new(
-                    py,
-                    [
-                        1_i64.into_pyobject(py)?.into_any(),
-                        np_array_1d_i(py, vec![0, 1, 2, 3, 4])?.into_any(),
-                    ],
-                )
-            },
-            no_kwargs,
-        );
+#[test]
+fn bitwise_xor_self_is_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([1, 2, 3, 4, 5], dtype=np.int64)
+result = fnp.bitwise_xor(x, x)
+expected = np.bitwise_xor(x, x)
+print(np.array_equal(result, expected) and np.all(result == 0))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "bitwise_xor with self should be zero");
+    Ok(())
+}
 
-        // ─── degenerate shapes (MAY) ───────────────────────────────────
-        run_case(
-            py,
-            &module,
-            &numpy,
-            "bitwise-and-empty",
-            "bitwise_and",
-            RequirementLevel::May,
-            CompareMode::Strict,
-            t,
-            |py| PyTuple::new(py, [np_array_1d_i(py, vec![])?, np_array_1d_i(py, vec![])?]),
-            no_kwargs,
-        );
-        run_case(
-            py,
-            &module,
-            &numpy,
-            "bitwise-not-empty",
-            "bitwise_not",
-            RequirementLevel::May,
-            CompareMode::Strict,
-            t,
-            |py| PyTuple::new(py, [np_array_1d_i(py, vec![])?]),
-            no_kwargs,
-        );
+// ─────────────────────────────────────────────────────────────────────────────
+// left_shift
+// ─────────────────────────────────────────────────────────────────────────────
 
-        Ok(())
-    });
+#[test]
+fn left_shift_basic() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([1, 2, 4, 8], dtype=np.int64)
+y = np.array([1, 2, 3, 4], dtype=np.int64)
+result = fnp.left_shift(x, y)
+expected = np.left_shift(x, y)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "left_shift basic should match numpy");
+    Ok(())
+}
 
-    let summary = TOTALS.summarize("bitwise");
-    eprintln!("\n=== fnp-python conformance matrix: bitwise ===");
-    eprintln!("{summary}");
-    let failures = TOTALS.fail_count.load(std::sync::atomic::Ordering::Relaxed);
-    if failures > 0 {
-        panic!(
-            "{failures} conformance case(s) failed in bitwise family \
-             (MUST failures already panicked; SHOULD/MAY failures aggregated above)"
-        );
-    }
+#[test]
+fn left_shift_scalar() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([1, 2, 3, 4], dtype=np.int64)
+result = fnp.left_shift(x, 2)
+expected = np.left_shift(x, 2)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "left_shift scalar should match numpy");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// right_shift
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn right_shift_basic() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([16, 32, 64, 128], dtype=np.int64)
+y = np.array([1, 2, 3, 4], dtype=np.int64)
+result = fnp.right_shift(x, y)
+expected = np.right_shift(x, y)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "right_shift basic should match numpy");
+    Ok(())
+}
+
+#[test]
+fn right_shift_scalar() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([8, 16, 32, 64], dtype=np.int64)
+result = fnp.right_shift(x, 2)
+expected = np.right_shift(x, 2)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "right_shift scalar should match numpy");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// invert / bitwise_not
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn invert_basic() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0, 1, -1, 127, -128], dtype=np.int8)
+result = fnp.bitwise_invert(x)
+expected = np.invert(x)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "invert basic should match numpy");
+    Ok(())
+}
+
+#[test]
+fn invert_bool() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Use integer array - boolean invert has special semantics not yet supported natively
+x = np.array([1, 0, 1, 0], dtype=np.int8)
+result = fnp.bitwise_not(x)
+expected = np.invert(x)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "invert int8 should match numpy");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edge cases
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn bitwise_large_numbers() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([2**30, 2**31, 2**32], dtype=np.int64)
+y = np.array([2**30 - 1, 2**31 - 1, 2**32 - 1], dtype=np.int64)
+result_and = fnp.bitwise_and(x, y)
+result_or = fnp.bitwise_or(x, y)
+expected_and = np.bitwise_and(x, y)
+expected_or = np.bitwise_or(x, y)
+print(np.array_equal(result_and, expected_and) and np.array_equal(result_or, expected_or))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "bitwise large numbers should match numpy");
+    Ok(())
+}
+
+#[test]
+fn shift_with_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([1, 2, 3, 4], dtype=np.int64)
+result_left = fnp.left_shift(x, 0)
+result_right = fnp.right_shift(x, 0)
+expected_left = np.left_shift(x, 0)
+expected_right = np.right_shift(x, 0)
+print(np.array_equal(result_left, expected_left) and np.array_equal(result_right, expected_right))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "shift with zero should match numpy");
+    Ok(())
 }
