@@ -31622,6 +31622,30 @@ pub fn divide(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError
     x1.elementwise_binary(x2, BinaryOp::Div)
 }
 
+/// Element-wise addition (x1 + x2).
+/// NumPy equivalent: `np.add(x1, x2)`.
+pub fn add(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    x1.elementwise_binary(x2, BinaryOp::Add)
+}
+
+/// Element-wise subtraction (x1 - x2).
+/// NumPy equivalent: `np.subtract(x1, x2)`.
+pub fn subtract(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    x1.elementwise_binary(x2, BinaryOp::Sub)
+}
+
+/// Element-wise multiplication (x1 * x2).
+/// NumPy equivalent: `np.multiply(x1, x2)`.
+pub fn multiply(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    x1.elementwise_binary(x2, BinaryOp::Mul)
+}
+
+/// Element-wise floor division (x1 // x2).
+/// NumPy equivalent: `np.floor_divide(x1, x2)`.
+pub fn floor_divide(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    x1.elementwise_binary(x2, BinaryOp::FloorDivide)
+}
+
 /// Sort a complex array by real part first, then imaginary part.
 ///
 /// The input is flattened, sorted, and returned as a 1-D complex array with
