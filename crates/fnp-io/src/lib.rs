@@ -3410,6 +3410,10 @@ fn escape_structured_field_name(name: &str) -> String {
         match ch {
             '\\' => escaped.push_str("\\\\"),
             '\'' => escaped.push_str("\\'"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\0' => escaped.push_str("\\x00"),
             _ => escaped.push(ch),
         }
     }
@@ -3515,20 +3519,77 @@ fn parse_structured_quoted_string(s: &str, pos: usize) -> Result<(String, usize)
             .chars()
             .next()
             .ok_or(IOError::DTypeDescriptorInvalid)?;
-        if ch == quote && !escaped {
+        let next_idx = idx + ch.len_utf8();
+
+        if escaped {
+            match ch {
+                '\'' => result.push('\''),
+                '"' => result.push('"'),
+                '\\' => result.push('\\'),
+                'n' => result.push('\n'),
+                'r' => result.push('\r'),
+                't' => result.push('\t'),
+                'x' => {
+                    let (decoded, after_escape) = parse_structured_hex_escape(s, next_idx, 2)?;
+                    result.push(decoded);
+                    idx = after_escape;
+                    escaped = false;
+                    continue;
+                }
+                'u' => {
+                    let (decoded, after_escape) = parse_structured_hex_escape(s, next_idx, 4)?;
+                    result.push(decoded);
+                    idx = after_escape;
+                    escaped = false;
+                    continue;
+                }
+                'U' => {
+                    let (decoded, after_escape) = parse_structured_hex_escape(s, next_idx, 8)?;
+                    result.push(decoded);
+                    idx = after_escape;
+                    escaped = false;
+                    continue;
+                }
+                _ => result.push(ch),
+            }
+            escaped = false;
+            idx = next_idx;
+            continue;
+        }
+
+        if ch == quote {
             return Ok((result, idx + ch.len_utf8()));
         }
 
-        if ch == '\\' && !escaped {
+        if ch == '\\' {
             escaped = true;
         } else {
             result.push(ch);
-            escaped = false;
         }
-        idx += ch.len_utf8();
+        idx = next_idx;
     }
 
     Err(IOError::DTypeDescriptorInvalid)
+}
+
+fn parse_structured_hex_escape(
+    s: &str,
+    pos: usize,
+    digits: usize,
+) -> Result<(char, usize), IOError> {
+    let end = pos
+        .checked_add(digits)
+        .ok_or(IOError::DTypeDescriptorInvalid)?;
+    if end > s.len() {
+        return Err(IOError::DTypeDescriptorInvalid);
+    }
+    let hex = &s[pos..end];
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(IOError::DTypeDescriptorInvalid);
+    }
+    let value = u32::from_str_radix(hex, 16).map_err(|_| IOError::DTypeDescriptorInvalid)?;
+    let ch = char::from_u32(value).ok_or(IOError::DTypeDescriptorInvalid)?;
+    Ok((ch, end))
 }
 
 /// Encode a structured NPY header dictionary line.
@@ -6462,6 +6523,45 @@ mm.flush()
 
         let encoded = desc.to_descr_string();
         assert_eq!(encoded, "[('can\\'t', '<i4'), ('path\\\\name', '|S8')]");
+        assert_eq!(parse_structured_descr(&encoded).unwrap(), desc);
+    }
+
+    #[test]
+    fn structured_descriptor_decodes_python_escaped_field_names() {
+        let desc = parse_structured_descr(
+            "[('line\\nbreak', '<i4'), ('tab\\tstop', '<i4'), ('nul\\x00byte', '|S2'), ('u\\u03b2', '<f8')]",
+        )
+        .unwrap();
+
+        assert_eq!(desc.fields[0].name, "line\nbreak");
+        assert_eq!(desc.fields[1].name, "tab\tstop");
+        assert_eq!(desc.fields[2].name, "nul\0byte");
+        assert_eq!(desc.fields[3].name, "u\u{03b2}");
+    }
+
+    #[test]
+    fn structured_descriptor_to_descr_string_escapes_control_field_names() {
+        let desc = StructuredIODescriptor {
+            fields: vec![
+                StructuredIOField {
+                    name: "line\nbreak".to_string(),
+                    dtype: IOSupportedDType::I32,
+                },
+                StructuredIOField {
+                    name: "tab\tstop".to_string(),
+                    dtype: IOSupportedDType::I16,
+                },
+                StructuredIOField {
+                    name: "nul\0byte".to_string(),
+                    dtype: IOSupportedDType::Bytes(2),
+                },
+            ],
+        };
+
+        let encoded = desc.to_descr_string();
+        assert!(encoded.contains("line\\nbreak"));
+        assert!(encoded.contains("tab\\tstop"));
+        assert!(encoded.contains("nul\\x00byte"));
         assert_eq!(parse_structured_descr(&encoded).unwrap(), desc);
     }
 
