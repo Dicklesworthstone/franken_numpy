@@ -22867,7 +22867,14 @@ fn atan2(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "atan2", args, kwargs)
+    if kwargs.is_none_or(|k| k.is_empty()) && args.len() == 2 {
+        let x1 = extract_numeric_array(py, &args.get_item(0)?, "atan2(x1)")?;
+        let x2 = extract_numeric_array(py, &args.get_item(1)?, "atan2(x2)")?;
+        let result = ufunc_arctan2(&x1, &x2).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "atan2", args, kwargs)
+    }
 }
 
 #[pyfunction]
