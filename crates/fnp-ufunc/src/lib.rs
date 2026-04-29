@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use fnp_dtype::{
-    ArrayStorage, DType, promote, promote_for_mean_reduction, promote_for_sum_reduction,
+    ArrayStorage, DType, f16, promote, promote_for_mean_reduction, promote_for_sum_reduction,
 };
 use fnp_ndarray::{ShapeError, broadcast_shape, element_count, fix_unknown_dimension};
 use fnp_runtime::{
@@ -22278,9 +22278,19 @@ impl UFuncArray {
     }
 
     /// Replace NaN with zero and infinity with large finite numbers using defaults (np.nan_to_num).
-    /// NaN -> 0.0, +inf -> f64::MAX, -inf -> f64::MIN.
+    /// NaN -> 0.0, infinities -> finite bounds for the array dtype.
     pub fn nan_to_num_default(&self) -> Self {
-        self.nan_to_num(0.0, f64::MAX, f64::MIN)
+        let (posinf, neginf) = self.nan_to_num_default_inf_replacements();
+        self.nan_to_num(0.0, posinf, neginf)
+    }
+
+    /// Default +inf/-inf replacements for np.nan_to_num with this array dtype.
+    pub fn nan_to_num_default_inf_replacements(&self) -> (f64, f64) {
+        match self.dtype {
+            DType::F16 => (f64::from(f16::MAX), f64::from(f16::MIN)),
+            DType::F32 => (f64::from(f32::MAX), f64::from(f32::MIN)),
+            _ => (f64::MAX, f64::MIN),
+        }
     }
 
     /// Return indices of non-zero elements in the flattened array (np.flatnonzero).

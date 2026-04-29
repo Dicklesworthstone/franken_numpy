@@ -112,8 +112,9 @@ fn nan_to_num_default_matches_numpy() -> Result<(), String> {
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_float_list(&numpy_result)?;
 
-        let rust_script =
-            fnp_script(format!("print(fnp.nan_to_num({arr_expr}).flatten().tolist())"));
+        let rust_script = fnp_script(format!(
+            "print(fnp.nan_to_num({arr_expr}).flatten().tolist())"
+        ));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_float_list(&rust_result)?;
 
@@ -153,6 +154,35 @@ fn nan_to_num_custom_nan_matches_numpy() -> Result<(), String> {
             "nan_to_num custom nan mismatch for {arr_expr} with nan={nan_val}\nnumpy: {numpy_vals:?}\nrust: {rust_vals:?}"
         );
     }
+
+    Ok(())
+}
+
+#[test]
+fn nan_to_num_custom_nan_preserves_dtype_inf_defaults() -> Result<(), String> {
+    let script = r#"
+import numpy as np
+x = np.array([np.nan, np.inf, -np.inf], dtype=np.float32)
+r = np.nan_to_num(x, nan=7.0)
+print(r.dtype, r.tolist())
+"#;
+    let numpy_result = numpy_oracle(script)?;
+
+    let rust_script = fnp_script(
+        r#"
+x = np.array([np.nan, np.inf, -np.inf], dtype=np.float32)
+r = fnp.nan_to_num(x, nan=7.0)
+print(r.dtype, r.tolist())
+"#
+        .into(),
+    );
+    let rust_result = numpy_oracle(&rust_script)?;
+
+    assert_eq!(
+        numpy_result.trim(),
+        rust_result.trim(),
+        "nan_to_num custom nan should use dtype-specific default inf bounds"
+    );
 
     Ok(())
 }
@@ -391,14 +421,10 @@ fn clip_dtype_preserved_matches_numpy() -> Result<(), String> {
     ];
 
     for arr_expr in &test_cases {
-        let script = format!(
-            "import numpy as np; r = np.clip({arr_expr}, 2, 4); print(r.dtype)"
-        );
+        let script = format!("import numpy as np; r = np.clip({arr_expr}, 2, 4); print(r.dtype)");
         let numpy_result = numpy_oracle(&script)?;
 
-        let rust_script = fnp_script(format!(
-            "r = fnp.clip({arr_expr}, 2, 4); print(r.dtype)"
-        ));
+        let rust_script = fnp_script(format!("r = fnp.clip({arr_expr}, 2, 4); print(r.dtype)"));
         let rust_result = numpy_oracle(&rust_script)?;
 
         assert_eq!(
@@ -419,14 +445,10 @@ fn nan_to_num_dtype_preserved_matches_numpy() -> Result<(), String> {
     ];
 
     for arr_expr in &test_cases {
-        let script = format!(
-            "import numpy as np; r = np.nan_to_num({arr_expr}); print(r.dtype)"
-        );
+        let script = format!("import numpy as np; r = np.nan_to_num({arr_expr}); print(r.dtype)");
         let numpy_result = numpy_oracle(&script)?;
 
-        let rust_script = fnp_script(format!(
-            "r = fnp.nan_to_num({arr_expr}); print(r.dtype)"
-        ));
+        let rust_script = fnp_script(format!("r = fnp.nan_to_num({arr_expr}); print(r.dtype)"));
         let rust_result = numpy_oracle(&rust_script)?;
 
         assert_eq!(

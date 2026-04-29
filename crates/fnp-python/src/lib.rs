@@ -9316,10 +9316,12 @@ fn nan_to_num(
     neginf: Option<f64>,
 ) -> PyResult<Py<PyAny>> {
     let x = extract_precise_numeric_array(py, x.bind(py), "nan_to_num(x)")?;
-    let result = match (posinf, neginf) {
-        (None, None) if nan == 0.0 => x.nan_to_num_default(),
-        _ => x.nan_to_num(nan, posinf.unwrap_or(f64::MAX), neginf.unwrap_or(f64::MIN)),
-    };
+    let (default_posinf, default_neginf) = x.nan_to_num_default_inf_replacements();
+    let result = x.nan_to_num(
+        nan,
+        posinf.unwrap_or(default_posinf),
+        neginf.unwrap_or(default_neginf),
+    );
     build_numpy_array_from_ufunc(py, &result)
 }
 
