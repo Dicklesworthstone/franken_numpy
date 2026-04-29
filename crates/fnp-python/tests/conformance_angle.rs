@@ -37,27 +37,34 @@ fn fnp_script(body: String) -> String {
     )
 }
 
-fn parse_float_list(s: &str) -> Vec<f64> {
+fn parse_float_list(s: &str) -> Result<Vec<f64>, String> {
     if s.is_empty() || s == "[]" {
-        return vec![];
+        return Ok(vec![]);
     }
-    let trimmed = s.trim_start_matches('[').trim_end_matches(']');
-    trimmed
+    let parsed = s
         .split(|c: char| c.is_whitespace() || c == ',')
-        .filter(|t| !t.is_empty())
         .filter_map(|token| {
-            let t = token.trim().trim_end_matches('.');
+            let t = token
+                .trim()
+                .trim_matches(|c| c == '[' || c == ']')
+                .trim_end_matches('.');
+            if t.is_empty() {
+                return None;
+            }
             if t == "nan" || t == "NaN" {
-                Some(f64::NAN)
+                Some(Ok(f64::NAN))
             } else if t == "inf" || t == "Inf" {
-                Some(f64::INFINITY)
+                Some(Ok(f64::INFINITY))
             } else if t == "-inf" || t == "-Inf" {
-                Some(f64::NEG_INFINITY)
+                Some(Ok(f64::NEG_INFINITY))
             } else {
-                t.parse().ok()
+                Some(t.parse().map_err(|error| {
+                    format!("failed to parse float token {t:?} from output {s:?}: {error}")
+                }))
             }
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(parsed)
 }
 
 fn floats_close(a: &[f64], b: &[f64], rel_tol: f64) -> bool {
@@ -70,7 +77,7 @@ fn floats_close(a: &[f64], b: &[f64], rel_tol: f64) -> bool {
         } else if x.is_infinite() && y.is_infinite() {
             x.signum() == y.signum()
         } else if *x == 0.0 && *y == 0.0 {
-            true
+            x.to_bits() == y.to_bits()
         } else {
             let diff = (x - y).abs();
             let max_val = x.abs().max(y.abs());
@@ -83,6 +90,7 @@ fn floats_close(a: &[f64], b: &[f64], rel_tol: f64) -> bool {
 fn degrees_matches_numpy_across_50_cases() -> Result<(), String> {
     let test_cases = vec![
         "np.array([0.0])",
+        "np.array([-0.0, 0.0])",
         "np.array([np.pi])",
         "np.array([np.pi / 2])",
         "np.array([np.pi / 4])",
@@ -113,12 +121,11 @@ fn degrees_matches_numpy_across_50_cases() -> Result<(), String> {
         let script =
             format!("import numpy as np; print(np.degrees({arr_expr}).flatten().tolist())");
         let numpy_result = numpy_oracle(&script)?;
-        let numpy_vals = parse_float_list(&numpy_result);
+        let numpy_vals = parse_float_list(&numpy_result)?;
 
-        let rust_script =
-            fnp_script(format!("print(fnp.degrees({arr_expr}).flatten().tolist())"));
+        let rust_script = fnp_script(format!("print(fnp.degrees({arr_expr}).flatten().tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
-        let rust_vals = parse_float_list(&rust_result);
+        let rust_vals = parse_float_list(&rust_result)?;
 
         assert!(
             floats_close(&numpy_vals, &rust_vals, 1e-10),
@@ -133,6 +140,7 @@ fn degrees_matches_numpy_across_50_cases() -> Result<(), String> {
 fn radians_matches_numpy_across_50_cases() -> Result<(), String> {
     let test_cases = vec![
         "np.array([0.0])",
+        "np.array([-0.0, 0.0])",
         "np.array([180.0])",
         "np.array([90.0])",
         "np.array([45.0])",
@@ -163,12 +171,11 @@ fn radians_matches_numpy_across_50_cases() -> Result<(), String> {
         let script =
             format!("import numpy as np; print(np.radians({arr_expr}).flatten().tolist())");
         let numpy_result = numpy_oracle(&script)?;
-        let numpy_vals = parse_float_list(&numpy_result);
+        let numpy_vals = parse_float_list(&numpy_result)?;
 
-        let rust_script =
-            fnp_script(format!("print(fnp.radians({arr_expr}).flatten().tolist())"));
+        let rust_script = fnp_script(format!("print(fnp.radians({arr_expr}).flatten().tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
-        let rust_vals = parse_float_list(&rust_result);
+        let rust_vals = parse_float_list(&rust_result)?;
 
         assert!(
             floats_close(&numpy_vals, &rust_vals, 1e-10),
@@ -193,13 +200,13 @@ fn degrees_radians_roundtrip_matches_numpy() -> Result<(), String> {
             "import numpy as np; print(np.degrees(np.radians({arr_expr})).flatten().tolist())"
         );
         let numpy_result = numpy_oracle(&script)?;
-        let numpy_vals = parse_float_list(&numpy_result);
+        let numpy_vals = parse_float_list(&numpy_result)?;
 
         let rust_script = fnp_script(format!(
             "print(fnp.degrees(fnp.radians({arr_expr})).flatten().tolist())"
         ));
         let rust_result = numpy_oracle(&rust_script)?;
-        let rust_vals = parse_float_list(&rust_result);
+        let rust_vals = parse_float_list(&rust_result)?;
 
         assert!(
             floats_close(&numpy_vals, &rust_vals, 1e-10),
@@ -207,6 +214,13 @@ fn degrees_radians_roundtrip_matches_numpy() -> Result<(), String> {
         );
     }
 
+    Ok(())
+}
+
+#[test]
+fn parse_float_list_retains_nested_array_values() -> Result<(), String> {
+    let parsed = parse_float_list("[[45.0, 90.0], [180.0, 360.0]]")?;
+    assert_eq!(parsed, vec![45.0, 90.0, 180.0, 360.0]);
     Ok(())
 }
 
