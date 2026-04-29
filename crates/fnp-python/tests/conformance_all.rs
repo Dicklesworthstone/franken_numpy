@@ -5,16 +5,37 @@
 
 use std::process::Command;
 
-fn numpy_oracle(script: &str) -> String {
+fn numpy_oracle(script: &str) -> Result<String, String> {
     let output = Command::new("python3")
         .args(["-c", script])
         .output()
-        .expect("python3 should be available");
+        .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        panic!("NumPy oracle failed: {stderr}\nScript: {script}");
+        return Err(format!("NumPy oracle failed: {stderr}\nScript: {script}"));
     }
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn fnp_all_script(body: String) -> String {
+    let library_name = format!(
+        "{}fnp_python{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
+    let module_path = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join(&library_name)))
+        .unwrap_or_else(|| library_name.into());
+    let module_literal = format!("{module_path:?}");
+    format!(
+        "import importlib.util\n\
+         import numpy as np\n\
+         spec = importlib.util.spec_from_file_location('fnp_python', {module_literal})\n\
+         fnp = importlib.util.module_from_spec(spec)\n\
+         spec.loader.exec_module(fnp)\n\
+         {body}"
+    )
 }
 
 fn parse_bool(s: &str) -> bool {
@@ -34,7 +55,7 @@ fn parse_bool_list(s: &str) -> Vec<bool> {
 }
 
 #[test]
-fn all_flat_matches_numpy_across_50_cases() {
+fn all_flat_matches_numpy_across_50_cases() -> Result<(), String> {
     let test_cases = vec![
         // All true arrays
         "[1, 2, 3]",
@@ -100,11 +121,11 @@ fn all_flat_matches_numpy_across_50_cases() {
 
     for arr_str in &test_cases {
         let script = format!("import numpy as np; print(np.all(np.array({arr_str})))");
-        let numpy_result = numpy_oracle(&script);
+        let numpy_result = numpy_oracle(&script)?;
         let numpy_val = parse_bool(&numpy_result);
 
-        let rust_script = format!("import numpy as np; print(np.all(np.array({arr_str})))");
-        let rust_result = numpy_oracle(&rust_script);
+        let rust_script = fnp_all_script(format!("print(fnp.all(np.array({arr_str})))"));
+        let rust_result = numpy_oracle(&rust_script)?;
         let rust_val = parse_bool(&rust_result);
 
         assert_eq!(
@@ -112,10 +133,12 @@ fn all_flat_matches_numpy_across_50_cases() {
             "all flat mismatch for {arr_str}\nnumpy: {numpy_val}\nrust: {rust_val}"
         );
     }
+
+    Ok(())
 }
 
 #[test]
-fn all_2d_axis_matches_numpy() {
+fn all_2d_axis_matches_numpy() -> Result<(), String> {
     let test_cases = vec![
         // 2D arrays with axis=0
         ("[[1, 1, 1], [1, 1, 1]]", "0"),
@@ -147,12 +170,13 @@ fn all_2d_axis_matches_numpy() {
     for (arr_str, axis) in &test_cases {
         let script =
             format!("import numpy as np; print(list(np.all(np.array({arr_str}), axis={axis})))");
-        let numpy_result = numpy_oracle(&script);
+        let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_bool_list(&numpy_result);
 
-        let rust_script =
-            format!("import numpy as np; print(list(np.all(np.array({arr_str}), axis={axis})))");
-        let rust_result = numpy_oracle(&rust_script);
+        let rust_script = fnp_all_script(format!(
+            "print(list(fnp.all(np.array({arr_str}), axis={axis})))"
+        ));
+        let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_bool_list(&rust_result);
 
         assert_eq!(
@@ -160,10 +184,12 @@ fn all_2d_axis_matches_numpy() {
             "all axis={axis} mismatch for {arr_str}\nnumpy: {numpy_vals:?}\nrust: {rust_vals:?}"
         );
     }
+
+    Ok(())
 }
 
 #[test]
-fn all_3d_axis_matches_numpy() {
+fn all_3d_axis_matches_numpy() -> Result<(), String> {
     let test_cases = vec![
         // 3D arrays
         ("[[[1, 1], [1, 1]], [[1, 1], [1, 1]]]", "0"),
@@ -185,13 +211,13 @@ fn all_3d_axis_matches_numpy() {
         let script = format!(
             "import numpy as np; print(list(np.all(np.array({arr_str}), axis={axis}).flatten()))"
         );
-        let numpy_result = numpy_oracle(&script);
+        let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_bool_list(&numpy_result);
 
-        let rust_script = format!(
-            "import numpy as np; print(list(np.all(np.array({arr_str}), axis={axis}).flatten()))"
-        );
-        let rust_result = numpy_oracle(&rust_script);
+        let rust_script = fnp_all_script(format!(
+            "print(list(fnp.all(np.array({arr_str}), axis={axis}).flatten()))"
+        ));
+        let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_bool_list(&rust_result);
 
         assert_eq!(
@@ -199,10 +225,12 @@ fn all_3d_axis_matches_numpy() {
             "all 3D axis={axis} mismatch for {arr_str}\nnumpy: {numpy_vals:?}\nrust: {rust_vals:?}"
         );
     }
+
+    Ok(())
 }
 
 #[test]
-fn all_integer_dtypes_match_numpy() {
+fn all_integer_dtypes_match_numpy() -> Result<(), String> {
     let test_cases = vec![
         ("np.array([1, 2, 3], dtype=np.int32)", "None"),
         ("np.array([1, 0, 3], dtype=np.int64)", "None"),
@@ -210,8 +238,14 @@ fn all_integer_dtypes_match_numpy() {
         ("np.array([0, 0, 0], dtype=np.int16)", "None"),
         ("np.array([[1, 1], [1, 1]], dtype=np.int32)", "None"),
         ("np.array([[1, 0], [1, 1]], dtype=np.int64)", "None"),
-        ("np.array([[1.0, 1.0], [1.0, 1.0]], dtype=np.float32)", "None"),
-        ("np.array([[1.0, 0.0], [1.0, 1.0]], dtype=np.float64)", "None"),
+        (
+            "np.array([[1.0, 1.0], [1.0, 1.0]], dtype=np.float32)",
+            "None",
+        ),
+        (
+            "np.array([[1.0, 0.0], [1.0, 1.0]], dtype=np.float64)",
+            "None",
+        ),
     ];
 
     for (arr_expr, axis) in &test_cases {
@@ -221,11 +255,11 @@ fn all_integer_dtypes_match_numpy() {
             format!(", axis={axis}")
         };
         let script = format!("import numpy as np; print(np.all({arr_expr}{axis_arg}))");
-        let numpy_result = numpy_oracle(&script);
+        let numpy_result = numpy_oracle(&script)?;
         let numpy_val = parse_bool(&numpy_result);
 
-        let rust_script = format!("import numpy as np; print(np.all({arr_expr}{axis_arg}))");
-        let rust_result = numpy_oracle(&rust_script);
+        let rust_script = fnp_all_script(format!("print(fnp.all({arr_expr}{axis_arg}))"));
+        let rust_result = numpy_oracle(&rust_script)?;
         let rust_val = parse_bool(&rust_result);
 
         assert_eq!(
@@ -233,10 +267,12 @@ fn all_integer_dtypes_match_numpy() {
             "all dtype mismatch for {arr_expr} axis={axis}\nnumpy: {numpy_val}\nrust: {rust_val}"
         );
     }
+
+    Ok(())
 }
 
 #[test]
-fn all_empty_array_matches_numpy() {
+fn all_empty_array_matches_numpy() -> Result<(), String> {
     let test_cases = vec![("[]", "None")];
 
     for (arr_str, axis) in &test_cases {
@@ -246,11 +282,10 @@ fn all_empty_array_matches_numpy() {
             format!(", axis={axis}")
         };
         let script = format!("import numpy as np; print(np.all(np.array({arr_str}){axis_arg}))");
-        let numpy_result = numpy_oracle(&script);
+        let numpy_result = numpy_oracle(&script)?;
 
-        let rust_script =
-            format!("import numpy as np; print(np.all(np.array({arr_str}){axis_arg}))");
-        let rust_result = numpy_oracle(&rust_script);
+        let rust_script = fnp_all_script(format!("print(fnp.all(np.array({arr_str}){axis_arg}))"));
+        let rust_result = numpy_oracle(&rust_script)?;
 
         assert_eq!(
             numpy_result.trim(),
@@ -258,4 +293,6 @@ fn all_empty_array_matches_numpy() {
             "all empty array mismatch for {arr_str} axis={axis}"
         );
     }
+
+    Ok(())
 }
