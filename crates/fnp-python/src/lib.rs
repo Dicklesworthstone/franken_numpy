@@ -9315,7 +9315,7 @@ fn nan_to_num(
     posinf: Option<f64>,
     neginf: Option<f64>,
 ) -> PyResult<Py<PyAny>> {
-    let x = extract_numeric_array(py, x.bind(py), "nan_to_num(x)")?;
+    let x = extract_precise_numeric_array(py, x.bind(py), "nan_to_num(x)")?;
     let result = match (posinf, neginf) {
         (None, None) if nan == 0.0 => x.nan_to_num_default(),
         _ => x.nan_to_num(nan, posinf.unwrap_or(f64::MAX), neginf.unwrap_or(f64::MIN)),
