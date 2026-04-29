@@ -38,27 +38,34 @@ fn fnp_script(body: String) -> String {
     )
 }
 
-fn parse_float_list(s: &str) -> Vec<f64> {
+fn parse_float_list(s: &str) -> Result<Vec<f64>, String> {
     if s.is_empty() || s == "[]" {
-        return vec![];
+        return Ok(vec![]);
     }
-    let trimmed = s.trim_start_matches('[').trim_end_matches(']');
-    trimmed
+    let trimmed = s
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .ok_or_else(|| format!("expected bracketed float list, got {s:?}"))?;
+
+    let mut values = Vec::new();
+    for token in trimmed
         .split(|c: char| c.is_whitespace() || c == ',')
         .filter(|t| !t.is_empty())
-        .filter_map(|token| {
-            let t = token.trim().trim_end_matches('.');
-            if t == "nan" || t == "NaN" {
-                Some(f64::NAN)
-            } else if t == "inf" || t == "Inf" {
-                Some(f64::INFINITY)
-            } else if t == "-inf" || t == "-Inf" {
-                Some(f64::NEG_INFINITY)
-            } else {
-                t.parse().ok()
-            }
-        })
-        .collect()
+    {
+        let t = token.trim().trim_end_matches('.');
+        let value = if t == "nan" || t == "NaN" {
+            f64::NAN
+        } else if t == "inf" || t == "Inf" {
+            f64::INFINITY
+        } else if t == "-inf" || t == "-Inf" {
+            f64::NEG_INFINITY
+        } else {
+            t.parse::<f64>()
+                .map_err(|error| format!("invalid float token {token:?} in {s:?}: {error}"))?
+        };
+        values.push(value);
+    }
+    Ok(values)
 }
 
 fn floats_close(a: &[f64], b: &[f64], rel_tol: f64) -> bool {
@@ -128,11 +135,11 @@ fn sinc_matches_numpy_across_50_cases() -> Result<(), String> {
     for arr_expr in &test_cases {
         let script = format!("import numpy as np; print(np.sinc({arr_expr}).flatten().tolist())");
         let numpy_result = numpy_oracle(&script)?;
-        let numpy_vals = parse_float_list(&numpy_result);
+        let numpy_vals = parse_float_list(&numpy_result)?;
 
         let rust_script = fnp_script(format!("print(fnp.sinc({arr_expr}).flatten().tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
-        let rust_vals = parse_float_list(&rust_result);
+        let rust_vals = parse_float_list(&rust_result)?;
 
         assert!(
             floats_close(&numpy_vals, &rust_vals, 1e-10),
@@ -156,11 +163,11 @@ fn sinc_special_values_match_numpy() -> Result<(), String> {
     for arr_expr in &test_cases {
         let script = format!("import numpy as np; print(np.sinc({arr_expr}).flatten().tolist())");
         let numpy_result = numpy_oracle(&script)?;
-        let numpy_vals = parse_float_list(&numpy_result);
+        let numpy_vals = parse_float_list(&numpy_result)?;
 
         let rust_script = fnp_script(format!("print(fnp.sinc({arr_expr}).flatten().tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
-        let rust_vals = parse_float_list(&rust_result);
+        let rust_vals = parse_float_list(&rust_result)?;
 
         assert!(
             floats_close(&numpy_vals, &rust_vals, 1e-10),
@@ -173,16 +180,15 @@ fn sinc_special_values_match_numpy() -> Result<(), String> {
 
 #[test]
 fn sinc_integer_zeros_match_numpy() -> Result<(), String> {
-    let script =
-        "import numpy as np; print(np.sinc(np.array([-3, -2, -1, 0, 1, 2, 3], dtype=float)).tolist())";
+    let script = "import numpy as np; print(np.sinc(np.array([-3, -2, -1, 0, 1, 2, 3], dtype=float)).tolist())";
     let numpy_result = numpy_oracle(script)?;
-    let numpy_vals = parse_float_list(&numpy_result);
+    let numpy_vals = parse_float_list(&numpy_result)?;
 
     let rust_script = fnp_script(
         "print(fnp.sinc(np.array([-3, -2, -1, 0, 1, 2, 3], dtype=float)).tolist())".into(),
     );
     let rust_result = numpy_oracle(&rust_script)?;
-    let rust_vals = parse_float_list(&rust_result);
+    let rust_vals = parse_float_list(&rust_result)?;
 
     assert!(
         floats_close(&numpy_vals, &rust_vals, 1e-10),
@@ -197,8 +203,7 @@ fn sinc_empty_array_matches_numpy() -> Result<(), String> {
     let script = "import numpy as np; print(np.sinc(np.array([], dtype=np.float64)).tolist())";
     let numpy_result = numpy_oracle(script)?;
 
-    let rust_script =
-        fnp_script("print(fnp.sinc(np.array([], dtype=np.float64)).tolist())".into());
+    let rust_script = fnp_script("print(fnp.sinc(np.array([], dtype=np.float64)).tolist())".into());
     let rust_result = numpy_oracle(&rust_script)?;
 
     assert_eq!(
