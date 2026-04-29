@@ -44,7 +44,9 @@ fn arrays_close(a: &[f64], b: &[f64], tol: f64) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.iter().zip(b.iter()).all(|(x, y)| floats_close(*x, *y, tol))
+    a.iter()
+        .zip(b.iter())
+        .all(|(x, y)| floats_close(*x, *y, tol))
 }
 
 #[test]
@@ -116,9 +118,7 @@ fn ptp_flat_reduction_matches_numpy_across_50_cases() {
         let numpy_result = numpy_oracle(&script);
         let numpy_val = parse_float(&numpy_result);
 
-        let rust_script = format!(
-            "import numpy as np; print(np.ptp(np.array({arr_str})))"
-        );
+        let rust_script = format!("import numpy as np; print(np.ptp(np.array({arr_str})))");
         let rust_result = numpy_oracle(&rust_script);
         let rust_val = parse_float(&rust_result);
 
@@ -160,15 +160,12 @@ fn ptp_2d_axis_reduction_matches_numpy() {
     ];
 
     for (arr_str, axis) in &test_cases {
-        let script = format!(
-            "import numpy as np; print(np.ptp(np.array({arr_str}), axis={axis}))"
-        );
+        let script = format!("import numpy as np; print(np.ptp(np.array({arr_str}), axis={axis}))");
         let numpy_result = numpy_oracle(&script);
         let numpy_vals = parse_float_list(&numpy_result);
 
-        let rust_script = format!(
-            "import numpy as np; print(np.ptp(np.array({arr_str}), axis={axis}))"
-        );
+        let rust_script =
+            format!("import numpy as np; print(np.ptp(np.array({arr_str}), axis={axis}))");
         let rust_result = numpy_oracle(&rust_script);
         let rust_vals = parse_float_list(&rust_result);
 
@@ -239,14 +236,10 @@ fn ptp_integer_dtypes_match_numpy() {
         } else {
             format!(", axis={axis}")
         };
-        let script = format!(
-            "import numpy as np; print(np.ptp({arr_expr}{axis_arg}))"
-        );
+        let script = format!("import numpy as np; print(np.ptp({arr_expr}{axis_arg}))");
         let numpy_result = numpy_oracle(&script);
 
-        let rust_script = format!(
-            "import numpy as np; print(np.ptp({arr_expr}{axis_arg}))"
-        );
+        let rust_script = format!("import numpy as np; print(np.ptp({arr_expr}{axis_arg}))");
         let rust_result = numpy_oracle(&rust_script);
 
         assert_eq!(
@@ -268,14 +261,10 @@ fn ptp_nan_handling_matches_numpy() {
     ];
 
     for arr_str in &test_cases {
-        let script = format!(
-            "import numpy as np; print(np.ptp(np.array({arr_str})))"
-        );
+        let script = format!("import numpy as np; print(np.ptp(np.array({arr_str})))");
         let numpy_result = numpy_oracle(&script);
 
-        let rust_script = format!(
-            "import numpy as np; print(np.ptp(np.array({arr_str})))"
-        );
+        let rust_script = format!("import numpy as np; print(np.ptp(np.array({arr_str})))");
         let rust_result = numpy_oracle(&rust_script);
 
         // Both should return nan for arrays with nan

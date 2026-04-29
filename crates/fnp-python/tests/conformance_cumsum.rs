@@ -43,7 +43,9 @@ fn arrays_close(a: &[f64], b: &[f64], tol: f64) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.iter().zip(b.iter()).all(|(x, y)| floats_close(*x, *y, tol))
+    a.iter()
+        .zip(b.iter())
+        .all(|(x, y)| floats_close(*x, *y, tol))
 }
 
 #[test]
@@ -111,15 +113,12 @@ fn cumsum_flat_matches_numpy_across_50_cases() {
     ];
 
     for arr_str in &test_cases {
-        let script = format!(
-            "import numpy as np; print(list(np.cumsum(np.array({arr_str}))))"
-        );
+        let script = format!("import numpy as np; print(list(np.cumsum(np.array({arr_str}))))");
         let numpy_result = numpy_oracle(&script);
         let numpy_vals = parse_float_list(&numpy_result);
 
-        let rust_script = format!(
-            "import numpy as np; print(list(np.cumsum(np.array({arr_str}))))"
-        );
+        let rust_script =
+            format!("import numpy as np; print(list(np.cumsum(np.array({arr_str}))))");
         let rust_result = numpy_oracle(&rust_script);
         let rust_vals = parse_float_list(&rust_result);
 
@@ -284,15 +283,12 @@ fn cumprod_flat_matches_numpy_across_50_cases() {
     ];
 
     for arr_str in &test_cases {
-        let script = format!(
-            "import numpy as np; print(list(np.cumprod(np.array({arr_str}))))"
-        );
+        let script = format!("import numpy as np; print(list(np.cumprod(np.array({arr_str}))))");
         let numpy_result = numpy_oracle(&script);
         let numpy_vals = parse_float_list(&numpy_result);
 
-        let rust_script = format!(
-            "import numpy as np; print(list(np.cumprod(np.array({arr_str}))))"
-        );
+        let rust_script =
+            format!("import numpy as np; print(list(np.cumprod(np.array({arr_str}))))");
         let rust_result = numpy_oracle(&rust_script);
         let rust_vals = parse_float_list(&rust_result);
 
@@ -372,15 +368,13 @@ fn cumsum_integer_dtypes_match_numpy() {
         } else {
             format!(", axis={axis}")
         };
-        let script = format!(
-            "import numpy as np; print(list(np.cumsum({arr_expr}{axis_arg}).flatten()))"
-        );
+        let script =
+            format!("import numpy as np; print(list(np.cumsum({arr_expr}{axis_arg}).flatten()))");
         let numpy_result = numpy_oracle(&script);
         let numpy_vals = parse_float_list(&numpy_result);
 
-        let rust_script = format!(
-            "import numpy as np; print(list(np.cumsum({arr_expr}{axis_arg}).flatten()))"
-        );
+        let rust_script =
+            format!("import numpy as np; print(list(np.cumsum({arr_expr}{axis_arg}).flatten()))");
         let rust_result = numpy_oracle(&rust_script);
         let rust_vals = parse_float_list(&rust_result);
 
@@ -410,15 +404,13 @@ fn cumprod_integer_dtypes_match_numpy() {
         } else {
             format!(", axis={axis}")
         };
-        let script = format!(
-            "import numpy as np; print(list(np.cumprod({arr_expr}{axis_arg}).flatten()))"
-        );
+        let script =
+            format!("import numpy as np; print(list(np.cumprod({arr_expr}{axis_arg}).flatten()))");
         let numpy_result = numpy_oracle(&script);
         let numpy_vals = parse_float_list(&numpy_result);
 
-        let rust_script = format!(
-            "import numpy as np; print(list(np.cumprod({arr_expr}{axis_arg}).flatten()))"
-        );
+        let rust_script =
+            format!("import numpy as np; print(list(np.cumprod({arr_expr}{axis_arg}).flatten()))");
         let rust_result = numpy_oracle(&rust_script);
         let rust_vals = parse_float_list(&rust_result);
 
