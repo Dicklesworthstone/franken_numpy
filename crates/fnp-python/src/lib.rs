@@ -13746,6 +13746,22 @@ fn native_unary_promoting(
     Ok(output)
 }
 
+fn native_unary_promoting_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+    op: UnaryOp,
+    numpy_name: &str,
+    context: &str,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
+        let x = args.get_item(0)?;
+        native_unary_promoting(py, &x, op, numpy_name, context)
+    } else {
+        core_numpy_passthrough(py, numpy_name, args, kwargs)
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn square(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
@@ -22398,51 +22414,83 @@ fn exp2(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 // Trig (Array-API aliases for arc*/inverse trig — numpy exposes both).
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn acos(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    arccos(py, x)
+#[pyo3(signature = (*args, **kwargs))]
+fn acos(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arccos, "acos", "acos(x)")
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn acosh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    arccosh(py, x)
+#[pyo3(signature = (*args, **kwargs))]
+fn acosh(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arccosh, "acosh", "acosh(x)")
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn asin(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    arcsin(py, x)
+#[pyo3(signature = (*args, **kwargs))]
+fn asin(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arcsin, "asin", "asin(x)")
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn asinh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    arcsinh(py, x)
+#[pyo3(signature = (*args, **kwargs))]
+fn asinh(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arcsinh, "asinh", "asinh(x)")
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn atan(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    arctan(py, x)
+#[pyo3(signature = (*args, **kwargs))]
+fn atan(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arctan, "atan", "atan(x)")
 }
 
 #[pyfunction]
-#[pyo3(signature = (x1, x2))]
-fn atan2(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    arctan2(py, x1, x2)
+#[pyo3(signature = (*args, **kwargs))]
+fn atan2(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    core_numpy_passthrough(py, "atan2", args, kwargs)
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn atanh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    arctanh(py, x)
+#[pyo3(signature = (*args, **kwargs))]
+fn atanh(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arctanh, "atanh", "atanh(x)")
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn tan(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_promoting(py, x.bind(py), UnaryOp::Tan, "tan", "tan(x)")
+#[pyo3(signature = (*args, **kwargs))]
+fn tan(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Tan, "tan", "tan(x)")
 }
 
 // Bitwise (11) — Array-API names + numpy legacy names.

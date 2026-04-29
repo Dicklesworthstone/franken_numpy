@@ -167,6 +167,69 @@ fn tan_matches_numpy_across_50_cases() -> Result<(), String> {
 }
 
 #[test]
+fn trig_aliases_accept_ufunc_out_keyword() -> Result<(), String> {
+    let cases = [
+        ("acos", "np.array([0.0])"),
+        ("acosh", "np.array([1.5])"),
+        ("asin", "np.array([0.0])"),
+        ("asinh", "np.array([0.5])"),
+        ("atan", "np.array([0.5])"),
+        ("atanh", "np.array([0.5])"),
+        ("tan", "np.array([0.5])"),
+    ];
+
+    for (func, input) in cases {
+        let script = format!(
+            "import numpy as np\n\
+             x = {input}\n\
+             out = np.empty_like(x, dtype=float)\n\
+             r = np.{func}(x, out=out)\n\
+             print(r is out, out.tolist())"
+        );
+        let numpy_result = numpy_oracle(&script)?;
+
+        let rust_script = fnp_script(format!(
+            "x = {input}\n\
+             out = np.empty_like(x, dtype=float)\n\
+             r = fnp.{func}(x, out=out)\n\
+             print(r is out, out.tolist())"
+        ));
+        let rust_result = numpy_oracle(&rust_script)?;
+
+        assert_eq!(
+            numpy_result.trim(),
+            rust_result.trim(),
+            "{func} out keyword mismatch"
+        );
+    }
+
+    let script = "import numpy as np\n\
+                  y = np.array([1.0])\n\
+                  x = np.array([1.0])\n\
+                  out = np.empty_like(x, dtype=float)\n\
+                  r = np.atan2(y, x, out=out)\n\
+                  print(r is out, out.tolist())";
+    let numpy_result = numpy_oracle(script)?;
+
+    let rust_script = fnp_script(
+        "y = np.array([1.0])\n\
+         x = np.array([1.0])\n\
+         out = np.empty_like(x, dtype=float)\n\
+         r = fnp.atan2(y, x, out=out)\n\
+         print(r is out, out.tolist())"
+            .into(),
+    );
+    let rust_result = numpy_oracle(&rust_script)?;
+
+    assert_eq!(
+        numpy_result.trim(),
+        rust_result.trim(),
+        "atan2 out keyword mismatch"
+    );
+    Ok(())
+}
+
+#[test]
 fn sqrt_matches_numpy_across_50_cases() -> Result<(), String> {
     let test_cases = vec![
         "np.array([0.0])",
