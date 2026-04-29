@@ -1,0 +1,301 @@
+//! Conformance tests for numpy.flatnonzero against NumPy oracle.
+//!
+//! Tests the native Rust flatnonzero implementation against NumPy across various
+//! input shapes, data types, and edge cases.
+
+use std::process::Command;
+
+fn numpy_oracle(script: &str) -> Result<String, String> {
+    let output = Command::new("python3")
+        .args(["-c", script])
+        .output()
+        .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("NumPy oracle failed: {stderr}\nScript: {script}"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn fnp_flatnonzero_script(body: String) -> String {
+    let library_name = format!(
+        "{}fnp_python{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
+    let module_path = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join(&library_name)))
+        .unwrap_or_else(|| library_name.into());
+    let module_literal = format!("{module_path:?}");
+    format!(
+        "import importlib.util\n\
+         import numpy as np\n\
+         spec = importlib.util.spec_from_file_location('fnp_python', {module_literal})\n\
+         fnp = importlib.util.module_from_spec(spec)\n\
+         spec.loader.exec_module(fnp)\n\
+         {body}"
+    )
+}
+
+fn parse_int_list(s: &str) -> Vec<i64> {
+    if s.is_empty() || s == "[]" {
+        return vec![];
+    }
+    let trimmed = s.trim_start_matches('[').trim_end_matches(']');
+    trimmed
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|t| !t.is_empty())
+        .filter_map(|token| token.trim().parse().ok())
+        .collect()
+}
+
+#[test]
+fn flatnonzero_1d_matches_numpy_across_50_cases() -> Result<(), String> {
+    let test_cases = vec![
+        // All nonzero
+        "[1, 2, 3]",
+        "[1, 1, 1, 1, 1]",
+        "[100, 200, 300]",
+        "[-1, -2, -3]",
+        "[1]",
+        // All zero
+        "[0, 0, 0]",
+        "[0, 0, 0, 0, 0]",
+        "[0]",
+        "[0, 0]",
+        "[0, 0, 0, 0, 0, 0, 0]",
+        // Mixed positions
+        "[1, 0, 0]",
+        "[0, 1, 0]",
+        "[0, 0, 1]",
+        "[1, 0, 1]",
+        "[0, 1, 1]",
+        "[1, 1, 0]",
+        "[1, 0, 0, 0, 0]",
+        "[0, 0, 0, 0, 1]",
+        "[0, 0, 1, 0, 0]",
+        "[1, 0, 1, 0, 1]",
+        // Larger arrays
+        "[0, 0, 0, 0, 0, 0, 0, 0, 0, 1]",
+        "[1, 0, 0, 0, 0, 0, 0, 0, 0, 0]",
+        "[0, 0, 0, 0, 1, 0, 0, 0, 0, 0]",
+        "[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]",
+        "[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]",
+        // Negative values (nonzero)
+        "[-1, 0, 0]",
+        "[0, -1, 0]",
+        "[0, 0, -1]",
+        "[-1, -2, -3]",
+        "[0, -5, 0, -10, 0]",
+        // Floating point
+        "[0.0, 0.0, 0.0]",
+        "[1.0, 0.0, 0.0]",
+        "[0.0, 1.0, 0.0]",
+        "[0.0, 0.0, 1.0]",
+        "[0.5, 0.0, 0.5]",
+        "[0.0, 0.0, 0.001]",
+        "[-0.5, 0.0, 0.5]",
+        "[1.1, 2.2, 3.3]",
+        "[0.0, 0.0, 0.0, 0.0]",
+        "[0.0, 0.1, 0.0, 0.2, 0.0]",
+        // Edge cases
+        "[0, 1]",
+        "[1, 0]",
+        "[0, 0, 0, 1, 0]",
+        "[5, 0, 0, 0, 0]",
+        "[0, 0, 0, 0, 5]",
+        // More variety
+        "[0, 8, 0, 0, 0]",
+        "[0, 0, 0, 0, 0, 66]",
+        "[1, 4, 9, 16, 25, 36, 49]",
+        "[0, 0, 25, 0, 0]",
+        "[-10, 0, 10, 0, -20]",
+    ];
+
+    for arr_str in &test_cases {
+        let script = format!("import numpy as np; print(list(np.flatnonzero(np.array({arr_str}))))");
+        let numpy_result = numpy_oracle(&script)?;
+        let numpy_vals = parse_int_list(&numpy_result);
+
+        let rust_script = fnp_flatnonzero_script(format!(
+            "print(list(fnp.flatnonzero(np.array({arr_str}))))"
+        ));
+        let rust_result = numpy_oracle(&rust_script)?;
+        let rust_vals = parse_int_list(&rust_result);
+
+        assert_eq!(
+            numpy_vals, rust_vals,
+            "flatnonzero mismatch for {arr_str}\nnumpy: {numpy_vals:?}\nrust: {rust_vals:?}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn flatnonzero_2d_matches_numpy() -> Result<(), String> {
+    let test_cases = vec![
+        // 2D arrays (flattened row-major)
+        "[[0, 0], [0, 0]]",
+        "[[1, 0], [0, 0]]",
+        "[[0, 1], [0, 0]]",
+        "[[0, 0], [1, 0]]",
+        "[[0, 0], [0, 1]]",
+        "[[1, 1], [1, 1]]",
+        "[[1, 0], [0, 1]]",
+        "[[0, 1], [1, 0]]",
+        // Different shapes
+        "[[0, 0, 0], [0, 0, 0]]",
+        "[[1, 0, 0], [0, 0, 0]]",
+        "[[0, 0, 1], [0, 0, 0]]",
+        "[[0, 0, 0], [1, 0, 0]]",
+        "[[0, 0, 0], [0, 0, 1]]",
+        "[[1, 2, 3], [4, 5, 6]]",
+        "[[0, 0], [0, 0], [0, 0]]",
+        "[[1, 0], [0, 1], [1, 0]]",
+        // Single row/column
+        "[[0, 0, 0, 0, 0]]",
+        "[[0, 0, 1, 0, 0]]",
+        "[[1, 2, 3, 4, 5]]",
+        "[[0], [0], [0], [0]]",
+        "[[0], [1], [0], [0]]",
+        "[[1], [2], [3], [4]]",
+    ];
+
+    for arr_str in &test_cases {
+        let script = format!("import numpy as np; print(list(np.flatnonzero(np.array({arr_str}))))");
+        let numpy_result = numpy_oracle(&script)?;
+        let numpy_vals = parse_int_list(&numpy_result);
+
+        let rust_script = fnp_flatnonzero_script(format!(
+            "print(list(fnp.flatnonzero(np.array({arr_str}))))"
+        ));
+        let rust_result = numpy_oracle(&rust_script)?;
+        let rust_vals = parse_int_list(&rust_result);
+
+        assert_eq!(
+            numpy_vals, rust_vals,
+            "flatnonzero 2D mismatch for {arr_str}\nnumpy: {numpy_vals:?}\nrust: {rust_vals:?}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn flatnonzero_3d_matches_numpy() -> Result<(), String> {
+    let test_cases = vec![
+        "[[[0, 0], [0, 0]], [[0, 0], [0, 0]]]",
+        "[[[1, 0], [0, 0]], [[0, 0], [0, 0]]]",
+        "[[[0, 0], [0, 0]], [[0, 0], [0, 1]]]",
+        "[[[0, 1], [0, 0]], [[0, 0], [1, 0]]]",
+        "[[[1, 1], [1, 1]], [[1, 1], [1, 1]]]",
+        "[[[0, 0, 0]], [[0, 0, 0]]]",
+        "[[[1, 0, 0]], [[0, 0, 1]]]",
+        "[[[0], [0], [0]], [[0], [1], [0]]]",
+        "[[[1], [0], [1]], [[0], [1], [0]]]",
+    ];
+
+    for arr_str in &test_cases {
+        let script = format!("import numpy as np; print(list(np.flatnonzero(np.array({arr_str}))))");
+        let numpy_result = numpy_oracle(&script)?;
+        let numpy_vals = parse_int_list(&numpy_result);
+
+        let rust_script = fnp_flatnonzero_script(format!(
+            "print(list(fnp.flatnonzero(np.array({arr_str}))))"
+        ));
+        let rust_result = numpy_oracle(&rust_script)?;
+        let rust_vals = parse_int_list(&rust_result);
+
+        assert_eq!(
+            numpy_vals, rust_vals,
+            "flatnonzero 3D mismatch for {arr_str}\nnumpy: {numpy_vals:?}\nrust: {rust_vals:?}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn flatnonzero_dtypes_match_numpy() -> Result<(), String> {
+    let test_cases = vec![
+        "np.array([0, 1, 0, 2], dtype=np.int32)",
+        "np.array([0, 0, 0, 0], dtype=np.int64)",
+        "np.array([1, 0, 0], dtype=np.uint8)",
+        "np.array([0, 0, 1], dtype=np.int16)",
+        "np.array([0.0, 1.0, 0.0], dtype=np.float32)",
+        "np.array([0.0, 0.0, 0.5], dtype=np.float64)",
+        "np.array([True, False, True], dtype=np.bool_)",
+        "np.array([False, False, False], dtype=np.bool_)",
+        "np.array([[0, 1], [0, 0]], dtype=np.int32)",
+        "np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float32)",
+    ];
+
+    for arr_expr in &test_cases {
+        let script = format!("import numpy as np; print(list(np.flatnonzero({arr_expr})))");
+        let numpy_result = numpy_oracle(&script)?;
+        let numpy_vals = parse_int_list(&numpy_result);
+
+        let rust_script = fnp_flatnonzero_script(format!(
+            "print(list(fnp.flatnonzero({arr_expr})))"
+        ));
+        let rust_result = numpy_oracle(&rust_script)?;
+        let rust_vals = parse_int_list(&rust_result);
+
+        assert_eq!(
+            numpy_vals, rust_vals,
+            "flatnonzero dtype mismatch for {arr_expr}\nnumpy: {numpy_vals:?}\nrust: {rust_vals:?}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn flatnonzero_empty_array_matches_numpy() -> Result<(), String> {
+    let script = "import numpy as np; print(list(np.flatnonzero(np.array([]))))";
+    let numpy_result = numpy_oracle(script)?;
+    let numpy_vals = parse_int_list(&numpy_result);
+
+    let rust_script = fnp_flatnonzero_script("print(list(fnp.flatnonzero(np.array([]))))".into());
+    let rust_result = numpy_oracle(&rust_script)?;
+    let rust_vals = parse_int_list(&rust_result);
+
+    assert_eq!(
+        numpy_vals, rust_vals,
+        "flatnonzero empty array mismatch\nnumpy: {numpy_vals:?}\nrust: {rust_vals:?}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn flatnonzero_large_sparse_matches_numpy() -> Result<(), String> {
+    let test_cases = vec![
+        "np.zeros(100)",
+        "np.ones(100)",
+        "np.eye(10).flatten()",
+        "np.arange(100) % 7 == 0",
+        "np.arange(50) > 25",
+    ];
+
+    for arr_expr in &test_cases {
+        let script = format!("import numpy as np; print(list(np.flatnonzero({arr_expr})))");
+        let numpy_result = numpy_oracle(&script)?;
+        let numpy_vals = parse_int_list(&numpy_result);
+
+        let rust_script = fnp_flatnonzero_script(format!(
+            "print(list(fnp.flatnonzero({arr_expr})))"
+        ));
+        let rust_result = numpy_oracle(&rust_script)?;
+        let rust_vals = parse_int_list(&rust_result);
+
+        assert_eq!(
+            numpy_vals, rust_vals,
+            "flatnonzero large/sparse mismatch for {arr_expr}\nnumpy: {numpy_vals:?}\nrust: {rust_vals:?}"
+        );
+    }
+
+    Ok(())
+}
