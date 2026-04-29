@@ -18021,6 +18021,48 @@ impl UFuncArray {
         Ok(())
     }
 
+    fn validate_einsum_input_shapes(
+        context: &str,
+        input_subs: &[&str],
+        operands: &[&Self],
+    ) -> Result<(), UFuncError> {
+        let mut label_sizes: std::collections::HashMap<char, usize> =
+            std::collections::HashMap::new();
+
+        for (sub, op) in input_subs.iter().zip(operands.iter()) {
+            let chars: Vec<char> = sub.chars().collect();
+            if chars.len() != op.shape.len() {
+                return Err(UFuncError::Msg(format!(
+                    "{context}: subscript '{}' has {} indices but operand has {} dimensions",
+                    sub,
+                    chars.len(),
+                    op.shape.len()
+                )));
+            }
+
+            for (idx, &label) in chars.iter().enumerate() {
+                let dim = op.shape[idx];
+                if let Some(existing) = label_sizes.get_mut(&label) {
+                    if *existing == dim {
+                        continue;
+                    }
+                    if *existing == 1 {
+                        *existing = dim;
+                    } else if dim != 1 {
+                        return Err(UFuncError::Msg(format!(
+                            "{context}: conflicting sizes for label '{}': {} vs {}",
+                            label, *existing, dim
+                        )));
+                    }
+                } else {
+                    label_sizes.insert(label, dim);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn einsum(subscripts: &str, operands: &[&Self]) -> Result<Self, UFuncError> {
         let parts: Vec<&str> = subscripts.split("->").collect();
         if parts.len() > 2 {
@@ -18260,6 +18302,7 @@ impl UFuncArray {
             labels
         };
         Self::validate_einsum_output_labels("einsum_path", &input_subs, &output_labels)?;
+        Self::validate_einsum_input_shapes("einsum_path", &input_subs, operands)?;
 
         let n = operands.len();
         if n <= 2 {
@@ -18387,6 +18430,7 @@ impl UFuncArray {
             labels
         };
         Self::validate_einsum_output_labels("einsum_optimized", &input_subs, &output_labels)?;
+        Self::validate_einsum_input_shapes("einsum_optimized", &input_subs, operands)?;
         let output_str: String = output_labels.iter().collect();
 
         // Inline greedy contraction: repeatedly pick and contract the cheapest pair
@@ -45488,6 +45532,30 @@ print(json.dumps(payload))
     fn einsum_path_mismatch() {
         let a = UFuncArray::new(vec![2], vec![0.0; 2], DType::F64).unwrap();
         assert!(UFuncArray::einsum_path("i,j->ij", &[&a]).is_err());
+    }
+
+    #[test]
+    fn einsum_path_rejects_operand_rank_mismatch() {
+        let a = UFuncArray::new(vec![3], vec![0.0; 3], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3, 2], vec![0.0; 6], DType::F64).unwrap();
+        let err = UFuncArray::einsum_path("ij,jk", &[&a, &b]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("subscript 'ij' has 2 indices but operand has 1 dimensions"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn einsum_path_rejects_conflicting_shared_label_sizes() {
+        let a = UFuncArray::new(vec![2, 3], vec![0.0; 6], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![4, 2], vec![0.0; 8], DType::F64).unwrap();
+        let err = UFuncArray::einsum_path("ij,jk->ik", &[&a, &b]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("conflicting sizes for label 'j': 3 vs 4"),
+            "{err}"
+        );
     }
 
     #[test]
