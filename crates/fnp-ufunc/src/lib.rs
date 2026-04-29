@@ -30936,9 +30936,19 @@ pub fn divmod_arrays(
                 quotients.push(f64::NAN);
                 remainders.push(f64::NAN);
             } else {
-                // av is finite, bv is inf: quotient is 0, remainder is av
-                quotients.push(0.0);
-                remainders.push(av);
+                // av is finite, bv is inf
+                // numpy: floor_divide has special handling for negative dividend
+                if av == 0.0 {
+                    quotients.push(0.0);
+                    remainders.push(0.0);
+                } else if av > 0.0 {
+                    quotients.push(0.0);
+                    remainders.push(av);
+                } else {
+                    // av < 0, bv is inf: quotient is -1, remainder is inf
+                    quotients.push(-1.0);
+                    remainders.push(f64::INFINITY);
+                }
             }
         } else if av.is_nan() || bv.is_nan() {
             quotients.push(f64::NAN);
