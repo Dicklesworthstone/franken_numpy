@@ -31088,6 +31088,29 @@ pub fn hypot(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError>
     })
 }
 
+/// Element-wise arc tangent of x1/x2 choosing the quadrant correctly.
+///
+/// The quadrant (i.e., branch) is chosen so that `arctan2(x1, x2)` is the
+/// signed angle in radians between the ray ending at the origin and passing
+/// through the point (1,0), and the ray ending at the origin and passing
+/// through the point (x2, x1). NumPy equivalent: `np.arctan2(x1, x2)`.
+pub fn arctan2(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
+    let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
+    let values: Vec<f64> = x1_bc
+        .values
+        .iter()
+        .zip(x2_bc.values.iter())
+        .map(|(&y, &x)| y.atan2(x))
+        .collect();
+    Ok(UFuncArray {
+        shape: x1_bc.shape.clone(),
+        values,
+        dtype: DType::F64,
+        integer_sidecar: None,
+    })
+}
+
 /// Logarithm of the sum of exponentiations: log(exp(x1) + exp(x2)).
 ///
 /// This is computed in a numerically stable way to avoid overflow.

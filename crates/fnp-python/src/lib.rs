@@ -10,7 +10,8 @@ use fnp_random::{
 use fnp_ufunc::{
     BinaryOp, FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
     FromPyFuncReduceOptions, GridSpec, MAError, MaskedArray, UFuncArray, UnaryOp,
-    copysign as ufunc_copysign, frexp as ufunc_frexp, hypot as ufunc_hypot,
+    arctan2 as ufunc_arctan2, copysign as ufunc_copysign, frexp as ufunc_frexp,
+    hypot as ufunc_hypot,
     isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, ldexp as ufunc_ldexp,
     logaddexp as ufunc_logaddexp, logaddexp2 as ufunc_logaddexp2, ma_is_masked, ma_make_mask,
     ma_mask_or, modf as ufunc_modf, nextafter as ufunc_nextafter, reduce_frompyfunc_values,
@@ -15869,14 +15870,10 @@ fn arctan(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x1, x2))]
 fn arctan2(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.arctan2. Two-argument arctangent that uses the
-    // signs of x1 and x2 to determine the correct quadrant; result in
-    // [-pi, pi]. Critical for cartesian-to-polar conversion.
-    let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("arctan2")?
-        .call1((x1.bind(py), x2.bind(py)))?
-        .unbind())
+    let x1 = extract_numeric_array(py, x1.bind(py), "arctan2(x1)")?;
+    let x2 = extract_numeric_array(py, x2.bind(py), "arctan2(x2)")?;
+    let result = ufunc_arctan2(&x1, &x2).map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
