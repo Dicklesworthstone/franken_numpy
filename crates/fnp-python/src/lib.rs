@@ -10,10 +10,12 @@ use fnp_random::{
 use fnp_ufunc::{
     BinaryOp, FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
     FromPyFuncReduceOptions, GridSpec, MAError, MaskedArray, UFuncArray, UnaryOp,
-    arctan2 as ufunc_arctan2, copysign as ufunc_copysign, fmax as ufunc_fmax,
-    fmin as ufunc_fmin, frexp as ufunc_frexp, gcd_arrays as ufunc_gcd,
+    arctan2 as ufunc_arctan2, copysign as ufunc_copysign,
+    float_power as ufunc_float_power, fmax as ufunc_fmax, fmin as ufunc_fmin,
+    fmod as ufunc_fmod, frexp as ufunc_frexp, gcd_arrays as ufunc_gcd,
     heaviside as ufunc_heaviside, hypot as ufunc_hypot, lcm_arrays as ufunc_lcm,
     maximum as ufunc_maximum, minimum as ufunc_minimum,
+    remainder as ufunc_remainder,
     isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, ldexp as ufunc_ldexp,
     logaddexp as ufunc_logaddexp, logaddexp2 as ufunc_logaddexp2, ma_is_masked, ma_make_mask,
     ma_mask_or, modf as ufunc_modf, nextafter as ufunc_nextafter, reduce_frompyfunc_values,
@@ -13662,14 +13664,10 @@ fn conjugate(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x1, x2))]
 fn fmod(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.fmod (C-style remainder: sign follows the
-    // dividend, unlike np.remainder which follows the divisor).
-    // Integer divide-by-zero and float nan/inf surfacing match numpy.
-    let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("fmod")?
-        .call1((x1.bind(py), x2.bind(py)))?
-        .unbind())
+    let x1 = extract_numeric_array(py, x1.bind(py), "fmod(x1)")?;
+    let x2 = extract_numeric_array(py, x2.bind(py), "fmod(x2)")?;
+    let result = ufunc_fmod(&x1, &x2).map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -13855,6 +13853,36 @@ fn native_binary_lcm_or_passthrough(
         build_numpy_array_from_ufunc(py, &result)
     } else {
         core_numpy_passthrough(py, "lcm", args, kwargs)
+    }
+}
+
+fn native_binary_float_power_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let x1 = extract_numeric_array(py, &args.get_item(0)?, "float_power(x1)")?;
+        let x2 = extract_numeric_array(py, &args.get_item(1)?, "float_power(x2)")?;
+        let result = ufunc_float_power(&x1, &x2).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "float_power", args, kwargs)
+    }
+}
+
+fn native_binary_remainder_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let x1 = extract_numeric_array(py, &args.get_item(0)?, "remainder(x1)")?;
+        let x2 = extract_numeric_array(py, &args.get_item(1)?, "remainder(x2)")?;
+        let result = ufunc_remainder(&x1, &x2).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "remainder", args, kwargs)
     }
 }
 
@@ -22856,7 +22884,7 @@ fn float_power(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "float_power", args, kwargs)
+    native_binary_float_power_or_passthrough(py, args, kwargs)
 }
 
 // Arithmetic: divmod + mod/remainder (3).
@@ -22878,7 +22906,7 @@ fn py_mod(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "mod", args, kwargs)
+    native_binary_remainder_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
@@ -22888,7 +22916,7 @@ fn remainder(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "remainder", args, kwargs)
+    native_binary_remainder_or_passthrough(py, args, kwargs)
 }
 
 // Datetime-aware ufunc (1).
