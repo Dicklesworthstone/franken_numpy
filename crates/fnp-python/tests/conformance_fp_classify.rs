@@ -84,8 +84,7 @@ fn isnan_matches_numpy_across_50_cases() -> Result<(), String> {
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_bool_list(&numpy_result);
 
-        let rust_script =
-            fnp_script(format!("print(fnp.isnan({arr_expr}).flatten().tolist())"));
+        let rust_script = fnp_script(format!("print(fnp.isnan({arr_expr}).flatten().tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_bool_list(&rust_result);
 
@@ -133,8 +132,7 @@ fn isinf_matches_numpy_across_50_cases() -> Result<(), String> {
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_bool_list(&numpy_result);
 
-        let rust_script =
-            fnp_script(format!("print(fnp.isinf({arr_expr}).flatten().tolist())"));
+        let rust_script = fnp_script(format!("print(fnp.isinf({arr_expr}).flatten().tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_bool_list(&rust_result);
 
@@ -183,8 +181,9 @@ fn isfinite_matches_numpy_across_50_cases() -> Result<(), String> {
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_bool_list(&numpy_result);
 
-        let rust_script =
-            fnp_script(format!("print(fnp.isfinite({arr_expr}).flatten().tolist())"));
+        let rust_script = fnp_script(format!(
+            "print(fnp.isfinite({arr_expr}).flatten().tolist())"
+        ));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_bool_list(&rust_result);
 
@@ -233,8 +232,7 @@ fn signbit_matches_numpy_across_50_cases() -> Result<(), String> {
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_bool_list(&numpy_result);
 
-        let rust_script =
-            fnp_script(format!("print(fnp.signbit({arr_expr}).flatten().tolist())"));
+        let rust_script = fnp_script(format!("print(fnp.signbit({arr_expr}).flatten().tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_bool_list(&rust_result);
 

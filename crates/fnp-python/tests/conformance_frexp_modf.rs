@@ -237,7 +237,8 @@ fn modf_empty_array_matches_numpy() -> Result<(), String> {
 
 #[test]
 fn frexp_dtype_matches_numpy() -> Result<(), String> {
-    let script = "import numpy as np; m, e = np.frexp(np.array([1.0, 2.0])); print(m.dtype, e.dtype)";
+    let script =
+        "import numpy as np; m, e = np.frexp(np.array([1.0, 2.0])); print(m.dtype, e.dtype)";
     let numpy_result = numpy_oracle(script)?;
 
     let rust_script =
@@ -255,7 +256,8 @@ fn frexp_dtype_matches_numpy() -> Result<(), String> {
 
 #[test]
 fn modf_dtype_matches_numpy() -> Result<(), String> {
-    let script = "import numpy as np; f, i = np.modf(np.array([1.5, 2.5])); print(f.dtype, i.dtype)";
+    let script =
+        "import numpy as np; f, i = np.modf(np.array([1.5, 2.5])); print(f.dtype, i.dtype)";
     let numpy_result = numpy_oracle(script)?;
 
     let rust_script =
@@ -322,11 +324,7 @@ print(np.allclose(f + i, x))
     );
     let rust_result = numpy_oracle(&rust_script)?;
 
-    assert_eq!(
-        numpy_result.trim(),
-        rust_result.trim(),
-        "modf sum mismatch"
-    );
+    assert_eq!(numpy_result.trim(), rust_result.trim(), "modf sum mismatch");
 
     Ok(())
 }

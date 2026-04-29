@@ -141,15 +141,13 @@ fn argwhere_1d_matches_numpy_across_50_cases() -> Result<(), String> {
     ];
 
     for arr_str in &test_cases {
-        let script = format!(
-            "import numpy as np; print(np.argwhere(np.array({arr_str})).tolist())"
-        );
+        let script =
+            format!("import numpy as np; print(np.argwhere(np.array({arr_str})).tolist())");
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_nested_int_list(&numpy_result);
 
-        let rust_script = fnp_argwhere_script(format!(
-            "print(fnp.argwhere(np.array({arr_str})).tolist())"
-        ));
+        let rust_script =
+            fnp_argwhere_script(format!("print(fnp.argwhere(np.array({arr_str})).tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_nested_int_list(&rust_result);
 
@@ -193,15 +191,13 @@ fn argwhere_2d_matches_numpy() -> Result<(), String> {
     ];
 
     for arr_str in &test_cases {
-        let script = format!(
-            "import numpy as np; print(np.argwhere(np.array({arr_str})).tolist())"
-        );
+        let script =
+            format!("import numpy as np; print(np.argwhere(np.array({arr_str})).tolist())");
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_nested_int_list(&numpy_result);
 
-        let rust_script = fnp_argwhere_script(format!(
-            "print(fnp.argwhere(np.array({arr_str})).tolist())"
-        ));
+        let rust_script =
+            fnp_argwhere_script(format!("print(fnp.argwhere(np.array({arr_str})).tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_nested_int_list(&rust_result);
 
@@ -229,15 +225,13 @@ fn argwhere_3d_matches_numpy() -> Result<(), String> {
     ];
 
     for arr_str in &test_cases {
-        let script = format!(
-            "import numpy as np; print(np.argwhere(np.array({arr_str})).tolist())"
-        );
+        let script =
+            format!("import numpy as np; print(np.argwhere(np.array({arr_str})).tolist())");
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_nested_int_list(&numpy_result);
 
-        let rust_script = fnp_argwhere_script(format!(
-            "print(fnp.argwhere(np.array({arr_str})).tolist())"
-        ));
+        let rust_script =
+            fnp_argwhere_script(format!("print(fnp.argwhere(np.array({arr_str})).tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_nested_int_list(&rust_result);
 
@@ -270,9 +264,7 @@ fn argwhere_dtypes_match_numpy() -> Result<(), String> {
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_nested_int_list(&numpy_result);
 
-        let rust_script = fnp_argwhere_script(format!(
-            "print(fnp.argwhere({arr_expr}).tolist())"
-        ));
+        let rust_script = fnp_argwhere_script(format!("print(fnp.argwhere({arr_expr}).tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_nested_int_list(&rust_result);
 
@@ -318,9 +310,7 @@ fn argwhere_large_sparse_matches_numpy() -> Result<(), String> {
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_nested_int_list(&numpy_result);
 
-        let rust_script = fnp_argwhere_script(format!(
-            "print(fnp.argwhere({arr_expr}).tolist())"
-        ));
+        let rust_script = fnp_argwhere_script(format!("print(fnp.argwhere({arr_expr}).tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_nested_int_list(&rust_result);
 

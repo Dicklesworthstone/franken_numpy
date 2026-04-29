@@ -128,8 +128,7 @@ fn spacing_matches_numpy_across_50_cases() -> Result<(), String> {
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_float_list(&numpy_result)?;
 
-        let rust_script =
-            fnp_script(format!("print(fnp.spacing({arr_expr}).flatten().tolist())"));
+        let rust_script = fnp_script(format!("print(fnp.spacing({arr_expr}).flatten().tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_float_list(&rust_result)?;
 
@@ -169,7 +168,10 @@ fn nextafter_matches_numpy_across_50_cases() -> Result<(), String> {
         ("np.array([1e-308])", "np.array([0.0])"),
         ("np.array([-0.0])", "np.array([0.0])"),
         ("np.array([0.0])", "np.array([-0.0])"),
-        ("np.array([[1.0, 2.0], [3.0, 4.0]])", "np.array([[2.0, 3.0], [4.0, 5.0]])"),
+        (
+            "np.array([[1.0, 2.0], [3.0, 4.0]])",
+            "np.array([[2.0, 3.0], [4.0, 5.0]])",
+        ),
     ];
 
     for (x1_expr, x2_expr) in &test_cases {
@@ -219,7 +221,10 @@ fn ldexp_matches_numpy_across_50_cases() -> Result<(), String> {
         ("np.array([-np.inf])", "np.array([1])"),
         ("np.array([np.nan])", "np.array([1])"),
         ("np.array([1.0])", "np.array([0, 1, 2, 3, 4])"),
-        ("np.array([[1.0, 2.0], [3.0, 4.0]])", "np.array([[1, 2], [3, 4]])"),
+        (
+            "np.array([[1.0, 2.0], [3.0, 4.0]])",
+            "np.array([[1, 2], [3, 4]])",
+        ),
         ("np.array([0.5])", "np.array([-1])"),
         ("np.array([0.25])", "np.array([-2])"),
     ];
@@ -230,8 +235,9 @@ fn ldexp_matches_numpy_across_50_cases() -> Result<(), String> {
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_float_list(&numpy_result)?;
 
-        let rust_script =
-            fnp_script(format!("print(fnp.ldexp({x1_expr}, {x2_expr}).flatten().tolist())"));
+        let rust_script = fnp_script(format!(
+            "print(fnp.ldexp({x1_expr}, {x2_expr}).flatten().tolist())"
+        ));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_float_list(&rust_result)?;
 
@@ -324,7 +330,8 @@ print(fnp.ldexp(x1, x2).tolist())
 
 #[test]
 fn spacing_integer_promotes_to_float() -> Result<(), String> {
-    let script = "import numpy as np; r = np.spacing(np.array([1, 2, 3], dtype=np.int32)); print(r.dtype)";
+    let script =
+        "import numpy as np; r = np.spacing(np.array([1, 2, 3], dtype=np.int32)); print(r.dtype)";
     let numpy_result = numpy_oracle(script)?;
 
     let rust_script =
