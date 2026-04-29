@@ -18063,8 +18063,54 @@ impl UFuncArray {
         Ok(())
     }
 
+    fn normalize_einsum_subscripts(
+        context: &str,
+        subscripts: &str,
+        allow_private_labels: bool,
+    ) -> Result<String, UFuncError> {
+        let mut normalized = String::with_capacity(subscripts.len());
+        let mut chars = subscripts.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == ' ' {
+                continue;
+            }
+            if ch.is_ascii_alphabetic()
+                || ch == ','
+                || ch == '.'
+                || (allow_private_labels && ('\u{E000}'..='\u{F8FF}').contains(&ch))
+            {
+                normalized.push(ch);
+                continue;
+            }
+            if ch == '-' && chars.peek() == Some(&'>') {
+                normalized.push('-');
+                normalized.push('>');
+                chars.next();
+                continue;
+            }
+
+            let escaped: String = ch.escape_debug().collect();
+            return Err(UFuncError::Msg(format!(
+                "{context}: invalid subscript '{escaped}' in subscripts string, subscripts must be letters"
+            )));
+        }
+
+        Ok(normalized)
+    }
+
     pub fn einsum(subscripts: &str, operands: &[&Self]) -> Result<Self, UFuncError> {
-        let parts: Vec<&str> = subscripts.split("->").collect();
+        Self::einsum_impl(subscripts, operands, false)
+    }
+
+    fn einsum_impl(
+        subscripts: &str,
+        operands: &[&Self],
+        allow_private_labels: bool,
+    ) -> Result<Self, UFuncError> {
+        let normalized_subscripts =
+            Self::normalize_einsum_subscripts("einsum", subscripts, allow_private_labels)?;
+        let parts: Vec<&str> = normalized_subscripts.split("->").collect();
         if parts.len() > 2 {
             return Err(UFuncError::Msg(
                 "einsum: subscripts must contain at most one '->'".to_string(),
@@ -18258,7 +18304,9 @@ impl UFuncArray {
         subscripts: &str,
         operands: &[&Self],
     ) -> Result<(Vec<Vec<usize>>, String), UFuncError> {
-        let parts: Vec<&str> = subscripts.split("->").collect();
+        let normalized_subscripts =
+            Self::normalize_einsum_subscripts("einsum_path", subscripts, false)?;
+        let parts: Vec<&str> = normalized_subscripts.split("->").collect();
         if parts.len() > 2 {
             return Err(UFuncError::Msg(
                 "einsum_path: subscripts must contain at most one '->'".to_string(),
@@ -18380,7 +18428,9 @@ impl UFuncArray {
         }
 
         // Parse subscripts
-        let parts: Vec<&str> = subscripts.split("->").collect();
+        let normalized_subscripts =
+            Self::normalize_einsum_subscripts("einsum_optimized", subscripts, false)?;
+        let parts: Vec<&str> = normalized_subscripts.split("->").collect();
         if parts.len() > 2 {
             return Err(UFuncError::Msg(
                 "einsum_optimized: subscripts must contain at most one '->'".to_string(),
@@ -18461,7 +18511,11 @@ impl UFuncArray {
             );
 
             let pair_sub = format!("{sub_a},{sub_b}->{inter_str}");
-            let result = Self::einsum(&pair_sub, &[&current_ops[best_lo], &current_ops[best_hi]])?;
+            let result = Self::einsum_impl(
+                &pair_sub,
+                &[&current_ops[best_lo], &current_ops[best_hi]],
+                true,
+            )?;
 
             // Remove hi first (larger index), then lo
             current_ops.remove(best_hi);
@@ -18478,7 +18532,7 @@ impl UFuncArray {
             Ok(current_ops.remove(0))
         } else {
             let s = format!("{final_sub}->{output_str}");
-            Self::einsum(&s, &[&current_ops[0]])
+            Self::einsum_impl(&s, &[&current_ops[0]], true)
         }
     }
 
@@ -45564,6 +45618,47 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn einsum_ignores_space_whitespace_like_numpy() {
+        let a =
+            UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
+        let b = UFuncArray::new(
+            vec![3, 2],
+            vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+            DType::F64,
+        )
+        .unwrap();
+        let c = UFuncArray::new(vec![2, 4], vec![1.0; 8], DType::F64).unwrap();
+
+        let compact = UFuncArray::einsum("ij,jk->ik", &[&a, &b]).unwrap();
+        let spaced = UFuncArray::einsum("ij, jk -> ik", &[&a, &b]).unwrap();
+        assert_eq!(spaced.shape(), compact.shape());
+        assert_eq!(spaced.values(), compact.values());
+
+        let (path, _desc) = UFuncArray::einsum_path("ij, jk -> ik", &[&a, &b]).unwrap();
+        assert_eq!(path, vec![vec![0, 1]]);
+
+        let compact_optimized =
+            UFuncArray::einsum_optimized("ij,jk,kl->il", &[&a, &b, &c], "greedy").unwrap();
+        let spaced_optimized =
+            UFuncArray::einsum_optimized("ij, jk, kl -> il", &[&a, &b, &c], "greedy").unwrap();
+        assert_eq!(spaced_optimized.shape(), compact_optimized.shape());
+        assert_eq!(spaced_optimized.values(), compact_optimized.values());
+    }
+
+    #[test]
+    fn einsum_rejects_non_letter_subscript_labels() {
+        let a = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
+        let err = UFuncArray::einsum("1->1", &[&a]).unwrap_err();
+        assert!(err.to_string().contains("invalid subscript '1'"), "{err}");
+
+        let err = UFuncArray::einsum_path("_->_", &[&a]).unwrap_err();
+        assert!(err.to_string().contains("invalid subscript '_'"), "{err}");
+
+        let err = UFuncArray::einsum("i\t->i", &[&a]).unwrap_err();
+        assert!(err.to_string().contains("invalid subscript '\\t'"), "{err}");
+    }
+
+    #[test]
     fn einsum_implicit_output() {
         // No '->' → implicit: "ij,jk" should produce "ik" (j appears twice, i and k once)
         let a =
@@ -56042,13 +56137,13 @@ print(json.dumps(payload))
     fn einsum_explicit_output_unknown_label_rejected() {
         let a = UFuncArray::new(vec![2, 3], vec![1.0; 6], DType::F64).unwrap();
 
-        let err = UFuncArray::einsum("ij->\n", &[&a]).unwrap_err();
+        let err = UFuncArray::einsum("ij->z", &[&a]).unwrap_err();
         assert!(err.to_string().contains("does not appear in inputs"));
 
-        let path_err = UFuncArray::einsum_path("ij->\n", &[&a]).unwrap_err();
+        let path_err = UFuncArray::einsum_path("ij->z", &[&a]).unwrap_err();
         assert!(path_err.to_string().contains("does not appear in inputs"));
 
-        let opt_err = UFuncArray::einsum_optimized("ij->\n", &[&a], "greedy").unwrap_err();
+        let opt_err = UFuncArray::einsum_optimized("ij->z", &[&a], "greedy").unwrap_err();
         assert!(opt_err.to_string().contains("does not appear in inputs"));
     }
 
