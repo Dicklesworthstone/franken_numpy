@@ -15748,19 +15748,13 @@ fn linalg_vecdot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>, axis: i64) -> PyR
 #[pyfunction]
 #[pyo3(name = "abs", signature = (x,))]
 fn py_abs(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.abs. Element-wise absolute value; supports real
-    // and complex input, integer dtype is preserved.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("abs")?.call1((x.bind(py),))?.unbind())
+    native_unary_elementwise(py, x.bind(py), UnaryOp::Abs, "abs", "abs(x)")
 }
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn absolute(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.absolute (alias of np.abs). Element-wise absolute
-    // value; supports real and complex input, integer dtype preserved.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("absolute")?.call1((x.bind(py),))?.unbind())
+    py_abs(py, x)
 }
 
 #[pyfunction]
@@ -17677,8 +17671,8 @@ fn einsum_path(
 #[pyo3(signature = (x,))]
 fn i0(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.i0 (modified Bessel function of the first
-    // kind, order 0). Integer input promotes to float; result dtype
-    // follows numpy's promotion rules.
+    // kind, order 0). Using passthrough for exact parity with numpy's
+    // higher-precision implementation.
     let numpy = py.import("numpy")?;
     Ok(numpy.getattr("i0")?.call1((x.bind(py),))?.unbind())
 }
