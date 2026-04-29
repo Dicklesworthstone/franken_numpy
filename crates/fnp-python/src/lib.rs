@@ -21934,7 +21934,7 @@ fn ptp(
         Err(_) => return fallback(),
     };
 
-    build_numpy_array_from_ufunc(py, &result)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 // Matrix gufunc siblings of matmul (2).
