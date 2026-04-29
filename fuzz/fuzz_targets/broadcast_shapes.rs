@@ -58,9 +58,6 @@ fuzz_target!(|data: &[u8]| {
 });
 
 fn checked_element_count(shape: &[usize]) -> Option<usize> {
-    if shape.is_empty() {
-        return None;
-    }
     shape
         .iter()
         .try_fold(1usize, |count, &dim| count.checked_mul(dim))
@@ -71,9 +68,9 @@ fn parse_shape(data: &[u8], idx: &mut usize) -> Vec<usize> {
         return vec![];
     }
 
-    let ndim = (data[*idx] as usize % MAX_DIMS)
-        .saturating_add(1)
-        .min(MAX_DIMS);
+    // NumPy scalar shape is `[]`; include it explicitly so this target exercises
+    // scalar broadcast, reshape, and stride contracts.
+    let ndim = data[*idx] as usize % (MAX_DIMS + 1);
     *idx += 1;
 
     let mut shape = Vec::with_capacity(ndim);
