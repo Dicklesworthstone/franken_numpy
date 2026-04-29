@@ -5,16 +5,16 @@
 
 use std::process::Command;
 
-fn numpy_oracle(script: &str) -> String {
+fn numpy_oracle(script: &str) -> Result<String, String> {
     let output = Command::new("python3")
         .args(["-c", script])
         .output()
-        .expect("python3 should be available");
+        .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        panic!("NumPy oracle failed: {stderr}\nScript: {script}");
+        return Err(format!("NumPy oracle failed: {stderr}\nScript: {script}"));
     }
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn fnp_trace_script(body: String) -> String {
@@ -74,7 +74,7 @@ fn arrays_close(a: &[f64], b: &[f64], tol: f64) -> bool {
 }
 
 #[test]
-fn trace_2d_default_matches_numpy_across_50_cases() {
+fn trace_2d_default_matches_numpy_across_50_cases() -> Result<(), String> {
     let test_cases = vec![
         // Identity matrices
         "[[1, 0], [0, 1]]",
@@ -148,11 +148,11 @@ fn trace_2d_default_matches_numpy_across_50_cases() {
 
     for arr_str in &test_cases {
         let script = format!("import numpy as np; print(np.trace(np.array({arr_str})))");
-        let numpy_result = numpy_oracle(&script);
+        let numpy_result = numpy_oracle(&script)?;
         let numpy_val = parse_float(&numpy_result);
 
         let rust_script = fnp_trace_script(format!("print(fnp.trace(np.array({arr_str})))"));
-        let rust_result = numpy_oracle(&rust_script);
+        let rust_result = numpy_oracle(&rust_script)?;
         let rust_val = parse_float(&rust_result);
 
         assert!(
@@ -160,10 +160,11 @@ fn trace_2d_default_matches_numpy_across_50_cases() {
             "trace default mismatch for {arr_str}\nnumpy: {numpy_val}\nrust: {rust_val}"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn trace_offset_matches_numpy() {
+fn trace_offset_matches_numpy() -> Result<(), String> {
     let test_cases = vec![
         // Positive offset (super-diagonal)
         ("[[1, 2, 3], [4, 5, 6], [7, 8, 9]]", 1),
@@ -213,13 +214,13 @@ fn trace_offset_matches_numpy() {
     for (arr_str, offset) in &test_cases {
         let script =
             format!("import numpy as np; print(np.trace(np.array({arr_str}), offset={offset}))");
-        let numpy_result = numpy_oracle(&script);
+        let numpy_result = numpy_oracle(&script)?;
         let numpy_val = parse_float(&numpy_result);
 
         let rust_script = fnp_trace_script(format!(
             "print(fnp.trace(np.array({arr_str}), offset={offset}))"
         ));
-        let rust_result = numpy_oracle(&rust_script);
+        let rust_result = numpy_oracle(&rust_script)?;
         let rust_val = parse_float(&rust_result);
 
         assert!(
@@ -227,10 +228,11 @@ fn trace_offset_matches_numpy() {
             "trace offset={offset} mismatch for {arr_str}\nnumpy: {numpy_val}\nrust: {rust_val}"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn trace_3d_axis_matches_numpy() {
+fn trace_3d_axis_matches_numpy() -> Result<(), String> {
     let test_cases = vec![
         // 3D arrays with different axis pairs
         ("[[[1, 2], [3, 4]], [[5, 6], [7, 8]]]", 0, 1, 2),
@@ -268,13 +270,13 @@ fn trace_3d_axis_matches_numpy() {
         let script = format!(
             "import numpy as np; print(list(np.trace(np.array({arr_str}), offset={offset}, axis1={axis1}, axis2={axis2}).flatten()))"
         );
-        let numpy_result = numpy_oracle(&script);
+        let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_float_list(&numpy_result);
 
         let rust_script = fnp_trace_script(format!(
             "print(list(fnp.trace(np.array({arr_str}), offset={offset}, axis1={axis1}, axis2={axis2}).flatten()))"
         ));
-        let rust_result = numpy_oracle(&rust_script);
+        let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_float_list(&rust_result);
 
         assert!(
@@ -282,10 +284,11 @@ fn trace_3d_axis_matches_numpy() {
             "trace 3D axis1={axis1}, axis2={axis2}, offset={offset} mismatch for {arr_str}\nnumpy: {numpy_vals:?}\nrust: {rust_vals:?}"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn trace_integer_dtypes_match_numpy() {
+fn trace_integer_dtypes_match_numpy() -> Result<(), String> {
     let test_cases = vec![
         ("np.array([[1, 2], [3, 4]], dtype=np.int32)", 0),
         ("np.array([[1, 2], [3, 4]], dtype=np.int64)", 0),
@@ -311,12 +314,12 @@ fn trace_integer_dtypes_match_numpy() {
 
     for (arr_expr, offset) in &test_cases {
         let script = format!("import numpy as np; print(np.trace({arr_expr}, offset={offset}))");
-        let numpy_result = numpy_oracle(&script);
+        let numpy_result = numpy_oracle(&script)?;
         let numpy_val = parse_float(&numpy_result);
 
         let rust_script =
             fnp_trace_script(format!("print(fnp.trace({arr_expr}, offset={offset}))"));
-        let rust_result = numpy_oracle(&rust_script);
+        let rust_result = numpy_oracle(&rust_script)?;
         let rust_val = parse_float(&rust_result);
 
         assert!(
@@ -324,10 +327,11 @@ fn trace_integer_dtypes_match_numpy() {
             "trace dtype mismatch for {arr_expr} offset={offset}\nnumpy: {numpy_val}\nrust: {rust_val}"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn trace_nan_handling_matches_numpy() {
+fn trace_nan_handling_matches_numpy() -> Result<(), String> {
     let test_cases = vec![
         "[[1.0, np.nan], [3.0, 4.0]]",
         "[[np.nan, 2.0], [3.0, np.nan]]",
@@ -337,10 +341,10 @@ fn trace_nan_handling_matches_numpy() {
 
     for arr_str in &test_cases {
         let script = format!("import numpy as np; print(np.trace(np.array({arr_str})))");
-        let numpy_result = numpy_oracle(&script);
+        let numpy_result = numpy_oracle(&script)?;
 
         let rust_script = fnp_trace_script(format!("print(fnp.trace(np.array({arr_str})))"));
-        let rust_result = numpy_oracle(&rust_script);
+        let rust_result = numpy_oracle(&rust_script)?;
 
         assert_eq!(
             numpy_result.trim(),
@@ -348,4 +352,5 @@ fn trace_nan_handling_matches_numpy() {
             "trace NaN mismatch for {arr_str}"
         );
     }
+    Ok(())
 }
