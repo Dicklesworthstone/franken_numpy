@@ -13757,11 +13757,7 @@ fn square(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn cbrt(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // numpy.cbrt promotes integer input to float64; our
-    // elementwise_unary preserves dtype. Routing through np.cbrt keeps
-    // the promotion rules exact.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("cbrt")?.call1((x.bind(py),))?.unbind())
+    native_unary_promoting(py, x.bind(py), UnaryOp::Cbrt, "cbrt", "cbrt(x)")
 }
 
 #[pyfunction]
@@ -13812,11 +13808,11 @@ fn deg2rad(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn fabs(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.fabs (element-wise absolute value, real-valued
-    // only). Unlike np.abs, numpy.fabs rejects complex inputs with
-    // TypeError — match that behavior. Integer input promotes to float.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("fabs")?.call1((x.bind(py),))?.unbind())
+    // np.fabs is element-wise absolute value for real-valued arrays only.
+    // Unlike np.abs, numpy.fabs rejects complex inputs with TypeError.
+    // Integer input promotes to float. native_unary_promoting falls back
+    // to numpy for complex (which raises TypeError) and integer promotion.
+    native_unary_promoting(py, x.bind(py), UnaryOp::Fabs, "fabs", "fabs(x)")
 }
 
 #[pyfunction]
