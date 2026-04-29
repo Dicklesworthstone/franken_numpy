@@ -65,7 +65,13 @@ fn floats_match(a: &[f64], b: &[f64]) -> bool {
         return false;
     }
     a.iter().zip(b.iter()).all(|(x, y)| {
-        (x.is_nan() && y.is_nan()) || (x == y)
+        if x.is_nan() && y.is_nan() {
+            true
+        } else if *x == 0.0 && *y == 0.0 {
+            x.to_bits() == y.to_bits()
+        } else {
+            x == y
+        }
     })
 }
 
