@@ -268,13 +268,13 @@ fn trace_3d_axis_matches_numpy() -> Result<(), String> {
 
     for (arr_str, offset, axis1, axis2) in &test_cases {
         let script = format!(
-            "import numpy as np; print(list(np.trace(np.array({arr_str}), offset={offset}, axis1={axis1}, axis2={axis2}).flatten()))"
+            "import numpy as np; print(np.trace(np.array({arr_str}), offset={offset}, axis1={axis1}, axis2={axis2}).flatten().tolist())"
         );
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_float_list(&numpy_result);
 
         let rust_script = fnp_trace_script(format!(
-            "print(list(fnp.trace(np.array({arr_str}), offset={offset}, axis1={axis1}, axis2={axis2}).flatten()))"
+            "print(fnp.trace(np.array({arr_str}), offset={offset}, axis1={axis1}, axis2={axis2}).flatten().tolist())"
         ));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_float_list(&rust_result);

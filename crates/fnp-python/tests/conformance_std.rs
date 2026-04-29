@@ -188,12 +188,12 @@ fn std_2d_axis_matches_numpy() -> Result<(), String> {
 
     for (arr_str, axis) in &test_cases {
         let script =
-            format!("import numpy as np; print(list(np.std(np.array({arr_str}), axis={axis})))");
+            format!("import numpy as np; print(np.std(np.array({arr_str}), axis={axis}).tolist())");
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_float_list(&numpy_result);
 
         let rust_script = fnp_std_script(format!(
-            "print(list(fnp.std(np.array({arr_str}), axis={axis})))"
+            "print(fnp.std(np.array({arr_str}), axis={axis}).tolist())"
         ));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_float_list(&rust_result);
@@ -227,13 +227,13 @@ fn std_3d_axis_matches_numpy() -> Result<(), String> {
 
     for (arr_str, axis) in &test_cases {
         let script = format!(
-            "import numpy as np; print(list(np.std(np.array({arr_str}), axis={axis}).flatten()))"
+            "import numpy as np; print(np.std(np.array({arr_str}), axis={axis}).flatten().tolist())"
         );
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_float_list(&numpy_result);
 
         let rust_script = fnp_std_script(format!(
-            "print(list(fnp.std(np.array({arr_str}), axis={axis}).flatten()))"
+            "print(fnp.std(np.array({arr_str}), axis={axis}).flatten().tolist())"
         ));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_float_list(&rust_result);

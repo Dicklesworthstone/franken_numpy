@@ -187,13 +187,14 @@ fn prod_2d_axis_matches_numpy() -> Result<(), String> {
     ];
 
     for (arr_str, axis) in &test_cases {
-        let script =
-            format!("import numpy as np; print(list(np.prod(np.array({arr_str}), axis={axis})))");
+        let script = format!(
+            "import numpy as np; print(np.prod(np.array({arr_str}), axis={axis}).tolist())"
+        );
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_float_list(&numpy_result);
 
         let rust_script = fnp_prod_script(format!(
-            "print(list(fnp.prod(np.array({arr_str}), axis={axis})))"
+            "print(fnp.prod(np.array({arr_str}), axis={axis}).tolist())"
         ));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_float_list(&rust_result);
@@ -227,13 +228,13 @@ fn prod_3d_axis_matches_numpy() -> Result<(), String> {
 
     for (arr_str, axis) in &test_cases {
         let script = format!(
-            "import numpy as np; print(list(np.prod(np.array({arr_str}), axis={axis}).flatten()))"
+            "import numpy as np; print(np.prod(np.array({arr_str}), axis={axis}).flatten().tolist())"
         );
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_float_list(&numpy_result);
 
         let rust_script = fnp_prod_script(format!(
-            "print(list(fnp.prod(np.array({arr_str}), axis={axis}).flatten()))"
+            "print(fnp.prod(np.array({arr_str}), axis={axis}).flatten().tolist())"
         ));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_float_list(&rust_result);
