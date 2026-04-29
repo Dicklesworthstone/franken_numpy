@@ -1403,7 +1403,16 @@ pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, 
         "npz: cannot find end of central directory",
     ))?;
 
+    let disk_no = u16::from_le_bytes([data[eocd + 4], data[eocd + 5]]);
+    let cd_disk = u16::from_le_bytes([data[eocd + 6], data[eocd + 7]]);
+    let entries_on_disk = u16::from_le_bytes([data[eocd + 8], data[eocd + 9]]) as usize;
     let entry_count = u16::from_le_bytes([data[eocd + 10], data[eocd + 11]]) as usize;
+    if disk_no != 0 || cd_disk != 0 || entries_on_disk != entry_count {
+        return Err(IOError::NpzArchiveContractViolation(
+            "npz: split archive metadata is unsupported",
+        ));
+    }
+
     let cd_size = u32::from_le_bytes([
         data[eocd + 12],
         data[eocd + 13],
@@ -5758,6 +5767,30 @@ mm.flush()
     fn npz_empty_archive_rejected() {
         let result = write_npz_bytes(&[]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn npz_rejects_split_archive_eocd_metadata() {
+        let h = NpyHeader {
+            shape: vec![1],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let p: Vec<u8> = 1.0_f64.to_le_bytes().to_vec();
+        let mut npz = write_npz_bytes(&[("a", &h, &p)]).expect("write");
+        let eocd_pos = npz
+            .windows(4)
+            .position(|window| window == [0x50, 0x4B, 0x05, 0x06])
+            .expect("end of central directory signature");
+
+        npz[eocd_pos + 4..eocd_pos + 6].copy_from_slice(&1_u16.to_le_bytes());
+
+        let err = read_npz_bytes(&npz, false).expect_err("split archive metadata must fail closed");
+        assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
+        assert!(
+            err.to_string().contains("split archive"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
