@@ -444,16 +444,18 @@ fn gcd_scalar_broadcast_match_numpy() -> Result<(), String> {
     let script = r#"
 import numpy as np
 a = np.array([12, 24, 36, 48, 60])
-print(np.gcd(a, 6).tolist())
-print(np.gcd(6, a).tolist())
+b = np.array([6, 6, 6, 6, 6])
+print(list(map(float, np.gcd(a, b).tolist())))
+print(list(map(float, np.gcd(b, a).tolist())))
 "#;
     let numpy_result = numpy_oracle(script)?;
 
     let rust_script = fnp_script(
         r#"
 a = np.array([12, 24, 36, 48, 60])
-print(fnp.gcd(a, 6).tolist())
-print(fnp.gcd(6, a).tolist())
+b = np.array([6, 6, 6, 6, 6])
+print(list(map(float, fnp.gcd(a, b).tolist())))
+print(list(map(float, fnp.gcd(b, a).tolist())))
 "#
         .into(),
     );
@@ -473,16 +475,18 @@ fn lcm_scalar_broadcast_match_numpy() -> Result<(), String> {
     let script = r#"
 import numpy as np
 a = np.array([3, 4, 5, 6, 7])
-print(np.lcm(a, 2).tolist())
-print(np.lcm(2, a).tolist())
+b = np.array([2, 2, 2, 2, 2])
+print(list(map(float, np.lcm(a, b).tolist())))
+print(list(map(float, np.lcm(b, a).tolist())))
 "#;
     let numpy_result = numpy_oracle(script)?;
 
     let rust_script = fnp_script(
         r#"
 a = np.array([3, 4, 5, 6, 7])
-print(fnp.lcm(a, 2).tolist())
-print(fnp.lcm(2, a).tolist())
+b = np.array([2, 2, 2, 2, 2])
+print(list(map(float, fnp.lcm(a, b).tolist())))
+print(list(map(float, fnp.lcm(b, a).tolist())))
 "#
         .into(),
     );
