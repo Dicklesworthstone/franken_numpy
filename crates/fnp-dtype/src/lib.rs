@@ -90,6 +90,7 @@ impl DType {
             "c8" | "complex64" => Some(Self::Complex64),
             "c16" | "complex128" => Some(Self::Complex128),
             "str" | "U" => Some(Self::Str),
+            "void" | "V" => Some(Self::Structured),
             "datetime64" | "M8" => Some(Self::DateTime64),
             "timedelta64" | "m8" => Some(Self::TimeDelta64),
             _ => {
@@ -100,6 +101,11 @@ impl DType {
                 // Handle bytes dtype: S10, S32, etc.
                 if name.starts_with('S') && name[1..].parse::<usize>().is_ok() {
                     return Some(Self::Str);
+                }
+                // Handle NumPy void descriptors: V0, V10, etc. Field layout is
+                // represented externally, so this maps to the structured marker.
+                if name.starts_with('V') && name[1..].parse::<usize>().is_ok() {
+                    return Some(Self::Structured);
                 }
                 // Handle datetime with unit: datetime64[ns], datetime64[us], etc.
                 if name.starts_with("datetime64") {
@@ -1934,6 +1940,17 @@ mod tests {
         assert_eq!(DType::parse("datetime64[ns]"), Some(DType::DateTime64));
         assert_eq!(DType::parse("timedelta64"), Some(DType::TimeDelta64));
         assert_eq!(DType::parse("m8"), Some(DType::TimeDelta64));
+    }
+
+    #[test]
+    fn parse_structured_void_dtypes() {
+        assert_eq!(
+            DType::parse(DType::Structured.name()),
+            Some(DType::Structured)
+        );
+        assert_eq!(DType::parse("V"), Some(DType::Structured));
+        assert_eq!(DType::parse("V0"), Some(DType::Structured));
+        assert_eq!(DType::parse("V10"), Some(DType::Structured));
     }
 
     #[test]
