@@ -1448,6 +1448,7 @@ pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, 
             ));
         }
 
+        let central_flags = u16::from_le_bytes([data[pos + 8], data[pos + 9]]);
         let compression = u16::from_le_bytes([data[pos + 10], data[pos + 11]]);
         if compression != 0 && compression != 8 {
             return Err(IOError::NpzArchiveContractViolation(
@@ -1534,6 +1535,13 @@ pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, 
                 "npz: invalid local file header signature",
             ));
         }
+        let local_flags = u16::from_le_bytes([data[local_offset + 6], data[local_offset + 7]]);
+        if local_flags != central_flags {
+            return Err(IOError::NpzArchiveContractViolation(
+                "npz: local/central directory flags mismatch",
+            ));
+        }
+
         let local_compression =
             u16::from_le_bytes([data[local_offset + 8], data[local_offset + 9]]);
         if local_compression != compression {
@@ -1541,18 +1549,153 @@ pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, 
                 "npz: local/central directory compression mismatch",
             ));
         }
+        let local_crc = u32::from_le_bytes([
+            data[local_offset + 14],
+            data[local_offset + 15],
+            data[local_offset + 16],
+            data[local_offset + 17],
+        ]);
+        let local_compressed_size = u32::from_le_bytes([
+            data[local_offset + 18],
+            data[local_offset + 19],
+            data[local_offset + 20],
+            data[local_offset + 21],
+        ]) as usize;
+        let local_uncompressed_size = u32::from_le_bytes([
+            data[local_offset + 22],
+            data[local_offset + 23],
+            data[local_offset + 24],
+            data[local_offset + 25],
+        ]) as usize;
+        if local_crc != crc {
+            return Err(IOError::NpzArchiveContractViolation(
+                "npz: local/central directory metadata mismatch",
+            ));
+        }
         let local_fname_len =
             u16::from_le_bytes([data[local_offset + 26], data[local_offset + 27]]) as usize;
         let local_extra_len =
             u16::from_le_bytes([data[local_offset + 28], data[local_offset + 29]]) as usize;
 
-        let data_start = local_offset
-            .checked_add(30)
-            .and_then(|s| s.checked_add(local_fname_len))
-            .and_then(|s| s.checked_add(local_extra_len))
-            .ok_or(IOError::NpzArchiveContractViolation(
-                "npz: local data start overflow",
-            ))?;
+        let local_fname_start =
+            local_offset
+                .checked_add(30)
+                .ok_or(IOError::NpzArchiveContractViolation(
+                    "npz: local filename start overflow",
+                ))?;
+        let local_fname_end = local_fname_start.checked_add(local_fname_len).ok_or(
+            IOError::NpzArchiveContractViolation("npz: local filename length overflow"),
+        )?;
+        if local_fname_end > data.len() {
+            return Err(IOError::NpzArchiveContractViolation(
+                "npz: local filename extends beyond archive",
+            ));
+        }
+        if data[local_fname_start..local_fname_end] != data[fname_start..fname_end] {
+            return Err(IOError::NpzArchiveContractViolation(
+                "npz: local/central directory filename mismatch",
+            ));
+        }
+
+        let local_extra_end = local_fname_end.checked_add(local_extra_len).ok_or(
+            IOError::NpzArchiveContractViolation("npz: local data start overflow"),
+        )?;
+        if local_extra_end > data.len() {
+            return Err(IOError::NpzArchiveContractViolation(
+                "npz: local extra field extends beyond archive",
+            ));
+        }
+
+        if local_compressed_size == u32::MAX as usize
+            || local_uncompressed_size == u32::MAX as usize
+        {
+            let mut cursor = local_fname_end;
+            let mut zip64_sizes = None;
+            while cursor < local_extra_end {
+                if cursor
+                    .checked_add(4)
+                    .is_none_or(|end| end > local_extra_end)
+                {
+                    return Err(IOError::NpzArchiveContractViolation(
+                        "npz: truncated local extra field",
+                    ));
+                }
+                let header_id = u16::from_le_bytes([data[cursor], data[cursor + 1]]);
+                let field_len = u16::from_le_bytes([data[cursor + 2], data[cursor + 3]]) as usize;
+                let field_start =
+                    cursor
+                        .checked_add(4)
+                        .ok_or(IOError::NpzArchiveContractViolation(
+                            "npz: local extra field offset overflow",
+                        ))?;
+                let field_end = field_start.checked_add(field_len).ok_or(
+                    IOError::NpzArchiveContractViolation("npz: local extra field length overflow"),
+                )?;
+                if field_end > local_extra_end {
+                    return Err(IOError::NpzArchiveContractViolation(
+                        "npz: local extra field extends beyond header",
+                    ));
+                }
+                if header_id == 0x0001 {
+                    if field_len < 16 {
+                        return Err(IOError::NpzArchiveContractViolation(
+                            "npz: ZIP64 local size field is truncated",
+                        ));
+                    }
+                    let zip64_uncompressed = u64::from_le_bytes([
+                        data[field_start],
+                        data[field_start + 1],
+                        data[field_start + 2],
+                        data[field_start + 3],
+                        data[field_start + 4],
+                        data[field_start + 5],
+                        data[field_start + 6],
+                        data[field_start + 7],
+                    ]);
+                    let zip64_compressed = u64::from_le_bytes([
+                        data[field_start + 8],
+                        data[field_start + 9],
+                        data[field_start + 10],
+                        data[field_start + 11],
+                        data[field_start + 12],
+                        data[field_start + 13],
+                        data[field_start + 14],
+                        data[field_start + 15],
+                    ]);
+                    zip64_sizes = Some((zip64_compressed, zip64_uncompressed));
+                    break;
+                }
+                cursor = field_end;
+            }
+            let (zip64_compressed, zip64_uncompressed) = zip64_sizes.ok_or(
+                IOError::NpzArchiveContractViolation("npz: ZIP64 local size field is missing"),
+            )?;
+            if zip64_compressed
+                != u64::try_from(compressed_size).map_err(|_| {
+                    IOError::NpzArchiveContractViolation(
+                        "npz: central compressed size exceeds ZIP64 comparison range",
+                    )
+                })?
+                || zip64_uncompressed
+                    != u64::try_from(uncompressed_size).map_err(|_| {
+                        IOError::NpzArchiveContractViolation(
+                            "npz: central uncompressed size exceeds ZIP64 comparison range",
+                        )
+                    })?
+            {
+                return Err(IOError::NpzArchiveContractViolation(
+                    "npz: local/central directory metadata mismatch",
+                ));
+            }
+        } else if local_compressed_size != compressed_size
+            || local_uncompressed_size != uncompressed_size
+        {
+            return Err(IOError::NpzArchiveContractViolation(
+                "npz: local/central directory metadata mismatch",
+            ));
+        }
+
+        let data_start = local_extra_end;
         let data_end =
             data_start
                 .checked_add(compressed_size)
@@ -5660,6 +5803,48 @@ mm.flush()
     }
 
     #[test]
+    fn npz_rejects_local_central_filename_mismatch() {
+        let h = NpyHeader {
+            shape: vec![1],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let p: Vec<u8> = 1.0_f64.to_le_bytes().to_vec();
+        let mut npz = write_npz_bytes(&[("a", &h, &p)]).expect("write");
+        let local_fname_len = u16::from_le_bytes([npz[26], npz[27]]) as usize;
+        assert!(local_fname_len > 0, "test archive should name local entry");
+
+        npz[30] = b'b';
+
+        let err = read_npz_bytes(&npz, false).expect_err("filename mismatch must be rejected");
+        assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
+        assert!(
+            err.to_string().contains("filename mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn npz_rejects_local_central_size_mismatch() {
+        let h = NpyHeader {
+            shape: vec![1],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let p: Vec<u8> = 1.0_f64.to_le_bytes().to_vec();
+        let mut npz = write_npz_bytes(&[("a", &h, &p)]).expect("write");
+
+        npz[18..22].copy_from_slice(&0_u32.to_le_bytes());
+
+        let err = read_npz_bytes(&npz, false).expect_err("size mismatch must be rejected");
+        assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
+        assert!(
+            err.to_string().contains("metadata mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn npz_eocd_beyond_comment_limit_rejected() {
         let h = NpyHeader {
             shape: vec![1],
@@ -6794,9 +6979,9 @@ mm.flush()
     #[test]
     fn save_structured_rejects_shape_mismatch() {
         let desc = make_test_descriptor();
+        // Shape says 5 but only 2 records.
         let col_x = vec![0u8; 16]; // 2 records
         let col_y = vec![0u8; 8]; // 2 records
-        // Shape says 5 but only 2 records
         let err = save_structured(&[5], &desc, &[col_x, col_y]).unwrap_err();
         assert_eq!(err.reason_code(), "io_write_contract_violation");
     }
