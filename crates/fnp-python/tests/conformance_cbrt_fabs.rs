@@ -318,3 +318,26 @@ fn cbrt_fabs_empty_arrays_match_numpy() -> Result<(), String> {
 
     Ok(())
 }
+
+#[test]
+fn cbrt_fabs_bool_inputs_promote_like_numpy() -> Result<(), String> {
+    for func in &["cbrt", "fabs"] {
+        let script = format!(
+            "import numpy as np; r = np.{func}(np.array([True, False], dtype=np.bool_)); print(r.dtype, r.flatten().tolist())"
+        );
+        let numpy_result = numpy_oracle(&script)?;
+
+        let rust_script = fnp_script(format!(
+            "r = fnp.{func}(np.array([True, False], dtype=np.bool_)); print(r.dtype, r.flatten().tolist())"
+        ));
+        let rust_result = numpy_oracle(&rust_script)?;
+
+        assert_eq!(
+            numpy_result.trim(),
+            rust_result.trim(),
+            "{func} bool input promotion mismatch"
+        );
+    }
+
+    Ok(())
+}

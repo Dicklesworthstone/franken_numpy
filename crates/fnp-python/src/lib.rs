@@ -13694,7 +13694,8 @@ fn native_unary_elementwise(
     let Ok(native) = extract_precise_numeric_array(py, x, context) else {
         return fallback(py);
     };
-    if native.has_integer_sidecar()
+    if native.dtype() == DType::Bool
+        || native.has_integer_sidecar()
         || matches!(native.dtype(), DType::Complex64 | DType::Complex128)
     {
         return fallback(py);
@@ -13727,7 +13728,8 @@ fn native_unary_promoting(
     let Ok(native) = extract_precise_numeric_array(py, x, context) else {
         return fallback(py);
     };
-    if native.has_integer_sidecar()
+    if native.dtype() == DType::Bool
+        || native.has_integer_sidecar()
         || matches!(native.dtype(), DType::Complex64 | DType::Complex128)
         || native.dtype().is_integer()
     {

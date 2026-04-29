@@ -332,3 +332,60 @@ fn trig_integer_input_promotes_to_float() -> Result<(), String> {
     }
     Ok(())
 }
+
+#[test]
+fn promoting_math_bool_inputs_match_numpy() -> Result<(), String> {
+    for func in &[
+        "sin", "cos", "sqrt", "exp", "log", "sinh", "cosh", "tanh", "arcsin", "arccos", "arctan",
+        "arcsinh", "arccosh", "arctanh", "expm1", "log1p",
+    ] {
+        let script = format!(
+            "import numpy as np; r = np.{func}(np.array([True, False], dtype=np.bool_)); print(r.dtype, r.flatten().tolist())"
+        );
+        let numpy_result = numpy_oracle(&script)?;
+
+        let rust_script = fnp_script(format!(
+            "r = fnp.{func}(np.array([True, False], dtype=np.bool_)); print(r.dtype, r.flatten().tolist())"
+        ));
+        let rust_result = numpy_oracle(&rust_script)?;
+
+        assert_eq!(
+            numpy_result.trim(),
+            rust_result.trim(),
+            "{func} bool input mismatch"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn positive_bool_input_matches_numpy_error() -> Result<(), String> {
+    let script = r#"
+import numpy as np
+try:
+    np.positive(np.array([True, False], dtype=np.bool_))
+    print("no_error")
+except Exception as exc:
+    print(type(exc).__name__)
+"#;
+    let numpy_result = numpy_oracle(script)?;
+
+    let rust_script = fnp_script(
+        r#"
+try:
+    fnp.positive(np.array([True, False], dtype=np.bool_))
+    print("no_error")
+except Exception as exc:
+    print(type(exc).__name__)
+"#
+        .into(),
+    );
+    let rust_result = numpy_oracle(&rust_script)?;
+
+    assert_eq!(
+        numpy_result.trim(),
+        rust_result.trim(),
+        "positive bool error mismatch"
+    );
+    Ok(())
+}
