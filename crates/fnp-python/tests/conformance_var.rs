@@ -330,6 +330,33 @@ fn var_ddof_matches_numpy() -> Result<(), String> {
 }
 
 #[test]
+fn var_non_integral_ddof_matches_numpy() -> Result<(), String> {
+    let test_cases = vec![
+        ("[1.0, 2.0, 3.0]", "-1"),
+        ("[1.0, 2.0, 3.0]", "0.5"),
+        ("[1.0, 2.0, 3.0]", "1.5"),
+        ("[2.0, 4.0, 8.0, 16.0]", "np.float64(0.5)"),
+    ];
+
+    for (arr_str, ddof) in &test_cases {
+        let script = format!("import numpy as np; print(np.var(np.array({arr_str}), ddof={ddof}))");
+        let numpy_result = numpy_oracle(&script)?;
+        let numpy_val = parse_float(&numpy_result);
+
+        let rust_script =
+            fnp_var_script(format!("print(fnp.var(np.array({arr_str}), ddof={ddof}))"));
+        let rust_result = numpy_oracle(&rust_script)?;
+        let rust_val = parse_float(&rust_result);
+
+        assert!(
+            floats_close(numpy_val, rust_val, 1e-9),
+            "var ddof={ddof} mismatch for {arr_str}\nnumpy: {numpy_val}\nrust: {rust_val}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn var_integer_dtypes_match_numpy() -> Result<(), String> {
     let test_cases = vec![
         ("np.array([1, 2, 3], dtype=np.int32)", "None"),

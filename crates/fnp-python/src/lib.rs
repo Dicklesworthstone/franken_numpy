@@ -21313,9 +21313,38 @@ fn mean(
     build_numpy_array_from_ufunc(py, &result)
 }
 
+enum DdofArg {
+    Native(usize),
+    Delegate(Py<PyAny>),
+}
+
+impl DdofArg {
+    fn native_usize(&self) -> Option<usize> {
+        match self {
+            Self::Native(value) => Some(*value),
+            Self::Delegate(_) => None,
+        }
+    }
+
+    fn set_numpy_kwarg(&self, py: Python<'_>, kw: &Bound<'_, PyDict>) -> PyResult<()> {
+        match self {
+            Self::Native(value) => kw.set_item("ddof", *value),
+            Self::Delegate(value) => kw.set_item("ddof", value.bind(py)),
+        }
+    }
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn parse_ddof_arg(value: &Bound<'_, PyAny>) -> PyResult<DdofArg> {
+    match value.extract::<usize>() {
+        Ok(value) => Ok(DdofArg::Native(value)),
+        Err(_) => Ok(DdofArg::Delegate(value.clone().unbind())),
+    }
+}
+
 // Native Rust std with fallback for unsupported parameters.
 #[pyfunction]
-#[pyo3(name = "std", signature = (a, axis=None, dtype=None, out=None, ddof=0, keepdims=false, **kwargs))]
+#[pyo3(name = "std", signature = (a, axis=None, dtype=None, out=None, ddof=DdofArg::Native(0), keepdims=false, **kwargs))]
 #[allow(clippy::too_many_arguments)]
 fn py_std(
     py: Python<'_>,
@@ -21323,10 +21352,11 @@ fn py_std(
     axis: Option<Py<PyAny>>,
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    ddof: usize,
+    #[pyo3(from_py_with = parse_ddof_arg)] ddof: DdofArg,
     keepdims: bool,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    let ddof_arg = ddof;
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
     let mean_ = kwargs.and_then(|kw| kw.get_item("mean").ok().flatten());
     let correction = kwargs.and_then(|kw| kw.get_item("correction").ok().flatten());
@@ -21352,7 +21382,7 @@ fn py_std(
         if let Some(o) = out_for_fallback.as_ref() {
             kw.set_item("out", o.bind(py))?;
         }
-        kw.set_item("ddof", ddof)?;
+        ddof_arg.set_numpy_kwarg(py, &kw)?;
         kw.set_item("keepdims", keepdims)?;
         if let Some(w) = where_for_fallback.as_ref() {
             kw.set_item("where", w.bind(py))?;
@@ -21393,6 +21423,11 @@ fn py_std(
         }
     };
 
+    let ddof = match ddof_arg.native_usize() {
+        Some(value) => value,
+        None => return fallback(),
+    };
+
     // Extract input array
     let array = match extract_precise_numeric_array(py, a.bind(py), "std(a)") {
         Ok(arr) => arr,
@@ -21410,7 +21445,7 @@ fn py_std(
 
 // Native Rust var with fallback for unsupported parameters.
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=0, keepdims=false, **kwargs))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=DdofArg::Native(0), keepdims=false, **kwargs))]
 #[allow(clippy::too_many_arguments)]
 fn var(
     py: Python<'_>,
@@ -21418,10 +21453,11 @@ fn var(
     axis: Option<Py<PyAny>>,
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    ddof: usize,
+    #[pyo3(from_py_with = parse_ddof_arg)] ddof: DdofArg,
     keepdims: bool,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    let ddof_arg = ddof;
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
     let mean_ = kwargs.and_then(|kw| kw.get_item("mean").ok().flatten());
     let correction = kwargs.and_then(|kw| kw.get_item("correction").ok().flatten());
@@ -21447,7 +21483,7 @@ fn var(
         if let Some(o) = out_for_fallback.as_ref() {
             kw.set_item("out", o.bind(py))?;
         }
-        kw.set_item("ddof", ddof)?;
+        ddof_arg.set_numpy_kwarg(py, &kw)?;
         kw.set_item("keepdims", keepdims)?;
         if let Some(w) = where_for_fallback.as_ref() {
             kw.set_item("where", w.bind(py))?;
@@ -21486,6 +21522,11 @@ fn var(
                 return fallback();
             }
         }
+    };
+
+    let ddof = match ddof_arg.native_usize() {
+        Some(value) => value,
+        None => return fallback(),
     };
 
     // Extract input array
