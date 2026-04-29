@@ -31416,6 +31416,207 @@ pub fn logaddexp2(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncE
     })
 }
 
+/// Element-wise equality comparison.
+/// Returns a boolean array where True indicates x1 == x2.
+/// NumPy equivalent: `np.equal(x1, x2)`.
+pub fn equal(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
+    let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
+    let values: Vec<f64> = x1_bc
+        .values
+        .iter()
+        .zip(x2_bc.values.iter())
+        .map(|(&a, &b)| if a == b { 1.0 } else { 0.0 })
+        .collect();
+    Ok(UFuncArray {
+        shape: x1_bc.shape.clone(),
+        values,
+        dtype: DType::Bool,
+        integer_sidecar: None,
+    })
+}
+
+/// Element-wise inequality comparison.
+/// Returns a boolean array where True indicates x1 != x2.
+/// NumPy equivalent: `np.not_equal(x1, x2)`.
+pub fn not_equal(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
+    let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
+    let values: Vec<f64> = x1_bc
+        .values
+        .iter()
+        .zip(x2_bc.values.iter())
+        .map(|(&a, &b)| if a != b { 1.0 } else { 0.0 })
+        .collect();
+    Ok(UFuncArray {
+        shape: x1_bc.shape.clone(),
+        values,
+        dtype: DType::Bool,
+        integer_sidecar: None,
+    })
+}
+
+/// Element-wise greater-than comparison.
+/// Returns a boolean array where True indicates x1 > x2.
+/// NumPy equivalent: `np.greater(x1, x2)`.
+pub fn greater(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
+    let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
+    let values: Vec<f64> = x1_bc
+        .values
+        .iter()
+        .zip(x2_bc.values.iter())
+        .map(|(&a, &b)| if a > b { 1.0 } else { 0.0 })
+        .collect();
+    Ok(UFuncArray {
+        shape: x1_bc.shape.clone(),
+        values,
+        dtype: DType::Bool,
+        integer_sidecar: None,
+    })
+}
+
+/// Element-wise greater-than-or-equal comparison.
+/// Returns a boolean array where True indicates x1 >= x2.
+/// NumPy equivalent: `np.greater_equal(x1, x2)`.
+pub fn greater_equal(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
+    let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
+    let values: Vec<f64> = x1_bc
+        .values
+        .iter()
+        .zip(x2_bc.values.iter())
+        .map(|(&a, &b)| if a >= b { 1.0 } else { 0.0 })
+        .collect();
+    Ok(UFuncArray {
+        shape: x1_bc.shape.clone(),
+        values,
+        dtype: DType::Bool,
+        integer_sidecar: None,
+    })
+}
+
+/// Element-wise less-than comparison.
+/// Returns a boolean array where True indicates x1 < x2.
+/// NumPy equivalent: `np.less(x1, x2)`.
+pub fn less(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
+    let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
+    let values: Vec<f64> = x1_bc
+        .values
+        .iter()
+        .zip(x2_bc.values.iter())
+        .map(|(&a, &b)| if a < b { 1.0 } else { 0.0 })
+        .collect();
+    Ok(UFuncArray {
+        shape: x1_bc.shape.clone(),
+        values,
+        dtype: DType::Bool,
+        integer_sidecar: None,
+    })
+}
+
+/// Element-wise less-than-or-equal comparison.
+/// Returns a boolean array where True indicates x1 <= x2.
+/// NumPy equivalent: `np.less_equal(x1, x2)`.
+pub fn less_equal(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
+    let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
+    let values: Vec<f64> = x1_bc
+        .values
+        .iter()
+        .zip(x2_bc.values.iter())
+        .map(|(&a, &b)| if a <= b { 1.0 } else { 0.0 })
+        .collect();
+    Ok(UFuncArray {
+        shape: x1_bc.shape.clone(),
+        values,
+        dtype: DType::Bool,
+        integer_sidecar: None,
+    })
+}
+
+/// Element-wise logical AND.
+/// Returns a boolean array where True indicates both x1 and x2 are truthy.
+/// NumPy equivalent: `np.logical_and(x1, x2)`.
+pub fn logical_and(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
+    let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
+    let values: Vec<f64> = x1_bc
+        .values
+        .iter()
+        .zip(x2_bc.values.iter())
+        .map(|(&a, &b)| if a != 0.0 && b != 0.0 { 1.0 } else { 0.0 })
+        .collect();
+    Ok(UFuncArray {
+        shape: x1_bc.shape.clone(),
+        values,
+        dtype: DType::Bool,
+        integer_sidecar: None,
+    })
+}
+
+/// Element-wise logical OR.
+/// Returns a boolean array where True indicates x1 or x2 (or both) are truthy.
+/// NumPy equivalent: `np.logical_or(x1, x2)`.
+pub fn logical_or(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
+    let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
+    let values: Vec<f64> = x1_bc
+        .values
+        .iter()
+        .zip(x2_bc.values.iter())
+        .map(|(&a, &b)| if a != 0.0 || b != 0.0 { 1.0 } else { 0.0 })
+        .collect();
+    Ok(UFuncArray {
+        shape: x1_bc.shape.clone(),
+        values,
+        dtype: DType::Bool,
+        integer_sidecar: None,
+    })
+}
+
+/// Element-wise logical XOR.
+/// Returns a boolean array where True indicates exactly one of x1 or x2 is truthy.
+/// NumPy equivalent: `np.logical_xor(x1, x2)`.
+pub fn logical_xor(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
+    let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
+    let values: Vec<f64> = x1_bc
+        .values
+        .iter()
+        .zip(x2_bc.values.iter())
+        .map(|(&a, &b)| {
+            let a_bool = a != 0.0;
+            let b_bool = b != 0.0;
+            if a_bool ^ b_bool { 1.0 } else { 0.0 }
+        })
+        .collect();
+    Ok(UFuncArray {
+        shape: x1_bc.shape.clone(),
+        values,
+        dtype: DType::Bool,
+        integer_sidecar: None,
+    })
+}
+
+/// Element-wise logical NOT.
+/// Returns a boolean array where True indicates x is falsy (zero or NaN).
+/// NumPy equivalent: `np.logical_not(x)`.
+pub fn logical_not(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let values: Vec<f64> = x
+        .values
+        .iter()
+        .map(|&a| if a == 0.0 || a.is_nan() { 1.0 } else { 0.0 })
+        .collect();
+    Ok(UFuncArray {
+        shape: x.shape.clone(),
+        values,
+        dtype: DType::Bool,
+        integer_sidecar: None,
+    })
+}
+
 /// Sort a complex array by real part first, then imaginary part.
 ///
 /// The input is flattened, sorted, and returned as a 1-D complex array with

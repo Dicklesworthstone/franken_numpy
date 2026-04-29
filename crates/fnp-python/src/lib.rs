@@ -11,6 +11,11 @@ use fnp_ufunc::{
     BinaryOp, FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
     FromPyFuncReduceOptions, GridSpec, MAError, MaskedArray, UFuncArray, UnaryOp,
     arctan2 as ufunc_arctan2, copysign as ufunc_copysign,
+    equal as ufunc_equal, not_equal as ufunc_not_equal,
+    greater as ufunc_greater, greater_equal as ufunc_greater_equal,
+    less as ufunc_less, less_equal as ufunc_less_equal,
+    logical_and as ufunc_logical_and, logical_or as ufunc_logical_or,
+    logical_xor as ufunc_logical_xor, logical_not as ufunc_logical_not,
     float_power as ufunc_float_power, fmax as ufunc_fmax, fmin as ufunc_fmin,
     fmod as ufunc_fmod, frexp as ufunc_frexp, gcd_arrays as ufunc_gcd,
     heaviside as ufunc_heaviside, hypot as ufunc_hypot, lcm_arrays as ufunc_lcm,
@@ -13886,6 +13891,155 @@ fn native_binary_remainder_or_passthrough(
     }
 }
 
+fn native_binary_equal_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let x1 = extract_numeric_array(py, &args.get_item(0)?, "equal(x1)")?;
+        let x2 = extract_numeric_array(py, &args.get_item(1)?, "equal(x2)")?;
+        let result = ufunc_equal(&x1, &x2).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "equal", args, kwargs)
+    }
+}
+
+fn native_binary_not_equal_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let x1 = extract_numeric_array(py, &args.get_item(0)?, "not_equal(x1)")?;
+        let x2 = extract_numeric_array(py, &args.get_item(1)?, "not_equal(x2)")?;
+        let result = ufunc_not_equal(&x1, &x2).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "not_equal", args, kwargs)
+    }
+}
+
+fn native_binary_greater_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let x1 = extract_numeric_array(py, &args.get_item(0)?, "greater(x1)")?;
+        let x2 = extract_numeric_array(py, &args.get_item(1)?, "greater(x2)")?;
+        let result = ufunc_greater(&x1, &x2).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "greater", args, kwargs)
+    }
+}
+
+fn native_binary_greater_equal_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let x1 = extract_numeric_array(py, &args.get_item(0)?, "greater_equal(x1)")?;
+        let x2 = extract_numeric_array(py, &args.get_item(1)?, "greater_equal(x2)")?;
+        let result = ufunc_greater_equal(&x1, &x2).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "greater_equal", args, kwargs)
+    }
+}
+
+fn native_binary_less_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let x1 = extract_numeric_array(py, &args.get_item(0)?, "less(x1)")?;
+        let x2 = extract_numeric_array(py, &args.get_item(1)?, "less(x2)")?;
+        let result = ufunc_less(&x1, &x2).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "less", args, kwargs)
+    }
+}
+
+fn native_binary_less_equal_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let x1 = extract_numeric_array(py, &args.get_item(0)?, "less_equal(x1)")?;
+        let x2 = extract_numeric_array(py, &args.get_item(1)?, "less_equal(x2)")?;
+        let result = ufunc_less_equal(&x1, &x2).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "less_equal", args, kwargs)
+    }
+}
+
+fn native_binary_logical_and_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let x1 = extract_numeric_array(py, &args.get_item(0)?, "logical_and(x1)")?;
+        let x2 = extract_numeric_array(py, &args.get_item(1)?, "logical_and(x2)")?;
+        let result = ufunc_logical_and(&x1, &x2).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "logical_and", args, kwargs)
+    }
+}
+
+fn native_binary_logical_or_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let x1 = extract_numeric_array(py, &args.get_item(0)?, "logical_or(x1)")?;
+        let x2 = extract_numeric_array(py, &args.get_item(1)?, "logical_or(x2)")?;
+        let result = ufunc_logical_or(&x1, &x2).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "logical_or", args, kwargs)
+    }
+}
+
+fn native_binary_logical_xor_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let x1 = extract_numeric_array(py, &args.get_item(0)?, "logical_xor(x1)")?;
+        let x2 = extract_numeric_array(py, &args.get_item(1)?, "logical_xor(x2)")?;
+        let result = ufunc_logical_xor(&x1, &x2).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "logical_xor", args, kwargs)
+    }
+}
+
+fn native_unary_logical_not_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
+        let x = extract_numeric_array(py, &args.get_item(0)?, "logical_not(x)")?;
+        let result = ufunc_logical_not(&x).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "logical_not", args, kwargs)
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn square(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
@@ -22742,7 +22896,7 @@ fn equal(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "equal", args, kwargs)
+    native_binary_equal_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
@@ -22752,7 +22906,7 @@ fn not_equal(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "not_equal", args, kwargs)
+    native_binary_not_equal_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
@@ -22762,7 +22916,7 @@ fn greater(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "greater", args, kwargs)
+    native_binary_greater_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
@@ -22772,7 +22926,7 @@ fn greater_equal(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "greater_equal", args, kwargs)
+    native_binary_greater_equal_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
@@ -22782,7 +22936,7 @@ fn less(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "less", args, kwargs)
+    native_binary_less_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
@@ -22792,7 +22946,7 @@ fn less_equal(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "less_equal", args, kwargs)
+    native_binary_less_equal_or_passthrough(py, args, kwargs)
 }
 
 // Logical (4).
@@ -22803,7 +22957,7 @@ fn logical_and(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "logical_and", args, kwargs)
+    native_binary_logical_and_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
@@ -22813,7 +22967,7 @@ fn logical_not(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "logical_not", args, kwargs)
+    native_unary_logical_not_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
@@ -22823,7 +22977,7 @@ fn logical_or(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "logical_or", args, kwargs)
+    native_binary_logical_or_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
@@ -22833,7 +22987,7 @@ fn logical_xor(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "logical_xor", args, kwargs)
+    native_binary_logical_xor_or_passthrough(py, args, kwargs)
 }
 
 // Elementwise min/max and float-typed arithmetic (5).
