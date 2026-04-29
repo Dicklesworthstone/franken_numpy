@@ -9251,6 +9251,11 @@ fn hypot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
 fn ldexp(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x1 = extract_numeric_array(py, x1.bind(py), "ldexp(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "ldexp(x2)")?;
+    if matches!(x2.dtype(), DType::F16 | DType::F32 | DType::F64) {
+        return Err(PyTypeError::new_err(
+            "ufunc 'ldexp' not supported for non-integer exponent dtype",
+        ));
+    }
     let result = ufunc_ldexp(&x1, &x2).map_err(map_ufunc_error)?;
     build_numpy_array_from_ufunc(py, &result)
 }
@@ -39123,6 +39128,26 @@ mod tests {
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ldexp_rejects_float_exponent_like_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let x1 = numeric_array(py, vec![1.0], "float64");
+            let x2 = numeric_array(py, vec![1.5], "float64");
+
+            let actual = ldexp(py, x1.clone().unbind(), x2.clone().unbind());
+            assert!(actual.is_err(), "ldexp should reject float exponents");
+
+            let numpy = py.import("numpy")?;
+            let expected = numpy.getattr("ldexp")?.call1((x1, x2));
+            assert!(expected.is_err(), "NumPy should reject float exponents");
             Ok(())
         });
     }
