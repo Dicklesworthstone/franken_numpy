@@ -22369,33 +22369,21 @@ fn power(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn log2(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "log2", args, kwargs)
+#[pyo3(signature = (x,))]
+fn log2(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    native_unary_promoting(py, x.bind(py), UnaryOp::Log2, "log2", "log2(x)")
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn log10(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "log10", args, kwargs)
+#[pyo3(signature = (x,))]
+fn log10(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    native_unary_promoting(py, x.bind(py), UnaryOp::Log10, "log10", "log10(x)")
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn exp2(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "exp2", args, kwargs)
+#[pyo3(signature = (x,))]
+fn exp2(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    native_unary_promoting(py, x.bind(py), UnaryOp::Exp2, "exp2", "exp2(x)")
 }
 
 // ---------------------------------------------------------------------------
