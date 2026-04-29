@@ -30928,6 +30928,21 @@ pub fn divmod_arrays(
                 });
             }
             remainders.push(f64::NAN);
+        } else if av.is_infinite() || bv.is_infinite() {
+            // numpy: floor_divide involving infinity returns nan
+            // (except 0/inf = 0, which is handled in the general path below
+            // since (0.0/inf).floor() = 0.0 correctly)
+            if av.is_infinite() {
+                quotients.push(f64::NAN);
+                remainders.push(f64::NAN);
+            } else {
+                // av is finite, bv is inf: quotient is 0, remainder is av
+                quotients.push(0.0);
+                remainders.push(av);
+            }
+        } else if av.is_nan() || bv.is_nan() {
+            quotients.push(f64::NAN);
+            remainders.push(f64::NAN);
         } else {
             let q = (av / bv).floor();
             let r = av - q * bv;
@@ -56966,12 +56981,17 @@ print(json.dumps(payload))
 
     #[test]
     fn divmod_inf_input() {
+        // numpy: floor_divide(inf, finite) returns nan, not inf
         let a = UFuncArray::new(vec![1], vec![f64::INFINITY], DType::F64).unwrap();
         let b = UFuncArray::new(vec![1], vec![2.0], DType::F64).unwrap();
-        let (q, _r) = divmod_arrays(&a, &b).unwrap();
+        let (q, r) = divmod_arrays(&a, &b).unwrap();
         assert!(
-            q.values()[0].is_infinite(),
-            "divmod(inf, 2) quotient should be inf"
+            q.values()[0].is_nan(),
+            "divmod(inf, 2) quotient should be nan (numpy behavior)"
+        );
+        assert!(
+            r.values()[0].is_nan(),
+            "divmod(inf, 2) remainder should be nan (numpy behavior)"
         );
     }
 

@@ -29,6 +29,7 @@ use fnp_ufunc::{
     logaddexp as ufunc_logaddexp, logaddexp2 as ufunc_logaddexp2, ma_is_masked, ma_make_mask,
     ma_mask_or, modf as ufunc_modf, nextafter as ufunc_nextafter, reduce_frompyfunc_values,
     signbit as ufunc_signbit, spacing as ufunc_spacing, where_nonzero,
+    divmod_arrays as ufunc_divmod,
 };
 use pyo3::exceptions::{
     PyDeprecationWarning, PyOSError, PyTypeError, PyValueError, PyZeroDivisionError,
@@ -23174,13 +23175,13 @@ fn float_power(
 
 // Arithmetic: divmod + mod/remainder (3).
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn divmod(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "divmod", args, kwargs)
+#[pyo3(signature = (x1, x2))]
+fn divmod(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let x1 = extract_numeric_array(py, x1.bind(py), "divmod(x1)")?;
+    let x2 = extract_numeric_array(py, x2.bind(py), "divmod(x2)")?;
+    let (quotient, remainder) = ufunc_divmod(&x1, &x2).map_err(map_ufunc_error)?;
+    let outputs = [quotient, remainder];
+    build_numpy_tuple_from_ufuncs(py, &outputs)
 }
 
 // `mod` is a reserved word in Rust — use py_mod with name override.
