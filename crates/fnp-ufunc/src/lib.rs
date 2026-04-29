@@ -6767,7 +6767,11 @@ impl UFuncArray {
         let source_sidecar = self.synthesized_integer_sidecar("sum")?;
         match axis {
             None => {
-                let sum: f64 = self.values.iter().copied().sum();
+                let sum = self
+                    .values
+                    .iter()
+                    .copied()
+                    .fold(0.0, |acc, value| acc + value);
                 let out_sidecar = source_sidecar.as_ref().map(|s| match s {
                     IntegerSidecar::I64(v) => IntegerSidecar::I64(vec![v.iter().copied().sum()]),
                     IntegerSidecar::U64(v) => IntegerSidecar::U64(vec![v.iter().copied().sum()]),
@@ -33551,6 +33555,20 @@ print(json.dumps(payload))
         let out = arr.reduce_sum(None, false).expect("sum");
         assert!(out.shape().is_empty());
         assert_eq!(out.values(), &[21.0]);
+    }
+
+    #[test]
+    fn reduce_sum_axis_none_normalizes_negative_zero() {
+        let empty = UFuncArray::new(vec![0], Vec::new(), DType::F64).expect("empty");
+        let empty_sum = empty.reduce_sum(None, false).expect("sum empty");
+        assert_eq!(empty_sum.values()[0].to_bits(), 0.0f64.to_bits());
+
+        let negative_zero =
+            UFuncArray::new(vec![2], vec![-0.0, -0.0], DType::F64).expect("negative zeros");
+        let zero_sum = negative_zero
+            .reduce_sum(None, false)
+            .expect("sum negative zeros");
+        assert_eq!(zero_sum.values()[0].to_bits(), 0.0f64.to_bits());
     }
 
     #[test]
