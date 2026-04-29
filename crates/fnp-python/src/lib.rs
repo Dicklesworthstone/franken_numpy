@@ -21697,24 +21697,154 @@ fn amin(
     py_min(py, a, axis, out, keepdims, initial, kwargs)
 }
 
+// Native Rust all with fallback for unsupported parameters.
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (a, axis=None, out=None, keepdims=false, **kwargs))]
 fn all(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
+    keepdims: bool,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "all", args, kwargs)
+    let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
+    let numpy = py.import("numpy")?;
+    let all_fn = numpy.getattr("all")?;
+
+    let a_for_fallback = a.clone_ref(py);
+    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
+    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
+    let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
+
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kw = PyDict::new(py);
+        if let Some(ax) = axis_for_fallback.as_ref() {
+            kw.set_item("axis", ax.bind(py))?;
+        }
+        if let Some(o) = out_for_fallback.as_ref() {
+            kw.set_item("out", o.bind(py))?;
+        }
+        kw.set_item("keepdims", keepdims)?;
+        if let Some(w) = where_for_fallback.as_ref() {
+            kw.set_item("where", w.bind(py))?;
+        }
+        Ok(all_fn
+            .call((a_for_fallback.bind(py),), Some(&kw))?
+            .unbind())
+    };
+
+    // Fallback for out, keepdims, or where parameters
+    if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        || keepdims
+        || where_.as_ref().is_some_and(|v| !v.is_none())
+    {
+        return fallback();
+    }
+
+    // Parse axis: None, integer, or tuple → fallback for tuple
+    let axis_val: Option<isize> = match &axis {
+        None => None,
+        Some(ax) => {
+            let ax_bound = ax.bind(py);
+            if ax_bound.is_none() {
+                None
+            } else if let Ok(i) = ax_bound.extract::<isize>() {
+                Some(i)
+            } else {
+                return fallback();
+            }
+        }
+    };
+
+    // Extract input array
+    let array = match extract_precise_numeric_array(py, a.bind(py), "all(a)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+
+    // Call native Rust all
+    let result = match array.all(axis_val) {
+        Ok(r) => r,
+        Err(_) => return fallback(),
+    };
+
+    build_numpy_array_from_ufunc(py, &result)
 }
 
+// Native Rust any with fallback for unsupported parameters.
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (a, axis=None, out=None, keepdims=false, **kwargs))]
 fn any(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
+    keepdims: bool,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "any", args, kwargs)
+    let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
+    let numpy = py.import("numpy")?;
+    let any_fn = numpy.getattr("any")?;
+
+    let a_for_fallback = a.clone_ref(py);
+    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
+    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
+    let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
+
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kw = PyDict::new(py);
+        if let Some(ax) = axis_for_fallback.as_ref() {
+            kw.set_item("axis", ax.bind(py))?;
+        }
+        if let Some(o) = out_for_fallback.as_ref() {
+            kw.set_item("out", o.bind(py))?;
+        }
+        kw.set_item("keepdims", keepdims)?;
+        if let Some(w) = where_for_fallback.as_ref() {
+            kw.set_item("where", w.bind(py))?;
+        }
+        Ok(any_fn
+            .call((a_for_fallback.bind(py),), Some(&kw))?
+            .unbind())
+    };
+
+    // Fallback for out, keepdims, or where parameters
+    if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        || keepdims
+        || where_.as_ref().is_some_and(|v| !v.is_none())
+    {
+        return fallback();
+    }
+
+    // Parse axis: None, integer, or tuple → fallback for tuple
+    let axis_val: Option<isize> = match &axis {
+        None => None,
+        Some(ax) => {
+            let ax_bound = ax.bind(py);
+            if ax_bound.is_none() {
+                None
+            } else if let Ok(i) = ax_bound.extract::<isize>() {
+                Some(i)
+            } else {
+                return fallback();
+            }
+        }
+    };
+
+    // Extract input array
+    let array = match extract_precise_numeric_array(py, a.bind(py), "any(a)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+
+    // Call native Rust any
+    let result = match array.any(axis_val) {
+        Ok(r) => r,
+        Err(_) => return fallback(),
+    };
+
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 // Cumulative sum with native Rust fast path.
