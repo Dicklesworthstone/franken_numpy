@@ -31288,31 +31288,7 @@ pub fn float_power(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFunc
 /// Uses Python/NumPy semantics: result has same sign as divisor.
 /// NumPy equivalent: `np.remainder(x1, x2)` or `np.mod(x1, x2)`.
 pub fn remainder(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
-    let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
-    let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
-    let values: Vec<f64> = x1_bc
-        .values
-        .iter()
-        .zip(x2_bc.values.iter())
-        .map(|(&a, &b)| {
-            if b == 0.0 {
-                f64::NAN
-            } else {
-                let r = a % b;
-                if r != 0.0 && r.signum() != b.signum() {
-                    r + b
-                } else {
-                    r
-                }
-            }
-        })
-        .collect();
-    Ok(UFuncArray {
-        shape: x1_bc.shape.clone(),
-        values,
-        dtype: DType::F64,
-        integer_sidecar: None,
-    })
+    x1.elementwise_binary(x2, BinaryOp::Remainder)
 }
 
 /// Return element-wise remainder of division (C-style fmod).
@@ -31320,26 +31296,7 @@ pub fn remainder(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncEr
 /// Uses C fmod semantics: result has same sign as dividend.
 /// NumPy equivalent: `np.fmod(x1, x2)`.
 pub fn fmod(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
-    let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
-    let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
-    let values: Vec<f64> = x1_bc
-        .values
-        .iter()
-        .zip(x2_bc.values.iter())
-        .map(|(&a, &b)| {
-            if b == 0.0 {
-                f64::NAN
-            } else {
-                a % b
-            }
-        })
-        .collect();
-    Ok(UFuncArray {
-        shape: x1_bc.shape.clone(),
-        values,
-        dtype: DType::F64,
-        integer_sidecar: None,
-    })
+    x1.elementwise_binary(x2, BinaryOp::Fmod)
 }
 
 /// Logarithm of the sum of exponentiations: log(exp(x1) + exp(x2)).
