@@ -8231,29 +8231,48 @@ fn stack(
     Ok(stack_fn.call(args, Some(&call_kwargs))?.unbind())
 }
 
-#[allow(dead_code)]
-fn validate_trim_zeros_mode(trim: &str) -> PyResult<()> {
-    if trim.is_empty() || trim.chars().any(|ch| ch != 'f' && ch != 'b') {
-        return Err(PyValueError::new_err(format!(
+fn normalize_trim_zeros_mode(trim: &str) -> PyResult<String> {
+    let mode = trim.to_ascii_lowercase();
+    if matches!(mode.as_str(), "f" | "b" | "fb" | "bf") {
+        Ok(mode)
+    } else {
+        Err(PyValueError::new_err(format!(
             "unexpected character(s) in `trim`: '{trim}'"
-        )));
+        )))
     }
-
-    Ok(())
 }
 
 #[pyfunction]
 #[pyo3(signature = (filt, trim="fb"))]
 fn trim_zeros(py: Python<'_>, filt: Py<PyAny>, trim: &str) -> PyResult<Py<PyAny>> {
-    // Delegate to NumPy so list/tuple/scalar preservation and error messages
-    // match trim_zeros exactly.
+    let filt_for_fallback = filt.clone_ref(py);
+    let trim_owned = trim.to_string();
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let trim_zeros_fn = numpy.getattr("trim_zeros")?;
+        if trim_owned == "fb" {
+            Ok(trim_zeros_fn.call1((filt_for_fallback.bind(py),))?.unbind())
+        } else {
+            Ok(trim_zeros_fn
+                .call1((filt_for_fallback.bind(py), trim_owned.as_str()))?
+                .unbind())
+        }
+    };
     let numpy = py.import("numpy")?;
-    let trim_zeros_fn = numpy.getattr("trim_zeros")?;
-    if trim == "fb" {
-        Ok(trim_zeros_fn.call1((filt.bind(py),))?.unbind())
-    } else {
-        Ok(trim_zeros_fn.call1((filt.bind(py), trim))?.unbind())
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !filt.bind(py).is_instance(&ndarray_type)? {
+        return fallback();
     }
+    let trim_mode = match normalize_trim_zeros_mode(trim) {
+        Ok(mode) => mode,
+        Err(_) => return fallback(),
+    };
+    let array = match extract_numeric_array(py, filt.bind(py), "trim_zeros(filt)") {
+        Ok(a) => a,
+        Err(_) => return fallback(),
+    };
+    let result = array.trim_zeros_mode(trim_mode.as_str());
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
@@ -35907,6 +35926,26 @@ mod tests {
             let actual_back = trim_zeros_fn.call1((array_input.clone(), "b"))?;
             let expected_back = numpy_trim_zeros.call1((array_input.clone(), "b"))?;
             assert_array_matches_numpy(&actual_back, &expected_back)?;
+
+            let actual_upper = trim_zeros_fn.call1((array_input.clone(), "FB"))?;
+            let expected_upper = numpy_trim_zeros.call1((array_input.clone(), "FB"))?;
+            assert_array_matches_numpy(&actual_upper, &expected_upper)?;
+
+            let actual_array_err = trim_zeros_fn.call1((array_input, "x")).unwrap_err();
+            let expected_array_err = numpy_trim_zeros
+                .call1((numeric_array(py, vec![0_i32, 0, 1, 2, 0, 0], "int64"), "x"))
+                .unwrap_err();
+            assert_eq!(
+                actual_array_err.get_type(py).name()?.extract::<String>()?,
+                expected_array_err
+                    .get_type(py)
+                    .name()?
+                    .extract::<String>()?
+            );
+            assert_eq!(
+                actual_array_err.value(py).str()?.extract::<String>()?,
+                expected_array_err.value(py).str()?.extract::<String>()?
+            );
 
             let scalar_input = 0_i32.into_pyobject(py)?.unbind();
             let scalar_args = PyTuple::new(py, [scalar_input.clone_ref(py).into_bound(py)])?;
