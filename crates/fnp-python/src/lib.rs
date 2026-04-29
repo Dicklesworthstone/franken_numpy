@@ -13629,11 +13629,7 @@ fn rad2deg(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn positive(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.positive (element-wise +x, returns a fresh
-    // array with preserved dtype). TypeError surface on non-numeric
-    // dtypes (e.g. string) must match numpy exactly.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("positive")?.call1((x.bind(py),))?.unbind())
+    native_unary_elementwise(py, x.bind(py), UnaryOp::Positive, "positive", "positive(x)")
 }
 
 #[pyfunction]
@@ -15806,79 +15802,49 @@ fn multiply(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>>
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn sin(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.sin. Element-wise trigonometric sine. Integer
-    // input is promoted to float; complex input returns complex output.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("sin")?.call1((x.bind(py),))?.unbind())
+    native_unary_promoting(py, x.bind(py), UnaryOp::Sin, "sin", "sin(x)")
 }
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn cos(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.cos. Element-wise trigonometric cosine. Integer
-    // input is promoted to float; complex input returns complex output.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("cos")?.call1((x.bind(py),))?.unbind())
+    native_unary_promoting(py, x.bind(py), UnaryOp::Cos, "cos", "cos(x)")
 }
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn log(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.log. Element-wise natural logarithm. Matches
-    // numpy for log(0) (returns -inf with RuntimeWarning) and log of
-    // negative real (returns NaN with RuntimeWarning, complex otherwise).
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("log")?.call1((x.bind(py),))?.unbind())
+    native_unary_promoting(py, x.bind(py), UnaryOp::Log, "log", "log(x)")
 }
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn exp(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.exp. Element-wise exponential (e**x). Integer
-    // input promotes to float; complex input returns complex output.
-    // Matches numpy overflow behavior for large real x (returns inf).
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("exp")?.call1((x.bind(py),))?.unbind())
+    native_unary_promoting(py, x.bind(py), UnaryOp::Exp, "exp", "exp(x)")
 }
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn sqrt(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.sqrt. Element-wise non-negative square root.
-    // Integer input promotes to float; negative real under the default
-    // real-only branch returns NaN with RuntimeWarning (matching numpy);
-    // complex input returns complex output.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("sqrt")?.call1((x.bind(py),))?.unbind())
+    native_unary_promoting(py, x.bind(py), UnaryOp::Sqrt, "sqrt", "sqrt(x)")
 }
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn arcsin(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.arcsin. Element-wise inverse sine over the
-    // closed real domain [-1, 1]; outside that range the real branch
-    // returns NaN with RuntimeWarning (complex input returns complex).
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("arcsin")?.call1((x.bind(py),))?.unbind())
+    native_unary_promoting(py, x.bind(py), UnaryOp::Arcsin, "arcsin", "arcsin(x)")
 }
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn arccos(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.arccos. Element-wise inverse cosine over [-1, 1];
-    // outside that range the real branch returns NaN; complex input
-    // returns complex output.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("arccos")?.call1((x.bind(py),))?.unbind())
+    native_unary_promoting(py, x.bind(py), UnaryOp::Arccos, "arccos", "arccos(x)")
 }
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn arctan(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.arctan. Element-wise inverse tangent over the
-    // entire real line, returning values in [-pi/2, pi/2].
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("arctan")?.call1((x.bind(py),))?.unbind())
+    native_unary_promoting(py, x.bind(py), UnaryOp::Arctan, "arctan", "arctan(x)")
 }
 
 #[pyfunction]
@@ -15897,60 +15863,37 @@ fn arctan2(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> 
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn arcsinh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.arcsinh. Element-wise inverse hyperbolic sine.
-    // Defined for all real and complex input.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("arcsinh")?.call1((x.bind(py),))?.unbind())
+    native_unary_promoting(py, x.bind(py), UnaryOp::Arcsinh, "arcsinh", "arcsinh(x)")
 }
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn arccosh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.arccosh. Element-wise inverse hyperbolic cosine
-    // defined on x >= 1; the real branch returns NaN for x < 1, while
-    // complex input returns complex output.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("arccosh")?.call1((x.bind(py),))?.unbind())
+    native_unary_promoting(py, x.bind(py), UnaryOp::Arccosh, "arccosh", "arccosh(x)")
 }
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn arctanh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.arctanh. Element-wise inverse hyperbolic tangent
-    // defined on (-1, 1); ±1 returns ±inf with RuntimeWarning, outside
-    // (-1, 1) returns NaN. Complex input returns complex output.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("arctanh")?.call1((x.bind(py),))?.unbind())
+    native_unary_promoting(py, x.bind(py), UnaryOp::Arctanh, "arctanh", "arctanh(x)")
 }
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn sinh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.sinh. Element-wise hyperbolic sine. Integer
-    // input promotes to float; complex input returns complex output;
-    // matches numpy overflow behavior for large |x| (returns inf).
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("sinh")?.call1((x.bind(py),))?.unbind())
+    native_unary_promoting(py, x.bind(py), UnaryOp::Sinh, "sinh", "sinh(x)")
 }
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn cosh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.cosh. Element-wise hyperbolic cosine. Integer
-    // input promotes to float; complex input returns complex output;
-    // matches numpy overflow behavior for large |x| (returns inf).
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("cosh")?.call1((x.bind(py),))?.unbind())
+    native_unary_promoting(py, x.bind(py), UnaryOp::Cosh, "cosh", "cosh(x)")
 }
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn tanh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.tanh. Element-wise hyperbolic tangent in (-1, 1).
-    // Integer input promotes to float; complex input returns complex
-    // output. Saturates to ±1 for very large |x| (matching numpy).
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("tanh")?.call1((x.bind(py),))?.unbind())
+    native_unary_promoting(py, x.bind(py), UnaryOp::Tanh, "tanh", "tanh(x)")
 }
 
 #[pyfunction]
