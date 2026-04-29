@@ -37,24 +37,28 @@ fn fnp_script(body: String) -> String {
     )
 }
 
-fn parse_float_list(s: &str) -> Vec<f64> {
+fn parse_float_list(s: &str) -> Result<Vec<f64>, String> {
     if s.is_empty() || s == "[]" {
-        return vec![];
+        return Ok(vec![]);
     }
     let trimmed = s.trim_start_matches('[').trim_end_matches(']');
     trimmed
         .split(|c: char| c.is_whitespace() || c == ',')
         .filter(|t| !t.is_empty())
-        .filter_map(|token| {
-            let t = token.trim().trim_end_matches('.');
+        .map(|token| {
+            let t = token
+                .trim()
+                .trim_matches(|c| c == '[' || c == ']')
+                .trim_end_matches('.');
             if t == "nan" || t == "NaN" {
-                Some(f64::NAN)
+                Ok(f64::NAN)
             } else if t == "inf" || t == "Inf" {
-                Some(f64::INFINITY)
+                Ok(f64::INFINITY)
             } else if t == "-inf" || t == "-Inf" {
-                Some(f64::NEG_INFINITY)
+                Ok(f64::NEG_INFINITY)
             } else {
-                t.parse().ok()
+                t.parse()
+                    .map_err(|error| format!("failed to parse float token {token:?}: {error}"))
             }
         })
         .collect()
@@ -101,7 +105,10 @@ fn hypot_matches_numpy_across_50_cases() -> Result<(), String> {
         ("np.array([np.nan])", "np.array([1.0])"),
         ("np.array([1.0])", "np.array([np.nan])"),
         ("np.array([np.nan])", "np.array([np.nan])"),
-        ("np.array([[1.0, 2.0], [3.0, 4.0]])", "np.array([[1.0, 2.0], [3.0, 4.0]])"),
+        (
+            "np.array([[1.0, 2.0], [3.0, 4.0]])",
+            "np.array([[1.0, 2.0], [3.0, 4.0]])",
+        ),
         ("np.array([0.6])", "np.array([0.8])"),
         ("np.array([5.0, 7.0])", "np.array([12.0, 24.0])"),
         ("np.array([1.0, 2.0, 3.0])", "np.array([1.0, 2.0, 3.0])"),
@@ -110,17 +117,16 @@ fn hypot_matches_numpy_across_50_cases() -> Result<(), String> {
     ];
 
     for (x_expr, y_expr) in &test_cases {
-        let script = format!(
-            "import numpy as np; print(np.hypot({x_expr}, {y_expr}).flatten().tolist())"
-        );
+        let script =
+            format!("import numpy as np; print(np.hypot({x_expr}, {y_expr}).flatten().tolist())");
         let numpy_result = numpy_oracle(&script)?;
-        let numpy_vals = parse_float_list(&numpy_result);
+        let numpy_vals = parse_float_list(&numpy_result)?;
 
         let rust_script = fnp_script(format!(
             "print(fnp.hypot({x_expr}, {y_expr}).flatten().tolist())"
         ));
         let rust_result = numpy_oracle(&rust_script)?;
-        let rust_vals = parse_float_list(&rust_result);
+        let rust_vals = parse_float_list(&rust_result)?;
 
         assert!(
             floats_close(&numpy_vals, &rust_vals, 1e-10),
@@ -156,7 +162,10 @@ fn copysign_matches_numpy_across_50_cases() -> Result<(), String> {
         ("np.array([np.nan])", "np.array([1.0])"),
         ("np.array([np.nan])", "np.array([-1.0])"),
         ("np.array([1.0])", "np.array([np.nan])"),
-        ("np.array([[1.0, -1.0], [2.0, -2.0]])", "np.array([[-1.0, 1.0], [-1.0, 1.0]])"),
+        (
+            "np.array([[1.0, -1.0], [2.0, -2.0]])",
+            "np.array([[-1.0, 1.0], [-1.0, 1.0]])",
+        ),
         ("np.array([1.0, 2.0, 3.0])", "np.array([-1.0, -1.0, -1.0])"),
         ("np.array([100.5, -100.5])", "np.array([-1.0, 1.0])"),
     ];
@@ -166,13 +175,13 @@ fn copysign_matches_numpy_across_50_cases() -> Result<(), String> {
             "import numpy as np; print(np.copysign({x_expr}, {y_expr}).flatten().tolist())"
         );
         let numpy_result = numpy_oracle(&script)?;
-        let numpy_vals = parse_float_list(&numpy_result);
+        let numpy_vals = parse_float_list(&numpy_result)?;
 
         let rust_script = fnp_script(format!(
             "print(fnp.copysign({x_expr}, {y_expr}).flatten().tolist())"
         ));
         let rust_result = numpy_oracle(&rust_script)?;
-        let rust_vals = parse_float_list(&rust_result);
+        let rust_vals = parse_float_list(&rust_result)?;
 
         assert!(
             floats_close(&numpy_vals, &rust_vals, 1e-10),
@@ -192,17 +201,16 @@ fn hypot_broadcast_matches_numpy() -> Result<(), String> {
     ];
 
     for (x_expr, y_expr) in &test_cases {
-        let script = format!(
-            "import numpy as np; print(np.hypot({x_expr}, {y_expr}).flatten().tolist())"
-        );
+        let script =
+            format!("import numpy as np; print(np.hypot({x_expr}, {y_expr}).flatten().tolist())");
         let numpy_result = numpy_oracle(&script)?;
-        let numpy_vals = parse_float_list(&numpy_result);
+        let numpy_vals = parse_float_list(&numpy_result)?;
 
         let rust_script = fnp_script(format!(
             "print(fnp.hypot({x_expr}, {y_expr}).flatten().tolist())"
         ));
         let rust_result = numpy_oracle(&rust_script)?;
-        let rust_vals = parse_float_list(&rust_result);
+        let rust_vals = parse_float_list(&rust_result)?;
 
         assert!(
             floats_close(&numpy_vals, &rust_vals, 1e-10),
@@ -234,4 +242,11 @@ fn binary_math_empty_arrays_match_numpy() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[test]
+fn parse_float_list_rejects_unparseable_tokens() {
+    let error = parse_float_list("[1.0, broken, 2.0]")
+        .expect_err("malformed oracle output must fail the harness");
+    assert!(error.contains("broken"), "unexpected parse error: {error}");
 }
