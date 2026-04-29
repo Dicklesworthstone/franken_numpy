@@ -21313,14 +21313,61 @@ fn cumprod(
     build_numpy_array_from_ufunc(py, &result)
 }
 
+// Trace (sum along diagonal) with native Rust fast path.
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (a, offset=0, axis1=0, axis2=1, dtype=None, out=None))]
 fn trace(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
+    a: Py<PyAny>,
+    offset: i64,
+    axis1: isize,
+    axis2: isize,
+    dtype: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "trace", args, kwargs)
+    let numpy = py.import("numpy")?;
+    let trace_fn = numpy.getattr("trace")?;
+
+    let a_for_fallback = a.clone_ref(py);
+    let dtype_for_fallback = dtype.as_ref().map(|v| v.clone_ref(py));
+    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
+
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("offset", offset)?;
+        kwargs.set_item("axis1", axis1)?;
+        kwargs.set_item("axis2", axis2)?;
+        if let Some(dt) = dtype_for_fallback.as_ref() {
+            kwargs.set_item("dtype", dt.bind(py))?;
+        }
+        if let Some(o) = out_for_fallback.as_ref() {
+            kwargs.set_item("out", o.bind(py))?;
+        }
+        Ok(trace_fn
+            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
+    // Fallback for `out` buffer or explicit dtype (conversion not native)
+    if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        || dtype.as_ref().is_some_and(|v| !v.bind(py).is_none())
+    {
+        return fallback();
+    }
+
+    // Extract input array
+    let array = match extract_precise_numeric_array(py, a.bind(py), "trace(a)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+
+    // Call native Rust trace_axis
+    let result = match array.trace_axis(offset, axis1, axis2) {
+        Ok(r) => r,
+        Err(_) => return fallback(),
+    };
+
+    build_numpy_scalar_or_array(py, &result)
 }
 
 // Arg reductions
