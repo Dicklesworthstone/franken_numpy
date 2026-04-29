@@ -31171,6 +31171,62 @@ pub fn fmin(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> 
     })
 }
 
+/// Element-wise maximum of array elements, propagating NaNs.
+///
+/// Compare two arrays and return a new array containing the element-wise
+/// maxima. If one of the elements being compared is a NaN, then that element
+/// is returned (NaN propagation). NumPy equivalent: `np.maximum(x1, x2)`.
+pub fn maximum(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
+    let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
+    let values: Vec<f64> = x1_bc
+        .values
+        .iter()
+        .zip(x2_bc.values.iter())
+        .map(|(&a, &b)| {
+            if a.is_nan() || b.is_nan() {
+                f64::NAN
+            } else {
+                a.max(b)
+            }
+        })
+        .collect();
+    Ok(UFuncArray {
+        shape: x1_bc.shape.clone(),
+        values,
+        dtype: DType::F64,
+        integer_sidecar: None,
+    })
+}
+
+/// Element-wise minimum of array elements, propagating NaNs.
+///
+/// Compare two arrays and return a new array containing the element-wise
+/// minima. If one of the elements being compared is a NaN, then that element
+/// is returned (NaN propagation). NumPy equivalent: `np.minimum(x1, x2)`.
+pub fn minimum(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
+    let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
+    let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
+    let values: Vec<f64> = x1_bc
+        .values
+        .iter()
+        .zip(x2_bc.values.iter())
+        .map(|(&a, &b)| {
+            if a.is_nan() || b.is_nan() {
+                f64::NAN
+            } else {
+                a.min(b)
+            }
+        })
+        .collect();
+    Ok(UFuncArray {
+        shape: x1_bc.shape.clone(),
+        values,
+        dtype: DType::F64,
+        integer_sidecar: None,
+    })
+}
+
 /// Logarithm of the sum of exponentiations: log(exp(x1) + exp(x2)).
 ///
 /// This is computed in a numerically stable way to avoid overflow.

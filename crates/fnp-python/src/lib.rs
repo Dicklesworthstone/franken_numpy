@@ -12,6 +12,7 @@ use fnp_ufunc::{
     FromPyFuncReduceOptions, GridSpec, MAError, MaskedArray, UFuncArray, UnaryOp,
     arctan2 as ufunc_arctan2, copysign as ufunc_copysign, fmax as ufunc_fmax,
     fmin as ufunc_fmin, frexp as ufunc_frexp, hypot as ufunc_hypot,
+    maximum as ufunc_maximum, minimum as ufunc_minimum,
     isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, ldexp as ufunc_ldexp,
     logaddexp as ufunc_logaddexp, logaddexp2 as ufunc_logaddexp2, ma_is_masked, ma_make_mask,
     ma_mask_or, modf as ufunc_modf, nextafter as ufunc_nextafter, reduce_frompyfunc_values,
@@ -13800,6 +13801,36 @@ fn native_binary_fmin_or_passthrough(
     }
 }
 
+fn native_binary_maximum_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let x1 = extract_numeric_array(py, &args.get_item(0)?, "maximum(x1)")?;
+        let x2 = extract_numeric_array(py, &args.get_item(1)?, "maximum(x2)")?;
+        let result = ufunc_maximum(&x1, &x2).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "maximum", args, kwargs)
+    }
+}
+
+fn native_binary_minimum_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let x1 = extract_numeric_array(py, &args.get_item(0)?, "minimum(x1)")?;
+        let x2 = extract_numeric_array(py, &args.get_item(1)?, "minimum(x2)")?;
+        let result = ufunc_minimum(&x1, &x2).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "minimum", args, kwargs)
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn square(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
@@ -22778,7 +22809,7 @@ fn maximum(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "maximum", args, kwargs)
+    native_binary_maximum_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
@@ -22788,7 +22819,7 @@ fn minimum(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "minimum", args, kwargs)
+    native_binary_minimum_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
