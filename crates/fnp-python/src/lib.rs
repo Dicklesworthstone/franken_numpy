@@ -21038,6 +21038,32 @@ fn core_numpy_passthrough(
     Ok(numpy.getattr(name)?.call(args, kwargs)?.unbind())
 }
 
+fn clone_py_kwargs<'py>(
+    py: Python<'py>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let cloned = PyDict::new(py);
+    if let Some(kwargs) = kwargs {
+        for (key, value) in kwargs.iter() {
+            cloned.set_item(key, value)?;
+        }
+    }
+    Ok(cloned)
+}
+
+fn has_unrecognized_kwargs(kwargs: Option<&Bound<'_, PyDict>>, allowed: &[&str]) -> PyResult<bool> {
+    let Some(kwargs) = kwargs else {
+        return Ok(false);
+    };
+    for (key, _) in kwargs.iter() {
+        let key = key.extract::<String>()?;
+        if !allowed.contains(&key.as_str()) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 // Array creators
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
@@ -21105,7 +21131,7 @@ fn sum(
     let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
 
     let fallback = || -> PyResult<Py<PyAny>> {
-        let kw = PyDict::new(py);
+        let kw = clone_py_kwargs(py, kwargs)?;
         if let Some(ax) = axis_for_fallback.as_ref() {
             kw.set_item("axis", ax.bind(py))?;
         }
@@ -21122,13 +21148,12 @@ fn sum(
         if let Some(w) = where_for_fallback.as_ref() {
             kw.set_item("where", w.bind(py))?;
         }
-        Ok(sum_fn
-            .call((a_for_fallback.bind(py),), Some(&kw))?
-            .unbind())
+        Ok(sum_fn.call((a_for_fallback.bind(py),), Some(&kw))?.unbind())
     };
 
     // Fallback for out, dtype, initial, or where parameters
-    if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
+    if has_unrecognized_kwargs(kwargs, &["where"])?
+        || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || dtype.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || initial.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || where_.as_ref().is_some_and(|v| !v.is_none())
@@ -21191,7 +21216,7 @@ fn prod(
     let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
 
     let fallback = || -> PyResult<Py<PyAny>> {
-        let kw = PyDict::new(py);
+        let kw = clone_py_kwargs(py, kwargs)?;
         if let Some(ax) = axis_for_fallback.as_ref() {
             kw.set_item("axis", ax.bind(py))?;
         }
@@ -21214,7 +21239,8 @@ fn prod(
     };
 
     // Fallback for out, dtype, initial, or where parameters
-    if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
+    if has_unrecognized_kwargs(kwargs, &["where"])?
+        || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || dtype.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || initial.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || where_.as_ref().is_some_and(|v| !v.is_none())
@@ -21275,7 +21301,7 @@ fn mean(
     let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
 
     let fallback = || -> PyResult<Py<PyAny>> {
-        let kw = PyDict::new(py);
+        let kw = clone_py_kwargs(py, kwargs)?;
         if let Some(ax) = axis_for_fallback.as_ref() {
             kw.set_item("axis", ax.bind(py))?;
         }
@@ -21295,7 +21321,8 @@ fn mean(
     };
 
     // Fallback for out, dtype, or where parameters
-    if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
+    if has_unrecognized_kwargs(kwargs, &["where"])?
+        || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || dtype.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || where_.as_ref().is_some_and(|v| !v.is_none())
     {
@@ -21391,7 +21418,7 @@ fn py_std(
     let correction_for_fallback = correction.as_ref().map(|v| v.clone().unbind());
 
     let fallback = || -> PyResult<Py<PyAny>> {
-        let kw = PyDict::new(py);
+        let kw = clone_py_kwargs(py, kwargs)?;
         if let Some(ax) = axis_for_fallback.as_ref() {
             kw.set_item("axis", ax.bind(py))?;
         }
@@ -21412,13 +21439,12 @@ fn py_std(
         if let Some(c) = correction_for_fallback.as_ref() {
             kw.set_item("correction", c.bind(py))?;
         }
-        Ok(std_fn
-            .call((a_for_fallback.bind(py),), Some(&kw))?
-            .unbind())
+        Ok(std_fn.call((a_for_fallback.bind(py),), Some(&kw))?.unbind())
     };
 
     // Fallback for out, dtype, where, mean, or correction parameters
-    if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
+    if has_unrecognized_kwargs(kwargs, &["where", "mean", "correction"])?
+        || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || dtype.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || where_.as_ref().is_some_and(|v| !v.is_none())
         || mean_.as_ref().is_some_and(|v| !v.is_none())
@@ -21492,7 +21518,7 @@ fn var(
     let correction_for_fallback = correction.as_ref().map(|v| v.clone().unbind());
 
     let fallback = || -> PyResult<Py<PyAny>> {
-        let kw = PyDict::new(py);
+        let kw = clone_py_kwargs(py, kwargs)?;
         if let Some(ax) = axis_for_fallback.as_ref() {
             kw.set_item("axis", ax.bind(py))?;
         }
@@ -21513,13 +21539,12 @@ fn var(
         if let Some(c) = correction_for_fallback.as_ref() {
             kw.set_item("correction", c.bind(py))?;
         }
-        Ok(var_fn
-            .call((a_for_fallback.bind(py),), Some(&kw))?
-            .unbind())
+        Ok(var_fn.call((a_for_fallback.bind(py),), Some(&kw))?.unbind())
     };
 
     // Fallback for out, dtype, where, mean, or correction parameters
-    if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
+    if has_unrecognized_kwargs(kwargs, &["where", "mean", "correction"])?
+        || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || dtype.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || where_.as_ref().is_some_and(|v| !v.is_none())
         || mean_.as_ref().is_some_and(|v| !v.is_none())
@@ -21587,7 +21612,7 @@ fn py_min(
     let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
 
     let fallback = || -> PyResult<Py<PyAny>> {
-        let kw = PyDict::new(py);
+        let kw = clone_py_kwargs(py, kwargs)?;
         if let Some(ax) = axis_for_fallback.as_ref() {
             kw.set_item("axis", ax.bind(py))?;
         }
@@ -21601,13 +21626,12 @@ fn py_min(
         if let Some(w) = where_for_fallback.as_ref() {
             kw.set_item("where", w.bind(py))?;
         }
-        Ok(min_fn
-            .call((a_for_fallback.bind(py),), Some(&kw))?
-            .unbind())
+        Ok(min_fn.call((a_for_fallback.bind(py),), Some(&kw))?.unbind())
     };
 
     // Fallback for out, initial, or where parameters
-    if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
+    if has_unrecognized_kwargs(kwargs, &["where"])?
+        || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || initial.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || where_.as_ref().is_some_and(|v| !v.is_none())
     {
@@ -21668,7 +21692,7 @@ fn py_max(
     let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
 
     let fallback = || -> PyResult<Py<PyAny>> {
-        let kw = PyDict::new(py);
+        let kw = clone_py_kwargs(py, kwargs)?;
         if let Some(ax) = axis_for_fallback.as_ref() {
             kw.set_item("axis", ax.bind(py))?;
         }
@@ -21682,13 +21706,12 @@ fn py_max(
         if let Some(w) = where_for_fallback.as_ref() {
             kw.set_item("where", w.bind(py))?;
         }
-        Ok(max_fn
-            .call((a_for_fallback.bind(py),), Some(&kw))?
-            .unbind())
+        Ok(max_fn.call((a_for_fallback.bind(py),), Some(&kw))?.unbind())
     };
 
     // Fallback for out, initial, or where parameters
-    if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
+    if has_unrecognized_kwargs(kwargs, &["where"])?
+        || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || initial.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || where_.as_ref().is_some_and(|v| !v.is_none())
     {
@@ -21778,7 +21801,7 @@ fn all(
     let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
 
     let fallback = || -> PyResult<Py<PyAny>> {
-        let kw = PyDict::new(py);
+        let kw = clone_py_kwargs(py, kwargs)?;
         if let Some(ax) = axis_for_fallback.as_ref() {
             kw.set_item("axis", ax.bind(py))?;
         }
@@ -21789,13 +21812,12 @@ fn all(
         if let Some(w) = where_for_fallback.as_ref() {
             kw.set_item("where", w.bind(py))?;
         }
-        Ok(all_fn
-            .call((a_for_fallback.bind(py),), Some(&kw))?
-            .unbind())
+        Ok(all_fn.call((a_for_fallback.bind(py),), Some(&kw))?.unbind())
     };
 
     // Fallback for out, keepdims, or where parameters
-    if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
+    if has_unrecognized_kwargs(kwargs, &["where"])?
+        || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || keepdims
         || where_.as_ref().is_some_and(|v| !v.is_none())
     {
@@ -21853,7 +21875,7 @@ fn any(
     let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
 
     let fallback = || -> PyResult<Py<PyAny>> {
-        let kw = PyDict::new(py);
+        let kw = clone_py_kwargs(py, kwargs)?;
         if let Some(ax) = axis_for_fallback.as_ref() {
             kw.set_item("axis", ax.bind(py))?;
         }
@@ -21864,13 +21886,12 @@ fn any(
         if let Some(w) = where_for_fallback.as_ref() {
             kw.set_item("where", w.bind(py))?;
         }
-        Ok(any_fn
-            .call((a_for_fallback.bind(py),), Some(&kw))?
-            .unbind())
+        Ok(any_fn.call((a_for_fallback.bind(py),), Some(&kw))?.unbind())
     };
 
     // Fallback for out, keepdims, or where parameters
-    if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
+    if has_unrecognized_kwargs(kwargs, &["where"])?
+        || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || keepdims
         || where_.as_ref().is_some_and(|v| !v.is_none())
     {
@@ -22117,10 +22138,7 @@ fn argmax(
     out: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let keepdims = kwargs
-        .and_then(|kw| kw.get_item("keepdims").ok().flatten())
-        .map(|v| v.extract::<bool>().unwrap_or(false))
-        .unwrap_or(false);
+    let keepdims_arg = kwargs.and_then(|kw| kw.get_item("keepdims").ok().flatten());
     let numpy = py.import("numpy")?;
     let argmax_fn = numpy.getattr("argmax")?;
 
@@ -22129,23 +22147,31 @@ fn argmax(
     let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
 
     let fallback = || -> PyResult<Py<PyAny>> {
-        let kw = PyDict::new(py);
+        let kw = clone_py_kwargs(py, kwargs)?;
         if let Some(ax) = axis_for_fallback.as_ref() {
             kw.set_item("axis", ax.bind(py))?;
         }
         if let Some(o) = out_for_fallback.as_ref() {
             kw.set_item("out", o.bind(py))?;
         }
-        if keepdims {
-            kw.set_item("keepdims", true)?;
-        }
         Ok(argmax_fn
             .call((a_for_fallback.bind(py),), Some(&kw))?
             .unbind())
     };
 
+    let keepdims = match keepdims_arg.as_ref() {
+        Some(value) => match value.extract::<bool>() {
+            Ok(value) => value,
+            Err(_) => return fallback(),
+        },
+        None => false,
+    };
+
     // Fallback for out or keepdims parameters
-    if out.as_ref().is_some_and(|v| !v.bind(py).is_none()) || keepdims {
+    if has_unrecognized_kwargs(kwargs, &["keepdims"])?
+        || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        || keepdims
+    {
         return fallback();
     }
 
@@ -22189,10 +22215,7 @@ fn argmin(
     out: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let keepdims = kwargs
-        .and_then(|kw| kw.get_item("keepdims").ok().flatten())
-        .map(|v| v.extract::<bool>().unwrap_or(false))
-        .unwrap_or(false);
+    let keepdims_arg = kwargs.and_then(|kw| kw.get_item("keepdims").ok().flatten());
     let numpy = py.import("numpy")?;
     let argmin_fn = numpy.getattr("argmin")?;
 
@@ -22201,23 +22224,31 @@ fn argmin(
     let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
 
     let fallback = || -> PyResult<Py<PyAny>> {
-        let kw = PyDict::new(py);
+        let kw = clone_py_kwargs(py, kwargs)?;
         if let Some(ax) = axis_for_fallback.as_ref() {
             kw.set_item("axis", ax.bind(py))?;
         }
         if let Some(o) = out_for_fallback.as_ref() {
             kw.set_item("out", o.bind(py))?;
         }
-        if keepdims {
-            kw.set_item("keepdims", true)?;
-        }
         Ok(argmin_fn
             .call((a_for_fallback.bind(py),), Some(&kw))?
             .unbind())
     };
 
+    let keepdims = match keepdims_arg.as_ref() {
+        Some(value) => match value.extract::<bool>() {
+            Ok(value) => value,
+            Err(_) => return fallback(),
+        },
+        None => false,
+    };
+
     // Fallback for out or keepdims parameters
-    if out.as_ref().is_some_and(|v| !v.bind(py).is_none()) || keepdims {
+    if has_unrecognized_kwargs(kwargs, &["keepdims"])?
+        || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        || keepdims
+    {
         return fallback();
     }
 

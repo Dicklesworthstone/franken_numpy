@@ -289,6 +289,32 @@ fn sum_keepdims_matches_numpy() -> Result<(), String> {
 }
 
 #[test]
+fn sum_unknown_keyword_matches_numpy_error() -> Result<(), String> {
+    let numpy_script = r#"import numpy as np
+try:
+    print(np.sum(np.array([1, 2, 3]), unexpected_kw=1))
+except Exception as exc:
+    print(f'{type(exc).__name__}:{exc}')"#;
+    let numpy_result = numpy_oracle(numpy_script)?;
+
+    let rust_script = fnp_sum_script(
+        r#"try:
+    print(fnp.sum(np.array([1, 2, 3]), unexpected_kw=1))
+except Exception as exc:
+    print(f'{type(exc).__name__}:{exc}')"#
+            .to_string(),
+    );
+    let rust_result = numpy_oracle(&rust_script)?;
+
+    assert!(
+        numpy_result.starts_with("TypeError:"),
+        "NumPy should reject unknown sum keyword, got {numpy_result}"
+    );
+    assert_eq!(numpy_result, rust_result);
+    Ok(())
+}
+
+#[test]
 fn sum_integer_dtypes_match_numpy() -> Result<(), String> {
     let test_cases = vec![
         ("np.array([1, 2, 3], dtype=np.int32)", "None"),
