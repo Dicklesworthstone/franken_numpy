@@ -13715,6 +13715,39 @@ fn native_unary_elementwise(
     Ok(output)
 }
 
+// Like native_unary_elementwise but also falls back for integer dtypes
+// (for functions like expm1/log1p that promote integers to float).
+fn native_unary_promoting(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    op: UnaryOp,
+    numpy_name: &str,
+    context: &str,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let fallback = |_py: Python<'_>| -> PyResult<Py<PyAny>> {
+        Ok(numpy.getattr(numpy_name)?.call1((x,))?.unbind())
+    };
+    let Ok(native) = extract_precise_numeric_array(py, x, context) else {
+        return fallback(py);
+    };
+    if native.has_integer_sidecar()
+        || matches!(native.dtype(), DType::Complex64 | DType::Complex128)
+        || native.dtype().is_integer()
+    {
+        return fallback(py);
+    }
+    let result = native.elementwise_unary(op);
+    if !dtype_supported_by_numpy_export_bridge(result.dtype()) {
+        return fallback(py);
+    }
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if native.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
+    }
+    Ok(output)
+}
+
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn square(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
@@ -13758,22 +13791,13 @@ fn isreal(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn expm1(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.expm1 (exp(x) - 1 with greater precision near
-    // zero). Integer input promotes to float; complex input is
-    // supported and returns complex.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("expm1")?.call1((x.bind(py),))?.unbind())
+    native_unary_promoting(py, x.bind(py), UnaryOp::Expm1, "expm1", "expm1(x)")
 }
 
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn log1p(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.log1p (log(1 + x) with greater precision for
-    // small x). Integer input promotes to float; complex input is
-    // supported and returns complex. Matches numpy for boundary values
-    // x == -1 (returns -inf) and x < -1 (returns NaN with warning).
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("log1p")?.call1((x.bind(py),))?.unbind())
+    native_unary_promoting(py, x.bind(py), UnaryOp::Log1p, "log1p", "log1p(x)")
 }
 
 #[pyfunction]
