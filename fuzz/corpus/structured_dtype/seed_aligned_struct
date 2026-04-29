@@ -1,0 +1,1 @@
+{'names': ['x', 'y'], 'formats': ['<f8', '<i4'], 'offsets': [0, 16], 'itemsize': 32}
