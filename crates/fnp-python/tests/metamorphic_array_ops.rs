@@ -383,3 +383,89 @@ print(np.allclose(result, expected, rtol=1e-10))
     assert_eq!(result.trim(), "True", "arctan2(y,x) should equal arctan(y/x) for positive x");
     Ok(())
 }
+
+#[test]
+fn divmod_invariant() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+a = np.random.uniform(-100, 100, 100)
+b = np.random.uniform(1, 10, 100)  # avoid zero
+q, r = fnp.divmod(a, b)
+# invariant: a == floor(a/b) * b + remainder
+reconstructed = q * b + r
+print(np.allclose(reconstructed, a, rtol=1e-10))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "divmod invariant: a == q * b + r");
+    Ok(())
+}
+
+#[test]
+fn reciprocal_product_is_one() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.uniform(0.01, 100, 100)  # positive, non-zero
+result = x * fnp.reciprocal(x)
+print(np.allclose(result, 1.0, rtol=1e-10))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "x * reciprocal(x) should equal 1");
+    Ok(())
+}
+
+#[test]
+fn expm1_log1p_roundtrip() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+# For small x, log1p(expm1(x)) == x
+x = np.random.uniform(-0.5, 0.5, 100)
+result = fnp.log1p(fnp.expm1(x))
+print(np.allclose(result, x, rtol=1e-10))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "log1p(expm1(x)) should equal x for small x");
+    Ok(())
+}
+
+#[test]
+fn deg2rad_rad2deg_roundtrip() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.uniform(-360, 360, 100)
+result = fnp.rad2deg(fnp.deg2rad(x))
+print(np.allclose(result, x, rtol=1e-10))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "rad2deg(deg2rad(x)) should equal x");
+    Ok(())
+}
+
+#[test]
+fn clip_equals_min_max_composition() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.uniform(-10, 10, 100)
+lo, hi = -5.0, 5.0
+clipped = fnp.clip(x, lo, hi)
+composed = fnp.minimum(fnp.maximum(x, lo), hi)
+print(np.allclose(clipped, composed, rtol=1e-10))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "clip(x, lo, hi) == minimum(maximum(x, lo), hi)");
+    Ok(())
+}
