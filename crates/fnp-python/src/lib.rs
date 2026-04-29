@@ -21313,24 +21313,194 @@ fn mean(
     build_numpy_array_from_ufunc(py, &result)
 }
 
+// Native Rust std with fallback for unsupported parameters.
 #[pyfunction]
-#[pyo3(name = "std", signature = (*args, **kwargs))]
+#[pyo3(name = "std", signature = (a, axis=None, dtype=None, out=None, ddof=0, keepdims=false, **kwargs))]
+#[allow(clippy::too_many_arguments)]
 fn py_std(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    dtype: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
+    ddof: usize,
+    keepdims: bool,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "std", args, kwargs)
+    let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
+    let mean_ = kwargs.and_then(|kw| kw.get_item("mean").ok().flatten());
+    let correction = kwargs.and_then(|kw| kw.get_item("correction").ok().flatten());
+    let numpy = py.import("numpy")?;
+    let std_fn = numpy.getattr("std")?;
+
+    let a_for_fallback = a.clone_ref(py);
+    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
+    let dtype_for_fallback = dtype.as_ref().map(|v| v.clone_ref(py));
+    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
+    let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
+    let mean_for_fallback = mean_.as_ref().map(|v| v.clone().unbind());
+    let correction_for_fallback = correction.as_ref().map(|v| v.clone().unbind());
+
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kw = PyDict::new(py);
+        if let Some(ax) = axis_for_fallback.as_ref() {
+            kw.set_item("axis", ax.bind(py))?;
+        }
+        if let Some(dt) = dtype_for_fallback.as_ref() {
+            kw.set_item("dtype", dt.bind(py))?;
+        }
+        if let Some(o) = out_for_fallback.as_ref() {
+            kw.set_item("out", o.bind(py))?;
+        }
+        kw.set_item("ddof", ddof)?;
+        kw.set_item("keepdims", keepdims)?;
+        if let Some(w) = where_for_fallback.as_ref() {
+            kw.set_item("where", w.bind(py))?;
+        }
+        if let Some(m) = mean_for_fallback.as_ref() {
+            kw.set_item("mean", m.bind(py))?;
+        }
+        if let Some(c) = correction_for_fallback.as_ref() {
+            kw.set_item("correction", c.bind(py))?;
+        }
+        Ok(std_fn
+            .call((a_for_fallback.bind(py),), Some(&kw))?
+            .unbind())
+    };
+
+    // Fallback for out, dtype, where, mean, or correction parameters
+    if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        || dtype.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        || where_.as_ref().is_some_and(|v| !v.is_none())
+        || mean_.as_ref().is_some_and(|v| !v.is_none())
+        || correction.as_ref().is_some_and(|v| !v.is_none())
+    {
+        return fallback();
+    }
+
+    // Parse axis: None, integer, or tuple → fallback for tuple
+    let axis_val: Option<isize> = match &axis {
+        None => None,
+        Some(ax) => {
+            let ax_bound = ax.bind(py);
+            if ax_bound.is_none() {
+                None
+            } else if let Ok(i) = ax_bound.extract::<isize>() {
+                Some(i)
+            } else {
+                return fallback();
+            }
+        }
+    };
+
+    // Extract input array
+    let array = match extract_precise_numeric_array(py, a.bind(py), "std(a)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+
+    // Call native Rust reduce_std
+    let result = match array.reduce_std(axis_val, keepdims, ddof) {
+        Ok(r) => r,
+        Err(_) => return fallback(),
+    };
+
+    build_numpy_array_from_ufunc(py, &result)
 }
 
+// Native Rust var with fallback for unsupported parameters.
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=0, keepdims=false, **kwargs))]
+#[allow(clippy::too_many_arguments)]
 fn var(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
+    a: Py<PyAny>,
+    axis: Option<Py<PyAny>>,
+    dtype: Option<Py<PyAny>>,
+    out: Option<Py<PyAny>>,
+    ddof: usize,
+    keepdims: bool,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "var", args, kwargs)
+    let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
+    let mean_ = kwargs.and_then(|kw| kw.get_item("mean").ok().flatten());
+    let correction = kwargs.and_then(|kw| kw.get_item("correction").ok().flatten());
+    let numpy = py.import("numpy")?;
+    let var_fn = numpy.getattr("var")?;
+
+    let a_for_fallback = a.clone_ref(py);
+    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
+    let dtype_for_fallback = dtype.as_ref().map(|v| v.clone_ref(py));
+    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
+    let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
+    let mean_for_fallback = mean_.as_ref().map(|v| v.clone().unbind());
+    let correction_for_fallback = correction.as_ref().map(|v| v.clone().unbind());
+
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kw = PyDict::new(py);
+        if let Some(ax) = axis_for_fallback.as_ref() {
+            kw.set_item("axis", ax.bind(py))?;
+        }
+        if let Some(dt) = dtype_for_fallback.as_ref() {
+            kw.set_item("dtype", dt.bind(py))?;
+        }
+        if let Some(o) = out_for_fallback.as_ref() {
+            kw.set_item("out", o.bind(py))?;
+        }
+        kw.set_item("ddof", ddof)?;
+        kw.set_item("keepdims", keepdims)?;
+        if let Some(w) = where_for_fallback.as_ref() {
+            kw.set_item("where", w.bind(py))?;
+        }
+        if let Some(m) = mean_for_fallback.as_ref() {
+            kw.set_item("mean", m.bind(py))?;
+        }
+        if let Some(c) = correction_for_fallback.as_ref() {
+            kw.set_item("correction", c.bind(py))?;
+        }
+        Ok(var_fn
+            .call((a_for_fallback.bind(py),), Some(&kw))?
+            .unbind())
+    };
+
+    // Fallback for out, dtype, where, mean, or correction parameters
+    if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        || dtype.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        || where_.as_ref().is_some_and(|v| !v.is_none())
+        || mean_.as_ref().is_some_and(|v| !v.is_none())
+        || correction.as_ref().is_some_and(|v| !v.is_none())
+    {
+        return fallback();
+    }
+
+    // Parse axis: None, integer, or tuple → fallback for tuple
+    let axis_val: Option<isize> = match &axis {
+        None => None,
+        Some(ax) => {
+            let ax_bound = ax.bind(py);
+            if ax_bound.is_none() {
+                None
+            } else if let Ok(i) = ax_bound.extract::<isize>() {
+                Some(i)
+            } else {
+                return fallback();
+            }
+        }
+    };
+
+    // Extract input array
+    let array = match extract_precise_numeric_array(py, a.bind(py), "var(a)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+
+    // Call native Rust reduce_var
+    let result = match array.reduce_var(axis_val, keepdims, ddof) {
+        Ok(r) => r,
+        Err(_) => return fallback(),
+    };
+
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
