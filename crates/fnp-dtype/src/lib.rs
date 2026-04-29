@@ -102,9 +102,18 @@ impl DType {
                 if name.starts_with('S') && name[1..].parse::<usize>().is_ok() {
                     return Some(Self::Str);
                 }
-                // Handle NumPy void descriptors: V0, V10, etc. Field layout is
+                // Handle NumPy void descriptors: V0, |V10, etc. Field layout is
                 // represented externally, so this maps to the structured marker.
-                if name.starts_with('V') && name[1..].parse::<usize>().is_ok() {
+                if parse_void_descriptor(name) {
+                    return Some(Self::Structured);
+                }
+                // NumPy exposes byte-string void descriptors as dtype names like
+                // "void80" for dtype("|V10"), even though np.dtype("void80") is
+                // not itself accepted by NumPy.
+                if name
+                    .strip_prefix("void")
+                    .is_some_and(|suffix| !suffix.is_empty() && suffix.parse::<usize>().is_ok())
+                {
                     return Some(Self::Structured);
                 }
                 // Handle datetime with unit: datetime64[ns], datetime64[us], etc.
@@ -155,6 +164,18 @@ impl DType {
     pub const fn is_numeric(self) -> bool {
         self.is_integer() || self.is_float()
     }
+}
+
+fn parse_void_descriptor(name: &str) -> bool {
+    let descriptor = name
+        .strip_prefix('|')
+        .or_else(|| name.strip_prefix('<'))
+        .or_else(|| name.strip_prefix('>'))
+        .unwrap_or(name);
+    descriptor == "V"
+        || descriptor
+            .strip_prefix('V')
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.parse::<usize>().is_ok())
 }
 
 /// Deterministic promotion table following NumPy semantics.
@@ -1949,8 +1970,18 @@ mod tests {
             Some(DType::Structured)
         );
         assert_eq!(DType::parse("V"), Some(DType::Structured));
+        assert_eq!(DType::parse("|V"), Some(DType::Structured));
+        assert_eq!(DType::parse("<V"), Some(DType::Structured));
+        assert_eq!(DType::parse(">V"), Some(DType::Structured));
         assert_eq!(DType::parse("V0"), Some(DType::Structured));
         assert_eq!(DType::parse("V10"), Some(DType::Structured));
+        assert_eq!(DType::parse("|V10"), Some(DType::Structured));
+        assert_eq!(DType::parse("<V10"), Some(DType::Structured));
+        assert_eq!(DType::parse(">V10"), Some(DType::Structured));
+        assert_eq!(DType::parse("void80"), Some(DType::Structured));
+        assert_eq!(DType::parse("void128"), Some(DType::Structured));
+        assert_eq!(DType::parse("voidx"), None);
+        assert_eq!(DType::parse("|Vx"), None);
     }
 
     #[test]
