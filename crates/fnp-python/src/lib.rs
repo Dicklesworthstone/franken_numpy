@@ -21212,7 +21212,11 @@ fn sum(
         Err(_) => return fallback(),
     };
 
-    build_numpy_array_from_ufunc(py, &result)
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
+    }
+    Ok(output)
 }
 
 #[pyfunction]
@@ -21299,7 +21303,11 @@ fn prod(
         Err(_) => return fallback(),
     };
 
-    build_numpy_array_from_ufunc(py, &result)
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
+    }
+    Ok(output)
 }
 
 #[pyfunction]
@@ -21380,7 +21388,11 @@ fn mean(
         Err(_) => return fallback(),
     };
 
-    build_numpy_array_from_ufunc(py, &result)
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
+    }
+    Ok(output)
 }
 
 enum DdofArg {
@@ -21509,7 +21521,11 @@ fn py_std(
         Err(_) => return fallback(),
     };
 
-    build_numpy_array_from_ufunc(py, &result)
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
+    }
+    Ok(output)
 }
 
 // Native Rust var with fallback for unsupported parameters.
@@ -21609,7 +21625,11 @@ fn var(
         Err(_) => return fallback(),
     };
 
-    build_numpy_array_from_ufunc(py, &result)
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
+    }
+    Ok(output)
 }
 
 // Native Rust min with fallback for unsupported parameters.
@@ -21689,7 +21709,11 @@ fn py_min(
         Err(_) => return fallback(),
     };
 
-    build_numpy_array_from_ufunc(py, &result)
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
+    }
+    Ok(output)
 }
 
 // Native Rust max with fallback for unsupported parameters.
@@ -21769,7 +21793,11 @@ fn py_max(
         Err(_) => return fallback(),
     };
 
-    build_numpy_array_from_ufunc(py, &result)
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
+    }
+    Ok(output)
 }
 
 // amax is an alias for max
@@ -21875,7 +21903,11 @@ fn all(
         Err(_) => return fallback(),
     };
 
-    build_numpy_array_from_ufunc(py, &result)
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
+    }
+    Ok(output)
 }
 
 // Native Rust any with fallback for unsupported parameters.
@@ -21949,7 +21981,11 @@ fn any(
         Err(_) => return fallback(),
     };
 
-    build_numpy_array_from_ufunc(py, &result)
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
+    }
+    Ok(output)
 }
 
 // Cumulative sum with native Rust fast path.
@@ -22226,7 +22262,11 @@ fn argmax(
         Err(_) => return fallback(),
     };
 
-    build_numpy_array_from_ufunc(py, &result)
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
+    }
+    Ok(output)
 }
 
 // Native Rust argmin with fallback for unsupported parameters.
@@ -22303,7 +22343,11 @@ fn argmin(
         Err(_) => return fallback(),
     };
 
-    build_numpy_array_from_ufunc(py, &result)
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
+    }
+    Ok(output)
 }
 
 // Linalg shortcuts
