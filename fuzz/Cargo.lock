@@ -115,7 +115,9 @@ dependencies = [
 name = "franken_numpy-fuzz"
 version = "0.0.0"
 dependencies = [
+ "fnp-dtype",
  "fnp-io",
+ "fnp-ndarray",
  "fnp-ufunc",
  "libfuzzer-sys",
 ]

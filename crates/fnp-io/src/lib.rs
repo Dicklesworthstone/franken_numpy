@@ -3392,10 +3392,28 @@ impl StructuredIODescriptor {
         let parts: Vec<String> = self
             .fields
             .iter()
-            .map(|f| format!("('{}', '{}')", f.name, f.dtype.descr()))
+            .map(|f| {
+                format!(
+                    "('{}', '{}')",
+                    escape_structured_field_name(&f.name),
+                    f.dtype.descr()
+                )
+            })
             .collect();
         format!("[{}]", parts.join(", "))
     }
+}
+
+fn escape_structured_field_name(name: &str) -> String {
+    let mut escaped = String::with_capacity(name.len());
+    for ch in name.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '\'' => escaped.push_str("\\'"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 /// Parse a NumPy structured dtype descriptor string.
@@ -6420,6 +6438,26 @@ mm.flush()
     fn structured_descriptor_to_descr_string() {
         let desc = make_test_descriptor();
         assert_eq!(desc.to_descr_string(), "[('x', '<f8'), ('y', '<i4')]");
+    }
+
+    #[test]
+    fn structured_descriptor_to_descr_string_escapes_field_names() {
+        let desc = StructuredIODescriptor {
+            fields: vec![
+                StructuredIOField {
+                    name: "can't".to_string(),
+                    dtype: IOSupportedDType::I32,
+                },
+                StructuredIOField {
+                    name: "path\\name".to_string(),
+                    dtype: IOSupportedDType::Bytes(8),
+                },
+            ],
+        };
+
+        let encoded = desc.to_descr_string();
+        assert_eq!(encoded, "[('can\\'t', '<i4'), ('path\\\\name', '|S8')]");
+        assert_eq!(parse_structured_descr(&encoded).unwrap(), desc);
     }
 
     #[test]

@@ -11,7 +11,16 @@ fuzz_target!(|data: &[u8]| {
     }
 
     if let Ok(text) = std::str::from_utf8(data) {
-        let _ = parse_structured_descr(text);
+        if let Ok(descriptor) = parse_structured_descr(text) {
+            let _ = descriptor.record_size();
+            let _ = descriptor.field_offsets();
+
+            let serialized = descriptor.to_descr_string();
+            assert!(
+                parse_structured_descr(&serialized).is_ok(),
+                "structured dtype descriptor did not serialize back to a parseable descriptor: {serialized}"
+            );
+        }
 
         let _ = IOSupportedDType::decode(text);
 
