@@ -188,3 +188,48 @@ print(np.allclose(q, qe) and np.allclose(r, re) and np.allclose(r, 0.0))
     assert_eq!(result.trim(), "True", "divmod exact division should match numpy");
     Ok(())
 }
+
+#[test]
+fn divmod_negative_inf_divisor() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.filterwarnings('ignore')
+x = np.array([1.0, -1.0, 0.0])
+y = np.array([-np.inf, -np.inf, -np.inf])
+q, r = fnp.divmod(x, y)
+qe, re = np.divmod(x, y)
+def check_special(a, b):
+    if np.isnan(a) and np.isnan(b):
+        return True
+    if np.isinf(a) and np.isinf(b):
+        return np.sign(a) == np.sign(b)
+    return np.allclose([a], [b])
+q_match = all(check_special(q[i], qe[i]) for i in range(len(q)))
+r_match = all(check_special(r[i], re[i]) for i in range(len(r)))
+print(q_match and r_match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "divmod negative inf divisor should match numpy");
+    Ok(())
+}
+
+#[test]
+fn divmod_large_numbers() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([1e300, 1e200, 1e100])
+y = np.array([1e100, 1e50, 1e10])
+q, r = fnp.divmod(x, y)
+qe, re = np.divmod(x, y)
+# Use relative tolerance for large numbers
+print(np.allclose(q, qe, rtol=1e-10) and np.allclose(r, re, rtol=1e-10))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "divmod large numbers should match numpy");
+    Ok(())
+}
