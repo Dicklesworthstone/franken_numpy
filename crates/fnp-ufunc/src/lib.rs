@@ -30936,18 +30936,32 @@ pub fn divmod_arrays(
                 quotients.push(f64::NAN);
                 remainders.push(f64::NAN);
             } else {
-                // av is finite, bv is inf
-                // numpy: floor_divide has special handling for negative dividend
+                // av is finite, bv is +/-inf
+                // numpy behavior depends on signs of both operands
                 if av == 0.0 {
                     quotients.push(0.0);
                     remainders.push(0.0);
-                } else if av > 0.0 {
-                    quotients.push(0.0);
-                    remainders.push(av);
+                } else if bv.is_sign_positive() {
+                    // bv = +inf
+                    if av > 0.0 {
+                        quotients.push(0.0);
+                        remainders.push(av);
+                    } else {
+                        // av < 0, bv = +inf: q=-1, r=+inf
+                        quotients.push(-1.0);
+                        remainders.push(f64::INFINITY);
+                    }
                 } else {
-                    // av < 0, bv is inf: quotient is -1, remainder is inf
-                    quotients.push(-1.0);
-                    remainders.push(f64::INFINITY);
+                    // bv = -inf
+                    if av > 0.0 {
+                        // av > 0, bv = -inf: q=-1, r=-inf
+                        quotients.push(-1.0);
+                        remainders.push(f64::NEG_INFINITY);
+                    } else {
+                        // av < 0, bv = -inf: q=0, r=av
+                        quotients.push(0.0);
+                        remainders.push(av);
+                    }
                 }
             }
         } else if av.is_nan() || bv.is_nan() {
@@ -30955,7 +30969,14 @@ pub fn divmod_arrays(
             remainders.push(f64::NAN);
         } else {
             let q = (av / bv).floor();
-            let r = av - q * bv;
+            // Use fmod for the remainder to preserve precision with large numbers
+            let r = av % bv;
+            // Adjust remainder sign to match floor division semantics
+            let r = if r != 0.0 && (r > 0.0) != (bv > 0.0) {
+                r + bv
+            } else {
+                r
+            };
             quotients.push(q);
             remainders.push(r);
         }
