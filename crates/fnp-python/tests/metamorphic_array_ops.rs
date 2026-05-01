@@ -469,3 +469,154 @@ print(np.allclose(clipped, composed, rtol=1e-10))
     assert_eq!(result.trim(), "True", "clip(x, lo, hi) == minimum(maximum(x, lo), hi)");
     Ok(())
 }
+
+#[test]
+fn logaddexp_with_neg_inf_is_identity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.uniform(-100, 100, 100)
+result = fnp.logaddexp(x, np.full_like(x, -np.inf))
+print(np.allclose(result, x, rtol=1e-10))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "logaddexp(x, -inf) should equal x");
+    Ok(())
+}
+
+#[test]
+fn logaddexp_equal_args_plus_log2() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.uniform(-50, 50, 100)
+result = fnp.logaddexp(x, x)
+expected = x + np.log(2)
+print(np.allclose(result, expected, rtol=1e-10))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "logaddexp(x, x) should equal x + log(2)");
+    Ok(())
+}
+
+#[test]
+fn sign_abs_product_is_identity_for_nonzero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.uniform(0.01, 100, 100) * np.random.choice([-1, 1], 100)
+result = fnp.sign(x) * fnp.abs(x)
+print(np.allclose(result, x, rtol=1e-10))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sign(x) * abs(x) should equal x for non-zero x");
+    Ok(())
+}
+
+#[test]
+fn copysign_abs_restores_original() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.uniform(0.01, 100, 100) * np.random.choice([-1, 1], 100)
+result = fnp.copysign(fnp.abs(x), x)
+print(np.allclose(result, x, rtol=1e-10))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "copysign(abs(x), x) should equal x for non-zero x");
+    Ok(())
+}
+
+#[test]
+fn hypot_with_zero_is_abs() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.uniform(-100, 100, 100)
+result1 = fnp.hypot(x, np.zeros_like(x))
+result2 = fnp.hypot(np.zeros_like(x), x)
+expected = fnp.abs(x)
+print(np.allclose(result1, expected) and np.allclose(result2, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "hypot(x, 0) and hypot(0, x) should equal abs(x)");
+    Ok(())
+}
+
+#[test]
+fn floor_le_x_le_ceil() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.uniform(-100, 100, 100)
+floored = fnp.floor(x)
+ceiled = fnp.ceil(x)
+print(np.all(floored <= x) and np.all(x <= ceiled))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "floor(x) <= x <= ceil(x)");
+    Ok(())
+}
+
+#[test]
+fn floor_plus_one_gt_x_unless_integer() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.uniform(-100, 100, 100)
+is_integer = (x == fnp.floor(x))
+floored_plus_one = fnp.floor(x) + 1
+result = np.logical_or(is_integer, floored_plus_one > x)
+print(np.all(result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "floor(x) + 1 > x unless x is integer");
+    Ok(())
+}
+
+#[test]
+fn cumsum_of_ones_is_arange() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+ones = np.ones(100)
+result = fnp.cumsum(ones)
+expected = np.arange(1, 101, dtype=float)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "cumsum([1,1,1,...]) should equal [1,2,3,...]");
+    Ok(())
+}
+
+#[test]
+fn prod_of_exp_is_exp_of_sum() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.uniform(-3, 3, 20)
+result = fnp.prod(fnp.exp(x))
+expected = np.exp(fnp.sum(x))
+print(np.allclose(result, expected, rtol=1e-10))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "prod(exp(x)) should equal exp(sum(x))");
+    Ok(())
+}
