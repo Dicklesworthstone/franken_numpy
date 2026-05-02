@@ -1,6 +1,6 @@
 //! Conformance tests for numpy interp and trapz functions against NumPy oracle.
 //!
-//! Tests interp, trapz.
+//! Tests interp, trapz (using np.trapezoid for NumPy 2.x compatibility).
 
 use std::process::Command;
 
@@ -139,7 +139,7 @@ fn trapz_basic() -> Result<(), String> {
         r#"
 y = [1, 2, 3, 4]
 result = fnp.trapz(y)
-expected = np.trapz(y)
+expected = np.trapezoid(y)
 print(np.allclose(result, expected))
 "#
         .into(),
@@ -156,7 +156,7 @@ fn trapz_with_x() -> Result<(), String> {
 y = [1, 2, 3, 4]
 x = [0, 1, 2, 3]
 result = fnp.trapz(y, x)
-expected = np.trapz(y, x)
+expected = np.trapezoid(y, x)
 print(np.allclose(result, expected))
 "#
         .into(),
@@ -172,7 +172,7 @@ fn trapz_with_dx() -> Result<(), String> {
         r#"
 y = [1, 2, 3, 4]
 result = fnp.trapz(y, dx=0.5)
-expected = np.trapz(y, dx=0.5)
+expected = np.trapezoid(y, dx=0.5)
 print(np.allclose(result, expected))
 "#
         .into(),
@@ -188,7 +188,7 @@ fn trapz_2d_axis0() -> Result<(), String> {
         r#"
 y = np.array([[1, 2, 3], [4, 5, 6]])
 result = fnp.trapz(y, axis=0)
-expected = np.trapz(y, axis=0)
+expected = np.trapezoid(y, axis=0)
 print(np.allclose(result, expected))
 "#
         .into(),
@@ -204,7 +204,7 @@ fn trapz_2d_axis1() -> Result<(), String> {
         r#"
 y = np.array([[1, 2, 3], [4, 5, 6]])
 result = fnp.trapz(y, axis=1)
-expected = np.trapz(y, axis=1)
+expected = np.trapezoid(y, axis=1)
 print(np.allclose(result, expected))
 "#
         .into(),
@@ -220,7 +220,7 @@ fn trapz_float() -> Result<(), String> {
         r#"
 y = np.array([0.0, 1.0, 1.0, 0.0])
 result = fnp.trapz(y)
-expected = np.trapz(y)
+expected = np.trapezoid(y)
 print(np.allclose(result, expected))
 "#
         .into(),
