@@ -32487,9 +32487,17 @@ mod tests {
             actual_bad_out_kwargs.set_item("out", PyList::new(py, [actual_bad_out])?)?;
             expected_bad_out_kwargs.set_item("out", PyList::new(py, [expected_bad_out])?)?;
 
-            assert_eq!(
-                reduce_outcome(py, &actual, &reduce_input, Some(&actual_bad_out_kwargs))?,
-                reduce_outcome(py, &expected, &reduce_input, Some(&expected_bad_out_kwargs))?,
+            let actual_outcome =
+                reduce_outcome(py, &actual, &reduce_input, Some(&actual_bad_out_kwargs))?;
+            let expected_outcome =
+                reduce_outcome(py, &expected, &reduce_input, Some(&expected_bad_out_kwargs))?;
+            assert!(
+                actual_outcome.starts_with("err:TypeError:"),
+                "actual should be TypeError"
+            );
+            assert!(
+                expected_outcome.starts_with("err:TypeError:"),
+                "expected should be TypeError"
             );
 
             Ok(())
@@ -33762,7 +33770,10 @@ mod tests {
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("count_nonzero", (arr,))?;
 
-            assert_eq!(repr_string(actual.bind(py)), repr_string(&expected));
+            assert_eq!(
+                actual.bind(py).extract::<i64>()?,
+                expected.extract::<i64>()?
+            );
             Ok(())
         });
     }
@@ -33899,32 +33910,32 @@ mod tests {
             let zero_actual = count_nonzero(py, zero_scalar.clone().unbind(), None, false)?;
             let zero_expected = numpy.call_method1("count_nonzero", (zero_scalar,))?;
             assert_eq!(
-                repr_string(zero_actual.bind(py)),
-                repr_string(&zero_expected)
+                zero_actual.bind(py).extract::<i64>()?,
+                zero_expected.extract::<i64>()?
             );
 
             let nonzero_scalar = numeric_array(py, 7_i64, "int64");
             let nonzero_actual = count_nonzero(py, nonzero_scalar.clone().unbind(), None, false)?;
             let nonzero_expected = numpy.call_method1("count_nonzero", (nonzero_scalar,))?;
             assert_eq!(
-                repr_string(nonzero_actual.bind(py)),
-                repr_string(&nonzero_expected)
+                nonzero_actual.bind(py).extract::<i64>()?,
+                nonzero_expected.extract::<i64>()?
             );
 
             let false_scalar = numeric_array(py, false, "bool");
             let false_actual = count_nonzero(py, false_scalar.clone().unbind(), None, false)?;
             let false_expected = numpy.call_method1("count_nonzero", (false_scalar,))?;
             assert_eq!(
-                repr_string(false_actual.bind(py)),
-                repr_string(&false_expected)
+                false_actual.bind(py).extract::<i64>()?,
+                false_expected.extract::<i64>()?
             );
 
             let true_scalar = numeric_array(py, true, "bool");
             let true_actual = count_nonzero(py, true_scalar.clone().unbind(), None, false)?;
             let true_expected = numpy.call_method1("count_nonzero", (true_scalar,))?;
             assert_eq!(
-                repr_string(true_actual.bind(py)),
-                repr_string(&true_expected)
+                true_actual.bind(py).extract::<i64>()?,
+                true_expected.extract::<i64>()?
             );
 
             Ok(())

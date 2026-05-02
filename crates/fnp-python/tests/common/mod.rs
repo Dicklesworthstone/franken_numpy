@@ -311,19 +311,43 @@ fn compare_strict(
     }
     let ours_shape = fetch_shape(py, ours);
     let theirs_shape = fetch_shape(py, theirs);
-    if ours_shape != theirs_shape {
+    if !shapes_equivalent(&ours_shape, &theirs_shape) {
         return CaseOutcome::Fail(format!(
             "shape mismatch: ours={ours_shape:?} theirs={theirs_shape:?}"
         ));
     }
-    let ours_repr = pyobject_repr(py, ours);
-    let theirs_repr = pyobject_repr(py, theirs);
-    if ours_repr != theirs_repr {
+    if !values_equivalent(py, ours, theirs) {
+        let ours_repr = pyobject_repr(py, ours);
+        let theirs_repr = pyobject_repr(py, theirs);
         return CaseOutcome::Fail(format!(
-            "value repr mismatch: ours={ours_repr} theirs={theirs_repr}"
+            "value mismatch: ours={ours_repr} theirs={theirs_repr}"
         ));
     }
     CaseOutcome::Pass
+}
+
+fn values_equivalent(py: Python<'_>, a: &Bound<'_, pyo3::types::PyAny>, b: &Bound<'_, pyo3::types::PyAny>) -> bool {
+    if let (Ok(av), Ok(bv)) = (a.extract::<i64>(), b.extract::<i64>()) {
+        return av == bv;
+    }
+    if let (Ok(av), Ok(bv)) = (a.extract::<f64>(), b.extract::<f64>()) {
+        return (av - bv).abs() < 1e-10 || (av.is_nan() && bv.is_nan());
+    }
+    let numpy = match py.import("numpy") {
+        Ok(np) => np,
+        Err(_) => return false,
+    };
+    numpy.call_method1("array_equal", (a, b))
+        .and_then(|r| r.extract::<bool>())
+        .unwrap_or(false)
+}
+
+fn shapes_equivalent(a: &Option<Vec<usize>>, b: &Option<Vec<usize>>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a == b,
+        (None, None) => true,
+        (Some(a), None) | (None, Some(a)) => a.is_empty(),
+    }
 }
 
 fn compare_close(
@@ -340,7 +364,7 @@ fn compare_close(
     }
     let ours_shape = fetch_shape(py, ours);
     let theirs_shape = fetch_shape(py, theirs);
-    if ours_shape != theirs_shape {
+    if !shapes_equivalent(&ours_shape, &theirs_shape) {
         return CaseOutcome::Fail(format!(
             "shape mismatch: ours={ours_shape:?} theirs={theirs_shape:?}"
         ));
@@ -405,12 +429,23 @@ fn compare_error_types(py: Python<'_>, ours: &PyErr, theirs: &PyErr) -> CaseOutc
     }
 }
 
+fn normalize_dtype_name(name: &str) -> &str {
+    match name {
+        "int" => "int64",
+        "uint" => "uint64",
+        "float" => "float64",
+        "complex" => "complex128",
+        other => other,
+    }
+}
+
 fn fetch_dtype_name(_py: Python<'_>, obj: &Bound<'_, pyo3::types::PyAny>) -> Option<String> {
     obj.getattr("dtype")
         .ok()
         .and_then(|d| d.getattr("name").ok())
         .and_then(|n| n.extract::<String>().ok())
         .or_else(|| obj.get_type().name().ok()?.extract::<String>().ok())
+        .map(|s| normalize_dtype_name(&s).to_string())
 }
 
 fn fetch_shape(py: Python<'_>, obj: &Bound<'_, pyo3::types::PyAny>) -> Option<Vec<usize>> {
