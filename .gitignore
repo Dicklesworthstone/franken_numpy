@@ -59,6 +59,13 @@ ci-artifacts/
 proptest-regressions/
 test_meminfo
 
+# Cargo-fuzz auto-generated corpus entries (hash-named).
+# Curated edge-case seeds are committed under fuzz/corpus/<target>/seed_*.
+fuzz/corpus/*/*
+!fuzz/corpus/*/seed_*
+!fuzz/corpus/*/README*
+!fuzz/corpus/*/.gitkeep
+
 # Agent session ephemeral files
 SESSION_TODO.md
 SESSION_REPORT.md
