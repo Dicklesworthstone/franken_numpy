@@ -10,26 +10,21 @@ use fnp_random::{
 use fnp_ufunc::{
     BinaryOp, FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
     FromPyFuncReduceOptions, GridSpec, MAError, MaskedArray, UFuncArray, UnaryOp,
-    arctan2 as ufunc_arctan2, copysign as ufunc_copysign,
-    equal as ufunc_equal, not_equal as ufunc_not_equal,
-    greater as ufunc_greater, greater_equal as ufunc_greater_equal,
-    less as ufunc_less, less_equal as ufunc_less_equal,
-    logical_and as ufunc_logical_and, logical_or as ufunc_logical_or,
-    logical_xor as ufunc_logical_xor, logical_not as ufunc_logical_not,
-    bitwise_and as ufunc_bitwise_and, bitwise_or as ufunc_bitwise_or,
-    bitwise_xor as ufunc_bitwise_xor, left_shift as ufunc_left_shift,
-    right_shift as ufunc_right_shift, invert as ufunc_invert,
-    power as ufunc_power, divide as ufunc_divide,
-    float_power as ufunc_float_power, fmax as ufunc_fmax, fmin as ufunc_fmin,
-    fmod as ufunc_fmod, frexp as ufunc_frexp, gcd_arrays as ufunc_gcd,
-    heaviside as ufunc_heaviside, hypot as ufunc_hypot, lcm_arrays as ufunc_lcm,
-    maximum as ufunc_maximum, minimum as ufunc_minimum,
-    remainder as ufunc_remainder,
-    isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, ldexp as ufunc_ldexp,
-    logaddexp as ufunc_logaddexp, logaddexp2 as ufunc_logaddexp2, ma_is_masked, ma_make_mask,
-    ma_mask_or, modf as ufunc_modf, nextafter as ufunc_nextafter, reduce_frompyfunc_values,
+    arctan2 as ufunc_arctan2, bitwise_and as ufunc_bitwise_and, bitwise_or as ufunc_bitwise_or,
+    bitwise_xor as ufunc_bitwise_xor, copysign as ufunc_copysign, divide as ufunc_divide,
+    divmod_arrays as ufunc_divmod, equal as ufunc_equal, float_power as ufunc_float_power,
+    fmax as ufunc_fmax, fmin as ufunc_fmin, fmod as ufunc_fmod, frexp as ufunc_frexp,
+    gcd_arrays as ufunc_gcd, greater as ufunc_greater, greater_equal as ufunc_greater_equal,
+    heaviside as ufunc_heaviside, hypot as ufunc_hypot, invert as ufunc_invert,
+    isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, lcm_arrays as ufunc_lcm,
+    ldexp as ufunc_ldexp, left_shift as ufunc_left_shift, less as ufunc_less,
+    less_equal as ufunc_less_equal, logaddexp as ufunc_logaddexp, logaddexp2 as ufunc_logaddexp2,
+    logical_and as ufunc_logical_and, logical_not as ufunc_logical_not,
+    logical_or as ufunc_logical_or, logical_xor as ufunc_logical_xor, ma_is_masked, ma_make_mask,
+    ma_mask_or, maximum as ufunc_maximum, minimum as ufunc_minimum, modf as ufunc_modf,
+    nextafter as ufunc_nextafter, not_equal as ufunc_not_equal, power as ufunc_power,
+    reduce_frompyfunc_values, remainder as ufunc_remainder, right_shift as ufunc_right_shift,
     signbit as ufunc_signbit, spacing as ufunc_spacing, where_nonzero,
-    divmod_arrays as ufunc_divmod,
 };
 use pyo3::exceptions::{
     PyDeprecationWarning, PyOSError, PyTypeError, PyValueError, PyZeroDivisionError,
@@ -73,16 +68,16 @@ pub struct PyVectorize {
     excluded: Vec<usize>,
 }
 
-#[pyclass(name = "MGridClass", unsendable)]
+#[pyclass(name = "MGridClass")]
 pub struct PyMGridClass;
 
-#[pyclass(name = "OGridClass", unsendable)]
+#[pyclass(name = "OGridClass")]
 pub struct PyOGridClass;
 
-#[pyclass(name = "RClass", unsendable)]
+#[pyclass(name = "RClass")]
 pub struct PyRClass;
 
-#[pyclass(name = "CClass", unsendable)]
+#[pyclass(name = "CClass")]
 pub struct PyCClass;
 
 #[pyclass(name = "Generator", unsendable)]
@@ -90,7 +85,7 @@ pub struct PyRandomGenerator {
     inner: RandomGenerator,
 }
 
-#[pyclass(name = "RandomState", unsendable)]
+#[pyclass(name = "RandomState")]
 pub struct PyRandomState {
     inner: CoreRandomState,
 }
@@ -25796,11 +25791,48 @@ mod tests {
     };
     use pyo3::{Py, PyResult, Python};
 
+    static PY_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn with_python(test: impl FnOnce(Python<'_>) -> PyResult<()>) {
+        let _guard = PY_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         Python::initialize();
-        Python::attach(|py| {
-            test(py).unwrap();
+        let outcome = Python::attach(|py| {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| test(py)));
+            let _ = py
+                .import("gc")
+                .and_then(|gc| gc.call_method0("collect"))
+                .map(drop);
+            outcome
         });
+        match outcome {
+            Ok(result) => result.unwrap(),
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    #[test]
+    fn with_python_serializes_unsendable_module_singletons_across_threads() {
+        let threads = (0..4)
+            .map(|i| {
+                std::thread::spawn(move || {
+                    with_python(|py| {
+                        let module_name = format!("fnp_python_thread_safety_{i}");
+                        let module = PyModule::new(py, &module_name)?;
+                        fnp_python(&module)?;
+                        drop(module);
+                        Ok(())
+                    });
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for thread in threads {
+            thread
+                .join()
+                .expect("threaded fnp_python initialization should not panic");
+        }
     }
 
     /// Process-wide mutex serializing every AttrGuard-based poisoning. The
