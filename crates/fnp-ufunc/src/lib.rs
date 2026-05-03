@@ -30939,8 +30939,8 @@ pub fn divmod_arrays(
                 // av is finite, bv is +/-inf
                 // numpy behavior depends on signs of both operands
                 if av == 0.0 {
-                    quotients.push(0.0);
-                    remainders.push(0.0);
+                    quotients.push((av / bv).floor());
+                    remainders.push(0.0_f64.copysign(bv));
                 } else if bv.is_sign_positive() {
                     // bv = +inf
                     if av > 0.0 {
@@ -30974,6 +30974,8 @@ pub fn divmod_arrays(
             // Adjust remainder sign to match floor division semantics
             let r = if r != 0.0 && (r > 0.0) != (bv > 0.0) {
                 r + bv
+            } else if r == 0.0 {
+                0.0_f64.copysign(bv)
             } else {
                 r
             };
@@ -52064,6 +52066,45 @@ print(json.dumps(payload))
         let (q, r) = divmod_arrays(&a, &b).unwrap();
         assert_eq!(q.values(), &[3.0]);
         assert!((r.values()[0]).abs() < 1e-15);
+    }
+
+    #[test]
+    fn divmod_signed_zero_parity() {
+        let a = UFuncArray::new(
+            vec![7],
+            vec![6.0, 0.0, -0.0, -0.0, 0.0, -0.0, -0.0],
+            DType::F64,
+        )
+        .unwrap();
+        let b = UFuncArray::new(
+            vec![7],
+            vec![
+                -3.0,
+                -3.0,
+                3.0,
+                -3.0,
+                f64::NEG_INFINITY,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+            ],
+            DType::F64,
+        )
+        .unwrap();
+        let (q, r) = divmod_arrays(&a, &b).unwrap();
+        assert_eq!(
+            q.values()
+                .iter()
+                .map(|v| v.is_sign_negative())
+                .collect::<Vec<_>>(),
+            [true, true, true, false, true, true, false]
+        );
+        assert_eq!(
+            r.values()
+                .iter()
+                .map(|v| v.is_sign_negative())
+                .collect::<Vec<_>>(),
+            [true, true, false, true, true, false, true]
+        );
     }
 
     #[test]
