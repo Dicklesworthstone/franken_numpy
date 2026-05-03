@@ -7535,13 +7535,16 @@ fn count_nonzero(
             let axis_bound = axis_obj.bind(py);
             if axis_bound.is_none() {
                 None
-            } else if axis_bound.cast::<PyBool>().is_ok() {
+            } else if axis_bound.cast::<PyBool>().is_ok() || is_numpy_bool_scalar(py, axis_bound) {
                 return fallback();
             } else if axis_bound.extract::<isize>().is_ok() {
                 extract_axis_spec(py, Some(axis_obj.clone_ref(py)), "count_nonzero")?
             } else if let Ok(axis_tuple) = axis_bound.cast::<PyTuple>() {
                 for item in axis_tuple.iter() {
-                    if item.cast::<PyBool>().is_ok() || item.extract::<isize>().is_err() {
+                    if item.cast::<PyBool>().is_ok()
+                        || is_numpy_bool_scalar(py, &item)
+                        || item.extract::<isize>().is_err()
+                    {
                         return fallback();
                     }
                 }
@@ -7582,6 +7585,16 @@ fn count_nonzero(
     }
 
     Ok(output)
+}
+
+fn is_numpy_bool_scalar(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
+    let Ok(numpy) = py.import("numpy") else {
+        return false;
+    };
+    let Ok(bool_type) = numpy.getattr("bool_") else {
+        return false;
+    };
+    value.is_instance(&bool_type).unwrap_or(false)
 }
 
 fn extract_expand_dims_axes(
