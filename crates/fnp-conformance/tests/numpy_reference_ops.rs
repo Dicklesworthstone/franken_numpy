@@ -20,6 +20,49 @@ struct RawOracleArray {
     values: Vec<serde_json::Value>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NumpyVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+}
+
+impl NumpyVersion {
+    fn parse(text: &str) -> Result<Self, String> {
+        let release = text
+            .trim()
+            .split(|ch: char| !ch.is_ascii_digit() && ch != '.')
+            .next()
+            .unwrap_or("");
+        let mut parts = release.split('.');
+        let major = parts
+            .next()
+            .filter(|part| !part.is_empty())
+            .ok_or_else(|| format!("missing NumPy major version in {text:?}"))?
+            .parse()
+            .map_err(|err| format!("invalid NumPy major version in {text:?}: {err}"))?;
+        let minor = parts
+            .next()
+            .unwrap_or("0")
+            .parse()
+            .map_err(|err| format!("invalid NumPy minor version in {text:?}: {err}"))?;
+        let patch = parts
+            .next()
+            .unwrap_or("0")
+            .parse()
+            .map_err(|err| format!("invalid NumPy patch version in {text:?}: {err}"))?;
+        Ok(Self {
+            major,
+            minor,
+            patch,
+        })
+    }
+
+    fn exposes_trapezoid(self) -> bool {
+        self.major >= 2
+    }
+}
+
 fn decode_oracle_scalar(case_id: &str, value: serde_json::Value) -> Result<f64, String> {
     match value {
         serde_json::Value::Number(number) => number
@@ -159,6 +202,25 @@ fn real_numpy_python() -> &'static str {
         .as_str()
 }
 
+fn live_numpy_version() -> NumpyVersion {
+    static VERSION: OnceLock<NumpyVersion> = OnceLock::new();
+    *VERSION.get_or_init(|| {
+        let output = Command::new(real_numpy_python())
+            .arg("-c")
+            .arg("import numpy as np; print(np.__version__)")
+            .output()
+            .expect("failed to query live NumPy version");
+        assert!(
+            output.status.success(),
+            "NumPy version query failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let version_text = String::from_utf8(output.stdout).expect("NumPy version should be UTF-8");
+        NumpyVersion::parse(version_text.trim()).expect("live NumPy version should parse")
+    })
+}
+
 fn numpy_case(case_id: &str) -> OracleArray {
     let script = r#"
 import json
@@ -221,6 +283,10 @@ elif case_id == "random_pcg64dxsm_standard_normal":
 elif case_id == "random_pcg64dxsm_integers":
     rng = np.random.Generator(np.random.PCG64DXSM(12345))
     emit(rng.integers(-3, 7, size=8))
+elif case_id == "trapz_axis0":
+    emit(np.trapz(np.array([[1.0, 2.0], [3.0, 4.0], [7.0, 11.0]]), dx=0.5, axis=0))
+elif case_id == "trapezoid_axis0":
+    emit(np.trapezoid(np.array([[1.0, 2.0], [3.0, 4.0], [7.0, 11.0]]), dx=0.5, axis=0))
 else:
     raise SystemExit(f"unknown case_id: {case_id}")
 "#;
@@ -365,4 +431,51 @@ fn random_ops_match_live_numpy_reference() {
         .map(|value| value as f64)
         .collect();
     assert_oracle_match("random_pcg64dxsm_integers", &[8], &integers, 0.0);
+}
+
+#[test]
+fn version_specific_trapezoid_reference_is_gated_by_live_numpy_version() {
+    let y = array(&[3, 2], &[1.0, 2.0, 3.0, 4.0, 7.0, 11.0]);
+    let version = live_numpy_version();
+    let (case_id, actual) = if version.exposes_trapezoid() {
+        (
+            "trapezoid_axis0",
+            y.trapezoid(0.5, Some(0))
+                .expect("trapezoid axis=0 should match NumPy 2.x"),
+        )
+    } else {
+        (
+            "trapz_axis0",
+            y.trapz(0.5, Some(0))
+                .expect("trapz axis=0 should match NumPy 1.x"),
+        )
+    };
+
+    assert_oracle_match(case_id, actual.shape(), actual.values(), 1e-12);
+
+    let alias = y
+        .trapz(0.5, Some(0))
+        .expect("trapz alias should stay behaviorally equivalent");
+    assert_eq!(alias.shape(), actual.shape());
+    assert_eq!(alias.values(), actual.values());
+}
+
+#[test]
+fn numpy_version_parser_accepts_release_and_prerelease_text() {
+    assert_eq!(
+        NumpyVersion::parse("2.4.3").expect("release version"),
+        NumpyVersion {
+            major: 2,
+            minor: 4,
+            patch: 3,
+        }
+    );
+    assert_eq!(
+        NumpyVersion::parse("2.5.0.dev0+git20260503").expect("dev version"),
+        NumpyVersion {
+            major: 2,
+            minor: 5,
+            patch: 0,
+        }
+    );
 }
