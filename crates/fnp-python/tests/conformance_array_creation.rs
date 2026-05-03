@@ -65,6 +65,20 @@ fn strict_harness_accepts_python_and_numpy_scalar_equivalence() {
 }
 
 #[test]
+fn strict_harness_rejects_zero_dim_array_scalar_surface_mismatch() {
+    with_fnp_and_numpy(|py, _module, numpy| {
+        let zero_dim_array = numpy.getattr("array")?.call1((3_i64,))?;
+        let numpy_scalar = numpy.getattr("int64")?.call1((3_i64,))?;
+        assert!(matches!(
+            common::compare_strict_for_tests(py, &zero_dim_array, &numpy_scalar),
+            common::CaseOutcome::Fail(_)
+        ));
+
+        Ok(())
+    });
+}
+
+#[test]
 fn strict_harness_accepts_matching_none_return_values() {
     with_fnp_and_numpy(|py, _module, _numpy| {
         let ours = py.None();

@@ -367,6 +367,9 @@ fn scalar_str_equivalent(
     {
         return false;
     }
+    if is_numpy_ndarray(py, a) != is_numpy_ndarray(py, b) {
+        return false;
+    }
     if fetch_dtype_name(py, a) != fetch_dtype_name(py, b) {
         return false;
     }
@@ -380,6 +383,16 @@ fn scalar_str_equivalent(
         .ok()
         .and_then(|value| value.extract::<String>().ok());
     a_str.is_some() && a_str == b_str
+}
+
+fn is_numpy_ndarray(py: Python<'_>, obj: &Bound<'_, pyo3::types::PyAny>) -> bool {
+    let Ok(numpy) = py.import("numpy") else {
+        return false;
+    };
+    let Ok(ndarray_type) = numpy.getattr("ndarray") else {
+        return false;
+    };
+    obj.is_instance(&ndarray_type).unwrap_or(false)
 }
 
 #[cfg(test)]
