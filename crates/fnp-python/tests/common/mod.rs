@@ -331,6 +331,11 @@ fn values_equivalent(
     a: &Bound<'_, pyo3::types::PyAny>,
     b: &Bound<'_, pyo3::types::PyAny>,
 ) -> bool {
+    if a.is_none() && b.is_none() {
+        return true;
+    }
+    let repr_match = pyobject_repr(py, a) == pyobject_repr(py, b);
+
     let numpy = match py.import("numpy") {
         Ok(np) => np,
         Err(_) => return false,
@@ -344,7 +349,37 @@ fn values_equivalent(
         .and_then(|array_equal| array_equal.call((a, b), Some(&kwargs)))
         .and_then(|r| r.extract::<bool>())
         .unwrap_or(false);
-    values_match && pyobject_repr(py, a) == pyobject_repr(py, b)
+    values_match && (repr_match || scalar_str_equivalent(py, a, b))
+}
+
+fn scalar_str_equivalent(
+    py: Python<'_>,
+    a: &Bound<'_, pyo3::types::PyAny>,
+    b: &Bound<'_, pyo3::types::PyAny>,
+) -> bool {
+    let a_shape = fetch_shape(py, a);
+    let b_shape = fetch_shape(py, b);
+    if !shapes_equivalent(&a_shape, &b_shape) {
+        return false;
+    }
+    if a_shape.as_ref().is_some_and(|shape| !shape.is_empty())
+        || b_shape.as_ref().is_some_and(|shape| !shape.is_empty())
+    {
+        return false;
+    }
+    if fetch_dtype_name(py, a) != fetch_dtype_name(py, b) {
+        return false;
+    }
+
+    let a_str = a
+        .str()
+        .ok()
+        .and_then(|value| value.extract::<String>().ok());
+    let b_str = b
+        .str()
+        .ok()
+        .and_then(|value| value.extract::<String>().ok());
+    a_str.is_some() && a_str == b_str
 }
 
 #[cfg(test)]

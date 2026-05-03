@@ -51,6 +51,34 @@ fn strict_harness_rejects_signed_zero_and_tiny_float_drift() {
 }
 
 #[test]
+fn strict_harness_accepts_python_and_numpy_scalar_equivalence() {
+    with_fnp_and_numpy(|py, _module, numpy| {
+        let numpy_scalar = numpy.getattr("int64")?.call1((3_i64,))?;
+        let python_scalar = 3_i64.into_pyobject(py)?;
+        assert!(matches!(
+            common::compare_strict_for_tests(py, &numpy_scalar, python_scalar.as_any()),
+            common::CaseOutcome::Pass
+        ));
+
+        Ok(())
+    });
+}
+
+#[test]
+fn strict_harness_accepts_matching_none_return_values() {
+    with_fnp_and_numpy(|py, _module, _numpy| {
+        let ours = py.None();
+        let theirs = py.None();
+        assert!(matches!(
+            common::compare_strict_for_tests(py, ours.bind(py), theirs.bind(py)),
+            common::CaseOutcome::Pass
+        ));
+
+        Ok(())
+    });
+}
+
+#[test]
 fn conformance_array_creation_matrix() {
     static TOTALS: Totals = Totals::new();
 
