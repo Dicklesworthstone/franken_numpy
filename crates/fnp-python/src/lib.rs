@@ -7530,7 +7530,10 @@ fn count_nonzero(
             .unbind())
     };
 
-    let a_array = extract_numeric_array(py, a.bind(py), "count_nonzero(a)")?;
+    let a_array = match extract_numeric_array(py, a.bind(py), "count_nonzero(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
     let axes = extract_axis_spec(py, axis, "count_nonzero")?;
     // Out-of-bounds / duplicate axes: numpy raises AxisError (a subclass of
     // ValueError). Fall back to numpy so the error type matches exactly.

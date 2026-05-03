@@ -36,9 +36,23 @@ fn np_array_1d_i<'py>(
     py.import("numpy")?.getattr("array")?.call1((values,))
 }
 
+fn np_array_1d_s<'py>(
+    py: Python<'py>,
+    values: Vec<&str>,
+) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+    py.import("numpy")?.getattr("array")?.call1((values,))
+}
+
 fn np_array_2d_f<'py>(
     py: Python<'py>,
     rows: Vec<Vec<f64>>,
+) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+    py.import("numpy")?.getattr("array")?.call1((rows,))
+}
+
+fn np_array_2d_s<'py>(
+    py: Python<'py>,
+    rows: Vec<Vec<&str>>,
 ) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
     py.import("numpy")?.getattr("array")?.call1((rows,))
 }
@@ -127,6 +141,18 @@ fn conformance_searching_matrix() {
             py,
             &module,
             &numpy,
+            "searching-count_nonzero-string-truthiness",
+            "count_nonzero",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| PyTuple::new(py, [np_array_1d_s(py, vec!["", "x", "0", "false"])?]),
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
             "searching-count_nonzero-2d-axis0",
             "count_nonzero",
             RequirementLevel::Should,
@@ -177,6 +203,30 @@ fn conformance_searching_matrix() {
                 let kw = PyDict::new(py);
                 kw.set_item("axis", 1_i64)?;
                 kw.set_item("keepdims", true)?;
+                Ok(Some(kw))
+            },
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-count_nonzero-string-axis1",
+            "count_nonzero",
+            RequirementLevel::Should,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_array_2d_s(
+                        py,
+                        vec![vec!["", "x", ""], vec!["a", "", "b"]],
+                    )?],
+                )
+            },
+            |py| {
+                let kw = PyDict::new(py);
+                kw.set_item("axis", 1_i64)?;
                 Ok(Some(kw))
             },
         );
