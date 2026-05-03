@@ -834,7 +834,19 @@ impl BinaryOp {
                 // ldexp(lhs, rhs) = lhs * 2^rhs
                 lhs * (2.0_f64).powf(rhs)
             }
-            Self::FloorDivide => (lhs / rhs).floor(),
+            Self::FloorDivide => {
+                if lhs.is_infinite() && rhs.is_finite() && rhs != 0.0 {
+                    f64::NAN
+                } else if lhs.is_finite() && lhs != 0.0 && rhs.is_infinite() {
+                    if lhs.is_sign_negative() == rhs.is_sign_positive() {
+                        -1.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    (lhs / rhs).floor()
+                }
+            }
             Self::FloatPower => lhs.powf(rhs),
             Self::BitwiseAnd => {
                 if !lhs.is_finite() || !rhs.is_finite() {
@@ -36206,13 +36218,25 @@ print(json.dumps(payload))
 
     #[test]
     fn binary_floor_divide_inf() {
-        let lhs = UFuncArray::new(vec![2], vec![f64::INFINITY, 1.0], DType::F64).expect("lhs");
-        let rhs = UFuncArray::new(vec![2], vec![2.0, f64::INFINITY], DType::F64).expect("rhs");
+        let lhs = UFuncArray::new(
+            vec![4],
+            vec![f64::INFINITY, f64::NEG_INFINITY, 1.0, -1.0],
+            DType::F64,
+        )
+        .expect("lhs");
+        let rhs = UFuncArray::new(
+            vec![4],
+            vec![2.0, -2.0, f64::INFINITY, f64::INFINITY],
+            DType::F64,
+        )
+        .expect("rhs");
         let out = lhs
             .elementwise_binary(&rhs, BinaryOp::FloorDivide)
             .expect("floor_divide");
-        assert!(out.values()[0].is_infinite(), "inf // 2 should be inf");
-        assert_eq!(out.values()[1], 0.0, "1 // inf should be 0");
+        assert!(out.values()[0].is_nan(), "inf // 2 should be NaN");
+        assert!(out.values()[1].is_nan(), "-inf // -2 should be NaN");
+        assert_eq!(out.values()[2], 0.0, "1 // inf should be 0");
+        assert_eq!(out.values()[3], -1.0, "-1 // inf should be -1");
     }
 
     #[test]

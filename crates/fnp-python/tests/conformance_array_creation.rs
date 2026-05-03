@@ -23,6 +23,34 @@ fn no_kwargs<'py>(_py: Python<'py>) -> PyResult<Option<pyo3::Bound<'py, PyDict>>
 }
 
 #[test]
+fn strict_harness_rejects_signed_zero_and_tiny_float_drift() {
+    with_fnp_and_numpy(|py, _module, numpy| {
+        let array = numpy.getattr("array")?;
+        let neg_zero = array.call1((vec![-0.0_f64],))?;
+        let pos_zero = array.call1((vec![0.0_f64],))?;
+        assert!(matches!(
+            common::compare_strict_for_tests(py, &neg_zero, &pos_zero),
+            common::CaseOutcome::Fail(_)
+        ));
+
+        let exact_nan_a = array.call1((vec![f64::NAN],))?;
+        let exact_nan_b = array.call1((vec![f64::NAN],))?;
+        assert!(matches!(
+            common::compare_strict_for_tests(py, &exact_nan_a, &exact_nan_b),
+            common::CaseOutcome::Pass
+        ));
+
+        let one = array.call1((vec![1.0_f64],))?;
+        let drifted = array.call1((vec![1.0_f64 + 1e-11],))?;
+        assert!(matches!(
+            common::compare_strict_for_tests(py, &one, &drifted),
+            common::CaseOutcome::Fail(_)
+        ));
+        Ok(())
+    });
+}
+
+#[test]
 fn conformance_array_creation_matrix() {
     static TOTALS: Totals = Totals::new();
 

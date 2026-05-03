@@ -190,6 +190,37 @@ print(np.allclose(q, qe) and np.allclose(r, re) and np.allclose(r, 0.0))
 }
 
 #[test]
+fn divmod_signed_zero_signbits() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.filterwarnings('ignore')
+x = np.array([6.0, 0.0, -0.0, -0.0, 0.0, -0.0, -0.0])
+y = np.array([-3.0, -3.0, 3.0, -3.0, -np.inf, np.inf, -np.inf])
+q, r = fnp.divmod(x, y)
+qe, re = np.divmod(x, y)
+value_match = (
+    np.array_equal(q, qe, equal_nan=True) and
+    np.array_equal(r, re, equal_nan=True)
+)
+sign_match = (
+    np.array_equal(np.signbit(q), np.signbit(qe)) and
+    np.array_equal(np.signbit(r), np.signbit(re))
+)
+print(value_match and sign_match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "divmod signed zero signbits should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
 fn divmod_negative_inf_divisor() -> Result<(), String> {
     let script = fnp_script(
         r#"

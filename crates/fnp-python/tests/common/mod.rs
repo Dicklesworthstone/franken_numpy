@@ -326,20 +326,34 @@ fn compare_strict(
     CaseOutcome::Pass
 }
 
-fn values_equivalent(py: Python<'_>, a: &Bound<'_, pyo3::types::PyAny>, b: &Bound<'_, pyo3::types::PyAny>) -> bool {
-    if let (Ok(av), Ok(bv)) = (a.extract::<i64>(), b.extract::<i64>()) {
-        return av == bv;
-    }
-    if let (Ok(av), Ok(bv)) = (a.extract::<f64>(), b.extract::<f64>()) {
-        return (av - bv).abs() < 1e-10 || (av.is_nan() && bv.is_nan());
-    }
+fn values_equivalent(
+    py: Python<'_>,
+    a: &Bound<'_, pyo3::types::PyAny>,
+    b: &Bound<'_, pyo3::types::PyAny>,
+) -> bool {
     let numpy = match py.import("numpy") {
         Ok(np) => np,
         Err(_) => return false,
     };
-    numpy.call_method1("array_equal", (a, b))
+    let kwargs = PyDict::new(py);
+    if kwargs.set_item("equal_nan", true).is_err() {
+        return false;
+    }
+    let values_match = numpy
+        .getattr("array_equal")
+        .and_then(|array_equal| array_equal.call((a, b), Some(&kwargs)))
         .and_then(|r| r.extract::<bool>())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    values_match && pyobject_repr(py, a) == pyobject_repr(py, b)
+}
+
+#[cfg(test)]
+pub(crate) fn compare_strict_for_tests(
+    py: Python<'_>,
+    ours: &Bound<'_, pyo3::types::PyAny>,
+    theirs: &Bound<'_, pyo3::types::PyAny>,
+) -> CaseOutcome {
+    compare_strict(py, ours, theirs)
 }
 
 fn shapes_equivalent(a: &Option<Vec<usize>>, b: &Option<Vec<usize>>) -> bool {

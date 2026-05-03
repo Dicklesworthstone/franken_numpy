@@ -432,6 +432,30 @@ print(np.array_equal(result, expected))
     Ok(())
 }
 
+#[test]
+fn logical_binary_nan_is_truthy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.nan, np.nan, 0.0, 1.0])
+y = np.array([0.0, 1.0, np.nan, np.nan])
+checks = []
+for name in ("logical_and", "logical_or", "logical_xor"):
+    result = getattr(fnp, name)(x, y)
+    expected = getattr(np, name)(x, y)
+    checks.append(np.array_equal(result, expected))
+print(all(checks))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "binary logical NaN truthiness should match numpy"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Edge cases
 // ─────────────────────────────────────────────────────────────────────────────
