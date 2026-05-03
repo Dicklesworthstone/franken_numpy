@@ -16,6 +16,8 @@ use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 
+const COMPENSATED_SUM_MIN_LEN: usize = 1_000_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UFuncRuntimeMode {
     Strict,
@@ -6791,11 +6793,7 @@ impl UFuncArray {
         let source_sidecar = self.synthesized_integer_sidecar("sum")?;
         match axis {
             None => {
-                let sum = self
-                    .values
-                    .iter()
-                    .copied()
-                    .fold(0.0, |acc, value| acc + value);
+                let sum = reduce_sum_values(&self.values);
                 let out_sidecar = source_sidecar.as_ref().map(|s| match s {
                     IntegerSidecar::I64(v) => IntegerSidecar::I64(vec![v.iter().copied().sum()]),
                     IntegerSidecar::U64(v) => IntegerSidecar::U64(vec![v.iter().copied().sum()]),
@@ -7272,7 +7270,7 @@ impl UFuncArray {
         match axis {
             None => {
                 let n = self.values.len() as f64;
-                let sum: f64 = self.values.iter().copied().sum();
+                let sum = reduce_sum_values(&self.values);
                 let shape = if keepdims {
                     vec![1; self.shape.len()]
                 } else {
@@ -20258,7 +20256,7 @@ impl UFuncArray {
         }
         match axis {
             None => {
-                let sum: f64 = self.values.iter().copied().filter(|v| !v.is_nan()).sum();
+                let sum = reduce_sum_non_nan_values(&self.values);
                 let shape = if keepdims {
                     vec![1; self.shape.len()]
                 } else {
@@ -20290,7 +20288,7 @@ impl UFuncArray {
                     .filter(|v| !v.is_nan())
                     .collect();
                 let n = non_nan.len() as f64;
-                let sum: f64 = non_nan.iter().sum();
+                let sum = reduce_sum_values(&non_nan);
                 let shape = if keepdims {
                     vec![1; self.shape.len()]
                 } else {
@@ -24449,6 +24447,100 @@ fn apply_complex_binary_op(
     }
 }
 
+fn finalize_sum(sum: f64) -> f64 {
+    if sum == 0.0 { 0.0 } else { sum }
+}
+
+fn linear_sum_values(values: &[f64]) -> f64 {
+    finalize_sum(values.iter().copied().fold(0.0, |acc, value| acc + value))
+}
+
+fn neumaier_sum_values(values: &[f64]) -> f64 {
+    let mut sum = 0.0f64;
+    let mut correction = 0.0f64;
+    for &value in values {
+        let next = sum + value;
+        if sum.abs() >= value.abs() {
+            correction += (sum - next) + value;
+        } else {
+            correction += (value - next) + sum;
+        }
+        sum = next;
+    }
+    finalize_sum(sum + correction)
+}
+
+fn reduce_sum_values(values: &[f64]) -> f64 {
+    if values.len() <= COMPENSATED_SUM_MIN_LEN || values.iter().any(|value| !value.is_finite()) {
+        linear_sum_values(values)
+    } else {
+        neumaier_sum_values(values)
+    }
+}
+
+fn reduce_sum_non_nan_values(values: &[f64]) -> f64 {
+    if values.len() <= COMPENSATED_SUM_MIN_LEN {
+        finalize_sum(
+            values
+                .iter()
+                .copied()
+                .filter(|value| !value.is_nan())
+                .fold(0.0, |acc, value| acc + value),
+        )
+    } else {
+        let filtered: Vec<f64> = values
+            .iter()
+            .copied()
+            .filter(|value| !value.is_nan())
+            .collect();
+        reduce_sum_values(&filtered)
+    }
+}
+
+fn linear_sum_strided(values: &[f64], start: usize, step: usize, len: usize) -> f64 {
+    let mut sum = 0.0f64;
+    let mut offset = start;
+    for _ in 0..len {
+        sum += values[offset];
+        offset += step;
+    }
+    finalize_sum(sum)
+}
+
+fn neumaier_sum_strided(values: &[f64], start: usize, step: usize, len: usize) -> f64 {
+    let mut sum = 0.0f64;
+    let mut correction = 0.0f64;
+    let mut offset = start;
+    for _ in 0..len {
+        let value = values[offset];
+        let next = sum + value;
+        if sum.abs() >= value.abs() {
+            correction += (sum - next) + value;
+        } else {
+            correction += (value - next) + sum;
+        }
+        sum = next;
+        offset += step;
+    }
+    finalize_sum(sum + correction)
+}
+
+fn reduce_sum_strided(values: &[f64], start: usize, step: usize, len: usize) -> f64 {
+    if len <= COMPENSATED_SUM_MIN_LEN {
+        return linear_sum_strided(values, start, step, len);
+    }
+
+    let mut offset = start;
+    for _ in 0..len {
+        if !values[offset].is_finite() {
+            return linear_sum_strided(values, start, step, len);
+        }
+        offset += step;
+    }
+
+    neumaier_sum_strided(values, start, step, len)
+}
+
 fn reduce_sum_axis_contiguous(
     values: &[f64],
     shape: &[usize],
@@ -24470,7 +24562,7 @@ fn reduce_sum_axis_contiguous(
 
     if inner == 1 {
         for (slot, chunk) in out_values.iter_mut().zip(values.chunks_exact(axis_len)) {
-            *slot = chunk.iter().copied().sum();
+            *slot = reduce_sum_values(chunk);
         }
         return;
     }
@@ -24479,13 +24571,7 @@ fn reduce_sum_axis_contiguous(
     for outer_idx in 0..outer {
         let base = outer_idx * axis_len * inner;
         for inner_idx in 0..inner {
-            let mut sum = 0.0f64;
-            let mut offset = base + inner_idx;
-            for _ in 0..axis_len {
-                sum += values[offset];
-                offset += inner;
-            }
-            out_values[out_flat] = sum;
+            out_values[out_flat] = reduce_sum_strided(values, base + inner_idx, inner, axis_len);
             out_flat += 1;
         }
     }
@@ -33064,8 +33150,8 @@ impl StringArray {
 #[cfg(test)]
 mod tests {
     use super::{
-        AxisSlice, BinaryDispatchMethod, BinaryOp, FloatErrorKind, FloatErrorMode,
-        FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
+        AxisSlice, BinaryDispatchMethod, BinaryOp, COMPENSATED_SUM_MIN_LEN, FloatErrorKind,
+        FloatErrorMode, FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
         FromPyFuncReduceOptions, GridSpec, IntegerSidecar, MAError, MaskedArray, MaskedArrayEdges,
         OverrideDispatchDecision, OverrideOperand, OverridePayloadClass, PrintOptions,
         PyObjectArray, PyObjectValue, QuantileInterp, ShapeError, StringArray,
@@ -34341,6 +34427,36 @@ print(json.dumps(payload))
 
         let out = arr.reduce_sum(Some(1), false).expect("sum axis=1");
         assert_eq!(out.values(), &[1.0]);
+    }
+
+    fn large_cancellation_values() -> Vec<f64> {
+        let repeats = (COMPENSATED_SUM_MIN_LEN / 4) + 1;
+        let mut values = Vec::with_capacity(repeats * 4);
+        for _ in 0..repeats {
+            values.extend_from_slice(&[1.0e16, 1.0, -1.0e16, 1.0]);
+        }
+        values
+    }
+
+    #[test]
+    fn reduce_sum_axis_none_compensates_large_cancellation() {
+        let values = large_cancellation_values();
+        let repeats = values.len() / 4;
+        let arr = UFuncArray::new(vec![values.len()], values, DType::F64).expect("arr");
+
+        let out = arr.reduce_sum(None, false).expect("sum all");
+        assert_eq!(out.values(), &[2.0 * repeats as f64]);
+    }
+
+    #[test]
+    fn reduce_sum_axis_one_compensates_large_contiguous_rows() {
+        let values = large_cancellation_values();
+        let repeats = values.len() / 4;
+        let arr = UFuncArray::new(vec![1, values.len()], values, DType::F64).expect("arr");
+
+        let out = arr.reduce_sum(Some(1), false).expect("sum axis=1");
+        assert_eq!(out.shape(), &[1]);
+        assert_eq!(out.values(), &[2.0 * repeats as f64]);
     }
 
     #[test]
@@ -35911,6 +36027,15 @@ print(json.dumps(payload))
         assert_eq!(out.shape(), &[2]);
         assert!((out.values()[0] - 2.0).abs() < 1e-10);
         assert!((out.values()[1] - 5.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn reduce_mean_axis_none_uses_compensated_sum_for_large_inputs() {
+        let values = large_cancellation_values();
+        let arr = UFuncArray::new(vec![values.len()], values, DType::F64).expect("arr");
+
+        let out = arr.reduce_mean(None, false).expect("mean all");
+        assert_eq!(out.values(), &[0.5]);
     }
 
     #[test]

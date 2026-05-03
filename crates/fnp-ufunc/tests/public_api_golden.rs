@@ -133,7 +133,7 @@ fn push_array(out: &mut String, label: &str, array: &UFuncArray) -> Result<(), B
     writeln!(out, "{label}")?;
     writeln!(out, "  shape: {}", format_shape(array.shape()))?;
     writeln!(out, "  dtype: {:?}", storage.dtype())?;
-    writeln!(out, "  values: {}", format_values(&array.values()))?;
+    writeln!(out, "  values: {}", format_values(array.values()))?;
     out.push('\n');
     Ok(())
 }
