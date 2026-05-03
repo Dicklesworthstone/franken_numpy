@@ -29,7 +29,7 @@ FrankenNumPy rebuilds NumPy's semantics from scratch in safe Rust with two non-n
 
 | | NumPy (C) | FrankenNumPy (Rust) |
 |---|---|---|
-| Memory safety | Buffer overflows possible | `#![forbid(unsafe_code)]` on all 9 crates |
+| Memory safety | Buffer overflows possible | `#![forbid(unsafe_code)]` on all 10 crates |
 | RNG parity | Reference implementation | Bit-exact PCG64DXSM core stream plus broad statistical and replay conformance coverage |
 | NaN semantics | Implicit C behavior | Explicit propagation verified by 20+ oracle tests |
 | Stride calculus | Evolved over decades | Clean-room deterministic engine (SCE) |
@@ -93,7 +93,7 @@ let perm = rng.permutation(&data)?;             // Fisher-Yates via random_inter
 
 ## API Surface
 
-Over 1,000 public functions across 9 crates covering the full NumPy API:
+Over 1,000 public functions across 10 crates covering the full NumPy API:
 
 | Category | Functions (highlights) |
 |---|---|
@@ -148,9 +148,9 @@ cargo test --workspace --all-features
       ┌───────────┬───────────────┼──────────────┬───────────┐
       ▼           ▼               ▼              ▼           ▼
  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
- │ fnp-ufunc│ │fnp-linalg│ │fnp-random│ │  fnp-io  │ │ fnp-fft  │
- │ array ops│ │ linalg   │ │ RNG      │ │ NPY/NPZ  │ │ (in-ufunc│
- │ dispatch │ │ kernels  │ │ engine   │ │ + text   │ │  module) │
+ │ fnp-ufunc│ │fnp-linalg│ │fnp-random│ │  fnp-io  │ │fnp-python│
+ │ array ops│ │ linalg   │ │ RNG      │ │ NPY/NPZ  │ │ PyO3     │
+ │ + FFT    │ │ kernels  │ │ engine   │ │ + text   │ │ bindings │
  └─────┬────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘
        │
  ┌─────┴────────────────────────────────────────────────────┐
@@ -341,7 +341,7 @@ The conformance crate is the quality backbone with four layers:
 
 FrankenNumPy's security posture covers more than memory safety:
 
-- **Zero unsafe Rust.** All 9 crates declare `#![forbid(unsafe_code)]`. The 92,000+ lines of Rust contain zero unsafe blocks.
+- **Zero unsafe Rust.** All 10 crates declare `#![forbid(unsafe_code)]`. The 250,000+ lines of Rust contain zero unsafe blocks.
 - **Fail-closed by default.** Unknown wire formats, unrecognized dtype descriptors, and metadata schema violations cause explicit errors, not silent fallbacks.
 - **Bounded resource consumption.** NPY header parsing caps at 64 KB. NPZ archives cap at 4,096 members and 2 GB uncompressed. Memmap validation retries cap at 64. These prevent denial-of-service via crafted inputs.
 - **Pickle rejection.** Object dtype arrays that could execute arbitrary code during deserialization require explicit opt-in, matching NumPy's `allow_pickle` security gate.
@@ -508,7 +508,7 @@ Every conformance artifact (fixture bundles, benchmark baselines, migration mani
 
 **Decode proof.** An explicit artifact recording which symbol was dropped, how many repair symbols were needed to recover, and whether recovery succeeded. This provides machine-checkable evidence that the artifact can survive single-symbol loss.
 
-The G8 CI gate (`run_raptorq_gate.sh`) enforces that all required bundles have valid sidecars, scrub reports with `status: "ok"`, and decode proofs with `recovery_success: true`.
+The G8 CI gate (`scripts/e2e/run_raptorq_gate.sh`) enforces that all required bundles have valid sidecars, scrub reports with `status: "ok"`, and decode proofs with `recovery_success: true`.
 
 ---
 
@@ -917,7 +917,7 @@ FNP_ORACLE_PYTHON="$(pwd)/.venv-numpy314/bin/python3" \
 
 ```
 franken_numpy/
-├── Cargo.toml                         # Workspace root (9 crates)
+├── Cargo.toml                         # Workspace root (10 crates)
 ├── FEATURE_PARITY.md                  # Live parity matrix + evidence links
 ├── PROPOSED_ARCHITECTURE.md           # High-level architecture notes
 ├── crates/
@@ -1009,7 +1009,7 @@ Oracle tests: we run the same operations with the same inputs in both NumPy and 
 We use Rust Edition 2024 features. The toolchain is pinned to a specific nightly date for reproducibility.
 
 **Why zero unsafe code?**
-Memory safety is a core value. All 9 crates declare `#![forbid(unsafe_code)]`. The 92,000+ lines of Rust contain zero unsafe blocks.
+Memory safety is a core value. All 10 crates declare `#![forbid(unsafe_code)]`. The 250,000+ lines of Rust contain zero unsafe blocks.
 
 **How fast is it?**
 Performance is not the primary goal in this phase. Correctness and parity come first. That said, the release profile uses `opt-level = 3`, LTO, and single codegen unit.
