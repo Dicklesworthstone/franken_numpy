@@ -234,6 +234,49 @@ fn conformance_searching_matrix() {
             py,
             &module,
             &numpy,
+            "searching-count_nonzero-empty-tuple-axis",
+            "count_nonzero",
+            RequirementLevel::Should,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_array_2d_f(py, vec![vec![0.0, 1.0], vec![2.0, 0.0]])?],
+                )
+            },
+            |py| {
+                let kw = PyDict::new(py);
+                kw.set_item("axis", PyTuple::empty(py))?;
+                Ok(Some(kw))
+            },
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-count_nonzero-tuple-axis-keepdims",
+            "count_nonzero",
+            RequirementLevel::Should,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_array_2d_f(py, vec![vec![0.0, 1.0], vec![2.0, 0.0]])?],
+                )
+            },
+            |py| {
+                let kw = PyDict::new(py);
+                kw.set_item("axis", (0_i64, 1_i64))?;
+                kw.set_item("keepdims", true)?;
+                Ok(Some(kw))
+            },
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
             "searching-count_nonzero-list-axis-rejected",
             "count_nonzero",
             RequirementLevel::Must,
@@ -248,6 +291,49 @@ fn conformance_searching_matrix() {
             |py| {
                 let kw = PyDict::new(py);
                 kw.set_item("axis", vec![0_i64])?;
+                Ok(Some(kw))
+            },
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-count_nonzero-tuple-bool-axis-rejected",
+            "count_nonzero",
+            RequirementLevel::Must,
+            CompareMode::Error,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_array_2d_f(py, vec![vec![0.0, 1.0], vec![2.0, 0.0]])?],
+                )
+            },
+            |py| {
+                let kw = PyDict::new(py);
+                kw.set_item("axis", PyTuple::new(py, [true])?)?;
+                Ok(Some(kw))
+            },
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-count_nonzero-ndarray-vector-axis-rejected",
+            "count_nonzero",
+            RequirementLevel::Must,
+            CompareMode::Error,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_array_2d_f(py, vec![vec![0.0, 1.0], vec![2.0, 0.0]])?],
+                )
+            },
+            |py| {
+                let numpy = py.import("numpy")?;
+                let kw = PyDict::new(py);
+                kw.set_item("axis", numpy.getattr("array")?.call1((vec![0_i64],))?)?;
                 Ok(Some(kw))
             },
         );
