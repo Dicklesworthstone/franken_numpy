@@ -6742,6 +6742,10 @@ impl UFuncArray {
     }
 
     pub fn try_elementwise_unary(&self, op: UnaryOp) -> Result<Self, UFuncError> {
+        if let Some(result) = self.try_complex_logical_unary(op) {
+            return result;
+        }
+
         if op.is_integer_only() && !self.dtype.is_integer() && self.dtype != DType::Bool {
             return Err(UFuncError::Msg(format!(
                 "ufunc '{}' not supported for input types, and the inputs could not be safely coerced to any supported types",
@@ -12174,6 +12178,38 @@ impl UFuncArray {
         } else {
             (self.values[logical_flat], 0.0)
         }
+    }
+
+    fn try_complex_logical_unary(&self, op: UnaryOp) -> Option<Result<Self, UFuncError>> {
+        if !self.uses_complex_interleaved_storage() {
+            return None;
+        }
+
+        match op {
+            UnaryOp::Abs => Some(self.abs_complex()),
+            UnaryOp::Isnan | UnaryOp::Isinf | UnaryOp::Isfinite => {
+                Some(self.complex_logical_predicate(op))
+            }
+            _ => None,
+        }
+    }
+
+    fn complex_logical_predicate(&self, op: UnaryOp) -> Result<Self, UFuncError> {
+        let shape = self.complex_logical_shape(op.name())?;
+        let count = self.values.len() / 2;
+        let values = (0..count)
+            .map(|idx| {
+                let (re, im) = self.logical_complex_value(idx);
+                let matched = match op {
+                    UnaryOp::Isnan => re.is_nan() || im.is_nan(),
+                    UnaryOp::Isinf => re.is_infinite() || im.is_infinite(),
+                    UnaryOp::Isfinite => re.is_finite() && im.is_finite(),
+                    _ => unreachable!("complex_logical_predicate only handles predicates"),
+                };
+                if matched { 1.0 } else { 0.0 }
+            })
+            .collect();
+        Self::from_values_with_dtype(shape, values, DType::Bool)
     }
 
     fn complex_matrix_from_interleaved(
@@ -34564,6 +34600,60 @@ print(json.dumps(payload))
         for (got, exp) in out.values().iter().zip(expected) {
             assert!((got - exp).abs() < 1e-12, "got {got}, expected {exp}");
         }
+    }
+
+    #[test]
+    fn complex_unary_abs_returns_logical_magnitude() {
+        let arr = UFuncArray::new(vec![2, 2], vec![3.0, 4.0, 5.0, -12.0], DType::Complex128)
+            .expect("array");
+
+        let out = arr
+            .try_elementwise_unary(UnaryOp::Abs)
+            .expect("complex absolute");
+
+        assert_eq!(out.dtype(), DType::F64);
+        assert_eq!(out.shape(), &[2]);
+        assert_eq!(out.values(), &[5.0, 13.0]);
+    }
+
+    #[test]
+    fn complex_unary_predicates_use_logical_elements() {
+        let arr = UFuncArray::new(
+            vec![4, 2],
+            vec![
+                1.0,
+                2.0,
+                f64::INFINITY,
+                0.0,
+                f64::NAN,
+                0.0,
+                3.0,
+                f64::NEG_INFINITY,
+            ],
+            DType::Complex128,
+        )
+        .expect("array");
+
+        let isnan = arr
+            .try_elementwise_unary(UnaryOp::Isnan)
+            .expect("complex isnan");
+        assert_eq!(isnan.dtype(), DType::Bool);
+        assert_eq!(isnan.shape(), &[4]);
+        assert_eq!(isnan.values(), &[0.0, 0.0, 1.0, 0.0]);
+
+        let isinf = arr
+            .try_elementwise_unary(UnaryOp::Isinf)
+            .expect("complex isinf");
+        assert_eq!(isinf.dtype(), DType::Bool);
+        assert_eq!(isinf.shape(), &[4]);
+        assert_eq!(isinf.values(), &[0.0, 1.0, 0.0, 1.0]);
+
+        let isfinite = arr
+            .try_elementwise_unary(UnaryOp::Isfinite)
+            .expect("complex isfinite");
+        assert_eq!(isfinite.dtype(), DType::Bool);
+        assert_eq!(isfinite.shape(), &[4]);
+        assert_eq!(isfinite.values(), &[1.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]
