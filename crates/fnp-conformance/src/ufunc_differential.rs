@@ -5078,6 +5078,129 @@ print(json.dumps({
     }
 
     #[test]
+    fn differential_zero_dim_scalar_broadcasts_through_binary_ops() {
+        let bin_ops = [
+            UFuncOperation::Add,
+            UFuncOperation::Sub,
+            UFuncOperation::Mul,
+            UFuncOperation::Div,
+            UFuncOperation::Power,
+            UFuncOperation::Remainder,
+            UFuncOperation::Minimum,
+            UFuncOperation::Maximum,
+            UFuncOperation::Arctan2,
+            UFuncOperation::Fmod,
+            UFuncOperation::Copysign,
+            UFuncOperation::Fmax,
+            UFuncOperation::Fmin,
+            UFuncOperation::Heaviside,
+            UFuncOperation::Nextafter,
+            UFuncOperation::Hypot,
+            UFuncOperation::Logaddexp,
+            UFuncOperation::Logaddexp2,
+            UFuncOperation::FloorDivide,
+            UFuncOperation::FloatPower,
+        ];
+        let rhs = vec![0.5, 1.25, 2.0, 3.5, 4.25, 5.0];
+
+        for op in &bin_ops {
+            let case = make_binary_case(
+                &format!("zero_dim_scalar_binary_{op:?}"),
+                *op,
+                &[],
+                &[2.0],
+                &[2, 3],
+                &rhs,
+            );
+
+            let result = execute_input_case(&case);
+            assert!(
+                result.is_ok(),
+                "binary op {op:?} failed scalar broadcast: {}",
+                result.unwrap_err()
+            );
+            let (shape, values, _) = result.expect("checked ok");
+            assert_eq!(
+                shape,
+                vec![2, 3],
+                "binary op {op:?} should broadcast scalar to rhs shape"
+            );
+            assert_eq!(
+                values.len(),
+                6,
+                "binary op {op:?} should produce one value per broadcast output element"
+            );
+        }
+    }
+
+    #[test]
+    fn differential_zero_dim_scalar_broadcast_matches_numpy_value_shape() {
+        let case = make_binary_case(
+            "zero_dim_scalar_add_matrix",
+            UFuncOperation::Add,
+            &[],
+            &[10.0],
+            &[2, 3],
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        );
+
+        let (shape, values, dtype) = execute_input_case(&case).expect("scalar add broadcast");
+        assert_eq!(shape, vec![2, 3]);
+        assert_eq!(values, vec![11.0, 12.0, 13.0, 14.0, 15.0, 16.0]);
+        assert_eq!(dtype, "f64");
+    }
+
+    #[test]
+    fn differential_keepdims_reduction_result_broadcasts_back_to_input_shape() {
+        let values: Vec<f64> = (1..=6).map(f64::from).collect();
+        let reduce_case = UFuncInputCase {
+            id: "sum_axis1_keepdims_for_broadcast".to_string(),
+            op: UFuncOperation::Sum,
+            lhs_shape: vec![2, 3],
+            lhs_values: values.clone(),
+            lhs_dtype: "f64".to_string(),
+            rhs_shape: None,
+            rhs_values: None,
+            rhs_dtype: None,
+            axis: Some(1),
+            axes: None,
+            keepdims: Some(true),
+            ddof: None,
+            clip_min: None,
+            clip_max: None,
+            third_shape: None,
+            third_values: None,
+            third_dtype: None,
+            sig: None,
+            signature: None,
+            dtype: None,
+            seed: 0,
+            mode: "strict".to_string(),
+            env_fingerprint: "tests".to_string(),
+            artifact_refs: Vec::new(),
+            reason_code: "ufunc_reduction_contract_violation".to_string(),
+            expected_reason_code: "ufunc_reduction_contract_violation".to_string(),
+            expected_error_contains: String::new(),
+        };
+
+        let (sum_shape, sum_values, dtype) =
+            execute_input_case(&reduce_case).expect("axis keepdims reduction");
+        assert_eq!(sum_shape, vec![2, 1]);
+        assert_eq!(sum_values, vec![6.0, 15.0]);
+        assert_eq!(dtype, "f64");
+
+        let input = UFuncArray::new(vec![2, 3], values, DType::F64).expect("input array");
+        let row_sums =
+            UFuncArray::new(sum_shape, sum_values, DType::F64).expect("keepdims result array");
+        let shifted = input
+            .elementwise_binary(&row_sums, fnp_ufunc::BinaryOp::Add)
+            .expect("keepdims result should broadcast across reduced axis");
+
+        assert_eq!(shifted.shape(), &[2, 3]);
+        assert_eq!(shifted.values(), &[7.0, 8.0, 9.0, 19.0, 20.0, 21.0]);
+    }
+
+    #[test]
     fn differential_reductions_with_axis_and_keepdims() {
         let reduce_ops = [
             UFuncOperation::Sum,
