@@ -230,6 +230,49 @@ fn conformance_searching_matrix() {
                 Ok(Some(kw))
             },
         );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-count_nonzero-list-axis-rejected",
+            "count_nonzero",
+            RequirementLevel::Must,
+            CompareMode::Error,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_array_2d_f(py, vec![vec![0.0, 1.0], vec![2.0, 0.0]])?],
+                )
+            },
+            |py| {
+                let kw = PyDict::new(py);
+                kw.set_item("axis", vec![0_i64])?;
+                Ok(Some(kw))
+            },
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-count_nonzero-ndarray-scalar-axis",
+            "count_nonzero",
+            RequirementLevel::Should,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_array_2d_f(py, vec![vec![0.0, 1.0], vec![2.0, 0.0]])?],
+                )
+            },
+            |py| {
+                let numpy = py.import("numpy")?;
+                let kw = PyDict::new(py);
+                kw.set_item("axis", numpy.getattr("array")?.call1((0_i64,))?)?;
+                Ok(Some(kw))
+            },
+        );
 
         // ─── argmax / argmin (MUST + SHOULD axis) ──────────────────────
         run_case(

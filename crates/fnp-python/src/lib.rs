@@ -7529,7 +7529,28 @@ fn count_nonzero(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axes = extract_axis_spec(py, axis, "count_nonzero")?;
+    let axes = match axis.as_ref() {
+        None => None,
+        Some(axis_obj) => {
+            let axis_bound = axis_obj.bind(py);
+            if axis_bound.is_none() {
+                None
+            } else if axis_bound.cast::<PyBool>().is_ok() {
+                return fallback();
+            } else if axis_bound.extract::<isize>().is_ok() {
+                extract_axis_spec(py, Some(axis_obj.clone_ref(py)), "count_nonzero")?
+            } else if let Ok(axis_tuple) = axis_bound.cast::<PyTuple>() {
+                for item in axis_tuple.iter() {
+                    if item.cast::<PyBool>().is_ok() || item.extract::<isize>().is_err() {
+                        return fallback();
+                    }
+                }
+                extract_axis_spec(py, Some(axis_obj.clone_ref(py)), "count_nonzero")?
+            } else {
+                return fallback();
+            }
+        }
+    };
     // Out-of-bounds / duplicate axes: numpy raises AxisError (a subclass of
     // ValueError). Fall back to numpy so the error type matches exactly.
     if let Some(axes) = axes.as_ref() {
