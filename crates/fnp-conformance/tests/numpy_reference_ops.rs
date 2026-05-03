@@ -256,6 +256,24 @@ if case_id == "ufunc_add_broadcast":
         np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
         np.array([10.0, 20.0, 30.0]),
     ))
+elif case_id == "ufunc_add_0d_scalar_lhs_broadcast":
+    emit(np.add(
+        np.array(5.0),
+        np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+    ))
+elif case_id == "ufunc_subtract_0d_scalar_lhs_broadcast":
+    emit(np.subtract(
+        np.array(10.0),
+        np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+    ))
+elif case_id == "ufunc_greater_0d_scalar_rhs_broadcast":
+    emit(np.greater(
+        np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+        np.array(3.0),
+    ))
+elif case_id == "ufunc_reduce_keepdims_broadcast_add":
+    values = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    emit(np.add(values, np.sum(values, axis=1, keepdims=True)))
 elif case_id == "ufunc_floor_divide_inf":
     emit(np.floor_divide(np.array([np.inf, -np.inf, 9.0]), np.array([2.0, 2.0, 4.0])))
 elif case_id == "ufunc_logical_or_nan":
@@ -352,6 +370,47 @@ fn ufunc_ops_match_live_numpy_reference() {
         .elementwise_binary(&rhs, BinaryOp::Add)
         .expect("broadcast add");
     assert_oracle_match("ufunc_add_broadcast", add.shape(), add.values(), 1e-12);
+
+    let scalar_add = UFuncArray::scalar(5.0, DType::F64)
+        .elementwise_binary(&lhs, BinaryOp::Add)
+        .expect("0-d scalar lhs add broadcast");
+    assert_oracle_match(
+        "ufunc_add_0d_scalar_lhs_broadcast",
+        scalar_add.shape(),
+        scalar_add.values(),
+        1e-12,
+    );
+
+    let scalar_subtract = UFuncArray::scalar(10.0, DType::F64)
+        .elementwise_binary(&lhs, BinaryOp::Sub)
+        .expect("0-d scalar lhs subtract broadcast");
+    assert_oracle_match(
+        "ufunc_subtract_0d_scalar_lhs_broadcast",
+        scalar_subtract.shape(),
+        scalar_subtract.values(),
+        1e-12,
+    );
+
+    let scalar_greater = lhs
+        .elementwise_binary(&UFuncArray::scalar(3.0, DType::F64), BinaryOp::Greater)
+        .expect("0-d scalar rhs comparison broadcast");
+    assert_oracle_match(
+        "ufunc_greater_0d_scalar_rhs_broadcast",
+        scalar_greater.shape(),
+        scalar_greater.values(),
+        0.0,
+    );
+
+    let row_sums = lhs.reduce_sum(Some(1), true).expect("sum axis=1 keepdims");
+    let keepdims_broadcast = lhs
+        .elementwise_binary(&row_sums, BinaryOp::Add)
+        .expect("keepdims reduction should broadcast back over source rows");
+    assert_oracle_match(
+        "ufunc_reduce_keepdims_broadcast_add",
+        keepdims_broadcast.shape(),
+        keepdims_broadcast.values(),
+        1e-12,
+    );
 
     let inf_lhs = array(&[3], &[f64::INFINITY, f64::NEG_INFINITY, 9.0]);
     let divisors = array(&[3], &[2.0, 2.0, 4.0]);
